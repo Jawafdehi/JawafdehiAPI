@@ -146,6 +146,7 @@ class TestWorkflowRegistry:
         assert review_step.required_outputs == {"draft-review.md": 100}
         assert revise_step.required_outputs == {"draft.md": 100}
         assert draft_step.retries == 1
+        assert review_step.retries == 1
 
     def test_draft_prompt_requires_immediate_file_creation(self, tmp_path):
         wf = get_workflow("ciaa_caseworker")
@@ -157,6 +158,18 @@ class TestWorkflowRegistry:
         assert "Create" in prompt
         assert "draft.md immediately" in prompt
         assert "core sources first" in prompt
+
+    def test_review_prompt_requires_immediate_file_creation(self, tmp_path):
+        wf = get_workflow("ciaa_caseworker")
+        case_dir = tmp_path / "081-CR-0123"
+        step = next(s for s in wf.steps if s.name == "review-draft")
+
+        prompt = step.prompt_fn(case_dir)
+
+        assert "Execution requirements:" in prompt
+        assert "draft-review.md immediately" in prompt
+        assert "preliminary findings" in prompt
+        assert "overall outcome line" in prompt
 
     def test_create_case_step_has_filtered_tools(self):
         wf = get_workflow("ciaa_caseworker")
@@ -188,7 +201,7 @@ class TestWorkflowRegistry:
         prompt = step.prompt_fn(case_dir)
 
         assert "Collect 6-10 high-quality, case-relevant news articles" in prompt
-        assert "Do not collect more than 10 articles" in prompt
+        assert "Treat 10 articles as a strong cap." in prompt
 
     def test_fetch_news_prompt_requires_parallel_batches(self, tmp_path):
         wf = get_workflow("ciaa_caseworker")

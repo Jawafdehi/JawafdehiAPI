@@ -824,10 +824,13 @@ class Workflow(ABC):
     ) -> str:
         """Build user prompt for the current step attempt."""
         prompt = step.prompt_fn(case_dir)
-        if step.name != "draft-case" or attempt <= 1:
+        if attempt <= 1:
             return prompt
 
-        fallback = f"""
+        fallback: str | None = None
+
+        if step.name == "draft-case":
+            fallback = f"""
 
 Retry context: attempt {attempt}/{max_attempts}.
 
@@ -840,6 +843,24 @@ Use fallback mode:
 3. Expand and refine with news sources only after the initial draft file exists.
 4. Before finishing, verify `{case_dir}/draft.md` exists and is not empty.
 """
+        elif step.name == "review-draft":
+            fallback = f"""
+
+Retry context: attempt {attempt}/{max_attempts}.
+
+Previous attempt failed because required output `draft-review.md` was missing.
+You MUST create `{case_dir}/draft-review.md` immediately using write_file before any long analysis.
+
+Use fallback mode:
+1. Write a minimally complete review skeleton first, including severity headings and the final outcome line.
+2. Start with the highest-risk checks: identity, allegations, amounts, timeline, procedural status, sources, template compliance, and common pitfalls.
+3. Refine the review iteratively as you inspect each source markdown file and note confirming facts, conflicts, or missing support.
+4. Before finishing, verify `{case_dir}/draft-review.md` exists and is not empty.
+"""
+
+        if fallback is None:
+            return prompt
+
         return prompt + fallback
 
     @staticmethod
@@ -891,11 +912,11 @@ Use fallback mode:
                     flags=re.IGNORECASE,
                 )
             )
-            if not has_override:
-                raise RuntimeError(
-                    "draft-case input policy violation: found "
-                    f"{len(news_files)} news markdown files (max 10) without a documented override reason in logs/news-search-summary.md"
-                )
+            logger.warning(
+                "draft-case input policy warning: found %s news markdown files (max 10); %sdocumented override reason in logs/news-search-summary.md. Drafting will continue.",
+                len(news_files),
+                "" if has_override else "no ",
+            )
 
         escaped_pattern = re.compile(r"\bu[0-9a-fA-F]{4}\b")
         escaped_candidates: list[str] = []
