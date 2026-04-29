@@ -269,6 +269,7 @@ class Command(BaseCommand):
                 raise CommandError(
                     f"No downloadable source found for source_id={source.source_id}."
                 )
+            source_url = self._validate_url_scheme(source_url)
             result = converter.convert_uri(source_url)
             return result.markdown
 
@@ -276,20 +277,22 @@ class Command(BaseCommand):
         self, source: DocumentSource, output_dir: Path
     ) -> Path | None:
         if source.uploaded_file:
-            filename = source.uploaded_filename or Path(source.uploaded_file.name).name
-            if not filename:
-                filename = f"{source.source_id}.bin"
-            out_path = output_dir / filename
+            filename = self._sanitize_download_filename(
+                source.uploaded_filename or source.uploaded_file.name,
+                source.source_id,
+            )
+            out_path = self._confined_output_path(output_dir, filename)
             with source.uploaded_file.open("rb") as in_file:
                 out_path.write_bytes(in_file.read())
             return out_path
 
         uploaded = source.uploaded_files.first()
         if uploaded and uploaded.file:
-            filename = uploaded.filename or Path(uploaded.file.name).name
-            if not filename:
-                filename = f"{source.source_id}.bin"
-            out_path = output_dir / filename
+            filename = self._sanitize_download_filename(
+                uploaded.filename or uploaded.file.name,
+                source.source_id,
+            )
+            out_path = self._confined_output_path(output_dir, filename)
             with uploaded.file.open("rb") as in_file:
                 out_path.write_bytes(in_file.read())
             return out_path
@@ -298,9 +301,10 @@ class Command(BaseCommand):
         if not source_url:
             return None
 
+        source_url = self._validate_url_scheme(source_url)
         parsed = urllib.parse.urlparse(source_url)
-        guessed_name = Path(parsed.path).name or f"{source.source_id}.bin"
-        out_path = output_dir / guessed_name
+        guessed_name = self._sanitize_download_filename(parsed.path, source.source_id)
+        out_path = self._confined_output_path(output_dir, guessed_name)
         try:
             request = urllib.request.Request(
                 source_url,
@@ -317,6 +321,29 @@ class Command(BaseCommand):
             url for url in (source.url or []) if isinstance(url, str) and url.strip()
         ]
         return urls[0].strip() if urls else None
+
+    def _validate_url_scheme(self, url: str) -> str:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            return url
+        raise ValueError(
+            f"Invalid URL '{url}'. Only http and https URLs are allowed with a host."
+        )
+
+    def _sanitize_download_filename(self, filename: str | None, source_id: str) -> str:
+        candidate = Path((filename or "").strip()).name
+        if candidate in {"", ".", ".."}:
+            return f"{source_id}.bin"
+        return candidate
+
+    def _confined_output_path(self, output_dir: Path, filename: str) -> Path:
+        output_dir_resolved = output_dir.resolve()
+        out_path = (output_dir / filename).resolve()
+        if output_dir_resolved not in out_path.parents:
+            raise CommandError(
+                f"Refusing to write outside output directory: '{filename}'"
+            )
+        return out_path
 
     def _extract_bigo_from_markdown(
         self,
@@ -443,7 +470,17 @@ Press release markdown:
             ) from exc
 
     def _case_patch_url(self, api_base_url: str, case_db_id: int) -> str:
-        base = api_base_url.rstrip("/")
+        parsed = urllib.parse.urlparse((api_base_url or "").strip())
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError(
+                f"Invalid api_base_url '{api_base_url}': scheme must be http or https."
+            )
+        if not parsed.netloc:
+            raise ValueError(
+                f"Invalid api_base_url '{api_base_url}': URL must include a host."
+            )
+        path = parsed.path.rstrip("/")
+        base = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
         if base.endswith("/api"):
             return f"{base}/cases/{case_db_id}/"
         return f"{base}/api/cases/{case_db_id}/"

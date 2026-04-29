@@ -1,10 +1,14 @@
+import tempfile
+from pathlib import Path
 from io import StringIO
 from unittest.mock import patch
 
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.core.files.uploadedfile import SimpleUploadedFile
 
+from cases.management.commands.enrich_missing_bigo import Command
 from cases.models import Case, CaseState, CaseType, DocumentSource, SourceType
 
 
@@ -154,3 +158,53 @@ def test_production_guardrail_requires_explicit_override(settings):
 def test_limit_guardrail_rejects_over_max():
     with pytest.raises(CommandError, match="must be between 1 and 1000"):
         call_command("enrich_missing_bigo", "--limit", "1001")
+
+
+def test_validate_url_scheme_allows_http_and_https_only():
+    command = Command()
+
+    assert (
+        command._validate_url_scheme("https://example.com/press-release.pdf")
+        == "https://example.com/press-release.pdf"
+    )
+    assert (
+        command._validate_url_scheme("http://example.com/press-release.pdf")
+        == "http://example.com/press-release.pdf"
+    )
+
+    with pytest.raises(ValueError, match="Only http and https URLs are allowed"):
+        command._validate_url_scheme("file:///tmp/press-release.pdf")
+
+    with pytest.raises(ValueError, match="Only http and https URLs are allowed"):
+        command._validate_url_scheme("press-release.pdf")
+
+
+def test_download_source_to_path_sanitizes_dot_filename_and_confines_output():
+    command = Command()
+    source = DocumentSource(
+        source_id="source-test-001",
+        title="CIAA Press Release",
+        source_type=SourceType.OFFICIAL_GOVERNMENT,
+        uploaded_filename="..",
+        url=[],
+    )
+    source.uploaded_file = SimpleUploadedFile("nested/press-release.pdf", b"test-bytes")
+
+    with tempfile.TemporaryDirectory(prefix="bigo-test-") as tmp_dir:
+        output_dir = Path(tmp_dir)
+        out_path = command._download_source_to_path(source, output_dir)
+
+        assert out_path is not None
+        assert out_path.name == "source-test-001.bin"
+        assert output_dir.resolve() in out_path.resolve().parents
+        assert out_path.read_bytes() == b"test-bytes"
+
+
+def test_case_patch_url_rejects_non_http_base_url():
+    command = Command()
+
+    with pytest.raises(ValueError, match="http or https"):
+        command._case_patch_url("ftp://example.com", 42)
+
+    with pytest.raises(ValueError, match="must include a host"):
+        command._case_patch_url("https:///api", 42)
