@@ -77,6 +77,12 @@ class Command(BaseCommand):
             help="LLM model used for BIGO extraction.",
         )
         parser.add_argument(
+            "--llm-base-url",
+            type=str,
+            default=os.getenv("JAWAFDEHI_CASEWORK_BASE_URL"),
+            help="LLM API base URL (for OpenAI-compatible proxy). Defaults to JAWAFDEHI_CASEWORK_BASE_URL.",
+        )
+        parser.add_argument(
             "--min-confidence",
             choices=["high", "medium", "low"],
             default="medium",
@@ -123,6 +129,7 @@ class Command(BaseCommand):
                     model=options["llm_model"],
                     anthropic_api_key=options["anthropic_api_key"],
                     min_confidence=options["min_confidence"],
+                    llm_base_url=options.get("llm_base_url"),
                 )
                 if bigo is None:
                     skipped += 1
@@ -352,22 +359,39 @@ class Command(BaseCommand):
         model: str,
         anthropic_api_key: str,
         min_confidence: str,
+        llm_base_url: str | None = None,
     ) -> int | None:
-        import anthropic
-
-        client = anthropic.Anthropic(api_key=anthropic_api_key)
         prompt = self._build_bigo_prompt(markdown=markdown, case=case)
-        response = client.messages.create(
-            model=model,
-            max_tokens=500,
-            temperature=0,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = "".join(
-            block.text
-            for block in response.content
-            if getattr(block, "type", "") == "text"
-        )
+        
+        # Use OpenAI-compatible client if base_url provided (Jawafdehi proxy)
+        if llm_base_url:
+            from openai import OpenAI
+            client = OpenAI(api_key=anthropic_api_key, base_url=llm_base_url)
+            # Strip "openai:" prefix if present in model name
+            model_name = model.replace("openai:", "") if "openai:" in model else model
+            response = client.chat.completions.create(
+                model=model_name,
+                max_tokens=500,
+                temperature=0,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = response.choices[0].message.content
+        else:
+            # Use native Anthropic client
+            import anthropic
+            client = anthropic.Anthropic(api_key=anthropic_api_key)
+            response = client.messages.create(
+                model=model,
+                max_tokens=500,
+                temperature=0,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = "".join(
+                block.text
+                for block in response.content
+                if getattr(block, "type", "") == "text"
+            )
+        
         payload = self._parse_json_response(text)
         confidence = str(payload.get("confidence", "")).strip().lower()
         if self._confidence_rank(confidence) < self._confidence_rank(min_confidence):
