@@ -362,10 +362,11 @@ class Command(BaseCommand):
         llm_base_url: str | None = None,
     ) -> int | None:
         prompt = self._build_bigo_prompt(markdown=markdown, case=case)
-        
+
         # Use OpenAI-compatible client if base_url provided (Jawafdehi proxy)
         if llm_base_url:
             from openai import OpenAI
+
             client = OpenAI(api_key=anthropic_api_key, base_url=llm_base_url)
             # Strip "openai:" prefix if present in model name
             model_name = model.replace("openai:", "") if "openai:" in model else model
@@ -379,6 +380,7 @@ class Command(BaseCommand):
         else:
             # Use native Anthropic client
             import anthropic
+
             client = anthropic.Anthropic(api_key=anthropic_api_key)
             response = client.messages.create(
                 model=model,
@@ -391,7 +393,7 @@ class Command(BaseCommand):
                 for block in response.content
                 if getattr(block, "type", "") == "text"
             )
-        
+
         payload = self._parse_json_response(text)
         confidence = str(payload.get("confidence", "")).strip().lower()
         if self._confidence_rank(confidence) < self._confidence_rank(min_confidence):
