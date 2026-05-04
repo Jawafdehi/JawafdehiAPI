@@ -19,6 +19,8 @@ from django.db.models import Q
 from cases.models import Case, CaseState, DocumentSource, SourceType
 
 MAX_LIMIT = 1000
+MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
+DOWNLOAD_CHUNK_SIZE = 16 * 1024
 
 _NEPALI_TO_ASCII_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
 
@@ -317,10 +319,24 @@ class Command(BaseCommand):
                 source_url,
                 headers={"User-Agent": "jawafdehi-bigo-enrichment/1.0"},
             )
-            with urllib.request.urlopen(request, timeout=30) as response:
-                out_path.write_bytes(response.read())
+            total_bytes = 0
+            with (
+                urllib.request.urlopen(request, timeout=30) as response,
+                out_path.open("wb") as out_file,
+            ):
+                while True:
+                    chunk = response.read(DOWNLOAD_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    total_bytes += len(chunk)
+                    if total_bytes > MAX_DOWNLOAD_BYTES:
+                        raise CommandError(
+                            f"Downloaded source exceeds max size of {MAX_DOWNLOAD_BYTES} bytes."
+                        )
+                    out_file.write(chunk)
             return out_path
-        except urllib.error.URLError:
+        except (urllib.error.URLError, OSError, CommandError):
+            out_path.unlink(missing_ok=True)
             return None
 
     def _pick_source_url(self, source: DocumentSource) -> str | None:
@@ -376,7 +392,7 @@ class Command(BaseCommand):
                 temperature=0,
                 messages=[{"role": "user", "content": prompt}],
             )
-            text = response.choices[0].message.content
+            text = self._openai_response_text(response)
         else:
             # Use native Anthropic client
             import anthropic
@@ -399,6 +415,40 @@ class Command(BaseCommand):
         if self._confidence_rank(confidence) < self._confidence_rank(min_confidence):
             return None
         return self._coerce_bigo_int(payload.get("bigo"))
+
+    def _openai_response_text(self, response: Any) -> str:
+        if not response:
+            raise CommandError("OpenAI-compatible LLM response was empty.")
+
+        choices = getattr(response, "choices", None)
+        if not isinstance(choices, list) or not choices:
+            raise CommandError(
+                "OpenAI-compatible LLM response missing choices content."
+            )
+
+        first_choice = choices[0]
+        message = getattr(first_choice, "message", None)
+        content = getattr(message, "content", None) if message is not None else None
+
+        if isinstance(content, str):
+            text = content.strip()
+            if text:
+                return text
+
+        if isinstance(content, list):
+            parts: list[str] = []
+            for block in content:
+                if isinstance(block, dict) and isinstance(block.get("text"), str):
+                    parts.append(block["text"])
+                    continue
+                block_text = getattr(block, "text", None)
+                if isinstance(block_text, str):
+                    parts.append(block_text)
+            text = "".join(parts).strip()
+            if text:
+                return text
+
+        raise CommandError("OpenAI-compatible LLM response missing text content.")
 
     def _build_bigo_prompt(self, markdown: str, case: Case) -> str:
         return f"""You extract BIGO (बिगो) amount from CIAA press release content.

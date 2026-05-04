@@ -1,6 +1,8 @@
 import tempfile
+import sys
 from pathlib import Path
 from io import StringIO
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -208,3 +210,73 @@ def test_case_patch_url_rejects_non_http_base_url():
 
     with pytest.raises(ValueError, match="must include a host"):
         command._case_patch_url("https:///api", 42)
+
+
+def test_extract_bigo_from_markdown_openai_missing_content_raises_command_error(
+    monkeypatch,
+):
+    command = Command()
+    case = SimpleNamespace(case_id="case-openai-001", title="Case")
+
+    class FakeOpenAIClient:
+        def __init__(self, api_key: str, base_url: str):
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=lambda **kwargs: SimpleNamespace(choices=[])
+                )
+            )
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAIClient))
+
+    with pytest.raises(CommandError, match="OpenAI-compatible LLM response"):
+        command._extract_bigo_from_markdown(
+            markdown="sample markdown",
+            case=case,
+            model="openai:claude-sonnet-4-6",
+            anthropic_api_key="test-key",
+            min_confidence="low",
+            llm_base_url="https://llm-proxy.jawafdehi.org/v1",
+        )
+
+
+@pytest.mark.django_db
+def test_download_source_to_path_enforces_max_bytes_and_cleans_partial_file():
+    command = Command()
+    source = _create_source(
+        source_id="source-test-002",
+        title="CIAA Press Release",
+        url="https://example.com/press-release.pdf",
+    )
+
+    class StreamingResponse:
+        def __init__(self, chunks: list[bytes]):
+            self._chunks = iter(chunks)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, _size: int = -1) -> bytes:
+            return next(self._chunks, b"")
+
+    with tempfile.TemporaryDirectory(prefix="bigo-test-") as tmp_dir:
+        output_dir = Path(tmp_dir)
+        out_file = output_dir / "press-release.pdf"
+
+        with (
+            patch(
+                "cases.management.commands.enrich_missing_bigo.MAX_DOWNLOAD_BYTES",
+                16,
+                create=True,
+            ),
+            patch(
+                "urllib.request.urlopen",
+                return_value=StreamingResponse([b"a" * 8, b"b" * 8, b"c" * 8]),
+            ),
+        ):
+            out_path = command._download_source_to_path(source, output_dir)
+
+        assert out_path is None
+        assert not out_file.exists()
