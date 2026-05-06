@@ -293,7 +293,7 @@ class Command(BaseCommand):
             )
             out_path = self._confined_output_path(output_dir, filename)
             with source.uploaded_file.open("rb") as in_file:
-                out_path.write_bytes(in_file.read())
+                self._copy_stream_to_path_with_limit(in_file, out_path)
             return out_path
 
         uploaded = source.uploaded_files.first()
@@ -304,7 +304,7 @@ class Command(BaseCommand):
             )
             out_path = self._confined_output_path(output_dir, filename)
             with uploaded.file.open("rb") as in_file:
-                out_path.write_bytes(in_file.read())
+                self._copy_stream_to_path_with_limit(in_file, out_path)
             return out_path
 
         source_url = self._pick_source_url(source)
@@ -320,13 +320,22 @@ class Command(BaseCommand):
                 source_url,
                 headers={"User-Agent": "jawafdehi-bigo-enrichment/1.0"},
             )
-            total_bytes = 0
-            with (
-                urllib.request.urlopen(request, timeout=30) as response,
-                out_path.open("wb") as out_file,
-            ):
+            with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
+                self._copy_stream_to_path_with_limit(response, out_path)
+            return out_path
+        except (urllib.error.URLError, OSError):
+            out_path.unlink(missing_ok=True)
+            return None
+        except CommandError:
+            out_path.unlink(missing_ok=True)
+            raise
+
+    def _copy_stream_to_path_with_limit(self, in_file: Any, out_path: Path) -> None:
+        total_bytes = 0
+        try:
+            with out_path.open("wb") as out_file:
                 while True:
-                    chunk = response.read(DOWNLOAD_CHUNK_SIZE)
+                    chunk = in_file.read(DOWNLOAD_CHUNK_SIZE)
                     if not chunk:
                         break
                     total_bytes += len(chunk)
@@ -335,10 +344,12 @@ class Command(BaseCommand):
                             f"Downloaded source exceeds max size of {MAX_DOWNLOAD_BYTES} bytes."
                         )
                     out_file.write(chunk)
-            return out_path
-        except (urllib.error.URLError, OSError, CommandError):
+        except OSError:
             out_path.unlink(missing_ok=True)
-            return None
+            raise
+        except CommandError:
+            out_path.unlink(missing_ok=True)
+            raise
 
     def _pick_source_url(self, source: DocumentSource) -> str | None:
         urls = [
@@ -567,7 +578,7 @@ Press release markdown:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=30):
+            with urllib.request.urlopen(request, timeout=30):  # noqa: S310
                 return
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")

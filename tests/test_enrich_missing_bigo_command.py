@@ -185,7 +185,7 @@ def test_validate_url_scheme_allows_http_and_https_only():
 def test_sanitize_download_filename_decodes_urlencoded_unicode_and_keeps_extension():
     command = Command()
 
-    decoded_name = "2413. जिल्ला मोरङ, सुन्दरहरैचा नगरपालिकाका लेखा अधिकृत शेखर ढकालउपर बिगो रु. २,००,०००.– कायम - 2.pdf"
+    decoded_name = "2413. जिल्ला मोरङ, सुन्दरहरैचा नगरपालिकाका लेखा अधिकृत शेखर ढकालउपर बिगो रु. २,००,०००.– कायम - 2.pdf"  # noqa: RUF001
     encoded_name = urllib.parse.quote(decoded_name, safe="")
     url_path = f"/uploads/ciaa/press-releases/files/{encoded_name}"
 
@@ -306,7 +306,7 @@ def test_download_source_to_path_enforces_max_bytes_and_cleans_partial_file():
                 return_value=StreamingResponse([b"a" * 8, b"b" * 8, b"c" * 8]),
             ),
         ):
-            out_path = command._download_source_to_path(source, output_dir)
+            with pytest.raises(CommandError, match="exceeds max size"):
+                command._download_source_to_path(source, output_dir)
 
-        assert out_path is None
         assert not out_file.exists()
