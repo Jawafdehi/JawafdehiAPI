@@ -29,7 +29,6 @@ from .widgets import (
     MultiURLField,
     MultiCourtCaseField,
 )
-from .validators import COURT_CHOICES
 from .rules.predicates import (
     is_admin,
     is_moderator,
