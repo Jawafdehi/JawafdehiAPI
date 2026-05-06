@@ -2388,9 +2388,10 @@ resolved_reference = "73f91701ff795271be5b17711ca7aabc3c9a363e"
 name = "nepali"
 version = "1.2.0"
 description = "nepalidatetime compatible with python's datetime feature. Converting nepali date to english, parsing nepali datetime, nepali timezone, and timedelta support in nepali datetime"
-optional = false
+optional = true
 python-versions = ">=3.10"
 groups = ["main"]
+markers = "extra == \"nepali-support\""
 files = [
     {file = "nepali-1.2.0-py3-none-any.whl", hash = "sha256:1f9244b2fcb51e6b9e710cc1c483024f8600954d545a9a12a2accf53213911b1"},
     {file = "nepali-1.2.0.tar.gz", hash = "sha256:75a9d0bd4b3e95d72c7045539b63e84077686ffa12dff5db3fffe6579cbb511d"},
@@ -5020,9 +5021,10 @@ cffi = ["cffi (>=1.17,<2.0) ; platform_python_implementation != \"PyPy\" and pyt
 
 [extras]
 llm-all = ["langchain", "langchain-google-genai", "langchain-openai", "openai"]
+nepali-support = ["nepali"]
 s3 = ["cloudpathlib"]
 
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.12"
-content-hash = "51b7bc80702026bd4b3ce9b754ac79682b77f441357bf8baa16a62fde65d4043"
+content-hash = "a89727acf7f105df3b2a4c18f2dffbec981924dada1c3b340564b9fee74b2c57"
