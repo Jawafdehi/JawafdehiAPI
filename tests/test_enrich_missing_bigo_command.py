@@ -1,5 +1,6 @@
 import tempfile
 import sys
+import urllib.parse
 from pathlib import Path
 from io import StringIO
 from types import SimpleNamespace
@@ -179,6 +180,35 @@ def test_validate_url_scheme_allows_http_and_https_only():
 
     with pytest.raises(ValueError, match="Only http and https URLs are allowed"):
         command._validate_url_scheme("press-release.pdf")
+
+
+def test_sanitize_download_filename_decodes_urlencoded_unicode_and_keeps_extension():
+    command = Command()
+
+    decoded_name = "2413. जिल्ला मोरङ, सुन्दरहरैचा नगरपालिकाका लेखा अधिकृत शेखर ढकालउपर बिगो रु. २,००,०००.– कायम - 2.pdf"
+    encoded_name = urllib.parse.quote(decoded_name, safe="")
+    url_path = f"/uploads/ciaa/press-releases/files/{encoded_name}"
+
+    sanitized = command._sanitize_download_filename(
+        url_path, source_id="source-test-003"
+    )
+
+    assert sanitized.endswith(".pdf")
+    assert "%" not in sanitized
+    assert len(sanitized) <= 200
+
+
+def test_sanitize_download_filename_truncates_very_long_filenames_with_hash():
+    command = Command()
+
+    very_long = ("a" * 500) + ".pdf"
+    sanitized = command._sanitize_download_filename(
+        very_long, source_id="source-test-004"
+    )
+
+    assert sanitized.endswith(".pdf")
+    assert len(sanitized) <= 200
+    assert "-" in sanitized
 
 
 def test_download_source_to_path_sanitizes_dot_filename_and_confines_output():

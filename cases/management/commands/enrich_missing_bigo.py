@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -354,10 +355,43 @@ class Command(BaseCommand):
         )
 
     def _sanitize_download_filename(self, filename: str | None, source_id: str) -> str:
-        candidate = Path((filename or "").strip()).name
+        raw = (filename or "").strip()
+        if not raw:
+            return f"{source_id}.bin"
+
+        # URL paths often contain percent-encoded Unicode; decoding keeps filenames readable
+        # and avoids hitting filesystem filename-length limits (e.g., 255 chars on macOS).
+        decoded = urllib.parse.unquote(raw)
+        candidate = Path(decoded).name.strip()
+
         if candidate in {"", ".", ".."}:
             return f"{source_id}.bin"
-        return candidate
+
+        # Basic cross-platform safety: remove NUL and replace Windows-forbidden characters.
+        candidate = candidate.replace("\x00", "")
+        candidate = re.sub(r"[<>:\"/\\|?*]+", "_", candidate).rstrip(" .")
+        if candidate in {"", ".", ".."}:
+            return f"{source_id}.bin"
+
+        # Keep well under typical per-filename limits (255) and leave room for temp dir paths.
+        max_len = 200
+        if len(candidate) <= max_len:
+            return candidate
+
+        suffix = "".join(Path(candidate).suffixes)
+        stem = candidate[: -len(suffix)] if suffix else candidate
+        digest = hashlib.sha256(candidate.encode("utf-8")).hexdigest()[:10]
+
+        stem_budget = max_len - len(suffix) - len(digest) - 1  # for '-'
+        if stem_budget < 1:
+            # Worst-case fallback: ensure a short, unique name.
+            return f"{source_id}-{digest}{suffix}"[:max_len]
+
+        truncated_stem = stem[:stem_budget].rstrip(" .-_")
+        if not truncated_stem:
+            truncated_stem = source_id
+
+        return f"{truncated_stem}-{digest}{suffix}"
 
     def _confined_output_path(self, output_dir: Path, filename: str) -> Path:
         output_dir_resolved = output_dir.resolve()
