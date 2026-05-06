@@ -5991,4 +5991,4 @@ s3 = ["cloudpathlib"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.12"
-content-hash = "eb882bb122848ff4044b79ccecd6f1a21147d4e0862d7adbc971e09ed1c4f2ca"
+content-hash = "2153792bb1260502d4c4da5ea3c6465b911a1370529de3cf0a3810ead066f4dc"
