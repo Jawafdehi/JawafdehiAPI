@@ -36,12 +36,11 @@ langchain-openai = {version = "^0.3.0", optional = true}
 langchain-google-genai = {version = "^4.2.1", optional = true}
 openai = {version = "^1.40.0", optional = true}
 cloudpathlib = {extras = ["s3"], version = "^0.20.0", optional = true}
-nepali = {version = "^1.2.0", optional = true}
+nepali = "^1.2.0"
 
 [tool.poetry.extras]
 llm-all = ["langchain", "langchain-openai", "langchain-google-genai", "openai"]
 s3 = ["cloudpathlib"]
-nepali-support = ["nepali"]
 
 
 [tool.poetry.group.dev.dependencies]
