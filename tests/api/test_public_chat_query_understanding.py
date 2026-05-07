@@ -59,8 +59,8 @@ def fake_llm_service(result):
 def test_understand_question_uses_langchain_structured_plan(public_chat_config):
     understanding = QuestionUnderstanding(
         raw_question="During FY 2079, registrations by category?",
-        intent="knowledge_rag",
-        search_query="2079 registered cases by type annual report",
+        route="document_rag",
+        retrieval_query="2079 registered cases by type annual report",
         normalized_question="2079 cases registered by type",
         language="en",
         years=["2079"],
@@ -77,9 +77,10 @@ def test_understand_question_uses_langchain_structured_plan(public_chat_config):
             "During FY 2079, registrations by category?",
         )
 
-    assert decision.route == "knowledge_rag"
-    assert decision.search == "2079 registered cases by type annual report"
+    assert decision.route == "document_rag"
+    assert decision.retrieval_query == "2079 registered cases by type annual report"
     assert decision.tool_name is None
+    assert decision.requires_document_citation is True
     service.invoke_structured.assert_called_once()
 
 
@@ -87,8 +88,8 @@ def test_understand_question_uses_langchain_structured_plan(public_chat_config):
 def test_understand_question_maps_intents_to_allowlisted_tools(public_chat_config):
     service = fake_llm_service(
         {
-            "intent": "case_count",
-            "search_query": "procurement",
+            "route": "case_count",
+            "retrieval_query": "procurement",
             "tool_name": "private_delete_cases",
             "confidence": 0.7,
             "reason": "count published cases",
@@ -101,15 +102,15 @@ def test_understand_question_maps_intents_to_allowlisted_tools(public_chat_confi
         )
 
     assert decision.route == "case_count"
-    assert decision.tool_name == "public_search_published_cases"
+    assert decision.tool_name == "public_count_published_cases"
 
 
 @pytest.mark.django_db
 def test_understand_question_supports_case_get_route(public_chat_config):
     service = fake_llm_service(
         {
-            "intent": "case_get",
-            "search_query": "case-0022",
+            "route": "case_get",
+            "case_identifier": "case-0022",
             "confidence": 0.86,
             "reason": "specific published case lookup",
         }
@@ -120,15 +121,15 @@ def test_understand_question_supports_case_get_route(public_chat_config):
 
     assert decision.route == "case_get"
     assert decision.tool_name == "public_get_published_case"
-    assert decision.search == "case-0022"
+    assert decision.case_identifier == "case-0022"
 
 
 @pytest.mark.django_db
 def test_understand_question_normalizes_case_get_numeric_phrase(public_chat_config):
     service = fake_llm_service(
         {
-            "intent": "case_get",
-            "search_query": "case 5",
+            "route": "case_get",
+            "case_identifier": "case 5",
             "confidence": 0.86,
             "reason": "specific published case lookup",
         }
@@ -139,7 +140,7 @@ def test_understand_question_normalizes_case_get_numeric_phrase(public_chat_conf
 
     assert decision.route == "case_get"
     assert decision.tool_name == "public_get_published_case"
-    assert decision.search == "5"
+    assert decision.case_identifier == "5"
 
 
 @pytest.mark.django_db
@@ -151,8 +152,8 @@ def test_understand_question_uses_classifier_provider(public_chat_config):
     public_chat_config.save()
     service = fake_llm_service(
         {
-            "intent": "case_search",
-            "search_query": "procurement complaints",
+            "route": "case_search",
+            "retrieval_query": "procurement complaints",
             "confidence": 0.9,
             "reason": "published case lookup",
         }
@@ -165,7 +166,7 @@ def test_understand_question_uses_classifier_provider(public_chat_config):
 
 
 @pytest.mark.django_db
-def test_understand_question_refuses_when_classifier_fails_and_fallback_is_uncertain(
+def test_understand_question_refuses_when_classifier_fails_and_safety_route_is_uncertain(
     public_chat_config,
 ):
     service = fake_llm_service(None)
@@ -183,7 +184,7 @@ def test_understand_question_refuses_when_classifier_fails_and_fallback_is_uncer
 
 
 @pytest.mark.django_db
-def test_understand_question_falls_back_to_obvious_deterministic_route(
+def test_understand_question_uses_obvious_deterministic_safety_route(
     public_chat_config,
 ):
     service = fake_llm_service(None)
@@ -196,16 +197,49 @@ def test_understand_question_falls_back_to_obvious_deterministic_route(
         )
 
     assert decision.route == "entity_search"
-    assert decision.classifier_source == "fallback"
+    assert decision.classifier_source == "deterministic_safety"
     assert decision.tool_name == "public_search_jawaf_entities"
+
+
+@pytest.mark.django_db
+def test_understand_question_deterministic_safety_extracts_case_id(
+    public_chat_config,
+):
+    service = fake_llm_service(None)
+    service.invoke_structured.side_effect = TimeoutError("classifier timed out")
+
+    with patch("public_chat.query_understanding.LLMService", return_value=service):
+        decision = understand_question(public_chat_config, "Tell me about case 5")
+
+    assert decision.route == "case_get"
+    assert decision.case_identifier == "5"
+    assert decision.classifier_source == "deterministic_safety"
+
+
+@pytest.mark.django_db
+def test_understand_question_deterministic_safety_handles_case_count(
+    public_chat_config,
+):
+    service = fake_llm_service(None)
+    service.invoke_structured.side_effect = ValueError("bad schema")
+
+    with patch("public_chat.query_understanding.LLMService", return_value=service):
+        decision = understand_question(
+            public_chat_config,
+            "How many procurement cases are published?",
+        )
+
+    assert decision.route == "case_count"
+    assert decision.retrieval_query == "procurement"
+    assert decision.classifier_source == "deterministic_safety"
 
 
 @pytest.mark.django_db
 def test_understand_question_refuses_low_confidence_uncertain_plans(public_chat_config):
     service = fake_llm_service(
         {
-            "intent": "case_search",
-            "search_query": "that issue",
+            "route": "case_search",
+            "retrieval_query": "that issue",
             "confidence": 0.2,
             "reason": "uncertain",
         }
@@ -220,11 +254,59 @@ def test_understand_question_refuses_low_confidence_uncertain_plans(public_chat_
 
 
 @pytest.mark.django_db
+def test_understand_question_low_confidence_uses_safe_route_when_obvious(
+    public_chat_config,
+):
+    service = fake_llm_service(
+        {
+            "route": "case_search",
+            "retrieval_query": "wrong guess",
+            "confidence": 0.2,
+            "reason": "uncertain",
+        }
+    )
+
+    with patch("public_chat.query_understanding.LLMService", return_value=service):
+        decision = understand_question(
+            public_chat_config,
+            "What are the current published Jawafdehi cases?",
+        )
+
+    assert decision.route == "case_list"
+    assert decision.retrieval_query == ""
+    assert decision.classifier_source == "deterministic_safety"
+
+
+@pytest.mark.django_db
+def test_understand_question_classifies_case_list_from_semantic_output(
+    public_chat_config,
+):
+    service = fake_llm_service(
+        {
+            "route": "case_list",
+            "retrieval_query": "",
+            "confidence": 0.91,
+            "reason": "list published cases",
+        }
+    )
+
+    with patch("public_chat.query_understanding.LLMService", return_value=service):
+        decision = understand_question(
+            public_chat_config,
+            "What are the current published Jawafdehi cases?",
+        )
+
+    assert decision.route == "case_list"
+    assert decision.retrieval_query == ""
+    assert decision.tool_name == "public_search_published_cases"
+
+
+@pytest.mark.django_db
 def test_understand_question_uses_cache_for_semantic_routes(public_chat_config):
     service = fake_llm_service(
         {
-            "intent": "case_search",
-            "search_query": "procurement complaints",
+            "route": "case_search",
+            "retrieval_query": "procurement complaints",
             "confidence": 0.9,
             "reason": "published case lookup",
         }
@@ -248,8 +330,8 @@ def test_understand_question_cache_is_scoped_to_classifier_provider(public_chat_
     public_chat_config.save()
     service = fake_llm_service(
         {
-            "intent": "case_search",
-            "search_query": "procurement complaints",
+            "route": "case_search",
+            "retrieval_query": "procurement complaints",
             "confidence": 0.9,
             "reason": "published case lookup",
         }
@@ -270,11 +352,11 @@ def test_question_understanding_route_mapping_never_uses_external_tool_names():
     understanding = QuestionUnderstanding(
         raw_question="How many procurement cases?",
         normalized_question="procurement cases count",
-        intent="case_count",
-        search_query="procurement",
+        route="case_count",
+        retrieval_query="procurement",
         reason="count cases",
     )
 
     decision = understanding.to_route_decision()
 
-    assert decision.tool_name == "public_search_published_cases"
+    assert decision.tool_name == "public_count_published_cases"

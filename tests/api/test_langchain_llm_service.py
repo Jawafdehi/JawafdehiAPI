@@ -2,6 +2,7 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from rest_framework.test import APIClient
 from pydantic import BaseModel
 
 from caseworker.models import LLMProvider, Prompt, PublicChatConfig
@@ -10,6 +11,7 @@ from caseworker.services import LLMService
 
 class FakeChatModel:
     calls = []
+    structured_calls = []
 
     def __init__(self, **kwargs):
         self.kwargs = kwargs
@@ -23,8 +25,9 @@ class FakeChatModel:
             return {"label": "ok"}
         return SimpleNamespace(content="hello")
 
-    def with_structured_output(self, schema):
+    def with_structured_output(self, schema, **kwargs):
         self.schema = schema
+        FakeChatModel.structured_calls.append(kwargs)
         return self
 
 
@@ -35,6 +38,7 @@ class StructuredResult(BaseModel):
 @pytest.fixture(autouse=True)
 def reset_fake_chat_model():
     FakeChatModel.calls = []
+    FakeChatModel.structured_calls = []
 
 
 def provider(name, provider_type="openai", **overrides):
@@ -102,6 +106,30 @@ def test_llm_service_invokes_text_and_structured_output(monkeypatch):
 
 
 @pytest.mark.django_db
+def test_llm_service_honors_structured_output_mode(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "langchain_openai",
+        SimpleNamespace(ChatOpenAI=FakeChatModel, AzureChatOpenAI=FakeChatModel),
+    )
+    llm_provider = provider(
+        "openai-provider-native",
+        "openai",
+        structured_output_mode="provider_native",
+    )
+
+    structured = LLMService().invoke_structured(
+        llm_provider,
+        [{"role": "user", "content": "Classify"}],
+        StructuredResult,
+        run_name="test-structured-provider-native",
+    )
+
+    assert structured == StructuredResult(label="ok")
+    assert FakeChatModel.structured_calls == [{"method": "json_schema"}]
+
+
+@pytest.mark.django_db
 def test_llm_service_resolves_public_chat_provider_fallbacks():
     PublicChatConfig.objects.all().delete()
     default_provider = provider("default-answer", "openai", is_default=True)
@@ -130,6 +158,39 @@ def test_llm_service_resolves_public_chat_provider_fallbacks():
     config.llm_provider = None
     assert service.resolve_answer_provider(config) == default_provider
     assert service.resolve_classifier_provider(config) == default_provider
+
+    answer_provider.is_active = False
+    answer_provider.save()
+    classifier_provider.is_active = False
+    classifier_provider.save()
+    config.classifier_llm_provider = classifier_provider
+    config.llm_provider = answer_provider
+    assert service.resolve_answer_provider(config) == default_provider
+    assert service.resolve_classifier_provider(config) == default_provider
+
+
+@pytest.mark.django_db
+def test_llm_provider_list_tolerates_unreadable_encrypted_api_key(django_user_model):
+    llm_provider = provider("unreadable-key", "google")
+    LLMProvider.objects.filter(pk=llm_provider.pk).update(
+        api_key="enc:v1:not-a-valid-fernet-token"
+    )
+
+    admin_user = django_user_model.objects.create_user(
+        username="llm-admin",
+        password="test-password",
+        is_staff=True,
+    )
+    client = APIClient()
+    client.force_authenticate(admin_user)
+    response = client.get("/api/caseworker/llm-providers/")
+
+    assert response.status_code == 200
+    payload = (
+        response.data["results"][0] if "results" in response.data else response.data[0]
+    )
+    assert payload["name"] == "unreadable-key"
+    assert payload["has_api_key"] is False
 
 
 @pytest.mark.django_db
