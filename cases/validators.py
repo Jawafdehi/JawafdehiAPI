@@ -8,110 +8,6 @@ following Django's convention of separating validation concerns.
 import re
 from django.core.exceptions import ValidationError
 
-# Valid court identifiers for Nepal's court system
-VALID_COURT_IDENTIFIERS = [
-    # Supreme/Special
-    "supreme",
-    "special",
-    # High Courts
-    "baglunghc",
-    "biratnagarhc",
-    "birgunjhc",
-    "butwalhc",
-    "dhankutahc",
-    "dipayalhc",
-    "hetaudahc",
-    "ilamhc",
-    "janakpurhc",
-    "jumlahc",
-    "mahendranagarhc",
-    "nepalgunjhc",
-    "okhaldhungahc",
-    "patanhc",
-    "pokharahc",
-    "rajbirajhc",
-    "surkhethc",
-    "tulsipurhc",
-    # District Courts
-    "achhamdc",
-    "arghakhanchidc",
-    "baglungdc",
-    "baitadidc",
-    "bajhangdc",
-    "bajuradc",
-    "bankedc",
-    "baradc",
-    "bardiyadc",
-    "bhaktapurdc",
-    "bhojpurdc",
-    "chitwandc",
-    "dadeldhuradc",
-    "dailekhdc",
-    "dangdc",
-    "darchuladc",
-    "dhadingdc",
-    "dhankutadc",
-    "dhanusadc",
-    "dolakhadc",
-    "dolpadc",
-    "dotidc",
-    "gorkhadc",
-    "gulmidc",
-    "humladc",
-    "ilamdc",
-    "jajarkotdc",
-    "jhapadc",
-    "jumladc",
-    "kailalidc",
-    "kalikotdc",
-    "kanchanpurdc",
-    "kapilbastudc",
-    "kaskidc",
-    "kathmandudc",
-    "kavrepalanchowkdc",
-    "khotangdc",
-    "lalitpurdc",
-    "lamjungdc",
-    "mahottaridc",
-    "makwanpurdc",
-    "manangdc",
-    "morangdc",
-    "mugudc",
-    "mustangdc",
-    "myagdidc",
-    "nawalparasidc",
-    "nawalpurdc",
-    "nuwakotdc",
-    "okhaldhungadc",
-    "palpadc",
-    "panchthardc",
-    "parbatdc",
-    "parsadc",
-    "pyuthandc",
-    "ramechhapdc",
-    "rasuwadc",
-    "rautahatdc",
-    "rolpadc",
-    "rukumdc",
-    "rukumkotdc",
-    "rupandehidc",
-    "salyandc",
-    "sankhuwasabhadc",
-    "saptaridc",
-    "sarlahidc",
-    "sindhulidc",
-    "sindhupalchowkdc",
-    "sirahadc",
-    "solukhumbudc",
-    "sunsaridc",
-    "surkhetdc",
-    "syangjadc",
-    "tanahundc",
-    "taplejungdc",
-    "tehrathumdc",
-    "udayapurdc",
-]
-
 COURT_CHOICES = [
     ("supreme", "Supreme Court"),
     ("special", "Special Court"),
@@ -296,8 +192,9 @@ def validate_court_cases(value):
         if not case_number or not case_number.strip():
             raise ValidationError("Case number cannot be empty in court case reference")
 
-        if court_identifier not in VALID_COURT_IDENTIFIERS:
-            valid_list = ", ".join(VALID_COURT_IDENTIFIERS)
+        valid_identifiers = [c[0] for c in COURT_CHOICES]
+        if court_identifier not in valid_identifiers:
+            valid_list = ", ".join(valid_identifiers)
             raise ValidationError(
                 f"Invalid court identifier '{court_identifier}'. "
                 f"Valid identifiers are: {valid_list}"
