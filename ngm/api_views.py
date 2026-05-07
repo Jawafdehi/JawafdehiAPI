@@ -58,12 +58,15 @@ class NGMQueryRateThrottle(SimpleRateThrottle):
         return super().allow_request(request, view)
 
     def get_cache_key(self, request, view):
+        # For authenticated requests, use token key
         token = getattr(request, "auth", None)
         token_key = getattr(token, "key", None)
-        if not token_key:
-            return None
+        if token_key:
+            return self.cache_format % {"scope": self.scope, "ident": token_key}
 
-        return self.cache_format % {"scope": self.scope, "ident": token_key}
+        # For anonymous requests, use IP address to enforce rate limiting
+        ident = self.get_ident(request)
+        return self.cache_format % {"scope": self.scope, "ident": ident}
 
 
 @extend_schema(
