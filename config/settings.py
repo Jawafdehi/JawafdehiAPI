@@ -10,11 +10,14 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
-from pathlib import Path
 import os
-from dotenv import load_dotenv
+import sys
 from datetime import timedelta
+from pathlib import Path
+
 import dj_database_url
+from dotenv import load_dotenv
+
 from config.mcp_servers import build_public_chat_mcp_servers
 
 load_dotenv()
@@ -92,7 +95,10 @@ def build_media_url(
 
 
 def build_public_chat_quota_cache():
-    backend = os.getenv("PUBLIC_CHAT_QUOTA_CACHE_BACKEND", "locmem").strip().lower()
+    default_backend = "locmem" if DEBUG or "pytest" in sys.modules else "database"
+    backend = (
+        os.getenv("PUBLIC_CHAT_QUOTA_CACHE_BACKEND", default_backend).strip().lower()
+    )
     if backend == "database":
         return {
             "BACKEND": "django.core.cache.backends.db.DatabaseCache",
@@ -107,7 +113,7 @@ def build_public_chat_quota_cache():
             "LOCATION": "jawafdehi-public-chat-quota",
         }
     raise ValueError(
-        "PUBLIC_CHAT_QUOTA_CACHE_BACKEND must be either 'locmem' or 'database'."
+        "PUBLIC_CHAT_QUOTA_CACHE_BACKEND must be one of: locmem, database."
     )
 
 
@@ -121,6 +127,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.getenv(
     "SECRET_KEY", "django-insecure-b&i!8@kw8v+w3%zk)gbsz8^v8w8xjb%l-$!-3x&*pc5hqio02g"
+)
+LLM_PROVIDER_API_KEY_ENCRYPTION_KEY = os.getenv(
+    "LLM_PROVIDER_API_KEY_ENCRYPTION_KEY", ""
 )
 
 # SECURITY WARNING: don't run with debug turned on in production!
@@ -439,14 +448,47 @@ CASE_WORKFLOWS_WORK_DIR = (
 )
 
 # Public Chat MCP Configuration
+DEFAULT_PUBLIC_CHAT_MCP_API_BASE_URL = "http://127.0.0.1:8000" if DEBUG else ""
 PUBLIC_CHAT_MCP_API_BASE_URL = os.getenv(
     "PUBLIC_CHAT_MCP_API_BASE_URL",
-    os.getenv("JAWAFDEHI_API_BASE_URL", "https://portal.jawafdehi.org"),
+    os.getenv("JAWAFDEHI_API_BASE_URL", DEFAULT_PUBLIC_CHAT_MCP_API_BASE_URL),
 )
 PUBLIC_CHAT_MCP_SERVERS = build_public_chat_mcp_servers(
     api_base_url=PUBLIC_CHAT_MCP_API_BASE_URL,
     servers_json=os.getenv("PUBLIC_CHAT_MCP_SERVERS_JSON"),
+    allow_default_stdio=DEBUG,
 )
+PUBLIC_CHAT_MCP_TOOL_CACHE_SECONDS = int(
+    os.getenv("PUBLIC_CHAT_MCP_TOOL_CACHE_SECONDS", "300")
+)
+PUBLIC_CHAT_MCP_TOOL_TIMEOUT_SECONDS = int(
+    os.getenv("PUBLIC_CHAT_MCP_TOOL_TIMEOUT_SECONDS", "30")
+)
+PUBLIC_CHAT_TRUSTED_PROXY_COUNT = int(os.getenv("PUBLIC_CHAT_TRUSTED_PROXY_COUNT", "0"))
+PUBLIC_CHAT_EDGE_SECRET_HEADER = os.getenv("PUBLIC_CHAT_EDGE_SECRET_HEADER", "")
+PUBLIC_CHAT_EDGE_SECRET_VALUE = os.getenv("PUBLIC_CHAT_EDGE_SECRET_VALUE", "")
+
+# Knowledge RAG retrieval configuration
+KNOWLEDGE_RAG_EMBEDDING_PROVIDER = os.getenv("KNOWLEDGE_RAG_EMBEDDING_PROVIDER", "")
+KNOWLEDGE_RAG_EMBEDDING_MODEL = os.getenv("KNOWLEDGE_RAG_EMBEDDING_MODEL", "")
+KNOWLEDGE_RAG_EMBEDDING_API_KEY = os.getenv(
+    "KNOWLEDGE_RAG_EMBEDDING_API_KEY",
+    os.getenv("OPENAI_API_KEY", ""),
+)
+KNOWLEDGE_RAG_EMBEDDING_BASE_URL = os.getenv("KNOWLEDGE_RAG_EMBEDDING_BASE_URL", "")
+KNOWLEDGE_RAG_LEXICAL_CANDIDATES = int(
+    os.getenv("KNOWLEDGE_RAG_LEXICAL_CANDIDATES", "1000")
+)
+KNOWLEDGE_RAG_VECTOR_CANDIDATES = int(
+    os.getenv("KNOWLEDGE_RAG_VECTOR_CANDIDATES", "50")
+)
+KNOWLEDGE_RAG_MIN_LEXICAL_SCORE = float(
+    os.getenv("KNOWLEDGE_RAG_MIN_LEXICAL_SCORE", "0.1")
+)
+KNOWLEDGE_RAG_MIN_VECTOR_SCORE = float(
+    os.getenv("KNOWLEDGE_RAG_MIN_VECTOR_SCORE", "0.2")
+)
+KNOWLEDGE_RAG_MMR_LAMBDA = float(os.getenv("KNOWLEDGE_RAG_MMR_LAMBDA", "0.75"))
 
 # Cache Configuration
 CACHES = {
