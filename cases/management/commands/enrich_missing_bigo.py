@@ -318,7 +318,9 @@ class Command(BaseCommand):
         try:
             request = urllib.request.Request(
                 source_url,
-                headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"},
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+                },
             )
             with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
                 self._copy_stream_to_path_with_limit(response, out_path)
