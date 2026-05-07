@@ -150,6 +150,71 @@ def test_dry_run_does_not_patch_cases():
     assert "DRY-RUN" in out.getvalue()
 
 
+def test_build_bigo_prompt_mentions_multiple_amounts_and_damage_claim_focus():
+    command = Command()
+    case = SimpleNamespace(case_id="case-prompt-001", title="Case prompt title")
+
+    prompt = command._build_bigo_prompt(
+        markdown="""
+            रकम रु. 5,00,000 उल्लेख छ।
+            बिगो रु. 1,50,000 रहेको छ।
+            जरिवाना रु. 20,000 छ।
+        """,
+        case=case,
+    )
+
+    assert "When multiple monetary amounts appear" in prompt
+    assert "damage claim amount" in prompt
+    assert "मागदाबी" in prompt
+
+
+@pytest.mark.django_db
+def test_verbose_flag_emits_detailed_logs():
+    source = _create_source(
+        source_id="source:test:press-verbose-001",
+        title="CIAA Press Release",
+        url="https://example.com/press-release-verbose.pdf",
+    )
+    _create_case(
+        case_id="case-draft-missing-bigo-verbose",
+        title="Draft Missing BIGO (verbose)",
+        state=CaseState.DRAFT,
+        bigo=None,
+        evidence=[
+            {"source_id": source.source_id, "description": "Press release evidence"}
+        ],
+    )
+
+    out = StringIO()
+    with (
+        patch(
+            "cases.management.commands.enrich_missing_bigo.Command._convert_source_to_markdown",
+            return_value="# Press Release\nबिगो रु. 123456",
+        ),
+        patch(
+            "cases.management.commands.enrich_missing_bigo.Command._extract_bigo_from_markdown",
+            return_value=123456,
+        ),
+        patch(
+            "cases.management.commands.enrich_missing_bigo.Command._patch_case_bigo",
+        ),
+    ):
+        call_command(
+            "enrich_missing_bigo",
+            "--allow-production",
+            "--api-token",
+            "test-token",
+            "--anthropic-api-key",
+            "test-key",
+            "--verbose",
+            stdout=out,
+        )
+
+    output = out.getvalue()
+    assert "[INFO] Starting BIGO enrichment run" in output
+    assert "[INFO] Processing case case-draft-missing-bigo-verbose" in output
+
+
 @pytest.mark.django_db
 def test_production_guardrail_requires_explicit_override(settings):
     settings.DEBUG = False
@@ -267,6 +332,76 @@ def test_extract_bigo_from_markdown_openai_missing_content_raises_command_error(
             min_confidence="low",
             llm_base_url="https://llm-proxy.jawafdehi.org/v1",
         )
+
+
+def test_extract_bigo_from_markdown_rejects_non_bigo_context_evidence_quote(
+    monkeypatch,
+):
+    command = Command()
+    case = SimpleNamespace(case_id="case-openai-002", title="Case")
+
+    class FakeOpenAIClient:
+        def __init__(self, api_key: str, base_url: str):
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=lambda **kwargs: SimpleNamespace(
+                        choices=[
+                            SimpleNamespace(
+                                message=SimpleNamespace(
+                                    content='{"bigo": 13000, "confidence": "high", "evidence_quote": "घुस/रिसवत बापत रु.१३,००० माग गरी लिएको"}'
+                                )
+                            )
+                        ]
+                    )
+                )
+            )
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAIClient))
+
+    extracted = command._extract_bigo_from_markdown(
+        markdown="sample markdown",
+        case=case,
+        model="openai:claude-sonnet-4-6",
+        anthropic_api_key="test-key",
+        min_confidence="low",
+        llm_base_url="https://llm-proxy.jawafdehi.org/v1",
+    )
+
+    assert extracted is None
+
+
+def test_extract_bigo_from_markdown_accepts_explicit_bigo_context_quote(monkeypatch):
+    command = Command()
+    case = SimpleNamespace(case_id="case-openai-003", title="Case")
+
+    class FakeOpenAIClient:
+        def __init__(self, api_key: str, base_url: str):
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=lambda **kwargs: SimpleNamespace(
+                        choices=[
+                            SimpleNamespace(
+                                message=SimpleNamespace(
+                                    content='{"bigo": 13000, "confidence": "high", "evidence_quote": "बिगो रु.१३,००० कायम गरी मागदाबी"}'
+                                )
+                            )
+                        ]
+                    )
+                )
+            )
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAIClient))
+
+    extracted = command._extract_bigo_from_markdown(
+        markdown="sample markdown",
+        case=case,
+        model="openai:claude-sonnet-4-6",
+        anthropic_api_key="test-key",
+        min_confidence="low",
+        llm_base_url="https://llm-proxy.jawafdehi.org/v1",
+    )
+
+    assert extracted == 13000
 
 
 @pytest.mark.django_db
