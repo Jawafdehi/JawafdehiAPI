@@ -15,6 +15,7 @@ from .models import (
     DraftVersion,
     LLMProvider,
     PublicChatConfig,
+    RAGSkillProfile,
 )
 from .serializers import (
     CurrentUserSerializer,
@@ -26,6 +27,7 @@ from .serializers import (
     DraftVersionSerializer,
     LLMProviderSerializer,
     PublicChatConfigSerializer,
+    RAGSkillProfileSerializer,
 )
 from .permissions import IsAdminOrReadOnly, IsOwnerOrAdmin
 from .services import MCPService, LLMService, SummaryGenerationService
@@ -223,8 +225,16 @@ class PublicChatConfigViewSet(viewsets.ModelViewSet):
             "llm_provider",
             "classifier_llm_provider",
         )
-        .prefetch_related("knowledge_collections")
+        .prefetch_related("knowledge_collections", "rag_skill_profiles")
         .all()
     )
     serializer_class = PublicChatConfigSerializer
+    permission_classes = [IsAuthenticated, IsAdminOrReadOnly]
+
+
+class RAGSkillProfileViewSet(viewsets.ModelViewSet):
+    queryset = RAGSkillProfile.objects.select_related("skill").prefetch_related(
+        "collections"
+    )
+    serializer_class = RAGSkillProfileSerializer
     permission_classes = [IsAuthenticated, IsAdminOrReadOnly]

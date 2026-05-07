@@ -1,6 +1,8 @@
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q
+
+from .crypto import SecretDecryptionError, decrypt_secret, encrypt_secret
 from django.contrib.auth.models import User
 
 # Providers that require an API key for authentication
@@ -176,10 +178,9 @@ class LLMProvider(models.Model):
         choices=PROVIDER_CHOICES,
     )
     model = models.CharField(max_length=255)
-    # TODO: Replace with encrypted field or secret reference (e.g., django-encrypted-model-fields)
-    # Storing secrets as plain text is a security risk
-    # Optional for local providers like ollama
-    api_key = models.CharField(max_length=500, blank=True, null=True)
+    # Stored encrypted at rest by save(); exposed through get_api_key() only.
+    # Optional for local providers like ollama.
+    api_key = models.CharField(max_length=2048, blank=True, null=True)
     base_url = models.URLField(max_length=1000, blank=True)
     api_version = models.CharField(max_length=100, blank=True)
     deployment_name = models.CharField(max_length=255, blank=True)
@@ -199,7 +200,7 @@ class LLMProvider(models.Model):
     def clean(self):
         """Validate that api_key is provided for providers that require it."""
         errors = {}
-        if self.provider_type in PROVIDERS_REQUIRING_API_KEY and not self.api_key:
+        if self.provider_type in PROVIDERS_REQUIRING_API_KEY and not self.has_api_key():
             errors["api_key"] = (
                 f"API key is required for {self.get_provider_type_display()}"
             )
@@ -234,7 +235,17 @@ class LLMProvider(models.Model):
 
     def save(self, *args, **kwargs):
         self.full_clean()
+        self.api_key = encrypt_secret(self.api_key)
         super().save(*args, **kwargs)
+
+    def get_api_key(self) -> str:
+        return decrypt_secret(self.api_key)
+
+    def has_api_key(self) -> bool:
+        try:
+            return bool(decrypt_secret(self.api_key).strip())
+        except SecretDecryptionError:
+            return False
 
     class Meta:
         ordering = ["-is_default", "name"]
@@ -302,6 +313,12 @@ class PublicChatConfig(models.Model):
         related_name="public_chat_configs",
         help_text="Public knowledge collections exposed to anonymous public chat.",
     )
+    rag_skill_profiles = models.ManyToManyField(
+        "RAGSkillProfile",
+        blank=True,
+        related_name="public_chat_configs",
+        help_text="File-synced RAG skills available to anonymous public chat.",
+    )
     max_knowledge_results = models.PositiveIntegerField(default=5)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -341,3 +358,67 @@ class PublicChatConfig(models.Model):
 
     class Meta:
         ordering = ["-is_active", "-created_at"]
+
+
+class RAGSkillProfile(models.Model):
+    """File-synced trigger and retrieval contract for a public RAG skill."""
+
+    name = models.SlugField(max_length=120, unique=True)
+    display_name = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    skill = models.ForeignKey(
+        Skill,
+        on_delete=models.PROTECT,
+        related_name="rag_skill_profiles",
+        help_text="Prompt instructions loaded from the skill pack SKILL.md.",
+    )
+    collections = models.ManyToManyField(
+        "knowledge.KnowledgeCollection",
+        blank=True,
+        related_name="rag_skill_profiles",
+        help_text=(
+            "Optional indexed public knowledge cache searched when this skill matches."
+        ),
+    )
+    trigger_keywords = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Case-insensitive phrases that trigger this RAG skill.",
+    )
+    priority = models.PositiveIntegerField(
+        default=100,
+        help_text="Lower values match first when multiple RAG skills trigger.",
+    )
+    max_results = models.PositiveIntegerField(default=5)
+    min_keyword_matches = models.PositiveIntegerField(default=1)
+    requires_citations = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    source_path = models.CharField(max_length=1000, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def clean(self):
+        errors = {}
+        if not isinstance(self.trigger_keywords, list):
+            errors["trigger_keywords"] = "Trigger keywords must be a list."
+        elif any(not isinstance(item, str) for item in self.trigger_keywords):
+            errors["trigger_keywords"] = "Trigger keywords must contain strings only."
+        if self.min_keyword_matches < 1:
+            errors["min_keyword_matches"] = "Must be at least 1."
+        if self.max_results < 1:
+            errors["max_results"] = "Must be at least 1."
+        if self.metadata is not None and not isinstance(self.metadata, dict):
+            errors["metadata"] = "Metadata must be a JSON object."
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.display_name or self.name
+
+    class Meta:
+        ordering = ["priority", "name"]

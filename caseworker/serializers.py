@@ -10,6 +10,7 @@ from .models import (
     LLMProvider,
     PublicChatConfig,
     PROVIDERS_REQUIRING_API_KEY,
+    RAGSkillProfile,
 )
 
 
@@ -137,6 +138,8 @@ class DraftSerializer(serializers.ModelSerializer):
 
 
 class LLMProviderSerializer(serializers.ModelSerializer):
+    has_api_key = serializers.SerializerMethodField()
+
     class Meta:
         model = LLMProvider
         fields = [
@@ -146,6 +149,7 @@ class LLMProviderSerializer(serializers.ModelSerializer):
             "provider_type",
             "model",
             "api_key",
+            "has_api_key",
             "base_url",
             "api_version",
             "deployment_name",
@@ -158,15 +162,21 @@ class LLMProviderSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "created_at", "updated_at"]
+        read_only_fields = ["id", "has_api_key", "created_at", "updated_at"]
         extra_kwargs = {"api_key": {"write_only": True}}
+
+    def get_has_api_key(self, obj):
+        return obj.has_api_key()
 
     def validate(self, data):
         """Validate provider-specific admin configuration."""
         provider_type = data.get(
             "provider_type", getattr(self.instance, "provider_type", None)
         )
-        api_key = data.get("api_key", getattr(self.instance, "api_key", None))
+        api_key = data.get("api_key")
+        has_api_key = bool(api_key) or bool(
+            self.instance and self.instance.has_api_key()
+        )
         base_url = data.get("base_url", getattr(self.instance, "base_url", ""))
         api_version = data.get("api_version", getattr(self.instance, "api_version", ""))
         deployment_name = data.get(
@@ -178,7 +188,7 @@ class LLMProviderSerializer(serializers.ModelSerializer):
             "extra_config", getattr(self.instance, "extra_config", {})
         )
 
-        if provider_type in PROVIDERS_REQUIRING_API_KEY and not api_key:
+        if provider_type in PROVIDERS_REQUIRING_API_KEY and not has_api_key:
             raise serializers.ValidationError(
                 {"api_key": f"API key is required for {provider_type}"}
             )
@@ -215,6 +225,11 @@ class LLMProviderSerializer(serializers.ModelSerializer):
 
         return data
 
+    def update(self, instance, validated_data):
+        if validated_data.get("api_key") == "":
+            validated_data.pop("api_key")
+        return super().update(instance, validated_data)
+
 
 class PublicChatConfigSerializer(serializers.ModelSerializer):
     class Meta:
@@ -238,8 +253,34 @@ class PublicChatConfigSerializer(serializers.ModelSerializer):
             "max_evidence_chars",
             "knowledge_rag_enabled",
             "knowledge_collections",
+            "rag_skill_profiles",
             "max_knowledge_results",
             "created_at",
             "updated_at",
         ]
         read_only_fields = ["id", "created_at", "updated_at"]
+
+
+class RAGSkillProfileSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RAGSkillProfile
+        fields = [
+            "id",
+            "name",
+            "display_name",
+            "description",
+            "skill",
+            "collections",
+            "trigger_keywords",
+            "priority",
+            "max_results",
+            "min_keyword_matches",
+            "requires_citations",
+            "is_active",
+            "source_path",
+            "metadata",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "created_at", "updated_at"]
+        extra_kwargs = {"collections": {"required": False}}

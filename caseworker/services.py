@@ -101,12 +101,17 @@ class LLMService:
         return provider
 
     def resolve_answer_provider(self, config):
-        return getattr(config, "llm_provider", None) or self.resolve_default_provider()
+        configured = getattr(config, "llm_provider", None)
+        return (
+            self._active_provider_or_none(configured) or self.resolve_default_provider()
+        )
 
     def resolve_classifier_provider(self, config):
         return (
-            getattr(config, "classifier_llm_provider", None)
-            or getattr(config, "llm_provider", None)
+            self._active_provider_or_none(
+                getattr(config, "classifier_llm_provider", None)
+            )
+            or self._active_provider_or_none(getattr(config, "llm_provider", None))
             or self.resolve_default_provider()
         )
 
@@ -114,6 +119,7 @@ class LLMService:
         provider = provider or self.resolve_default_provider()
         provider_type = provider.provider_type
         common_kwargs = self._common_chat_kwargs(provider)
+        api_key = self._provider_api_key(provider)
 
         try:
             if provider_type == "anthropic":
@@ -132,7 +138,7 @@ class LLMService:
 
                 kwargs = {
                     "model": provider.model,
-                    "google_api_key": provider.api_key,
+                    "google_api_key": api_key,
                     "temperature": provider.temperature,
                     "max_output_tokens": provider.max_tokens,
                     **self._extra_config(provider),
@@ -142,7 +148,7 @@ class LLMService:
                 from langchain_openai import AzureChatOpenAI
 
                 return AzureChatOpenAI(
-                    api_key=provider.api_key,
+                    api_key=api_key,
                     azure_endpoint=provider.base_url,
                     azure_deployment=provider.deployment_name,
                     api_version=provider.api_version,
@@ -172,8 +178,8 @@ class LLMService:
                     "max_tokens": provider.max_tokens,
                     **self._extra_config(provider),
                 }
-                if provider.api_key:
-                    kwargs["api_key"] = provider.api_key
+                if api_key:
+                    kwargs["api_key"] = api_key
                 return ChatOpenAI(**kwargs)
         except ImportError as e:
             raise ValueError(f"LangChain provider not installed: {e}")
@@ -205,7 +211,7 @@ class LLMService:
         metadata: dict[str, Any] | None = None,
     ):
         model = self.get_chat_model(provider)
-        structured_model = model.with_structured_output(schema)
+        structured_model = self._with_structured_output(model, provider, schema)
         result = structured_model.invoke(
             self._normalize_messages(messages),
             config=self._run_config(run_name=run_name, metadata=metadata),
@@ -253,9 +259,16 @@ class LLMService:
             "max_tokens": provider.max_tokens,
             **self._extra_config(provider),
         }
-        if provider.api_key:
-            kwargs["api_key"] = provider.api_key
+        api_key = LLMService._provider_api_key(provider)
+        if api_key:
+            kwargs["api_key"] = api_key
         return kwargs
+
+    @staticmethod
+    def _provider_api_key(provider) -> str:
+        if hasattr(provider, "get_api_key"):
+            return provider.get_api_key()
+        return getattr(provider, "api_key", "") or ""
 
     @staticmethod
     def _extra_config(provider) -> dict[str, Any]:
@@ -302,6 +315,33 @@ class LLMService:
                     parts.append(str(getattr(item, "text", item)))
             return "".join(parts)
         return str(content)
+
+    @staticmethod
+    def _active_provider_or_none(provider):
+        if provider is not None and getattr(provider, "is_active", False):
+            return provider
+        return None
+
+    @staticmethod
+    def _with_structured_output(model, provider, schema):
+        mode = getattr(provider, "structured_output_mode", "auto")
+        method = None
+        if mode == "provider_native":
+            method = "json_schema"
+        elif mode == "tool_calling":
+            method = "function_calling"
+
+        if method is None:
+            return model.with_structured_output(schema)
+
+        try:
+            return model.with_structured_output(schema, method=method)
+        except TypeError:
+            logger.warning(
+                "Structured output mode %s is not supported by this provider wrapper; using auto.",
+                mode,
+            )
+            return model.with_structured_output(schema)
 
 
 class SummaryGenerationService:

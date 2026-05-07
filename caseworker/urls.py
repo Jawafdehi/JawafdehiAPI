@@ -10,6 +10,7 @@ from .views import (
     DraftViewSet,
     LLMProviderViewSet,
     PublicChatConfigViewSet,
+    RAGSkillProfileViewSet,
 )
 
 router = SimpleRouter()
@@ -25,6 +26,11 @@ router.register(
     r"public-chat-configs",
     PublicChatConfigViewSet,
     basename="cw-public-chat-config",
+)
+router.register(
+    r"rag-skill-profiles",
+    RAGSkillProfileViewSet,
+    basename="cw-rag-skill-profile",
 )
 
 urlpatterns = [

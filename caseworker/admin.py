@@ -8,6 +8,7 @@ from .models import (
     DraftVersion,
     LLMProvider,
     PublicChatConfig,
+    RAGSkillProfile,
 )
 
 
@@ -105,5 +106,23 @@ class PublicChatConfigAdmin(admin.ModelAdmin):
     ]
     list_filter = ["enabled", "is_active", "quota_scope", "knowledge_rag_enabled"]
     search_fields = ["name", "prompt__name", "prompt__display_name"]
-    filter_horizontal = ["knowledge_collections"]
+    filter_horizontal = ["knowledge_collections", "rag_skill_profiles"]
+    readonly_fields = ["created_at", "updated_at"]
+
+
+@admin.register(RAGSkillProfile)
+class RAGSkillProfileAdmin(admin.ModelAdmin):
+    list_display = [
+        "name",
+        "display_name",
+        "skill",
+        "priority",
+        "max_results",
+        "min_keyword_matches",
+        "requires_citations",
+        "is_active",
+    ]
+    list_filter = ["is_active", "requires_citations"]
+    search_fields = ["name", "display_name", "description", "trigger_keywords"]
+    filter_horizontal = ["collections"]
     readonly_fields = ["created_at", "updated_at"]
