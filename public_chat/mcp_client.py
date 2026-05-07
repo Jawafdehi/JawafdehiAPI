@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from collections.abc import Iterable
 from typing import Any
 
@@ -10,6 +12,9 @@ from django.conf import settings
 
 class PublicChatMCPError(RuntimeError):
     pass
+
+
+_TOOL_CACHE: dict[str, dict[str, Any]] = {}
 
 
 class PublicChatMCPClient:
@@ -27,6 +32,7 @@ class PublicChatMCPClient:
         servers = getattr(settings, "PUBLIC_CHAT_MCP_SERVERS", {})
         if not servers:
             raise PublicChatMCPError("Public chat MCP server is not configured")
+        _validate_mcp_server_lifecycle(servers)
 
         try:
             from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -35,13 +41,7 @@ class PublicChatMCPClient:
                 "langchain-mcp-adapters is required for public chat MCP access"
             ) from exc
 
-        client = MultiServerMCPClient(servers)
-        tools = await client.get_tools()
-        for tool in tools:
-            tool.handle_tool_error = True
-        tool_map = {
-            tool.name: tool for tool in tools if tool.name in self.allowed_tools
-        }
+        tool_map = await self._load_tool_map(MultiServerMCPClient, servers)
         tool = tool_map.get(name)
         if tool is None:
             available_tools = ", ".join(sorted(tool_map)) or "none"
@@ -50,8 +50,50 @@ class PublicChatMCPClient:
                 f"Available public MCP tools: {available_tools}"
             )
 
-        raw_result = await tool.ainvoke(arguments)
+        try:
+            raw_result = await self._invoke_tool(tool, arguments)
+        except Exception:
+            if _should_cache_tools(servers):
+                _clear_tool_cache(servers, self.allowed_tools)
+                tool_map = await self._load_tool_map(MultiServerMCPClient, servers)
+                tool = tool_map.get(name)
+                if tool is None:
+                    raise
+                raw_result = await self._invoke_tool(tool, arguments)
+            else:
+                raise
         return self._parse_tool_result(raw_result)
+
+    async def _load_tool_map(
+        self, client_cls, servers: dict[str, Any]
+    ) -> dict[str, Any]:
+        # Keep tool objects scoped to this async call. LangChain MCP stdio tools can
+        # own event-loop/process resources, so a global tool-object cache is unsafe
+        # under Django request concurrency.
+        if _should_cache_tools(servers):
+            cache_key = _tool_cache_key(servers, self.allowed_tools)
+            cached = _TOOL_CACHE.get(cache_key)
+            if cached and cached["expires_at"] > time.monotonic():
+                return cached["tools"]
+
+        client = client_cls(servers)
+        tools = await client.get_tools()
+        for tool in tools:
+            tool.handle_tool_error = True
+        tool_map = {
+            tool.name: tool for tool in tools if tool.name in self.allowed_tools
+        }
+        if _should_cache_tools(servers):
+            _TOOL_CACHE[_tool_cache_key(servers, self.allowed_tools)] = {
+                "expires_at": time.monotonic()
+                + getattr(settings, "PUBLIC_CHAT_MCP_TOOL_CACHE_SECONDS", 300),
+                "tools": tool_map,
+            }
+        return tool_map
+
+    async def _invoke_tool(self, tool: Any, arguments: dict[str, Any]) -> Any:
+        timeout = getattr(settings, "PUBLIC_CHAT_MCP_TOOL_TIMEOUT_SECONDS", 30)
+        return await asyncio.wait_for(tool.ainvoke(arguments), timeout=timeout)
 
     def _parse_tool_result(self, raw_result: Any) -> dict[str, Any]:
         if isinstance(raw_result, dict):
@@ -83,6 +125,41 @@ class PublicChatMCPClient:
     def _parse_json_text(self, text: str) -> dict[str, Any]:
         try:
             return json.loads(text)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError):
             message = str(text).strip() or "MCP tool returned a non-JSON response"
-            raise PublicChatMCPError(message[:500]) from exc
+            if message.lower().startswith("error"):
+                raise PublicChatMCPError(message[:500])
+            return {"text": message}
+
+
+def _validate_mcp_server_lifecycle(servers: dict[str, Any]) -> None:
+    if settings.DEBUG:
+        return
+    stdio_servers = [
+        name
+        for name, config in servers.items()
+        if isinstance(config, dict) and config.get("transport") == "stdio"
+    ]
+    if stdio_servers:
+        raise PublicChatMCPError(
+            "Production public chat MCP must use a managed non-stdio transport."
+        )
+
+
+def _should_cache_tools(servers: dict[str, Any]) -> bool:
+    return bool(servers) and all(
+        isinstance(config, dict) and config.get("transport") != "stdio"
+        for config in servers.values()
+    )
+
+
+def _tool_cache_key(servers: dict[str, Any], allowed_tools: frozenset[str]) -> str:
+    payload = {
+        "servers": servers,
+        "allowed_tools": sorted(allowed_tools),
+    }
+    return json.dumps(payload, sort_keys=True, default=str)
+
+
+def _clear_tool_cache(servers: dict[str, Any], allowed_tools: frozenset[str]) -> None:
+    _TOOL_CACHE.pop(_tool_cache_key(servers, allowed_tools), None)

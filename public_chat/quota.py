@@ -1,15 +1,32 @@
 import hashlib
 
+from django.conf import settings
 from django.core.cache import caches
 
 QUOTA_CACHE_NAME = "public_chat_quota"
 
 
 def get_client_ip(request) -> str:
+    edge_header = getattr(settings, "PUBLIC_CHAT_EDGE_SECRET_HEADER", "")
+    edge_value = getattr(settings, "PUBLIC_CHAT_EDGE_SECRET_VALUE", "")
+    if edge_header and edge_value:
+        header_name = f"HTTP_{edge_header.upper().replace('-', '_')}"
+        if request.META.get(header_name) == edge_value:
+            cf_ip = request.META.get("HTTP_CF_CONNECTING_IP")
+            if cf_ip:
+                return cf_ip.strip()
+
+    remote_addr = request.META.get("REMOTE_ADDR", "unknown")
+    trusted_proxy_count = getattr(settings, "PUBLIC_CHAT_TRUSTED_PROXY_COUNT", 0)
+    if trusted_proxy_count < 1:
+        return remote_addr
+
     forwarded = request.META.get("HTTP_X_FORWARDED_FOR")
     if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.META.get("REMOTE_ADDR", "unknown")
+        chain = [item.strip() for item in forwarded.split(",") if item.strip()]
+        if len(chain) > trusted_proxy_count:
+            return chain[-trusted_proxy_count - 1]
+    return remote_addr
 
 
 def _quota_identity(config, request, session_id: str) -> str:
