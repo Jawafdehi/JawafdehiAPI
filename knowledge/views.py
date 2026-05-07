@@ -1,8 +1,11 @@
-from rest_framework import viewsets
+from rest_framework import status, viewsets
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from caseworker.permissions import IsAdminOrReadOnly
 
+from .importer import KnowledgeImportError, import_knowledge_manifest
 from .models import (
     KnowledgeChunk,
     KnowledgeCollection,
@@ -43,3 +46,30 @@ class KnowledgeEmbeddingViewSet(viewsets.ModelViewSet):
     )
     serializer_class = KnowledgeEmbeddingSerializer
     permission_classes = [IsAuthenticated, IsAdminOrReadOnly]
+
+
+class KnowledgeImportView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminOrReadOnly]
+
+    def post(self, request):
+        manifest = (
+            request.data.get("manifest", request.data)
+            if isinstance(request.data, dict)
+            else request.data
+        )
+        try:
+            result = import_knowledge_manifest(manifest)
+        except KnowledgeImportError as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response(
+            {
+                "collection": KnowledgeCollectionSerializer(result.collection).data,
+                "source": KnowledgeSourceSerializer(result.source).data,
+                "chunks_imported": result.chunks_imported,
+            },
+            status=status.HTTP_201_CREATED,
+        )

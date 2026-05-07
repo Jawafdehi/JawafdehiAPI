@@ -5,6 +5,7 @@ from .views import (
     KnowledgeChunkViewSet,
     KnowledgeCollectionViewSet,
     KnowledgeEmbeddingViewSet,
+    KnowledgeImportView,
     KnowledgeSourceViewSet,
 )
 
@@ -15,5 +16,6 @@ router.register("chunks", KnowledgeChunkViewSet)
 router.register("embeddings", KnowledgeEmbeddingViewSet)
 
 urlpatterns = [
+    path("import/", KnowledgeImportView.as_view(), name="knowledge-import"),
     path("", include(router.urls)),
 ]

@@ -11,6 +11,15 @@ class AccessLevel(models.TextChoices):
     PUBLIC = "public", "Public"
 
 
+def has_public_citation_metadata(metadata: dict) -> bool:
+    citation = metadata.get("public_citation") if isinstance(metadata, dict) else None
+    if not isinstance(citation, dict):
+        return False
+    return bool(
+        citation.get("title") or citation.get("url") or citation.get("identifier")
+    )
+
+
 class KnowledgeCollection(models.Model):
     """A logical bucket of searchable knowledge artifacts."""
 
@@ -87,12 +96,14 @@ class KnowledgeSource(models.Model):
         errors = {}
         if self.access_level == AccessLevel.PUBLIC:
             has_citation_target = bool(
-                self.source_url or self.storage_path or self.document_source_id
+                self.source_url
+                or self.document_source_id
+                or has_public_citation_metadata(self.metadata)
             )
             if not has_citation_target:
                 errors["source_url"] = (
-                    "Public knowledge sources need a URL, storage path, or linked "
-                    "document source for citations."
+                    "Public knowledge sources need a source URL, linked document "
+                    "source, or metadata.public_citation for citations."
                 )
         if errors:
             raise ValidationError(errors)

@@ -6,6 +6,7 @@ from .models import (
     KnowledgeCollection,
     KnowledgeEmbedding,
     KnowledgeSource,
+    has_public_citation_metadata,
 )
 
 
@@ -58,20 +59,18 @@ class KnowledgeSourceSerializer(serializers.ModelSerializer):
             getattr(self.instance, "access_level", AccessLevel.PRIVATE),
         )
         source_url = attrs.get("source_url", getattr(self.instance, "source_url", ""))
-        storage_path = attrs.get(
-            "storage_path", getattr(self.instance, "storage_path", "")
-        )
+        metadata = attrs.get("metadata", getattr(self.instance, "metadata", {}))
         document_source = attrs.get(
             "document_source", getattr(self.instance, "document_source", None)
         )
         if access_level == AccessLevel.PUBLIC and not (
-            source_url or storage_path or document_source
+            source_url or document_source or has_public_citation_metadata(metadata)
         ):
             raise serializers.ValidationError(
                 {
                     "source_url": (
-                        "Public knowledge sources need a URL, storage path, or "
-                        "linked document source for citations."
+                        "Public knowledge sources need a source URL, linked document "
+                        "source, or metadata.public_citation for citations."
                     )
                 }
             )
