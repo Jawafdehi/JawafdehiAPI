@@ -7,33 +7,49 @@ import logging
 logger = logging.getLogger(__name__)
 
 def index(request):
-    return render(request, 'index.html')
+    return render(request, "index.html")
 
 def docs(request):
-    return render(request, 'docs.html')
+    return render(request, "docs.html")
 
 def legacy_case_redirect(request, legacy_id):
     """
     Handle 301 redirects for legacy numeric case URLs.
+    
+    Prioritizes canonical slugs and stable case IDs to ensure 
+    one source of truth per fact (verified by Bishop).
     """
-    case_key = LEGACY_CASE_MAP.get(str(legacy_id))
-    if case_key:
+    target = LEGACY_CASE_MAP.get(str(legacy_id))
+    if not target:
+        return render(request, "index.html")
+
+    # 1. Try exact slug match (fastest and most canonical)
+    case = Case.objects.filter(slug=target).first()
+    
+    if not case:
+        # 2. Try exact case_id match
+        case = Case.objects.filter(case_id=target).first()
+        
+    if not case:
+        # 3. Try searching for the case by key in court_cases or title
+        # This handles legacy mappings that use Case Keys or Titles
+        # Note: court_cases search might be limited by DB vendor
         try:
-            # Try to find by partial title match first (safest across DBs)
-            case = Case.objects.filter(title__icontains=case_key).first()
+            case = Case.objects.filter(court_cases__icontains=target).first()
+        except Exception:
+            case = None
             
-            # If not found by title, try searching court_cases (JSONField)
-            if not case:
-                # In Postgres, icontains on JSONField might fail. 
-                # We use a string-based search if possible or just skip.
-                case = Case.objects.filter(court_cases__icontains=case_key).first()
-                
-            if case and case.slug:
-                return HttpResponsePermanentRedirect(f'/case/{case.slug}')
-            elif case:
-                return HttpResponsePermanentRedirect(f'/case/{case.case_id}')
-        except Exception as e:
-            logger.error(f'Error in legacy_case_redirect for {legacy_id}: {e}')
+        if not case:
+            case = Case.objects.filter(title__icontains=target).first()
             
-    # Fallback: serve index.html with 200 (frontend will handle routing)
-    return render(request, 'index.html')
+    if case:
+        if case.slug:
+            return HttpResponsePermanentRedirect(f"/case/{case.slug}")
+        return HttpResponsePermanentRedirect(f"/case/{case.case_id}")
+            
+    # Final fallback: if target looks like a slug/path but case not found in DB
+    # We still try to redirect to it to let the frontend handle the 404
+    if "-" in target or target.startswith("case-"):
+        return HttpResponsePermanentRedirect(f"/case/{target}")
+
+    return render(request, "index.html")

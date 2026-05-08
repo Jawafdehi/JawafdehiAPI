@@ -24,8 +24,8 @@ LEGACY_CASE_MAP = {
     "210": "case-b72c6120bc6a",
     "209": "case-c785c0f6656e",
     "208": "case-34d29eefd230",
-    "207": "Rabi Lamichhane Cooperative Fraud",
-    "188": "Budhigandaki Hydropower Project",
-    "175": "Giribandhu Tea Estate Land Swap Scandal",
-    "111": "Maoist Combatant Cantonment Corruption Case",
+    "207": "case-rabi-lamichhane-cooperative-fraud",
+    "188": "case-budhigandaki-hydropower-project",
+    "175": "case-giribandhu-tea-estate-land-swap-scandal",
+    "111": "case-maoist-combatant-cantonment-corruption-case",
 }
