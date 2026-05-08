@@ -498,6 +498,23 @@ class Case(models.Model):
         validators=[validate_court_cases],
         help_text="List of court case references in format {court_identifier}:{case_number}, e.g. ['supreme:078-WC-0123', 'special:076-CR-0456']",
     )
+
+    # Phase 3 Fields
+    financials = models.JSONField(
+        blank=True,
+        null=True,
+        help_text="Financial details of the case (alleged amount, recovered, fines, etc.)",
+    )
+    outcomes = models.JSONField(
+        blank=True,
+        null=True,
+        help_text="Final outcomes and verdict details of the case",
+    )
+    narrative = models.JSONField(
+        blank=True,
+        null=True,
+        help_text="Structured narrative fields for public display and social cards",
+    )
     missing_details = models.TextField(
         blank=True,
         null=True,

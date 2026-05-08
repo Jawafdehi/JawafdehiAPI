@@ -1,3 +1,4 @@
+# Hardening JAW-146 in progress
 """
 Django settings for config project.
 
@@ -172,6 +173,19 @@ WSGI_APPLICATION = "config.wsgi.application"
 
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
+
+# Handle secret interpolation for database URLs
+def interpolate_db_url(url_env_name):
+    url = os.getenv(url_env_name)
+    if not url:
+        return
+    password = os.getenv("DATABASE_PASSWORD")
+    if password:
+        url = url.replace("${DATABASE_PASSWORD}", password)
+        os.environ[url_env_name] = url
+
+interpolate_db_url("DATABASE_URL")
+interpolate_db_url("NGM_DATABASE_URL")
 
 DATABASES = {
     "default": dj_database_url.config(

@@ -535,6 +535,9 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
                 "evidence",
                 "slug",
                 "court_cases",
+                "financials",
+                "outcomes",
+                "narrative",
                 "missing_details",
                 "bigo",
             ]
@@ -616,6 +619,9 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
             ],
             "slug": case.slug,
             "court_cases": list(case.court_cases) if case.court_cases else [],
+            "financials": case.financials,
+            "outcomes": case.outcomes,
+            "narrative": case.narrative,
             "missing_details": case.missing_details,
             "bigo": case.bigo,
         }
