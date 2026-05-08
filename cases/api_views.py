@@ -304,7 +304,16 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
         else:
             # Slug lookup (preferred)
             try:
-                obj = queryset.get(slug=lookup_value)
+                # Try exact match on slug or case_id
+                obj = queryset.filter(Q(slug=lookup_value) | Q(case_id=lookup_value)).first()
+                
+                # Fallback: search within court_cases list
+                if not obj:
+                    obj = queryset.filter(court_cases__icontains=lookup_value).first()
+
+                if not obj:
+                    raise Case.DoesNotExist()
+
                 self.check_object_permissions(self.request, obj)
                 return obj
             except Case.DoesNotExist as exc:

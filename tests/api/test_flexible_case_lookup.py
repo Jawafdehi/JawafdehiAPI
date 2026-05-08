@@ -66,3 +66,28 @@ class TestFlexibleCaseLookup:
             "Deprecation" not in response
         ), "Response should NOT include Deprecation header"
         assert response.data["case_id"] == case.case_id, "Should return correct case"
+
+    def test_lookup_by_case_id_no_deprecation_header(self):
+        """
+        GET /api/cases/{case_id}/ on a published case should return 200 without Deprecation header.
+        """
+        # Create a published case
+        case = create_case_with_entities(
+            title="Test Case for Case ID Lookup",
+            alleged_entities=["entity:person/test-person-2"],
+            key_allegations=["Another allegation"],
+            case_type=CaseType.CORRUPTION,
+            description="Test description 2",
+            state=CaseState.PUBLISHED,
+        )
+
+        # Make request using public case_id
+        client = APIClient()
+        response = client.get(f"/api/cases/{case.case_id}/")
+
+        # Verify response
+        assert response.status_code == 200, "Should return 200 for published case by case_id"
+        assert (
+            "Deprecation" not in response
+        ), "Response should NOT include Deprecation header for case_id"
+        assert response.data["case_id"] == case.case_id, "Should return correct case"

@@ -25,6 +25,8 @@ from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 urlpatterns = [
     path("", index, name="index"),
+    path("case/<path:path>", index, name="case-detail-fallback"),
+    path("entity/<path:path>", index, name="entity-detail-fallback"),
     path("docs/", docs, name="docs"),
     path("admin/", admin.site.urls),
     path("tinymce/", include("tinymce.urls")),
