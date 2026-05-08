@@ -362,18 +362,66 @@ class Command(BaseCommand):
                                 f"    ✓ Created/updated source {combined_source.source_id} with {file_count} file(s)"
                             )
                         )
+                    else:
+                        # No valid file URLs found - preserve original evidence
+                        self.stdout.write(
+                            self.style.WARNING(
+                                f"  ⊘ No valid file URLs found for press release {press_id}, preserving original evidence"
+                            )
+                        )
+                        updated_evidence.append(evidence_entry)
             else:
-                # Dry-run mode
+                # Dry-run mode - simulate the same existence check
                 file_count = len(pr_data["files"])
-                self.stdout.write(
-                    f"    [DRY RUN] Would create source with web URL + {file_count} file URL(s)"
-                )
+
+                # Check if source already exists (same logic as get_or_create_press_release_source)
+                if connection.vendor == "postgresql":
+                    existing = DocumentSource.objects.filter(
+                        url__contains=[press_release_url], is_deleted=False
+                    ).first()
+                else:
+                    existing = None
+                    candidates = DocumentSource.objects.filter(
+                        url__icontains=press_release_url, is_deleted=False
+                    )
+                    for source in candidates:
+                        if (
+                            isinstance(source.url, list)
+                            and press_release_url in source.url
+                        ):
+                            existing = source
+                            break
+
+                if existing:
+                    # Check if it would need updating
+                    existing_urls = (
+                        existing.url
+                        if isinstance(existing.url, list)
+                        else [existing.url]
+                    )
+                    file_urls = [f.get("url") for f in pr_data["files"] if f.get("url")]
+                    needs_update = any(
+                        file_url not in existing_urls for file_url in file_urls
+                    )
+
+                    if needs_update:
+                        self.stats["sources_updated"] += 1
+                        self.stdout.write(
+                            f"    [DRY RUN] Would update existing source with {file_count} file URL(s)"
+                        )
+                    else:
+                        self.stdout.write(
+                            "    [DRY RUN] Would reuse existing source (no changes needed)"
+                        )
+                else:
+                    self.stats["sources_created"] += 1
+                    self.stdout.write(
+                        f"    [DRY RUN] Would create source with web URL + {file_count} file URL(s)"
+                    )
+
                 for file_data in pr_data["files"]:
                     file_name = file_data.get("file_name", "")
                     self.stdout.write(f"      - {file_name}")
-
-                # In dry-run, we still need to track what would happen
-                self.stats["sources_created"] += 1  # Assume it would be created
 
                 updated_evidence.append(
                     {

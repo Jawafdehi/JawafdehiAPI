@@ -147,12 +147,12 @@ class TestMapPressReleaseFiles:
             # Check that new source was created
             evidence_entry = case.evidence[0]
             source = DocumentSource.objects.get(source_id=evidence_entry["source_id"])
-            
+
             # Source should have both the web URL and file URLs
             assert len(source.url) == 3  # web URL + 2 file URLs
             assert any("ciaa.gov.np/pressrelease/3173" in url for url in source.url)
             assert sum("ngm-store.jawafdehi.org" in url for url in source.url) == 2
-            
+
             # Evidence description should show file count
             assert "2 documents" in evidence_entry["description"]
 
