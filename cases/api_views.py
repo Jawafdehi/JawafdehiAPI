@@ -20,7 +20,37 @@ from drf_spectacular.utils import (
     extend_schema_view,
 )
 from django.db.models import Q
-from rest_framework import filters, mixins, status, viewsets
+from rest_framework import filters, mixins, status, viewsets, authentication, exceptions
+from django.contrib.auth.models import User
+from django.conf import settings
+
+
+class ServiceTokenAuthentication(authentication.BaseAuthentication):
+    """
+    Simple authentication class that checks for a pre-shared secret in X-Service-Token header.
+    Maps to a virtual 'admin-service' user with superuser permissions.
+    """
+
+    def authenticate(self, request):
+        token = request.headers.get("X-Service-Token")
+        if not token:
+            return None
+
+        if not settings.ADMIN_SERVICE_TOKEN:
+            return None
+
+        if token == settings.ADMIN_SERVICE_TOKEN:
+            try:
+                # Return a system user with full permissions
+                user, _ = User.objects.get_or_create(
+                    username="admin-service",
+                    defaults={"is_staff": True, "is_superuser": True},
+                )
+                return (user, None)
+            except Exception:
+                raise exceptions.AuthenticationFailed("Service user mapping failed")
+
+        raise exceptions.AuthenticationFailed("Invalid service token")
 from rest_framework.authentication import SessionAuthentication, TokenAuthentication
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
@@ -188,6 +218,7 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
         JWTAuthentication,
         TokenAuthentication,
         SessionAuthentication,
+        ServiceTokenAuthentication,
     ]
 
     def get_permissions(self):
