@@ -29,6 +29,7 @@ from .widgets import (
     MultiURLField,
     MultiCourtCaseField,
 )
+from .validators import COURT_CHOICES
 from .rules.predicates import (
     is_admin,
     is_moderator,
@@ -74,10 +75,7 @@ class CaseAdminForm(forms.ModelForm):
         button_label="Add Court Case",
         label="Court Cases",
         help_text="Court case references in format {court_identifier}:{case_number}",
-        court_choices=[
-            ("supreme", "Supreme Court"),
-            ("special", "Special Court"),
-        ],
+        court_choices=COURT_CHOICES,
     )
 
     timeline = MultiTimelineField(
