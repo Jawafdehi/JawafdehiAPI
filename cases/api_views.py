@@ -303,12 +303,8 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
         Override to support lookup by either numeric id or slug.
 
         Lookup disambiguation:
-        - If lookup_value is purely numeric → query by id
+        - If lookup_value is purely numeric → query by id and redirect to slug
         - Otherwise → query by slug
-
-        Deprecation tracking:
-        - Numeric ID lookups trigger deprecation warning
-        - Sets request._used_numeric_id flag for response header
 
         Returns:
             Case: The retrieved case object
@@ -324,11 +320,19 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
             # Numeric ID lookup (deprecated)
             try:
                 obj = queryset.get(id=int(lookup_value))
+                
+                # Check for canonical slug in our redirect map
+                from .redirects import REDIRECT_MAP
+                canonical_slug = REDIRECT_MAP.get(lookup_value) or obj.slug
+                
+                if canonical_slug:
+                    # We found a canonical slug, we should ideally redirect here, 
+                    # but DRF get_object is expected to return an object.
+                    # We can set a flag and handle it in finalize_response or a decorator.
+                    self.request._canonical_slug = canonical_slug
+                
                 self.check_object_permissions(self.request, obj)
-
-                # Track deprecation
                 self.request._used_numeric_id = True
-
                 return obj
             except (Case.DoesNotExist, ValueError) as exc:
                 raise Http404("Not found.") from exc
@@ -357,6 +361,17 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
         Checks for _used_numeric_id flag set by get_object() and adds
         the Deprecation header if present.
         """
+        # If we have a canonical slug, we should issue a 301 redirect for GET requests
+        canonical_slug = getattr(request, "_canonical_slug", None)
+        if canonical_slug and request.method == "GET" and self.action == "retrieve":
+            from django.http import HttpResponsePermanentRedirect
+            # Build the new URL by replacing the numeric ID with the slug
+            # This assumes the ID is the last part of the path before the trailing slash
+            import re
+            lookup_value = self.kwargs.get(self.lookup_field)
+            new_path = request.path.replace(f"/{lookup_value}/", f"/{canonical_slug}/")
+            return HttpResponsePermanentRedirect(new_path)
+
         response = super().finalize_response(request, response, *args, **kwargs)
 
         # Add deprecation header if numeric ID was used
