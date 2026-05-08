@@ -689,7 +689,7 @@ class DocumentSourceViewSet(
     lookup_field = "pk"
 
     def get_permissions(self):
-        if self.action == "create":
+        if self.action in ("create", "partial_update", "update"):
             return [IsAuthenticated()]
         return super().get_permissions()
 
@@ -824,6 +824,7 @@ class JawafEntityViewSet(
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
+    mixins.UpdateModelMixin,
     viewsets.GenericViewSet,
 ):
     """
@@ -833,6 +834,7 @@ class JawafEntityViewSet(
     - List endpoint: GET /api/entities/ (filtered by case association)
     - Retrieve endpoint: GET /api/entities/{id}/
     - Create endpoint: POST /api/entities/
+    - Update endpoint: PATCH /api/entities/{id}/ (authenticated users only)
 
     Search:
     - Full-text search across nes_id and display_name
@@ -845,12 +847,12 @@ class JawafEntityViewSet(
     search_fields = ["nes_id", "display_name"]
 
     def get_permissions(self):
-        if self.action == "create":
+        if self.action in ("create", "partial_update", "update"):
             return [IsAuthenticated()]
         return super().get_permissions()
 
     def get_serializer_class(self):
-        if self.action == "create":
+        if self.action in ("create", "update", "partial_update"):
             from .serializers import JawafEntityCreateSerializer
 
             return JawafEntityCreateSerializer
