@@ -333,7 +333,7 @@ class Command(BaseCommand):
 
                     if file_urls:
                         # Create or update single DocumentSource with all URLs
-                        combined_source, created = (
+                        combined_source, created, updated = (
                             self.get_or_create_press_release_source(
                                 press_release_url=press_release_url,
                                 file_urls=file_urls,
@@ -344,9 +344,9 @@ class Command(BaseCommand):
                         )
                         if created:
                             self.stats["sources_created"] += 1
-                        else:
-                            # Source was updated (not newly created)
+                        elif updated:
                             self.stats["sources_updated"] += 1
+                        # else: reused unchanged — no counter change
 
                         # Add single evidence entry
                         file_count = len(file_urls)
@@ -424,7 +424,7 @@ class Command(BaseCommand):
         title: str,
         publication_date: Optional[str],
         file_names: list[str],
-    ) -> tuple[DocumentSource, bool]:
+    ) -> tuple[DocumentSource, bool, bool]:
         """Get or create DocumentSource for a press release with all its files.
 
         Creates a single DocumentSource containing:
@@ -439,7 +439,10 @@ class Command(BaseCommand):
             file_names: List of file names (for logging)
 
         Returns:
-            tuple: (DocumentSource, created) where created is True if a new source was created
+            tuple: (DocumentSource, created, updated) where:
+                - created is True if a new source was created
+                - updated is True if an existing source was modified
+                - both are False if an existing source was reused unchanged
         """
         # Check if source already exists by press release URL (database-agnostic)
         if connection.vendor == "postgresql":
@@ -524,12 +527,12 @@ class Command(BaseCommand):
                 logger.info(
                     f"Updated existing source {existing.source_id} with {len(file_urls)} file URL(s)"
                 )
-                return existing, True  # Return True to indicate it was updated
+                return existing, False, True  # created=False, updated=True
             else:
                 logger.debug(
                     f"Reusing existing source: {existing.source_id} (already has all file URLs)"
                 )
-                return existing, False
+                return existing, False, False  # created=False, updated=False
 
         source_type = SourceType.LEGAL_PROCEDURAL
 
@@ -606,7 +609,7 @@ class Command(BaseCommand):
         logger.info(
             f"Created new source: {source.source_id} for press release with {file_count} file(s)"
         )
-        return source, True
+        return source, True, False  # created=True, updated=False
 
     def print_summary(self, dry_run: bool):
         """Print summary statistics."""
