@@ -80,9 +80,9 @@ class Command(BaseCommand):
             return
 
         # Bulk fetch all DocumentSources to avoid N+1 queries
-        # First pass: collect all source_ids from all cases
+        # First pass: collect all source_ids from DRAFT cases only
         all_source_ids = set()
-        queryset = Case.objects.all()
+        queryset = Case.objects.filter(state="DRAFT")
         if case_id:
             queryset = queryset.filter(case_id=case_id)
 
@@ -193,8 +193,11 @@ class Command(BaseCommand):
     def find_cases_with_press_release_evidence(
         self, case_id: Optional[str], limit: Optional[int], source_lookup: dict
     ) -> list:
-        """Find cases with evidence pointing to CIAA press release URLs."""
-        queryset = Case.objects.all()
+        """Find cases with evidence pointing to CIAA press release URLs.
+
+        Only processes DRAFT cases to avoid modifying published or in-review cases.
+        """
+        queryset = Case.objects.filter(state="DRAFT")
 
         if case_id:
             queryset = queryset.filter(case_id=case_id)
