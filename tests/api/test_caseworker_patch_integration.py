@@ -108,7 +108,7 @@ def test_patch_multi_operation_end_to_end_persists_all_changes():
     ]
 
     response = _authed_client(user).patch(
-        URL.format(case.id), data=patch_ops, format="json"
+        URL.format(case.slug), data=patch_ops, format="json"
     )
 
     assert response.status_code == 200
@@ -155,7 +155,7 @@ def test_patch_rejects_unauthorized_state_transition_in_multi_op_without_partial
     ]
 
     response = _authed_client(user).patch(
-        URL.format(case.id), data=patch_ops, format="json"
+        URL.format(case.slug), data=patch_ops, format="json"
     )
 
     assert response.status_code == 403
@@ -171,7 +171,7 @@ def test_admin_can_patch_without_assignment():
 
     patch_ops = [{"op": "replace", "path": "/title", "value": "Edited by admin"}]
     response = _authed_client(admin).patch(
-        URL.format(case.id), data=patch_ops, format="json"
+        URL.format(case.slug), data=patch_ops, format="json"
     )
 
     assert response.status_code == 200
@@ -191,7 +191,7 @@ def test_invalid_post_patch_payload_produces_422_and_no_persistence():
     ]
 
     response = _authed_client(user).patch(
-        URL.format(case.id), data=patch_ops, format="json"
+        URL.format(case.slug), data=patch_ops, format="json"
     )
 
     assert response.status_code == 422

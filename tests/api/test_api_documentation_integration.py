@@ -173,7 +173,7 @@ class TestAPIDocumentationIntegration:
         assert "notes" in case_detail_schema["properties"]
 
         # Get actual API response
-        api_response = client.get(f"/api/cases/{published_case.id}/")
+        api_response = client.get(f"/api/cases/{published_case.slug}/")
         assert api_response.status_code == 200
 
         case_data = api_response.json()

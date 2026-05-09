@@ -54,7 +54,7 @@ class TestOpenAPIDocumentation:
 
         # Verify case endpoints are documented
         assert "/api/cases/" in schema["paths"]
-        assert "/api/cases/{id}/" in schema["paths"]
+        assert "/api/cases/{slug}/" in schema["paths"]
         assert "post" in schema["paths"]["/api/cases/"]
 
         # Verify list endpoint has proper documentation

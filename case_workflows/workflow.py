@@ -23,6 +23,7 @@ from case_workflows.storage_utils import (
     download_workflow_outputs,
     upload_workflow_outputs,
 )
+from case_workflows.unicode_repair_middleware import UnicodeEscapeRepairMiddleware
 
 if TYPE_CHECKING:
     from case_workflows.models import CaseWorkflowRun
@@ -605,6 +606,7 @@ class Workflow(ABC):
                             root_dir=str(case_dir), virtual_mode=False
                         ),
                         memory=memory_paths,
+                        middleware=[UnicodeEscapeRepairMiddleware()],
                     )
 
                     files_before = set(self._list_relative_files(case_dir))

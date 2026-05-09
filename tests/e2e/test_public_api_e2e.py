@@ -158,8 +158,8 @@ class TestPublicAPIWorkflows:
         ), "Should find the land encroachment case"
 
         # Step 4: View detailed case information
-        case_id = corruption_case_result["id"]
-        response = self.client.get(f"/api/cases/{case_id}/")
+        case_slug = corruption_case_result["slug"]
+        response = self.client.get(f"/api/cases/{case_slug}/")
         assert response.status_code == 200, "Detail endpoint should return 200"
 
         case_detail = response.data
@@ -231,7 +231,7 @@ class TestPublicAPIWorkflows:
         )
 
         # IN_REVIEW cases are always accessible via detail endpoint
-        response = self.client.get(f"/api/cases/{in_review_case.id}/")
+        response = self.client.get(f"/api/cases/{in_review_case.slug}/")
         assert (
             response.status_code == 200
         ), "IN_REVIEW cases should always be accessible via detail endpoint"
@@ -272,7 +272,7 @@ class TestPublicAPIWorkflows:
         case.save()
 
         # Step 2: Retrieve the case via API
-        response = self.client.get(f"/api/cases/{case.id}/")
+        response = self.client.get(f"/api/cases/{case.slug}/")
         assert response.status_code == 200
 
         case_detail = response.data

@@ -9,7 +9,6 @@ import jsonpatch
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db import connection, transaction
-from django.http import Http404
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.types import OpenApiTypes
@@ -181,6 +180,7 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
     """
 
     serializer_class = CaseSerializer
+    lookup_field = "slug"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ["case_type"]
     search_fields = ["title", "description", "key_allegations"]
@@ -266,64 +266,6 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
         return queryset.prefetch_related(
             "entity_relationships__entity",
         ).order_by("-created_at")
-
-    def get_object(self):
-        """
-        Override to support lookup by either numeric id or slug.
-
-        Lookup disambiguation:
-        - If lookup_value is purely numeric → query by id
-        - Otherwise → query by slug
-
-        Deprecation tracking:
-        - Numeric ID lookups trigger deprecation warning
-        - Sets request._used_numeric_id flag for response header
-
-        Returns:
-            Case: The retrieved case object
-
-        Raises:
-            Http404: If no case matches the lookup value
-        """
-        queryset = self.filter_queryset(self.get_queryset())
-        lookup_value = self.kwargs.get(self.lookup_field)
-
-        # Disambiguation logic
-        if lookup_value.isdigit():
-            # Numeric ID lookup (deprecated)
-            try:
-                obj = queryset.get(id=int(lookup_value))
-                self.check_object_permissions(self.request, obj)
-
-                # Track deprecation
-                self.request._used_numeric_id = True
-
-                return obj
-            except (Case.DoesNotExist, ValueError) as exc:
-                raise Http404("Not found.") from exc
-        else:
-            # Slug lookup (preferred)
-            try:
-                obj = queryset.get(slug=lookup_value)
-                self.check_object_permissions(self.request, obj)
-                return obj
-            except Case.DoesNotExist as exc:
-                raise Http404("Not found.") from exc
-
-    def finalize_response(self, request, response, *args, **kwargs):
-        """
-        Override to add deprecation header for numeric ID lookups.
-
-        Checks for _used_numeric_id flag set by get_object() and adds
-        the Deprecation header if present.
-        """
-        response = super().finalize_response(request, response, *args, **kwargs)
-
-        # Add deprecation header if numeric ID was used
-        if getattr(request, "_used_numeric_id", False):
-            response["Deprecation"] = "true"
-
-        return response
 
     def create(self, request, *args, **kwargs):
         """
@@ -680,7 +622,7 @@ class DocumentSourceViewSet(
     lookup_field = "pk"
 
     def get_permissions(self):
-        if self.action == "create":
+        if self.action in ("create", "partial_update", "update"):
             return [IsAuthenticated()]
         return super().get_permissions()
 
@@ -815,6 +757,7 @@ class JawafEntityViewSet(
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
+    mixins.UpdateModelMixin,
     viewsets.GenericViewSet,
 ):
     """
@@ -824,6 +767,7 @@ class JawafEntityViewSet(
     - List endpoint: GET /api/entities/ (filtered by case association)
     - Retrieve endpoint: GET /api/entities/{id}/
     - Create endpoint: POST /api/entities/
+    - Update endpoint: PATCH /api/entities/{id}/ (authenticated users only)
 
     Search:
     - Full-text search across nes_id and display_name
@@ -836,12 +780,12 @@ class JawafEntityViewSet(
     search_fields = ["nes_id", "display_name"]
 
     def get_permissions(self):
-        if self.action == "create":
+        if self.action in ("create", "partial_update", "update"):
             return [IsAuthenticated()]
         return super().get_permissions()
 
     def get_serializer_class(self):
-        if self.action == "create":
+        if self.action in ("create", "update", "partial_update"):
             from .serializers import JawafEntityCreateSerializer
 
             return JawafEntityCreateSerializer

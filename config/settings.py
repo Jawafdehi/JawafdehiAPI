@@ -173,14 +173,49 @@ WSGI_APPLICATION = "config.wsgi.application"
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
+
+# Handle secret interpolation for database URLs
+def interpolate_db_url(url_env_name):
+    url = os.getenv(url_env_name)
+    if not url:
+        return
+    password = os.getenv("DATABASE_PASSWORD")
+    if password:
+        url = url.replace("${DATABASE_PASSWORD}", password)
+        os.environ[url_env_name] = url
+
+
+interpolate_db_url("DATABASE_URL")
+interpolate_db_url("NGM_DATABASE_URL")
+
 DATABASES = {
     "default": dj_database_url.config(
         default="sqlite:///db.sqlite3",
     )
 }
 
+# Dynamic interpolation of database password from environment variable
+# This allows us to inject the password from Google Secret Manager at runtime
+db_password = os.getenv("DATABASE_PASSWORD")
+if db_password:
+    for db_key in DATABASES:
+        db_url = os.getenv(f"{db_key.upper()}_DATABASE_URL") or os.getenv(
+            "DATABASE_URL"
+        )
+        if db_url and "${DATABASE_PASSWORD}" in db_url:
+            DATABASES[db_key]["PASSWORD"] = db_password
+            # Re-configure with dj_database_url if needed, but usually just setting PASSWORD works if the URL had a placeholder
+            # Better approach: replace placeholder in URL before parsing
+            new_url = db_url.replace("${DATABASE_PASSWORD}", db_password)
+            DATABASES[db_key] = dj_database_url.parse(new_url)
+
 if os.getenv("NGM_DATABASE_URL"):
     DATABASES["ngm"] = dj_database_url.config(env="NGM_DATABASE_URL")
+    if db_password and "${DATABASE_PASSWORD}" in os.getenv("NGM_DATABASE_URL"):
+        new_url = os.getenv("NGM_DATABASE_URL").replace(
+            "${DATABASE_PASSWORD}", db_password
+        )
+        DATABASES["ngm"] = dj_database_url.parse(new_url)
 
 # Configure connection pooling for PostgreSQL only
 if DATABASES["default"].get("ENGINE") == "django.db.backends.postgresql":

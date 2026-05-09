@@ -9,7 +9,6 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.core.validators import URLValidator
 from django.utils import timezone
-from django.utils.text import slugify
 import mimetypes
 import uuid
 
@@ -540,22 +539,48 @@ class Case(models.Model):
         """
         Generate a unique, URL-friendly slug.
 
-        Uses title as base; falls back to case_id; appends UUID suffix to ensure uniqueness.
-        Ensures the slug always starts with a letter to comply with validate_slug requirements.
+        Deterministic based on court case number, title, and a stable hash of case_id.
         """
-        base = slugify(self.title) or slugify(self.case_id) or "case"
-        base = base[:42]  # Leave room for UUID suffix
+        parts = []
+
+        # 1. Try to extract CR number from court_cases
+        if self.court_cases and isinstance(self.court_cases, list):
+            for cc in self.court_cases:
+                if ":" in cc:
+                    # Expecting format "CIAA:081-CR-0127" or similar
+                    _, case_no = cc.split(":", 1)
+                    if case_no:
+                        from django.utils.text import slugify
+
+                        parts.append(slugify(case_no))
+                        break
+
+        # 2. Add title (truncated to avoid overly long slugs)
+        if self.title:
+            from django.utils.text import slugify
+
+            parts.append(slugify(self.title)[:30])
+
+        base = "-".join(p for p in parts if p)
+
+        if not base:
+            from django.utils.text import slugify
+
+            base = slugify(self.case_id) or "case"
 
         # Ensure base starts with a letter (required by validate_slug)
         if base and not base[0].isalpha():
             base = f"case-{base}"
-            base = base[:42]  # Re-trim after adding prefix
 
-        # Append a short UUID to ensure uniqueness without database queries
-        unique_suffix = uuid.uuid4().hex[:8]
-        slug = f"{base}-{unique_suffix}"
+        # Use a stable hash of case_id for uniqueness instead of a random UUID.
+        # This ensures that if a case is re-imported with the same case_id,
+        # it gets the same slug.
+        import hashlib
 
-        return slug[:50]  # Respect max_length
+        stable_suffix = hashlib.md5(self.case_id.encode()).hexdigest()[:6]
+        slug = f"{base}-{stable_suffix}"
+
+        return slug[:50]
 
     def save(self, *args, **kwargs):
         """Override save to generate case_id for new cases."""
@@ -571,10 +596,8 @@ class Case(models.Model):
         if not self.title or not self.title.strip():
             raise ValidationError("Title cannot be empty")
 
-        # Auto-generate slug for published cases if not set
-        if self.state == CaseState.PUBLISHED and (
-            not self.slug or not self.slug.strip()
-        ):
+        # Auto-generate slug for any case without one (slug-only API addressing).
+        if not self.slug or not self.slug.strip():
             self.slug = self._generate_unique_slug()
 
         # Enforce slug immutability (use cached original value to avoid extra query)
@@ -626,10 +649,9 @@ class Case(models.Model):
                     "Description is required for IN_REVIEW or PUBLISHED state"
                 )
 
-        # Auto-generate slug for published cases if not set
-        if self.state == CaseState.PUBLISHED:
-            if not self.slug or not self.slug.strip():
-                self.slug = self._generate_unique_slug()
+        # Auto-generate slug for any case without one (slug-only API addressing).
+        if not self.slug or not self.slug.strip():
+            self.slug = self._generate_unique_slug()
 
         if errors:
             raise ValidationError(errors)
