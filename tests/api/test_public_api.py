@@ -77,7 +77,7 @@ def test_public_api_only_shows_published_cases(case_data, state):
         ), f"Case {case.case_id} with state={state} should NOT appear in API list response"
 
     # Test detail endpoint - IN_REVIEW cases always accessible, others match list behavior
-    detail_response = client.get(f"/api/cases/{case.id}/")
+    detail_response = client.get(f"/api/cases/{case.slug}/")
 
     if state == CaseState.PUBLISHED:
         assert (
@@ -135,7 +135,7 @@ def test_evidence_requires_valid_source_references(case_data, source_data):
 
     # Retrieve via API
     client = APIClient()
-    response = client.get(f"/api/cases/{case.id}/")
+    response = client.get(f"/api/cases/{case.slug}/")
 
     assert response.status_code == 200
 
@@ -370,7 +370,7 @@ def test_published_cases_display_complete_data(case_data, source_data):
 
     # Retrieve via API
     client = APIClient()
-    response = client.get(f"/api/cases/{case.id}/")
+    response = client.get(f"/api/cases/{case.slug}/")
 
     assert response.status_code == 200
 
@@ -432,7 +432,7 @@ def test_published_cases_include_all_entity_fields(case_data):
 
     # Retrieve via API
     client = APIClient()
-    response = client.get(f"/api/cases/{case.id}/")
+    response = client.get(f"/api/cases/{case.slug}/")
 
     assert response.status_code == 200
 
@@ -519,7 +519,7 @@ def test_api_does_not_expose_contributors():
 
     # Make API request
     client = APIClient()
-    response = client.get(f"/api/cases/{case.id}/")
+    response = client.get(f"/api/cases/{case.slug}/")
 
     assert response.status_code == 200
 
@@ -547,7 +547,7 @@ def test_api_exposes_state_field():
 
     # Make API request
     client = APIClient()
-    response = client.get(f"/api/cases/{case.id}/")
+    response = client.get(f"/api/cases/{case.slug}/")
 
     assert response.status_code == 200
 
@@ -576,7 +576,7 @@ def test_public_api_exposes_case_in_review_under_the_retrieve_mode(case_data):
     client = APIClient()
 
     # Test 1: Detail endpoint should ALWAYS show IN_REVIEW cases
-    detail_response = client.get(f"/api/cases/{case.id}/")
+    detail_response = client.get(f"/api/cases/{case.slug}/")
     assert (
         detail_response.status_code == 200
     ), "IN_REVIEW case should always be accessible via detail endpoint"

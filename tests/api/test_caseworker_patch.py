@@ -63,7 +63,7 @@ def test_patch_requires_authentication():
     case = _make_case()
     client = APIClient()
     response = client.patch(
-        URL.format(case.pk),
+        URL.format(case.slug),
         data=[{"op": "replace", "path": "/title", "value": "New"}],
         format="json",
     )
@@ -76,7 +76,7 @@ def test_patch_returns_403_for_unassigned_contributor():
     user = _contributor("sunita")
     client = _authed_client(user)
     response = client.patch(
-        URL.format(case.pk),
+        URL.format(case.slug),
         data=[{"op": "replace", "path": "/title", "value": "Hacked"}],
         format="json",
     )
@@ -96,7 +96,7 @@ def test_patch_replace_scalar_field():
 
     client = _authed_client(user)
     response = client.patch(
-        URL.format(case.pk),
+        URL.format(case.slug),
         data=[{"op": "replace", "path": "/title", "value": "Updated title"}],
         format="json",
     )
@@ -119,7 +119,7 @@ def test_patch_replace_timeline_item_title():
 
     client = _authed_client(user)
     response = client.patch(
-        URL.format(case.pk),
+        URL.format(case.slug),
         data=[{"op": "replace", "path": "/timeline/0/title", "value": "Renamed"}],
         format="json",
     )
@@ -138,7 +138,7 @@ def test_patch_add_appends_timeline_item():
     new_item = {"date": "2025-03-15", "title": "New event", "description": "Details"}
     client = _authed_client(user)
     response = client.patch(
-        URL.format(case.pk),
+        URL.format(case.slug),
         data=[{"op": "add", "path": "/timeline/-", "value": new_item}],
         format="json",
     )
@@ -160,7 +160,7 @@ def test_patch_remove_timeline_item():
 
     client = _authed_client(user)
     response = client.patch(
-        URL.format(case.pk),
+        URL.format(case.slug),
         data=[{"op": "remove", "path": "/timeline/1"}],
         format="json",
     )
@@ -179,7 +179,7 @@ def test_patch_add_entity_with_relationship_type():
 
     client = _authed_client(user)
     response = client.patch(
-        URL.format(case.pk),
+        URL.format(case.slug),
         data=[
             {
                 "op": "add",
@@ -209,7 +209,7 @@ def test_patch_add_location_entity():
 
     client = _authed_client(user)
     response = client.patch(
-        URL.format(case.pk),
+        URL.format(case.slug),
         data=[
             {
                 "op": "add",
@@ -240,7 +240,7 @@ def test_patch_replace_evidence_list():
 
     client = _authed_client(user)
     response = client.patch(
-        URL.format(case.pk),
+        URL.format(case.slug),
         data=[{"op": "replace", "path": "/evidence", "value": new_evidence}],
         format="json",
     )
@@ -264,7 +264,7 @@ def test_patch_400_for_malformed_patch_body():
     client = _authed_client(user)
     # Send a dict instead of a list — invalid RFC 6902
     response = client.patch(
-        URL.format(case.pk),
+        URL.format(case.slug),
         data={"op": "replace", "path": "/title", "value": "x"},
         format="json",
     )
@@ -280,7 +280,7 @@ def test_patch_400_for_invalid_json_patch_operation():
     client = _authed_client(user)
     # Reference a path index that doesn't exist
     response = client.patch(
-        URL.format(case.pk),
+        URL.format(case.slug),
         data=[{"op": "remove", "path": "/timeline/99"}],
         format="json",
     )
@@ -295,7 +295,7 @@ def test_patch_403_for_unauthorized_state_transition_to_published():
 
     client = _authed_client(user)
     response = client.patch(
-        URL.format(case.pk),
+        URL.format(case.slug),
         data=[{"op": "replace", "path": "/state", "value": "PUBLISHED"}],
         format="json",
     )
@@ -321,7 +321,7 @@ def test_patch_200_for_draft_to_in_review_transition():
 
     client = _authed_client(user)
     response = client.patch(
-        URL.format(case.pk),
+        URL.format(case.slug),
         data=[{"op": "replace", "path": "/state", "value": "IN_REVIEW"}],
         format="json",
     )
@@ -340,7 +340,7 @@ def test_patch_400_for_draft_to_in_review_missing_required_fields():
 
     client = _authed_client(user)
     response = client.patch(
-        URL.format(case.pk),
+        URL.format(case.slug),
         data=[{"op": "replace", "path": "/state", "value": "IN_REVIEW"}],
         format="json",
     )
@@ -360,7 +360,7 @@ def test_patch_422_for_blocked_path_case_id():
 
     client = _authed_client(user)
     response = client.patch(
-        URL.format(case.pk),
+        URL.format(case.slug),
         data=[{"op": "replace", "path": "/case_id", "value": "case-tampered"}],
         format="json",
     )
@@ -375,7 +375,7 @@ def test_patch_422_for_blocked_path_case_type():
 
     client = _authed_client(user)
     response = client.patch(
-        URL.format(case.pk),
+        URL.format(case.slug),
         data=[{"op": "replace", "path": "/case_type", "value": "PROMISES"}],
         format="json",
     )
@@ -392,7 +392,7 @@ def test_patch_422_for_nonexistent_entity_id():
 
     client = _authed_client(user)
     response = client.patch(
-        URL.format(case.pk),
+        URL.format(case.slug),
         data=[
             {
                 "op": "add",
@@ -422,7 +422,7 @@ def test_patch_scalar_only_does_not_touch_entity_relationships():
 
     client = _authed_client(user)
     response = client.patch(
-        URL.format(case.pk),
+        URL.format(case.slug),
         data=[{"op": "replace", "path": "/title", "value": "Updated Title"}],
         format="json",
     )
