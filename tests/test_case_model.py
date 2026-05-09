@@ -381,7 +381,7 @@ def test_multiple_drafts_get_unique_auto_slugs():
         drafts.append(case)
 
     slugs = [d.slug for d in drafts]
-    assert all(s and s.strip() for s in slugs), (
-        "Every draft must have a non-empty auto-generated slug"
-    )
+    assert all(
+        s and s.strip() for s in slugs
+    ), "Every draft must have a non-empty auto-generated slug"
     assert len(set(slugs)) == len(slugs), "Auto-generated slugs must be unique"
