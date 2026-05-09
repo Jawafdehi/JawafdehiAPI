@@ -20,37 +20,7 @@ from drf_spectacular.utils import (
     extend_schema_view,
 )
 from django.db.models import Q
-from rest_framework import filters, mixins, status, viewsets, authentication, exceptions
-from django.contrib.auth.models import User
-from django.conf import settings
-
-
-class ServiceTokenAuthentication(authentication.BaseAuthentication):
-    """
-    Simple authentication class that checks for a pre-shared secret in X-Service-Token header.
-    Maps to a virtual 'admin-service' user with superuser permissions.
-    """
-
-    def authenticate(self, request):
-        token = request.headers.get("X-Service-Token")
-        if not token:
-            return None
-
-        if not settings.ADMIN_SERVICE_TOKEN:
-            return None
-
-        if token == settings.ADMIN_SERVICE_TOKEN:
-            try:
-                # Return a system user with full permissions
-                user, _ = User.objects.get_or_create(
-                    username="admin-service",
-                    defaults={"is_staff": True, "is_superuser": True},
-                )
-                return (user, None)
-            except Exception:
-                raise exceptions.AuthenticationFailed("Service user mapping failed")
-
-        raise exceptions.AuthenticationFailed("Invalid service token")
+from rest_framework import filters, mixins, status, viewsets
 from rest_framework.authentication import SessionAuthentication, TokenAuthentication
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
@@ -218,7 +188,6 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
         JWTAuthentication,
         TokenAuthentication,
         SessionAuthentication,
-        ServiceTokenAuthentication,
     ]
 
     def get_permissions(self):
@@ -303,8 +272,12 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
         Override to support lookup by either numeric id or slug.
 
         Lookup disambiguation:
-        - If lookup_value is purely numeric → query by id and redirect to slug
+        - If lookup_value is purely numeric → query by id
         - Otherwise → query by slug
+
+        Deprecation tracking:
+        - Numeric ID lookups trigger deprecation warning
+        - Sets request._used_numeric_id flag for response header
 
         Returns:
             Case: The retrieved case object
@@ -320,35 +293,18 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
             # Numeric ID lookup (deprecated)
             try:
                 obj = queryset.get(id=int(lookup_value))
-                
-                # Check for canonical slug in our redirect map
-                from .redirects import REDIRECT_MAP
-                canonical_slug = REDIRECT_MAP.get(lookup_value) or obj.slug
-                
-                if canonical_slug:
-                    # We found a canonical slug, we should ideally redirect here, 
-                    # but DRF get_object is expected to return an object.
-                    # We can set a flag and handle it in finalize_response or a decorator.
-                    self.request._canonical_slug = canonical_slug
-                
                 self.check_object_permissions(self.request, obj)
+
+                # Track deprecation
                 self.request._used_numeric_id = True
+
                 return obj
             except (Case.DoesNotExist, ValueError) as exc:
                 raise Http404("Not found.") from exc
         else:
             # Slug lookup (preferred)
             try:
-                # Try exact match on slug or case_id
-                obj = queryset.filter(Q(slug=lookup_value) | Q(case_id=lookup_value)).first()
-                
-                # Fallback: search within court_cases list
-                if not obj:
-                    obj = queryset.filter(court_cases__icontains=lookup_value).first()
-
-                if not obj:
-                    raise Case.DoesNotExist()
-
+                obj = queryset.get(slug=lookup_value)
                 self.check_object_permissions(self.request, obj)
                 return obj
             except Case.DoesNotExist as exc:
@@ -361,17 +317,6 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
         Checks for _used_numeric_id flag set by get_object() and adds
         the Deprecation header if present.
         """
-        # If we have a canonical slug, we should issue a 301 redirect for GET requests
-        canonical_slug = getattr(request, "_canonical_slug", None)
-        if canonical_slug and request.method == "GET" and self.action == "retrieve":
-            from django.http import HttpResponsePermanentRedirect
-            # Build the new URL by replacing the numeric ID with the slug
-            # This assumes the ID is the last part of the path before the trailing slash
-            import re
-            lookup_value = self.kwargs.get(self.lookup_field)
-            new_path = request.path.replace(f"/{lookup_value}/", f"/{canonical_slug}/")
-            return HttpResponsePermanentRedirect(new_path)
-
         response = super().finalize_response(request, response, *args, **kwargs)
 
         # Add deprecation header if numeric ID was used
@@ -581,9 +526,6 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
                 "evidence",
                 "slug",
                 "court_cases",
-                "financials",
-                "outcomes",
-                "narrative",
                 "missing_details",
                 "bigo",
             ]
@@ -665,9 +607,6 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
             ],
             "slug": case.slug,
             "court_cases": list(case.court_cases) if case.court_cases else [],
-            "financials": case.financials,
-            "outcomes": case.outcomes,
-            "narrative": case.narrative,
             "missing_details": case.missing_details,
             "bigo": case.bigo,
         }
@@ -741,7 +680,7 @@ class DocumentSourceViewSet(
     lookup_field = "pk"
 
     def get_permissions(self):
-        if self.action in ("create", "partial_update", "update"):
+        if self.action == "create":
             return [IsAuthenticated()]
         return super().get_permissions()
 
@@ -876,7 +815,6 @@ class JawafEntityViewSet(
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
-    mixins.UpdateModelMixin,
     viewsets.GenericViewSet,
 ):
     """
@@ -886,7 +824,6 @@ class JawafEntityViewSet(
     - List endpoint: GET /api/entities/ (filtered by case association)
     - Retrieve endpoint: GET /api/entities/{id}/
     - Create endpoint: POST /api/entities/
-    - Update endpoint: PATCH /api/entities/{id}/ (authenticated users only)
 
     Search:
     - Full-text search across nes_id and display_name
@@ -899,12 +836,12 @@ class JawafEntityViewSet(
     search_fields = ["nes_id", "display_name"]
 
     def get_permissions(self):
-        if self.action in ("create", "partial_update", "update"):
+        if self.action == "create":
             return [IsAuthenticated()]
         return super().get_permissions()
 
     def get_serializer_class(self):
-        if self.action in ("create", "update", "partial_update"):
+        if self.action == "create":
             from .serializers import JawafEntityCreateSerializer
 
             return JawafEntityCreateSerializer

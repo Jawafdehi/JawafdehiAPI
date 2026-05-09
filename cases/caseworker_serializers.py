@@ -144,9 +144,6 @@ class CaseCreateSerializer(CaseEntityValidationMixin, serializers.Serializer):
         allow_null=True,
         validators=[validate_court_cases],
     )
-    financials = serializers.JSONField(required=False, allow_null=True)
-    outcomes = serializers.JSONField(required=False, allow_null=True)
-    narrative = serializers.JSONField(required=False, allow_null=True)
     missing_details = serializers.CharField(
         required=False,
         allow_blank=True,
@@ -203,9 +200,6 @@ class CasePatchSerializer(serializers.Serializer):
         allow_null=True,
         validators=[validate_court_cases],
     )
-    financials = serializers.JSONField(required=False, allow_null=True)
-    outcomes = serializers.JSONField(required=False, allow_null=True)
-    narrative = serializers.JSONField(required=False, allow_null=True)
     missing_details = serializers.CharField(
         required=False,
         allow_blank=True,

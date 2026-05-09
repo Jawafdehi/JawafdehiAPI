@@ -20,7 +20,6 @@ COPY case_workflows ./case_workflows
 COPY nesq ./nesq
 COPY ngm ./ngm
 COPY caseworker ./caseworker
-COPY scripts ./scripts
 COPY static ./static
 
 # Collect static files
@@ -28,4 +27,4 @@ RUN python manage.py collectstatic --noinput
 
 EXPOSE 8080
 
-CMD ["/app/scripts/entrypoint.sh"]
+CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8080", "--workers", "2", "--threads", "4", "--timeout", "60", "--access-logfile", "-", "--error-logfile", "-"]

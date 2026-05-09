@@ -498,23 +498,6 @@ class Case(models.Model):
         validators=[validate_court_cases],
         help_text="List of court case references in format {court_identifier}:{case_number}, e.g. ['supreme:078-WC-0123', 'special:076-CR-0456']",
     )
-
-    # Phase 3 Fields
-    financials = models.JSONField(
-        blank=True,
-        null=True,
-        help_text="Financial details of the case (alleged amount, recovered, fines, etc.)",
-    )
-    outcomes = models.JSONField(
-        blank=True,
-        null=True,
-        help_text="Final outcomes and verdict details of the case",
-    )
-    narrative = models.JSONField(
-        blank=True,
-        null=True,
-        help_text="Structured narrative fields for public display and social cards",
-    )
     missing_details = models.TextField(
         blank=True,
         null=True,
@@ -557,44 +540,22 @@ class Case(models.Model):
         """
         Generate a unique, URL-friendly slug.
 
-        Deterministic based on court case number, title, and a stable hash of case_id.
+        Uses title as base; falls back to case_id; appends UUID suffix to ensure uniqueness.
+        Ensures the slug always starts with a letter to comply with validate_slug requirements.
         """
-        parts = []
-        
-        # 1. Try to extract CR number from court_cases
-        if self.court_cases and isinstance(self.court_cases, list):
-            for cc in self.court_cases:
-                if ":" in cc:
-                    # Expecting format "CIAA:081-CR-0127" or similar
-                    _, case_no = cc.split(":", 1)
-                    if case_no:
-                        from django.utils.text import slugify
-                        parts.append(slugify(case_no))
-                        break
+        base = slugify(self.title) or slugify(self.case_id) or "case"
+        base = base[:42]  # Leave room for UUID suffix
 
-        # 2. Add title (truncated to avoid overly long slugs)
-        if self.title:
-            from django.utils.text import slugify
-            parts.append(slugify(self.title)[:30])
-        
-        base = "-".join(p for p in parts if p)
-        
-        if not base:
-            from django.utils.text import slugify
-            base = slugify(self.case_id) or "case"
-        
         # Ensure base starts with a letter (required by validate_slug)
         if base and not base[0].isalpha():
             base = f"case-{base}"
+            base = base[:42]  # Re-trim after adding prefix
 
-        # Use a stable hash of case_id for uniqueness instead of a random UUID.
-        # This ensures that if a case is re-imported with the same case_id,
-        # it gets the same slug.
-        import hashlib
-        stable_suffix = hashlib.md5(self.case_id.encode()).hexdigest()[:6]
-        slug = f"{base}-{stable_suffix}"
+        # Append a short UUID to ensure uniqueness without database queries
+        unique_suffix = uuid.uuid4().hex[:8]
+        slug = f"{base}-{unique_suffix}"
 
-        return slug[:50]
+        return slug[:50]  # Respect max_length
 
     def save(self, *args, **kwargs):
         """Override save to generate case_id for new cases."""
@@ -611,7 +572,7 @@ class Case(models.Model):
             raise ValidationError("Title cannot be empty")
 
         # Auto-generate slug for published cases if not set
-        if self.state in [CaseState.PUBLISHED, CaseState.IN_REVIEW] and (
+        if self.state == CaseState.PUBLISHED and (
             not self.slug or not self.slug.strip()
         ):
             self.slug = self._generate_unique_slug()
