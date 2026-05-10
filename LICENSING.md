@@ -53,7 +53,7 @@ The private `org-admin-panel` repository is excluded from the public license req
 
 ## License Compliance Verification
 
-A CI check validates that all files carry the correct SPDX license identifier. See the `.github/workflows/spdx-check.yml` workflow in each repository.
+A CI check validates that all files carry the correct SPDX license identifier. See the `.github/workflows/spdx-header-check.yml` workflow in each repository.
 
 ## Questions
 
