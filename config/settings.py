@@ -15,6 +15,7 @@ import os
 from dotenv import load_dotenv
 from datetime import timedelta
 import dj_database_url
+from django.core.exceptions import ImproperlyConfigured
 
 load_dotenv()
 
@@ -98,14 +99,23 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.getenv(
-    "SECRET_KEY", "django-insecure-b&i!8@kw8v+w3%zk)gbsz8^v8w8xjb%l-$!-3x&*pc5hqio02g"
-)
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY or SECRET_KEY.startswith("django-insecure-"):
+    raise ImproperlyConfigured(
+        "SECRET_KEY environment variable must be set to a secure value. "
+        "Generate one with: python -c 'from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())'"
+    )
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.getenv("DEBUG", "True") == "True"
+DEBUG = os.getenv("DEBUG", "False") == "True"
 
-ALLOWED_HOSTS = get_env_list("ALLOWED_HOSTS", "localhost,127.0.0.1")
+ALLOWED_HOSTS = get_env_list("ALLOWED_HOSTS", "")
+if not DEBUG and not ALLOWED_HOSTS:
+    raise ImproperlyConfigured(
+        "ALLOWED_HOSTS environment variable must be set in production. "
+        "Set it to a comma-separated list of allowed hostnames "
+        "(e.g. ALLOWED_HOSTS=jawafdehi.org,beta.jawafdehi.org)."
+    )
 
 CSRF_TRUSTED_ORIGINS = get_env_list("CSRF_TRUSTED_ORIGINS")
 
@@ -350,6 +360,14 @@ REST_FRAMEWORK = {
         "rest_framework.renderers.JSONRenderer",
     ],
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "100/hour",
+        "user": "1000/hour",
+    },
 }
 
 # JWT Configuration
@@ -431,6 +449,22 @@ CORS_ALLOW_CREDENTIALS = True
 # Keep Django's CSRF origin validation aligned with credentialed CORS writes.
 if not CSRF_TRUSTED_ORIGINS:
     CSRF_TRUSTED_ORIGINS = CORS_ALLOWED_ORIGINS.copy()
+
+# Security headers and TLS enforcement
+SECURE_BROWSER_XSS_FILTER = True
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+CSRF_COOKIE_SECURE = True
+SESSION_COOKIE_SECURE = True
+X_FRAME_OPTIONS = "DENY"
+
+if not DEBUG:
+    SECURE_HSTS_SECONDS = int(os.getenv("SECURE_HSTS_SECONDS", "31536000"))
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_HTTPONLY = True
+    CSRF_COOKIE_HTTPONLY = True
 
 # NES API Configuration
 NES_API_URL = os.getenv("NES_API_URL", "https://nes.jawafdehi.org/api")
