@@ -302,5 +302,5 @@ Contributors cannot access cases they are not assigned to.
 
 ## License
 
-MIT
+This project is licensed under the [Hippocratic License Version 3.0 (HL3)](./LICENSE), an [Ethical Source](https://ethicalsource.dev) license. See [LICENSING.md](./LICENSING.md) for more information.
 
