@@ -141,18 +141,20 @@ class TestMapPressReleaseFiles:
             # Refresh case from database
             case.refresh_from_db()
 
-            # Evidence should be updated with file sources
-            assert len(case.evidence) == 2  # Two files from press release
+            # Evidence should be updated with ONE source per press release (not per file)
+            assert len(case.evidence) == 1  # One source containing both files
 
-            # Check that new sources were created
-            for evidence_entry in case.evidence:
-                source = DocumentSource.objects.get(
-                    source_id=evidence_entry["source_id"]
-                )
-                # Source should have file URL
-                assert any("ngm-store.jawafdehi.org" in url for url in source.url)
-                # Source should also have press release URL for reference
-                assert any("ciaa.gov.np/pressrelease/3173" in url for url in source.url)
+            # Check that new source was created
+            evidence_entry = case.evidence[0]
+            source = DocumentSource.objects.get(source_id=evidence_entry["source_id"])
+
+            # Source should have both the web URL and file URLs
+            assert len(source.url) == 3  # web URL + 2 file URLs
+            assert any("ciaa.gov.np/pressrelease/3173" in url for url in source.url)
+            assert sum("ngm-store.jawafdehi.org" in url for url in source.url) == 2
+
+            # Evidence description should show file count
+            assert "2 documents" in evidence_entry["description"]
 
             # Output should indicate success
             output = out.getvalue()
@@ -243,8 +245,8 @@ class TestMapPressReleaseFiles:
             case.refresh_from_db()
             other_case.refresh_from_db()
 
-            # Target case should be fixed
-            assert len(case.evidence) == 2
+            # Target case should be fixed (one source per press release)
+            assert len(case.evidence) == 1
 
             # Other case should not be changed
             assert other_case.evidence == other_original_evidence

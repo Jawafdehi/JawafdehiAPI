@@ -40,6 +40,7 @@ class Command(BaseCommand):
             "cases_fixed": 0,
             "cases_skipped": 0,
             "sources_created": 0,
+            "sources_updated": 0,
             "evidence_updated": 0,
             "errors": 0,
         }
@@ -202,9 +203,14 @@ class Command(BaseCommand):
         if case_id:
             queryset = queryset.filter(case_id=case_id)
 
+        self.stdout.write(f"Scanning {queryset.count()} DRAFT cases...")
+
         # Filter cases with evidence containing ciaa.gov.np/pressrelease URLs
         # Uses source_lookup passed from handle() to avoid duplicate DB queries
         cases_with_pr_evidence = []
+        skipped_already_mapped = 0
+        skipped_no_pr_url = 0
+
         for case in queryset:
             if not case.evidence:
                 continue
@@ -226,6 +232,7 @@ class Command(BaseCommand):
                                 break
 
                     if is_file_backed:
+                        skipped_already_mapped += 1
                         continue
 
                     # Check if source URL contains press release URL
@@ -237,9 +244,21 @@ class Command(BaseCommand):
 
             if has_pr_evidence:
                 cases_with_pr_evidence.append(case)
+            elif case.evidence:
+                skipped_no_pr_url += 1
 
             if limit and len(cases_with_pr_evidence) >= limit:
                 break
+
+        self.stdout.write(
+            f"  - Cases with unmapped press releases: {len(cases_with_pr_evidence)}"
+        )
+        self.stdout.write(
+            f"  - Cases already mapped (skipped): {skipped_already_mapped}"
+        )
+        self.stdout.write(
+            f"  - Cases without press release URLs (skipped): {skipped_no_pr_url}"
+        )
 
         return cases_with_pr_evidence
 
@@ -313,57 +332,133 @@ class Command(BaseCommand):
                 f"  → Found {len(pr_data['files'])} file(s) for press release {press_id}"
             )
 
-            # Intentionally replace the original web URL source with file-backed sources
-            # The original evidence_entry (web URL) is NOT appended to updated_evidence
-            # This is by design: we want file URLs, not web page URLs, in the final evidence
+            # Create ONE DocumentSource containing the web URL + all file URLs
             self.stdout.write(
-                f"  → Replacing source {source_id} (web URL) with {len(pr_data['files'])} file-backed source(s)"
+                f"  → Creating single source with web URL + {len(pr_data['files'])} file URL(s)"
             )
 
-            # Create DocumentSource for each file and add to evidence
-            files_processed = 0
-            for file_data in pr_data["files"]:
-                file_url = file_data.get("url")
-                file_name = file_data.get("file_name", "")
+            if not dry_run:
+                with transaction.atomic():
+                    # Collect all file URLs
+                    file_urls = []
+                    file_names = []
+                    for file_data in pr_data["files"]:
+                        file_url = file_data.get("url")
+                        file_name = file_data.get("file_name", "")
+                        if file_url:
+                            file_urls.append(file_url)
+                            file_names.append(file_name)
 
-                if not file_url:
-                    continue
-
-                if not dry_run:
-                    with transaction.atomic():
-                        file_source, created = self.get_or_create_file_source(
-                            file_url=file_url,
-                            file_name=file_name,
-                            press_release_url=press_release_url,
-                            title=pr_data.get("title", "CIAA Press Release Document"),
-                            publication_date=pr_data.get("publication_date"),
+                    if file_urls:
+                        # Create or update single DocumentSource with all URLs
+                        combined_source, created, updated = (
+                            self.get_or_create_press_release_source(
+                                press_release_url=press_release_url,
+                                file_urls=file_urls,
+                                title=pr_data.get("title", "CIAA Press Release"),
+                                publication_date=pr_data.get("publication_date"),
+                                file_names=file_names,
+                            )
                         )
                         if created:
                             self.stats["sources_created"] += 1
+                        elif updated:
+                            self.stats["sources_updated"] += 1
+                        # else: reused unchanged — no counter change
 
-                        # Add to updated evidence
+                        # Add single evidence entry
+                        file_count = len(file_urls)
                         updated_evidence.append(
                             {
-                                "source_id": file_source.source_id,
-                                "description": f"CIAA Press Release Document - {file_name}",
+                                "source_id": combined_source.source_id,
+                                "description": f"CIAA Press Release ({file_count} document{'s' if file_count > 1 else ''})",
                             }
                         )
-                        files_processed += 1
-                else:
-                    self.stdout.write(
-                        f"    [DRY RUN] Would create source for: {file_name}"
-                    )
-                    # In dry-run mode, append synthetic entry to updated_evidence
-                    updated_evidence.append(
-                        {
-                            "source_id": f"dry-run-{file_name}",
-                            "description": f"CIAA Press Release Document - {file_name}",
-                        }
-                    )
-                    files_processed += 1
+                        evidence_changed = True
+                        self.stdout.write(
+                            self.style.SUCCESS(
+                                f"    ✓ Created/updated source {combined_source.source_id} with {file_count} file(s)"
+                            )
+                        )
+                    else:
+                        # No valid file URLs found - preserve original evidence
+                        self.stdout.write(
+                            self.style.WARNING(
+                                f"  ⊘ No valid file URLs found for press release {press_id}, preserving original evidence"
+                            )
+                        )
+                        updated_evidence.append(evidence_entry)
+            else:
+                # Dry-run mode - mirror real-run logic
+                # Build file_urls same as real-run
+                file_urls = [f.get("url") for f in pr_data["files"] if f.get("url")]
+                file_count = len(file_urls)
 
-            # Only mark as changed if we actually processed files
-            if files_processed > 0:
+                # If no valid file URLs, log warning and preserve original evidence
+                if not file_urls:
+                    self.stdout.write(
+                        self.style.WARNING(
+                            f"  ⊘ No valid file URLs found for press release {press_id}, preserving original evidence"
+                        )
+                    )
+                    updated_evidence.append(evidence_entry)
+                    continue
+
+                # Check if source already exists (same logic as get_or_create_press_release_source)
+                if connection.vendor == "postgresql":
+                    existing = DocumentSource.objects.filter(
+                        url__contains=[press_release_url], is_deleted=False
+                    ).first()
+                else:
+                    existing = None
+                    candidates = DocumentSource.objects.filter(
+                        url__icontains=press_release_url, is_deleted=False
+                    )
+                    for source in candidates:
+                        if (
+                            isinstance(source.url, list)
+                            and press_release_url in source.url
+                        ):
+                            existing = source
+                            break
+
+                if existing:
+                    # Check if it would need updating
+                    existing_urls = (
+                        existing.url
+                        if isinstance(existing.url, list)
+                        else [existing.url]
+                    )
+                    needs_update = any(
+                        file_url not in existing_urls for file_url in file_urls
+                    )
+
+                    if needs_update:
+                        self.stats["sources_updated"] += 1
+                        self.stdout.write(
+                            f"    [DRY RUN] Would update existing source with {file_count} file URL(s)"
+                        )
+                    else:
+                        self.stdout.write(
+                            "    [DRY RUN] Would reuse existing source (no changes needed)"
+                        )
+                else:
+                    self.stats["sources_created"] += 1
+                    self.stdout.write(
+                        f"    [DRY RUN] Would create source with web URL + {file_count} file URL(s)"
+                    )
+
+                for file_data in pr_data["files"]:
+                    if file_data.get("url"):  # Only show files with valid URLs
+                        file_name = file_data.get("file_name", "")
+                        self.stdout.write(f"      - {file_name}")
+
+                updated_evidence.append(
+                    {
+                        "source_id": f"dry-run-pr-{press_id}",
+                        "description": f"CIAA Press Release ({file_count} document{'s' if file_count > 1 else ''})",
+                    }
+                )
                 evidence_changed = True
 
         # Update case evidence if changed
@@ -379,6 +474,9 @@ class Command(BaseCommand):
                     )
                 )
             else:
+                # Dry-run mode - still track what would happen
+                self.stats["evidence_updated"] += 1
+                self.stats["cases_fixed"] += 1
                 self.stdout.write(
                     self.style.SUCCESS(
                         f"  [DRY RUN] Would update evidence with {len(updated_evidence)} source(s)"
@@ -397,39 +495,128 @@ class Command(BaseCommand):
         except (ValueError, IndexError):
             return None
 
-    def get_or_create_file_source(
+    def get_or_create_press_release_source(
         self,
-        file_url: str,
-        file_name: str,
         press_release_url: str,
+        file_urls: list[str],
         title: str,
         publication_date: Optional[str],
-    ) -> tuple[DocumentSource, bool]:
-        """Get or create DocumentSource for a press release file.
+        file_names: list[str],
+    ) -> tuple[DocumentSource, bool, bool]:
+        """Get or create DocumentSource for a press release with all its files.
+
+        Creates a single DocumentSource containing:
+        - The original web URL (e.g., https://ciaa.gov.np/pressrelease/3294)
+        - All file URLs (e.g., PDF/DOCX files from NGM bucket)
+
+        Args:
+            press_release_url: The CIAA press release web page URL
+            file_urls: List of file URLs from NGM bucket
+            title: Press release title
+            publication_date: Publication date in BS format (YYYY-MM-DD)
+            file_names: List of file names (for logging)
 
         Returns:
-            tuple: (DocumentSource, created) where created is True if a new source was created
+            tuple: (DocumentSource, created, updated) where:
+                - created is True if a new source was created
+                - updated is True if an existing source was modified
+                - both are False if an existing source was reused unchanged
         """
-        # Check if source already exists by URL (database-agnostic)
+        # Check if source already exists by press release URL (database-agnostic)
         if connection.vendor == "postgresql":
             existing = DocumentSource.objects.filter(
-                url__contains=[file_url], is_deleted=False
+                url__contains=[press_release_url], is_deleted=False
             ).first()
         else:
-            # Fallback for SQLite and other databases - filter candidates at DB level first
+            # Fallback for SQLite and other databases
             existing = None
-            # Use text containment to narrow down candidates at DB level
             candidates = DocumentSource.objects.filter(
-                url__icontains=file_url, is_deleted=False
+                url__icontains=press_release_url, is_deleted=False
             )
             for source in candidates:
-                if isinstance(source.url, list) and file_url in source.url:
+                if isinstance(source.url, list) and press_release_url in source.url:
                     existing = source
                     break
 
         if existing:
-            logger.debug(f"Reusing existing source: {existing.source_id}")
-            return existing, False
+            # Check if existing source needs to be updated with file URLs
+            existing_urls = (
+                existing.url if isinstance(existing.url, list) else [existing.url]
+            )
+            needs_update = False
+
+            # Check if any file URLs are missing
+            for file_url in file_urls:
+                if file_url not in existing_urls:
+                    needs_update = True
+                    break
+
+            if needs_update:
+                # Build complete URL list: merge new URLs with existing ones
+                # Start with existing URLs to preserve any prior URLs
+                url_list = list(existing_urls) if existing_urls else []
+
+                # Encode and add press release web URL first (ensure it's at the beginning)
+                if press_release_url and str(press_release_url).strip():
+                    pr_url_str = str(press_release_url).strip()
+                    parsed = urllib.parse.urlsplit(pr_url_str)
+                    encoded_path = urllib.parse.quote(parsed.path, safe="/")
+                    encoded_query = urllib.parse.quote(parsed.query, safe="=&")
+                    encoded_fragment = urllib.parse.quote(parsed.fragment, safe="")
+                    encoded_url = urllib.parse.urlunsplit(
+                        (
+                            parsed.scheme,
+                            parsed.netloc,
+                            encoded_path,
+                            encoded_query,
+                            encoded_fragment,
+                        )
+                    )
+                    # Remove if already exists and prepend to ensure it's first
+                    if encoded_url in url_list:
+                        url_list.remove(encoded_url)
+                    url_list.insert(0, encoded_url)
+
+                # Add all file URLs (skip duplicates)
+                for file_url in file_urls:
+                    if file_url and str(file_url).strip():
+                        file_url_str = str(file_url).strip()
+                        parsed = urllib.parse.urlsplit(file_url_str)
+                        encoded_path = urllib.parse.quote(parsed.path, safe="/")
+                        encoded_query = urllib.parse.quote(parsed.query, safe="=&")
+                        encoded_fragment = urllib.parse.quote(parsed.fragment, safe="")
+                        encoded_url = urllib.parse.urlunsplit(
+                            (
+                                parsed.scheme,
+                                parsed.netloc,
+                                encoded_path,
+                                encoded_query,
+                                encoded_fragment,
+                            )
+                        )
+                        # Only add if not already present
+                        if encoded_url not in url_list:
+                            url_list.append(encoded_url)
+
+                # Update existing source with complete URL list
+                existing.url = url_list
+
+                # Update description with file count
+                file_count = len(file_urls)
+                existing.description = f"CIAA Press Release with {file_count} document{'s' if file_count > 1 else ''}: {press_release_url}"[
+                    :500
+                ]
+
+                existing.save(update_fields=["url", "description"])
+                logger.info(
+                    f"Updated existing source {existing.source_id} with {len(file_urls)} file URL(s)"
+                )
+                return existing, False, True  # created=False, updated=True
+            else:
+                logger.debug(
+                    f"Reusing existing source: {existing.source_id} (already has all file URLs)"
+                )
+                return existing, False, False  # created=False, updated=False
 
         source_type = SourceType.LEGAL_PROCEDURAL
 
@@ -446,30 +633,11 @@ class Command(BaseCommand):
                     f"Failed to parse publication date {publication_date}: {e}"
                 )
 
-        # Build URL list: file URL + press release web page URL
+        # Build URL list: web URL first, then all file URLs
         url_list = []
-        if file_url and str(file_url).strip():
-            # Properly URL-encode the file URL
-            file_url_str = str(file_url).strip()
-            parsed = urllib.parse.urlsplit(file_url_str)
-            # Encode path, query, and fragment components
-            encoded_path = urllib.parse.quote(parsed.path, safe="/")
-            encoded_query = urllib.parse.quote(parsed.query, safe="=&")
-            encoded_fragment = urllib.parse.quote(parsed.fragment, safe="")
-            # Rebuild the URL
-            encoded_url = urllib.parse.urlunsplit(
-                (
-                    parsed.scheme,
-                    parsed.netloc,
-                    encoded_path,
-                    encoded_query,
-                    encoded_fragment,
-                )
-            )
-            url_list.append(encoded_url)
 
+        # Add press release web URL first
         if press_release_url and str(press_release_url).strip():
-            # Properly URL-encode the press release URL
             pr_url_str = str(press_release_url).strip()
             parsed = urllib.parse.urlsplit(pr_url_str)
             encoded_path = urllib.parse.quote(parsed.path, safe="/")
@@ -486,21 +654,46 @@ class Command(BaseCommand):
             )
             url_list.append(encoded_url)
 
+        # Add all file URLs
+        for file_url in file_urls:
+            if file_url and str(file_url).strip():
+                file_url_str = str(file_url).strip()
+                parsed = urllib.parse.urlsplit(file_url_str)
+                encoded_path = urllib.parse.quote(parsed.path, safe="/")
+                encoded_query = urllib.parse.quote(parsed.query, safe="=&")
+                encoded_fragment = urllib.parse.quote(parsed.fragment, safe="")
+                encoded_url = urllib.parse.urlunsplit(
+                    (
+                        parsed.scheme,
+                        parsed.netloc,
+                        encoded_path,
+                        encoded_query,
+                        encoded_fragment,
+                    )
+                )
+                url_list.append(encoded_url)
+
         if not url_list:
-            logger.error(f"No valid URLs for file {file_name}")
-            raise ValueError(f"No valid URLs for file {file_name}")
+            logger.error(f"No valid URLs for press release {press_release_url}")
+            raise ValueError(f"No valid URLs for press release {press_release_url}")
+
+        # Create description with file count
+        file_count = len(file_urls)
+        description = f"CIAA Press Release with {file_count} document{'s' if file_count > 1 else ''}: {press_release_url}"
 
         # Create new source (save() will generate source_id and validate)
         source = DocumentSource.objects.create(
-            title=f"{title[:250]} - {file_name[:50]}"[:300],
-            description=f"Document from CIAA press release: {press_release_url}",
+            title=title[:300],
+            description=description[:500],
             source_type=source_type,
             url=url_list,
             publication_date=pub_date,
         )
 
-        logger.info(f"Created new source: {source.source_id} for {file_name}")
-        return source, True
+        logger.info(
+            f"Created new source: {source.source_id} for press release with {file_count} file(s)"
+        )
+        return source, True, False  # created=True, updated=False
 
     def print_summary(self, dry_run: bool):
         """Print summary statistics."""
@@ -517,6 +710,7 @@ class Command(BaseCommand):
             self.style.WARNING(f"⊘ Cases skipped:     {self.stats['cases_skipped']}")
         )
         self.stdout.write(f"Sources created:     {self.stats['sources_created']}")
+        self.stdout.write(f"Sources updated:     {self.stats['sources_updated']}")
         self.stdout.write(f"Evidence updated:    {self.stats['evidence_updated']}")
         if self.stats["errors"] > 0:
             self.stdout.write(
