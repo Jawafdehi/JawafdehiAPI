@@ -210,7 +210,7 @@ class Command(BaseCommand):
         cases_with_pr_evidence = []
         skipped_already_mapped = 0
         skipped_no_pr_url = 0
-        
+
         for case in queryset:
             if not case.evidence:
                 continue
@@ -250,9 +250,15 @@ class Command(BaseCommand):
             if limit and len(cases_with_pr_evidence) >= limit:
                 break
 
-        self.stdout.write(f"  - Cases with unmapped press releases: {len(cases_with_pr_evidence)}")
-        self.stdout.write(f"  - Cases already mapped (skipped): {skipped_already_mapped}")
-        self.stdout.write(f"  - Cases without press release URLs (skipped): {skipped_no_pr_url}")
+        self.stdout.write(
+            f"  - Cases with unmapped press releases: {len(cases_with_pr_evidence)}"
+        )
+        self.stdout.write(
+            f"  - Cases already mapped (skipped): {skipped_already_mapped}"
+        )
+        self.stdout.write(
+            f"  - Cases without press release URLs (skipped): {skipped_no_pr_url}"
+        )
 
         return cases_with_pr_evidence
 
@@ -549,7 +555,7 @@ class Command(BaseCommand):
                 # Build complete URL list: merge new URLs with existing ones
                 # Start with existing URLs to preserve any prior URLs
                 url_list = list(existing_urls) if existing_urls else []
-                
+
                 # Encode and add press release web URL first (ensure it's at the beginning)
                 if press_release_url and str(press_release_url).strip():
                     pr_url_str = str(press_release_url).strip()
