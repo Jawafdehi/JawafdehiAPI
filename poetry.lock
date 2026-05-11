@@ -2396,7 +2396,7 @@ scraping = ["google-auth (>=2.23.0,<3.0.0)", "google-cloud-aiplatform (>=1.38.0,
 type = "git"
 url = "https://github.com/Jawafdehi/NepalEntityService.git"
 reference = "HEAD"
-resolved_reference = "73f91701ff795271be5b17711ca7aabc3c9a363e"
+resolved_reference = "020bfc4c91b5934e526bf39168725ef985abe9e9"
 
 [[package]]
 name = "nepali"
@@ -3991,6 +3991,7 @@ files = [
 
 [package.dependencies]
 certifi = "*"
+django = {version = ">=1.8", optional = true, markers = "extra == \"django\""}
 urllib3 = ">=1.26.11"
 
 [package.extras]
@@ -4208,6 +4209,24 @@ typing-extensions = {version = ">=4.10.0", markers = "python_version < \"3.13\""
 
 [package.extras]
 full = ["httpx (>=0.27.0,<0.29.0)", "itsdangerous", "jinja2", "python-multipart (>=0.0.18)", "pyyaml"]
+
+[[package]]
+name = "structlog"
+version = "24.4.0"
+description = "Structured Logging for Python"
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+files = [
+    {file = "structlog-24.4.0-py3-none-any.whl", hash = "sha256:597f61e80a91cc0749a9fd2a098ed76715a1c8a01f73e336b746504d1aad7610"},
+    {file = "structlog-24.4.0.tar.gz", hash = "sha256:b27bfecede327a6d2da5fbc96bd859f114ecc398a6389d664f62085ee7ae6fc4"},
+]
+
+[package.extras]
+dev = ["freezegun (>=0.2.8)", "mypy (>=1.4)", "pretend", "pytest (>=6.0)", "pytest-asyncio (>=0.17)", "rich", "simplejson", "twisted"]
+docs = ["cogapp", "furo", "myst-parser", "sphinx", "sphinx-notfound-page", "sphinxcontrib-mermaid", "sphinxext-opengraph", "twisted"]
+tests = ["freezegun (>=0.2.8)", "pretend", "pytest (>=6.0)", "pytest-asyncio (>=0.17)", "simplejson"]
+typing = ["mypy (>=1.4)", "rich", "twisted"]
 
 [[package]]
 name = "tenacity"
@@ -5035,4 +5054,4 @@ s3 = ["cloudpathlib"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.12"
-content-hash = "499f7936de905730e8f75341c788ff4b941d34ff576f1fa717419a2485ecfba6"
+content-hash = "07f335ed6662b05b8a60477ac6e16e4940955de5fad3ff33b8798379f16991a1"

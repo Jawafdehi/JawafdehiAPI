@@ -16,9 +16,28 @@ import sys
 from dotenv import load_dotenv
 from datetime import timedelta
 import dj_database_url
+import sentry_sdk
+from sentry_sdk.integrations.django import DjangoIntegration
+import structlog as _structlog
 from django.core.exceptions import ImproperlyConfigured
 
+from config.structlog_config import configure_structlog
+
 load_dotenv()
+
+configure_structlog()
+
+_sentry_dsn = os.getenv("SENTRY_DSN")
+if _sentry_dsn:
+    sentry_sdk.init(
+        dsn=_sentry_dsn,
+        integrations=[
+            DjangoIntegration(),
+        ],
+        traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "1.0")),
+        send_default_pii=False,
+        environment=os.getenv("SENTRY_ENVIRONMENT", "production"),
+    )
 
 
 def get_env_list(name, default=""):
@@ -121,6 +140,52 @@ if not DEBUG and not ALLOWED_HOSTS:
 CSRF_TRUSTED_ORIGINS = get_env_list("CSRF_TRUSTED_ORIGINS")
 
 
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "json": {
+            "()": _structlog.stdlib.ProcessorFormatter,
+            "processor": _structlog.processors.JSONRenderer(),
+            "foreign_pre_chain": [
+                _structlog.contextvars.merge_contextvars,
+                _structlog.processors.TimeStamper(fmt="iso", utc=True),
+                _structlog.stdlib.add_logger_name,
+                _structlog.stdlib.add_log_level,
+                _structlog.stdlib.ExtraAdder(),
+            ],
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "json",
+        },
+    },
+    "loggers": {
+        "django": {
+            "handlers": ["console"],
+            "level": os.getenv("DJANGO_LOG_LEVEL", "INFO"),
+            "propagate": False,
+        },
+        "django.request": {
+            "handlers": ["console"],
+            "level": "ERROR",
+            "propagate": False,
+        },
+        "django.server": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": os.getenv("ROOT_LOG_LEVEL", "INFO"),
+    },
+}
+
+
 # Application definition
 
 INSTALLED_APPS = [
@@ -150,6 +215,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "config.middleware.RequestIdMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
