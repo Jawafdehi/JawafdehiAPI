@@ -541,6 +541,6 @@ TINYMCE_DEFAULT_CONFIG = {
     "license_key": "gpl",
 }
 
-from config.logging import configure_structlog
+from config.logging import configure_structlog  # noqa: E402
 
 configure_structlog()
