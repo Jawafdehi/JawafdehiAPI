@@ -15,13 +15,13 @@ import os
 from dotenv import load_dotenv
 from datetime import timedelta
 import dj_database_url
-
-load_dotenv()
-
 import sentry_sdk
 from sentry_sdk.integrations.django import DjangoIntegration
+import structlog as _structlog
 
 from config.structlog_config import configure_structlog
+
+load_dotenv()
 
 configure_structlog()
 
@@ -128,8 +128,6 @@ ALLOWED_HOSTS = get_env_list("ALLOWED_HOSTS", "localhost,127.0.0.1")
 
 CSRF_TRUSTED_ORIGINS = get_env_list("CSRF_TRUSTED_ORIGINS")
 
-
-import structlog as _structlog
 
 LOGGING = {
     "version": 1,

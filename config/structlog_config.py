@@ -1,7 +1,5 @@
 import os
 import structlog
-
-
 SHARED_CONTEXT_VARS = [
     "request_id",
     "entity_id",
@@ -28,9 +26,11 @@ def configure_structlog():
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
             structlog.processors.UnicodeDecoder(),
-            structlog.dev.ConsoleRenderer()
-            if os.getenv("STRUCTLOG_CONSOLE", "1") == "1"
-            else structlog.processors.JSONRenderer(),
+            (
+                structlog.dev.ConsoleRenderer()
+                if os.getenv("STRUCTLOG_CONSOLE", "1") == "1"
+                else structlog.processors.JSONRenderer()
+            ),
         ],
         context_class=dict,
         logger_factory=structlog.stdlib.LoggerFactory(),
