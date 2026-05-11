@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 from pathlib import Path
 import os
+import sys
 from dotenv import load_dotenv
 from datetime import timedelta
 import dj_database_url
@@ -347,6 +348,10 @@ MEDIA_ROOT = os.getenv("MEDIA_ROOT", BASE_DIR / "media")
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+# Detect test runner to disable throttling during tests (global rate limits
+# applied by JAW-60 would cause 429s in the test suite).
+TESTING = "test" in sys.argv or "pytest" in sys.argv
+
 # REST Framework
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
@@ -360,15 +365,17 @@ REST_FRAMEWORK = {
         "rest_framework.renderers.JSONRenderer",
     ],
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
-    "DEFAULT_THROTTLE_CLASSES": [
+}
+
+if not TESTING:
+    REST_FRAMEWORK["DEFAULT_THROTTLE_CLASSES"] = [
         "rest_framework.throttling.AnonRateThrottle",
         "rest_framework.throttling.UserRateThrottle",
-    ],
-    "DEFAULT_THROTTLE_RATES": {
+    ]
+    REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
         "anon": "100/hour",
         "user": "1000/hour",
-    },
-}
+    }
 
 # JWT Configuration
 SIMPLE_JWT = {
