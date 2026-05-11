@@ -1,5 +1,6 @@
 import os
 import structlog
+
 SHARED_CONTEXT_VARS = [
     "request_id",
     "entity_id",

@@ -11,6 +11,10 @@ jobs:
     env:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_jawafdehi
       DJANGO_SETTINGS_MODULE: config.settings
+      SECRET_KEY: ci-test-key-not-for-production
+      DEBUG: "True"
+      ALLOWED_HOSTS: localhost,127.0.0.1,testserver
+      TESTING: "true"
     services:
       postgres:
         image: postgres:15
