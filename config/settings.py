@@ -350,7 +350,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # Detect test runner to disable throttling during tests (global rate limits
 # applied by JAW-60 would cause 429s in the test suite).
-TESTING = any("pytest" in arg for arg in sys.argv)
+TESTING = os.getenv("TESTING") == "true" or any("pytest" in arg for arg in sys.argv)
 
 # REST Framework
 REST_FRAMEWORK = {
