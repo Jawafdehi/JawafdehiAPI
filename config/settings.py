@@ -15,6 +15,8 @@ import os
 from dotenv import load_dotenv
 from datetime import timedelta
 import dj_database_url
+import sentry_sdk
+from sentry_sdk.integrations.django import DjangoIntegration
 
 load_dotenv()
 
@@ -109,6 +111,25 @@ ALLOWED_HOSTS = get_env_list("ALLOWED_HOSTS", "localhost,127.0.0.1")
 
 CSRF_TRUSTED_ORIGINS = get_env_list("CSRF_TRUSTED_ORIGINS")
 
+SENTRY_DSN = os.getenv("SENTRY_DSN")
+
+TRACES_SAMPLE_RATE = float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.1"))
+PROFILES_SAMPLE_RATE = float(os.getenv("SENTRY_PROFILES_SAMPLE_RATE", "0.1"))
+
+SENTRY_ENVIRONMENT = os.getenv("SENTRY_ENVIRONMENT", "development")
+
+if SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        environment=SENTRY_ENVIRONMENT,
+        traces_sample_rate=TRACES_SAMPLE_RATE,
+        profiles_sample_rate=PROFILES_SAMPLE_RATE,
+        send_default_pii=True,
+        integrations=[
+            DjangoIntegration(),
+        ],
+    )
+
 
 # Application definition
 
@@ -138,6 +159,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    "config.middleware.RequestIDMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "corsheaders.middleware.CorsMiddleware",
@@ -518,3 +540,7 @@ TINYMCE_DEFAULT_CONFIG = {
     "removeformat | code | help",
     "license_key": "gpl",
 }
+
+from config.logging import configure_structlog
+
+configure_structlog()
