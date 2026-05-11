@@ -203,9 +203,14 @@ class Command(BaseCommand):
         if case_id:
             queryset = queryset.filter(case_id=case_id)
 
+        self.stdout.write(f"Scanning {queryset.count()} DRAFT cases...")
+
         # Filter cases with evidence containing ciaa.gov.np/pressrelease URLs
         # Uses source_lookup passed from handle() to avoid duplicate DB queries
         cases_with_pr_evidence = []
+        skipped_already_mapped = 0
+        skipped_no_pr_url = 0
+        
         for case in queryset:
             if not case.evidence:
                 continue
@@ -227,6 +232,7 @@ class Command(BaseCommand):
                                 break
 
                     if is_file_backed:
+                        skipped_already_mapped += 1
                         continue
 
                     # Check if source URL contains press release URL
@@ -238,9 +244,15 @@ class Command(BaseCommand):
 
             if has_pr_evidence:
                 cases_with_pr_evidence.append(case)
+            elif case.evidence:
+                skipped_no_pr_url += 1
 
             if limit and len(cases_with_pr_evidence) >= limit:
                 break
+
+        self.stdout.write(f"  - Cases with unmapped press releases: {len(cases_with_pr_evidence)}")
+        self.stdout.write(f"  - Cases already mapped (skipped): {skipped_already_mapped}")
+        self.stdout.write(f"  - Cases without press release URLs (skipped): {skipped_no_pr_url}")
 
         return cases_with_pr_evidence
 
@@ -371,8 +383,20 @@ class Command(BaseCommand):
                         )
                         updated_evidence.append(evidence_entry)
             else:
-                # Dry-run mode - simulate the same existence check
-                file_count = len(pr_data["files"])
+                # Dry-run mode - mirror real-run logic
+                # Build file_urls same as real-run
+                file_urls = [f.get("url") for f in pr_data["files"] if f.get("url")]
+                file_count = len(file_urls)
+
+                # If no valid file URLs, log warning and preserve original evidence
+                if not file_urls:
+                    self.stdout.write(
+                        self.style.WARNING(
+                            f"  ⊘ No valid file URLs found for press release {press_id}, preserving original evidence"
+                        )
+                    )
+                    updated_evidence.append(evidence_entry)
+                    continue
 
                 # Check if source already exists (same logic as get_or_create_press_release_source)
                 if connection.vendor == "postgresql":
@@ -399,7 +423,6 @@ class Command(BaseCommand):
                         if isinstance(existing.url, list)
                         else [existing.url]
                     )
-                    file_urls = [f.get("url") for f in pr_data["files"] if f.get("url")]
                     needs_update = any(
                         file_url not in existing_urls for file_url in file_urls
                     )
@@ -420,8 +443,9 @@ class Command(BaseCommand):
                     )
 
                 for file_data in pr_data["files"]:
-                    file_name = file_data.get("file_name", "")
-                    self.stdout.write(f"      - {file_name}")
+                    if file_data.get("url"):  # Only show files with valid URLs
+                        file_name = file_data.get("file_name", "")
+                        self.stdout.write(f"      - {file_name}")
 
                 updated_evidence.append(
                     {
@@ -522,10 +546,11 @@ class Command(BaseCommand):
                     break
 
             if needs_update:
-                # Build complete URL list: web URL first, then all file URLs
-                url_list = []
-
-                # Add press release web URL first
+                # Build complete URL list: merge new URLs with existing ones
+                # Start with existing URLs to preserve any prior URLs
+                url_list = list(existing_urls) if existing_urls else []
+                
+                # Encode and add press release web URL first (ensure it's at the beginning)
                 if press_release_url and str(press_release_url).strip():
                     pr_url_str = str(press_release_url).strip()
                     parsed = urllib.parse.urlsplit(pr_url_str)
@@ -541,9 +566,12 @@ class Command(BaseCommand):
                             encoded_fragment,
                         )
                     )
-                    url_list.append(encoded_url)
+                    # Remove if already exists and prepend to ensure it's first
+                    if encoded_url in url_list:
+                        url_list.remove(encoded_url)
+                    url_list.insert(0, encoded_url)
 
-                # Add all file URLs
+                # Add all file URLs (skip duplicates)
                 for file_url in file_urls:
                     if file_url and str(file_url).strip():
                         file_url_str = str(file_url).strip()
@@ -560,7 +588,9 @@ class Command(BaseCommand):
                                 encoded_fragment,
                             )
                         )
-                        url_list.append(encoded_url)
+                        # Only add if not already present
+                        if encoded_url not in url_list:
+                            url_list.append(encoded_url)
 
                 # Update existing source with complete URL list
                 existing.url = url_list
