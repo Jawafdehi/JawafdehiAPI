@@ -26,6 +26,7 @@ from rest_framework import filters, mixins, status, viewsets
 from rest_framework.authentication import SessionAuthentication, TokenAuthentication
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
@@ -1011,8 +1012,8 @@ OEMBED_CASE_URL_PATTERN = re.compile(
     r"^https?://(?:www\.)?jawafdehi\.org/case/(?P<slug>[^/?#]+)"
 )
 EMBED_BASE_URL = "https://jawafdehi.org"
-DEFAULT_EMBED_WIDTH = 480
-DEFAULT_EMBED_HEIGHT = 360
+DEFAULT_EMBED_WIDTH = 600
+DEFAULT_EMBED_HEIGHT = 300
 
 
 @extend_schema(
@@ -1068,7 +1069,16 @@ class OEmbedView(APIView):
     authentication_classes = []
     permission_classes = []
 
+    def perform_content_negotiation(self, request, force=False):
+        # oEmbed uses 'format' as a query param per the oEmbed spec.
+        # Prevent DRF from intercepting it for content negotiation,
+        # which would raise Http404 when format != 'json'.
+        renderer = JSONRenderer()
+        return (renderer, renderer.media_type)
+
     def get(self, request):
+        response_format = request.query_params.get("format", "json").lower()
+
         url = request.query_params.get("url", "").strip()
         if not url:
             return Response(
@@ -1098,21 +1108,34 @@ class OEmbedView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        if response_format not in ("json", "xml"):
+            return Response(
+                {"error": f"Unsupported format: {response_format}"},
+                status=status.HTTP_501_NOT_IMPLEMENTED,
+            )
+
+        width = self._parse_dimension(
+            request.query_params.get("maxwidth"), DEFAULT_EMBED_WIDTH
+        )
+        height = self._parse_dimension(
+            request.query_params.get("maxheight"), DEFAULT_EMBED_HEIGHT
+        )
+
         embed_url = f"{EMBED_BASE_URL}/embed/case/{slug}"
 
         oembed_data = {
             "type": "rich",
             "version": "1.0",
             "title": case.title,
-            "author_name": "Jawafdehi",
+            "author_name": "Jawafdehi Editorial",
             "author_url": EMBED_BASE_URL,
             "provider_name": "Jawafdehi",
             "provider_url": EMBED_BASE_URL,
             "cache_age": 3600,
             "html": (
                 f'<iframe src="{embed_url}" '
-                f'width="{DEFAULT_EMBED_WIDTH}" '
-                f'height="{DEFAULT_EMBED_HEIGHT}" '
+                f'width="{width}" '
+                f'height="{height}" '
                 f'frameborder="0" '
                 f'allowtransparency="true" '
                 f'scrolling="no" '
@@ -1120,33 +1143,41 @@ class OEmbedView(APIView):
                 f'title="{case.title}">'
                 f"</iframe>"
             ),
-            "width": DEFAULT_EMBED_WIDTH,
-            "height": DEFAULT_EMBED_HEIGHT,
+            "width": width,
+            "height": height,
+            "thumbnail_url": case.thumbnail_url or "",
+            "thumbnail_width": width if case.thumbnail_url else None,
+            "thumbnail_height": height if case.thumbnail_url else None,
         }
-
-        if case.thumbnail_url:
-            oembed_data["thumbnail_url"] = case.thumbnail_url
-            oembed_data["thumbnail_width"] = DEFAULT_EMBED_WIDTH
-            oembed_data["thumbnail_height"] = DEFAULT_EMBED_HEIGHT
-
-        response_format = request.query_params.get("format", "json").lower()
 
         if response_format == "xml":
             return self._xml_response(oembed_data)
 
         return Response(oembed_data)
 
+    def _parse_dimension(self, raw, default):
+        if raw is None:
+            return default
+        try:
+            val = int(raw)
+        except (ValueError, TypeError):
+            return default
+        if val <= 0:
+            return default
+        return val
+
     def _xml_response(self, data):
         root = Element("oembed")
 
         for key, value in data.items():
+            if value is None:
+                continue
             if isinstance(value, int):
                 value = str(value)
             child = SubElement(root, key)
             child.text = value
 
-        xml_str = (
-            '<?xml version="1.0" encoding="utf-8"?>\n'
-            + tostring(root, encoding="unicode")
+        xml_str = '<?xml version="1.0" encoding="utf-8"?>\n' + tostring(
+            root, encoding="unicode"
         )
-        return HttpResponse(xml_str, content_type="application/xml")
+        return HttpResponse(xml_str, content_type="text/xml")
