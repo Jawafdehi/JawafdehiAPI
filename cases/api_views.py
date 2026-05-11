@@ -5,10 +5,13 @@ See: .kiro/specs/accountability-platform-core/design.md
 """
 
 import logging
+import re
 import jsonpatch
+from xml.etree.ElementTree import Element, SubElement, tostring
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db import connection, transaction
+from django.http import HttpResponse
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.types import OpenApiTypes
@@ -1002,3 +1005,148 @@ class FeedbackView(APIView):
         else:
             ip = request.META.get("REMOTE_ADDR")
         return ip
+
+
+OEMBED_CASE_URL_PATTERN = re.compile(
+    r"^https?://(?:www\.)?jawafdehi\.org/case/(?P<slug>[^/?#]+)"
+)
+EMBED_BASE_URL = "https://jawafdehi.org"
+DEFAULT_EMBED_WIDTH = 480
+DEFAULT_EMBED_HEIGHT = 360
+
+
+@extend_schema(
+    summary="oEmbed endpoint",
+    description="""
+    oEmbed provider endpoint for Jawafdehi case pages.
+
+    When a journalist pastes a Jawafdehi case URL into Substack, Medium,
+    WordPress, or any oEmbed-compatible platform, the platform discovers
+    this endpoint and requests an embeddable widget.
+
+    **Parameters:**
+    - `url` (required): the jawafdehi.org case URL to embed
+    - `format` (optional): response format — `json` (default) or `xml`
+
+    Only published cases are available for embedding.
+    Returns a `rich` type embed with an iframe pointing to the embed card.
+    """,
+    parameters=[
+        OpenApiParameter(
+            name="url",
+            type=OpenApiTypes.URI,
+            location=OpenApiParameter.QUERY,
+            description="Full jawafdehi.org/case/{slug} URL to embed",
+            required=True,
+        ),
+        OpenApiParameter(
+            name="format",
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            description="Response format: json or xml",
+            enum=["json", "xml"],
+            required=False,
+        ),
+    ],
+    tags=["oembed"],
+    responses={
+        200: OpenApiTypes.OBJECT,
+        400: OpenApiTypes.OBJECT,
+        404: OpenApiTypes.OBJECT,
+    },
+)
+class OEmbedView(APIView):
+    """
+    oEmbed provider endpoint.
+
+    GET /api/oembed/?url=https://jawafdehi.org/case/{slug}
+
+    Extracts the case slug from the provided URL, looks up the published case,
+    and returns an oEmbed response with an iframe embed code.
+    """
+
+    authentication_classes = []
+    permission_classes = []
+
+    def get(self, request):
+        url = request.query_params.get("url", "").strip()
+        if not url:
+            return Response(
+                {"error": "Missing required parameter: url"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        match = OEMBED_CASE_URL_PATTERN.match(url)
+        if not match:
+            return Response(
+                {
+                    "error": (
+                        "URL does not match a supported Jawafdehi case pattern. "
+                        "Expected: https://jawafdehi.org/case/{slug}"
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        slug = match.group("slug")
+
+        try:
+            case = Case.objects.get(slug=slug, state=CaseState.PUBLISHED)
+        except Case.DoesNotExist:
+            return Response(
+                {"error": "Case not found or not published."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        embed_url = f"{EMBED_BASE_URL}/embed/case/{slug}"
+
+        oembed_data = {
+            "type": "rich",
+            "version": "1.0",
+            "title": case.title,
+            "author_name": "Jawafdehi",
+            "author_url": EMBED_BASE_URL,
+            "provider_name": "Jawafdehi",
+            "provider_url": EMBED_BASE_URL,
+            "cache_age": 3600,
+            "html": (
+                f'<iframe src="{embed_url}" '
+                f'width="{DEFAULT_EMBED_WIDTH}" '
+                f'height="{DEFAULT_EMBED_HEIGHT}" '
+                f'frameborder="0" '
+                f'allowtransparency="true" '
+                f'scrolling="no" '
+                f'style="border:0;overflow:hidden;max-width:100%;" '
+                f'title="{case.title}">'
+                f"</iframe>"
+            ),
+            "width": DEFAULT_EMBED_WIDTH,
+            "height": DEFAULT_EMBED_HEIGHT,
+        }
+
+        if case.thumbnail_url:
+            oembed_data["thumbnail_url"] = case.thumbnail_url
+            oembed_data["thumbnail_width"] = DEFAULT_EMBED_WIDTH
+            oembed_data["thumbnail_height"] = DEFAULT_EMBED_HEIGHT
+
+        response_format = request.query_params.get("format", "json").lower()
+
+        if response_format == "xml":
+            return self._xml_response(oembed_data)
+
+        return Response(oembed_data)
+
+    def _xml_response(self, data):
+        root = Element("oembed")
+
+        for key, value in data.items():
+            if isinstance(value, int):
+                value = str(value)
+            child = SubElement(root, key)
+            child.text = value
+
+        xml_str = (
+            '<?xml version="1.0" encoding="utf-8"?>\n'
+            + tostring(root, encoding="unicode")
+        )
+        return HttpResponse(xml_str, content_type="application/xml")

@@ -20,6 +20,7 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import path, include
 from cases.views import index, docs
+from cases.api_views import OEmbedView
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
@@ -35,6 +36,7 @@ urlpatterns = [
         name="swagger-ui",
     ),
     path("api/", include("cases.urls")),
+    path("oembed/", OEmbedView.as_view(), name="oembed"),
     path("api/", include("nesq.urls")),
     path("api/", include("ngm.urls")),
     # Case Workflows routes

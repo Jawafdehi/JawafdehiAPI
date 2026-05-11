@@ -10,6 +10,7 @@ from .api_views import (
     CaseViewSet,
     DocumentSourceViewSet,
     JawafEntityViewSet,
+    OEmbedView,
     StatisticsView,
     FeedbackView,
 )
@@ -23,5 +24,6 @@ router.register(r"entities", JawafEntityViewSet, basename="jawafentity")
 urlpatterns = [
     path("statistics/", StatisticsView.as_view(), name="statistics"),
     path("feedback/", FeedbackView.as_view(), name="feedback"),
+    path("oembed/", OEmbedView.as_view(), name="oembed"),
     path("", include(router.urls)),
 ]
