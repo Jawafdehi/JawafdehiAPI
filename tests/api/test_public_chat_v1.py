@@ -875,6 +875,188 @@ def test_public_chat_rag_skill_triggers_and_scopes_retrieval(public_chat_config)
 
 
 @pytest.mark.django_db
+def test_public_chat_skill_source_page_range_is_passed_to_mcp(public_chat_config):
+    report_url = "https://ngm-store.jawafdehi.org/reports/annual-report.pdf"
+    skill = Skill.objects.create(
+        name="annual-report-page-range",
+        display_name="Annual Report Page Range",
+        description="Annual report skill",
+        content="Use the configured annual report pages only.",
+    )
+    profile = RAGSkillProfile.objects.create(
+        name="annual-report-page-range",
+        display_name="Annual Report Page Range",
+        description="Annual report profile",
+        skill=skill,
+        trigger_keywords=["annual report"],
+        metadata={
+            "source_locations": [report_url],
+            "allowed_mcp_tools": ["convert_to_markdown"],
+            "source_page_ranges": {report_url: "12-15"},
+        },
+    )
+    public_chat_config.knowledge_rag_enabled = True
+    public_chat_config.save()
+    public_chat_config.rag_skill_profiles.add(profile)
+
+    with (
+        patch(
+            "public_chat.views.PublicChatMCPClient.call_tool",
+            return_value={
+                "text": "Annual report page 12 says 201 cases were registered."
+            },
+        ) as mcp_call,
+        patch(
+            "public_chat.views.generate_answer",
+            return_value=(
+                "The configured annual report pages say 201 cases were registered."
+            ),
+        ),
+    ):
+        response = APIClient().post(
+            PUBLIC_CHAT_URL,
+            data={
+                "question": "According to the annual report, how many cases were registered?",
+                "session_id": "session-rag-page-range",
+            },
+            format="json",
+        )
+
+    assert response.status_code == 200
+    mcp_call.assert_called_once_with(
+        "convert_to_markdown",
+        {"uri": report_url, "pages": "12-15"},
+    )
+    assert response.data["sources"][0]["retrieval_mode"] == "skill_tool"
+
+
+@pytest.mark.django_db
+def test_public_chat_skill_uses_toc_to_select_pdf_pages(public_chat_config):
+    report_url = "https://ngm-store.jawafdehi.org/reports/annual-report.pdf"
+    skill = Skill.objects.create(
+        name="annual-report-toc",
+        display_name="Annual Report TOC",
+        description="Annual report skill",
+        content="Use the TOC to find the relevant annual report pages.",
+    )
+    profile = RAGSkillProfile.objects.create(
+        name="annual-report-toc",
+        display_name="Annual Report TOC",
+        description="Annual report profile",
+        skill=skill,
+        trigger_keywords=["annual report"],
+        metadata={
+            "source_locations": [report_url],
+            "allowed_mcp_tools": ["convert_to_markdown"],
+            "toc_pages": "7-11",
+            "toc_section_titles": ["भ्रष्टाचारजन्य कसूरको प्रवृत्ति विश्लेषण"],
+            "answer_page_window": 2,
+        },
+    )
+    public_chat_config.knowledge_rag_enabled = True
+    public_chat_config.save()
+    public_chat_config.rag_skill_profiles.add(profile)
+
+    def fake_mcp_call(tool_name, arguments):
+        assert tool_name == "convert_to_markdown"
+        if arguments["pages"] == "7-11":
+            return {
+                "text": "२.३ भ्रष्टाचारजन्य कसूरको प्रवृत्ति विश्लेषण ........ ४२"
+            }
+        assert arguments == {"uri": report_url, "pages": "42-44"}
+        return {"text": "Page 42 says 201 cases were registered."}
+
+    with (
+        patch(
+            "public_chat.views.PublicChatMCPClient.call_tool",
+            side_effect=fake_mcp_call,
+        ) as mcp_call,
+        patch(
+            "public_chat.views.generate_answer",
+            return_value="The annual report says 201 cases were registered.",
+        ),
+    ):
+        response = APIClient().post(
+            PUBLIC_CHAT_URL,
+            data={
+                "question": "According to the annual report, how many cases were registered?",
+                "session_id": "session-rag-toc",
+            },
+            format="json",
+        )
+
+    assert response.status_code == 200
+    assert mcp_call.call_count == 2
+    assert response.data["sources"][0]["retrieval_mode"] == "skill_tool"
+    assert response.data["sources"][0]["page_start"] == 42
+    assert response.data["sources"][0]["page_end"] == 44
+
+
+@pytest.mark.django_db
+def test_public_chat_skill_reads_toc_page_from_nearby_text(public_chat_config):
+    report_url = "https://ngm-store.jawafdehi.org/reports/annual-report.pdf"
+    skill = Skill.objects.create(
+        name="annual-report-noisy-toc",
+        display_name="Annual Report Noisy TOC",
+        description="Annual report skill",
+        content="Use the TOC to find the relevant annual report pages.",
+    )
+    profile = RAGSkillProfile.objects.create(
+        name="annual-report-noisy-toc",
+        display_name="Annual Report Noisy TOC",
+        description="Annual report profile",
+        skill=skill,
+        trigger_keywords=["annual report"],
+        metadata={
+            "source_locations": [report_url],
+            "allowed_mcp_tools": ["convert_to_markdown"],
+            "toc_pages": "7-11",
+            "toc_section_titles": ["भ्रष्टाचारजन्य कार्यको प्रवृत्ति विश्लेषण"],
+            "answer_page_window": 1,
+        },
+    )
+    public_chat_config.knowledge_rag_enabled = True
+    public_chat_config.save()
+    public_chat_config.rag_skill_profiles.add(profile)
+
+    def fake_mcp_call(tool_name, arguments):
+        assert tool_name == "convert_to_markdown"
+        if arguments["pages"] == "7-11":
+            return {
+                "text": (
+                    "परिच्छेद सूची\n"
+                    "भ्रष्टाचारजन्य कार्यको प्रवृत्ति विश्लेषण\n"
+                    "................................ ३७"
+                )
+            }
+        assert arguments == {"uri": report_url, "pages": "37-38"}
+        return {"text": "Page 37 says 201 cases were registered."}
+
+    with (
+        patch(
+            "public_chat.views.PublicChatMCPClient.call_tool",
+            side_effect=fake_mcp_call,
+        ),
+        patch(
+            "public_chat.views.generate_answer",
+            return_value="The annual report says 201 cases were registered.",
+        ),
+    ):
+        response = APIClient().post(
+            PUBLIC_CHAT_URL,
+            data={
+                "question": "According to the annual report, how many cases were registered?",
+                "session_id": "session-rag-noisy-toc",
+            },
+            format="json",
+        )
+
+    assert response.status_code == 200
+    assert response.data["sources"][0]["page_start"] == 37
+    assert response.data["sources"][0]["page_end"] == 38
+
+
+@pytest.mark.django_db
 def test_public_chat_knowledge_sources_return_public_citation_metadata(
     public_chat_config,
 ):

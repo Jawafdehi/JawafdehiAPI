@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import uuid
 import ipaddress
+import re
 from typing import Any
 import json
 from urllib.parse import urlparse
@@ -435,10 +436,32 @@ class PublicChatView(APIView):
         client = PublicChatMCPClient(allowed_tools={"convert_to_markdown"})
         chunks: list[dict[str, Any]] = []
         for index, url in enumerate(safe_urls):
-            data = client.call_tool("convert_to_markdown", {"uri": url})
+            page_args = _skill_source_page_args(rag_skill, url)
+            if not page_args:
+                toc_args = _skill_toc_page_args(rag_skill)
+                if toc_args:
+                    toc_data = client.call_tool("convert_to_markdown", {"uri": url} | toc_args)
+                    toc_markdown = str(
+                        toc_data.get("markdown") or toc_data.get("text") or ""
+                    ).strip()
+                    target_pages = _select_pages_from_toc(
+                        toc_markdown,
+                        decision=decision,
+                        rag_skill=rag_skill,
+                    )
+                    if not target_pages:
+                        continue
+                    page_args = {"pages": target_pages}
+                elif _is_pdf_url(url):
+                    continue
+
+            page_range = _page_range_from_args(page_args)
+            tool_args = {"uri": url} | page_args
+            data = client.call_tool("convert_to_markdown", tool_args)
             markdown = str(data.get("markdown") or data.get("text") or "").strip()
             if not markdown:
                 continue
+            page_start, page_end = _page_bounds(page_range)
             chunks.append(
                 {
                     "chunk_id": f"skill-tool:{rag_skill.name}:{index}",
@@ -447,10 +470,14 @@ class PublicChatView(APIView):
                     "source_title": rag_skill.display_name or rag_skill.name,
                     "source_type": "skill_source",
                     "source_url": url,
-                    "section_title": "Skill-fetched public source",
+                    "section_title": (
+                        f"Skill-fetched public source pages {page_range}"
+                        if page_range
+                        else "Skill-fetched public source"
+                    ),
                     "table_title": "",
-                    "page_start": None,
-                    "page_end": None,
+                    "page_start": page_start,
+                    "page_end": page_end,
                     "text": markdown[: config.max_evidence_chars],
                     "score": 1.0,
                     "retrieval_mode": "skill_tool",
@@ -616,6 +643,201 @@ def _skill_allowed_mcp_tools(rag_skill) -> list[str]:
     if not isinstance(raw_tools, list):
         return []
     return [item.strip() for item in raw_tools if isinstance(item, str) and item.strip()]
+
+
+def _skill_source_page_args(rag_skill, url: str) -> dict[str, Any]:
+    """Read optional per-source page range metadata for MCP conversion."""
+    metadata = getattr(rag_skill, "metadata", {}) or {}
+    page_ranges = metadata.get("source_page_ranges", {})
+    if isinstance(page_ranges, dict):
+        page_range = page_ranges.get(url)
+        if isinstance(page_range, str) and page_range.strip():
+            return {"pages": page_range.strip()}
+
+    pages = metadata.get("pages") or metadata.get("page_range")
+    if isinstance(pages, str) and pages.strip():
+        return {"pages": pages.strip()}
+
+    page_start = metadata.get("page_start")
+    page_end = metadata.get("page_end")
+    if page_start is not None:
+        args = {"page_start": page_start}
+        if page_end is not None:
+            args["page_end"] = page_end
+        return args
+
+    return {}
+
+
+def _skill_toc_page_args(rag_skill) -> dict[str, Any]:
+    """Read optional TOC page metadata for a two-step PDF lookup."""
+    metadata = getattr(rag_skill, "metadata", {}) or {}
+    toc_pages = metadata.get("toc_pages") or metadata.get("toc_page_range")
+    if isinstance(toc_pages, str) and toc_pages.strip():
+        return {"pages": toc_pages.strip()}
+
+    toc_page_start = metadata.get("toc_page_start")
+    toc_page_end = metadata.get("toc_page_end")
+    if toc_page_start is not None:
+        args = {"page_start": toc_page_start}
+        if toc_page_end is not None:
+            args["page_end"] = toc_page_end
+        return args
+
+    return {}
+
+
+def _select_pages_from_toc(
+    markdown: str,
+    *,
+    decision: RouteDecision,
+    rag_skill,
+) -> str | None:
+    """Find a configured section title in converted TOC text and return pages."""
+    del decision  # Reserved for query-aware title selection in future revisions.
+    if not markdown:
+        return None
+
+    metadata = getattr(rag_skill, "metadata", {}) or {}
+    titles = _skill_toc_section_titles(rag_skill)
+    if not titles:
+        return None
+
+    lines = [line.strip() for line in markdown.splitlines() if line.strip()]
+    for title in titles:
+        target = _normalized_toc_text(title)
+        if not target:
+            continue
+        for index, line in enumerate(lines):
+            candidates = [line]
+            if index + 1 < len(lines):
+                candidates.append(f"{line} {lines[index + 1]}")
+            if index + 2 < len(lines):
+                candidates.append(f"{line} {lines[index + 1]} {lines[index + 2]}")
+            for candidate in candidates:
+                if target not in _normalized_toc_text(candidate):
+                    continue
+                page = _last_page_number(candidate)
+                if page is None and index + 1 < len(lines):
+                    page = _last_page_number(lines[index + 1])
+                if page is None:
+                    continue
+                return _page_range_for_toc_page(page, metadata)
+        page = _find_page_near_toc_title(markdown, target)
+        if page is not None:
+            return _page_range_for_toc_page(page, metadata)
+    return None
+
+
+def _skill_toc_section_titles(rag_skill) -> list[str]:
+    metadata = getattr(rag_skill, "metadata", {}) or {}
+    raw_titles = metadata.get("toc_section_titles") or metadata.get("toc_section_title")
+    if isinstance(raw_titles, str):
+        raw_titles = [raw_titles]
+    if not isinstance(raw_titles, list):
+        return []
+    return [item.strip() for item in raw_titles if isinstance(item, str) and item.strip()]
+
+
+def _normalized_toc_text(value: str) -> str:
+    normalized = _translate_nepali_digits(value).casefold()
+    return re.sub(r"[\s\W_]+", "", normalized, flags=re.UNICODE)
+
+
+def _find_page_near_toc_title(markdown: str, target: str) -> int | None:
+    """Find a title in noisy TOC text and read the nearest following page number."""
+    compact_text, offsets = _compact_text_with_offsets(markdown)
+    if not compact_text:
+        return None
+    position = compact_text.find(target)
+    if position < 0:
+        return None
+    raw_end = offsets[min(position + len(target) - 1, len(offsets) - 1)] + 1
+    nearby_text = markdown[raw_end : raw_end + 300]
+    return _first_page_number(nearby_text)
+
+
+def _compact_text_with_offsets(value: str) -> tuple[str, list[int]]:
+    translated = _translate_nepali_digits(value).casefold()
+    chars: list[str] = []
+    offsets: list[int] = []
+    for index, char in enumerate(translated):
+        if re.match(r"[\s\W_]", char, flags=re.UNICODE):
+            continue
+        chars.append(char)
+        offsets.append(index)
+    return "".join(chars), offsets
+
+
+def _last_page_number(value: str) -> int | None:
+    normalized = _translate_nepali_digits(value)
+    numbers = re.findall(r"\d+", normalized)
+    if not numbers:
+        return None
+    try:
+        return int(numbers[-1])
+    except ValueError:
+        return None
+
+
+def _first_page_number(value: str) -> int | None:
+    normalized = _translate_nepali_digits(value)
+    numbers = re.findall(r"\d+", normalized)
+    if not numbers:
+        return None
+    try:
+        return int(numbers[0])
+    except ValueError:
+        return None
+
+
+def _page_range_for_toc_page(page: int, metadata: dict[str, Any]) -> str:
+    page += _metadata_int(metadata, "toc_pdf_page_offset", 0)
+    window = max(_metadata_int(metadata, "answer_page_window", 2), 0)
+    end_page = page + window
+    if end_page == page:
+        return str(page)
+    return f"{page}-{end_page}"
+
+
+def _translate_nepali_digits(value: str) -> str:
+    return value.translate(str.maketrans("०१२३४५६७८९", "0123456789"))
+
+
+def _metadata_int(metadata: dict[str, Any], key: str, default: int) -> int:
+    value = metadata.get(key, default)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _page_range_from_args(args: dict[str, Any]) -> str | None:
+    pages = args.get("pages")
+    if isinstance(pages, str) and pages.strip():
+        return pages.strip()
+    page_start = args.get("page_start")
+    if page_start is None:
+        return None
+    page_end = args.get("page_end", page_start)
+    if str(page_start) == str(page_end):
+        return str(page_start)
+    return f"{page_start}-{page_end}"
+
+
+def _page_bounds(page_range: str | None) -> tuple[int | None, int | None]:
+    if not page_range:
+        return None, None
+    numbers = re.findall(r"\d+", _translate_nepali_digits(page_range))
+    if not numbers:
+        return None, None
+    start = int(numbers[0])
+    end = int(numbers[-1])
+    return start, end
+
+
+def _is_pdf_url(url: str) -> bool:
+    return urlparse(url).path.lower().endswith(".pdf")
 
 
 def _safe_public_skill_urls(urls: list[str]) -> list[str]:
