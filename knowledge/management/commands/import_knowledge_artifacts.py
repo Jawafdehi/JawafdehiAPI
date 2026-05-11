@@ -12,6 +12,14 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("manifest", help="Path to a knowledge artifact manifest")
+        parser.add_argument(
+            "--embed",
+            action="store_true",
+            help=(
+                "Generate embeddings during import using the configured "
+                "KNOWLEDGE_RAG_EMBEDDING_MODEL."
+            ),
+        )
 
     def handle(self, *args, **options):
         manifest_path = Path(options["manifest"]).resolve()
@@ -19,6 +27,12 @@ class Command(BaseCommand):
             raise CommandError(f"Manifest not found: {manifest_path}")
 
         manifest = _load_json(manifest_path)
+        if options["embed"]:
+            embedding_payload = manifest.get("embedding") or {}
+            if isinstance(embedding_payload, dict):
+                manifest["embedding"] = embedding_payload | {"auto": True}
+            else:
+                manifest["embedding"] = {"auto": True}
         base_dir = manifest_path.parent
 
         try:
@@ -30,6 +44,7 @@ class Command(BaseCommand):
             self.style.SUCCESS(
                 f"Imported {result.chunks_imported} chunks into "
                 f"{result.collection.name}/{result.source.id}"
+                f" and {result.embeddings_imported} embeddings"
             )
         )
 

@@ -282,17 +282,6 @@ class PublicChatConfig(models.Model):
         related_name="public_chat_configs",
         help_text="Optional answer provider override. Falls back to the default active provider.",
     )
-    classifier_llm_provider = models.ForeignKey(
-        LLMProvider,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name="public_chat_classifier_configs",
-        help_text=(
-            "Optional classifier provider. Falls back to the answer provider, then "
-            "the default active provider."
-        ),
-    )
     quota_scope = models.CharField(
         max_length=20,
         choices=QuotaScope.choices,

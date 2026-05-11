@@ -106,15 +106,6 @@ class LLMService:
             self._active_provider_or_none(configured) or self.resolve_default_provider()
         )
 
-    def resolve_classifier_provider(self, config):
-        return (
-            self._active_provider_or_none(
-                getattr(config, "classifier_llm_provider", None)
-            )
-            or self._active_provider_or_none(getattr(config, "llm_provider", None))
-            or self.resolve_default_provider()
-        )
-
     def get_chat_model(self, provider=None):
         provider = provider or self.resolve_default_provider()
         provider_type = provider.provider_type

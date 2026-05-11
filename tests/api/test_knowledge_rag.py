@@ -15,6 +15,7 @@ from knowledge.models import (
     KnowledgeEmbedding,
     KnowledgeSource,
 )
+from knowledge.importer import import_knowledge_manifest
 from knowledge.retrieval import KnowledgeAccessContext, KnowledgeRetriever
 
 User = get_user_model()
@@ -178,6 +179,127 @@ def test_staff_can_import_public_knowledge_manifest_from_api(staff_client):
     assert KnowledgeChunk.objects.filter(
         text__icontains="document questions from public chunks"
     ).exists()
+
+
+@pytest.mark.django_db
+def test_import_chunks_raw_document_text_with_recursive_overlap(staff_client):
+    document_text = "\n\n".join(
+        [
+            "## Case statistics",
+            "In 2079, annual report case statistics were published. " * 12,
+            "## Investigation outcomes",
+            "The report grouped outcomes by case type and institution. " * 12,
+        ]
+    )
+
+    response = staff_client.post(
+        "/api/knowledge/import/",
+        data={
+            "collection": {
+                "name": "auto_chunked_reports",
+                "display_name": "Auto Chunked Reports",
+                "access_level": AccessLevel.PUBLIC,
+            },
+            "source": {
+                "title": "Annual Report 2079",
+                "source_type": "annual_report",
+                "source_url": "https://jawafdehi.org/reports/2079.pdf",
+                "access_level": AccessLevel.PUBLIC,
+            },
+            "document": {"markdown": document_text},
+            "chunking": {
+                "strategy": "recursive",
+                "chunk_size": 360,
+                "chunk_overlap": 80,
+                "min_chunk_chars": 60,
+            },
+        },
+        format="json",
+    )
+
+    assert response.status_code == 201
+    assert response.data["chunks_imported"] > 1
+    chunks = list(KnowledgeChunk.objects.order_by("chunk_index"))
+    assert chunks[0].section_title == "Case statistics"
+    assert chunks[0].metadata["chunking_strategy"] == "recursive"
+    assert all(len(chunk.text) <= 460 for chunk in chunks)
+
+
+@pytest.mark.django_db
+def test_import_chunks_page_aware_document_and_preserves_page_metadata():
+    result = import_knowledge_manifest(
+        {
+            "collection": {
+                "name": "page_reports",
+                "display_name": "Page Reports",
+                "access_level": AccessLevel.PUBLIC,
+            },
+            "source": {
+                "title": "Annual Report 2080",
+                "source_type": "annual_report",
+                "source_url": "https://jawafdehi.org/reports/2080.pdf",
+                "access_level": AccessLevel.PUBLIC,
+            },
+            "document": {
+                "pages": [
+                    {
+                        "page": 10,
+                        "section_title": "Registered cases",
+                        "text": "Registered cases by type. " * 20,
+                    },
+                    {
+                        "page": 11,
+                        "section_title": "Court outcomes",
+                        "text": "Court outcomes by institution. " * 20,
+                    },
+                ]
+            },
+            "chunking": {"chunk_size": 240, "chunk_overlap": 40},
+        }
+    )
+
+    assert result.chunks_imported >= 2
+    pages = list(
+        KnowledgeChunk.objects.order_by("chunk_index").values_list(
+            "page_start", "page_end", "section_title"
+        )
+    )
+    assert (10, 10, "Registered cases") in pages
+    assert (11, 11, "Court outcomes") in pages
+
+
+@pytest.mark.django_db
+def test_import_can_generate_embeddings_into_vector_store(settings):
+    settings.KNOWLEDGE_RAG_EMBEDDING_MODEL = "test-embedding"
+    embedder = FakeQueryEmbedder([0.1, 0.2, 0.3])
+
+    result = import_knowledge_manifest(
+        {
+            "collection": {
+                "name": "embedded_reports",
+                "display_name": "Embedded Reports",
+                "access_level": AccessLevel.PUBLIC,
+            },
+            "source": {
+                "title": "Embedded Annual Report",
+                "source_type": "annual_report",
+                "source_url": "https://jawafdehi.org/reports/embedded.pdf",
+                "access_level": AccessLevel.PUBLIC,
+            },
+            "document": {"text": "Annual report 2079 registered 120 cases. " * 12},
+            "chunking": {"chunk_size": 240, "chunk_overlap": 40},
+            "embedding": {"auto": True, "model": "test-embedding", "batch_size": 2},
+        },
+        query_embedder=embedder,
+    )
+
+    assert result.chunks_imported > 0
+    assert result.embeddings_imported == result.chunks_imported
+    assert KnowledgeEmbedding.objects.count() == result.chunks_imported
+    embedding = KnowledgeEmbedding.objects.first()
+    assert embedding.embedding_model == "test-embedding"
+    assert embedding.embedding == [0.1, 0.2, 0.3]
+    assert embedding.vector is not None
 
 
 @pytest.mark.django_db

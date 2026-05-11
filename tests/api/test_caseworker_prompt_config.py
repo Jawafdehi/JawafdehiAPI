@@ -72,16 +72,16 @@ def test_caseworker_admin_can_manage_prompts_skills_and_public_chat_config(
             "max_question_chars": 1000,
             "max_history_turns": 6,
             "max_history_chars": 4000,
-            "max_mcp_results": 5,
             "max_tool_calls": 3,
-            "max_evidence_chars": 8000,
         },
         format="json",
     )
     assert config_response.status_code == 201
     assert config_response.data["prompt"] == prompt_response.data["id"]
     assert config_response.data["quota_limit"] == 10
-    assert config_response.data["classifier_llm_provider"] is None
+    assert "classifier_llm_provider" not in config_response.data
+    assert "knowledge_rag_enabled" not in config_response.data
+    assert "knowledge_collections" not in config_response.data
 
 
 @pytest.mark.django_db
@@ -105,8 +105,8 @@ def test_caseworker_admin_can_manage_multiple_llm_provider_profiles(staff_client
     second = staff_client.post(
         "/api/caseworker/llm-providers/",
         data={
-            "name": "openai-public-classifier",
-            "display_name": "OpenAI Public Classifier",
+            "name": "openai-public-secondary",
+            "display_name": "OpenAI Public Secondary",
             "provider_type": "openai",
             "model": "gpt-4o-mini",
             "api_key": "test-key-b",

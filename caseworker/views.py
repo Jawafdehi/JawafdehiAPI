@@ -219,15 +219,7 @@ class LLMProviderViewSet(viewsets.ModelViewSet):
 
 
 class PublicChatConfigViewSet(viewsets.ModelViewSet):
-    queryset = (
-        PublicChatConfig.objects.select_related(
-            "prompt",
-            "llm_provider",
-            "classifier_llm_provider",
-        )
-        .prefetch_related("knowledge_collections", "rag_skill_profiles")
-        .all()
-    )
+    queryset = PublicChatConfig.objects.select_related("prompt", "llm_provider").all()
     serializer_class = PublicChatConfigSerializer
     permission_classes = [IsAuthenticated, IsAdminOrReadOnly]
 

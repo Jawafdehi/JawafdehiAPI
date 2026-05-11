@@ -5,8 +5,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from django.conf import settings
 from django.db import transaction
 
+from .chunking import KnowledgeChunkingError, chunks_from_manifest
 from .models import (
     AccessLevel,
     KnowledgeChunk,
@@ -26,6 +28,7 @@ class KnowledgeImportResult:
     collection: KnowledgeCollection
     source: KnowledgeSource
     chunks_imported: int
+    embeddings_imported: int = 0
 
 
 @transaction.atomic
@@ -33,6 +36,7 @@ def import_knowledge_manifest(
     manifest: dict[str, Any],
     *,
     base_dir: Path | None = None,
+    query_embedder=None,
 ) -> KnowledgeImportResult:
     if not isinstance(manifest, dict):
         raise KnowledgeImportError("Manifest must be a JSON object.")
@@ -41,16 +45,25 @@ def import_knowledge_manifest(
     source = _upsert_source(manifest, collection)
     chunks = _load_chunks(manifest, base_dir)
 
+    imported_chunks: list[KnowledgeChunk] = []
     imported = 0
     for index, row in enumerate(chunks):
         chunk = _upsert_chunk(source, row, index)
         _upsert_embedding(chunk, row)
+        imported_chunks.append(chunk)
         imported += 1
+
+    embeddings_imported = _auto_embed_chunks(
+        manifest,
+        imported_chunks,
+        query_embedder=query_embedder,
+    )
 
     return KnowledgeImportResult(
         collection=collection,
         source=source,
         chunks_imported=imported,
+        embeddings_imported=embeddings_imported,
     )
 
 
@@ -61,7 +74,9 @@ def _upsert_collection(manifest: dict[str, Any]) -> KnowledgeCollection:
     elif isinstance(collection_data, dict):
         collection_payload = collection_data
     else:
-        raise KnowledgeImportError("Manifest must include collection as a string or object.")
+        raise KnowledgeImportError(
+            "Manifest must include collection as a string or object."
+        )
 
     name = collection_payload.get("name")
     if not name:
@@ -138,16 +153,25 @@ def _load_chunks(
         chunks = manifest["chunks"]
     elif manifest.get("chunks_file"):
         if base_dir is None:
-            raise KnowledgeImportError("chunks_file is only supported for file imports.")
+            raise KnowledgeImportError(
+                "chunks_file is only supported for file imports."
+            )
         chunks_file = (base_dir / manifest["chunks_file"]).resolve()
         if not str(chunks_file).startswith(str(base_dir.resolve())):
-            raise KnowledgeImportError("chunks_file must stay inside the manifest directory.")
+            raise KnowledgeImportError(
+                "chunks_file must stay inside the manifest directory."
+            )
         chunks = _load_json(chunks_file)
     else:
-        raise KnowledgeImportError("Manifest must include chunks or chunks_file.")
+        try:
+            chunks = chunks_from_manifest(manifest, base_dir=base_dir)
+        except KnowledgeChunkingError as exc:
+            raise KnowledgeImportError(str(exc)) from exc
 
     if not isinstance(chunks, list):
         raise KnowledgeImportError("Knowledge chunks must be a list.")
+    if not chunks:
+        raise KnowledgeImportError("Knowledge import produced no chunks.")
     return chunks
 
 
@@ -165,8 +189,10 @@ def _upsert_chunk(
     if not isinstance(metadata, dict):
         raise KnowledgeImportError(f"Chunk {index} metadata must be a JSON object.")
 
-    content_hash = row.get("content_hash") or hash_text(text)
     chunk_index = int(row.get("chunk_index", index))
+    content_hash = row.get("content_hash") or hash_text(
+        f"{source.id}:{chunk_index}:{text}"
+    )
     defaults = {
         "text": text,
         "chunk_index": chunk_index,
@@ -203,6 +229,63 @@ def _upsert_embedding(chunk: KnowledgeChunk, row: dict[str, Any]) -> None:
             "metadata": row.get("embedding_metadata", {}),
         },
     )
+
+
+def _auto_embed_chunks(
+    manifest: dict[str, Any],
+    chunks: list[KnowledgeChunk],
+    *,
+    query_embedder=None,
+) -> int:
+    embedding_payload = manifest.get("embedding") or {}
+    if isinstance(embedding_payload, bool):
+        embedding_payload = {"auto": embedding_payload}
+    if not isinstance(embedding_payload, dict):
+        raise KnowledgeImportError("embedding must be a JSON object or boolean.")
+    if not embedding_payload.get("auto"):
+        return 0
+
+    model = (
+        embedding_payload.get("model")
+        or getattr(settings, "KNOWLEDGE_RAG_EMBEDDING_MODEL", "")
+        or ""
+    )
+    if not model:
+        raise KnowledgeImportError(
+            "embedding.auto requires KNOWLEDGE_RAG_EMBEDDING_MODEL or embedding.model."
+        )
+
+    if query_embedder is None:
+        from .retrieval import KnowledgeQueryEmbedder
+
+        query_embedder = KnowledgeQueryEmbedder.from_settings()
+
+    batch_size = max(1, int(embedding_payload.get("batch_size") or 32))
+    imported = 0
+    for start in range(0, len(chunks), batch_size):
+        batch = chunks[start : start + batch_size]
+        vectors = query_embedder.embed_documents([chunk.text for chunk in batch])
+        if len(vectors) != len(batch):
+            raise KnowledgeImportError(
+                "Embedding provider returned an unexpected batch size."
+            )
+        for chunk, vector in zip(batch, vectors, strict=True):
+            if not vector:
+                raise KnowledgeImportError(
+                    f"Embedding provider returned an empty vector for chunk {chunk.id}."
+                )
+            KnowledgeEmbedding.objects.update_or_create(
+                chunk=chunk,
+                embedding_model=model,
+                defaults={
+                    "embedding": vector,
+                    "vector": vector,
+                    "dimensions": len(vector),
+                    "metadata": embedding_payload.get("metadata", {}),
+                },
+            )
+            imported += 1
+    return imported
 
 
 def _load_json(path: Path) -> Any:

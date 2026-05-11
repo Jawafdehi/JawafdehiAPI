@@ -8,27 +8,42 @@ from typing import Any
 
 from asgiref.sync import async_to_sync
 from django.conf import settings
+from pydantic import BaseModel, Field
 
 
 class PublicChatMCPError(RuntimeError):
     pass
 
 
+PUBLIC_CHAT_AGENT_TOOLS = frozenset(
+    {
+        "search_jawafdehi_cases",
+        "get_jawafdehi_case",
+        "search_jawaf_entities",
+        "get_jawaf_entity",
+        "search_jawafdehi_knowledge",
+        "get_jawafdehi_knowledge_source",
+        "convert_to_markdown",
+    }
+)
+
 _TOOL_CACHE: dict[str, dict[str, Any]] = {}
 
 
 class PublicChatMCPClient:
-    """Small MCP facade for caller allow-listed tools."""
+    """Load public-chat MCP tools for a single agent run."""
 
-    def __init__(self, *, allowed_tools: Iterable[str] | None = None) -> None:
-        self.allowed_tools = frozenset(allowed_tools or [])
+    def __init__(
+        self,
+        *,
+        allowed_tools: Iterable[str] | None = None,
+    ) -> None:
+        self.allowed_tools = frozenset(allowed_tools or PUBLIC_CHAT_AGENT_TOOLS)
 
-    def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        if name not in self.allowed_tools:
-            raise PublicChatMCPError(f"Tool {name} is not allowed for public chat")
-        return async_to_sync(self._call_tool)(name, arguments)
+    def get_tools(self) -> list[Any]:
+        return async_to_sync(self._get_tools)()
 
-    async def _call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _get_tools(self) -> list[Any]:
         servers = getattr(settings, "PUBLIC_CHAT_MCP_SERVERS", {})
         if not servers:
             raise PublicChatMCPError("Public chat MCP server is not configured")
@@ -42,34 +57,11 @@ class PublicChatMCPClient:
             ) from exc
 
         tool_map = await self._load_tool_map(MultiServerMCPClient, servers)
-        tool = tool_map.get(name)
-        if tool is None:
-            available_tools = ", ".join(sorted(tool_map)) or "none"
-            raise PublicChatMCPError(
-                f"MCP tool {name} was not found. "
-                f"Available public MCP tools: {available_tools}"
-            )
-
-        try:
-            raw_result = await self._invoke_tool(tool, arguments)
-        except Exception:
-            if _should_cache_tools(servers):
-                _clear_tool_cache(servers, self.allowed_tools)
-                tool_map = await self._load_tool_map(MultiServerMCPClient, servers)
-                tool = tool_map.get(name)
-                if tool is None:
-                    raise
-                raw_result = await self._invoke_tool(tool, arguments)
-            else:
-                raise
-        return self._parse_tool_result(raw_result)
+        return [tool_map[name] for name in sorted(tool_map)]
 
     async def _load_tool_map(
         self, client_cls, servers: dict[str, Any]
     ) -> dict[str, Any]:
-        # Keep tool objects scoped to this async call. LangChain MCP stdio tools can
-        # own event-loop/process resources, so a global tool-object cache is unsafe
-        # under Django request concurrency.
         if _should_cache_tools(servers):
             cache_key = _tool_cache_key(servers, self.allowed_tools)
             cached = _TOOL_CACHE.get(cache_key)
@@ -78,58 +70,84 @@ class PublicChatMCPClient:
 
         client = client_cls(servers)
         tools = await client.get_tools()
+        raw_tool_map = {}
         for tool in tools:
+            if tool.name not in self.allowed_tools:
+                continue
             tool.handle_tool_error = True
-        tool_map = {
-            tool.name: tool for tool in tools if tool.name in self.allowed_tools
-        }
+            if tool.name == "convert_to_markdown":
+                tool = _public_document_converter(tool)
+            raw_tool_map[tool.name] = tool
+
         if _should_cache_tools(servers):
             _TOOL_CACHE[_tool_cache_key(servers, self.allowed_tools)] = {
                 "expires_at": time.monotonic()
                 + getattr(settings, "PUBLIC_CHAT_MCP_TOOL_CACHE_SECONDS", 300),
-                "tools": tool_map,
+                "tools": raw_tool_map,
             }
-        return tool_map
+        return raw_tool_map
 
-    async def _invoke_tool(self, tool: Any, arguments: dict[str, Any]) -> Any:
+
+class PublicDocumentConversionInput(BaseModel):
+    uri: str = Field(
+        description="Public http(s) URL of the document or web page to convert."
+    )
+    pages: str | None = Field(
+        default=None,
+        description="Optional PDF page or inclusive range, such as '12' or '12-15'.",
+    )
+    page_start: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional first PDF page to convert.",
+    )
+    page_end: int | None = Field(
+        default=None,
+        ge=1,
+        description="Optional last PDF page to convert.",
+    )
+
+
+def _public_document_converter(mcp_tool: Any) -> Any:
+    from langchain_core.tools import StructuredTool
+
+    async def aconvert(
+        uri: str,
+        pages: str | None = None,
+        page_start: int | None = None,
+        page_end: int | None = None,
+    ) -> Any:
+        if not uri.startswith(("http://", "https://")):
+            return "Error: only public http(s) document URLs are allowed."
+        args: dict[str, Any] = {"uri": uri}
+        if pages:
+            args["pages"] = pages
+        if page_start is not None:
+            args["page_start"] = page_start
+        if page_end is not None:
+            args["page_end"] = page_end
         timeout = getattr(settings, "PUBLIC_CHAT_MCP_TOOL_TIMEOUT_SECONDS", 30)
-        return await asyncio.wait_for(tool.ainvoke(arguments), timeout=timeout)
+        return await asyncio.wait_for(mcp_tool.ainvoke(args), timeout=timeout)
 
-    def _parse_tool_result(self, raw_result: Any) -> dict[str, Any]:
-        if isinstance(raw_result, dict):
-            if "structuredContent" in raw_result:
-                return raw_result["structuredContent"]
-            content = raw_result.get("content")
-            if content is None:
-                return raw_result
-            if isinstance(content, str):
-                return self._parse_json_text(content)
-            if isinstance(content, list):
-                raw_result = content
-        if isinstance(raw_result, str):
-            return self._parse_json_text(raw_result)
-        if isinstance(raw_result, list) and raw_result:
-            first_item = raw_result[0]
-            text = (
-                first_item.get("text")
-                if isinstance(first_item, dict)
-                else getattr(first_item, "text", None)
-            )
-            if text is not None:
-                return self._parse_json_text(text)
-        text = getattr(raw_result, "content", None) or getattr(raw_result, "text", None)
-        if text:
-            return self._parse_json_text(text)
-        raise PublicChatMCPError("Unexpected MCP tool response")
+    def convert(
+        uri: str,
+        pages: str | None = None,
+        page_start: int | None = None,
+        page_end: int | None = None,
+    ) -> Any:
+        return async_to_sync(aconvert)(uri, pages, page_start, page_end)
 
-    def _parse_json_text(self, text: str) -> dict[str, Any]:
-        try:
-            return json.loads(text)
-        except (TypeError, ValueError):
-            message = str(text).strip() or "MCP tool returned a non-JSON response"
-            if message.lower().startswith("error"):
-                raise PublicChatMCPError(message[:500])
-            return {"text": message}
+    return StructuredTool.from_function(
+        func=convert,
+        coroutine=aconvert,
+        name="convert_to_markdown",
+        description=(
+            "Convert a public http(s) document or web page to Markdown. For PDFs, "
+            "use pages, page_start, or page_end to convert only relevant pages. "
+            "This public chat wrapper does not allow local files or output paths."
+        ),
+        args_schema=PublicDocumentConversionInput,
+    )
 
 
 def _validate_mcp_server_lifecycle(servers: dict[str, Any]) -> None:
@@ -159,7 +177,3 @@ def _tool_cache_key(servers: dict[str, Any], allowed_tools: frozenset[str]) -> s
         "allowed_tools": sorted(allowed_tools),
     }
     return json.dumps(payload, sort_keys=True, default=str)
-
-
-def _clear_tool_cache(servers: dict[str, Any], allowed_tools: frozenset[str]) -> None:
-    _TOOL_CACHE.pop(_tool_cache_key(servers, allowed_tools), None)

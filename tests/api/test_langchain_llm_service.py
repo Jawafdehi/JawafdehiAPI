@@ -134,7 +134,6 @@ def test_llm_service_resolves_public_chat_provider_fallbacks():
     PublicChatConfig.objects.all().delete()
     default_provider = provider("default-answer", "openai", is_default=True)
     answer_provider = provider("configured-answer", "openai")
-    classifier_provider = provider("configured-classifier", "anthropic")
     prompt = Prompt.objects.create(
         name="provider-fallback-prompt",
         display_name="Provider Fallback Prompt",
@@ -146,27 +145,19 @@ def test_llm_service_resolves_public_chat_provider_fallbacks():
         name="provider-fallback-config",
         prompt=prompt,
         llm_provider=answer_provider,
-        classifier_llm_provider=classifier_provider,
     )
 
     service = LLMService()
 
     assert service.resolve_answer_provider(config) == answer_provider
-    assert service.resolve_classifier_provider(config) == classifier_provider
 
-    config.classifier_llm_provider = None
     config.llm_provider = None
     assert service.resolve_answer_provider(config) == default_provider
-    assert service.resolve_classifier_provider(config) == default_provider
 
     answer_provider.is_active = False
     answer_provider.save()
-    classifier_provider.is_active = False
-    classifier_provider.save()
-    config.classifier_llm_provider = classifier_provider
     config.llm_provider = answer_provider
     assert service.resolve_answer_provider(config) == default_provider
-    assert service.resolve_classifier_provider(config) == default_provider
 
 
 @pytest.mark.django_db
