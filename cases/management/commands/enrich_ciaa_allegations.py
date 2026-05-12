@@ -152,9 +152,7 @@ class Command(BaseCommand):
         client = self._init_client(api_key, base_url, model)
 
         cases = self._get_eligible_cases(limit, force, case_id)
-        self.stdout.write(
-            f"Found {len(cases)} eligible CIAA DRAFT case(s) to process"
-        )
+        self.stdout.write(f"Found {len(cases)} eligible CIAA DRAFT case(s) to process")
 
         self._fetch_source_cache(cases)
 
@@ -167,9 +165,7 @@ class Command(BaseCommand):
             except Exception as e:
                 self.stats["cases_failed"] += 1
                 logger.exception(f"Error processing {case.case_id}: {e}")
-                self.stdout.write(
-                    self.style.ERROR(f"FAILED: {case.case_id} - {e}")
-                )
+                self.stdout.write(self.style.ERROR(f"FAILED: {case.case_id} - {e}"))
 
         self._print_summary(dry_run)
 
@@ -196,9 +192,7 @@ class Command(BaseCommand):
         eligible = []
         for case in cases:
             if case.court_cases and isinstance(case.court_cases, list):
-                has_ciaa = any(
-                    ref.startswith("special:") for ref in case.court_cases
-                )
+                has_ciaa = any(ref.startswith("special:") for ref in case.court_cases)
                 if has_ciaa:
                     eligible.append(case)
             else:
@@ -243,9 +237,7 @@ class Command(BaseCommand):
                 )
                 current = case.missing_details or ""
                 if note not in current:
-                    case.missing_details = (
-                        f"{current}\n{note}" if current else note
-                    )
+                    case.missing_details = f"{current}\n{note}" if current else note
                     case.save(update_fields=["missing_details"])
             self.stdout.write(
                 self.style.WARNING("  SKIPPED: No press release markdown content")
@@ -280,11 +272,7 @@ class Command(BaseCommand):
             )
         if len(allegations) > 5:
             allegations = allegations[:5]
-            self.stdout.write(
-                self.style.WARNING(
-                    f"  Truncated to 5 allegations"
-                )
-            )
+            self.stdout.write(self.style.WARNING("  Truncated to 5 allegations"))
 
         self.stdout.write(f"  Extracted {len(allegations)} allegation(s):")
         for a in allegations:
@@ -319,7 +307,11 @@ class Command(BaseCommand):
             if not source:
                 continue
 
-            urls = source.url if isinstance(source.url, list) else [source.url] if source.url else []
+            urls = (
+                source.url
+                if isinstance(source.url, list)
+                else [source.url] if source.url else []
+            )
 
             for url in urls:
                 if not isinstance(url, str):
@@ -365,14 +357,14 @@ class Command(BaseCommand):
             except Exception as e:
                 logger.warning(f"LLM call attempt {attempt + 1} failed: {e}")
                 if attempt < max_retries - 1:
-                    wait = 2 ** attempt
-                    self.stdout.write(
-                        self.style.WARNING(f"  Retrying in {wait}s...")
-                    )
+                    wait = 2**attempt
+                    self.stdout.write(self.style.WARNING(f"  Retrying in {wait}s..."))
                     time.sleep(wait)
                 else:
                     self.stdout.write(
-                        self.style.ERROR(f"  LLM call failed after {max_retries} attempts: {e}")
+                        self.style.ERROR(
+                            f"  LLM call failed after {max_retries} attempts: {e}"
+                        )
                     )
                     return None
 
@@ -396,7 +388,7 @@ class Command(BaseCommand):
                 for line in raw.split("\n")
                 if line.strip()
             ]
-            allegations = [l for l in lines if len(l) > 10]
+            allegations = [line for line in lines if len(line) > 10]
 
         allegations = [
             a.strip() for a in allegations if isinstance(a, str) and a.strip()
@@ -417,9 +409,7 @@ class Command(BaseCommand):
             self.style.WARNING(f"Cases skipped:    {self.stats['cases_skipped']}")
         )
         self.stdout.write(
-            self.style.WARNING(
-                f"Cases no content:  {self.stats['cases_no_content']}"
-            )
+            self.style.WARNING(f"Cases no content:  {self.stats['cases_no_content']}")
         )
         if self.stats["cases_failed"] > 0:
             self.stdout.write(
