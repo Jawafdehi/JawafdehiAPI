@@ -127,7 +127,15 @@ def _public_document_converter(mcp_tool: Any) -> Any:
         if page_end is not None:
             args["page_end"] = page_end
         timeout = getattr(settings, "PUBLIC_CHAT_MCP_TOOL_TIMEOUT_SECONDS", 30)
-        return await asyncio.wait_for(mcp_tool.ainvoke(args), timeout=timeout)
+        try:
+            return await asyncio.wait_for(mcp_tool.ainvoke(args), timeout=timeout)
+        except (TimeoutError, asyncio.TimeoutError):
+            return (
+                "Error: document conversion timed out. Try a smaller PDF page range "
+                "or answer from the indexed knowledge chunks."
+            )
+        except Exception as exc:  # noqa: BLE001 - tool errors should not kill agent runs.
+            return f"Error: document conversion failed: {exc}"
 
     def convert(
         uri: str,
