@@ -22,9 +22,11 @@ from cases.models import Case, CaseState, CaseType
 # Fixtures & helpers
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def workflow():
     return CIAACaseworkerWorkflow()
+
 
 def make_ciaa_case(
     case_number: str = "081-CR-0097", state: str = CaseState.DRAFT
@@ -36,9 +38,11 @@ def make_ciaa_case(
         state=state,
     )
 
+
 # ---------------------------------------------------------------------------
 # Inclusion
 # ---------------------------------------------------------------------------
+
 
 class TestGetEligibleCasesInclusion:
     @pytest.mark.django_db
@@ -61,9 +65,11 @@ class TestGetEligibleCasesInclusion:
         eligible = workflow.get_eligible_cases()
         assert len(eligible) == len(CIAA_CASE_NUMBERS)
 
+
 # ---------------------------------------------------------------------------
 # Exclusion
 # ---------------------------------------------------------------------------
+
 
 class TestGetEligibleCasesExclusion:
     @pytest.mark.django_db

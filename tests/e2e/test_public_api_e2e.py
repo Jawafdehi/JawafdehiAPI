@@ -16,6 +16,7 @@ from tests.conftest import (
     create_document_source_with_entities,
 )
 
+
 @pytest.mark.django_db
 class TestPublicAPIWorkflows:
     """
@@ -203,7 +204,7 @@ class TestPublicAPIWorkflows:
         case_ids = [case["case_id"] for case in results]
 
         assert self.published_corruption_case.case_id in case_ids
-        
+
         assert self.draft_case.case_id not in case_ids
         assert self.closed_case.case_id not in case_ids
 
