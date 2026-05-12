@@ -733,13 +733,10 @@ NOTE: along with the case title, you MUST update the Key allegations, Timeline, 
 
         from case_workflows.workflows.ciaa_caseworker.constants import CIAA_CASE_NUMBERS
 
-        rows = (
-            Case.objects.filter(
-                case_type=CaseType.CORRUPTION,
-                state__in=[CaseState.DRAFT, CaseState.IN_REVIEW],
-            )
-            .values_list("case_id", "title")
-        )
+        rows = Case.objects.filter(
+            case_type=CaseType.CORRUPTION,
+            state__in=[CaseState.DRAFT, CaseState.IN_REVIEW],
+        ).values_list("case_id", "title")
 
         if not self.update_existing:
             completed_case_ids = set(
@@ -781,12 +778,20 @@ NOTE: along with the case title, you MUST update the Key allegations, Timeline, 
                 ),
                 total_entities=Count("entity_relationships"),
             )
-            .values_list("case_id", "bigo", "accused_count", "total_entities",
-                         "court_cases", "notes")
+            .values_list(
+                "case_id",
+                "bigo",
+                "accused_count",
+                "total_entities",
+                "court_cases",
+                "notes",
+            )
         )
 
         def _score(bigo, acc, total, cc, notes):
-            bigo_s = min(1.0, math.log10(float(bigo)) / 12.0) if bigo and bigo > 0 else 0.0
+            bigo_s = (
+                min(1.0, math.log10(float(bigo)) / 12.0) if bigo and bigo > 0 else 0.0
+            )
             complexity = min(1.0, (acc or 0) * 0.15 + (total or 0) * 0.05)
             richness = (0.4 if cc else 0.0) + (0.2 if notes and notes.strip() else 0.0)
             return 0.55 * bigo_s + 0.30 * complexity + 0.15 * richness

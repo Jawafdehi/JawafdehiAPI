@@ -74,7 +74,9 @@ def _compute_priority_score(
     return (0.55 * bigo_score) + (0.30 * complexity_score) + (0.15 * richness)
 
 
-def _select_priority_cases(limit: int) -> List[Tuple[str, str, float, Optional[int], int]]:
+def _select_priority_cases(
+    limit: int,
+) -> List[Tuple[str, str, float, Optional[int], int]]:
     """
     Return list of ``(case_id, title, score, bigo, defendant_count)`` tuples
     sorted by descending priority score.
@@ -82,7 +84,6 @@ def _select_priority_cases(limit: int) -> List[Tuple[str, str, float, Optional[i
     Only considers CORRUPTION cases in DRAFT or IN_REVIEW state whose title
     contains a known CIAA Special Court case number.
     """
-    from cases.models import CaseEntityRelationship
 
     # Base queryset: CIAA corruption cases in enrichment states
     base = (
@@ -94,9 +95,7 @@ def _select_priority_cases(limit: int) -> List[Tuple[str, str, float, Optional[i
             total_entities=Count("entity_relationships"),
             accused_count=Count(
                 "entity_relationships",
-                filter=Q(
-                    entity_relationships__relationship_type="accused"
-                ),
+                filter=Q(entity_relationships__relationship_type="accused"),
             ),
         )
         .values_list(
@@ -132,7 +131,10 @@ def _select_priority_cases(limit: int) -> List[Tuple[str, str, float, Optional[i
     # Sort by score descending, then bigo descending for ties
     scored.sort(key=lambda x: (x[2], x[3] or 0), reverse=True)
 
-    return [(cid, title, score, bigo, acc) for (cid, title, score, bigo, acc, _) in scored[:limit]]
+    return [
+        (cid, title, score, bigo, acc)
+        for (cid, title, score, bigo, acc, _) in scored[:limit]
+    ]
 
 
 class Command(BaseCommand):
@@ -207,7 +209,9 @@ class Command(BaseCommand):
                     "  Score = 0.55 × bigo(log) + 0.30 × complexity + 0.15 × richness"
                 )
                 self.stdout.write("  bigo:        log₁₀(bigo) / 12, capped at 1.0")
-                self.stdout.write("  complexity:  defendants × 0.15 + total_entities × 0.05")
+                self.stdout.write(
+                    "  complexity:  defendants × 0.15 + total_entities × 0.05"
+                )
                 self.stdout.write("  richness:    court_cases (0.4) + notes (0.2)")
 
         if output_file:

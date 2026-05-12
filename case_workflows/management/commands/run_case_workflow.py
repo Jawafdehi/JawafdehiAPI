@@ -215,9 +215,7 @@ class Command(BaseCommand):
         priority_limit = options["priority_limit"]
         if update_existing:
             workflow.update_existing = True
-            printer._console.print(
-                "  [bold yellow]Mode: update-existing[/bold yellow]"
-            )
+            printer._console.print("  [bold yellow]Mode: update-existing[/bold yellow]")
         if priority_limit > 0:
             printer._console.print(
                 f"  [bold cyan]Priority limit: top {priority_limit} cases[/bold cyan]"
@@ -306,8 +304,11 @@ class Command(BaseCommand):
                 run.case_data = {}
                 run.save(
                     update_fields=[
-                        "is_complete", "has_failed", "error_message",
-                        "case_data", "updated_at",
+                        "is_complete",
+                        "has_failed",
+                        "error_message",
+                        "case_data",
+                        "updated_at",
                     ]
                 )
 
