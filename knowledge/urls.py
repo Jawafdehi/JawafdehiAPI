@@ -6,6 +6,7 @@ from .views import (
     KnowledgeCollectionViewSet,
     KnowledgeEmbeddingViewSet,
     KnowledgeImportView,
+    KnowledgeSourceImportView,
     KnowledgeSourceViewSet,
     PublicKnowledgeSearchView,
     PublicKnowledgeSourceView,
@@ -19,7 +20,16 @@ router.register("embeddings", KnowledgeEmbeddingViewSet)
 
 urlpatterns = [
     path("import/", KnowledgeImportView.as_view(), name="knowledge-import"),
-    path("public-search/", PublicKnowledgeSearchView.as_view(), name="public-knowledge-search"),
+    path(
+        "import-source/",
+        KnowledgeSourceImportView.as_view(),
+        name="knowledge-import-source",
+    ),
+    path(
+        "public-search/",
+        PublicKnowledgeSearchView.as_view(),
+        name="public-knowledge-search",
+    ),
     path(
         "public-sources/<int:source_id>/",
         PublicKnowledgeSourceView.as_view(),
