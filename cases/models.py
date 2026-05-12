@@ -444,7 +444,7 @@ class Case(models.Model):
     # Content fields
     tags = TextListField(blank=True, help_text="List of tags for categorization")
     description = models.TextField(
-        blank=True, help_text="Rich text description of the case"
+        blank=True, help_text="Markdown description of the case"
     )
     key_allegations = TextListField(
         blank=True, help_text="List of key allegation statements"
