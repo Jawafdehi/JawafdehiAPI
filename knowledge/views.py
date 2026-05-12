@@ -1,4 +1,6 @@
+from django.db.models import Count
 from rest_framework import status, viewsets
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -13,6 +15,7 @@ from .models import (
     KnowledgeEmbedding,
     KnowledgeSource,
 )
+from .source_importer import SourceImportRequest, SourceImportSummary, import_source
 from .retrieval import KnowledgeAccessContext, KnowledgeRetriever
 from .serializers import (
     KnowledgeChunkSerializer,
@@ -29,11 +32,26 @@ class KnowledgeCollectionViewSet(viewsets.ModelViewSet):
 
 
 class KnowledgeSourceViewSet(viewsets.ModelViewSet):
-    queryset = KnowledgeSource.objects.select_related(
-        "collection", "owner", "case", "document_source"
-    ).prefetch_related("allowed_users", "allowed_groups")
+    queryset = KnowledgeSource.objects.all()
     serializer_class = KnowledgeSourceSerializer
     permission_classes = [IsAuthenticated, IsAdminOrReadOnly]
+
+    def get_queryset(self):
+        queryset = (
+            KnowledgeSource.objects.select_related(
+                "collection", "owner", "case", "document_source"
+            )
+            .prefetch_related("allowed_users", "allowed_groups")
+            .annotate(chunk_count=Count("chunks"))
+            .order_by("collection__name", "title")
+        )
+        collection_id = self.request.query_params.get("collection")
+        if collection_id:
+            queryset = queryset.filter(collection_id=collection_id)
+        search = str(self.request.query_params.get("search") or "").strip()
+        if search:
+            queryset = queryset.filter(title__icontains=search)
+        return queryset
 
 
 class KnowledgeChunkViewSet(viewsets.ModelViewSet):
@@ -74,6 +92,26 @@ class KnowledgeImportView(APIView):
                 "chunks_imported": result.chunks_imported,
                 "embeddings_imported": result.embeddings_imported,
             },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class KnowledgeSourceImportView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminOrReadOnly]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    def post(self, request):
+        try:
+            payload = _source_import_request_from_request(request)
+            result = import_source(payload)
+        except KnowledgeImportError as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response(
+            _source_import_response(result),
             status=status.HTTP_201_CREATED,
         )
 
@@ -204,5 +242,87 @@ def _public_source_metadata(source: KnowledgeSource) -> dict:
             "page_start",
             "page_end",
             "source_page_ranges",
+            "catalog_url",
+            "catalog_name",
+            "year_tokens",
+            "is_summary",
+            "original_file_name",
+            "content_type",
         }
     }
+
+
+def _source_import_request_from_request(request) -> SourceImportRequest:
+    data = request.data
+    uploaded = request.FILES.get("file") if hasattr(request, "FILES") else None
+    manifest = data.get("manifest")
+    if isinstance(manifest, str) and manifest.strip():
+        import json
+
+        try:
+            manifest = json.loads(manifest)
+        except json.JSONDecodeError as exc:
+            raise KnowledgeImportError(f"manifest must be valid JSON: {exc}") from exc
+    elif not isinstance(manifest, dict):
+        manifest = None
+
+    file_bytes = uploaded.read() if uploaded is not None else None
+    return SourceImportRequest(
+        collection_name=str(data.get("collection_name") or "public_docs"),
+        collection_display_name=str(
+            data.get("collection_display_name") or "Public Docs"
+        ),
+        source_title=str(data.get("source_title") or ""),
+        source_type=str(data.get("source_type") or "document"),
+        access_level=str(data.get("access_level") or AccessLevel.PUBLIC),
+        embed=_truthy(data.get("embed")),
+        source_url=str(data.get("source_url") or "").strip(),
+        text=str(data.get("text") or ""),
+        markdown=str(data.get("markdown") or ""),
+        manifest=manifest,
+        file_name=getattr(uploaded, "name", "") if uploaded is not None else "",
+        file_bytes=file_bytes,
+        content_type=(
+            getattr(uploaded, "content_type", "")
+            if uploaded is not None
+            else str(data.get("content_type") or "")
+        ),
+        pages=str(data.get("pages") or ""),
+        page_start=_int_or_none(data.get("page_start")),
+        page_end=_int_or_none(data.get("page_end")),
+        expand_catalog=_truthy(data.get("expand_catalog"), default=True),
+        convert_linked_documents=_truthy(data.get("convert_linked_documents")),
+    )
+
+
+def _source_import_response(result: SourceImportSummary) -> dict:
+    payload = {
+        "collection": KnowledgeCollectionSerializer(result.collection).data,
+        "source": (
+            KnowledgeSourceSerializer(result.source).data
+            if result.source is not None
+            else None
+        ),
+        "sources_imported": result.sources_imported,
+        "chunks_imported": result.chunks_imported,
+        "embeddings_imported": result.embeddings_imported,
+        "failures": result.failures,
+    }
+    return payload
+
+
+def _truthy(value, *, default: bool = False) -> bool:
+    if value in (None, ""):
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _int_or_none(value):
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise KnowledgeImportError("page_start and page_end must be integers.") from exc
