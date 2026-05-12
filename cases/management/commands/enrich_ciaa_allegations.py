@@ -1,157 +1,70 @@
 """
-Django management command to extract key allegations from CIAA press release
-documents using LLM extraction.
-
-Phase 1d of CIAA FY 080/081 Case Enrichment pipeline.
-Populates ``Case.key_allegations`` with 2-5 structured allegation statements
-in Nepali extracted from CIAA press release text.
-
-Processes all DRAFT cases with empty ``key_allegations``, regardless of
-court case naming conventions.
-
-Idempotent: skips cases with non-empty ``key_allegations``.
+Management command to enrich CIAA DRAFT cases with key allegations extracted
+via LLM from press release markdown content.
 
 Usage::
 
     python manage.py enrich_ciaa_allegations --dry-run
-    python manage.py enrich_ciaa_allegations --case-id case-0123
-    python manage.py enrich_ciaa_allegations --limit 10 --verbose
+    python manage.py enrich_ciaa_allegations --limit 10
+    python manage.py enrich_ciaa_allegations --llm-model claude-sonnet-4-5 --verbose
+
+Environment variables::
+
+    ANTHROPIC_API_KEY  — API key for Anthropic (fallback for --api-key)
+    LLM_PROXY_URL      — optional base URL for an OpenAI-compatible proxy
 """
 
 import json
 import logging
 import os
-from typing import Optional
-from urllib.parse import urlparse
+import re
+import sys
+import time
 
 import requests
 from django.core.management.base import BaseCommand, CommandError
-from django.db import transaction
 
-from cases.models import Case, DocumentSource
+from cases.models import Case, CaseState, DocumentSource
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s: %(message)s",
+    stream=sys.stdout,
+    force=True,
+)
 logger = logging.getLogger(__name__)
 
-_ALLOWED_HOSTS = frozenset({"ciaa.gov.np", "ngm-store.jawafdehi.org"})
+NEPALI_ALLEGATION_PROMPT = """तपाईं एक नेपाली कानुनी सहायक हुनुहुन्छ। तलको CIAA (Commission for the Investigation of Abuse of Authority) प्रेस विज्ञप्तिको अध्ययन गरी मुख्य आरोपहरू निकाल्नुहोस्।
 
-EXTRACTION_SYSTEM_PROMPT = """\
-You are a Nepali legal analyst extracting structured key allegations from \
-CIAA (Commission for the Investigation of Abuse of Authority) press releases.
+**निर्देशनहरू:**
+1. प्रेस विज्ञप्तिको विषयवस्तुलाई ध्यानपूर्वक पढी मुख्य भ्रष्टाचार/अनियमितताका आरोपहरू पहिचान गर्नुहोस्।
+2. २ देखि ५ वटासम्म मुख्य आरोपहरू लेख्नुहोस् — प्रत्येक एउटा वा दुई वाक्यमा।
+3. आरोपहरू नेपाली भाषामा स्पष्ट, तथ्यपरक र विशिष्ट हुनुपर्छ।
+4. बिगो रकम उल्लेख भएमा समावेश गर्नुहोस्।
+5. काल्पनिक वा प्रेस विज्ञप्तिमा नभएका आरोपहरू नलेख्नुहोस्।
 
-Every allegation MUST:
-1. Be factually grounded in the provided press release — NO fabrication
-2. Be written in professional, accessible Nepali
-3. Name the persons involved and their official positions
-4. Describe the specific misconduct mechanism (what was done and how)
-5. Include the disputed amount when mentioned in the source
-6. Include the time period (date range or fiscal year) when specified
-7. Be self-contained — understandable without additional context
-8. Follow the established Jawafdehi allegation style (see examples below)
+**केस शीर्षक:** {case_title}
+**बिगो रकम:** {bigo}
+**प्रेस विज्ञप्ति:** {press_release}
 
-Each allegation is 1-3 complete sentences. Use formal but clear Nepali.
+**प्रतिक्रिया ढाँचा (JSON मात्र):**
+```json
+{{
+  "allegations": [
+    "पहिलो मुख्य आरोप...",
+    "दोस्रो मुख्य आरोप...",
+    "तेस्रो मुख्य आरोप..."
+  ]
+}}
+```
 
-DO NOT:
-- Fabricate or embellish beyond the source text
-- Use legal jargon without explanation
-- State legal conclusions about guilt or innocence
-- Write vague statements
-- Mix multiple unrelated misconducts into one allegation
+JSON बाहेक अन्य केही नलेख्नुहोस्।"""
 
-STRUCTURE each allegation as:
-"Kasle — ke garyo — kasari — kati rakam — kun avadhima"
-(Who — did what — how — what amount — during what period)
-
-REFERENCE EXAMPLES from published Jawafdehi cases:
-
-Example 1 (Illegal property):
-"Kamal Raj Gautam le miti 2055/01/07 dekhi 2079/12/24 samma saarvajanik \
-pad dharan garda vaidh aaybhanda ru. 2,51,78,687.71 badhi sampatti \
-kharcha tatha lagani gari gairkanuni rupma sampatti aarjan gareko."
-
-Example 2 (Procurement fraud):
-"Prativadiharuko NCBW-KMC ko thekkama Pending Litigation nahune vishayalai \
-Pending Litigation raheko bhani galat mulyankan prativedan khada gari \
-saarvajanik sampatti badaniyatpurvak hani noksani puryayeko."
-
-Example 3 (Bribery):
-"Mohan Bahadur Basnet le nagar pramukh padko durupayog gari Padma Company \
-haru ra Raju Prasad Kadel lai kar chhut ra jagga upalabdhata lagayat \
-anuchit labh puryai so bapat karib ru. 9.22 karod ghus/rishwat liyeko."
-
-Example 4 (Embezzlement):
-"Prativadiharuko milemato ma Hulak Bachat Bank ma bachatkartaharuko \
-nikshep rakam bank dakhila nagari apchalan gari hinamina gareko."
-"""
-
-EXTRACTION_USER_PROMPT = """\
-Extract 2-5 key allegation statements from this CIAA press release.
-
-Case title: {case_title}
-
-Instructions:
-- Each allegation must be a complete, self-contained statement in Nepali
-- Follow the Jawafdehi allegation style shown in the system prompt
-- Include names, positions, amounts, and time periods when available
-- Extract distinct allegations, not variations of the same claim
-
-IMPORTANT: Return ONLY a valid JSON array of strings.
-Example: ["First allegation...", "Second allegation..."]
-No explanations, no markdown, no text outside the JSON array.
-
-Press release text:
-
-{press_release_text}
-"""
+SYSTEM_PROMPT = "You are a Nepali legal assistant that extracts key allegations from CIAA press releases. You respond ONLY with valid JSON."
 
 
 class Command(BaseCommand):
-    help = (
-        "Extract key allegations from CIAA press release documents via LLM. "
-        "Populates key_allegations for CIAA Special Court draft cases."
-    )
-
-    def add_arguments(self, parser):
-        """Register CLI flags for dry-run, case selection, LLM config, and verbosity."""
-        parser.add_argument(
-            "--dry-run",
-            action="store_true",
-            help="Preview without saving to database",
-        )
-        parser.add_argument(
-            "--case-id",
-            type=str,
-            help="Process a specific case by case_id",
-        )
-        parser.add_argument(
-            "--limit",
-            type=int,
-            help="Maximum number of cases to process",
-        )
-        parser.add_argument(
-            "--llm-model",
-            type=str,
-            default="claude-sonnet-4-20250514",
-            help="LLM model identifier (default: claude-sonnet-4-20250514)",
-        )
-        parser.add_argument(
-            "--llm-base-url",
-            type=str,
-            default=os.environ.get(
-                "JAWAFDEHI_LLM_PROXY_URL", "https://llm-proxy.jawafdehi.org/v1"
-            ),
-            help="LLM API base URL (OpenAI-compatible endpoint)",
-        )
-        parser.add_argument(
-            "--llm-api-key",
-            type=str,
-            default=None,
-            help="LLM API key (defaults to JAWAFDEHI_LLM_API_KEY or ANTHROPIC_API_KEY env var)",
-        )
-        parser.add_argument(
-            "--verbose",
-            action="store_true",
-            help="Enable verbose debug logging",
-        )
+    help = "Extract key allegations from CIAA press release content using LLM"
 
     def __init__(self):
         super().__init__()
@@ -159,448 +72,365 @@ class Command(BaseCommand):
             "cases_processed": 0,
             "cases_enriched": 0,
             "cases_skipped": 0,
+            "cases_failed": 0,
             "cases_no_content": 0,
-            "cases_llm_error": 0,
-            "cases_already_populated": 0,
         }
 
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Preview without saving to database",
+        )
+        parser.add_argument(
+            "--limit",
+            type=int,
+            default=None,
+            help="Process only N cases (useful for testing)",
+        )
+        parser.add_argument(
+            "--llm-model",
+            type=str,
+            default=os.environ.get("JAWAFDEHI_ALLEGATION_MODEL", "claude-sonnet-4-5"),
+            help="Anthropic model name (default: claude-sonnet-4-5)",
+        )
+        parser.add_argument(
+            "--api-key",
+            type=str,
+            default=None,
+            help="Anthropic API key (env: ANTHROPIC_API_KEY)",
+        )
+        parser.add_argument(
+            "--base-url",
+            type=str,
+            default=None,
+            help="Base URL for LLM proxy (env: LLM_PROXY_URL)",
+        )
+        parser.add_argument(
+            "--verbose",
+            action="store_true",
+            help="Enable detailed debug logging",
+        )
+        parser.add_argument(
+            "--force",
+            action="store_true",
+            help="Re-process cases that already have key_allegations",
+        )
+        parser.add_argument(
+            "--case-id",
+            type=str,
+            default=None,
+            help="Process a specific case by case_id",
+        )
+
     def handle(self, *args, **options):
-        """Orchestrate the enrichment pipeline: discover cases, extract press release content, call LLM, persist results."""
         dry_run = options["dry_run"]
+        limit = options["limit"]
+        model = options["llm_model"]
+        api_key = options["api_key"]
+        base_url = options["base_url"] or os.environ.get("LLM_PROXY_URL")
+        verbose = options["verbose"]
+        force = options["force"]
         case_id = options.get("case_id")
-        limit = options.get("limit")
-        llm_model = options["llm_model"]
-        llm_base_url = options["llm_base_url"]
-        llm_api_key = options.get("llm_api_key")
-        verbose = options.get("verbose")
 
         if verbose:
             logger.setLevel(logging.DEBUG)
 
-        if not logger.handlers:
-            handler = logging.StreamHandler(self.stdout)
-            handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
-            logger.addHandler(handler)
-            logger.propagate = False
-
-        if dry_run:
-            self.stdout.write(self.style.WARNING("[DRY RUN] No changes will be saved."))
-
-        api_key = self._resolve_api_key(llm_api_key)
-        if not dry_run and not api_key:
-            raise CommandError(
-                "No LLM API key provided. Set JAWAFDEHI_LLM_API_KEY or "
-                "ANTHROPIC_API_KEY environment variable, or use --llm-api-key."
-            )
-
-        cases = self._get_ciaa_cases(case_id=case_id, limit=limit)
-        total = len(cases)
-
         self.stdout.write(
-            f"Found {total} CIAA draft cases to process. " f"Model: {llm_model}"
+            self.style.WARNING(
+                f"{'[DRY RUN] ' if dry_run else ''}Starting CIAA allegation enrichment..."
+            )
         )
 
-        for idx, case in enumerate(cases, 1):
-            self._process_case(
-                case=case,
-                idx=idx,
-                total=total,
-                dry_run=dry_run,
-                llm_model=llm_model,
-                llm_base_url=llm_base_url,
-                llm_api_key=api_key,
+        api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise CommandError(
+                "No API key provided. Set ANTHROPIC_API_KEY environment variable "
+                "or pass --api-key."
             )
+
+        client = self._init_client(api_key, base_url, model)
+
+        cases = self._get_eligible_cases(limit, force, case_id)
+        self.stdout.write(
+            f"Found {len(cases)} eligible CIAA DRAFT case(s) to process"
+        )
+
+        self._fetch_source_cache(cases)
+
+        for idx, case in enumerate(cases, 1):
+            try:
+                self.stdout.write(
+                    f"\n[{idx}/{len(cases)}] {case.case_id} - {case.title[:80]}..."
+                )
+                self._process_case(case, client, model, dry_run)
+            except Exception as e:
+                self.stats["cases_failed"] += 1
+                logger.exception(f"Error processing {case.case_id}: {e}")
+                self.stdout.write(
+                    self.style.ERROR(f"FAILED: {case.case_id} - {e}")
+                )
 
         self._print_summary(dry_run)
 
-    def _resolve_api_key(self, cli_key: Optional[str]) -> Optional[str]:
-        """Resolve LLM API key from CLI argument or environment variables."""
-        if cli_key:
-            return cli_key
-        return os.environ.get("JAWAFDEHI_LLM_API_KEY") or os.environ.get(
-            "ANTHROPIC_API_KEY"
-        )
+    def _init_client(self, api_key, base_url, model):
+        import anthropic
 
-    def _get_ciaa_cases(
-        self, case_id: Optional[str] = None, limit: Optional[int] = None
-    ) -> list[Case]:
-        """Return DRAFT cases with empty key_allegations that are candidates for enrichment."""
-        all_cases = []
-        queryset = Case.objects.filter(state="DRAFT")
+        if base_url:
+            return anthropic.Anthropic(
+                api_key=api_key,
+                base_url=base_url,
+            )
+        return anthropic.Anthropic(api_key=api_key)
+
+    def _get_eligible_cases(self, limit, force, case_id):
+        queryset = Case.objects.filter(state=CaseState.DRAFT)
 
         if case_id:
             queryset = queryset.filter(case_id=case_id)
 
-        for case in queryset.order_by("case_id"):
-            if case.key_allegations:
-                self.stats["cases_already_populated"] += 1
-                continue
-            all_cases.append(case)
-            if limit and len(all_cases) >= limit:
-                break
+        if not force:
+            queryset = queryset.filter(key_allegations__exact=[])
 
-        return all_cases
+        cases = list(queryset)
+        eligible = []
+        for case in cases:
+            if case.court_cases and isinstance(case.court_cases, list):
+                has_ciaa = any(
+                    ref.startswith("special:") for ref in case.court_cases
+                )
+                if has_ciaa:
+                    eligible.append(case)
+            else:
+                eligible.append(case)
 
-    def _process_case(
-        self,
-        case: Case,
-        idx: int,
-        total: int,
-        dry_run: bool,
-        llm_model: str,
-        llm_base_url: str,
-        llm_api_key: Optional[str],
-    ):
-        """Process a single case: acquire content, extract allegations via LLM, persist or dry-run."""
+        if limit and limit > 0:
+            eligible = eligible[:limit]
+
+        return eligible
+
+    def _fetch_source_cache(self, cases):
+        source_ids = set()
+        for case in cases:
+            if case.evidence:
+                for entry in case.evidence:
+                    if sid := entry.get("source_id"):
+                        source_ids.add(sid)
+
+        self._source_lookup = {
+            source.source_id: source
+            for source in DocumentSource.objects.filter(
+                source_id__in=source_ids, is_deleted=False
+            )
+        }
+        logger.debug(f"Cached {len(self._source_lookup)} DocumentSource records")
+
+    def _process_case(self, case, client, model, dry_run):
         self.stats["cases_processed"] += 1
-        self.stdout.write(f"\n[{idx}/{total}] {case.case_id} — {case.title[:80]}")
 
-        press_release_text = self._get_press_release_content(case)
+        if not case.evidence:
+            self.stats["cases_skipped"] += 1
+            self.stdout.write(self.style.WARNING("  SKIPPED: No evidence"))
+            return
+
+        press_release_text = self._collect_press_release_content(case)
         if not press_release_text:
             self.stats["cases_no_content"] += 1
+            if not dry_run:
+                note = (
+                    "enrich_ciaa_allegations: No press release markdown content "
+                    "available for LLM extraction"
+                )
+                current = case.missing_details or ""
+                if note not in current:
+                    case.missing_details = (
+                        f"{current}\n{note}" if current else note
+                    )
+                    case.save(update_fields=["missing_details"])
             self.stdout.write(
-                self.style.WARNING("  No press release content found — skipping")
+                self.style.WARNING("  SKIPPED: No press release markdown content")
             )
             return
 
-        self.stdout.write(f"  Press release content: {len(press_release_text)} chars")
+        bigo = case.bigo
+        bigo_display = f"रू {bigo:,}" if bigo else "उल्लेख छैन"
 
-        if dry_run and not llm_api_key:
-            self.stdout.write(
-                self.style.WARNING("  [DRY RUN] No API key — skipping LLM extraction")
-            )
+        prompt = NEPALI_ALLEGATION_PROMPT.format(
+            case_title=case.title,
+            bigo=bigo_display,
+            press_release=press_release_text[:60000],
+        )
+
+        logger.debug(f"Prompt length: {len(prompt)} chars")
+        self.stdout.write(
+            f"  Sending to LLM ({len(press_release_text)} chars of content)..."
+        )
+
+        allegations = self._call_llm(client, model, prompt)
+        if not allegations:
+            self.stats["cases_failed"] += 1
+            self.stdout.write(self.style.ERROR("  FAILED: No allegations extracted"))
             return
+
+        if len(allegations) < 2:
+            self.stdout.write(
+                self.style.WARNING(
+                    f"  WARNING: Only {len(allegations)} allegation(s) extracted (want 2-5)"
+                )
+            )
+        if len(allegations) > 5:
+            allegations = allegations[:5]
+            self.stdout.write(
+                self.style.WARNING(
+                    f"  Truncated to 5 allegations"
+                )
+            )
+
+        self.stdout.write(f"  Extracted {len(allegations)} allegation(s):")
+        for a in allegations:
+            self.stdout.write(f"    - {a}")
+
+        if not dry_run:
+            case.key_allegations = allegations
+            case.save(update_fields=["key_allegations"])
+            self.stats["cases_enriched"] += 1
+            self.stdout.write(
+                self.style.SUCCESS(f"  ENRICHED: {len(allegations)} allegation(s)")
+            )
+        else:
+            self.stats["cases_enriched"] += 1
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"  [DRY RUN] Would save {len(allegations)} allegation(s)"
+                )
+            )
+
+    def _collect_press_release_content(self, case):
+        texts = []
+        if not case.evidence:
+            return ""
+
+        for entry in case.evidence:
+            source_id = entry.get("source_id")
+            if not source_id:
+                continue
+
+            source = self._source_lookup.get(source_id)
+            if not source:
+                continue
+
+            urls = source.url if isinstance(source.url, list) else [source.url] if source.url else []
+
+            for url in urls:
+                if not isinstance(url, str):
+                    continue
+                if "ngm-store.jawafdehi.org" in url or url.endswith(".md"):
+                    content = self._fetch_url_content(url)
+                    if content:
+                        texts.append(content)
+                        break
+
+        return "\n\n".join(texts)
+
+    def _fetch_url_content(self, url):
+        try:
+            resp = requests.get(url, timeout=30)
+            resp.raise_for_status()
+            content = resp.text
+            if len(content) < 50:
+                logger.debug(f"Content too short from {url}: {len(content)} chars")
+                return None
+            return content
+        except requests.exceptions.Timeout:
+            logger.warning(f"Timeout fetching {url}")
+            return None
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Failed to fetch {url}: {e}")
+            return None
+
+    def _call_llm(self, client, model, prompt):
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = client.messages.create(
+                    model=model,
+                    max_tokens=1024,
+                    system=SYSTEM_PROMPT,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3,
+                )
+                raw = response.content[0].text
+                logger.debug(f"LLM response: {raw[:500]}...")
+                return self._parse_allegations(raw)
+            except Exception as e:
+                logger.warning(f"LLM call attempt {attempt + 1} failed: {e}")
+                if attempt < max_retries - 1:
+                    wait = 2 ** attempt
+                    self.stdout.write(
+                        self.style.WARNING(f"  Retrying in {wait}s...")
+                    )
+                    time.sleep(wait)
+                else:
+                    self.stdout.write(
+                        self.style.ERROR(f"  LLM call failed after {max_retries} attempts: {e}")
+                    )
+                    return None
+
+    def _parse_allegations(self, raw):
+        raw = raw.strip()
+        json_match = re.search(r"```(?:json)?\s*(.*?)\s*```", raw, re.DOTALL)
+        if json_match:
+            raw = json_match.group(1).strip()
+        else:
+            brace_start = raw.find("{")
+            brace_end = raw.rfind("}")
+            if brace_start != -1 and brace_end != -1:
+                raw = raw[brace_start : brace_end + 1]
 
         try:
-            allegations = self._extract_allegations(
-                press_release_text=press_release_text,
-                case_title=case.title,
-                llm_model=llm_model,
-                llm_base_url=llm_base_url,
-                llm_api_key=llm_api_key,
-            )
-        except (
-            requests.RequestException,
-            CommandError,
-            ValueError,
-            json.JSONDecodeError,
-        ) as exc:
-            self.stats["cases_llm_error"] += 1
-            self.stdout.write(self.style.ERROR(f"  LLM extraction failed: {exc}"))
-            return
+            data = json.loads(raw)
+            allegations = data.get("allegations", [])
+        except json.JSONDecodeError:
+            lines = [
+                line.strip().lstrip("0123456789.-) ")
+                for line in raw.split("\n")
+                if line.strip()
+            ]
+            allegations = [l for l in lines if len(l) > 10]
 
-        if not allegations:
-            self.stats["cases_skipped"] += 1
-            self.stdout.write(
-                self.style.WARNING("  LLM returned no allegations — skipping")
-            )
-            return
+        allegations = [
+            a.strip() for a in allegations if isinstance(a, str) and a.strip()
+        ]
+        return allegations[:5]
 
+    def _print_summary(self, dry_run):
+        self.stdout.write("\n" + "=" * 60)
         self.stdout.write(
-            self.style.SUCCESS(f"  Extracted {len(allegations)} allegation(s):")
+            self.style.WARNING(f"{'[DRY RUN] ' if dry_run else ''}SUMMARY")
         )
-        for i, allegation in enumerate(allegations, 1):
-            self.stdout.write(f"    {i}. {allegation[:120]}")
+        self.stdout.write("=" * 60)
+        self.stdout.write(f"Cases processed:  {self.stats['cases_processed']}")
+        self.stdout.write(
+            self.style.SUCCESS(f"Cases enriched:   {self.stats['cases_enriched']}")
+        )
+        self.stdout.write(
+            self.style.WARNING(f"Cases skipped:    {self.stats['cases_skipped']}")
+        )
+        self.stdout.write(
+            self.style.WARNING(
+                f"Cases no content:  {self.stats['cases_no_content']}"
+            )
+        )
+        if self.stats["cases_failed"] > 0:
+            self.stdout.write(
+                self.style.ERROR(f"Cases failed:     {self.stats['cases_failed']}")
+            )
+        self.stdout.write("=" * 60)
 
         if dry_run:
             self.stdout.write(
-                self.style.WARNING("  [DRY RUN] Would save but --dry-run is set")
-            )
-        else:
-            self._save_allegations(case, allegations)
-            self.stats["cases_enriched"] += 1
-
-    def _get_press_release_content(self, case: Case) -> Optional[str]:
-        """Extract press release text for a CIAA case.
-
-        Strategy:
-        1. Look for DocumentSource records linked via evidence with press release content
-           in the description field (populated by Phase 1b).
-        2. If description is insufficient, try downloading the file from NGM store URLs
-           or direct CIAA website URLs (ciaa.gov.np) and extracting text via
-           likhit/markitdown.
-        """
-        if not case.evidence:
-            logger.debug("  No evidence entries on case")
-            return None
-
-        source_ids = [
-            entry["source_id"]
-            for entry in case.evidence
-            if isinstance(entry, dict) and entry.get("source_id")
-        ]
-        if not source_ids:
-            logger.debug("  No source_ids in evidence")
-            return None
-
-        sources = list(
-            DocumentSource.objects.filter(
-                source_id__in=source_ids, is_deleted=False
-            ).only("source_id", "description", "title", "url")
-        )
-        if not sources:
-            logger.debug("  No DocumentSource records found")
-            return None
-
-        source_by_id = {s.source_id: s for s in sources}
-
-        press_release_parts = []
-
-        for sid in source_ids:
-            source = source_by_id.get(sid)
-            if source is None:
-                continue
-            if not self._is_press_release_source(source):
-                continue
-
-            description = (source.description or "").strip()
-            if len(description) > 200:
-                press_release_parts.append(description)
-                break
-
-            if isinstance(source.url, list):
-                for url in source.url:
-                    parsed = urlparse(url)
-                    if parsed.hostname and parsed.hostname in _ALLOWED_HOSTS:
-                        content = self._convert_to_markdown(url)
-                        if content and len(content) > 200:
-                            press_release_parts.append(content)
-                            break
-
-            if press_release_parts:
-                break
-
-        if not press_release_parts:
-            logger.debug("  No usable press release content in any source")
-            return None
-
-        return "\n\n".join(press_release_parts)
-
-    def _is_press_release_source(self, source: DocumentSource) -> bool:
-        """Check if a DocumentSource is a CIAA press release."""
-        title_lower = (source.title or "").lower()
-        if "press release" in title_lower or "ciaa" in title_lower:
-            return True
-
-        if isinstance(source.url, list):
-            for url in source.url:
-                parsed = urlparse(url)
-                if parsed.hostname and parsed.hostname in _ALLOWED_HOSTS:
-                    return True
-        return False
-
-    def _convert_to_markdown(self, url: str) -> Optional[str]:
-        """Download file from URL and convert to markdown using likhit.
-
-        Pipeline: URL download -> temp file -> likhit/markitdown -> Nepali markdown.
-        Returns None when conversion fails or produces insufficient content.
-        """
-        import tempfile
-        from pathlib import Path
-
-        try:
-            response = requests.get(url, timeout=120, stream=True)
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            logger.warning("  Failed to download %s: %s", url, exc)
-            return None
-
-        final_hostname = urlparse(response.url).hostname
-        if final_hostname not in _ALLOWED_HOSTS:
-            logger.warning("  Redirected to untrusted host: %s", response.url)
-            return None
-
-        content_type = response.headers.get("content-type", "").lower()
-
-        if "text/plain" in content_type or "application/json" in content_type:
-            response.encoding = "utf-8"
-            text = response.text
-            if len(text) > 200:
-                return text
-            return None
-
-        suffix = ""
-        if "pdf" in content_type:
-            suffix = ".pdf"
-        elif "html" in content_type:
-            suffix = ".html"
-        elif any(kw in content_type for kw in ("document", "word", "docx", "msword")):
-            suffix = ".docx"
-
-        tmp_path = None
-        try:
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-                tmp_path = tmp.name
-                for chunk in response.iter_content(chunk_size=8192):
-                    tmp.write(chunk)
-
-            import likhit  # noqa: F401 — registers Nepali converters
-            from markitdown import MarkItDown
-
-            md = MarkItDown(enable_plugins=True)
-            result = md.convert(tmp_path)
-
-            if (
-                result
-                and result.text_content
-                and len(result.text_content.strip()) > 200
-            ):
-                return result.text_content.strip()
-
-            logger.warning(
-                "  Likhit conversion produced insufficient content for %s", url
-            )
-            return None
-        except Exception as exc:
-            logger.warning("  Likhit conversion failed for %s: %s", url, exc)
-            return None
-        finally:
-            if tmp_path:
-                try:
-                    Path(tmp_path).unlink(missing_ok=True)
-                except Exception:
-                    pass
-
-    def _extract_allegations(
-        self,
-        press_release_text: str,
-        case_title: str,
-        llm_model: str,
-        llm_base_url: str,
-        llm_api_key: Optional[str],
-    ) -> Optional[list[str]]:
-        """Call LLM to extract key allegations from press release text."""
-        prompt = EXTRACTION_USER_PROMPT.format(
-            case_title=case_title,
-            press_release_text=press_release_text[:30000],
-        )
-
-        response_text = self._call_llm(
-            system_prompt=EXTRACTION_SYSTEM_PROMPT,
-            user_prompt=prompt,
-            model=llm_model,
-            base_url=llm_base_url,
-            api_key=llm_api_key,
-        )
-
-        return self._parse_allegations_response(response_text)
-
-    def _call_llm(
-        self,
-        system_prompt: str,
-        user_prompt: str,
-        model: str,
-        base_url: str,
-        api_key: Optional[str],
-    ) -> str:
-        """Call LLM API via OpenAI-compatible chat completions endpoint."""
-        url = f"{base_url.rstrip('/')}/chat/completions"
-
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        }
-
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": 0.1,
-            "max_tokens": 3000,
-        }
-
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=120)
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            raise CommandError(f"LLM API request failed: {exc}") from exc
-
-        data = response.json()
-        choices = data.get("choices", [])
-        if not choices:
-            raise CommandError("LLM API returned no choices")
-
-        return choices[0]["message"]["content"]
-
-    def _parse_allegations_response(self, response_text: str) -> Optional[list[str]]:
-        """Parse the LLM response to extract the JSON array of allegations."""
-        text = response_text.strip()
-
-        json_start = text.find("[")
-        json_end = text.rfind("]")
-
-        if json_start == -1 or json_end == -1 or json_end <= json_start:
-            logger.warning("  Could not find JSON array in LLM response")
-            logger.debug("  Response: %s", text[:500])
-            return None
-
-        json_str = text[json_start : json_end + 1]
-
-        try:
-            allegations = json.loads(json_str)
-        except json.JSONDecodeError as exc:
-            logger.warning("  Failed to parse JSON from LLM response: %s", exc)
-            logger.debug("  JSON string: %s", json_str[:500])
-            return None
-
-        if isinstance(allegations, dict) and isinstance(
-            allegations.get("allegations"), list
-        ):
-            allegations = allegations["allegations"]
-        if not isinstance(allegations, list):
-            logger.warning("  LLM returned non-list: %s", type(allegations).__name__)
-            return None
-
-        clean = []
-        for item in allegations:
-            if isinstance(item, str) and item.strip():
-                clean.append(item.strip())
-            elif isinstance(item, dict):
-                combined = " ".join(
-                    str(v).strip() for v in item.values() if v and str(v).strip()
+                self.style.WARNING(
+                    "\nThis was a dry run. No changes were made to the database."
                 )
-                if combined:
-                    clean.append(combined)
-
-        if not clean:
-            return None
-
-        if len(clean) < 2:
-            logger.error(
-                "  Only %d allegation(s) extracted, minimum is 2 — aborting", len(clean)
             )
-            return None
-
-        max_count = 5
-        if len(clean) > max_count:
-            clean = clean[:max_count]
-
-        return clean
-
-    def _save_allegations(self, case: Case, allegations: list[str]):
-        """Persist key allegations to the database."""
-        with transaction.atomic():
-            case.key_allegations = allegations
-            case.save(update_fields=["key_allegations", "updated_at"])
-        logger.info("  Saved %d allegations to %s", len(allegations), case.case_id)
-
-    def _print_summary(self, dry_run: bool):
-        """Print final statistics table summarizing the enrichment run results."""
-        self.stdout.write("\n" + "=" * 60)
-        self.stdout.write(
-            self.style.SUCCESS(
-                f"{'[DRY RUN] ' if dry_run else ''}Allegation extraction complete."
-            )
-        )
-        self.stdout.write(f"  Cases processed:        {self.stats['cases_processed']}")
-        self.stdout.write(f"  Cases enriched:         {self.stats['cases_enriched']}")
-        self.stdout.write(f"  Cases skipped:          {self.stats['cases_skipped']}")
-        self.stdout.write(
-            f"  No press release content: {self.stats['cases_no_content']}"
-        )
-        self.stdout.write(f"  LLM errors:             {self.stats['cases_llm_error']}")
-        self.stdout.write(
-            f"  Already populated:      {self.stats['cases_already_populated']}"
-        )
+            self.stdout.write("Run without --dry-run to apply changes.")
