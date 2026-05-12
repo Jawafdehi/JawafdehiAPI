@@ -68,9 +68,7 @@ class Command(BaseCommand):
             ).order_by("created_at")
 
             if not force:
-                cases = cases.filter(
-                    Q(tags__isnull=True) | Q(tags=[])
-                )
+                cases = cases.filter(Q(tags__isnull=True) | Q(tags=[]))
 
         if limit:
             cases = cases[:limit]
