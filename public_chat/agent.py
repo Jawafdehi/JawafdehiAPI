@@ -301,7 +301,7 @@ def _tool_budget_exhausted_response(
     language: str,
 ) -> PublicChatAgentResponse:
     is_nepali = language == "ne" or any(
-        "\u0900" <= char <= "\u097F" for char in question
+        "\u0900" <= char <= "\u097f" for char in question
     )
     if is_nepali:
         answer = (
@@ -325,7 +325,7 @@ def _provider_quota_exhausted_response(
     retry_seconds: int | None,
 ) -> PublicChatAgentResponse:
     is_nepali = language == "ne" or any(
-        "\u0900" <= char <= "\u097F" for char in question
+        "\u0900" <= char <= "\u097f" for char in question
     )
     if retry_seconds:
         retry_text = (

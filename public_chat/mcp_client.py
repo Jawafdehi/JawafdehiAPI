@@ -134,7 +134,9 @@ def _public_document_converter(mcp_tool: Any) -> Any:
                 "Error: document conversion timed out. Try a smaller PDF page range "
                 "or answer from the indexed knowledge chunks."
             )
-        except Exception as exc:  # noqa: BLE001 - tool errors should not kill agent runs.
+        except (
+            Exception
+        ) as exc:  # noqa: BLE001 - tool errors should not kill agent runs.
             return f"Error: document conversion failed: {exc}"
 
     def convert(

@@ -17,7 +17,6 @@ from datetime import timedelta
 from pathlib import Path
 
 import dj_database_url
-from dotenv import load_dotenv
 
 from config.mcp_servers import build_public_chat_mcp_servers
 import sentry_sdk
