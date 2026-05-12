@@ -203,7 +203,7 @@ INSTALLED_APPS = [
     "drf_spectacular",
     "django_filters",
     "corsheaders",
-    "tinymce",
+    "markdownx",
     "auditlog",
     "rules.apps.AutodiscoverRulesConfig",
     "cases",
@@ -609,17 +609,7 @@ JAZZMIN_SETTINGS = {
     },
 }
 
-TINYMCE_DEFAULT_CONFIG = {
-    "height": 800,
-    "width": "100%",
-    "menubar": True,
-    "browser_spellcheck": True,
-    "plugins": "advlist,autolink,lists,link,image,charmap,preview,anchor,"
-    "searchreplace,visualblocks,code,fullscreen,insertdatetime,media,table,"
-    "help,wordcount,markdown",
-    "toolbar": "undo redo | blocks | "
-    "bold italic backcolor | alignleft aligncenter "
-    "alignright alignjustify | bullist numlist outdent indent | "
-    "removeformat | code | help",
-    "license_key": "gpl",
-}
+MARKDOWNX_MARKDOWNIFY_FUNCTION = "markdownx.utils.markdownify"
+MARKDOWNX_MEDIA_PATH = "markdownx/"
+MARKDOWNX_UPLOAD_CONTENT_TYPES = ["image/jpeg", "image/png", "image/webp"]
+MARKDOWNX_UPLOAD_MAX_SIZE = 5 * 1024 * 1024
