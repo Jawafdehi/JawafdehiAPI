@@ -293,7 +293,7 @@ class PublicChatConfig(models.Model):
     max_history_turns = models.PositiveIntegerField(default=6)
     max_history_chars = models.PositiveIntegerField(default=4000)
     max_mcp_results = models.PositiveIntegerField(default=5)
-    max_tool_calls = models.PositiveIntegerField(default=3)
+    max_tool_calls = models.PositiveIntegerField(default=8)
     max_evidence_chars = models.PositiveIntegerField(default=8000)
     knowledge_rag_enabled = models.BooleanField(default=False)
     knowledge_collections = models.ManyToManyField(

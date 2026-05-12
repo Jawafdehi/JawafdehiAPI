@@ -315,6 +315,64 @@ def test_run_public_chat_agent_uses_langchain_agent(monkeypatch, public_chat_con
         "What evidence supports case 7?"
         in captured["payload"]["messages"][-1]["content"]
     )
+    assert captured["config"]["recursion_limit"] >= 32
+
+
+@pytest.mark.django_db
+def test_run_public_chat_agent_returns_stable_answer_on_recursion_limit(
+    monkeypatch, public_chat_config
+):
+    from langgraph.errors import GraphRecursionError
+
+    llm_provider = LLMProvider.objects.create(
+        name="recursion-provider",
+        provider_type="openai",
+        model="gpt-test",
+        api_key="test-key",
+        is_active=True,
+        is_default=True,
+    )
+    public_chat_config.llm_provider = llm_provider
+    public_chat_config.save()
+
+    class FakeLLMService:
+        def resolve_answer_provider(self, config):
+            return llm_provider
+
+        def get_chat_model(self, provider):
+            return object()
+
+    class FakeMCPClient:
+        def get_tools(self):
+            return [SimpleNamespace(name="search_jawafdehi_knowledge")]
+
+    def fake_create_agent(model, tools, system_prompt, middleware, response_format):
+        class FakeAgent:
+            async def ainvoke(self, payload, config=None):
+                raise GraphRecursionError("Recursion limit reached")
+
+        return FakeAgent()
+
+    monkeypatch.setattr("public_chat.agent.LLMService", FakeLLMService)
+    monkeypatch.setattr("public_chat.agent.PublicChatMCPClient", FakeMCPClient)
+    monkeypatch.setitem(
+        sys.modules,
+        "langchain.agents",
+        SimpleNamespace(create_agent=fake_create_agent),
+    )
+
+    result = run_public_chat_agent(
+        config=public_chat_config,
+        question="What types of corruption cases were seen in 2079?",
+        history=[],
+        language="en",
+        session_id="recursion-session",
+    )
+
+    assert result["session_id"] == "recursion-session"
+    assert "could not verify" in result["answer_text"]
+    assert result["sources"] == []
+    assert result["follow_up_questions"] == []
 
 
 @pytest.mark.django_db

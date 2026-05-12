@@ -88,7 +88,7 @@ def run_public_chat_agent(
     except ImportError as exc:
         raise PublicChatAgentError("LangChain agent support is not installed") from exc
 
-    max_tool_calls = int(getattr(config, "max_tool_calls", 3))
+    max_tool_calls = int(getattr(config, "max_tool_calls", 8))
     guardrail_context = PublicChatGuardrailContext(
         question=question,
         language=language,
@@ -105,7 +105,7 @@ def run_public_chat_agent(
         ],
         response_format=PublicChatAgentResponse,
     )
-    recursion_limit = max(8, max_tool_calls * 4 + 6)
+    recursion_limit = _public_chat_recursion_limit(max_tool_calls)
     try:
         agent_input = {
             "messages": build_public_chat_messages(
@@ -127,6 +127,19 @@ def run_public_chat_agent(
             result = async_to_sync(agent.ainvoke)(agent_input, config=agent_config)
         else:
             result = agent.invoke(agent_input, config=agent_config)
+    except _graph_recursion_error_types():
+        logger.warning("public_chat_agent_recursion_limit", exc_info=True)
+        response = _tool_budget_exhausted_response(
+            question=question,
+            language=language,
+        )
+        response = guardrail_context.filter_response_sources(response)
+        payload = response.model_dump()
+        payload["session_id"] = session_id
+        payload["sources"] = []
+        payload["related_cases"] = []
+        payload["follow_up_questions"] = []
+        return payload
     except Exception as exc:  # noqa: BLE001 - public API should expose stable errors.
         logger.warning("public_chat_agent_failed", exc_info=True)
         raise PublicChatAgentError("Public chat agent failed") from exc
@@ -144,7 +157,7 @@ def run_public_chat_agent(
 def build_public_chat_system_prompt(config) -> str:
     configured_prompt = getattr(getattr(config, "prompt", None), "prompt", "") or ""
     skill_text = _active_prompt_skill_text(config)
-    max_tool_calls = getattr(config, "max_tool_calls", 3)
+    max_tool_calls = getattr(config, "max_tool_calls", 8)
 
     return "\n\n".join(
         part.strip()
@@ -170,6 +183,9 @@ Tool use:
 - You decide when to call tools, which tools to call, and how many times to call
   them, up to the public tool budget of about {max_tool_calls} meaningful calls.
 - Use only the attached read-only public tools.
+- If a tool fails, times out, or says the tool budget has been reached, stop
+  calling tools. Answer from evidence already available, or say the answer
+  cannot be verified yet.
 - For case questions, call get_jawafdehi_case with fetch_sources=true when the
   user asks about a particular case or its evidence. If the structured case
   fields answer the question, use them. If evidence/source details are needed,
@@ -236,6 +252,48 @@ def build_public_chat_messages(
         }
     )
     return messages
+
+
+def _public_chat_recursion_limit(max_tool_calls: int) -> int:
+    """Give LangGraph room for model/tool cycles plus structured output.
+
+    Tool calls are limited separately by LangChain's ToolCallLimitMiddleware.
+    The graph recursion limit is only the execution step cap, so it must be
+    larger than the public tool budget.
+    """
+
+    return max(32, max_tool_calls * 8 + 20)
+
+
+def _graph_recursion_error_types() -> tuple[type[BaseException], ...]:
+    try:
+        from langgraph.errors import GraphRecursionError
+    except ImportError:
+        return ()
+    return (GraphRecursionError,)
+
+
+def _tool_budget_exhausted_response(
+    *,
+    question: str,
+    language: str,
+) -> PublicChatAgentResponse:
+    is_nepali = language == "ne" or any(
+        "\u0900" <= char <= "\u097F" for char in question
+    )
+    if is_nepali:
+        answer = (
+            "म यो उत्तर सार्वजनिक उपकरण बजेटभित्र प्रमाणित गर्न सकिनँ। कृपया "
+            "प्रश्नलाई अझ साँघुरो बनाउनुहोस्, जस्तै कुनै विशेष मुद्दा, वर्ष, "
+            "प्रतिवेदन, वा पृष्ठ दायरा।"
+        )
+    else:
+        answer = (
+            "I could not verify the answer within the public tool budget. Please "
+            "try a narrower question, such as a specific case, year, report, or "
+            "PDF page range."
+        )
+    return PublicChatAgentResponse(answer_text=answer)
 
 
 def _extract_agent_response(result: Any) -> PublicChatAgentResponse:
