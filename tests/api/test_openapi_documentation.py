@@ -156,4 +156,4 @@ class TestOpenAPIDocumentation:
         # Verify enum values
         assert "enum" in case_type_enum
         assert "CORRUPTION" in case_type_enum["enum"]
-        assert "PROMISES" in case_type_enum["enum"]
+        assert "CORRUPTION" in case_type_enum["enum"]

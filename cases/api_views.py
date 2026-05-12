@@ -90,7 +90,7 @@ logger = logging.getLogger(__name__)
         Results are ordered by creation date (newest first).
         
         **Filtering:**
-        - `case_type`: Filter by case type (CORRUPTION or PROMISES)
+        - `case_type`: Filter by case type (CORRUPTION)
         - `tags`: Filter cases containing a specific tag
         
         **Search:**
@@ -106,7 +106,7 @@ logger = logging.getLogger(__name__)
                 type=OpenApiTypes.STR,
                 location=OpenApiParameter.QUERY,
                 description="Filter by case type",
-                enum=["CORRUPTION", "PROMISES"],
+                enum=["CORRUPTION"],
                 required=False,
             ),
             OpenApiParameter(

@@ -251,7 +251,7 @@ def test_search_functionality_across_fields(case_data, search_term):
 @settings(max_examples=20, deadline=800)
 @given(
     case_data=complete_case_data(),
-    case_type=st.sampled_from([CaseType.CORRUPTION, CaseType.PROMISES]),
+    case_type=st.sampled_from([CaseType.CORRUPTION]),
 )
 def test_filter_by_case_type(case_data, case_type):
     """

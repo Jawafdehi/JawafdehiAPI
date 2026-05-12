@@ -16,7 +16,6 @@ from tests.conftest import (
     create_document_source_with_entities,
 )
 
-
 @pytest.mark.django_db
 class TestPublicAPIWorkflows:
     """
@@ -75,11 +74,11 @@ class TestPublicAPIWorkflows:
         self.published_corruption_case.save()
 
         # Create another published case with different type
-        self.published_promises_case = create_case_with_entities(
+        self.infrastructure_case = create_case_with_entities(
             title="Broken Promise - Infrastructure Project",
             alleged_entities=["entity:person/test-politician"],
             key_allegations=["Failed to deliver promised infrastructure"],
-            case_type=CaseType.PROMISES,
+            case_type=CaseType.CORRUPTION,
             description="Election promise to build hospital was not fulfilled.",
             tags=["infrastructure", "healthcare"],
             state=CaseState.PUBLISHED,
@@ -204,7 +203,7 @@ class TestPublicAPIWorkflows:
         case_ids = [case["case_id"] for case in results]
 
         assert self.published_corruption_case.case_id in case_ids
-        assert self.published_promises_case.case_id in case_ids
+        
         assert self.draft_case.case_id not in case_ids
         assert self.closed_case.case_id not in case_ids
 
@@ -355,12 +354,12 @@ class TestPublicAPIWorkflows:
         results = response.data.get("results", [])
         assert len(results) >= 1, "Should find cases with 'hospital' in description"
 
-        # Verify the promises case is found
-        found_promises_case = any(
+        # Verify the infrastructure case is found
+        found_infrastructure_case = any(
             case["title"] == "Broken Promise - Infrastructure Project"
             for case in results
         )
-        assert found_promises_case, "Should find the infrastructure case"
+        assert found_infrastructure_case, "Should find the infrastructure case"
 
         # Test 3: Search for term in key allegations
         response = self.client.get("/api/cases/?search=assets")

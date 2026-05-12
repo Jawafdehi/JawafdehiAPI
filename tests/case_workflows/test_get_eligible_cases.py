@@ -7,7 +7,6 @@ Covers:
 - Excludes CLOSED cases (explicit user requirement)
 - Excludes PUBLISHED cases
 - Excludes non-CIAA CORRUPTION drafts (title contains no case number)
-- Excludes PROMISES cases even with a CIAA number in the title
 - Excludes cases with a completed CaseWorkflowRun
 - Still includes cases with a failed (but not completed) CaseWorkflowRun
 """
@@ -23,11 +22,9 @@ from cases.models import Case, CaseState, CaseType
 # Fixtures & helpers
 # ---------------------------------------------------------------------------
 
-
 @pytest.fixture
 def workflow():
     return CIAACaseworkerWorkflow()
-
 
 def make_ciaa_case(
     case_number: str = "081-CR-0097", state: str = CaseState.DRAFT
@@ -39,11 +36,9 @@ def make_ciaa_case(
         state=state,
     )
 
-
 # ---------------------------------------------------------------------------
 # Inclusion
 # ---------------------------------------------------------------------------
-
 
 class TestGetEligibleCasesInclusion:
     @pytest.mark.django_db
@@ -66,11 +61,9 @@ class TestGetEligibleCasesInclusion:
         eligible = workflow.get_eligible_cases()
         assert len(eligible) == len(CIAA_CASE_NUMBERS)
 
-
 # ---------------------------------------------------------------------------
 # Exclusion
 # ---------------------------------------------------------------------------
-
 
 class TestGetEligibleCasesExclusion:
     @pytest.mark.django_db
@@ -91,16 +84,6 @@ class TestGetEligibleCasesExclusion:
         case = Case.objects.create(
             title="Embezzlement case in Kailali",
             case_type=CaseType.CORRUPTION,
-            state=CaseState.DRAFT,
-        )
-        assert case.case_id not in workflow.get_eligible_cases()
-
-    @pytest.mark.django_db
-    def test_excludes_promises_case(self, workflow):
-        """A PROMISES case is excluded even when a CIAA number appears in the title."""
-        case = Case.objects.create(
-            title="CIAA Special Court Case 081-CR-0097",
-            case_type=CaseType.PROMISES,
             state=CaseState.DRAFT,
         )
         assert case.case_id not in workflow.get_eligible_cases()

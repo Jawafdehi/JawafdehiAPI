@@ -55,7 +55,7 @@ GET /api/cases/
 ```
 
 **Query Parameters:**
-- `case_type`: Filter by case type (CORRUPTION or PROMISES)
+- `case_type`: Filter by case type (CORRUPTION)
 - `tags`: Filter cases containing a specific tag
 - `search`: Full-text search across title, description, and key allegations
 - `page`: Page number for pagination

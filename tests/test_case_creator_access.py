@@ -232,7 +232,7 @@ def test_multiple_cases_by_same_creator(contributor_user, case_admin):
 
     case2 = create_case_with_entities(
         title="Case 2",
-        case_type=CaseType.PROMISES,
+        case_type=CaseType.CORRUPTION,
         alleged_entities=["entity:person/test-person"],
         state=CaseState.DRAFT,
     )
