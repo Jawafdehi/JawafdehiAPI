@@ -192,6 +192,8 @@ class Command(BaseCommand):
         if verbose:
             printer.install_logging_handler()
 
+        update_existing = options["update_existing"]
+
         printer.print_workflow_header(
             workflow.display_name, workflow_id, model, base_url
         )
@@ -211,7 +213,6 @@ class Command(BaseCommand):
         if resume_from_step_override and not resume:
             raise CommandError("--resume-from-step can only be used with --resume")
 
-        update_existing = options["update_existing"]
         if update_existing:
             workflow.update_existing = True
 
