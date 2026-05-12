@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from asgiref.sync import async_to_sync
@@ -141,6 +142,19 @@ def run_public_chat_agent(
         payload["follow_up_questions"] = []
         return payload
     except Exception as exc:  # noqa: BLE001 - public API should expose stable errors.
+        if _is_provider_quota_error(exc):
+            logger.warning("public_chat_provider_quota_exhausted", exc_info=True)
+            response = _provider_quota_exhausted_response(
+                question=question,
+                language=language,
+                retry_seconds=_extract_retry_seconds(exc),
+            )
+            payload = response.model_dump()
+            payload["session_id"] = session_id
+            payload["sources"] = []
+            payload["related_cases"] = []
+            payload["follow_up_questions"] = []
+            return payload
         logger.warning("public_chat_agent_failed", exc_info=True)
         raise PublicChatAgentError("Public chat agent failed") from exc
 
@@ -302,6 +316,80 @@ def _tool_budget_exhausted_response(
             "PDF page range."
         )
     return PublicChatAgentResponse(answer_text=answer)
+
+
+def _provider_quota_exhausted_response(
+    *,
+    question: str,
+    language: str,
+    retry_seconds: int | None,
+) -> PublicChatAgentResponse:
+    is_nepali = language == "ne" or any(
+        "\u0900" <= char <= "\u097F" for char in question
+    )
+    if retry_seconds:
+        retry_text = (
+            f" करिब {retry_seconds} सेकेन्डपछि फेरि प्रयास गर्नुहोस्।"
+            if is_nepali
+            else f" Please wait about {retry_seconds} seconds and try again."
+        )
+    else:
+        retry_text = (
+            " केही समयपछि फेरि प्रयास गर्नुहोस्।"
+            if is_nepali
+            else " Please try again later."
+        )
+
+    if is_nepali:
+        answer = (
+            "उत्तर बनाउने मोडेल अहिले दर सीमा वा कोटाका कारण उपलब्ध छैन।"
+            f"{retry_text}"
+        )
+    else:
+        answer = (
+            "The answer model is temporarily rate limited or out of quota."
+            f"{retry_text}"
+        )
+    return PublicChatAgentResponse(answer_text=answer)
+
+
+def _is_provider_quota_error(exc: BaseException) -> bool:
+    text = _exception_chain_text(exc).lower()
+    quota_markers = (
+        "resource_exhausted",
+        "quota exceeded",
+        "rate limit",
+        "rate_limit",
+        "too many requests",
+        "429",
+    )
+    return any(marker in text for marker in quota_markers)
+
+
+def _extract_retry_seconds(exc: BaseException) -> int | None:
+    text = _exception_chain_text(exc)
+    patterns = (
+        r"retryDelay['\"]?\s*:\s*['\"](?P<seconds>\d+(?:\.\d+)?)s",
+        r"retry in (?P<seconds>\d+(?:\.\d+)?)s",
+        r"retry after (?P<seconds>\d+(?:\.\d+)?)s",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return max(1, round(float(match.group("seconds"))))
+    return None
+
+
+def _exception_chain_text(exc: BaseException) -> str:
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        parts.append(type(current).__name__)
+        parts.append(str(current))
+        current = current.__cause__ or current.__context__
+    return " ".join(parts)
 
 
 def _extract_agent_response(result: Any) -> PublicChatAgentResponse:
