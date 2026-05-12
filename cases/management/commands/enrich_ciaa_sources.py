@@ -124,9 +124,7 @@ class Command(BaseCommand):
         pr_path = data_dir / "ciaa-press-releases.csv"
 
         if not ag_path.exists():
-            self.stdout.write(
-                self.style.ERROR(f"AG index not found: {ag_path}")
-            )
+            self.stdout.write(self.style.ERROR(f"AG index not found: {ag_path}"))
             return False
 
         if not pr_path.exists():
@@ -153,9 +151,7 @@ class Command(BaseCommand):
                     }
 
         self.stdout.write(
-            self.style.SUCCESS(
-                f"Loaded {len(self.ag_index)} AG charge sheet entries"
-            )
+            self.style.SUCCESS(f"Loaded {len(self.ag_index)} AG charge sheet entries")
         )
 
     def _load_press_release_index(self, path: Path):
@@ -169,7 +165,9 @@ class Command(BaseCommand):
                     if key not in self.press_release_index:
                         self.press_release_index[key] = {
                             "press_id": press_id,
-                            "publication_date": (row.get("publication_date") or "").strip(),
+                            "publication_date": (
+                                row.get("publication_date") or ""
+                            ).strip(),
                             "title": (row.get("title") or "").strip(),
                             "source_url": source_url,
                         }
@@ -180,9 +178,7 @@ class Command(BaseCommand):
             )
         )
 
-    def _get_cases(
-        self, case_id: Optional[str], limit: Optional[int]
-    ) -> list[Case]:
+    def _get_cases(self, case_id: Optional[str], limit: Optional[int]) -> list[Case]:
         queryset = Case.objects.filter(state="DRAFT")
 
         if case_id:
@@ -318,9 +314,7 @@ class Command(BaseCommand):
                 if not pr_data:
                     continue
 
-                if self._enrich_existing_pr_source(
-                    source, pr_data, dry_run
-                ):
+                if self._enrich_existing_pr_source(source, pr_data, dry_run):
                     self.stats["pr_sources_enriched"] += 1
                     enriched = True
                 else:
@@ -402,17 +396,11 @@ class Command(BaseCommand):
                 names.append(name)
         return names
 
-    def _get_existing_sources_for_case(
-        self, case: Case
-    ) -> dict[str, DocumentSource]:
+    def _get_existing_sources_for_case(self, case: Case) -> dict[str, DocumentSource]:
         if not case.evidence:
             return {}
 
-        source_ids = [
-            e.get("source_id")
-            for e in case.evidence
-            if e.get("source_id")
-        ]
+        source_ids = [e.get("source_id") for e in case.evidence if e.get("source_id")]
         if not source_ids:
             return {}
 
@@ -427,11 +415,7 @@ class Command(BaseCommand):
         if not url or not case.evidence:
             return False
 
-        source_ids = {
-            e.get("source_id")
-            for e in case.evidence
-            if e.get("source_id")
-        }
+        source_ids = {e.get("source_id") for e in case.evidence if e.get("source_id")}
         if not source_ids:
             return False
 
@@ -446,16 +430,11 @@ class Command(BaseCommand):
                 source_id__in=source_ids, is_deleted=False
             )
             for source in sources:
-                if (
-                    isinstance(source.url, list)
-                    and url in source.url
-                ):
+                if isinstance(source.url, list) and url in source.url:
                     return True
             return False
 
-    def _title_matches_defendant(
-        self, title: str, defendants: list[str]
-    ) -> bool:
+    def _title_matches_defendant(self, title: str, defendants: list[str]) -> bool:
         if not title:
             return False
         for defendant in defendants:
@@ -510,9 +489,7 @@ class Command(BaseCommand):
             )
             return True
         except Exception:
-            logger.exception(
-                f"Failed to enrich source {source.source_id}"
-            )
+            logger.exception(f"Failed to enrich source {source.source_id}")
             return False
 
     def _parse_bs_date(self, date_str: str) -> Optional[date]:

@@ -15,7 +15,6 @@ Covers:
 import csv
 from datetime import date
 from io import StringIO
-from pathlib import Path
 
 import pytest
 
@@ -43,21 +42,27 @@ def ag_index_csv(data_dir):
     path = data_dir / "ag_index.csv"
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["case_number", "title", "filing_date", "pdf_url", "court_office"])
-        writer.writerow([
-            "081-CR-0002",
-            "Test AG Charge Sheet",
-            "2081-03-29",
-            "https://ag.gov.np/storage/abhiyogPatra/test.pdf",
-            "Special Court",
-        ])
-        writer.writerow([
-            "081-CR-0099",
-            "Another Case",
-            "2081-04-15",
-            "https://ag.gov.np/storage/abhiyogPatra/other.pdf",
-            "District Court",
-        ])
+        writer.writerow(
+            ["case_number", "title", "filing_date", "pdf_url", "court_office"]
+        )
+        writer.writerow(
+            [
+                "081-CR-0002",
+                "Test AG Charge Sheet",
+                "2081-03-29",
+                "https://ag.gov.np/storage/abhiyogPatra/test.pdf",
+                "Special Court",
+            ]
+        )
+        writer.writerow(
+            [
+                "081-CR-0099",
+                "Another Case",
+                "2081-04-15",
+                "https://ag.gov.np/storage/abhiyogPatra/other.pdf",
+                "District Court",
+            ]
+        )
     return path
 
 
@@ -67,18 +72,22 @@ def pr_index_csv(data_dir):
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["press_id", "publication_date", "title", "source_url"])
-        writer.writerow([
-            "3345",
-            "2081-12-15",
-            "प्रतिवादी राम शर्मा समेत रहेको भ्रष्टाचार मुद्दा",
-            "https://ciaa.gov.np/pressrelease/3345",
-        ])
-        writer.writerow([
-            "3400",
-            "2082-01-10",
-            "भ्रष्टाचार मुद्दाको अनुसन्धान",
-            "https://ciaa.gov.np/pressrelease/3400",
-        ])
+        writer.writerow(
+            [
+                "3345",
+                "2081-12-15",
+                "प्रतिवादी राम शर्मा समेत रहेको भ्रष्टाचार मुद्दा",
+                "https://ciaa.gov.np/pressrelease/3345",
+            ]
+        )
+        writer.writerow(
+            [
+                "3400",
+                "2082-01-10",
+                "भ्रष्टाचार मुद्दाको अनुसन्धान",
+                "https://ciaa.gov.np/pressrelease/3400",
+            ]
+        )
     return path
 
 
@@ -106,9 +115,7 @@ def draft_case_with_press_release(db):
         state="DRAFT",
         title="Test Case with PR",
         court_cases=["special:081-CR-0002"],
-        evidence=[
-            {"source_id": source.source_id, "description": "CIAA Press Release"}
-        ],
+        evidence=[{"source_id": source.source_id, "description": "CIAA Press Release"}],
     )
     return case, source
 
@@ -156,7 +163,9 @@ class TestDataLoading:
 
 
 class TestAGChargeSheet:
-    def test_creates_ag_source(self, data_dir, ag_index_csv, pr_index_csv, draft_case_with_court_case):
+    def test_creates_ag_source(
+        self, data_dir, ag_index_csv, pr_index_csv, draft_case_with_court_case
+    ):
         out = StringIO()
         call_command(
             "enrich_ciaa_sources",
@@ -308,7 +317,10 @@ class TestPressReleaseEnrichment:
 
         pr_source = None
         for s in sources:
-            if isinstance(s.url, list) and "https://ciaa.gov.np/pressrelease/3345" in s.url:
+            if (
+                isinstance(s.url, list)
+                and "https://ciaa.gov.np/pressrelease/3345" in s.url
+            ):
                 pr_source = s
                 break
         assert pr_source is not None
@@ -326,8 +338,6 @@ class TestPressReleaseEnrichment:
             "--skip-press-releases",
             stdout=out,
         )
-        output = out.getvalue()
-
         source.refresh_from_db()
         assert source.publication_date is None
 
@@ -351,7 +361,9 @@ class TestPressReleaseEnrichment:
 
 
 class TestPublicationDateParsing:
-    def test_parse_bs_date_returns_ad_date(self, data_dir, ag_index_csv, pr_index_csv, draft_case_with_court_case):
+    def test_parse_bs_date_returns_ad_date(
+        self, data_dir, ag_index_csv, pr_index_csv, draft_case_with_court_case
+    ):
         out = StringIO()
         call_command(
             "enrich_ciaa_sources",
