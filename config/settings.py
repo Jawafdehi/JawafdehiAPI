@@ -621,6 +621,5 @@ TINYMCE_DEFAULT_CONFIG = {
     "bold italic backcolor | alignleft aligncenter "
     "alignright alignjustify | bullist numlist outdent indent | "
     "removeformat | code | help",
-    "output_format": "markdown",
     "license_key": "gpl",
 }
