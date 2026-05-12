@@ -11,6 +11,8 @@ from django.core.exceptions import PermissionDenied, ValidationError
 from django.forms.models import BaseInlineFormSet
 from django.template.response import TemplateResponse
 from tinymce.widgets import TinyMCE
+from rest_framework.authtoken.models import Token
+from rest_framework.authtoken.admin import TokenAdmin as BaseTokenAdmin
 from .models import (
     Case,
     DocumentSource,
@@ -44,6 +46,21 @@ from .rules.predicates import (
 )
 
 User = get_user_model()
+
+
+class UserModelChoiceField(forms.ModelChoiceField):
+    def label_from_instance(self, obj):
+        full_name = obj.get_full_name()
+        if full_name:
+            return f"{full_name} ({obj.username})"
+        return obj.username
+
+
+class UserFullNameAdminMixin:
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.remote_field.model == User:
+            kwargs["form_class"] = UserModelChoiceField
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
 
 
 # ============================================================================
@@ -1346,3 +1363,18 @@ class FeedbackAdmin(admin.ModelAdmin):
         )
 
     attachment_link.short_description = "Attachment"
+
+
+# ============================================================================
+# Token Admin (DRF authtoken) — show full name for user
+# ============================================================================
+
+try:
+    admin.site.unregister(Token)
+except admin.sites.NotRegistered:
+    pass
+
+
+@admin.register(Token)
+class CustomTokenAdmin(UserFullNameAdminMixin, BaseTokenAdmin):
+    raw_id_fields = ()

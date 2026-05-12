@@ -14,11 +14,12 @@ from django.contrib import admin
 from django.utils import timezone
 from django.utils.html import format_html
 
+from cases.admin import UserFullNameAdminMixin
 from nesq.models import NESQueueItem, QueueStatus
 
 
 @admin.register(NESQueueItem)
-class NESQueueItemAdmin(admin.ModelAdmin):
+class NESQueueItemAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
     """Admin configuration for NESQueueItem model.
 
     Features:
