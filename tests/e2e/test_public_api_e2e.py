@@ -138,9 +138,12 @@ class TestPublicAPIWorkflows:
         assert response.status_code == 200, "Filter endpoint should return 200"
 
         results = response.data.get("results", [])
-        assert len(results) == 1, "Should return 1 corruption case"
-        assert results[0]["case_type"] == CaseType.CORRUPTION
-        assert results[0]["title"] == "Corruption Case - Land Encroachment"
+        assert len(results) == 2, "Should return 2 corruption cases (PROMISES removed)"
+        for result in results:
+            assert result["case_type"] == CaseType.CORRUPTION
+        titles = [case["title"] for case in results]
+        assert "Corruption Case - Land Encroachment" in titles
+        assert "Broken Promise - Infrastructure Project" in titles
 
         # Step 3: Search for specific term
         response = self.client.get("/api/cases/?search=land")
