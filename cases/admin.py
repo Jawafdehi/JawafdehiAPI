@@ -1359,7 +1359,10 @@ class FeedbackAdmin(admin.ModelAdmin):
 # Token Admin (DRF authtoken) — show full name for user
 # ============================================================================
 
-admin.site.unregister(Token)
+try:
+    admin.site.unregister(Token)
+except admin.sites.NotRegistered:
+    pass
 
 
 @admin.register(Token)
