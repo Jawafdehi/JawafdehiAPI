@@ -12,6 +12,10 @@ Usage::
     # Run workflow for a specific case
     python manage.py run_case_workflow ciaa_caseworker --case-id case-abc123
 
+    # Run workflow in update-existing mode (patch existing draft cases)
+    python manage.py run_case_workflow ciaa_caseworker --update-existing
+    python manage.py run_case_workflow ciaa_caseworker --update-existing --case-id case-abc123
+
     # Use a specific model (any OpenAI-compatible provider)
     python manage.py run_case_workflow ciaa_caseworker --model openai:gpt-4o
     python manage.py run_case_workflow ciaa_caseworker --model anthropic:claude-sonnet-4-5
@@ -139,6 +143,16 @@ class Command(BaseCommand):
             default=None,
             help="Override the step name to resume from (defaults to failed step).",
         )
+        parser.add_argument(
+            "--update-existing",
+            action="store_true",
+            dest="update_existing",
+            help=(
+                "Run in update mode: patch existing draft cases instead of "
+                "creating new ones. Steps 5-7 find and patch the existing "
+                "Jawafdehi case."
+            ),
+        )
 
     def handle(self, *args, **options):
         printer = WorkflowPrinter()
@@ -181,6 +195,10 @@ class Command(BaseCommand):
         printer.print_workflow_header(
             workflow.display_name, workflow_id, model, base_url
         )
+        if update_existing:
+            printer._console.print(
+                "  [bold yellow]Mode: update-existing[/bold yellow]"
+            )
 
         # ---- Determine target cases ----
         specific_case = options["case_id"]
@@ -192,6 +210,10 @@ class Command(BaseCommand):
 
         if resume_from_step_override and not resume:
             raise CommandError("--resume-from-step can only be used with --resume")
+
+        update_existing = options["update_existing"]
+        if update_existing:
+            workflow.update_existing = True
 
         if specific_case:
             case_ids = [specific_case]
@@ -236,7 +258,7 @@ class Command(BaseCommand):
         for run, created in target_runs:
             cid = run.case_id
 
-            if not created and run.is_complete:
+            if not created and run.is_complete and not update_existing:
                 printer.print_step_skipped(cid)
                 skip_count += 1
                 continue
@@ -256,6 +278,18 @@ class Command(BaseCommand):
                 continue
 
             printer.print_case_header(cid, created)
+
+            if update_existing and not created and run.is_complete:
+                run.is_complete = False
+                run.has_failed = False
+                run.error_message = ""
+                run.case_data = {}
+                run.save(
+                    update_fields=[
+                        "is_complete", "has_failed", "error_message",
+                        "case_data", "updated_at",
+                    ]
+                )
 
             try:
                 resume_from_step = None
