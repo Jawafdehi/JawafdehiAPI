@@ -1,5 +1,6 @@
 from django.contrib import admin
 from .models import MCPServer, Skill, Summary, Draft, DraftVersion, LLMProvider
+from cases.admin import UserFullNameAdminMixin
 
 
 @admin.register(MCPServer)
@@ -26,14 +27,14 @@ class SkillAdmin(admin.ModelAdmin):
 
 
 @admin.register(Summary)
-class SummaryAdmin(admin.ModelAdmin):
+class SummaryAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
     list_display = ["case_number", "user", "skill", "created_at"]
     list_filter = ["skill"]
     search_fields = ["case_number", "user__username"]
 
 
 @admin.register(Draft)
-class DraftAdmin(admin.ModelAdmin):
+class DraftAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
     list_display = ["case_number", "user", "skill", "status", "created_at"]
     list_filter = ["status", "skill"]
     search_fields = ["case_number", "user__username"]
