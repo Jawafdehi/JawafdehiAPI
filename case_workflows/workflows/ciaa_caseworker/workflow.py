@@ -281,10 +281,14 @@ class CIAACaseworkerWorkflow(Workflow):
     2. fetch-source-documents   — download CIAA press release, charge sheet, bolpatra; convert to markdown
     3. fetch-news-articles      — web search for news articles
     4. draft-case               — prepare local case draft
-    5. create-case              — create a basic Jawafdehi case via the API
+    5. create-case              — create a basic Jawafdehi case via the API (or patch existing in update mode)
     6. create-update-entities   — create or update Jawafdehi entities linked to the case
     7. update-case-details      — populate remaining case details collected during research
     """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.update_existing: bool = False
 
     @property
     def workflow_id(self) -> str:
@@ -534,15 +538,7 @@ missing bigo amount, fixed template fields").
             ),
             WorkflowStep(
                 name="create-case",
-                prompt_fn=lambda case_dir: f"""\
-The Jawafdehi case ID is: {case_dir.name}
-
-Read the case draft at {case_dir}/draft.md and create a basic Jawafdehi case via the API
-using the minimum required fields (title, case type, summary). Record the returned numeric Jawafdehi case ID (1, 2, 3, 4, etc.)
-in {case_dir}/MEMORY.md for use in subsequent steps.
-
-NOTE: along with the case title, you MUST update the Key allegations, Timeline, case start, case end dates.
-""",
+                prompt_fn=self._create_case_prompt,
                 tools=[fix_encoding],
                 mcp_servers_fn=_jserver,
                 mcp_tool_filter=[
@@ -685,41 +681,122 @@ All patch operations for these fields can be combined into a single patch_jawafd
             ),
         ]
 
-    def get_eligible_cases(self) -> List[str]:
+    def _create_case_prompt(self, case_dir: Path) -> str:
+        if self.update_existing:
+            return f"""\
+The CIAA case number is: {case_dir.name}
+
+This case already exists as a draft in Jawafdehi. Your job is to find it and patch it
+with the details from the draft — do NOT create a new case.
+
+Step 1 — Find the existing draft case.
+  Call search_jawafdehi_cases with the CIAA case number {case_dir.name} to locate
+  the existing Jawafdehi draft case. If the search does not return results, try
+  searching by the primary defendant name from {case_dir}/draft.md.
+
+Step 2 — Record the case ID.
+  Once found, record the returned numeric Jawafdehi case ID (1, 2, 3, 4, etc.)
+  in {case_dir}/MEMORY.md for use in subsequent steps.
+
+Step 3 — Patch the case with updated details.
+  Read the case draft at {case_dir}/draft.md and call patch_jawafdehi_case with the
+  numeric case ID to update: title, Key allegations, Timeline, case start date,
+  case end date, and any other improved fields from the draft.
+"""
+        else:
+            return f"""\
+The Jawafdehi case ID is: {case_dir.name}
+
+Read the case draft at {case_dir}/draft.md and create a basic Jawafdehi case via the API
+using the minimum required fields (title, case type, summary). Record the returned numeric Jawafdehi case ID (1, 2, 3, 4, etc.)
+in {case_dir}/MEMORY.md for use in subsequent steps.
+
+NOTE: along with the case title, you MUST update the Key allegations, Timeline, case start, case end dates.
+"""
+
+    def get_eligible_cases(self, limit: int = 0) -> List[str]:
         """
         Return Jawafdehi Case ``case_id`` values eligible for this workflow.
 
         A case is eligible if:
         - It is a CORRUPTION case in DRAFT or IN_REVIEW state
         - Its title contains one of the known CIAA Special Court case numbers
-        - There is no existing completed CaseWorkflowRun for it
+        - In normal mode: there is no existing completed CaseWorkflowRun for it
+        - In update mode: existing completed runs are included (we are re-enriching)
+
+        When ``limit > 0``, selects the top ``limit`` cases by priority score
+        (bigo + defendant count + data richness), excluding already-completed runs
+        unless in update-existing mode.
         """
         from case_workflows.models import CaseWorkflowRun
         from cases.models import Case, CaseState, CaseType
 
         from case_workflows.workflows.ciaa_caseworker.constants import CIAA_CASE_NUMBERS
 
-        completed_case_ids = set(
-            CaseWorkflowRun.objects.filter(
-                workflow_id=self.workflow_id,
-                is_complete=True,
-            ).values_list("case_id", flat=True)
-        )
-
         rows = (
             Case.objects.filter(
                 case_type=CaseType.CORRUPTION,
                 state__in=[CaseState.DRAFT, CaseState.IN_REVIEW],
             )
-            .exclude(case_id__in=completed_case_ids)
             .values_list("case_id", "title")
         )
 
-        return [
+        if not self.update_existing:
+            completed_case_ids = set(
+                CaseWorkflowRun.objects.filter(
+                    workflow_id=self.workflow_id,
+                    is_complete=True,
+                ).values_list("case_id", flat=True)
+            )
+            rows = rows.exclude(case_id__in=completed_case_ids)
+
+        eligible = [
             case_id
             for case_id, title in rows
             if any(num in title for num in CIAA_CASE_NUMBERS)
         ]
+
+        if limit > 0 and len(eligible) > limit:
+            sorted_cases = self._sort_by_priority(eligible)
+            eligible = sorted_cases[:limit]
+
+        return eligible
+
+    def _sort_by_priority(self, case_ids: List[str]) -> List[str]:
+        """
+        Sort ``case_ids`` by descending priority score (bigo + complexity).
+        Used when ``--priority N`` selects a subset of eligible cases.
+        """
+        import math
+
+        from django.db.models import Count, Q
+        from cases.models import Case
+
+        cases = (
+            Case.objects.filter(case_id__in=case_ids)
+            .annotate(
+                accused_count=Count(
+                    "entity_relationships",
+                    filter=Q(entity_relationships__relationship_type="accused"),
+                ),
+                total_entities=Count("entity_relationships"),
+            )
+            .values_list("case_id", "bigo", "accused_count", "total_entities",
+                         "court_cases", "notes")
+        )
+
+        def _score(bigo, acc, total, cc, notes):
+            bigo_s = min(1.0, math.log10(float(bigo)) / 12.0) if bigo and bigo > 0 else 0.0
+            complexity = min(1.0, (acc or 0) * 0.15 + (total or 0) * 0.05)
+            richness = (0.4 if cc else 0.0) + (0.2 if notes and notes.strip() else 0.0)
+            return 0.55 * bigo_s + 0.30 * complexity + 0.15 * richness
+
+        scored = []
+        for cid, bigo, acc, total, cc, notes in cases:
+            scored.append((cid, _score(bigo, acc, total, cc, notes), bigo or 0))
+
+        scored.sort(key=lambda x: (x[1], x[2]), reverse=True)
+        return [cid for cid, _, _ in scored]
 
     def get_template_dir(self) -> Path:
         return TEMPLATE_DIR

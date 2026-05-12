@@ -12,6 +12,13 @@ Usage::
     # Run workflow for a specific case
     python manage.py run_case_workflow ciaa_caseworker --case-id case-abc123
 
+    # Run in update-existing mode (patch existing draft cases)
+    python manage.py run_case_workflow ciaa_caseworker --update-existing
+    python manage.py run_case_workflow ciaa_caseworker --update-existing --case-id case-abc123
+
+    # Run on top N highest-priority cases (by bigo + complexity)
+    python manage.py run_case_workflow ciaa_caseworker --priority 30 --update-existing
+
     # Use a specific model (any OpenAI-compatible provider)
     python manage.py run_case_workflow ciaa_caseworker --model openai:gpt-4o
     python manage.py run_case_workflow ciaa_caseworker --model anthropic:claude-sonnet-4-5
@@ -139,6 +146,27 @@ class Command(BaseCommand):
             default=None,
             help="Override the step name to resume from (defaults to failed step).",
         )
+        parser.add_argument(
+            "--update-existing",
+            action="store_true",
+            dest="update_existing",
+            help=(
+                "Run in update mode: patch existing draft cases instead of "
+                "creating new ones. Steps 5-7 find and patch the existing "
+                "Jawafdehi case."
+            ),
+        )
+        parser.add_argument(
+            "--priority",
+            type=int,
+            default=0,
+            dest="priority_limit",
+            help=(
+                "Select only the top N cases by priority score "
+                "(bigo + defendant count + data richness). "
+                "Use with --update-existing for Phase 2c batch enrichment."
+            ),
+        )
 
     def handle(self, *args, **options):
         printer = WorkflowPrinter()
@@ -182,6 +210,19 @@ class Command(BaseCommand):
             workflow.display_name, workflow_id, model, base_url
         )
 
+        # ---- Update-existing mode ----
+        update_existing = options["update_existing"]
+        priority_limit = options["priority_limit"]
+        if update_existing:
+            workflow.update_existing = True
+            printer._console.print(
+                "  [bold yellow]Mode: update-existing[/bold yellow]"
+            )
+        if priority_limit > 0:
+            printer._console.print(
+                f"  [bold cyan]Priority limit: top {priority_limit} cases[/bold cyan]"
+            )
+
         # ---- Determine target cases ----
         specific_case = options["case_id"]
         resume = options["resume"]
@@ -199,9 +240,10 @@ class Command(BaseCommand):
                 f"  Targeting specific case: [bold]{specific_case}[/bold]"
             )
         else:
-            case_ids = workflow.get_eligible_cases()
+            case_ids = workflow.get_eligible_cases(limit=priority_limit)
+            label = "priority" if priority_limit > 0 else "eligible"
             printer._console.print(
-                f"  Found [bold]{len(case_ids)}[/bold] eligible case(s)"
+                f"  Found [bold]{len(case_ids)}[/bold] {label} case(s)"
             )
 
         if not case_ids:
@@ -236,7 +278,7 @@ class Command(BaseCommand):
         for run, created in target_runs:
             cid = run.case_id
 
-            if not created and run.is_complete:
+            if not created and run.is_complete and not update_existing:
                 printer.print_step_skipped(cid)
                 skip_count += 1
                 continue
@@ -256,6 +298,18 @@ class Command(BaseCommand):
                 continue
 
             printer.print_case_header(cid, created)
+
+            if update_existing and not created and run.is_complete:
+                run.is_complete = False
+                run.has_failed = False
+                run.error_message = ""
+                run.case_data = {}
+                run.save(
+                    update_fields=[
+                        "is_complete", "has_failed", "error_message",
+                        "case_data", "updated_at",
+                    ]
+                )
 
             try:
                 resume_from_step = None
