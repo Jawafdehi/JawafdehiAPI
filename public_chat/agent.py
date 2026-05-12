@@ -195,10 +195,18 @@ Tool use:
   questions, search_jawafdehi_knowledge first. Use returned source metadata,
   citation fields, TOC hints, page ranges, and source URLs to decide whether a
   document conversion is needed.
+- If the user asks about corruption case types, counts, registrations,
+  classifications, trends, or statistics for a specific BS year, treat it as a
+  CIAA annual-report question. Include "CIAA annual report", the year, and the
+  user's topic in the knowledge search. Prefer source_type="annual_report" when
+  available. If that returns no results, retry once without source_type before
+  concluding there is no evidence.
 - For PDF reports, inspect TOC pages first when TOC/page metadata is available.
-  Then convert only the relevant pages with convert_to_markdown using pages,
-  page_start, or page_end. Do not convert whole PDFs unless no narrower public
-  page range is available and the question cannot otherwise be answered.
+  If no TOC metadata is available, convert only a small initial page range such
+  as pages="1-8" to locate the table of contents. Then convert only the relevant
+  pages with convert_to_markdown using pages, page_start, or page_end. Do not
+  convert whole PDFs unless no narrower public page range is available and the
+  question cannot otherwise be answered.
 - For entity questions, use search_jawaf_entities or get_jawaf_entity when
   public entity records are needed.
 

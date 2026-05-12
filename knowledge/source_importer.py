@@ -225,14 +225,15 @@ def _import_catalog(
             or str(item.get("file_name") or "").strip()
             or _title_from_url(item_url)
         )
-        source_type = payload.source_type or "document"
+        item_file_name = str(
+            item.get("file_name") or item_metadata.get("file_name") or ""
+        )
+        source_type = (payload.source_type or "document").strip() or "document"
         metadata = _metadata(
             title=item_title,
             source_url=item_url,
             source_type=source_type,
-            original_file_name=str(
-                item.get("file_name") or item_metadata.get("file_name") or ""
-            ),
+            original_file_name=item_file_name,
             content_type=_guess_content_type(item_url),
             extra={
                 "catalog_url": payload.source_url,

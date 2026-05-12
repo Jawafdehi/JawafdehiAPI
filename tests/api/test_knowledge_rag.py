@@ -400,6 +400,7 @@ def test_import_source_catalog_expands_manuscripts_and_is_idempotent(
     assert KnowledgeChunk.objects.count() == 1
     source = KnowledgeSource.objects.get()
     assert source.source_url == "https://ngm-store.jawafdehi.org/uploads/2081.pdf"
+    assert source.source_type == "annual_report"
     assert "2081" in source.metadata["year_tokens"]
     assert "२०८१" in source.metadata["year_tokens"]
     assert source.metadata["catalog_url"] == payload["source_url"]
