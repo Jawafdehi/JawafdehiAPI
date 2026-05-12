@@ -326,6 +326,237 @@ def test_public_knowledge_import_requires_public_citation(staff_client):
 
 
 @pytest.mark.django_db
+def test_import_source_pasted_markdown_chunks_and_indexes(staff_client):
+    response = staff_client.post(
+        "/api/knowledge/import-source/",
+        data={
+            "collection_name": "public_docs",
+            "collection_display_name": "Public Docs",
+            "source_title": "Jawafdehi platform FAQ",
+            "source_type": "faq",
+            "access_level": "public",
+            "markdown": "## Case types\n\nJawafdehi tracks corruption accountability records.",
+        },
+        format="json",
+    )
+
+    assert response.status_code == 201
+    assert response.data["sources_imported"] == 1
+    assert response.data["chunks_imported"] == 1
+    chunk = KnowledgeChunk.objects.get()
+    assert "corruption accountability" in chunk.text
+    assert chunk.source.metadata["public_citation"]["title"] == "Jawafdehi platform FAQ"
+
+
+@pytest.mark.django_db
+def test_import_source_catalog_expands_manuscripts_and_is_idempotent(
+    staff_client, monkeypatch
+):
+    class FakeResponse:
+        content = json.dumps(
+            {
+                "name": "ciaa-annual-reports",
+                "path": "/ciaa-annual-reports",
+                "manuscripts": [
+                    {
+                        "url": "https://ngm-store.jawafdehi.org/uploads/2081.pdf",
+                        "file_name": "annual-report-2081-82.pdf",
+                        "metadata": {
+                            "title": "पैँतिसौँ वार्षिक प्रतिवेदन आर्थिक वर्ष २०८१/८२",
+                            "serial_number": "1",
+                        },
+                    }
+                ],
+            }
+        ).encode()
+        headers = {"content-type": "application/json"}
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(
+        "knowledge.source_importer.httpx.get",
+        lambda *args, **kwargs: FakeResponse(),
+    )
+
+    payload = {
+        "collection_name": "ciaa_annual_reports",
+        "collection_display_name": "CIAA Annual Reports",
+        "source_type": "annual_report",
+        "access_level": "public",
+        "source_url": "https://ngm-store.jawafdehi.org/indices/index.ciaa-annual-reports.json",
+        "expand_catalog": True,
+    }
+    first = staff_client.post(
+        "/api/knowledge/import-source/", data=payload, format="json"
+    )
+    second = staff_client.post(
+        "/api/knowledge/import-source/", data=payload, format="json"
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert KnowledgeSource.objects.count() == 1
+    assert KnowledgeChunk.objects.count() == 1
+    source = KnowledgeSource.objects.get()
+    assert source.source_url == "https://ngm-store.jawafdehi.org/uploads/2081.pdf"
+    assert "2081" in source.metadata["year_tokens"]
+    assert "२०८१" in source.metadata["year_tokens"]
+    assert source.metadata["catalog_url"] == payload["source_url"]
+    assert "2081/82" in KnowledgeChunk.objects.get().text
+
+    search_response = staff_client.get(
+        "/api/knowledge/public-search/",
+        data={
+            "query": "registered cases",
+            "collection": "ciaa_annual_reports",
+            "source_type": "annual_report",
+            "year": "2081",
+        },
+    )
+    assert search_response.status_code == 200
+    assert search_response.data["results"][0]["source_url"] == source.source_url
+    assert "2081" in search_response.data["results"][0]["metadata"]["year_tokens"]
+
+
+@pytest.mark.django_db
+def test_import_source_catalog_skips_embeddings_when_model_unconfigured(
+    staff_client, monkeypatch, settings
+):
+    settings.KNOWLEDGE_RAG_EMBEDDING_MODEL = ""
+
+    class FakeResponse:
+        content = json.dumps(
+            {
+                "manuscripts": [
+                    {
+                        "url": "https://ngm-store.jawafdehi.org/uploads/2081.pdf",
+                        "metadata": {"title": "CIAA Annual Report 2081/82"},
+                    }
+                ]
+            }
+        ).encode()
+        headers = {"content-type": "application/json"}
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(
+        "knowledge.source_importer.httpx.get",
+        lambda *args, **kwargs: FakeResponse(),
+    )
+
+    response = staff_client.post(
+        "/api/knowledge/import-source/",
+        data={
+            "collection_name": "ciaa_annual_reports",
+            "source_type": "annual_report",
+            "access_level": "public",
+            "source_url": "https://ngm-store.jawafdehi.org/indices/index.ciaa-annual-reports.json",
+            "expand_catalog": True,
+            "embed": True,
+        },
+        format="json",
+    )
+
+    assert response.status_code == 201
+    assert response.data["sources_imported"] == 1
+    assert response.data["chunks_imported"] == 1
+    assert response.data["embeddings_imported"] == 0
+    assert KnowledgeEmbedding.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_import_source_pdf_url_passes_page_range_to_converter(
+    staff_client, monkeypatch
+):
+    class FakeResponse:
+        content = b"%PDF fake"
+        headers = {"content-type": "application/pdf"}
+
+        def raise_for_status(self):
+            return None
+
+    captured = {}
+
+    def fake_convert(content, *, source_url, content_type, original_file_name, pages):
+        captured["pages"] = pages
+        captured["source_url"] = source_url
+        return "Registered cases table from PDF page range."
+
+    monkeypatch.setattr(
+        "knowledge.source_importer.httpx.get",
+        lambda *args, **kwargs: FakeResponse(),
+    )
+    monkeypatch.setattr(
+        "knowledge.source_importer._content_to_markdown",
+        fake_convert,
+    )
+
+    response = staff_client.post(
+        "/api/knowledge/import-source/",
+        data={
+            "collection_name": "public_docs",
+            "source_title": "CIAA Annual Report 2081",
+            "source_type": "annual_report",
+            "source_url": "https://jawafdehi.org/reports/2081.pdf",
+            "pages": "12-15",
+            "access_level": "public",
+        },
+        format="json",
+    )
+
+    assert response.status_code == 201
+    assert captured == {
+        "pages": "12-15",
+        "source_url": "https://jawafdehi.org/reports/2081.pdf",
+    }
+    assert KnowledgeChunk.objects.filter(text__icontains="Registered cases").exists()
+
+
+@pytest.mark.django_db
+def test_knowledge_sources_api_filters_by_collection_and_returns_chunk_count(
+    staff_client,
+):
+    annual_collection = make_collection(
+        name="ciaa_annual_reports",
+        display_name="CIAA Annual Reports",
+        access_level=AccessLevel.PUBLIC,
+    )
+    other_collection = make_collection(
+        name="other_docs",
+        display_name="Other Docs",
+        access_level=AccessLevel.PUBLIC,
+    )
+    annual_source = make_source(
+        annual_collection,
+        title="CIAA Annual Report 2081",
+        access_level=AccessLevel.PUBLIC,
+        source_url="https://jawafdehi.org/reports/2081.pdf",
+    )
+    make_source(
+        other_collection,
+        title="Other Public Document",
+        access_level=AccessLevel.PUBLIC,
+        source_url="https://jawafdehi.org/docs/other.pdf",
+    )
+    make_chunk(annual_source, text="Annual report locator chunk.")
+
+    response = staff_client.get(
+        "/api/knowledge/sources/",
+        data={"collection": annual_collection.id, "search": "2081"},
+    )
+
+    assert response.status_code == 200
+    rows = (
+        response.data["results"] if isinstance(response.data, dict) else response.data
+    )
+    assert len(rows) == 1
+    assert rows[0]["title"] == "CIAA Annual Report 2081"
+    assert rows[0]["chunk_count"] == 1
+
+
+@pytest.mark.django_db
 def test_public_retrieval_with_empty_collection_scope_returns_no_chunks():
     collection = make_collection(access_level=AccessLevel.PUBLIC)
     source = make_source(
