@@ -54,7 +54,7 @@ class TestOpenAPIDocumentation:
 
         # Verify case endpoints are documented
         assert "/api/cases/" in schema["paths"]
-        assert "/api/cases/{id}/" in schema["paths"]
+        assert "/api/cases/{slug}/" in schema["paths"]
         assert "post" in schema["paths"]["/api/cases/"]
 
         # Verify list endpoint has proper documentation
@@ -156,4 +156,4 @@ class TestOpenAPIDocumentation:
         # Verify enum values
         assert "enum" in case_type_enum
         assert "CORRUPTION" in case_type_enum["enum"]
-        assert "PROMISES" in case_type_enum["enum"]
+        assert "CORRUPTION" in case_type_enum["enum"]

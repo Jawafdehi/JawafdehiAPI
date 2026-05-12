@@ -5,11 +5,13 @@ See: .kiro/specs/accountability-platform-core/design.md
 """
 
 import logging
+import re
 import jsonpatch
+from xml.etree.ElementTree import Element, SubElement, tostring
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db import connection, transaction
-from django.http import Http404
+from django.http import HttpResponse
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.types import OpenApiTypes
@@ -24,6 +26,7 @@ from rest_framework import filters, mixins, status, viewsets
 from rest_framework.authentication import SessionAuthentication, TokenAuthentication
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
@@ -87,7 +90,7 @@ logger = logging.getLogger(__name__)
         Results are ordered by creation date (newest first).
         
         **Filtering:**
-        - `case_type`: Filter by case type (CORRUPTION or PROMISES)
+        - `case_type`: Filter by case type (CORRUPTION)
         - `tags`: Filter cases containing a specific tag
         
         **Search:**
@@ -103,7 +106,7 @@ logger = logging.getLogger(__name__)
                 type=OpenApiTypes.STR,
                 location=OpenApiParameter.QUERY,
                 description="Filter by case type",
-                enum=["CORRUPTION", "PROMISES"],
+                enum=["CORRUPTION"],
                 required=False,
             ),
             OpenApiParameter(
@@ -181,6 +184,7 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
     """
 
     serializer_class = CaseSerializer
+    lookup_field = "slug"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ["case_type"]
     search_fields = ["title", "description", "key_allegations"]
@@ -266,64 +270,6 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
         return queryset.prefetch_related(
             "entity_relationships__entity",
         ).order_by("-created_at")
-
-    def get_object(self):
-        """
-        Override to support lookup by either numeric id or slug.
-
-        Lookup disambiguation:
-        - If lookup_value is purely numeric → query by id
-        - Otherwise → query by slug
-
-        Deprecation tracking:
-        - Numeric ID lookups trigger deprecation warning
-        - Sets request._used_numeric_id flag for response header
-
-        Returns:
-            Case: The retrieved case object
-
-        Raises:
-            Http404: If no case matches the lookup value
-        """
-        queryset = self.filter_queryset(self.get_queryset())
-        lookup_value = self.kwargs.get(self.lookup_field)
-
-        # Disambiguation logic
-        if lookup_value.isdigit():
-            # Numeric ID lookup (deprecated)
-            try:
-                obj = queryset.get(id=int(lookup_value))
-                self.check_object_permissions(self.request, obj)
-
-                # Track deprecation
-                self.request._used_numeric_id = True
-
-                return obj
-            except (Case.DoesNotExist, ValueError) as exc:
-                raise Http404("Not found.") from exc
-        else:
-            # Slug lookup (preferred)
-            try:
-                obj = queryset.get(slug=lookup_value)
-                self.check_object_permissions(self.request, obj)
-                return obj
-            except Case.DoesNotExist as exc:
-                raise Http404("Not found.") from exc
-
-    def finalize_response(self, request, response, *args, **kwargs):
-        """
-        Override to add deprecation header for numeric ID lookups.
-
-        Checks for _used_numeric_id flag set by get_object() and adds
-        the Deprecation header if present.
-        """
-        response = super().finalize_response(request, response, *args, **kwargs)
-
-        # Add deprecation header if numeric ID was used
-        if getattr(request, "_used_numeric_id", False):
-            response["Deprecation"] = "true"
-
-        return response
 
     def create(self, request, *args, **kwargs):
         """
@@ -680,7 +626,7 @@ class DocumentSourceViewSet(
     lookup_field = "pk"
 
     def get_permissions(self):
-        if self.action == "create":
+        if self.action in ("create", "partial_update", "update"):
             return [IsAuthenticated()]
         return super().get_permissions()
 
@@ -815,6 +761,7 @@ class JawafEntityViewSet(
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
+    mixins.UpdateModelMixin,
     viewsets.GenericViewSet,
 ):
     """
@@ -824,6 +771,7 @@ class JawafEntityViewSet(
     - List endpoint: GET /api/entities/ (filtered by case association)
     - Retrieve endpoint: GET /api/entities/{id}/
     - Create endpoint: POST /api/entities/
+    - Update endpoint: PATCH /api/entities/{id}/ (authenticated users only)
 
     Search:
     - Full-text search across nes_id and display_name
@@ -836,12 +784,12 @@ class JawafEntityViewSet(
     search_fields = ["nes_id", "display_name"]
 
     def get_permissions(self):
-        if self.action == "create":
+        if self.action in ("create", "partial_update", "update"):
             return [IsAuthenticated()]
         return super().get_permissions()
 
     def get_serializer_class(self):
-        if self.action == "create":
+        if self.action in ("create", "update", "partial_update"):
             from .serializers import JawafEntityCreateSerializer
 
             return JawafEntityCreateSerializer
@@ -1058,3 +1006,178 @@ class FeedbackView(APIView):
         else:
             ip = request.META.get("REMOTE_ADDR")
         return ip
+
+
+OEMBED_CASE_URL_PATTERN = re.compile(
+    r"^https?://(?:www\.)?jawafdehi\.org/case/(?P<slug>[^/?#]+)"
+)
+EMBED_BASE_URL = "https://jawafdehi.org"
+DEFAULT_EMBED_WIDTH = 600
+DEFAULT_EMBED_HEIGHT = 300
+
+
+@extend_schema(
+    summary="oEmbed endpoint",
+    description="""
+    oEmbed provider endpoint for Jawafdehi case pages.
+
+    When a journalist pastes a Jawafdehi case URL into Substack, Medium,
+    WordPress, or any oEmbed-compatible platform, the platform discovers
+    this endpoint and requests an embeddable widget.
+
+    **Parameters:**
+    - `url` (required): the jawafdehi.org case URL to embed
+    - `format` (optional): response format — `json` (default) or `xml`
+
+    Only published cases are available for embedding.
+    Returns a `rich` type embed with an iframe pointing to the embed card.
+    """,
+    parameters=[
+        OpenApiParameter(
+            name="url",
+            type=OpenApiTypes.URI,
+            location=OpenApiParameter.QUERY,
+            description="Full jawafdehi.org/case/{slug} URL to embed",
+            required=True,
+        ),
+        OpenApiParameter(
+            name="format",
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            description="Response format: json or xml",
+            enum=["json", "xml"],
+            required=False,
+        ),
+    ],
+    tags=["oembed"],
+    responses={
+        200: OpenApiTypes.OBJECT,
+        400: OpenApiTypes.OBJECT,
+        404: OpenApiTypes.OBJECT,
+    },
+)
+class OEmbedView(APIView):
+    """
+    oEmbed provider endpoint.
+
+    GET /api/oembed/?url=https://jawafdehi.org/case/{slug}
+
+    Extracts the case slug from the provided URL, looks up the published case,
+    and returns an oEmbed response with an iframe embed code.
+    """
+
+    authentication_classes = []
+    permission_classes = []
+
+    def perform_content_negotiation(self, request, force=False):
+        # oEmbed uses 'format' as a query param per the oEmbed spec.
+        # Prevent DRF from intercepting it for content negotiation,
+        # which would raise Http404 when format != 'json'.
+        renderer = JSONRenderer()
+        return (renderer, renderer.media_type)
+
+    def get(self, request):
+        response_format = request.query_params.get("format", "json").lower()
+
+        url = request.query_params.get("url", "").strip()
+        if not url:
+            return Response(
+                {"error": "Missing required parameter: url"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        match = OEMBED_CASE_URL_PATTERN.match(url)
+        if not match:
+            return Response(
+                {
+                    "error": (
+                        "URL does not match a supported Jawafdehi case pattern. "
+                        "Expected: https://jawafdehi.org/case/{slug}"
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        slug = match.group("slug")
+
+        try:
+            case = Case.objects.get(slug=slug, state=CaseState.PUBLISHED)
+        except Case.DoesNotExist:
+            return Response(
+                {"error": "Case not found or not published."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if response_format not in ("json", "xml"):
+            return Response(
+                {"error": f"Unsupported format: {response_format}"},
+                status=status.HTTP_501_NOT_IMPLEMENTED,
+            )
+
+        width = self._parse_dimension(
+            request.query_params.get("maxwidth"), DEFAULT_EMBED_WIDTH
+        )
+        height = self._parse_dimension(
+            request.query_params.get("maxheight"), DEFAULT_EMBED_HEIGHT
+        )
+
+        embed_url = f"{EMBED_BASE_URL}/embed/case/{slug}"
+
+        oembed_data = {
+            "type": "rich",
+            "version": "1.0",
+            "title": case.title,
+            "author_name": "Jawafdehi Editorial",
+            "author_url": EMBED_BASE_URL,
+            "provider_name": "Jawafdehi",
+            "provider_url": EMBED_BASE_URL,
+            "cache_age": 3600,
+            "html": (
+                f'<iframe src="{embed_url}" '
+                f'width="{width}" '
+                f'height="{height}" '
+                f'frameborder="0" '
+                f'allowtransparency="true" '
+                f'scrolling="no" '
+                f'style="border:0;overflow:hidden;max-width:100%;" '
+                f'title="{case.title}">'
+                f"</iframe>"
+            ),
+            "width": width,
+            "height": height,
+            "thumbnail_url": case.thumbnail_url or "",
+            "thumbnail_width": width if case.thumbnail_url else None,
+            "thumbnail_height": height if case.thumbnail_url else None,
+        }
+
+        if response_format == "xml":
+            return self._xml_response(oembed_data)
+
+        return Response(oembed_data)
+
+    def _parse_dimension(self, raw, default):
+        if raw is None:
+            return default
+        try:
+            val = int(raw)
+        except (ValueError, TypeError):
+            return default
+        if val <= 0:
+            return default
+        return val
+
+    def _xml_response(self, data):
+        root = Element("oembed")
+
+        for key, value in data.items():
+            if value is None:
+                continue
+            if isinstance(value, int):
+                value = str(value)
+            child = SubElement(root, key)
+            child.text = value
+
+        xml_str = '<?xml version="1.0" encoding="utf-8"?>\n' + tostring(
+            root, encoding="unicode"
+        )
+        return HttpResponse(xml_str, content_type="text/xml")

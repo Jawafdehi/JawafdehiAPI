@@ -75,11 +75,11 @@ class TestPublicAPIWorkflows:
         self.published_corruption_case.save()
 
         # Create another published case with different type
-        self.published_promises_case = create_case_with_entities(
+        self.infrastructure_case = create_case_with_entities(
             title="Broken Promise - Infrastructure Project",
             alleged_entities=["entity:person/test-politician"],
             key_allegations=["Failed to deliver promised infrastructure"],
-            case_type=CaseType.PROMISES,
+            case_type=CaseType.CORRUPTION,
             description="Election promise to build hospital was not fulfilled.",
             tags=["infrastructure", "healthcare"],
             state=CaseState.PUBLISHED,
@@ -138,9 +138,12 @@ class TestPublicAPIWorkflows:
         assert response.status_code == 200, "Filter endpoint should return 200"
 
         results = response.data.get("results", [])
-        assert len(results) == 1, "Should return 1 corruption case"
-        assert results[0]["case_type"] == CaseType.CORRUPTION
-        assert results[0]["title"] == "Corruption Case - Land Encroachment"
+        assert len(results) == 2, "Should return 2 corruption cases (PROMISES removed)"
+        for result in results:
+            assert result["case_type"] == CaseType.CORRUPTION
+        titles = [case["title"] for case in results]
+        assert "Corruption Case - Land Encroachment" in titles
+        assert "Broken Promise - Infrastructure Project" in titles
 
         # Step 3: Search for specific term
         response = self.client.get("/api/cases/?search=land")
@@ -158,8 +161,8 @@ class TestPublicAPIWorkflows:
         ), "Should find the land encroachment case"
 
         # Step 4: View detailed case information
-        case_id = corruption_case_result["id"]
-        response = self.client.get(f"/api/cases/{case_id}/")
+        case_slug = corruption_case_result["slug"]
+        response = self.client.get(f"/api/cases/{case_slug}/")
         assert response.status_code == 200, "Detail endpoint should return 200"
 
         case_detail = response.data
@@ -204,7 +207,7 @@ class TestPublicAPIWorkflows:
         case_ids = [case["case_id"] for case in results]
 
         assert self.published_corruption_case.case_id in case_ids
-        assert self.published_promises_case.case_id in case_ids
+
         assert self.draft_case.case_id not in case_ids
         assert self.closed_case.case_id not in case_ids
 
@@ -231,7 +234,7 @@ class TestPublicAPIWorkflows:
         )
 
         # IN_REVIEW cases are always accessible via detail endpoint
-        response = self.client.get(f"/api/cases/{in_review_case.id}/")
+        response = self.client.get(f"/api/cases/{in_review_case.slug}/")
         assert (
             response.status_code == 200
         ), "IN_REVIEW cases should always be accessible via detail endpoint"
@@ -272,7 +275,7 @@ class TestPublicAPIWorkflows:
         case.save()
 
         # Step 2: Retrieve the case via API
-        response = self.client.get(f"/api/cases/{case.id}/")
+        response = self.client.get(f"/api/cases/{case.slug}/")
         assert response.status_code == 200
 
         case_detail = response.data
@@ -355,12 +358,12 @@ class TestPublicAPIWorkflows:
         results = response.data.get("results", [])
         assert len(results) >= 1, "Should find cases with 'hospital' in description"
 
-        # Verify the promises case is found
-        found_promises_case = any(
+        # Verify the infrastructure case is found
+        found_infrastructure_case = any(
             case["title"] == "Broken Promise - Infrastructure Project"
             for case in results
         )
-        assert found_promises_case, "Should find the infrastructure case"
+        assert found_infrastructure_case, "Should find the infrastructure case"
 
         # Test 3: Search for term in key allegations
         response = self.client.get("/api/cases/?search=assets")

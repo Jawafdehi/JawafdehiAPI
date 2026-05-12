@@ -479,7 +479,7 @@ def test_contributor_can_access_multiple_assigned_cases():
         title="Case 2",
         alleged_entities=["entity:person/person2"],
         key_allegations=["Allegation 2"],
-        case_type=CaseType.PROMISES,
+        case_type=CaseType.CORRUPTION,
         description="Description 2",
     )
     case2.contributors.add(contributor)

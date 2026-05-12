@@ -11,6 +11,15 @@ import pytest
 # real PostgreSQL instance. This is intentionally only set here (test context).
 os.environ.setdefault("DATABASE_URL", "sqlite:///db.sqlite3")
 
+# Set a test SECRET_KEY before Django settings are loaded so the fail-fast
+# check passes. This key is only used during testing.
+os.environ.setdefault("SECRET_KEY", "test-key-for-tests-only")
+
+# Enable DEBUG mode and set ALLOWED_HOSTS for the test suite so the
+# production fail-fast guards do not fire.
+os.environ.setdefault("DEBUG", "True")
+os.environ.setdefault("ALLOWED_HOSTS", "localhost,127.0.0.1,testserver")
+
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group, Permission
 from django.contrib.contenttypes.models import ContentType

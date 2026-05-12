@@ -204,7 +204,7 @@ Example:
   {
     "op": "replace",
     "path": "/case_type",
-    "value": "PROMISES"
+    "value": "CORRUPTION"
   }
 ]
 

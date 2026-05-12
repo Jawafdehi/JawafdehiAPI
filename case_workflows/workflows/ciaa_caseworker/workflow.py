@@ -393,7 +393,7 @@ If you encounter rate-limit errors (HTTP 429 or repeatedly empty results from en
 previously productive), temporarily switch to single-engine queries, pause a few seconds between
 calls, and return to full multi-engine parallel search only after the responses stabilize.
 
-Collect 6-10 high-quality, case-relevant news articles and stop when you have enough source diversity and factual coverage. Do not collect more than 10 articles unless you document a specific reason in {case_dir}/logs/news-search-summary.md.
+Collect 6-10 high-quality, case-relevant news articles and stop when you have enough source diversity and factual coverage. Treat 10 articles as a strong cap. If you intentionally collect more than 10, document the specific justification in {case_dir}/logs/news-search-summary.md so later steps can understand why the cap was exceeded.
 
 For each relevant result, use `fetchWebContent` (or `fetch`) to retrieve the full page,
 then use `convert_to_markdown` to save it to {case_dir}/sources/markdown/news-<source-name>.md.
@@ -459,6 +459,12 @@ The Jawafdehi case ID is: {case_dir.name}
 You are performing a structured review of the case draft before it is submitted to the API.
 Follow the cross-check methodology from the Jawafdehi Case Reviewer skill.
 
+Execution requirements:
+1. Create {case_dir}/draft-review.md immediately with a complete review skeleton before long analysis.
+2. Record at least preliminary findings for every major review dimension even if some issues remain uncertain.
+3. Review source files methodically and refine the findings as you verify more evidence.
+4. Before finishing, confirm {case_dir}/draft-review.md exists, contains substantive review content, and ends with one explicit overall outcome line.
+
 Step 1 — Load the Jawafdehi Knowledge Share document.
 Download the plain-text export to {case_dir}/data/knowledge-share.txt:
   URL: https://docs.google.com/document/d/1-AZedWGhcQjRH4E7a6q1CDWpeBcb_CVqa8S_kRLQCx4/export?format=txt
@@ -502,6 +508,7 @@ End draft-review.md with an overall outcome:
 """,
                 tools=[download_file, fix_encoding],
                 required_outputs={"draft-review.md": 100},
+                retries=1,
                 system_prompt=_SYSTEM_PROMPT,
             ),
             WorkflowStep(

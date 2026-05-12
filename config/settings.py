@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 import os
 import sys
+from dotenv import load_dotenv
 from datetime import timedelta
 from pathlib import Path
 
@@ -19,8 +20,28 @@ import dj_database_url
 from dotenv import load_dotenv
 
 from config.mcp_servers import build_public_chat_mcp_servers
+import sentry_sdk
+from sentry_sdk.integrations.django import DjangoIntegration
+import structlog as _structlog
+from django.core.exceptions import ImproperlyConfigured
+
+from config.structlog_config import configure_structlog
 
 load_dotenv()
+
+configure_structlog()
+
+_sentry_dsn = os.getenv("SENTRY_DSN")
+if _sentry_dsn:
+    sentry_sdk.init(
+        dsn=_sentry_dsn,
+        integrations=[
+            DjangoIntegration(),
+        ],
+        traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "1.0")),
+        send_default_pii=False,
+        environment=os.getenv("SENTRY_ENVIRONMENT", "production"),
+    )
 
 
 def get_env_list(name, default=""):
@@ -125,19 +146,75 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.getenv(
-    "SECRET_KEY", "django-insecure-b&i!8@kw8v+w3%zk)gbsz8^v8w8xjb%l-$!-3x&*pc5hqio02g"
-)
+
 LLM_PROVIDER_API_KEY_ENCRYPTION_KEY = os.getenv(
     "LLM_PROVIDER_API_KEY_ENCRYPTION_KEY", ""
 )
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY or SECRET_KEY.startswith("django-insecure-"):
+    raise ImproperlyConfigured(
+        "SECRET_KEY environment variable must be set to a secure value. "
+        "Generate one with: python -c 'from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())'"
+    )
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.getenv("DEBUG", "True") == "True"
+DEBUG = os.getenv("DEBUG", "False") == "True"
 
-ALLOWED_HOSTS = get_env_list("ALLOWED_HOSTS", "localhost,127.0.0.1")
+ALLOWED_HOSTS = get_env_list("ALLOWED_HOSTS", "")
+if not DEBUG and not ALLOWED_HOSTS:
+    raise ImproperlyConfigured(
+        "ALLOWED_HOSTS environment variable must be set in production. "
+        "Set it to a comma-separated list of allowed hostnames "
+        "(e.g. ALLOWED_HOSTS=jawafdehi.org,beta.jawafdehi.org)."
+    )
 
 CSRF_TRUSTED_ORIGINS = get_env_list("CSRF_TRUSTED_ORIGINS")
+
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "json": {
+            "()": _structlog.stdlib.ProcessorFormatter,
+            "processor": _structlog.processors.JSONRenderer(),
+            "foreign_pre_chain": [
+                _structlog.contextvars.merge_contextvars,
+                _structlog.processors.TimeStamper(fmt="iso", utc=True),
+                _structlog.stdlib.add_logger_name,
+                _structlog.stdlib.add_log_level,
+                _structlog.stdlib.ExtraAdder(),
+            ],
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "json",
+        },
+    },
+    "loggers": {
+        "django": {
+            "handlers": ["console"],
+            "level": os.getenv("DJANGO_LOG_LEVEL", "INFO"),
+            "propagate": False,
+        },
+        "django.request": {
+            "handlers": ["console"],
+            "level": "ERROR",
+            "propagate": False,
+        },
+        "django.server": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": os.getenv("ROOT_LOG_LEVEL", "INFO"),
+    },
+}
 
 
 # Application definition
@@ -171,6 +248,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "config.middleware.RequestIdMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -205,14 +283,49 @@ WSGI_APPLICATION = "config.wsgi.application"
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
+
+# Handle secret interpolation for database URLs
+def interpolate_db_url(url_env_name):
+    url = os.getenv(url_env_name)
+    if not url:
+        return
+    password = os.getenv("DATABASE_PASSWORD")
+    if password:
+        url = url.replace("${DATABASE_PASSWORD}", password)
+        os.environ[url_env_name] = url
+
+
+interpolate_db_url("DATABASE_URL")
+interpolate_db_url("NGM_DATABASE_URL")
+
 DATABASES = {
     "default": dj_database_url.config(
         default="sqlite:///db.sqlite3",
     )
 }
 
+# Dynamic interpolation of database password from environment variable
+# This allows us to inject the password from Google Secret Manager at runtime
+db_password = os.getenv("DATABASE_PASSWORD")
+if db_password:
+    for db_key in DATABASES:
+        db_url = os.getenv(f"{db_key.upper()}_DATABASE_URL") or os.getenv(
+            "DATABASE_URL"
+        )
+        if db_url and "${DATABASE_PASSWORD}" in db_url:
+            DATABASES[db_key]["PASSWORD"] = db_password
+            # Re-configure with dj_database_url if needed, but usually just setting PASSWORD works if the URL had a placeholder
+            # Better approach: replace placeholder in URL before parsing
+            new_url = db_url.replace("${DATABASE_PASSWORD}", db_password)
+            DATABASES[db_key] = dj_database_url.parse(new_url)
+
 if os.getenv("NGM_DATABASE_URL"):
     DATABASES["ngm"] = dj_database_url.config(env="NGM_DATABASE_URL")
+    if db_password and "${DATABASE_PASSWORD}" in os.getenv("NGM_DATABASE_URL"):
+        new_url = os.getenv("NGM_DATABASE_URL").replace(
+            "${DATABASE_PASSWORD}", db_password
+        )
+        DATABASES["ngm"] = dj_database_url.parse(new_url)
 
 # Configure connection pooling for PostgreSQL only
 if DATABASES["default"].get("ENGINE") == "django.db.backends.postgresql":
@@ -334,6 +447,10 @@ MEDIA_ROOT = os.getenv("MEDIA_ROOT", BASE_DIR / "media")
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+# Detect test runner to disable throttling during tests (global rate limits
+# applied by JAW-60 would cause 429s in the test suite).
+TESTING = os.getenv("TESTING") == "true" or any("pytest" in arg for arg in sys.argv)
+
 # REST Framework
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
@@ -348,6 +465,16 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
 }
+
+if not TESTING:
+    REST_FRAMEWORK["DEFAULT_THROTTLE_CLASSES"] = [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ]
+    REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
+        "anon": "100/hour",
+        "user": "1000/hour",
+    }
 
 # JWT Configuration
 SIMPLE_JWT = {
@@ -428,6 +555,21 @@ CORS_ALLOW_CREDENTIALS = True
 # Keep Django's CSRF origin validation aligned with credentialed CORS writes.
 if not CSRF_TRUSTED_ORIGINS:
     CSRF_TRUSTED_ORIGINS = CORS_ALLOWED_ORIGINS.copy()
+
+# Security headers and TLS enforcement
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+X_FRAME_OPTIONS = "DENY"
+
+if not DEBUG:
+    SECURE_HSTS_SECONDS = int(os.getenv("SECURE_HSTS_SECONDS", "300"))
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = env_flag("SECURE_HSTS_INCLUDE_SUBDOMAINS", False)
+    SECURE_HSTS_PRELOAD = env_flag("SECURE_HSTS_PRELOAD", False)
+    SECURE_SSL_REDIRECT = True
+    CSRF_COOKIE_SECURE = True
+    SESSION_COOKIE_SECURE = True
+    SESSION_COOKIE_HTTPONLY = True
+    CSRF_COOKIE_HTTPONLY = True
 
 # NES API Configuration
 NES_API_URL = os.getenv("NES_API_URL", "https://nes.jawafdehi.org/api")

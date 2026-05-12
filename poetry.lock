@@ -491,6 +491,27 @@ files = [
     {file = "cobble-0.1.4.tar.gz", hash = "sha256:de38be1539992c8a06e569630717c485a5f91be2192c461ea2b220607dfa78aa"},
 ]
 
+name = "cloudpathlib"
+version = "0.20.0"
+description = "pathlib-style classes for cloud storage services."
+optional = true
+python-versions = ">=3.8"
+groups = ["main"]
+markers = "extra == \"s3\""
+files = [
+    {file = "cloudpathlib-0.20.0-py3-none-any.whl", hash = "sha256:7af3bcefbf73392ae7f31c08b3660ec31607f8c01b7f6262d4d73469a845f641"},
+    {file = "cloudpathlib-0.20.0.tar.gz", hash = "sha256:f6ef7ca409a510f7ba4639ba50ab3fc5b6dee82d6dff0d7f5715fd0c9ab35891"},
+]
+
+[package.dependencies]
+boto3 = {version = ">=1.34.0", optional = true, markers = "extra == \"s3\""}
+
+[package.extras]
+all = ["cloudpathlib[azure]", "cloudpathlib[gs]", "cloudpathlib[s3]"]
+azure = ["azure-storage-blob (>=12)", "azure-storage-file-datalake (>=12)"]
+gs = ["google-cloud-storage"]
+s3 = ["boto3 (>=1.34.0)"]
+
 [[package]]
 name = "colorama"
 version = "0.4.6"
@@ -2113,14 +2134,14 @@ pydantic = ">=2.7.4,<3.0.0"
 
 [[package]]
 name = "langchain-core"
-version = "1.3.2"
+version = "1.3.3"
 description = "Building applications with LLMs through composability"
 optional = false
 python-versions = "<4.0.0,>=3.10.0"
 groups = ["main"]
 files = [
-    {file = "langchain_core-1.3.2-py3-none-any.whl", hash = "sha256:d44a66127f9f8db735bdfd0ab9661bccb47a97113cfd3f2d89c74864422b7274"},
-    {file = "langchain_core-1.3.2.tar.gz", hash = "sha256:fd7a50b2f28ba561fd9d7f5d2760bc9e06cf00cdf820a3ccafe88a94ffa8d5b7"},
+    {file = "langchain_core-1.3.3-py3-none-any.whl", hash = "sha256:18aae8506f37da7f74398492279a7d6efcee4f8e23c4c41c7af080eeb7ef7bd1"},
+    {file = "langchain_core-1.3.3.tar.gz", hash = "sha256:fa510a5db8efdc0c6ff41c0939fb5c00a0183c11f6b84233e892e3227ff69182"},
 ]
 
 [package.dependencies]
@@ -2813,6 +2834,18 @@ reference = "HEAD"
 resolved_reference = "020bfc4c91b5934e526bf39168725ef985abe9e9"
 
 [[package]]
+name = "nepali"
+version = "1.2.0"
+description = "nepalidatetime compatible with python's datetime feature. Converting nepali date to english, parsing nepali datetime, nepali timezone, and timedelta support in nepali datetime"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "nepali-1.2.0-py3-none-any.whl", hash = "sha256:1f9244b2fcb51e6b9e710cc1c483024f8600954d545a9a12a2accf53213911b1"},
+    {file = "nepali-1.2.0.tar.gz", hash = "sha256:75a9d0bd4b3e95d72c7045539b63e84077686ffa12dff5db3fffe6579cbb511d"},
+]
+
+[[package]]
 name = "nepali-date-utils"
 version = "0.3.1"
 description = "Convert Nepali to English Dates: Easily switch between Nepali and English dates with this Python package."
@@ -3058,6 +3091,7 @@ description = "Fast, correct Python JSON library supporting dataclasses, datetim
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
+markers = "platform_python_implementation != \"PyPy\" or extra == \"llm-all\""
 files = [
     {file = "orjson-3.11.7-cp310-cp310-macosx_10_15_x86_64.macosx_11_0_arm64.macosx_10_15_universal2.whl", hash = "sha256:a02c833f38f36546ba65a452127633afce4cf0dd7296b753d3bb54e55e5c0174"},
     {file = "orjson-3.11.7-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:b63c6e6738d7c3470ad01601e23376aa511e50e1f3931395b9f9c722406d1a67"},
@@ -4877,6 +4911,7 @@ files = [
 
 [package.dependencies]
 certifi = "*"
+django = {version = ">=1.8", optional = true, markers = "extra == \"django\""}
 urllib3 = ">=1.26.11"
 
 [package.extras]
@@ -5136,6 +5171,22 @@ mpmath = ">=1.1.0,<1.4"
 
 [package.extras]
 dev = ["hypothesis (>=6.70.0)", "pytest (>=7.1.0)"]
+name = "structlog"
+version = "24.4.0"
+description = "Structured Logging for Python"
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+files = [
+    {file = "structlog-24.4.0-py3-none-any.whl", hash = "sha256:597f61e80a91cc0749a9fd2a098ed76715a1c8a01f73e336b746504d1aad7610"},
+    {file = "structlog-24.4.0.tar.gz", hash = "sha256:b27bfecede327a6d2da5fbc96bd859f114ecc398a6389d664f62085ee7ae6fc4"},
+]
+
+[package.extras]
+dev = ["freezegun (>=0.2.8)", "mypy (>=1.4)", "pretend", "pytest (>=6.0)", "pytest-asyncio (>=0.17)", "rich", "simplejson", "twisted"]
+docs = ["cogapp", "furo", "myst-parser", "sphinx", "sphinx-notfound-page", "sphinxcontrib-mermaid", "sphinxext-opengraph", "twisted"]
+tests = ["freezegun (>=0.2.8)", "pretend", "pytest (>=6.0)", "pytest-asyncio (>=0.17)", "simplejson"]
+typing = ["mypy (>=1.4)", "rich", "twisted"]
 
 [[package]]
 name = "tenacity"
@@ -5966,7 +6017,11 @@ files = [
 [package.extras]
 cffi = ["cffi (>=1.17,<2.0) ; platform_python_implementation != \"PyPy\" and python_version < \"3.14\"", "cffi (>=2.0.0b0) ; platform_python_implementation != \"PyPy\" and python_version >= \"3.14\""]
 
+[extras]
+llm-all = ["langchain", "langchain-google-genai", "langchain-openai", "openai"]
+s3 = ["cloudpathlib"]
+
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.12"
-content-hash = "8ec58d1968a01bdb94400aacb9c7484575f8241f0b6be241af13cdc0bf7a2223"
+content-hash = "07f335ed6662b05b8a60477ac6e16e4940955de5fad3ff33b8798379f16991a1"

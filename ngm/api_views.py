@@ -1,3 +1,5 @@
+import logging
+
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
 from rest_framework.authentication import TokenAuthentication
@@ -6,8 +8,15 @@ from rest_framework.response import Response
 from rest_framework.throttling import SimpleRateThrottle
 from rest_framework.views import APIView
 
-from ngm.serializers import NGMQuerySerializer
-from ngm.services import execute_select_query, validate_query
+from ngm.serializers import CourtCaseDetailSerializer, NGMQuerySerializer
+from ngm.services import (
+    execute_select_query,
+    get_court_case_details,
+    normalize_case_number,
+    validate_query,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class NGMQueryRateThrottle(SimpleRateThrottle):
@@ -49,12 +58,15 @@ class NGMQueryRateThrottle(SimpleRateThrottle):
         return super().allow_request(request, view)
 
     def get_cache_key(self, request, view):
+        # For authenticated requests, use token key
         token = getattr(request, "auth", None)
         token_key = getattr(token, "key", None)
-        if not token_key:
-            return None
+        if token_key:
+            return self.cache_format % {"scope": self.scope, "ident": token_key}
 
-        return self.cache_format % {"scope": self.scope, "ident": token_key}
+        # For anonymous requests, use IP address to enforce rate limiting
+        ident = self.get_ident(request)
+        return self.cache_format % {"scope": self.scope, "ident": ident}
 
 
 @extend_schema(
@@ -110,13 +122,18 @@ class NGMJudicialQueryView(APIView):
 
         try:
             result = execute_select_query(query, timeout)
-        except Exception as exc:
+        except ValueError as exc:
+            # Map ValueError to appropriate status code based on message
             message = str(exc)
-            status_code = (
-                status.HTTP_503_SERVICE_UNAVAILABLE
-                if "not configured" in message.lower()
-                else status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            message_lower = message.lower()
+
+            if "not configured" in message_lower:
+                status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+            elif "database" in message_lower or "query failed" in message_lower:
+                status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+            else:
+                status_code = status.HTTP_400_BAD_REQUEST
+
             return Response(
                 {
                     "success": False,
@@ -125,6 +142,18 @@ class NGMJudicialQueryView(APIView):
                     "query_time_ms": 0,
                 },
                 status=status_code,
+            )
+        except Exception:
+            # Unexpected errors - log full details but return generic message
+            logger.exception("Unexpected error executing NGM query")
+            return Response(
+                {
+                    "success": False,
+                    "data": None,
+                    "error": "Internal server error",
+                    "query_time_ms": 0,
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
         return Response(
@@ -139,5 +168,111 @@ class NGMJudicialQueryView(APIView):
                 "error": None,
                 "query_time_ms": result["query_time_ms"],
             },
+            status=status.HTTP_200_OK,
+        )
+
+
+@extend_schema(
+    summary="Get court case details by court and case number",
+    description="""
+    Retrieves complete case details including hearings and entities.
+    
+    URL format: /api/ngm/court_case/{case_id}
+    where {case_id} = {court_identifier}:{case_number}
+    
+    Example: /api/ngm/court_case/supreme:081-CR-0081
+    
+    Returns:
+    - Case details (registration, verdict, parties, etc.)
+    - All hearings for the case (ordered by date, newest first)
+    - All entities involved (plaintiffs, defendants, etc.)
+    
+    Returns 404 if case does not exist.
+    """,
+    responses={
+        200: CourtCaseDetailSerializer,
+        404: {"description": "Case not found"},
+    },
+)
+class CourtCaseDetailView(APIView):
+    authentication_classes = []
+    permission_classes = []
+    throttle_classes = [NGMQueryRateThrottle]
+
+    def get(self, request, case_id):
+        # Parse case_id format: court_identifier:case_number
+        if ":" not in case_id:
+            return Response(
+                {
+                    "error": "Invalid case_id format. Expected format: {court}:{case_number}"
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        parts = case_id.split(":", 1)
+        court_identifier = parts[0].strip()
+        case_number_raw = parts[1].strip()
+
+        # Validate that both parts are non-empty
+        if not court_identifier or not case_number_raw:
+            return Response(
+                {
+                    "error": "Invalid case_id format. Both court identifier and case number are required"
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Normalize case number to standard format
+        try:
+            case_number = normalize_case_number(case_number_raw)
+        except ValueError as exc:
+            return Response(
+                {"error": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            result = get_court_case_details(court_identifier, case_number)
+        except ValueError as exc:
+            # Map ValueError to appropriate status code based on message
+            message = str(exc)
+            message_lower = message.lower()
+
+            if "not configured" in message_lower:
+                status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+            elif "database" in message_lower or "query failed" in message_lower:
+                status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+            else:
+                status_code = status.HTTP_400_BAD_REQUEST
+
+            return Response(
+                {"error": message},
+                status=status_code,
+            )
+        except Exception:
+            # Unexpected errors - log full details but return generic message
+            logger.exception("Unexpected error fetching court case details")
+            return Response(
+                {"error": "Internal server error"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        if result is None:
+            return Response(
+                {"error": f"Case not found: {case_id}"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Combine case data with hearings and entities
+        response_data = {
+            **result["case"],
+            "hearings": result["hearings"],
+            "entities": result["entities"],
+        }
+
+        serializer = CourtCaseDetailSerializer(response_data)
+
+        return Response(
+            serializer.data,
             status=status.HTTP_200_OK,
         )

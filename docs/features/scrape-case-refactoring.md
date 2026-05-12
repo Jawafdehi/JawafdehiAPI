@@ -44,7 +44,7 @@ Created `cases/services/case_importer.py` with `CaseImporter` class:
 Enhanced `scrape_case` management command with:
 - `--create-db-entry` flag to enable database import
 - `--no-confirm` flag to skip confirmation prompt
-- `--case-type` flag (CORRUPTION or PROMISES)
+- `--case-type` flag (CORRUPTION)
 - `--case-state` flag (DRAFT, IN_REVIEW, or PUBLISHED)
 - Interactive confirmation with detailed preview
 - Import statistics and progress logging
@@ -139,7 +139,7 @@ python manage.py scrape_case case-details.md \
 ```bash
 python manage.py scrape_case case-details.md \
     --create-db-entry \
-    --case-type PROMISES \
+    --case-type CORRUPTION \
     --case-state IN_REVIEW
 ```
 
@@ -256,7 +256,7 @@ Optional:
 Database Import:
   --create-db-entry         Create database entry after scraping
   --no-confirm              Skip confirmation prompt
-  --case-type {CORRUPTION,PROMISES}    Case type (default: CORRUPTION)
+  --case-type {CORRUPTION,CORRUPTION}    Case type (default: CORRUPTION)
   --case-state {DRAFT,IN_REVIEW,PUBLISHED}    Initial state (default: DRAFT)
 ```
 
