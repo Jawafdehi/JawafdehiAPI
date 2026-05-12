@@ -11,6 +11,8 @@ from django.core.exceptions import PermissionDenied, ValidationError
 from django.forms.models import BaseInlineFormSet
 from django.template.response import TemplateResponse
 from tinymce.widgets import TinyMCE
+from rest_framework.authtoken.models import Token
+from rest_framework.authtoken.admin import TokenAdmin as BaseTokenAdmin
 from .models import (
     Case,
     DocumentSource,
@@ -1356,9 +1358,6 @@ class FeedbackAdmin(admin.ModelAdmin):
 # ============================================================================
 # Token Admin (DRF authtoken) — show full name for user
 # ============================================================================
-
-from rest_framework.authtoken.models import Token
-from rest_framework.authtoken.admin import TokenAdmin as BaseTokenAdmin
 
 admin.site.unregister(Token)
 
