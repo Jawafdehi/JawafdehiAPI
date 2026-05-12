@@ -10,7 +10,7 @@ from django.utils.html import format_html
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.forms.models import BaseInlineFormSet
 from django.template.response import TemplateResponse
-from tinymce.widgets import TinyMCE
+from markdownx.widgets import MarkdownxWidget
 from rest_framework.authtoken.models import Token
 from rest_framework.authtoken.admin import TokenAdmin as BaseTokenAdmin
 from .models import (
@@ -154,8 +154,8 @@ class CaseAdminForm(forms.ModelForm):
             "unified_entities"
         ]  # Exclude unified_entities as it's managed through the inline
         widgets = {
-            "description": TinyMCE(attrs={"cols": 80, "rows": 30}),
-            "notes": TinyMCE(attrs={"cols": 80, "rows": 20}),
+            "description": MarkdownxWidget(attrs={"cols": 80, "rows": 30}),
+            "notes": MarkdownxWidget(attrs={"cols": 80, "rows": 20}),
             "state": forms.RadioSelect(),
             "case_start_date": forms.DateInput(attrs={"type": "date"}),
             "case_end_date": forms.DateInput(attrs={"type": "date"}),
