@@ -58,7 +58,7 @@ class TestTokenAuthDraftCases:
         )
 
         # Try to access without authentication
-        response = self.client.get(f"/api/cases/{case.id}/")
+        response = self.client.get(f"/api/cases/{case.slug}/")
 
         assert response.status_code == 404
 
@@ -76,7 +76,7 @@ class TestTokenAuthDraftCases:
 
         # Access with admin token
         self.client.credentials(HTTP_AUTHORIZATION=f"Token {self.admin_token.key}")
-        response = self.client.get(f"/api/cases/{case.id}/")
+        response = self.client.get(f"/api/cases/{case.slug}/")
 
         assert response.status_code == 200
         assert response.data["case_id"] == case.case_id
@@ -101,7 +101,7 @@ class TestTokenAuthDraftCases:
         self.client.credentials(
             HTTP_AUTHORIZATION=f"Token {self.contributor_token.key}"
         )
-        response = self.client.get(f"/api/cases/{case.id}/")
+        response = self.client.get(f"/api/cases/{case.slug}/")
 
         assert response.status_code == 200
         assert response.data["case_id"] == case.case_id
@@ -124,7 +124,7 @@ class TestTokenAuthDraftCases:
         self.client.credentials(
             HTTP_AUTHORIZATION=f"Token {self.other_contributor_token.key}"
         )
-        response = self.client.get(f"/api/cases/{case.id}/")
+        response = self.client.get(f"/api/cases/{case.slug}/")
 
         assert response.status_code == 404
         assert response.data["detail"] == "Not found."
@@ -142,7 +142,7 @@ class TestTokenAuthDraftCases:
         )
 
         # Access without authentication
-        response = self.client.get(f"/api/cases/{case.id}/")
+        response = self.client.get(f"/api/cases/{case.slug}/")
 
         assert response.status_code == 200
         assert response.data["case_id"] == case.case_id
@@ -161,7 +161,7 @@ class TestTokenAuthDraftCases:
         )
 
         # Access without authentication
-        response = self.client.get(f"/api/cases/{case.id}/")
+        response = self.client.get(f"/api/cases/{case.slug}/")
 
         assert response.status_code == 200
         assert response.data["case_id"] == case.case_id

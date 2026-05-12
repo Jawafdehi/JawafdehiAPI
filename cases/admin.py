@@ -29,6 +29,7 @@ from .widgets import (
     MultiURLField,
     MultiCourtCaseField,
 )
+from .validators import COURT_CHOICES
 from .rules.predicates import (
     is_admin,
     is_moderator,
@@ -74,10 +75,7 @@ class CaseAdminForm(forms.ModelForm):
         button_label="Add Court Case",
         label="Court Cases",
         help_text="Court case references in format {court_identifier}:{case_number}",
-        court_choices=[
-            ("supreme", "Supreme Court"),
-            ("special", "Special Court"),
-        ],
+        court_choices=COURT_CHOICES,
     )
 
     timeline = MultiTimelineField(
@@ -172,15 +170,21 @@ class CaseAdminForm(forms.ModelForm):
                     # No role - see nothing
                     sources_queryset = DocumentSource.objects.none()
 
-            sources = sources_queryset.values_list("source_id", "title", "url")
+            # Build sources list with admin URLs for viewing
+            # Format: (source_id, title, admin_url)
+            sources = []
+            for source in sources_queryset:
+                admin_url = f"/admin/cases/documentsource/{source.pk}/change/"
+                sources.append((source.source_id, source.title, admin_url))
         else:
             # Fallback if no request (shouldn't happen in normal admin usage)
-            sources = DocumentSource.objects.filter(is_deleted=False).values_list(
-                "source_id", "title", "url"
-            )
+            sources = []
+            for source in DocumentSource.objects.filter(is_deleted=False):
+                admin_url = f"/admin/cases/documentsource/{source.pk}/change/"
+                sources.append((source.source_id, source.title, admin_url))
 
-        self.fields["evidence"].sources = list(sources)
-        self.fields["evidence"].widget.sources = list(sources)
+        self.fields["evidence"].sources = sources
+        self.fields["evidence"].widget.sources = sources
 
         # Disable PUBLISHED and CLOSED states for Contributors
         if self.request:
@@ -501,7 +505,7 @@ class CaseAdmin(admin.ModelAdmin):
         Display Edit and View on Site action buttons for each case row.
 
         Edit button: Always active, navigates to admin edit page
-        View on Site button: Only active for PUBLISHED cases with slug, opens public URL
+        View on Site button: Only active for PUBLISHED or IN_REVIEW cases with slug, opens public URL
         """
         edit_url = reverse("admin:cases_case_change", args=[obj.pk])
 
@@ -512,7 +516,8 @@ class CaseAdmin(admin.ModelAdmin):
         )
 
         # View on Site button (conditional)
-        if obj.state == CaseState.PUBLISHED and obj.slug:
+        viewable_states = [CaseState.PUBLISHED, CaseState.IN_REVIEW]
+        if obj.state in viewable_states and obj.slug:
             public_url = f"https://jawafdehi.org/case/{obj.slug}"
             view_button = format_html(
                 '<a href="{}" target="_blank" rel="noopener noreferrer" '
@@ -521,10 +526,10 @@ class CaseAdmin(admin.ModelAdmin):
             )
         else:
             # Determine tooltip message based on what's missing
-            if obj.state != CaseState.PUBLISHED and not obj.slug:
-                tooltip = "Requires PUBLISHED state and a slug"
-            elif obj.state != CaseState.PUBLISHED:
-                tooltip = "Only PUBLISHED cases can be viewed publicly"
+            if obj.state not in viewable_states and not obj.slug:
+                tooltip = "Requires PUBLISHED or IN_REVIEW state and a slug"
+            elif obj.state not in viewable_states:
+                tooltip = "Only PUBLISHED or IN_REVIEW cases can be viewed publicly"
             else:  # obj.slug is missing
                 tooltip = "Case needs a slug to be viewed publicly"
 
@@ -775,6 +780,9 @@ class DocumentSourceAdmin(admin.ModelAdmin):
 
     form = DocumentSourceAdminForm
     inlines = [DocumentSourceUploadInline]
+
+    # Disable "View on site" button since DocumentSource doesn't have a public detail page
+    view_on_site = False
 
     list_display = [
         "source_id",

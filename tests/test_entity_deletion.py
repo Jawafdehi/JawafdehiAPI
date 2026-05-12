@@ -158,7 +158,7 @@ class TestEntityDeletionProtection:
             title="Case 2",
             alleged_entities=["entity:person/another"],
             key_allegations=["Allegation 2"],
-            case_type=CaseType.PROMISES,
+            case_type=CaseType.CORRUPTION,
             description="Description 2",
         )
         CaseEntityRelationship.objects.create(

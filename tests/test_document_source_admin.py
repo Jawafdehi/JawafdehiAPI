@@ -117,6 +117,15 @@ class TestDocumentSourceAdmin:
         inline_models = [inline.model.__name__ for inline in admin_instance.inlines]
         assert "DocumentSourceUpload" in inline_models
 
+    def test_view_on_site_is_disabled(self, db):
+        """Test that 'View on site' button is disabled for DocumentSource.
+
+        DocumentSource doesn't have a public detail page, so the 'View on site'
+        button should be disabled to prevent errors when users click it.
+        """
+        admin_instance = admin.site._registry[DocumentSource]
+        assert admin_instance.view_on_site is False
+
     def test_list_display_configured(self, db):
         """Test that list display is properly configured."""
         admin_instance = admin.site._registry[DocumentSource]
@@ -328,3 +337,66 @@ class TestDocumentSourceAdminForm:
         )
 
         assert form.is_valid(), f"Form errors: {form.errors}"
+
+
+class TestCaseEvidenceWidget:
+    """Test Case admin evidence widget configuration."""
+
+    def test_evidence_widget_uses_admin_urls_not_source_urls(self, db, admin_user):
+        """Test that evidence widget uses admin URLs instead of DocumentSource.url field.
+
+        The evidence widget's "View" button should link to the DocumentSource admin page,
+        not to the DocumentSource.url field (which is a JSON array and causes errors).
+
+        Regression test for: "Case with ID '691/change/[...]' doesn't exist" error.
+        """
+        from cases.admin import CaseAdminForm
+        from cases.models import CaseType
+
+        # Create a document source with URL array
+        source = create_document_source_with_entities(
+            title="Test Source", description="Test", related_entity_ids=[]
+        )
+        source.url = ["https://example.com/file.pdf", "https://example.com/page"]
+        source.save()
+
+        # Create a case
+        case = create_case_with_entities(
+            title="Test Case",
+            alleged_entities=["entity:person/test"],
+            case_type=CaseType.CORRUPTION,
+        )
+
+        # Create a mock request with admin user
+        request = create_mock_request(admin_user)
+
+        # Initialize the form with request
+        form = CaseAdminForm(instance=case, request=request)
+
+        # Check that sources are populated with admin URLs, not the url field
+        sources = form.fields["evidence"].widget.sources
+
+        # Find our test source in the sources list
+        test_source_entry = None
+        for source_id, title, url in sources:
+            if source_id == source.source_id:
+                test_source_entry = (source_id, title, url)
+                break
+
+        assert test_source_entry is not None, "Test source should be in sources list"
+
+        source_id, title, admin_url = test_source_entry
+
+        # Verify the URL is an admin URL, not the source.url array
+        assert admin_url.startswith(
+            "/admin/cases/documentsource/"
+        ), f"Expected admin URL, got: {admin_url}"
+        assert admin_url.endswith(
+            "/change/"
+        ), f"Expected admin change URL, got: {admin_url}"
+
+        # Verify it's NOT the JSON array from source.url
+        assert not isinstance(admin_url, list), "URL should be a string, not a list"
+        assert (
+            "https://example.com" not in admin_url
+        ), "URL should not contain the source's external URLs"

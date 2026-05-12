@@ -11,6 +11,10 @@ jobs:
     env:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_jawafdehi
       DJANGO_SETTINGS_MODULE: config.settings
+      SECRET_KEY: ci-test-key-not-for-production
+      DEBUG: "True"
+      ALLOWED_HOSTS: localhost,127.0.0.1,testserver
+      TESTING: "true"
     services:
       postgres:
         image: postgres:15
@@ -26,32 +30,20 @@ jobs:
         ports:
           - 5432:5432
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Set up Python
-        id: setup-python
-        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Python + Poetry
+        id: setup
+        uses: ./.github/actions/setup-poetry-python
         with:
           python-version: '3.12'
-      - name: Install Poetry
-        uses: snok/install-poetry@v1
-        with:
-          version: latest
-          virtualenvs-create: true
-          virtualenvs-in-project: true
-      - name: Load cached venv
-        id: cached-poetry-dependencies
-        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
-        with:
-          path: .venv
-          key: venv-${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-llm-all-${{ hashFiles('**/poetry.lock') }}
-      - name: Install dependencies
-        if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
-        run: poetry install --no-interaction --no-root --extras llm-all
-      - name: Install project
-        run: poetry install --no-interaction --extras llm-all
+          extras: 'llm-all'
+
       - name: Check formatting
         run: ./scripts/format.sh --check
+
       - name: Collect static files
         run: poetry run python manage.py collectstatic --noinput
+
       - name: Run tests
         run: poetry run pytest -v --tb=short --maxfail=15 --durations=20

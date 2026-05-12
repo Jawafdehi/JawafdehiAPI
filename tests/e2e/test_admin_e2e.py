@@ -549,7 +549,7 @@ class TestDjangoAdminWorkflows:
             title="Case for Contributor 2",
             alleged_entities=["entity:person/test2"],
             key_allegations=["Allegation 2"],
-            case_type=CaseType.PROMISES,
+            case_type=CaseType.CORRUPTION,
             description="Description 2",
             state=CaseState.IN_REVIEW,
         )
