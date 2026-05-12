@@ -38,6 +38,7 @@ langchain-mcp-adapters = "^0.2.2"
 pgvector = "^0.4.2"
 langchain-anthropic = "^1.4.3"
 langchain-ollama = "^1.1.0"
+markitdown = {version = "^0.1.5", extras = ["pdf", "docx", "pptx", "xlsx"]}
 
 
 [tool.poetry.group.dev.dependencies]
