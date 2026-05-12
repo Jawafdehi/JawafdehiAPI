@@ -28,6 +28,7 @@ class KnowledgeCollectionSerializer(serializers.ModelSerializer):
 
 class KnowledgeSourceSerializer(serializers.ModelSerializer):
     collection_name = serializers.CharField(source="collection.name", read_only=True)
+    chunk_count = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = KnowledgeSource
@@ -38,6 +39,7 @@ class KnowledgeSourceSerializer(serializers.ModelSerializer):
             "title",
             "source_type",
             "source_url",
+            "chunk_count",
             "storage_path",
             "checksum",
             "metadata",
