@@ -505,7 +505,7 @@ class CaseAdmin(admin.ModelAdmin):
         Display Edit and View on Site action buttons for each case row.
 
         Edit button: Always active, navigates to admin edit page
-        View on Site button: Only active for PUBLISHED cases with slug, opens public URL
+        View on Site button: Only active for PUBLISHED or IN_REVIEW cases with slug, opens public URL
         """
         edit_url = reverse("admin:cases_case_change", args=[obj.pk])
 
@@ -516,7 +516,8 @@ class CaseAdmin(admin.ModelAdmin):
         )
 
         # View on Site button (conditional)
-        if obj.state == CaseState.PUBLISHED and obj.slug:
+        viewable_states = [CaseState.PUBLISHED, CaseState.IN_REVIEW]
+        if obj.state in viewable_states and obj.slug:
             public_url = f"https://jawafdehi.org/case/{obj.slug}"
             view_button = format_html(
                 '<a href="{}" target="_blank" rel="noopener noreferrer" '
@@ -525,10 +526,10 @@ class CaseAdmin(admin.ModelAdmin):
             )
         else:
             # Determine tooltip message based on what's missing
-            if obj.state != CaseState.PUBLISHED and not obj.slug:
-                tooltip = "Requires PUBLISHED state and a slug"
-            elif obj.state != CaseState.PUBLISHED:
-                tooltip = "Only PUBLISHED cases can be viewed publicly"
+            if obj.state not in viewable_states and not obj.slug:
+                tooltip = "Requires PUBLISHED or IN_REVIEW state and a slug"
+            elif obj.state not in viewable_states:
+                tooltip = "Only PUBLISHED or IN_REVIEW cases can be viewed publicly"
             else:  # obj.slug is missing
                 tooltip = "Case needs a slug to be viewed publicly"
 
