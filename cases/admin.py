@@ -56,11 +56,24 @@ class UserModelChoiceField(forms.ModelChoiceField):
         return obj.username
 
 
+class UserModelMultipleChoiceField(forms.ModelMultipleChoiceField):
+    def label_from_instance(self, obj):
+        full_name = obj.get_full_name()
+        if full_name:
+            return f"{full_name} ({obj.username})"
+        return obj.username
+
+
 class UserFullNameAdminMixin:
     def formfield_for_foreignkey(self, db_field, request, **kwargs):
         if db_field.remote_field.model == User:
             kwargs["form_class"] = UserModelChoiceField
         return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+    def formfield_for_manytomany(self, db_field, request, **kwargs):
+        if db_field.remote_field.model == User:
+            kwargs["form_class"] = UserModelMultipleChoiceField
+        return super().formfield_for_manytomany(db_field, request, **kwargs)
 
 
 # ============================================================================
@@ -383,7 +396,7 @@ class CaseEntityRelationshipInline(admin.TabularInline):
 
 
 @admin.register(Case)
-class CaseAdmin(admin.ModelAdmin):
+class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
     """
     Django Admin configuration for Case model.
 
@@ -778,7 +791,7 @@ class DocumentSourceUploadInline(admin.TabularInline):
 
 
 @admin.register(DocumentSource)
-class DocumentSourceAdmin(admin.ModelAdmin):
+class DocumentSourceAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
     """
     Django Admin configuration for DocumentSource model.
 
