@@ -541,6 +541,7 @@ class Case(models.Model):
         Deterministic based on court case number, title, and a stable hash of case_id.
         """
         parts = []
+        from django.utils.text import slugify
 
         # 1. Try to extract CR number from court_cases
         if self.court_cases and isinstance(self.court_cases, list):
@@ -549,22 +550,25 @@ class Case(models.Model):
                     # Expecting format "CIAA:081-CR-0127" or similar
                     _, case_no = cc.split(":", 1)
                     if case_no:
-                        from django.utils.text import slugify
-
                         parts.append(slugify(case_no))
                         break
 
-        # 2. Add title (truncated to avoid overly long slugs)
-        if self.title:
-            from django.utils.text import slugify
+        # 2. If no court_cases CR number, try to extract case number from title
+        #    (e.g. "CIAA Special Court Case 080-CR-0127" → "080-cr-0127")
+        if not parts and self.title:
+            import re
 
+            cr_match = re.search(r"(\d{3}-CR-\d{4})", self.title)
+            if cr_match:
+                parts.append(slugify(cr_match.group(1)))
+
+        # 3. Add title (truncated to avoid overly long slugs)
+        if self.title:
             parts.append(slugify(self.title)[:30])
 
         base = "-".join(p for p in parts if p)
 
         if not base:
-            from django.utils.text import slugify
-
             base = slugify(self.case_id) or "case"
 
         # Ensure base starts with a letter (required by validate_slug)
