@@ -170,15 +170,21 @@ class CaseAdminForm(forms.ModelForm):
                     # No role - see nothing
                     sources_queryset = DocumentSource.objects.none()
 
-            sources = sources_queryset.values_list("source_id", "title", "url")
+            # Build sources list with admin URLs for viewing
+            # Format: (source_id, title, admin_url)
+            sources = []
+            for source in sources_queryset:
+                admin_url = f"/admin/cases/documentsource/{source.pk}/change/"
+                sources.append((source.source_id, source.title, admin_url))
         else:
             # Fallback if no request (shouldn't happen in normal admin usage)
-            sources = DocumentSource.objects.filter(is_deleted=False).values_list(
-                "source_id", "title", "url"
-            )
+            sources = []
+            for source in DocumentSource.objects.filter(is_deleted=False):
+                admin_url = f"/admin/cases/documentsource/{source.pk}/change/"
+                sources.append((source.source_id, source.title, admin_url))
 
-        self.fields["evidence"].sources = list(sources)
-        self.fields["evidence"].widget.sources = list(sources)
+        self.fields["evidence"].sources = sources
+        self.fields["evidence"].widget.sources = sources
 
         # Disable PUBLISHED and CLOSED states for Contributors
         if self.request:
@@ -773,6 +779,9 @@ class DocumentSourceAdmin(admin.ModelAdmin):
 
     form = DocumentSourceAdminForm
     inlines = [DocumentSourceUploadInline]
+
+    # Disable "View on site" button since DocumentSource doesn't have a public detail page
+    view_on_site = False
 
     list_display = [
         "source_id",
