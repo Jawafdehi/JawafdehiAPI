@@ -198,9 +198,7 @@ class Command(BaseCommand):
             workflow.display_name, workflow_id, model, base_url
         )
         if update_existing:
-            printer._console.print(
-                "  [bold yellow]Mode: update-existing[/bold yellow]"
-            )
+            printer._console.print("  [bold yellow]Mode: update-existing[/bold yellow]")
 
         # ---- Determine target cases ----
         specific_case = options["case_id"]
@@ -287,8 +285,11 @@ class Command(BaseCommand):
                 run.case_data = {}
                 run.save(
                     update_fields=[
-                        "is_complete", "has_failed", "error_message",
-                        "case_data", "updated_at",
+                        "is_complete",
+                        "has_failed",
+                        "error_message",
+                        "case_data",
+                        "updated_at",
                     ]
                 )
 

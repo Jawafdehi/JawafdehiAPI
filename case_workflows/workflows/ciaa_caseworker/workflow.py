@@ -729,13 +729,10 @@ NOTE: along with the case title, you MUST update the Key allegations, Timeline, 
 
         from case_workflows.workflows.ciaa_caseworker.constants import CIAA_CASE_NUMBERS
 
-        rows = (
-            Case.objects.filter(
-                case_type=CaseType.CORRUPTION,
-                state__in=[CaseState.DRAFT, CaseState.IN_REVIEW],
-            )
-            .values_list("case_id", "title")
-        )
+        rows = Case.objects.filter(
+            case_type=CaseType.CORRUPTION,
+            state__in=[CaseState.DRAFT, CaseState.IN_REVIEW],
+        ).values_list("case_id", "title")
 
         if not self.update_existing:
             completed_case_ids = set(
