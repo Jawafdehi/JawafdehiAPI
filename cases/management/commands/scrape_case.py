@@ -66,7 +66,7 @@ class Command(BaseCommand):
             "--case-type",
             type=str,
             default="CORRUPTION",
-            choices=["CORRUPTION", "PROMISES"],
+            choices=["CORRUPTION"],
             help="Case type for database entry (default: CORRUPTION)",
         )
         parser.add_argument(
@@ -171,7 +171,7 @@ class Command(BaseCommand):
             json_file: Path to the case-result.json file
             case_data: Parsed Case object
             no_confirm: Skip confirmation prompt if True
-            case_type: Case type (CORRUPTION or PROMISES)
+            case_type: Case type (CORRUPTION)
             case_state: Initial case state (DRAFT, IN_REVIEW, or PUBLISHED)
         """
         from cases.services.case_importer import CaseImporter

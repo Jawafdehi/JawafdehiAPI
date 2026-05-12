@@ -196,7 +196,7 @@ class CaseImporter:
 
         Args:
             json_file: Path to case-result.json file
-            case_type: Case type (CORRUPTION or PROMISES)
+            case_type: Case type (CORRUPTION)
             case_state: Initial case state (DRAFT, IN_REVIEW, or PUBLISHED)
 
         Returns:

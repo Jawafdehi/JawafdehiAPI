@@ -204,4 +204,4 @@ class TestAPIDocumentationIntegration:
         )
         assert "enum" in case_type_param["schema"]
         assert "CORRUPTION" in case_type_param["schema"]["enum"]
-        assert "PROMISES" in case_type_param["schema"]["enum"]
+        assert "CORRUPTION" in case_type_param["schema"]["enum"]

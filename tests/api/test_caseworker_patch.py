@@ -376,7 +376,7 @@ def test_patch_422_for_blocked_path_case_type():
     client = _authed_client(user)
     response = client.patch(
         URL.format(case.slug),
-        data=[{"op": "replace", "path": "/case_type", "value": "PROMISES"}],
+        data=[{"op": "replace", "path": "/case_type", "value": "CORRUPTION"}],
         format="json",
     )
     assert response.status_code == 422

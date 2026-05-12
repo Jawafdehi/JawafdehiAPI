@@ -341,7 +341,6 @@ class CaseType(models.TextChoices):
     """Enum for case types."""
 
     CORRUPTION = "CORRUPTION", "Corruption"
-    PROMISES = "PROMISES", "Broken Promises"
 
 
 class CaseState(models.TextChoices):
@@ -404,7 +403,7 @@ class Case(models.Model):
     case_type = models.CharField(
         max_length=20,
         choices=CaseType.choices,
-        help_text="Type of case (corruption, broken promises, etc.)",
+        help_text="Type of case",
     )
     state = models.CharField(
         max_length=20,

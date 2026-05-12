@@ -384,7 +384,7 @@ class Command(BaseCommand):
 
         # 4. KP Oli
         oli = Case.objects.create(
-            case_type=CaseType.PROMISES,
+            case_type=CaseType.CORRUPTION,
             state=CaseState.PUBLISHED,
             title="KP Sharma Oli's Unfulfilled 2017 Election Promises",
             description="""<h1>KP Sharma Oli's Broken Election Promises</h1>
