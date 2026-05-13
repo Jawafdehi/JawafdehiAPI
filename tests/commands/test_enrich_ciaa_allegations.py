@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 from unittest.mock import patch
 
 import pytest
@@ -243,6 +244,7 @@ def test_collect_content_empty_evidence_entries():
 
 
 @pytest.mark.django_db
+@patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
 @patch(
     "cases.management.commands.enrich_ciaa_allegations.Command._init_client",
 )
