@@ -484,11 +484,11 @@ class Case(models.Model):
     slug = models.SlugField(
         max_length=50,
         blank=True,
-        null=True,
+        null=False,
         unique=True,
         db_index=True,
         validators=[validate_slug],
-        help_text="A slug will go in the URL (e.g., jawafdehi.org/case/YOUR-SLUG). For CIAA corruption cases, you can prepend the special court case number (e.g., case-078-WC-0123-sunil-poudel). Must start with a letter and contain only letters, numbers, and hyphens (max 50 characters). Immutable once set, required for published cases.",
+        help_text="A slug will go in the URL (e.g., jawafdehi.org/case/YOUR-SLUG). For CIAA corruption cases, you can prepend the special court case number (e.g., case-078-WC-0123-sunil-poudel). Must start with a letter and contain only letters, numbers, and hyphens (max 50 characters). Immutable once set, auto-generated on save if not provided.",
     )
     court_cases = models.JSONField(
         blank=True,
