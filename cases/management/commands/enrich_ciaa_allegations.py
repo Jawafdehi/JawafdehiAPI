@@ -35,33 +35,73 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-NEPALI_ALLEGATION_PROMPT = """तपाईं एक नेपाली कानुनी सहायक हुनुहुन्छ। तलको CIAA (Commission for the Investigation of Abuse of Authority) प्रेस विज्ञप्तिको अध्ययन गरी मुख्य आरोपहरू निकाल्नुहोस्।
+SYSTEM_PROMPT = """You are a Nepali legal analyst extracting structured key allegations
+from CIAA (Commission for the Investigation of Abuse of Authority) press releases.
 
-**निर्देशनहरू:**
-1. प्रेस विज्ञप्तिको विषयवस्तुलाई ध्यानपूर्वक पढी मुख्य भ्रष्टाचार/अनियमितताका आरोपहरू पहिचान गर्नुहोस्।
-2. २ देखि ५ वटासम्म मुख्य आरोपहरू लेख्नुहोस् — प्रत्येक एउटा वा दुई वाक्यमा।
-3. आरोपहरू नेपाली भाषामा स्पष्ट, तथ्यपरक र विशिष्ट हुनुपर्छ।
-4. बिगो रकम उल्लेख भएमा समावेश गर्नुहोस्।
-5. काल्पनिक वा प्रेस विज्ञप्तिमा नभएका आरोपहरू नलेख्नुहोस्।
+Every allegation MUST:
+1. Be factually grounded in the provided press release — NO fabrication
+2. Be written in professional, accessible Nepali (नेपाली)
+3. Name the persons involved and their official positions
+4. Describe the specific misconduct mechanism (what was done and how)
+5. Include the disputed amount (बिगो) when mentioned in the source
+6. Include the time period (date range or fiscal year) when specified
+7. Be self-contained — understandable without additional context
+8. Follow the established Jawafdehi allegation style (see examples below)
 
-**केस शीर्षक:** {case_title}
-**बिगो रकम:** {bigo}
-**प्रेस विज्ञप्ति:** {press_release}
+Each allegation is 1-3 complete sentences. Use formal but clear Nepali.
 
-**प्रतिक्रिया ढाँचा (JSON मात्र):**
-```json
-{{
-  "allegations": [
-    "पहिलो मुख्य आरोप...",
-    "दोस्रो मुख्य आरोप...",
-    "तेस्रो मुख्य आरोप..."
-  ]
-}}
-```
+DO NOT:
+- Fabricate or embellish beyond the source text
+- Use legal jargon without explanation
+- State legal conclusions about guilt or innocence
+- Write vague statements like "भ्रष्टाचार गरेको"
+- Mix multiple unrelated misconducts into one allegation
 
-JSON बाहेक अन्य केही नलेख्नुहोस्।"""
+STRUCTURE each allegation in Nepali as:
+"कसले — के गर्यो — कसरी — कति रकम — कुन अवधिमा"
+(Who — did what — how — what amount — during what period)
 
-SYSTEM_PROMPT = "You are a Nepali legal assistant that extracts key allegations from CIAA press releases. You respond ONLY with valid JSON."
+REFERENCE EXAMPLES from published Jawafdehi cases:
+
+Example 1 (Illegal property accumulation):
+"कमल राज गौतमले मिति २०५५/०१/०७ देखि २०७९/१२/२४ सम्म सार्वजनिक पद धारण
+गर्दा वैध आयभन्दा रु. २,५१,७८,६८७.७१ बढी सम्पत्ति खर्च तथा लगानी गरी
+गैरकानूनी रूपमा सम्पत्ति आर्जन गरेको।"
+
+Example 2 (Procurement fraud):
+"प्रतिवादीहरूको मिलेमतोमा काठमाडौं महानगरपालिकाको NCBW-KMC को ठेक्कामा
+Pending Litigation नहुने विषयलाई Pending Litigation रहेको भनी गलत मूल्याङ्कन
+प्रतिवेदन खडा गरी सार्वजनिक सम्पत्ति बदनियतपूर्वक हानि नोक्सानी पुर्याएको।"
+
+Example 3 (Bribery and money laundering):
+"मोहनबहादुर बस्नेतले नगर प्रमुख पदको दुरुपयोग गरी पद्मा कम्पनीहरू र राजु
+प्रसाद कँडेललाई कर छुट र जग्गा उपलब्धता लगायत अनुचित लाभ पुर्याई सो बापत
+करिब रु. ९.२२ करोड घुस/रिसवत लिएको।"
+
+Example 4 (Embezzlement):
+"प्रतिवादीहरूको मिलेमतोमा हुलाक बचत बैङ्कमा बचतकर्ताहरूको निक्षेप रकम
+बैङ्क दाखिला नगरी अपचलन गरी हिनामिना गरेको।"
+"""
+
+USER_PROMPT_TEMPLATE = """Extract 2-5 key allegation statements from this CIAA press release.
+
+Case title: {case_title}
+Bigo amount: {bigo}
+
+Instructions:
+- Each allegation must be a complete, self-contained statement in Nepali
+- Follow the Jawafdehi allegation style shown in the system prompt
+- Include names, positions, amounts, and time periods when available
+- Extract distinct allegations, not variations of the same claim
+
+Press release text:
+
+{press_release}
+
+IMPORTANT: Return ONLY a valid JSON object with an "allegations" key.
+Example:
+{{"allegations": ["पहिलो मुख्य आरोप...", "दोस्रो मुख्य आरोप..."]}}
+No explanations, no markdown, no text outside the JSON object."""
 
 
 class Command(BaseCommand):
@@ -186,12 +226,11 @@ class Command(BaseCommand):
         if case_id:
             queryset = queryset.filter(case_id=case_id)
 
-        if not force:
-            queryset = queryset.filter(key_allegations__exact=[])
-
         cases = list(queryset)
         eligible = []
         for case in cases:
+            if not force and case.key_allegations:
+                continue
             if case.court_cases and isinstance(case.court_cases, list):
                 has_ciaa = any(ref.startswith("special:") for ref in case.court_cases)
                 if has_ciaa:
@@ -248,7 +287,7 @@ class Command(BaseCommand):
         bigo = case.bigo
         bigo_display = f"रू {bigo:,}" if bigo else "उल्लेख छैन"
 
-        prompt = NEPALI_ALLEGATION_PROMPT.format(
+        prompt = USER_PROMPT_TEMPLATE.format(
             case_title=case.title,
             bigo=bigo_display,
             press_release=press_release_text[:60000],
@@ -389,10 +428,10 @@ class Command(BaseCommand):
             try:
                 response = client.messages.create(
                     model=model,
-                    max_tokens=1024,
+                    max_tokens=3000,
                     system=SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=0.3,
+                    temperature=0.1,
                 )
                 raw = response.content[0].text
                 logger.debug(f"LLM response: {raw[:500]}...")
