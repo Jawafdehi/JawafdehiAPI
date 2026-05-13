@@ -43,7 +43,11 @@ def _make_source(
         source_id=source_id,
         title=title,
         description=description,
-        url=url if url is not None else ["https://ngm-store.jawafdehi.org/case/test-file.md"],
+        url=(
+            url
+            if url is not None
+            else ["https://ngm-store.jawafdehi.org/case/test-file.md"]
+        ),
         source_type=None,
     )
 
@@ -55,56 +59,53 @@ def test_parse_valid_json_array():
     from cases.management.commands.enrich_ciaa_allegations import Command
 
     cmd = Command()
-    raw = '{"allegations": ["First allegation", "Second allegation", "Third allegation"]}'
+    raw = (
+        '{"allegations": ["First allegation", "Second allegation", "Third allegation"]}'
+    )
     result = cmd._parse_allegations(raw)
     assert result == ["First allegation", "Second allegation", "Third allegation"]
 
 
 def test_parse_json_with_markdown_fence():
-    cmd = __import__(
-        "cases.management.commands.enrich_ciaa_allegations",
-        fromlist=["Command"],
-    ).Command()
+    from cases.management.commands.enrich_ciaa_allegations import Command
+
+    cmd = Command()
     raw = '```json\n{"allegations": ["Nested", "List"]}\n```'
     result = cmd._parse_allegations(raw)
     assert result == ["Nested", "List"]
 
 
 def test_parse_json_with_surrounding_text():
-    cmd = __import__(
-        "cases.management.commands.enrich_ciaa_allegations",
-        fromlist=["Command"],
-    ).Command()
+    from cases.management.commands.enrich_ciaa_allegations import Command
+
+    cmd = Command()
     raw = 'Here is the result:\n{"allegations": ["Allegation A"]}\nHope that helps.'
     result = cmd._parse_allegations(raw)
     assert result == ["Allegation A"]
 
 
 def test_parse_invalid_json_fallback():
-    cmd = __import__(
-        "cases.management.commands.enrich_ciaa_allegations",
-        fromlist=["Command"],
-    ).Command()
+    from cases.management.commands.enrich_ciaa_allegations import Command
+
+    cmd = Command()
     raw = "1. First allegation\n2. Second allegation\n"
     result = cmd._parse_allegations(raw)
     assert len(result) == 2
 
 
 def test_parse_empty_array():
-    cmd = __import__(
-        "cases.management.commands.enrich_ciaa_allegations",
-        fromlist=["Command"],
-    ).Command()
+    from cases.management.commands.enrich_ciaa_allegations import Command
+
+    cmd = Command()
     raw = '{"allegations": []}'
     result = cmd._parse_allegations(raw)
     assert result == []
 
 
 def test_parse_truncates_over_max():
-    cmd = __import__(
-        "cases.management.commands.enrich_ciaa_allegations",
-        fromlist=["Command"],
-    ).Command()
+    from cases.management.commands.enrich_ciaa_allegations import Command
+
+    cmd = Command()
     items = [f"Allegation {i}" for i in range(10)]
     raw = json.dumps({"allegations": items})
     result = cmd._parse_allegations(raw)
@@ -214,32 +215,14 @@ def test_collect_content_from_url():
     cmd = Command()
     cmd._source_lookup = {"source:url-test": src}
 
-    with patch.object(cmd, "_fetch_and_convert_content", return_value="Converted markdown content for testing") as mock:
+    with patch.object(
+        cmd,
+        "_fetch_and_convert_content",
+        return_value="Converted markdown content for testing",
+    ) as mock:
         result = cmd._collect_press_release_content(case)
         mock.assert_called_once_with("https://ngm-store.jawafdehi.org/case/file.md")
     assert result == "Converted markdown content for testing"
-
-
-@pytest.mark.django_db
-def test_collect_content_from_url_fallback():
-    from cases.management.commands.enrich_ciaa_allegations import Command
-
-    src = _make_source(
-        source_id="source:url",
-        description="",
-        url=["https://ngm-store.jawafdehi.org/case/test-file.md"],
-    )
-    case = _make_case(
-        case_id="by-url",
-        evidence=[{"source_id": "source:url", "description": "Press release"}],
-    )
-    cmd = Command()
-    cmd._source_lookup = {"source:url": src}
-
-    with patch.object(cmd, "_fetch_and_convert_content", return_value="Fetched markdown content with sufficient length here") as mock:
-        result = cmd._collect_press_release_content(case)
-        mock.assert_called_once()
-    assert result == "Fetched markdown content with sufficient length here"
 
 
 @pytest.mark.django_db
@@ -267,7 +250,11 @@ def test_collect_content_empty_evidence_entries():
     "cases.management.commands.enrich_ciaa_allegations.Command._call_llm",
     return_value=["Test allegation"],
 )
-def test_dry_run_does_not_save(mock_llm, mock_client):
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.Command._fetch_and_convert_content",
+    return_value="Mocked press release content for dry-run test with enough chars",
+)
+def test_dry_run_does_not_save(mock_fetch, mock_llm, mock_client):
     _make_source(
         source_id="source:dry",
         description="Dry run test content " * 10,
@@ -282,7 +269,6 @@ def test_dry_run_does_not_save(mock_llm, mock_client):
         "enrich_ciaa_allegations",
         "--dry-run",
         "--case-id=dry-run-test",
-        "--api-key=test-key",
         stdout=out,
     )
 
@@ -301,11 +287,17 @@ def test_command_help():
 
 @pytest.mark.parametrize(
     "flag",
-    ["--dry-run", "--limit", "--llm-model", "--api-key", "--base-url", "--verbose", "--force", "--case-id"],
+    [
+        "--dry-run",
+        "--limit",
+        "--llm-model",
+        "--base-url",
+        "--verbose",
+        "--force",
+        "--case-id",
+    ],
 )
 def test_cli_flags_registered(flag):
-    from django.core.management import load_command_class
-
     cmd = load_command_class("cases", "enrich_ciaa_allegations")
     parser = cmd.create_parser("manage.py", "enrich_ciaa_allegations")
     for action in parser._actions:

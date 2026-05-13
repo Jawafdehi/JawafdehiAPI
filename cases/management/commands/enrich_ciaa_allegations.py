@@ -10,7 +10,7 @@ Usage::
 
 Environment variables::
 
-    ANTHROPIC_API_KEY  — API key for Anthropic (fallback for --api-key)
+    ANTHROPIC_API_KEY  — API key for Anthropic (required)
     LLM_PROXY_URL      — optional base URL for an OpenAI-compatible proxy
 """
 
@@ -18,21 +18,15 @@ import json
 import logging
 import os
 import re
-import sys
 import tempfile
 import time
+from urllib.parse import urlparse
 
 import requests
 from django.core.management.base import BaseCommand, CommandError
 
 from cases.models import Case, CaseState, DocumentSource
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(levelname)s: %(message)s",
-    stream=sys.stdout,
-    force=True,
-)
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are a Nepali legal analyst extracting structured key allegations
@@ -136,12 +130,6 @@ class Command(BaseCommand):
             help="Anthropic model name (default: claude-sonnet-4-5)",
         )
         parser.add_argument(
-            "--api-key",
-            type=str,
-            default=None,
-            help="Anthropic API key (env: ANTHROPIC_API_KEY)",
-        )
-        parser.add_argument(
             "--base-url",
             type=str,
             default=None,
@@ -168,7 +156,6 @@ class Command(BaseCommand):
         dry_run = options["dry_run"]
         limit = options["limit"]
         model = options["llm_model"]
-        api_key = options["api_key"]
         base_url = options["base_url"] or os.environ.get("LLM_PROXY_URL")
         verbose = options["verbose"]
         force = options["force"]
@@ -183,11 +170,10 @@ class Command(BaseCommand):
             )
         )
 
-        api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             raise CommandError(
-                "No API key provided. Set ANTHROPIC_API_KEY environment variable "
-                "or pass --api-key."
+                "No API key provided. Set the ANTHROPIC_API_KEY environment variable."
             )
 
         client = self._init_client(api_key, base_url, model)
@@ -238,8 +224,10 @@ class Command(BaseCommand):
             else:
                 eligible.append(case)
 
-        if limit and limit > 0:
-            eligible = eligible[:limit]
+        if limit is not None:
+            if limit < 0:
+                raise CommandError(f"--limit must be >= 0, got {limit}")
+            eligible = eligible[:limit] if limit > 0 else []
 
         return eligible
 
@@ -333,6 +321,22 @@ class Command(BaseCommand):
                 )
             )
 
+    ALLOWED_HOSTS = frozenset({"ngm-store.jawafdehi.org"})
+
+    @classmethod
+    def _is_safe_url(cls, url):
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return False
+        if parsed.scheme not in ("http", "https"):
+            return False
+        if not parsed.hostname:
+            return False
+        if parsed.hostname not in cls.ALLOWED_HOSTS:
+            return False
+        return True
+
     def _collect_press_release_content(self, case):
         texts = []
         if not case.evidence:
@@ -356,11 +360,13 @@ class Command(BaseCommand):
             for url in urls:
                 if not isinstance(url, str):
                     continue
-                if "ngm-store.jawafdehi.org" in url or url.endswith(".md"):
-                    content = self._fetch_and_convert_content(url)
-                    if content:
-                        texts.append(content)
-                        break
+                if not self._is_safe_url(url):
+                    logger.debug(f"Skipping non-allowlisted URL: {url}")
+                    continue
+                content = self._fetch_and_convert_content(url)
+                if content:
+                    texts.append(content)
+                    break
 
         return "\n\n".join(texts)
 
@@ -403,7 +409,11 @@ class Command(BaseCommand):
 
             md = MarkItDown()
             result = md.convert(tmp_path)
-            if result and result.text_content and len(result.text_content.strip()) >= 50:
+            if (
+                result
+                and result.text_content
+                and len(result.text_content.strip()) >= 50
+            ):
                 return result.text_content.strip()
             logger.debug(f"MarkItDown conversion returned short content from {url}")
             return None
@@ -463,7 +473,7 @@ class Command(BaseCommand):
 
         try:
             data = json.loads(raw)
-            allegations = data.get("allegations", [])
+            allegations = data.get("allegations", []) if isinstance(data, dict) else []
         except json.JSONDecodeError:
             lines = [
                 line.strip().lstrip("0123456789.-) ")
