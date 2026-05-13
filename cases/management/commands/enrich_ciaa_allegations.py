@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import sys
+import tempfile
 import time
 
 import requests
@@ -317,28 +318,70 @@ class Command(BaseCommand):
                 if not isinstance(url, str):
                     continue
                 if "ngm-store.jawafdehi.org" in url or url.endswith(".md"):
-                    content = self._fetch_url_content(url)
+                    content = self._fetch_and_convert_content(url)
                     if content:
                         texts.append(content)
                         break
 
         return "\n\n".join(texts)
 
-    def _fetch_url_content(self, url):
+    def _fetch_and_convert_content(self, url):
         try:
-            resp = requests.get(url, timeout=30)
+            resp = requests.get(url, timeout=60)
             resp.raise_for_status()
-            content = resp.text
-            if len(content) < 50:
-                logger.debug(f"Content too short from {url}: {len(content)} chars")
-                return None
-            return content
         except requests.exceptions.Timeout:
             logger.warning(f"Timeout fetching {url}")
             return None
         except requests.exceptions.RequestException as e:
             logger.warning(f"Failed to fetch {url}: {e}")
             return None
+
+        content_type = resp.headers.get("content-type", "").lower()
+
+        if "text/plain" in content_type or url.endswith(".md"):
+            content = resp.text
+            if len(content) < 50:
+                logger.debug(f"Content too short from {url}: {len(content)} chars")
+                return None
+            return content
+
+        ext = ".tmp"
+        if url.lower().endswith(".pdf"):
+            ext = ".pdf"
+        elif url.lower().endswith(".docx"):
+            ext = ".docx"
+        elif url.lower().endswith(".doc"):
+            ext = ".doc"
+        elif "text/html" in content_type:
+            ext = ".html"
+
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+            tmp.write(resp.content)
+            tmp_path = tmp.name
+
+        try:
+            from markitdown import MarkItDown
+
+            md = MarkItDown()
+            result = md.convert(tmp_path)
+            if result and result.text_content and len(result.text_content.strip()) >= 50:
+                return result.text_content.strip()
+            logger.debug(f"MarkItDown conversion returned short content from {url}")
+            return None
+        except ImportError:
+            logger.warning("markitdown/likhit not installed, falling back to raw text")
+            try:
+                return resp.text
+            except Exception:
+                return None
+        except Exception as e:
+            logger.warning(f"likhit conversion failed for {url}: {e}")
+            return None
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
     def _call_llm(self, client, model, prompt):
         max_retries = 3
