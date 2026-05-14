@@ -808,18 +808,21 @@ def _collect_evidence_text(case: Case) -> str:
     return result
 
 
+try:
+    from markitdown import MarkItDown
+
+    _MD_CONVERTER = MarkItDown(enable_plugins=False)
+except ImportError:
+    _MD_CONVERTER = None
+
+
 def _convert_source_file(src: DocumentSource) -> str:
     """Convert a DocumentSource's uploaded file(s) to text using MarkItDown.
 
     Returns file content as markdown text, or empty string if conversion fails.
     """
-    try:
-        from markitdown import MarkItDown
-    except ImportError:
-        logger.warning("markitdown not installed, skipping file conversion")
+    if _MD_CONVERTER is None:
         return ""
-
-    md_converter = MarkItDown(enable_plugins=False)
 
     files_to_try = []
     if src.uploaded_file and hasattr(src.uploaded_file, "path"):
@@ -835,7 +838,7 @@ def _convert_source_file(src: DocumentSource) -> str:
 
     for filepath in files_to_try:
         try:
-            result = md_converter.convert(filepath)
+            result = _MD_CONVERTER.convert(filepath)
             if result and result.text_content:
                 return result.text_content[:16000]
         except Exception as e:
@@ -1067,8 +1070,11 @@ class TagEnricher:
                 "reason": "already has tags",
             }
 
-        evidence_text = _collect_evidence_text(case)
-        has_evidence = bool(evidence_text.strip())
+        evidence_text = ""
+        has_evidence = False
+        if self.use_llm:
+            evidence_text = _collect_evidence_text(case)
+            has_evidence = bool(evidence_text.strip())
 
         if self.use_llm and has_evidence:
             logger.info("  Attempting source_llm classification...")
@@ -1151,8 +1157,7 @@ class TagEnricher:
             self._llm_service = LLMService()
 
         prompt = build_llm_classification_prompt(case)
-        llm = self._llm_service.get_llm()
-        response = self._llm_service._call_llm(llm, prompt)
+        response = self._llm_service.invoke(prompt)
         return parse_llm_response(response)
 
     def _classify_with_llm_from_sources(
@@ -1165,8 +1170,7 @@ class TagEnricher:
             self._llm_service = LLMService()
 
         prompt = build_llm_classification_prompt_from_sources(case, evidence_text)
-        llm = self._llm_service.get_llm()
-        response = self._llm_service._call_llm(llm, prompt)
+        response = self._llm_service.invoke(prompt)
         return parse_llm_response(response)
 
     def enrich_cases(self, cases, force: bool = False, dry_run: bool = False) -> dict:

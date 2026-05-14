@@ -127,6 +127,11 @@ class LLMService:
 
         raise ValueError(f"Unsupported provider type: {provider.provider_type}")
 
+    def invoke(self, prompt, provider=None):
+        """Public entry point: get an LLM and call it with the given prompt."""
+        llm = self.get_llm(provider)
+        return self._call_llm(llm, prompt)
+
     def test_connection(self, provider):
         try:
             llm = self.get_llm(provider)
