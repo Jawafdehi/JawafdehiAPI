@@ -203,7 +203,6 @@ INSTALLED_APPS = [
     "drf_spectacular",
     "django_filters",
     "corsheaders",
-    "markdownx",
     "auditlog",
     "rules.apps.AutodiscoverRulesConfig",
     "cases",
@@ -609,7 +608,8 @@ JAZZMIN_SETTINGS = {
     },
 }
 
-MARKDOWNX_MARKDOWNIFY_FUNCTION = "markdownx.utils.markdownify"
-MARKDOWNX_MEDIA_PATH = "markdownx/"
-MARKDOWNX_UPLOAD_CONTENT_TYPES = ["image/jpeg", "image/png", "image/webp"]
-MARKDOWNX_UPLOAD_MAX_SIZE = 5 * 1024 * 1024
+# markdownx removed — replaced by EasyMDE editor widget
+# MARKDOWNX_MARKDOWNIFY_FUNCTION = "markdownx.utils.markdownify"
+# MARKDOWNX_MEDIA_PATH = "markdownx/"
+# MARKDOWNX_UPLOAD_CONTENT_TYPES = ["image/jpeg", "image/png", "image/webp"]
+# MARKDOWNX_UPLOAD_MAX_SIZE = 5 * 1024 * 1024
