@@ -768,9 +768,9 @@ class DocumentSourceAdminForm(forms.ModelForm):
                 # Contributors cannot edit the contributors field
                 if "contributors" in self.fields:
                     self.fields["contributors"].disabled = True
-                    self.fields[
-                        "contributors"
-                    ].help_text = "Only Moderators and Admins can assign contributors"
+                    self.fields["contributors"].help_text = (
+                        "Only Moderators and Admins can assign contributors"
+                    )
 
     def clean(self):
         """
