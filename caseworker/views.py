@@ -4,6 +4,8 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.authentication import TokenAuthentication
+from rest_framework.views import APIView
 from django.shortcuts import get_object_or_404
 
 from .models import MCPServer, Skill, Summary, Draft, DraftVersion, LLMProvider
@@ -198,3 +200,83 @@ class LLMProviderViewSet(viewsets.ModelViewSet):
         provider = self.get_object()
         is_connected = LLMService().test_connection(provider)
         return Response({"connected": is_connected})
+
+
+PUBLIC_TOOLS = [
+    "search_jawafdehi_cases",
+    "get_jawafdehi_case",
+    "search_jawaf_entities",
+    "get_jawaf_entity",
+    "search_nes_entities",
+    "get_nes_entities",
+    "get_nes_tags",
+    "get_nes_entity_prefixes",
+    "get_nes_entity_prefix_schema",
+    "convert_date",
+    "convert_to_markdown",
+]
+
+CASEWORKER_TOOLS = PUBLIC_TOOLS + [
+    "create_jawafdehi_case",
+    "patch_jawafdehi_case",
+    "submit_nes_change",
+    "create_jawaf_entity",
+    "upload_document_source",
+    "ngm_query_judicial",
+    "ngm_extract_case_data",
+]
+
+
+class ResolveIdentityView(APIView):
+    authentication_classes = [TokenAuthentication]
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        token_user = request.user
+        if request.auth:
+            token_user = request.auth.user
+
+        if token_user.username != "chat-jawafdehi-org":
+            return Response(
+                {"error": "Service account token required"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        owui_user_id = request.META.get("HTTP_X_JAWAFDEHI_USER_ID")
+        if not owui_user_id:
+            return Response(
+                {"error": "X-Jawafdehi-User-Id header is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from cases.models import ChatUserIdentity
+
+        try:
+            identity = ChatUserIdentity.objects.select_related("user").get(
+                owui_user_id=owui_user_id
+            )
+            real_user = identity.user
+        except ChatUserIdentity.DoesNotExist:
+            return Response(
+                {"error": f"Unknown user: {owui_user_id}"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        is_caseworker = (
+            real_user.is_superuser
+            or real_user.groups.filter(
+                name__in=["Admin", "Moderator", "Contributor"]
+            ).exists()
+        )
+
+        role = "caseworker" if is_caseworker else "public"
+        tools = CASEWORKER_TOOLS if is_caseworker else PUBLIC_TOOLS
+
+        return Response(
+            {
+                "role": role,
+                "tools": tools,
+                "user_id": real_user.id,
+                "username": real_user.get_username(),
+            }
+        )
