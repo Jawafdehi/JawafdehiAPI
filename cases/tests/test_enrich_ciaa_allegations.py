@@ -11,6 +11,7 @@ from io import StringIO
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 from django.core.management import call_command
 
 from cases.management.commands.enrich_ciaa_allegations import Command
@@ -446,7 +447,7 @@ class TestEnrichCiaaAllegations:
         )
 
         with patch("requests.post") as mock_post:
-            mock_post.side_effect = Exception("Connection refused")
+            mock_post.side_effect = requests.ConnectionError("Connection refused")
 
             out = StringIO()
             call_command(

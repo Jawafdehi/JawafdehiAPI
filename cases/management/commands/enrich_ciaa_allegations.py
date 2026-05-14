@@ -21,8 +21,8 @@ Usage::
 import json
 import logging
 import os
-import sys
 from typing import Optional
+from urllib.parse import urlparse
 
 import requests
 from django.core.management.base import BaseCommand, CommandError
@@ -30,13 +30,9 @@ from django.db import transaction
 
 from cases.models import Case, DocumentSource
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(levelname)s: %(message)s",
-    stream=sys.stdout,
-    force=True,
-)
 logger = logging.getLogger(__name__)
+
+_ALLOWED_HOSTS = frozenset({"ciaa.gov.np", "ngm-store.jawafdehi.org"})
 
 EXTRACTION_SYSTEM_PROMPT = """\
 You are a Nepali legal analyst extracting structured key allegations from \
@@ -277,7 +273,7 @@ class Command(BaseCommand):
                 llm_base_url=llm_base_url,
                 llm_api_key=llm_api_key,
             )
-        except Exception as exc:
+        except (requests.RequestException, CommandError, ValueError) as exc:
             self.stats["cases_llm_error"] += 1
             self.stdout.write(self.style.ERROR(f"  LLM extraction failed: {exc}"))
             return
@@ -335,9 +331,14 @@ class Command(BaseCommand):
             logger.debug("  No DocumentSource records found")
             return None
 
+        source_by_id = {s.source_id: s for s in sources}
+
         press_release_parts = []
 
-        for source in sources:
+        for sid in source_ids:
+            source = source_by_id.get(sid)
+            if source is None:
+                continue
             if not self._is_press_release_source(source):
                 continue
 
@@ -348,7 +349,8 @@ class Command(BaseCommand):
 
             if isinstance(source.url, list):
                 for url in source.url:
-                    if "ngm-store.jawafdehi.org" in url or "ciaa.gov.np" in url:
+                    parsed = urlparse(url)
+                    if parsed.hostname and parsed.hostname in _ALLOWED_HOSTS:
                         content = self._convert_to_markdown(url)
                         if content and len(content) > 200:
                             press_release_parts.append(content)
@@ -371,8 +373,8 @@ class Command(BaseCommand):
 
         if isinstance(source.url, list):
             for url in source.url:
-                url_lower = url.lower()
-                if "ciaa.gov.np" in url_lower or "ngm-store.jawafdehi.org" in url_lower:
+                parsed = urlparse(url)
+                if parsed.hostname and parsed.hostname in _ALLOWED_HOSTS:
                     return True
         return False
 
@@ -390,6 +392,11 @@ class Command(BaseCommand):
             response.raise_for_status()
         except requests.RequestException as exc:
             logger.warning("  Failed to download %s: %s", url, exc)
+            return None
+
+        final_hostname = urlparse(response.url).hostname
+        if final_hostname not in _ALLOWED_HOSTS:
+            logger.warning("  Redirected to untrusted host: %s", response.url)
             return None
 
         content_type = response.headers.get("content-type", "").lower()
