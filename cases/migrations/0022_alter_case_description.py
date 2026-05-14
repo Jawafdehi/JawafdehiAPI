@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("cases", "0020_remove_promises_case_type"),
+        ("cases", "0021_enforce_slug_not_null"),
     ]
 
     operations = [
