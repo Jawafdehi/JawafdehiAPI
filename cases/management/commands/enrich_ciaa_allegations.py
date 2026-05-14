@@ -341,7 +341,7 @@ class Command(BaseCommand):
 
             if isinstance(source.url, list):
                 for url in source.url:
-                    if "ngm-store.jawafdehi.org" in url:
+                    if "ngm-store.jawafdehi.org" in url or "ciaa.gov.np" in url:
                         content = self._convert_to_markdown(url)
                         if content and len(content) > 200:
                             press_release_parts.append(content)
