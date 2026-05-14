@@ -1,4 +1,4 @@
-from django.forms.widgets import Widget
+from django.forms.widgets import Widget, Textarea
 from django.forms.fields import Field
 from django.utils.safestring import mark_safe
 from django.core.exceptions import ValidationError
@@ -7,6 +7,65 @@ from django.template.loader import render_to_string
 from nes.core.identifiers.validators import validate_entity_id
 import json
 from json import JSONDecodeError
+
+
+class EasyMDEWidget(Textarea):
+    class Media:
+        css = {
+            "all": (
+                "https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.css",
+            )
+        }
+        js = (
+            "https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.js",
+        )
+
+    def __init__(self, attrs=None):
+        default_attrs = {
+            "cols": 80,
+            "rows": 25,
+            "data-easymde": "true",
+        }
+        if attrs:
+            default_attrs.update(attrs)
+        super().__init__(default_attrs)
+
+    def render(self, name, value, attrs=None, renderer=None):
+        textarea_html = super().render(name, value, attrs, renderer)
+        widget_id = attrs.get("id", f"id_{name}") if attrs else f"id_{name}"
+        init_script = f"""
+<script>
+(function() {{
+    var el = document.getElementById("{widget_id}");
+    if (el && !el._easymde_initialized) {{
+        el._easymde_initialized = true;
+        new EasyMDE({{
+            element: el,
+            spellChecker: false,
+            status: ["lines", "words", "cursor"],
+            toolbar: [
+                "bold", "italic", "strikethrough", "heading", "|",
+                "quote", "unordered-list", "ordered-list", "|",
+                "link", "image", "table", "horizontal-rule", "|",
+                "preview", "side-by-side", "fullscreen", "|",
+                "guide"
+            ],
+            renderingConfig: {{
+                singleLineBreaks: false,
+                codeSyntaxHighlighting: true,
+            }},
+            placeholder: "Write in Markdown...",
+            autosave: {{
+                enabled: false,
+            }},
+            minHeight: "400px",
+            maxHeight: "600px",
+        }});
+    }}
+}})();
+</script>
+"""
+        return mark_safe(textarea_html + init_script)
 
 
 class BaseMultiWidget(Widget):

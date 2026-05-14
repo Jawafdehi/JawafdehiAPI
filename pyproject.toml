@@ -39,7 +39,6 @@ nepali = "^1.2.0"
 langchain-core = "^1.3.3"
 sentry-sdk = {extras = ["django", "structlog"], version = "^2.47.0"}
 structlog = "^24.4.0"
-django-markdownx = "^4.0.9"
 
 [tool.poetry.extras]
 llm-all = ["langchain", "langchain-openai", "langchain-google-genai", "openai"]
