@@ -804,7 +804,7 @@ def _convert_source_file(src: DocumentSource) -> str:
         logger.warning("markitdown not installed, skipping file conversion")
         return ""
 
-    md_converter = MarkItDown()
+    md_converter = MarkItDown(enable_plugins=True)
 
     files_to_try = []
     if src.uploaded_file and hasattr(src.uploaded_file, "path"):
