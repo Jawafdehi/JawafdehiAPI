@@ -3,7 +3,7 @@
 import logging
 import re
 
-from cases.models import Case
+from cases.models import Case, DocumentSource
 
 logger = logging.getLogger(__name__)
 
@@ -747,6 +747,36 @@ def _collect_case_text(case: Case) -> str:
     return " ".join(parts).lower()
 
 
+def _collect_evidence_text(case: Case) -> str:
+    """Build a text blob from evidence entries and linked DocumentSource records."""
+    parts = []
+    if case.evidence:
+        source_ids = []
+        for entry in case.evidence:
+            if isinstance(entry, dict):
+                desc = entry.get("description", "")
+                if desc:
+                    parts.append(desc)
+                sid = entry.get("source_id", "")
+                if sid:
+                    source_ids.append(sid)
+
+        if source_ids:
+            try:
+                sources = DocumentSource.objects.filter(source_id__in=source_ids)
+                for src in sources:
+                    if src.title:
+                        parts.append(src.title)
+                    if src.description:
+                        parts.append(src.description)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to fetch DocumentSource records for {case.case_id}: {e}"
+                )
+
+    return " ".join(parts).lower()
+
+
 def _match_keywords(text: str, keyword_map: dict[str, list[str]]) -> list[str]:
     """Match text against keyword maps. Returns matched tag names."""
     matched = []
@@ -817,7 +847,7 @@ def classify_case_rules(case: Case) -> list[str]:
 
 
 def build_llm_classification_prompt(case: Case) -> str:
-    """Build a prompt for LLM-based tag classification."""
+    """Build a prompt for LLM-based tag classification from case metadata."""
     lines = []
     lines.append(
         "Classify the following Nepal corruption case with tags from the controlled vocabulary below."
@@ -828,6 +858,48 @@ def build_llm_classification_prompt(case: Case) -> str:
         lines.append("Key Allegations:")
         for a in case.key_allegations:
             lines.append(f"  - {a}")
+    if case.court_cases:
+        lines.append(
+            "Court Cases: "
+            + ", ".join(c for c in case.court_cases if isinstance(c, str))
+        )
+    if case.bigo is not None:
+        lines.append(f"Bigo (Disputed Amount): NPR {case.bigo:,}")
+    lines.append("")
+    lines.append("Select the most appropriate tags from each category:")
+    lines.append("")
+    lines.append(f"Sector (choose 1-3): {', '.join(SECTOR_TAGS)}")
+    lines.append(f"Corruption Type (choose 1-3): {', '.join(CORRUPTION_TYPE_TAGS)}")
+    lines.append(f"Region (choose 1-2): {', '.join(REGION_TAGS)}")
+    lines.append(f"Amount Tier (choose 1): {', '.join(AMOUNT_TIER_TAGS)}")
+    lines.append("")
+    lines.append("Always include: CIAA, Corruption, Special Court")
+    lines.append("")
+    lines.append("Return ONLY a JSON array of tag strings, nothing else.")
+    lines.append(
+        'Example: ["CIAA", "Corruption", "Special Court", "Local Government", "Bribery", "Kathmandu Valley", "10M-100M NPR"]'
+    )
+    return "\n".join(lines)
+
+
+def build_llm_classification_prompt_from_sources(
+    case: Case, evidence_text: str
+) -> str:
+    """Build a prompt for LLM-based tag classification using source documents."""
+    lines = []
+    lines.append(
+        "Classify the following Nepal corruption case with tags from the controlled vocabulary below."
+    )
+    lines.append("Use the source documents (press releases, court orders) as the primary evidence.")
+    lines.append("")
+    lines.append(f"Case Title: {case.title}")
+    lines.append("")
+    lines.append("Source Documents (press releases, court orders, evidence):")
+    truncated = evidence_text[:8000]
+    if len(evidence_text) > 8000:
+        truncated += " [truncated]"
+    lines.append(truncated)
+    lines.append("")
     if case.court_cases:
         lines.append(
             "Court Cases: "
@@ -895,20 +967,42 @@ def validate_tags(tags: list[str]) -> list[str]:
 
 
 class TagEnricher:
-    """Service for enriching CIAA cases with tags via rule-based + LLM classification."""
+    """Service for enriching CIAA cases with tags via source documents + rule-based + LLM classification.
+
+    Three-tier pipeline per case:
+    1. Primary: LLM classification from source documents (evidence + DocumentSource)
+    2. Fallback: Rule-based keyword matching on case metadata
+    3. Default: Core tags only (CIAA, Corruption, Special Court)
+    """
 
     def __init__(self, use_llm: bool = True):
         self.use_llm = use_llm
         self._llm_service = None
 
     def enrich_case(self, case: Case, force: bool = False) -> dict:
-        """Enrich a single case with tags. Returns dict with status and tags."""
+        """Enrich a single case with tags. Returns dict with status, tags, and tier."""
         if case.tags and len(case.tags) > 0 and not force:
             return {
                 "status": "skipped",
                 "tags": case.tags,
+                "tier": "already_tagged",
                 "reason": "already has tags",
             }
+
+        evidence_text = _collect_evidence_text(case)
+        has_evidence = bool(evidence_text.strip())
+
+        if self.use_llm and has_evidence:
+            try:
+                llm_tags = self._classify_with_llm_from_sources(case, evidence_text)
+                if llm_tags and len(llm_tags) >= 3:
+                    all_tags = list(dict.fromkeys(llm_tags))
+                    all_tags = validate_tags(all_tags)
+                    return {"status": "enriched", "tags": all_tags, "tier": "source_llm", "reason": ""}
+            except Exception as e:
+                logger.warning(
+                    f"Source-based LLM classification failed for {case.case_id}: {e}"
+                )
 
         tags = classify_case_rules(case)
 
@@ -930,10 +1024,11 @@ class TagEnricher:
         if not all_tags:
             all_tags = ["CIAA", "Corruption", "Special Court"]
 
-        return {"status": "enriched", "tags": all_tags, "reason": ""}
+        tier = "rule_based" if not has_evidence else "metadata_llm"
+        return {"status": "enriched", "tags": all_tags, "tier": tier, "reason": ""}
 
     def _classify_with_llm(self, case: Case) -> list[str]:
-        """Use LLM to classify a case. Returns list of tag strings."""
+        """Use LLM to classify a case from metadata. Returns list of tag strings."""
         if self._llm_service is None:
             from caseworker.services import LLMService
 
@@ -944,9 +1039,24 @@ class TagEnricher:
         response = self._llm_service._call_llm(llm, prompt)
         return parse_llm_response(response)
 
+    def _classify_with_llm_from_sources(
+        self, case: Case, evidence_text: str
+    ) -> list[str]:
+        """Use LLM to classify a case from source documents. Returns list of tag strings."""
+        if self._llm_service is None:
+            from caseworker.services import LLMService
+
+            self._llm_service = LLMService()
+
+        prompt = build_llm_classification_prompt_from_sources(case, evidence_text)
+        llm = self._llm_service.get_llm()
+        response = self._llm_service._call_llm(llm, prompt)
+        return parse_llm_response(response)
+
     def enrich_cases(self, cases, force: bool = False, dry_run: bool = False) -> dict:
         """Enrich multiple cases. Returns stats dict."""
-        stats = {"total": 0, "enriched": 0, "skipped": 0, "failed": 0}
+        stats = {"total": 0, "enriched": 0, "skipped": 0, "failed": 0,
+                 "source_llm": 0, "metadata_llm": 0, "rule_based": 0}
         for case in cases:
             stats["total"] += 1
             try:
@@ -956,10 +1066,15 @@ class TagEnricher:
                     logger.debug(f"Skipped {case.case_id}: {result['reason']}")
                 else:
                     stats["enriched"] += 1
+                    tier = result.get("tier", "unknown")
+                    if tier in stats:
+                        stats[tier] += 1
                     if not dry_run:
                         case.tags = result["tags"]
                         case.save(update_fields=["tags", "updated_at"])
-                    logger.info(f"Enriched {case.case_id}: {result['tags']}")
+                    logger.info(
+                        f"Enriched {case.case_id} ({tier}): {result['tags']}"
+                    )
             except Exception as e:
                 stats["failed"] += 1
                 logger.error(f"Failed to enrich {case.case_id}: {e}")
