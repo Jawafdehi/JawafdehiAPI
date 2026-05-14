@@ -191,7 +191,6 @@ SECTOR_KEYWORDS = {
         "विद्युत",
         "hydropower",
         "जलविद्युत",
-        "power",
         "सौर्य",
         "solar",
         "petroleum",
@@ -282,7 +281,6 @@ SECTOR_KEYWORDS = {
         "लघुवित्त",
         "savings",
         "बचत",
-        "interest",
     ],
     "IT": [
         "information technology",
@@ -724,7 +722,6 @@ REGION_KEYWORDS = {
     "Kathmandu Valley": [
         "kathmandu valley",
         "काठमाडौं उपत्यका",
-        "valley",
     ],
 }
 
@@ -854,9 +851,14 @@ def _match_keywords(text: str, keyword_map: dict[str, list[str]]) -> list[str]:
     for tag, keywords in keyword_map.items():
         for kw in keywords:
             if kw.isascii() and all(c.isascii() for c in kw):
-                if re.search(r"\b" + re.escape(kw) + r"\b", text):
-                    matched.append(tag)
-                    break
+                if " " in kw:
+                    if re.search(r"\b" + re.escape(kw) + r"\b", text):
+                        matched.append(tag)
+                        break
+                else:
+                    if re.search(r"\b" + re.escape(kw) + r"\w*\b", text):
+                        matched.append(tag)
+                        break
             else:
                 if kw in text:
                     matched.append(tag)
@@ -1075,11 +1077,19 @@ class TagEnricher:
                 if llm_tags:
                     validated = validate_tags(list(dict.fromkeys(llm_tags)))
                     if validated:
-                        rule_tags = classify_case_rules(case)
-                        all_tags = validate_tags(
-                            list(dict.fromkeys(validated + rule_tags))
-                        )
-                        logger.info(f"  + source_llm succeeded: {len(all_tags)} tags")
+                        if len(validated) >= 3:
+                            all_tags = validated
+                            logger.info(
+                                f"  + source_llm succeeded: {len(all_tags)} tags"
+                            )
+                        else:
+                            rule_tags = classify_case_rules(case)
+                            all_tags = validate_tags(
+                                list(dict.fromkeys(validated + rule_tags))
+                            )
+                            logger.info(
+                                f"  + source_llm augmented: {len(all_tags)} tags"
+                            )
                         logger.info(
                             f"+ Enriched {case.case_id} (source_llm): {all_tags}"
                         )
