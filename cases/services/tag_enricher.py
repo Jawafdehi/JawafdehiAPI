@@ -1,5 +1,6 @@
 """Service for rule-based and LLM-based tag classification of CIAA cases."""
 
+import json
 import logging
 import re
 
@@ -215,8 +216,6 @@ SECTOR_KEYWORDS = {
         "सवारी",
         "railway",
         "रेल",
-        "bus",
-        "बस",
         "truck",
         "ट्रक",
         "airline",
@@ -265,7 +264,7 @@ SECTOR_KEYWORDS = {
         "भन्सार",
         "excise",
         "अन्तःशुल्क",
-        "vat",
+        "value added tax",
         "मूल्य अभिवृद्धि कर",
     ],
     "Banking": [
@@ -443,7 +442,6 @@ CORRUPTION_TYPE_KEYWORDS = {
         "relative appointment",
         "आफन्त",
         "nephew",
-        "nati",
     ],
     "Witness Tampering": [
         "witness tamper",
@@ -824,7 +822,7 @@ def _convert_source_file(src: DocumentSource) -> str:
         logger.warning("markitdown not installed, skipping file conversion")
         return ""
 
-    md_converter = MarkItDown(enable_plugins=True)
+    md_converter = MarkItDown(enable_plugins=False)
 
     files_to_try = []
     if src.uploaded_file and hasattr(src.uploaded_file, "path"):
@@ -855,9 +853,14 @@ def _match_keywords(text: str, keyword_map: dict[str, list[str]]) -> list[str]:
     matched = []
     for tag, keywords in keyword_map.items():
         for kw in keywords:
-            if kw in text:
-                matched.append(tag)
-                break
+            if kw.isascii() and all(c.isascii() for c in kw):
+                if re.search(r"\b" + re.escape(kw) + r"\b", text):
+                    matched.append(tag)
+                    break
+            else:
+                if kw in text:
+                    matched.append(tag)
+                    break
     return matched
 
 
@@ -1005,16 +1008,13 @@ def parse_llm_response(response: str) -> list[str]:
         response = "\n".join(line for line in lines if not line.startswith("```"))
         response = response.strip()
 
-    import json
-
-    json_match = re.search(r"\[.*?\]", response, re.DOTALL)
-    if json_match:
+    for match in re.finditer(r"\[.*?\]", response, re.DOTALL):
         try:
-            tags = json.loads(json_match.group())
+            tags = json.loads(match.group())
             if isinstance(tags, list) and all(isinstance(t, str) for t in tags):
                 return tags
         except json.JSONDecodeError:
-            pass
+            continue
     return []
 
 
@@ -1072,20 +1072,26 @@ class TagEnricher:
             logger.info("  Attempting source_llm classification...")
             try:
                 llm_tags = self._classify_with_llm_from_sources(case, evidence_text)
-                if llm_tags and len(llm_tags) >= 3:
-                    all_tags = list(dict.fromkeys(llm_tags))
-                    all_tags = validate_tags(all_tags)
-                    logger.info(f"  + source_llm succeeded: {len(all_tags)} tags")
-                    logger.info(f"+ Enriched {case.case_id} (source_llm): {all_tags}")
-                    return {
-                        "status": "enriched",
-                        "tags": all_tags,
-                        "tier": "source_llm",
-                        "reason": "",
-                    }
+                if llm_tags:
+                    validated = validate_tags(list(dict.fromkeys(llm_tags)))
+                    if validated:
+                        rule_tags = classify_case_rules(case)
+                        all_tags = validate_tags(list(dict.fromkeys(validated + rule_tags)))
+                        logger.info(f"  + source_llm succeeded: {len(all_tags)} tags")
+                        logger.info(f"+ Enriched {case.case_id} (source_llm): {all_tags}")
+                        return {
+                            "status": "enriched",
+                            "tags": all_tags,
+                            "tier": "source_llm",
+                            "reason": "",
+                        }
+                    else:
+                        logger.warning(
+                            "  - source_llm returned no valid tags, falling back"
+                        )
                 else:
                     logger.warning(
-                        f"  - source_llm returned insufficient tags ({len(llm_tags)}), falling back"
+                        "  - source_llm returned no tags, falling back"
                     )
             except Exception as e:
                 logger.warning(f"  - source_llm failed: {str(e)[:120]}")
