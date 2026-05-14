@@ -11,14 +11,8 @@ from json import JSONDecodeError
 
 class EasyMDEWidget(Textarea):
     class Media:
-        css = {
-            "all": (
-                "https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.css",
-            )
-        }
-        js = (
-            "https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.js",
-        )
+        css = {"all": ("https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.css",)}
+        js = ("https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.js",)
 
     def __init__(self, attrs=None):
         default_attrs = {
