@@ -1076,9 +1076,13 @@ class TagEnricher:
                     validated = validate_tags(list(dict.fromkeys(llm_tags)))
                     if validated:
                         rule_tags = classify_case_rules(case)
-                        all_tags = validate_tags(list(dict.fromkeys(validated + rule_tags)))
+                        all_tags = validate_tags(
+                            list(dict.fromkeys(validated + rule_tags))
+                        )
                         logger.info(f"  + source_llm succeeded: {len(all_tags)} tags")
-                        logger.info(f"+ Enriched {case.case_id} (source_llm): {all_tags}")
+                        logger.info(
+                            f"+ Enriched {case.case_id} (source_llm): {all_tags}"
+                        )
                         return {
                             "status": "enriched",
                             "tags": all_tags,
@@ -1090,9 +1094,7 @@ class TagEnricher:
                             "  - source_llm returned no valid tags, falling back"
                         )
                 else:
-                    logger.warning(
-                        "  - source_llm returned no tags, falling back"
-                    )
+                    logger.warning("  - source_llm returned no tags, falling back")
             except Exception as e:
                 logger.warning(f"  - source_llm failed: {str(e)[:120]}")
 
