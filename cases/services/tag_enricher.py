@@ -406,7 +406,8 @@ CORRUPTION_TYPE_KEYWORDS = {
         "financial irregularity",
     ],
     "Forged Documents": [
-        "forg",
+        "forged",
+        "forgery",
         "किर्ते",
         "fake document",
         "नक्कली",
@@ -439,7 +440,6 @@ CORRUPTION_TYPE_KEYWORDS = {
         "कृपा",
         "favouritism",
         "favoritism",
-        "nepot",
         "relative appointment",
         "आफन्त",
         "nephew",
@@ -457,7 +457,6 @@ CORRUPTION_TYPE_KEYWORDS = {
     ],
     "Bid Rigging": [
         "bid rig",
-        "mil",
         "मिलेमतो",
         "collusion",
         "cartel",
@@ -524,7 +523,7 @@ REGION_KEYWORDS = {
         "bhadrapur",
         "dharan",
         "धरान",
-        "birtanagar",
+        "biratnagar",
         "विराटनगर",
         "illam",
         "इलाम",
@@ -535,7 +534,7 @@ REGION_KEYWORDS = {
         "morang",
         "मोरङ",
         "sankhuwasabha",
-        "tapurjung",
+        "taplejung",
         "terhathum",
         "bhojpur",
         "भोजपुर",
@@ -544,7 +543,6 @@ REGION_KEYWORDS = {
         "khotang",
         "खोटाङ",
         "okhaldhunga",
-        "solukhumbu",
         "solukhumbu",
         "udayapur",
         "उदयपुर",
@@ -661,7 +659,7 @@ REGION_KEYWORDS = {
         "birendranagar",
         "surkhet",
         "सुर्खेत",
-        "dailekha",
+        "dailekh",
         "दैलेख",
         "jajarkot",
         "जाजरकोट",
@@ -836,8 +834,8 @@ def _convert_source_file(src: DocumentSource) -> str:
         for upload in uploads:
             if upload.file and hasattr(upload.file, "path"):
                 files_to_try.append(upload.file.path)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Failed to fetch DocumentSourceUpload for src.id={src.id}: {e}")
 
     for filepath in files_to_try:
         try:
@@ -947,11 +945,11 @@ def build_llm_classification_prompt(case: Case) -> str:
     lines.append(f"Region (choose 1-2): {', '.join(REGION_TAGS)}")
     lines.append(f"Amount Tier (choose 1): {', '.join(AMOUNT_TIER_TAGS)}")
     lines.append("")
-    lines.append("Always include: CIAA, Corruption, Special Court")
+    lines.append("Always include: CIAA, Corruption")
     lines.append("")
     lines.append("Return ONLY a JSON array of tag strings, nothing else.")
     lines.append(
-        'Example: ["CIAA", "Corruption", "Special Court", "Local Government", "Bribery", "Kathmandu Valley", "10M-100M NPR"]'
+        'Example: ["CIAA", "Corruption", "Local Government", "Bribery", "Kathmandu Valley", "10M-100M NPR"]'
     )
     return "\n".join(lines)
 
@@ -989,11 +987,11 @@ def build_llm_classification_prompt_from_sources(
     lines.append(f"Region (choose 1-2): {', '.join(REGION_TAGS)}")
     lines.append(f"Amount Tier (choose 1): {', '.join(AMOUNT_TIER_TAGS)}")
     lines.append("")
-    lines.append("Always include: CIAA, Corruption, Special Court")
+    lines.append("Always include: CIAA, Corruption")
     lines.append("")
     lines.append("Return ONLY a JSON array of tag strings, nothing else.")
     lines.append(
-        'Example: ["CIAA", "Corruption", "Special Court", "Local Government", "Bribery", "Kathmandu Valley", "10M-100M NPR"]'
+        'Example: ["CIAA", "Corruption", "Local Government", "Bribery", "Kathmandu Valley", "10M-100M NPR"]'
     )
     return "\n".join(lines)
 
@@ -1046,7 +1044,7 @@ class TagEnricher:
     Three-tier pipeline per case:
     1. Primary: LLM classification from source documents (evidence + DocumentSource)
     2. Fallback: Rule-based keyword matching on case metadata
-    3. Default: Core tags only (CIAA, Corruption, Special Court)
+    3. Default: Core tags only (CIAA, Corruption)
     """
 
     def __init__(self, use_llm: bool = True):
@@ -1088,12 +1086,17 @@ class TagEnricher:
 
         tags = classify_case_rules(case)
 
+        llm_invoked = False
+        llm_contributed = False
         if self.use_llm and len(tags) < 5:
             logger.info(f"  Attempting metadata_llm classification...")
+            llm_invoked = True
             try:
                 llm_tags = self._classify_with_llm(case)
                 if llm_tags:
-                    all_tags = list(dict.fromkeys(tags + llm_tags))
+                    new_tags = list(dict.fromkeys(tags + llm_tags))
+                    llm_contributed = len(new_tags) > len(tags)
+                    all_tags = new_tags
                     logger.info(f"  + metadata_llm succeeded: {len(all_tags)} tags")
                 else:
                     all_tags = tags
@@ -1107,9 +1110,12 @@ class TagEnricher:
         all_tags = validate_tags(all_tags)
 
         if not all_tags:
-            all_tags = ["CIAA", "Corruption", "Special Court"]
+            all_tags = ["CIAA", "Corruption"]
 
-        tier = "rule_based" if not has_evidence else "metadata_llm"
+        if llm_invoked and llm_contributed:
+            tier = "metadata_llm"
+        else:
+            tier = "rule_based"
         logger.info(f"+ Enriched {case.case_id} ({tier}): {all_tags}")
         return {"status": "enriched", "tags": all_tags, "tier": tier, "reason": ""}
 
