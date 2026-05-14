@@ -259,6 +259,14 @@ class Command(BaseCommand):
 
         self.stdout.write(f"  Press release content: {len(press_release_text)} chars")
 
+        if dry_run and not llm_api_key:
+            self.stdout.write(
+                self.style.WARNING(
+                    "  [DRY RUN] No API key — skipping LLM extraction"
+                )
+            )
+            return
+
         try:
             allegations = self._extract_allegations(
                 press_release_text=press_release_text,
@@ -517,6 +525,8 @@ class Command(BaseCommand):
             logger.debug("  JSON string: %s", json_str[:500])
             return None
 
+        if isinstance(allegations, dict) and isinstance(allegations.get("allegations"), list):
+            allegations = allegations["allegations"]
         if not isinstance(allegations, list):
             logger.warning("  LLM returned non-list: %s", type(allegations).__name__)
             return None
@@ -536,9 +546,10 @@ class Command(BaseCommand):
             return None
 
         if len(clean) < 2:
-            logger.warning(
-                "  Only %d allegation(s) extracted, minimum is 2", len(clean)
+            logger.error(
+                "  Only %d allegation(s) extracted, minimum is 2 — aborting", len(clean)
             )
+            return None
 
         max_count = 5
         if len(clean) > max_count:

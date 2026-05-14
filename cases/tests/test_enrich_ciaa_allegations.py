@@ -63,20 +63,20 @@ class TestEnrichCiaaAllegations:
 
     def test_skips_cases_with_populated_key_allegations(self):
         """
-        Idempotency: cases with non-empty key_allegations are skipped.
+        Idempotency: cases with non-empty key_allegations are skipped
+        and counted as 'Already populated' in the summary.
         """
         self._create_case(
+            case_id="populated-test",
             key_allegations=["Already populated allegation"],
         )
-        cmd = Command()
 
-        with patch.object(cmd, "_get_ciaa_cases") as mock_get_cases:
-            mock_get_cases.return_value = []
-            out = StringIO()
-            call_command(cmd, "--dry-run", stdout=out)
+        out = StringIO()
+        call_command("enrich_ciaa_allegations", "--dry-run", stdout=out)
 
         output = out.getvalue()
-        assert "Found 0 CIAA draft cases" in output
+        assert "Already populated:      1" in output
+        assert "Cases processed:        0" in output
 
     def test_processes_cases_with_empty_key_allegations(self):
         """
