@@ -12,9 +12,9 @@ from json import JSONDecodeError
 class EasyMDEWidget(Textarea):
     class Media:
         css = {
-            "all": ("https://cdn.jsdelivr.net/npm/easymde@2.18.0/dist/easymde.min.css",)
+            "all": ("https://cdn.jsdelivr.net/npm/easymde@2.19.0/dist/easymde.min.css",)
         }
-        js = ("https://cdn.jsdelivr.net/npm/easymde@2.18.0/dist/easymde.min.js",)
+        js = ("https://cdn.jsdelivr.net/npm/easymde@2.19.0/dist/easymde.min.js",)
 
     def __init__(self, attrs=None):
         default_attrs = {
@@ -28,12 +28,12 @@ class EasyMDEWidget(Textarea):
 
     def render(self, name, value, attrs=None, renderer=None):
         textarea_html = super().render(name, value, attrs, renderer)
-        merged_attrs = {**(self.attrs or {}), **(attrs or {})}
-        widget_id = merged_attrs.get("id", f"id_{name}")
+        final_attrs = self.build_attrs(self.attrs, attrs)
+        widget_id = final_attrs.get("id", f"id_{name}")
         init_script = f"""
 <script>
 (function() {{
-    var el = document.getElementById("{json.dumps(widget_id)[1:-1]}");
+    var el = document.getElementById({json.dumps(widget_id)});
     if (el && !el._easymde_initialized) {{
         el._easymde_initialized = true;
         new EasyMDE({{
