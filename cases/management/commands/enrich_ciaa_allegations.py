@@ -6,6 +6,9 @@ Phase 1d of CIAA FY 080/081 Case Enrichment pipeline.
 Populates ``Case.key_allegations`` with 2-5 structured allegation statements
 in Nepali extracted from CIAA press release text.
 
+Processes all DRAFT cases with empty ``key_allegations``, regardless of
+court case naming conventions.
+
 Idempotent: skips cases with non-empty ``key_allegations``.
 
 Usage::
@@ -216,7 +219,7 @@ class Command(BaseCommand):
     def _get_ciaa_cases(
         self, case_id: Optional[str] = None, limit: Optional[int] = None
     ) -> list[Case]:
-        """Return CIAA Special Court draft cases that are candidates for enrichment."""
+        """Return DRAFT cases with empty key_allegations that are candidates for enrichment."""
         all_cases = []
         queryset = Case.objects.filter(state="DRAFT")
 
@@ -224,13 +227,6 @@ class Command(BaseCommand):
             queryset = queryset.filter(case_id=case_id)
 
         for case in queryset.order_by("case_id"):
-            if not case.court_cases:
-                continue
-            if not any(
-                isinstance(ref, str) and ref.startswith("special:")
-                for ref in case.court_cases
-            ):
-                continue
             if case.key_allegations:
                 self.stats["cases_already_populated"] += 1
                 continue
@@ -303,8 +299,9 @@ class Command(BaseCommand):
         Strategy:
         1. Look for DocumentSource records linked via evidence with press release content
            in the description field (populated by Phase 1b).
-        2. If description is empty, try downloading the file from NGM store URLs
-           and extracting text via likhit/markitdown.
+        2. If description is insufficient, try downloading the file from NGM store URLs
+           or direct CIAA website URLs (ciaa.gov.np) and extracting text via
+           likhit/markitdown.
         """
         if not case.evidence:
             logger.debug("  No evidence entries on case")

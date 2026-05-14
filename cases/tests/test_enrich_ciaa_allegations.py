@@ -107,10 +107,11 @@ class TestEnrichCiaaAllegations:
 
     # ── 2. CIAA case filtering ──────────────────────────────────────────
 
-    def test_filters_ciaa_cases_by_special_prefix(self):
+    def test_includes_draft_case_without_special_prefix(self):
         """
-        Only cases with a court_cases entry starting with 'special:' are
-        returned by _get_ciaa_cases.
+        DRAFT cases without 'special:' in court_cases are included.
+        No strict court_cases filtering — all DRAFT cases with empty
+        key_allegations are candidates.
         """
         self._create_case(
             case_id="ciaa-001",
@@ -119,8 +120,14 @@ class TestEnrichCiaaAllegations:
         )
 
         self._create_case(
-            case_id="non-ciaa-001",
+            case_id="non-special-001",
             court_cases=["district:789"],
+            key_allegations=[],
+        )
+
+        self._create_case(
+            case_id="no-court-001",
+            court_cases=[],
             key_allegations=[],
         )
 
@@ -137,7 +144,8 @@ class TestEnrichCiaaAllegations:
         cases = cmd._get_ciaa_cases()
         case_ids = [c.case_id for c in cases]
         assert "ciaa-001" in case_ids
-        assert "non-ciaa-001" not in case_ids
+        assert "non-special-001" in case_ids
+        assert "no-court-001" in case_ids
 
     def test_skips_non_draft_cases(self):
         """
@@ -288,6 +296,25 @@ class TestEnrichCiaaAllegations:
         )
         cmd = Command()
         assert cmd._is_press_release_source(source) is True
+
+    def test_ciaa_url_accepted_in_extraction_path(self):
+        """A source with a CIAA URL is accepted for extraction when description is short."""
+        source = DocumentSource.objects.create(
+            title="CIAA Press Release",
+            description="Short.",
+            url=["https://ciaa.gov.np/pressrelease/3173"],
+            source_type=SourceType.LEGAL_PROCEDURAL,
+        )
+        case = self._create_case(
+            evidence=[{"source_id": source.source_id, "description": "test"}],
+        )
+
+        cmd = Command()
+        with patch.object(cmd, "_convert_to_markdown", return_value="Extracted text. " * 50):
+            content = cmd._get_press_release_content(case)
+
+        assert content is not None
+        assert "Extracted text" in content
 
     # ── 5. Dry-run safety ───────────────────────────────────────────────
 
