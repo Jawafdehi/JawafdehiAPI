@@ -277,7 +277,7 @@ class TestPressReleaseEnrichment:
     def test_enriches_existing_pr_metadata(
         self, data_dir, ag_index_csv, pr_index_csv, draft_case_with_press_release
     ):
-        case, source = draft_case_with_press_release
+        _, source = draft_case_with_press_release
         assert source.publication_date is None
         assert source.title == "CIAA Press Release"
 

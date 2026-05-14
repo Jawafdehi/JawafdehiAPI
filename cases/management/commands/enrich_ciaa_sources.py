@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from django.conf import settings
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.db import connection, transaction
 from nepali.datetime import nepalidate
 
@@ -92,6 +92,8 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         dry_run = options["dry_run"]
         limit = options.get("limit")
+        if limit is not None and (not isinstance(limit, int) or limit <= 0):
+            raise CommandError("--limit must be a positive integer")
         case_id = options.get("case_id")
         data_dir = Path(options["data_dir"])
         skip_pr = options["skip_press_releases"]
@@ -101,7 +103,7 @@ class Command(BaseCommand):
             self.style.WARNING(f"{prefix}Starting CIAA source enrichment...")
         )
 
-        if not self._load_data_indices(data_dir):
+        if not self._load_data_indices(data_dir, skip_pr):
             self.stdout.write(
                 self.style.ERROR("Failed to load data indices. Aborting.")
             )
@@ -119,21 +121,25 @@ class Command(BaseCommand):
 
         self._print_summary(dry_run)
 
-    def _load_data_indices(self, data_dir: Path) -> bool:
+    def _load_data_indices(self, data_dir: Path, skip_pr: bool = False) -> bool:
         ag_path = data_dir / "ag_index.csv"
-        pr_path = data_dir / "ciaa-press-releases.csv"
 
         if not ag_path.exists():
             self.stdout.write(self.style.ERROR(f"AG index not found: {ag_path}"))
             return False
 
+        self._load_ag_index(ag_path)
+
+        if skip_pr:
+            return True
+
+        pr_path = data_dir / "ciaa-press-releases.csv"
         if not pr_path.exists():
             self.stdout.write(
                 self.style.ERROR(f"Press release index not found: {pr_path}")
             )
             return False
 
-        self._load_ag_index(ag_path)
         self._load_press_release_index(pr_path)
         return True
 
@@ -302,6 +308,13 @@ class Command(BaseCommand):
         defendants = self._get_defendant_names(case)
         existing_sources = self._get_existing_sources_for_case(case)
 
+        existing_urls: set[str] = set()
+        for source in existing_sources.values():
+            if isinstance(source.url, list):
+                for url in source.url:
+                    if url:
+                        existing_urls.add(url)
+
         for source_id, source in existing_sources.items():
             if not isinstance(source.url, list):
                 continue
@@ -324,7 +337,7 @@ class Command(BaseCommand):
 
         if defendants:
             for source_url, pr_data in self.press_release_index.items():
-                if self._url_already_in_evidence(case, source_url):
+                if source_url in existing_urls:
                     continue
 
                 pr_title = pr_data.get("title", "")
