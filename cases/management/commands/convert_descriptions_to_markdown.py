@@ -136,9 +136,7 @@ class Command(BaseCommand):
                     continue
                 if dry_run:
                     logger.info(
-                        _format_diff(
-                            FIELD_LABELS[field], case.id, original, converted
-                        )
+                        _format_diff(FIELD_LABELS[field], case.id, original, converted)
                     )
                 else:
                     setattr(case, field, converted)
