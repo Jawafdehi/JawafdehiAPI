@@ -261,9 +261,7 @@ class Command(BaseCommand):
 
         if dry_run and not llm_api_key:
             self.stdout.write(
-                self.style.WARNING(
-                    "  [DRY RUN] No API key — skipping LLM extraction"
-                )
+                self.style.WARNING("  [DRY RUN] No API key — skipping LLM extraction")
             )
             return
 
@@ -525,7 +523,9 @@ class Command(BaseCommand):
             logger.debug("  JSON string: %s", json_str[:500])
             return None
 
-        if isinstance(allegations, dict) and isinstance(allegations.get("allegations"), list):
+        if isinstance(allegations, dict) and isinstance(
+            allegations.get("allegations"), list
+        ):
             allegations = allegations["allegations"]
         if not isinstance(allegations, list):
             logger.warning("  LLM returned non-list: %s", type(allegations).__name__)

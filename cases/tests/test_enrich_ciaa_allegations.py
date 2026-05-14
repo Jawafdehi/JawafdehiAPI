@@ -310,7 +310,9 @@ class TestEnrichCiaaAllegations:
         )
 
         cmd = Command()
-        with patch.object(cmd, "_convert_to_markdown", return_value="Extracted text. " * 50):
+        with patch.object(
+            cmd, "_convert_to_markdown", return_value="Extracted text. " * 50
+        ):
             content = cmd._get_press_release_content(case)
 
         assert content is not None
