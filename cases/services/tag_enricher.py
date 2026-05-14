@@ -3,8 +3,7 @@
 import logging
 import re
 
-from django.conf import settings
-from cases.models import Case, DocumentSource, DocumentSourceUpload
+from cases.models import Case, DocumentSource, DocumentSourceUpload, SourceType
 
 logger = logging.getLogger(__name__)
 
@@ -756,9 +755,15 @@ def _collect_evidence_text(case: Case) -> str:
     2. DocumentSourceUpload file content (converted via MarkItDown)
     3. DocumentSource title + description (metadata)
     4. Evidence entry description
+
+    Filters to high-value source types (press releases, court orders) that
+    contain the richest information for CIAA cases.
     """
+    HIGH_VALUE_SOURCE_TYPES = (SourceType.LEGAL_PROCEDURAL, SourceType.LEGAL_COURT_ORDER)
+
     parts = []
     if not case.evidence:
+        logger.info(f"  No evidence entries found")
         return ""
 
     source_ids = []
@@ -772,25 +777,41 @@ def _collect_evidence_text(case: Case) -> str:
                 source_ids.append(sid)
 
     if not source_ids:
+        logger.info(f"  No source IDs in evidence entries")
         return " ".join(parts)
 
     try:
-        sources = DocumentSource.objects.filter(source_id__in=source_ids)
+        all_sources = DocumentSource.objects.filter(source_id__in=source_ids)
+        high_value = all_sources.filter(source_type__in=HIGH_VALUE_SOURCE_TYPES)
+        other = all_sources.exclude(source_type__in=HIGH_VALUE_SOURCE_TYPES)
     except Exception as e:
-        logger.warning(f"Failed to fetch DocumentSource records for {case.case_id}: {e}")
+        logger.warning(f"  Failed to fetch DocumentSource records: {e}")
         return " ".join(parts)
 
+    all_count = len(source_ids)
+    hv_count = high_value.count()
+    logger.info(
+        f"  Found {hv_count}/{all_count} high-value sources (press releases, court orders)"
+    )
+
+    sources = list(high_value) + list(other)
+    source_count = 0
     for src in sources:
         file_text = _convert_source_file(src)
         if file_text:
             parts.append(file_text)
+            source_count += 1
         else:
             if src.title:
                 parts.append(src.title)
             if src.description:
                 parts.append(src.description)
 
-    return " ".join(parts)
+    result = " ".join(parts)
+    logger.info(
+        f"  Extracted {len(result)} chars from {source_count} source documents"
+    )
+    return result
 
 
 def _convert_source_file(src: DocumentSource) -> str:
@@ -1034,7 +1055,10 @@ class TagEnricher:
 
     def enrich_case(self, case: Case, force: bool = False) -> dict:
         """Enrich a single case with tags. Returns dict with status, tags, and tier."""
+        logger.info(f"Processing {case.case_id}...")
+
         if case.tags and len(case.tags) > 0 and not force:
+            logger.info(f"  Already tagged, skipping")
             return {
                 "status": "skipped",
                 "tags": case.tags,
@@ -1046,28 +1070,36 @@ class TagEnricher:
         has_evidence = bool(evidence_text.strip())
 
         if self.use_llm and has_evidence:
+            logger.info(f"  Attempting source_llm classification...")
             try:
                 llm_tags = self._classify_with_llm_from_sources(case, evidence_text)
                 if llm_tags and len(llm_tags) >= 3:
                     all_tags = list(dict.fromkeys(llm_tags))
                     all_tags = validate_tags(all_tags)
+                    logger.info(f"  + source_llm succeeded: {len(all_tags)} tags")
+                    logger.info(f"+ Enriched {case.case_id} (source_llm): {all_tags}")
                     return {"status": "enriched", "tags": all_tags, "tier": "source_llm", "reason": ""}
+                else:
+                    logger.warning(
+                        f"  - source_llm returned insufficient tags ({len(llm_tags)}), falling back"
+                    )
             except Exception as e:
-                logger.warning(
-                    f"Source-based LLM classification failed for {case.case_id}: {e}"
-                )
+                logger.warning(f"  - source_llm failed: {str(e)[:120]}")
 
         tags = classify_case_rules(case)
 
         if self.use_llm and len(tags) < 5:
+            logger.info(f"  Attempting metadata_llm classification...")
             try:
                 llm_tags = self._classify_with_llm(case)
                 if llm_tags:
                     all_tags = list(dict.fromkeys(tags + llm_tags))
+                    logger.info(f"  + metadata_llm succeeded: {len(all_tags)} tags")
                 else:
                     all_tags = tags
+                    logger.info(f"  - metadata_llm returned no tags, using rule-based")
             except Exception as e:
-                logger.warning(f"LLM classification failed for {case.case_id}: {e}")
+                logger.warning(f"  - metadata_llm failed: {str(e)[:120]}")
                 all_tags = tags
         else:
             all_tags = tags
@@ -1078,6 +1110,7 @@ class TagEnricher:
             all_tags = ["CIAA", "Corruption", "Special Court"]
 
         tier = "rule_based" if not has_evidence else "metadata_llm"
+        logger.info(f"+ Enriched {case.case_id} ({tier}): {all_tags}")
         return {"status": "enriched", "tags": all_tags, "tier": tier, "reason": ""}
 
     def _classify_with_llm(self, case: Case) -> list[str]:
