@@ -3,7 +3,8 @@
 import logging
 import re
 
-from cases.models import Case, DocumentSource
+from django.conf import settings
+from cases.models import Case, DocumentSource, DocumentSourceUpload
 
 logger = logging.getLogger(__name__)
 
@@ -748,33 +749,85 @@ def _collect_case_text(case: Case) -> str:
 
 
 def _collect_evidence_text(case: Case) -> str:
-    """Build a text blob from evidence entries and linked DocumentSource records."""
+    """Build a text blob from evidence entries, using actual file content when available.
+
+    Priority:
+    1. DocumentSource uploaded_file content (converted via MarkItDown)
+    2. DocumentSourceUpload file content (converted via MarkItDown)
+    3. DocumentSource title + description (metadata)
+    4. Evidence entry description
+    """
     parts = []
-    if case.evidence:
-        source_ids = []
-        for entry in case.evidence:
-            if isinstance(entry, dict):
-                desc = entry.get("description", "")
-                if desc:
-                    parts.append(desc)
-                sid = entry.get("source_id", "")
-                if sid:
-                    source_ids.append(sid)
+    if not case.evidence:
+        return ""
 
-        if source_ids:
-            try:
-                sources = DocumentSource.objects.filter(source_id__in=source_ids)
-                for src in sources:
-                    if src.title:
-                        parts.append(src.title)
-                    if src.description:
-                        parts.append(src.description)
-            except Exception as e:
-                logger.warning(
-                    f"Failed to fetch DocumentSource records for {case.case_id}: {e}"
-                )
+    source_ids = []
+    for entry in case.evidence:
+        if isinstance(entry, dict):
+            desc = entry.get("description", "")
+            if desc:
+                parts.append(desc)
+            sid = entry.get("source_id", "")
+            if sid:
+                source_ids.append(sid)
 
-    return " ".join(parts).lower()
+    if not source_ids:
+        return " ".join(parts)
+
+    try:
+        sources = DocumentSource.objects.filter(source_id__in=source_ids)
+    except Exception as e:
+        logger.warning(f"Failed to fetch DocumentSource records for {case.case_id}: {e}")
+        return " ".join(parts)
+
+    for src in sources:
+        file_text = _convert_source_file(src)
+        if file_text:
+            parts.append(file_text)
+        else:
+            if src.title:
+                parts.append(src.title)
+            if src.description:
+                parts.append(src.description)
+
+    return " ".join(parts)
+
+
+def _convert_source_file(src: DocumentSource) -> str:
+    """Convert a DocumentSource's uploaded file(s) to text using MarkItDown.
+
+    Returns file content as markdown text, or empty string if conversion fails.
+    """
+    try:
+        from markitdown import MarkItDown
+    except ImportError:
+        logger.warning("markitdown not installed, skipping file conversion")
+        return ""
+
+    md_converter = MarkItDown()
+
+    files_to_try = []
+    if src.uploaded_file and hasattr(src.uploaded_file, "path"):
+        files_to_try.append(src.uploaded_file.path)
+
+    try:
+        uploads = DocumentSourceUpload.objects.filter(source_id=src.id)
+        for upload in uploads:
+            if upload.file and hasattr(upload.file, "path"):
+                files_to_try.append(upload.file.path)
+    except Exception:
+        pass
+
+    for filepath in files_to_try:
+        try:
+            result = md_converter.convert(filepath)
+            if result and result.text_content:
+                return result.text_content[:16000]
+        except Exception as e:
+            logger.debug(f"MarkItDown conversion failed for {filepath}: {e}")
+            continue
+
+    return ""
 
 
 def _match_keywords(text: str, keyword_map: dict[str, list[str]]) -> list[str]:
