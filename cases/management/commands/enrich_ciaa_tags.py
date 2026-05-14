@@ -106,4 +106,9 @@ class Command(BaseCommand):
             logger.info(
                 f"Failed:        {stats['failed']} ({stats['failed']/total*100:.1f}%)"
             )
+            logger.info("")
+            logger.info("By tier:")
+            logger.info(f"  Source LLM:  {stats.get('source_llm', 0)}")
+            logger.info(f"  Metadata LLM: {stats.get('metadata_llm', 0)}")
+            logger.info(f"  Rule-based:  {stats.get('rule_based', 0)}")
         logger.info("=" * 60)
