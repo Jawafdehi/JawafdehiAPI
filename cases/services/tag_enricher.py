@@ -342,7 +342,6 @@ CORRUPTION_TYPE_KEYWORDS = {
         "bribery",
         "घुस",
         "रिश्वत",
-        "kickback",
         "pay off",
         "illegal payment",
         "गैरकानूनी भुक्तानी",
@@ -420,14 +419,12 @@ CORRUPTION_TYPE_KEYWORDS = {
     "Revenue Leakage": [
         "revenue leak",
         "राजस्व चुहावट",
-        "tax evasion",
         "tax avoidance",
         "customs fraud",
         "under invoicing",
         "smuggling",
         "तस्करी",
         "duty evasion",
-        "tax fraud",
     ],
     "Nepotism": [
         "nepotism",
