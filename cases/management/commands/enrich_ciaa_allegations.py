@@ -177,6 +177,12 @@ class Command(BaseCommand):
         if verbose:
             logger.setLevel(logging.DEBUG)
 
+        if not logger.handlers:
+            handler = logging.StreamHandler(self.stdout)
+            handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+            logger.addHandler(handler)
+            logger.propagate = False
+
         if dry_run:
             self.stdout.write(self.style.WARNING("[DRY RUN] No changes will be saved."))
 
@@ -273,7 +279,12 @@ class Command(BaseCommand):
                 llm_base_url=llm_base_url,
                 llm_api_key=llm_api_key,
             )
-        except (requests.RequestException, CommandError, ValueError) as exc:
+        except (
+            requests.RequestException,
+            CommandError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
             self.stats["cases_llm_error"] += 1
             self.stdout.write(self.style.ERROR(f"  LLM extraction failed: {exc}"))
             return
