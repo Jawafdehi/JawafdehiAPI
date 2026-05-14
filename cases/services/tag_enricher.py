@@ -757,11 +757,14 @@ def _collect_evidence_text(case: Case) -> str:
     Filters to high-value source types (press releases, court orders) that
     contain the richest information for CIAA cases.
     """
-    HIGH_VALUE_SOURCE_TYPES = (SourceType.LEGAL_PROCEDURAL, SourceType.LEGAL_COURT_ORDER)
+    HIGH_VALUE_SOURCE_TYPES = (
+        SourceType.LEGAL_PROCEDURAL,
+        SourceType.LEGAL_COURT_ORDER,
+    )
 
     parts = []
     if not case.evidence:
-        logger.info(f"  No evidence entries found")
+        logger.info("  No evidence entries found")
         return ""
 
     source_ids = []
@@ -775,7 +778,7 @@ def _collect_evidence_text(case: Case) -> str:
                 source_ids.append(sid)
 
     if not source_ids:
-        logger.info(f"  No source IDs in evidence entries")
+        logger.info("  No source IDs in evidence entries")
         return " ".join(parts)
 
     try:
@@ -806,9 +809,7 @@ def _collect_evidence_text(case: Case) -> str:
                 parts.append(src.description)
 
     result = " ".join(parts)
-    logger.info(
-        f"  Extracted {len(result)} chars from {source_count} source documents"
-    )
+    logger.info(f"  Extracted {len(result)} chars from {source_count} source documents")
     return result
 
 
@@ -954,15 +955,15 @@ def build_llm_classification_prompt(case: Case) -> str:
     return "\n".join(lines)
 
 
-def build_llm_classification_prompt_from_sources(
-    case: Case, evidence_text: str
-) -> str:
+def build_llm_classification_prompt_from_sources(case: Case, evidence_text: str) -> str:
     """Build a prompt for LLM-based tag classification using source documents."""
     lines = []
     lines.append(
         "Classify the following Nepal corruption case with tags from the controlled vocabulary below."
     )
-    lines.append("Use the source documents (press releases, court orders) as the primary evidence.")
+    lines.append(
+        "Use the source documents (press releases, court orders) as the primary evidence."
+    )
     lines.append("")
     lines.append(f"Case Title: {case.title}")
     lines.append("")
@@ -1056,7 +1057,7 @@ class TagEnricher:
         logger.info(f"Processing {case.case_id}...")
 
         if case.tags and len(case.tags) > 0 and not force:
-            logger.info(f"  Already tagged, skipping")
+            logger.info("  Already tagged, skipping")
             return {
                 "status": "skipped",
                 "tags": case.tags,
@@ -1068,7 +1069,7 @@ class TagEnricher:
         has_evidence = bool(evidence_text.strip())
 
         if self.use_llm and has_evidence:
-            logger.info(f"  Attempting source_llm classification...")
+            logger.info("  Attempting source_llm classification...")
             try:
                 llm_tags = self._classify_with_llm_from_sources(case, evidence_text)
                 if llm_tags and len(llm_tags) >= 3:
@@ -1076,7 +1077,12 @@ class TagEnricher:
                     all_tags = validate_tags(all_tags)
                     logger.info(f"  + source_llm succeeded: {len(all_tags)} tags")
                     logger.info(f"+ Enriched {case.case_id} (source_llm): {all_tags}")
-                    return {"status": "enriched", "tags": all_tags, "tier": "source_llm", "reason": ""}
+                    return {
+                        "status": "enriched",
+                        "tags": all_tags,
+                        "tier": "source_llm",
+                        "reason": "",
+                    }
                 else:
                     logger.warning(
                         f"  - source_llm returned insufficient tags ({len(llm_tags)}), falling back"
@@ -1089,7 +1095,7 @@ class TagEnricher:
         llm_invoked = False
         llm_contributed = False
         if self.use_llm and len(tags) < 5:
-            logger.info(f"  Attempting metadata_llm classification...")
+            logger.info("  Attempting metadata_llm classification...")
             llm_invoked = True
             try:
                 llm_tags = self._classify_with_llm(case)
@@ -1100,7 +1106,7 @@ class TagEnricher:
                     logger.info(f"  + metadata_llm succeeded: {len(all_tags)} tags")
                 else:
                     all_tags = tags
-                    logger.info(f"  - metadata_llm returned no tags, using rule-based")
+                    logger.info("  - metadata_llm returned no tags, using rule-based")
             except Exception as e:
                 logger.warning(f"  - metadata_llm failed: {str(e)[:120]}")
                 all_tags = tags
@@ -1147,8 +1153,15 @@ class TagEnricher:
 
     def enrich_cases(self, cases, force: bool = False, dry_run: bool = False) -> dict:
         """Enrich multiple cases. Returns stats dict."""
-        stats = {"total": 0, "enriched": 0, "skipped": 0, "failed": 0,
-                 "source_llm": 0, "metadata_llm": 0, "rule_based": 0}
+        stats = {
+            "total": 0,
+            "enriched": 0,
+            "skipped": 0,
+            "failed": 0,
+            "source_llm": 0,
+            "metadata_llm": 0,
+            "rule_based": 0,
+        }
         for case in cases:
             stats["total"] += 1
             try:
@@ -1164,9 +1177,7 @@ class TagEnricher:
                     if not dry_run:
                         case.tags = result["tags"]
                         case.save(update_fields=["tags", "updated_at"])
-                    logger.info(
-                        f"Enriched {case.case_id} ({tier}): {result['tags']}"
-                    )
+                    logger.info(f"Enriched {case.case_id} ({tier}): {result['tags']}")
             except Exception as e:
                 stats["failed"] += 1
                 logger.error(f"Failed to enrich {case.case_id}: {e}")
