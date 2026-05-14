@@ -115,6 +115,7 @@ class Command(BaseCommand):
     )
 
     def add_arguments(self, parser):
+        """Register CLI flags for dry-run, case selection, LLM config, and verbosity."""
         parser.add_argument(
             "--dry-run",
             action="store_true",
@@ -168,6 +169,7 @@ class Command(BaseCommand):
         }
 
     def handle(self, *args, **options):
+        """Orchestrate the enrichment pipeline: discover cases, extract press release content, call LLM, persist results."""
         dry_run = options["dry_run"]
         case_id = options.get("case_id")
         limit = options.get("limit")
@@ -210,6 +212,7 @@ class Command(BaseCommand):
         self._print_summary(dry_run)
 
     def _resolve_api_key(self, cli_key: Optional[str]) -> Optional[str]:
+        """Resolve LLM API key from CLI argument or environment variables."""
         if cli_key:
             return cli_key
         return os.environ.get("JAWAFDEHI_LLM_API_KEY") or os.environ.get(
@@ -246,6 +249,7 @@ class Command(BaseCommand):
         llm_base_url: str,
         llm_api_key: Optional[str],
     ):
+        """Process a single case: acquire content, extract allegations via LLM, persist or dry-run."""
         self.stats["cases_processed"] += 1
         self.stdout.write(f"\n[{idx}/{total}] {case.case_id} — {case.title[:80]}")
 
@@ -565,6 +569,7 @@ class Command(BaseCommand):
         logger.info("  Saved %d allegations to %s", len(allegations), case.case_id)
 
     def _print_summary(self, dry_run: bool):
+        """Print final statistics table summarizing the enrichment run results."""
         self.stdout.write("\n" + "=" * 60)
         self.stdout.write(
             self.style.SUCCESS(
