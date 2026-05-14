@@ -1,7 +1,6 @@
 """Enrich CIAA draft cases with tags via rule-based + LLM classification."""
 
 import logging
-import sys
 
 from django.core.management.base import BaseCommand
 from django.db.models import Q
@@ -9,12 +8,6 @@ from django.db.models import Q
 from cases.models import Case, CaseType, CaseState
 from cases.services.tag_enricher import TagEnricher
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(levelname)s: %(message)s",
-    stream=sys.stdout,
-    force=True,
-)
 logger = logging.getLogger(__name__)
 
 
@@ -70,7 +63,7 @@ class Command(BaseCommand):
             if not force:
                 cases = cases.filter(Q(tags__isnull=True) | Q(tags=[]))
 
-        if limit:
+        if limit is not None:
             cases = cases[:limit]
 
         total = cases.count()
