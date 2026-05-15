@@ -27,7 +27,7 @@ class ChatServiceAccountAuthentication(TokenAuthentication):
         if user.username != SERVICE_ACCOUNT_USERNAME:
             return auth_result
 
-        owui_user_id = request.META.get(JAWAFDEHI_USER_ID_HEADER)
+        owui_user_id = (request.META.get(JAWAFDEHI_USER_ID_HEADER) or "").strip()
         if not owui_user_id:
             return auth_result
 
@@ -35,6 +35,10 @@ class ChatServiceAccountAuthentication(TokenAuthentication):
 
         try:
             identity = ChatUserIdentity.objects.get(owui_user_id=owui_user_id)
-            return (identity.user, token)
         except ChatUserIdentity.DoesNotExist:
-            return auth_result
+            return None
+
+        if not identity.user.is_active:
+            return None
+
+        return (identity.user, token)

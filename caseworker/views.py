@@ -8,6 +8,7 @@ from rest_framework.authentication import TokenAuthentication
 from rest_framework.views import APIView
 from django.shortcuts import get_object_or_404
 
+from config.auth import SERVICE_ACCOUNT_USERNAME, JAWAFDEHI_USER_ID_HEADER
 from .models import MCPServer, Skill, Summary, Draft, DraftVersion, LLMProvider
 from .serializers import (
     CurrentUserSerializer,
@@ -216,7 +217,8 @@ PUBLIC_TOOLS = [
     "convert_to_markdown",
 ]
 
-CASEWORKER_TOOLS = PUBLIC_TOOLS + [
+CASEWORKER_TOOLS = [
+    *PUBLIC_TOOLS,
     "create_jawafdehi_case",
     "patch_jawafdehi_case",
     "submit_nes_change",
@@ -232,17 +234,13 @@ class ResolveIdentityView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        token_user = request.user
-        if request.auth:
-            token_user = request.auth.user
-
-        if token_user.username != "chat-jawafdehi-org":
+        if request.user.username != SERVICE_ACCOUNT_USERNAME:
             return Response(
                 {"error": "Service account token required"},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        owui_user_id = request.META.get("HTTP_X_JAWAFDEHI_USER_ID")
+        owui_user_id = (request.META.get(JAWAFDEHI_USER_ID_HEADER) or "").strip()
         if not owui_user_id:
             return Response(
                 {"error": "X-Jawafdehi-User-Id header is required"},
@@ -260,6 +258,12 @@ class ResolveIdentityView(APIView):
             return Response(
                 {"error": f"Unknown user: {owui_user_id}"},
                 status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if not real_user.is_active:
+            return Response(
+                {"error": "User account is inactive"},
+                status=status.HTTP_403_FORBIDDEN,
             )
 
         is_caseworker = (

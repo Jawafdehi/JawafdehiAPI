@@ -25,6 +25,9 @@ class Command(BaseCommand):
         else:
             self.stdout.write(f"Service account user already exists: {user.username}")
 
+        user.set_unusable_password()
+        user.save(update_fields=["password"])
+
         contributor_group, _ = Group.objects.get_or_create(name="Contributor")
         user.groups.add(contributor_group)
         self.stdout.write("Ensured user is in Contributor group")

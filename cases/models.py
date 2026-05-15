@@ -1056,11 +1056,22 @@ class Feedback(models.Model):
 
 
 class ChatUserIdentity(models.Model):
-    owui_user_id = models.CharField(max_length=255, unique=True)
-    user = models.OneToOneField(
-        User, on_delete=models.CASCADE, related_name="chat_identity"
+    owui_user_id = models.CharField(
+        max_length=255,
+        unique=True,
+        db_index=True,
+        help_text="Chat system user identifier (e.g., OpenWebUI user ID)",
     )
-    created_at = models.DateTimeField(auto_now_add=True)
+    user = models.OneToOneField(
+        User,
+        on_delete=models.CASCADE,
+        related_name="chat_identity",
+        help_text="Django user associated with this chat identity",
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        help_text="When this identity mapping was created",
+    )
 
     class Meta:
         verbose_name = "Chat User Identity"
