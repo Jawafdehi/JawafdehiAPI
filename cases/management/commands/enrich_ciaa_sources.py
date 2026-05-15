@@ -271,7 +271,7 @@ class Command(BaseCommand):
                     description=f"AG Charge Sheet for case {case_number} from {ag_entry.get('court_office', '')}"[
                         :500
                     ],
-                    source_type=SourceType.LEGAL_PROCEDURAL,
+                    source_type=SourceType.OFFICIAL_GOVERNMENT,
                     url=[pdf_url],
                     publication_date=pub_date,
                 )

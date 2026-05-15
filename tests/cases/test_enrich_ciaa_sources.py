@@ -182,7 +182,7 @@ class TestAGChargeSheet:
         assert len(case.evidence) == 1
         source_id = case.evidence[0]["source_id"]
         source = DocumentSource.objects.get(source_id=source_id)
-        assert source.source_type == SourceType.LEGAL_PROCEDURAL
+        assert source.source_type == SourceType.OFFICIAL_GOVERNMENT
         assert "https://ag.gov.np/storage/abhiyogPatra/test.pdf" in source.url
         assert "AG Charge Sheet" in source.title
 
