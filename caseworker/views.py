@@ -4,11 +4,15 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.authentication import TokenAuthentication
 from rest_framework.views import APIView
 from django.shortcuts import get_object_or_404
 
-from config.auth import SERVICE_ACCOUNT_USERNAME, JAWAFDEHI_USER_ID_HEADER
+
+from config.auth import (
+    SERVICE_ACCOUNT_USERNAME,
+    JAWAFDEHI_USER_ID_HEADER,
+    ChatServiceAccountAuthentication,
+)
 from .models import MCPServer, Skill, Summary, Draft, DraftVersion, LLMProvider
 from .serializers import (
     CurrentUserSerializer,
@@ -203,38 +207,17 @@ class LLMProviderViewSet(viewsets.ModelViewSet):
         return Response({"connected": is_connected})
 
 
-PUBLIC_TOOLS = [
-    "search_jawafdehi_cases",
-    "get_jawafdehi_case",
-    "search_jawaf_entities",
-    "get_jawaf_entity",
-    "search_nes_entities",
-    "get_nes_entities",
-    "get_nes_tags",
-    "get_nes_entity_prefixes",
-    "get_nes_entity_prefix_schema",
-    "convert_date",
-    "convert_to_markdown",
-]
-
-CASEWORKER_TOOLS = [
-    *PUBLIC_TOOLS,
-    "create_jawafdehi_case",
-    "patch_jawafdehi_case",
-    "submit_nes_change",
-    "create_jawaf_entity",
-    "upload_document_source",
-    "ngm_query_judicial",
-    "ngm_extract_case_data",
-]
-
-
-class ResolveIdentityView(APIView):
-    authentication_classes = [TokenAuthentication]
-    permission_classes = [IsAuthenticated]
+class MeView(APIView):
+    authentication_classes = [ChatServiceAccountAuthentication]
 
     def get(self, request):
-        if request.user.username != SERVICE_ACCOUNT_USERNAME:
+        if not request.user.is_authenticated:
+            return Response(
+                {"error": "Authentication required"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if not request.auth or request.auth.user.username != SERVICE_ACCOUNT_USERNAME:
             return Response(
                 {"error": "Service account token required"},
                 status=status.HTTP_403_FORBIDDEN,
@@ -266,20 +249,11 @@ class ResolveIdentityView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        is_caseworker = (
-            real_user.is_superuser
-            or real_user.groups.filter(
-                name__in=["Admin", "Moderator", "Contributor"]
-            ).exists()
-        )
-
-        role = "caseworker" if is_caseworker else "public"
-        tools = CASEWORKER_TOOLS if is_caseworker else PUBLIC_TOOLS
+        roles = list(real_user.groups.values_list("name", flat=True))
 
         return Response(
             {
-                "role": role,
-                "tools": tools,
+                "roles": roles,
                 "user_id": real_user.id,
                 "username": real_user.get_username(),
             }
