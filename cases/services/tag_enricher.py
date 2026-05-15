@@ -1,9 +1,11 @@
 """Service for rule-based and LLM-based tag classification of CIAA cases."""
 
+import ipaddress
 import json
 import logging
 import os
 import re
+import socket
 import tempfile
 import urllib.request
 from urllib.parse import urlparse
@@ -861,17 +863,48 @@ def _convert_source_file(src: DocumentSource) -> str:
     return ""
 
 
+_MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024
+_REQUEST_TIMEOUT = 30
+
+
+def _is_public_hostname(hostname: str) -> bool:
+    """Resolve hostname and reject private/link-local addresses."""
+    try:
+        infos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    except socket.gaierror:
+        return False
+    for info in infos:
+        addr = ipaddress.ip_address(info[4][0])
+        if addr.is_private or addr.is_link_local or addr.is_loopback:
+            return False
+        if isinstance(addr, ipaddress.IPv6Address):
+            if addr.is_multicast or addr.ipv4_mapped:
+                mapped = addr.ipv4_mapped
+                if mapped and (mapped.is_private or mapped.is_link_local or mapped.is_loopback):
+                    return False
+    return True
+
+
 def _convert_urls(src: DocumentSource) -> str:
-    """Download remote document URLs from src.url, convert via MarkItDown."""
+    """Download remote document URLs from src.url, convert via MarkItDown.
+
+    SSRF-safe: only http/https schemes, public hostnames, timeout + size limit.
+    """
     urls = src.url or []
     doc_urls = []
     for u in urls:
         if not isinstance(u, str):
             continue
         parsed = urlparse(u)
+        if parsed.scheme not in ("http", "https"):
+            continue
         ext = os.path.splitext(parsed.path.lower())[1]
-        if ext in _DOCUMENT_EXTENSIONS:
-            doc_urls.append(u)
+        if ext not in _DOCUMENT_EXTENSIONS:
+            continue
+        hostname = parsed.hostname
+        if not hostname or not _is_public_hostname(hostname):
+            continue
+        doc_urls.append(u)
 
     if not doc_urls:
         return ""
@@ -885,7 +918,19 @@ def _convert_urls(src: DocumentSource) -> str:
             tmp_path = tmp.name
             tmp.close()
 
-            urllib.request.urlretrieve(url, tmp_path)
+            req = urllib.request.Request(url, headers={"User-Agent": "JawafdehiAPI/1.0"})
+            with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
+                content_length = resp.headers.get("Content-Length")
+                if content_length and int(content_length) > _MAX_DOWNLOAD_BYTES:
+                    logger.debug(f"Skipping {url}: Content-Length {content_length} > {_MAX_DOWNLOAD_BYTES}")
+                    continue
+                data = resp.read(_MAX_DOWNLOAD_BYTES + 1)
+                if len(data) > _MAX_DOWNLOAD_BYTES:
+                    logger.debug(f"Skipping {url}: download exceeds {_MAX_DOWNLOAD_BYTES} bytes")
+                    continue
+                with open(tmp_path, "wb") as f:
+                    f.write(data)
+
             doc_result = _MD_CONVERTER.convert(tmp_path)
             if doc_result and doc_result.text_content:
                 parts.append(doc_result.text_content)
