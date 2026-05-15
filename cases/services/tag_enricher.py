@@ -812,7 +812,7 @@ def _collect_evidence_text(case: Case) -> str:
 try:
     from markitdown import MarkItDown
 
-    _MD_CONVERTER = MarkItDown(enable_plugins=True)
+    _MD_CONVERTER = MarkItDown(enable_plugins=False)
 except ImportError:
     _MD_CONVERTER = None
 
