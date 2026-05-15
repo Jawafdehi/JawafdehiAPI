@@ -909,14 +909,9 @@ def _match_keywords(text: str, keyword_map: dict[str, list[str]]) -> list[str]:
     for tag, keywords in keyword_map.items():
         for kw in keywords:
             if kw.isascii() and all(c.isascii() for c in kw):
-                if " " in kw:
-                    if re.search(r"\b" + re.escape(kw) + r"\b", text):
-                        matched.append(tag)
-                        break
-                else:
-                    if re.search(r"\b" + re.escape(kw) + r"\w*\b", text):
-                        matched.append(tag)
-                        break
+                if re.search(r"\b" + re.escape(kw) + r"\w*\b", text):
+                    matched.append(tag)
+                    break
             else:
                 if kw in text:
                     matched.append(tag)
