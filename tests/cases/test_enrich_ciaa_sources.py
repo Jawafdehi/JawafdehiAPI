@@ -329,7 +329,7 @@ class TestPressReleaseEnrichment:
     def test_skip_press_releases_flag(
         self, data_dir, ag_index_csv, pr_index_csv, draft_case_with_press_release
     ):
-        case, source = draft_case_with_press_release
+        _case, source = draft_case_with_press_release
 
         out = StringIO()
         call_command(
