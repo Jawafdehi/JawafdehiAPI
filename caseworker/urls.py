@@ -8,6 +8,7 @@ from .views import (
     SummaryViewSet,
     DraftViewSet,
     LLMProviderViewSet,
+    MeView,
 )
 
 router = SimpleRouter()
@@ -20,5 +21,6 @@ router.register(r"drafts", DraftViewSet, basename="cw-draft")
 router.register(r"llm-providers", LLMProviderViewSet, basename="cw-llm-provider")
 
 urlpatterns = [
+    path("me", MeView.as_view(), name="cw-me"),
     path("", include(router.urls)),
 ]

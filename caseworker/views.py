@@ -4,8 +4,15 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.views import APIView
 from django.shortcuts import get_object_or_404
 
+
+from config.auth import (
+    SERVICE_ACCOUNT_USERNAME,
+    JAWAFDEHI_USER_ID_HEADER,
+    ChatServiceAccountAuthentication,
+)
 from .models import MCPServer, Skill, Summary, Draft, DraftVersion, LLMProvider
 from .serializers import (
     CurrentUserSerializer,
@@ -198,3 +205,56 @@ class LLMProviderViewSet(viewsets.ModelViewSet):
         provider = self.get_object()
         is_connected = LLMService().test_connection(provider)
         return Response({"connected": is_connected})
+
+
+class MeView(APIView):
+    authentication_classes = [ChatServiceAccountAuthentication]
+
+    def get(self, request):
+        if not request.user.is_authenticated:
+            return Response(
+                {"error": "Authentication required"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if not request.auth or request.auth.user.username != SERVICE_ACCOUNT_USERNAME:
+            return Response(
+                {"error": "Service account token required"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        owui_user_id = (request.META.get(JAWAFDEHI_USER_ID_HEADER) or "").strip()
+        if not owui_user_id:
+            return Response(
+                {"error": "X-Jawafdehi-User-Id header is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from cases.models import ChatUserIdentity
+
+        try:
+            identity = ChatUserIdentity.objects.select_related("user").get(
+                owui_user_id=owui_user_id
+            )
+            real_user = identity.user
+        except ChatUserIdentity.DoesNotExist:
+            return Response(
+                {"error": f"Unknown user: {owui_user_id}"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if not real_user.is_active:
+            return Response(
+                {"error": "User account is inactive"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        roles = list(real_user.groups.values_list("name", flat=True))
+
+        return Response(
+            {
+                "roles": roles,
+                "user_id": real_user.id,
+                "username": real_user.get_username(),
+            }
+        )
