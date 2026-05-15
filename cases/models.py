@@ -1057,7 +1057,9 @@ class Feedback(models.Model):
 
 class ChatUserIdentity(models.Model):
     owui_user_id = models.CharField(max_length=255, unique=True)
-    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="chat_identity")
+    user = models.OneToOneField(
+        User, on_delete=models.CASCADE, related_name="chat_identity"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
