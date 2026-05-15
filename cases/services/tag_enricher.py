@@ -2,7 +2,11 @@
 
 import json
 import logging
+import os
 import re
+import tempfile
+import urllib.request
+from urllib.parse import urlparse
 
 from cases.models import Case, DocumentSource, DocumentSourceUpload, SourceType
 
@@ -808,18 +812,30 @@ def _collect_evidence_text(case: Case) -> str:
 try:
     from markitdown import MarkItDown
 
-    _MD_CONVERTER = MarkItDown(enable_plugins=False)
+    _MD_CONVERTER = MarkItDown(enable_plugins=True)
 except ImportError:
     _MD_CONVERTER = None
 
 
+_DOCUMENT_EXTENSIONS = frozenset({".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png"})
+
+
 def _convert_source_file(src: DocumentSource) -> str:
-    """Convert a DocumentSource's uploaded file(s) to text using MarkItDown.
+    """Convert a DocumentSource's files to text using MarkItDown.
+
+    Checks sources in order:
+    1. Remote URLs in src.url (download .pdf/.doc/.docx, convert, clean up)
+    2. Local uploaded_file on src
+    3. Local DocumentSourceUpload files
 
     Returns file content as markdown text, or empty string if conversion fails.
     """
     if _MD_CONVERTER is None:
         return ""
+
+    url_result = _convert_urls(src)
+    if url_result:
+        return url_result
 
     files_to_try = []
     if src.uploaded_file and hasattr(src.uploaded_file, "path"):
@@ -842,6 +858,48 @@ def _convert_source_file(src: DocumentSource) -> str:
             logger.debug(f"MarkItDown conversion failed for {filepath}: {e}")
             continue
 
+    return ""
+
+
+def _convert_urls(src: DocumentSource) -> str:
+    """Download remote document URLs from src.url, convert via MarkItDown."""
+    urls = src.url or []
+    doc_urls = []
+    for u in urls:
+        if not isinstance(u, str):
+            continue
+        parsed = urlparse(u)
+        ext = os.path.splitext(parsed.path.lower())[1]
+        if ext in _DOCUMENT_EXTENSIONS:
+            doc_urls.append(u)
+
+    if not doc_urls:
+        return ""
+
+    parts = []
+    for url in doc_urls:
+        tmp_path = None
+        try:
+            suffix = os.path.splitext(urlparse(url).path.lower())[1] or ".tmp"
+            tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+            tmp_path = tmp.name
+            tmp.close()
+
+            urllib.request.urlretrieve(url, tmp_path)
+            doc_result = _MD_CONVERTER.convert(tmp_path)
+            if doc_result and doc_result.text_content:
+                parts.append(doc_result.text_content)
+        except Exception as e:
+            logger.debug(f"URL download/conversion failed for {url}: {e}")
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+    if parts:
+        return " ".join(parts)[:16000]
     return ""
 
 
