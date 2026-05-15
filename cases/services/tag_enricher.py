@@ -880,7 +880,9 @@ def _is_public_hostname(hostname: str) -> bool:
         if isinstance(addr, ipaddress.IPv6Address):
             if addr.is_multicast or addr.ipv4_mapped:
                 mapped = addr.ipv4_mapped
-                if mapped and (mapped.is_private or mapped.is_link_local or mapped.is_loopback):
+                if mapped and (
+                    mapped.is_private or mapped.is_link_local or mapped.is_loopback
+                ):
                     return False
     return True
 
@@ -918,15 +920,21 @@ def _convert_urls(src: DocumentSource) -> str:
             tmp_path = tmp.name
             tmp.close()
 
-            req = urllib.request.Request(url, headers={"User-Agent": "JawafdehiAPI/1.0"})
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "JawafdehiAPI/1.0"}
+            )
             with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
                 content_length = resp.headers.get("Content-Length")
                 if content_length and int(content_length) > _MAX_DOWNLOAD_BYTES:
-                    logger.debug(f"Skipping {url}: Content-Length {content_length} > {_MAX_DOWNLOAD_BYTES}")
+                    logger.debug(
+                        f"Skipping {url}: Content-Length {content_length} > {_MAX_DOWNLOAD_BYTES}"
+                    )
                     continue
                 data = resp.read(_MAX_DOWNLOAD_BYTES + 1)
                 if len(data) > _MAX_DOWNLOAD_BYTES:
-                    logger.debug(f"Skipping {url}: download exceeds {_MAX_DOWNLOAD_BYTES} bytes")
+                    logger.debug(
+                        f"Skipping {url}: download exceeds {_MAX_DOWNLOAD_BYTES} bytes"
+                    )
                     continue
                 with open(tmp_path, "wb") as f:
                     f.write(data)
