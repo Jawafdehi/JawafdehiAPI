@@ -1062,10 +1062,10 @@ class ChatUserIdentity(models.Model):
         db_index=True,
         help_text="Chat system user identifier (e.g., OpenWebUI user ID)",
     )
-    user = models.ForeignKey(
+    user = models.OneToOneField(
         User,
         on_delete=models.CASCADE,
-        related_name="chat_identities",
+        related_name="chat_identity",
         help_text="Django user associated with this chat identity",
     )
     created_at = models.DateTimeField(
