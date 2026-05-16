@@ -689,14 +689,21 @@ The CIAA case number is: {case_dir.name}
 This case already exists as a draft in Jawafdehi. Your job is to find it and patch it
 with the details from the draft — do NOT create a new case.
 
-Step 1 — Find the existing draft case.
+Step 1 — Find the existing draft case by CIAA case number.
   Call search_jawafdehi_cases with the CIAA case number {case_dir.name} to locate
-  the existing Jawafdehi draft case. If the search does not return results, try
-  searching by the primary defendant name from {case_dir}/draft.md.
-  If the defendant-name search returns multiple results, cross-reference each
-  candidate against the CIAA case number, bigo amount, and other details in
-  the draft to identify the correct case. Do NOT patch a case you are not
-  certain about.
+  the existing Jawafdehi draft case.
+  If the CIAA case-number search returns a single result, proceed to Step 2.
+  If it returns no results, proceed to Step 1b.
+
+Step 1b — Defendant-name fallback (use only when CIAA-search returns nothing).
+  Search by the primary defendant name from {case_dir}/draft.md.
+  If the defendant-name search returns a single result: cross-reference that
+  candidate against the CIAA case number, bigo amount, and defendant list in
+  the draft. Proceed only if at least two of these fields match.
+  If the defendant-name search returns multiple results: STOP. Do NOT guess
+  which case to patch. Report in {case_dir}/logs/case-summary.md which
+  candidates were found and why none could be uniquely identified. Skip
+  this case entirely — do NOT proceed to patching.
 
 Step 2 — Record the case ID.
   Once found, record the returned numeric Jawafdehi case ID (1, 2, 3, 4, etc.)
