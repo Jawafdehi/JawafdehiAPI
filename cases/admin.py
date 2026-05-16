@@ -1383,8 +1383,8 @@ class CustomTokenAdmin(UserFullNameAdminMixin, BaseTokenAdmin):
 
 @admin.register(ChatUserIdentity)
 class ChatUserIdentityAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
-    list_display = ("owui_user_id", "user", "created_at")
-    search_fields = ("owui_user_id", "user__username", "user__email")
+    list_display = ("owui_user_id", "owui_user_name", "user", "created_at")
+    search_fields = ("owui_user_id", "owui_user_name", "user__username", "user__email")
     list_filter = ("created_at",)
     autocomplete_fields = ("user",)
     readonly_fields = ("created_at",)
@@ -1395,6 +1395,7 @@ class ChatUserIdentityAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
             {
                 "fields": (
                     "owui_user_id",
+                    "owui_user_name",
                     "user",
                     "created_at",
                 ),

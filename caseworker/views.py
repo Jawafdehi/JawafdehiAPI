@@ -1,6 +1,7 @@
 import re
 import logging
 from rest_framework import viewsets, status
+from rest_framework.authentication import TokenAuthentication
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -12,6 +13,7 @@ from config.auth import (
     SERVICE_ACCOUNT_USERNAME,
     JAWAFDEHI_USER_ID_HEADER,
     ChatServiceAccountAuthentication,
+    resolve_or_create_identity,
 )
 from .models import MCPServer, Skill, Summary, Draft, DraftVersion, LLMProvider
 from .serializers import (
@@ -208,7 +210,7 @@ class LLMProviderViewSet(viewsets.ModelViewSet):
 
 
 class MeView(APIView):
-    authentication_classes = [ChatServiceAccountAuthentication]
+    authentication_classes = [TokenAuthentication]
 
     def get(self, request):
         if not request.user.is_authenticated:
@@ -230,17 +232,24 @@ class MeView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        from cases.models import ChatUserIdentity
-
-        try:
-            identity = ChatUserIdentity.objects.select_related("user").get(
-                owui_user_id=owui_user_id
-            )
-            real_user = identity.user
-        except ChatUserIdentity.DoesNotExist:
+        identity = resolve_or_create_identity(owui_user_id, request)
+        if identity is None:
             return Response(
                 {"error": f"Unknown user: {owui_user_id}"},
                 status=status.HTTP_404_NOT_FOUND,
+            )
+
+        real_user = identity.user
+
+        if real_user is None:
+            return Response(
+                {
+                    "mapped": False,
+                    "owui_user_id": identity.owui_user_id,
+                    "owui_user_name": identity.owui_user_name,
+                    "message": "Chat identity is not yet mapped to a Jawafdehi user. An admin must link this identity in the admin panel.",
+                },
+                status=status.HTTP_200_OK,
             )
 
         if not real_user.is_active:
@@ -253,8 +262,11 @@ class MeView(APIView):
 
         return Response(
             {
+                "mapped": True,
                 "roles": roles,
                 "user_id": real_user.id,
                 "username": real_user.get_username(),
+                "owui_user_id": identity.owui_user_id,
+                "owui_user_name": identity.owui_user_name,
             }
         )

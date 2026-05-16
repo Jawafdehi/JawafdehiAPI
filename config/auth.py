@@ -2,6 +2,7 @@ from rest_framework.authentication import TokenAuthentication
 
 SERVICE_ACCOUNT_USERNAME = "chat-jawafdehi-org"
 JAWAFDEHI_USER_ID_HEADER = "HTTP_X_JAWAFDEHI_USER_ID"
+JAWAFDEHI_USER_NAME_HEADER = "HTTP_X_JAWAFDEHI_USER_NAME"
 
 
 class ChatServiceAccountAuthentication(TokenAuthentication):
@@ -10,11 +11,12 @@ class ChatServiceAccountAuthentication(TokenAuthentication):
     impersonation.
 
     When a request is authenticated with the chat-jawafdehi-org service account
-    token AND includes an X-Jawafdehi-User-Id header, resolves the header value
-    to a real Django user via ChatUserIdentity and returns that user.
+    token AND includes an X-Jawafdehi-User-Id header, get-or-creates a
+    ChatUserIdentity record and — if the identity is mapped to a real Django
+    user — returns that user for downstream permission checks.
 
-    Downstream permission checks (django-rules, DRF permissions) then operate
-    against the real user rather than the service account.
+    If the identity exists but is not yet mapped to a Django user, returns None
+    to deny authorization.
     """
 
     def authenticate(self, request):
@@ -31,14 +33,29 @@ class ChatServiceAccountAuthentication(TokenAuthentication):
         if not owui_user_id:
             return auth_result
 
-        from cases.models import ChatUserIdentity
-
-        try:
-            identity = ChatUserIdentity.objects.get(owui_user_id=owui_user_id)
-        except ChatUserIdentity.DoesNotExist:
+        identity = resolve_or_create_identity(owui_user_id, request)
+        if identity is None:
             return None
 
-        if not identity.user.is_active:
+        if identity.user is None or not identity.user.is_active:
             return None
 
         return (identity.user, token)
+
+
+def resolve_or_create_identity(owui_user_id, request):
+    """Get or create a ChatUserIdentity for the given OpenWebUI user ID."""
+    from cases.models import ChatUserIdentity
+
+    owui_user_name = (request.META.get(JAWAFDEHI_USER_NAME_HEADER) or "").strip()
+
+    identity, created = ChatUserIdentity.objects.get_or_create(
+        owui_user_id=owui_user_id,
+        defaults={"owui_user_name": owui_user_name},
+    )
+
+    if not created and owui_user_name:
+        identity.owui_user_name = owui_user_name
+        identity.save(update_fields=["owui_user_name"])
+
+    return identity

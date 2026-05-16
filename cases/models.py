@@ -1062,11 +1062,19 @@ class ChatUserIdentity(models.Model):
         db_index=True,
         help_text="Chat system user identifier (e.g., OpenWebUI user ID)",
     )
-    user = models.OneToOneField(
+    owui_user_name = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Display name from the chat system",
+    )
+    user = models.ForeignKey(
         User,
-        on_delete=models.CASCADE,
-        related_name="chat_identity",
-        help_text="Django user associated with this chat identity",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="chat_identities",
+        help_text="Django user associated with this chat identity (must be mapped for authorization)",
     )
     created_at = models.DateTimeField(
         auto_now_add=True,
@@ -1078,4 +1086,5 @@ class ChatUserIdentity(models.Model):
         verbose_name_plural = "Chat User Identities"
 
     def __str__(self):
-        return f"{self.owui_user_id} -> {self.user.get_username()}"
+        user_display = self.user.get_username() if self.user else "(unmapped)"
+        return f"{self.owui_user_id} -> {user_display}"
