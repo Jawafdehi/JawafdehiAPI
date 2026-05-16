@@ -864,7 +864,7 @@ def _convert_source_file(src: DocumentSource) -> str:
 
 
 _MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024
-_REQUEST_TIMEOUT = 30
+_REQUEST_TIMEOUT = 20
 
 
 def _is_public_hostname(hostname: str) -> bool:
@@ -912,44 +912,49 @@ def _convert_urls(src: DocumentSource) -> str:
         return ""
 
     parts = []
-    for url in doc_urls:
-        tmp_path = None
-        try:
-            suffix = os.path.splitext(urlparse(url).path.lower())[1] or ".tmp"
-            tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
-            tmp_path = tmp.name
-            tmp.close()
+    saved_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(max(_REQUEST_TIMEOUT, saved_timeout or 0))
+    try:
+        for url in doc_urls:
+            tmp_path = None
+            try:
+                suffix = os.path.splitext(urlparse(url).path.lower())[1] or ".tmp"
+                tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+                tmp_path = tmp.name
+                tmp.close()
 
-            req = urllib.request.Request(
-                url, headers={"User-Agent": "JawafdehiAPI/1.0"}
-            )
-            with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
-                content_length = resp.headers.get("Content-Length")
-                if content_length and int(content_length) > _MAX_DOWNLOAD_BYTES:
-                    logger.debug(
-                        f"Skipping {url}: Content-Length {content_length} > {_MAX_DOWNLOAD_BYTES}"
-                    )
-                    continue
-                data = resp.read(_MAX_DOWNLOAD_BYTES + 1)
-                if len(data) > _MAX_DOWNLOAD_BYTES:
-                    logger.debug(
-                        f"Skipping {url}: download exceeds {_MAX_DOWNLOAD_BYTES} bytes"
-                    )
-                    continue
-                with open(tmp_path, "wb") as f:
-                    f.write(data)
+                req = urllib.request.Request(
+                    url, headers={"User-Agent": "JawafdehiAPI/1.0"}
+                )
+                with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
+                    content_length = resp.headers.get("Content-Length")
+                    if content_length and int(content_length) > _MAX_DOWNLOAD_BYTES:
+                        logger.debug(
+                            f"Skipping {url}: Content-Length {content_length} > {_MAX_DOWNLOAD_BYTES}"
+                        )
+                        continue
+                    data = resp.read(_MAX_DOWNLOAD_BYTES + 1)
+                    if len(data) > _MAX_DOWNLOAD_BYTES:
+                        logger.debug(
+                            f"Skipping {url}: download exceeds {_MAX_DOWNLOAD_BYTES} bytes"
+                        )
+                        continue
+                    with open(tmp_path, "wb") as f:
+                        f.write(data)
 
-            doc_result = _MD_CONVERTER.convert(tmp_path)
-            if doc_result and doc_result.text_content:
-                parts.append(doc_result.text_content)
-        except Exception as e:
-            logger.debug(f"URL download/conversion failed for {url}: {e}")
-        finally:
-            if tmp_path and os.path.exists(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
+                doc_result = _MD_CONVERTER.convert(tmp_path)
+                if doc_result and doc_result.text_content:
+                    parts.append(doc_result.text_content)
+            except Exception as e:
+                logger.debug(f"URL download/conversion failed for {url}: {e}")
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+    finally:
+        socket.setdefaulttimeout(saved_timeout)
 
     if parts:
         return " ".join(parts)[:16000]
@@ -1163,6 +1168,7 @@ class TagEnricher:
 
     def _invoke_llm(self, prompt: str) -> str:
         if self._llm_client is not None:
+            logger.debug("  Using CLI-provided LLM client (bypassing DB LLMProvider)")
             response = self._llm_client.invoke(prompt)
             if hasattr(response, "content"):
                 return response.content
@@ -1173,6 +1179,7 @@ class TagEnricher:
 
             self._llm_service = LLMService()
 
+        logger.debug("  Using DB LLMProvider")
         llm = self._llm_service.get_llm()
         return self._llm_service._call_llm(llm, prompt)
 

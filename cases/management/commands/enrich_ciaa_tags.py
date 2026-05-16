@@ -73,8 +73,8 @@ class Command(BaseCommand):
         use_llm = not options["no_llm"]
         force = options["force"]
         limit = options.get("limit")
-        llm_base_url = options.get("llm_base_url")
-        llm_api_key = options.get("llm_api_key")
+        llm_base_url = (options.get("llm_base_url") or "").strip() or None
+        llm_api_key = (options.get("llm_api_key") or "").strip() or None
         llm_model = options.get("llm_model", "gpt-4.5")
 
         if dry_run:
@@ -115,8 +115,28 @@ class Command(BaseCommand):
         if not use_llm:
             logger.info("LLM classification disabled, using rules only")
 
-        enricher = TagEnricher(use_llm=use_llm, llm_client=llm_client)
-        stats = enricher.enrich_cases(cases.iterator(), force=force, dry_run=dry_run)
+        auditlog_disabled = False
+        try:
+            if dry_run:
+                from auditlog.registry import auditlog
+                from cases.models import DocumentSource
+
+                auditlog.unregister(Case)
+                auditlog.unregister(DocumentSource)
+                auditlog_disabled = True
+                logger.info(
+                    "Audit logging suppressed for dry-run (unregistered Case, DocumentSource)"
+                )
+
+            enricher = TagEnricher(use_llm=use_llm, llm_client=llm_client)
+            stats = enricher.enrich_cases(
+                cases.iterator(), force=force, dry_run=dry_run
+            )
+        finally:
+            if auditlog_disabled:
+                auditlog.register(Case)
+                auditlog.register(DocumentSource)
+                logger.debug("Audit logging re-registered")
 
         self._log_summary(stats, dry_run)
 
