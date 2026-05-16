@@ -1156,9 +1156,25 @@ class TagEnricher:
     3. Default: Core tags only (CIAA, Corruption)
     """
 
-    def __init__(self, use_llm: bool = True):
+    def __init__(self, use_llm: bool = True, llm_client=None):
         self.use_llm = use_llm
+        self._llm_client = llm_client
         self._llm_service = None
+
+    def _invoke_llm(self, prompt: str) -> str:
+        if self._llm_client is not None:
+            response = self._llm_client.invoke(prompt)
+            if hasattr(response, "content"):
+                return response.content
+            return str(response)
+
+        if self._llm_service is None:
+            from caseworker.services import LLMService
+
+            self._llm_service = LLMService()
+
+        llm = self._llm_service.get_llm()
+        return self._llm_service._call_llm(llm, prompt)
 
     def enrich_case(self, case: Case, force: bool = False) -> dict:
         """Enrich a single case with tags. Returns dict with status, tags, and tier."""
@@ -1254,26 +1270,16 @@ class TagEnricher:
 
     def _classify_with_llm(self, case: Case) -> list[str]:
         """Use LLM to classify a case from metadata. Returns list of tag strings."""
-        if self._llm_service is None:
-            from caseworker.services import LLMService
-
-            self._llm_service = LLMService()
-
         prompt = build_llm_classification_prompt(case)
-        response = self._llm_service.invoke(prompt)
+        response = self._invoke_llm(prompt)
         return parse_llm_response(response)
 
     def _classify_with_llm_from_sources(
         self, case: Case, evidence_text: str
     ) -> list[str]:
         """Use LLM to classify a case from source documents. Returns list of tag strings."""
-        if self._llm_service is None:
-            from caseworker.services import LLMService
-
-            self._llm_service = LLMService()
-
         prompt = build_llm_classification_prompt_from_sources(case, evidence_text)
-        response = self._llm_service.invoke(prompt)
+        response = self._invoke_llm(prompt)
         return parse_llm_response(response)
 
     def enrich_cases(self, cases, force: bool = False, dry_run: bool = False) -> dict:

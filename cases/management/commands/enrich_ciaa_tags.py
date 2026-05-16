@@ -1,6 +1,7 @@
 """Enrich CIAA draft cases with tags via rule-based + LLM classification."""
 
 import logging
+import sys
 
 from django.core.management.base import BaseCommand
 from django.db.models import Q
@@ -8,6 +9,12 @@ from django.db.models import Q
 from cases.models import Case, CaseType, CaseState
 from cases.services.tag_enricher import TagEnricher
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s: %(message)s",
+    stream=sys.stdout,
+    force=True,
+)
 logger = logging.getLogger(__name__)
 
 
@@ -41,6 +48,24 @@ class Command(BaseCommand):
             default=None,
             help="Limit number of cases to process",
         )
+        parser.add_argument(
+            "--llm-base-url",
+            type=str,
+            default=None,
+            help="OpenAI-compatible LLM base URL (bypasses DB LLMProvider)",
+        )
+        parser.add_argument(
+            "--llm-api-key",
+            type=str,
+            default=None,
+            help="LLM API key (required when --llm-base-url is set)",
+        )
+        parser.add_argument(
+            "--llm-model",
+            type=str,
+            default="gpt-4.5",
+            help="LLM model name (default: gpt-4.5)",
+        )
 
     def handle(self, *args, **options):
         dry_run = options["dry_run"]
@@ -48,9 +73,24 @@ class Command(BaseCommand):
         use_llm = not options["no_llm"]
         force = options["force"]
         limit = options.get("limit")
+        llm_base_url = options.get("llm_base_url")
+        llm_api_key = options.get("llm_api_key")
+        llm_model = options.get("llm_model", "gpt-4.5")
 
         if dry_run:
             logger.warning("DRY-RUN MODE: No changes will be saved")
+
+        llm_client = None
+        if use_llm and llm_base_url:
+            if not llm_api_key:
+                self.stderr.write(
+                    self.style.ERROR("--llm-api-key is required when --llm-base-url is set")
+                )
+                return
+            llm_client = self._build_llm_client(llm_base_url, llm_api_key, llm_model)
+            logger.info(f"LLM client configured: {llm_model} @ {llm_base_url}")
+        elif use_llm:
+            logger.info("Using DB LLMProvider (no --llm-base-url)")
 
         if case_id:
             cases = Case.objects.filter(case_id=case_id, case_type=CaseType.CORRUPTION)
@@ -75,10 +115,30 @@ class Command(BaseCommand):
         if not use_llm:
             logger.info("LLM classification disabled, using rules only")
 
-        enricher = TagEnricher(use_llm=use_llm)
+        enricher = TagEnricher(use_llm=use_llm, llm_client=llm_client)
         stats = enricher.enrich_cases(cases.iterator(), force=force, dry_run=dry_run)
 
         self._log_summary(stats, dry_run)
+
+    def _build_llm_client(self, base_url: str, api_key: str, model: str):
+        try:
+            from langchain_openai import ChatOpenAI
+        except ImportError:
+            self.stderr.write(
+                self.style.ERROR(
+                    "langchain-openai not installed. Install with: "
+                    "pip install langchain-openai"
+                )
+            )
+            raise
+
+        return ChatOpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            temperature=0.3,
+            max_tokens=1024,
+        )
 
     def _log_summary(self, stats: dict, dry_run: bool):
         logger.info("")
