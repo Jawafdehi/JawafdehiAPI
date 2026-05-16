@@ -693,6 +693,10 @@ Step 1 — Find the existing draft case.
   Call search_jawafdehi_cases with the CIAA case number {case_dir.name} to locate
   the existing Jawafdehi draft case. If the search does not return results, try
   searching by the primary defendant name from {case_dir}/draft.md.
+  If the defendant-name search returns multiple results, cross-reference each
+  candidate against the CIAA case number, bigo amount, and other details in
+  the draft to identify the correct case. Do NOT patch a case you are not
+  certain about.
 
 Step 2 — Record the case ID.
   Once found, record the returned numeric Jawafdehi case ID (1, 2, 3, 4, etc.)
