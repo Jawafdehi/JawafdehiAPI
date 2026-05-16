@@ -750,7 +750,7 @@ NOTE: along with the case title, you MUST update the Key allegations, Timeline, 
         eligible = [
             case_id
             for case_id, title in rows
-            if any(num in title for num in CIAA_CASE_NUMBERS)
+            if any(num in (title or "") for num in CIAA_CASE_NUMBERS)
         ]
 
         if limit > 0 and len(eligible) > limit:

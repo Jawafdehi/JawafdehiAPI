@@ -32,7 +32,7 @@ from __future__ import annotations
 import math
 from typing import List, Optional, Tuple
 
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.db.models import Count, Q
 
 from case_workflows.workflows.ciaa_caseworker.constants import CIAA_CASE_NUMBERS
@@ -170,6 +170,8 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         limit = options["limit"]
+        if limit <= 0:
+            raise CommandError("--limit must be a positive integer")
         ids_only = options["ids_only"]
         verbose = options["verbose"]
         output_file = options["output_file"]

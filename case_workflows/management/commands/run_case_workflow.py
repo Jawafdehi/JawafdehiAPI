@@ -213,6 +213,8 @@ class Command(BaseCommand):
         # ---- Update-existing mode ----
         update_existing = options["update_existing"]
         priority_limit = options["priority_limit"]
+        if priority_limit < 0:
+            raise CommandError("--priority must be a positive integer")
         if update_existing:
             workflow.update_existing = True
             printer._console.print("  [bold yellow]Mode: update-existing[/bold yellow]")
