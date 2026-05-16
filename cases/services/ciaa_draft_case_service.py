@@ -279,7 +279,7 @@ class CIAADraftCaseService:
     def create_document_sources(
         self, ciaa_json: dict, case: Case
     ) -> list[DocumentSource]:
-        """Create DocumentSource records from press releases and court orders. Returns list of sources."""
+        """Create DocumentSource records from press releases, charge sheets, and court orders. Returns list of sources."""
         sources = []
         evidence = []
 
@@ -289,6 +289,7 @@ class CIAADraftCaseService:
                 "title": pr.get("title", "CIAA Press Release")[:300],
                 "url": pr.get("url", ""),
                 "source_type": SourceType.LEGAL_PROCEDURAL,
+                "publication_date": self.convert_bs_to_ad(pr.get("date", "")),
             }
             if source := self.get_or_create_source(source_data):
                 sources.append(source)
@@ -296,6 +297,24 @@ class CIAADraftCaseService:
                     {
                         "source_id": source.source_id,
                         "description": f"CIAA Press Release (ID: {pr.get('release_id', 'N/A')})",
+                    }
+                )
+
+        # Process abhiyogPatras (AG charge sheets)
+        for ap in ciaa_json.get("ciaa", {}).get("abhiyogPatras", []):
+            source_data = {
+                "title": ap.get("title", "AG Charge Sheet")[:300],
+                "url": ap.get("pdf_url", ""),
+                "source_type": SourceType.OFFICIAL_GOVERNMENT,
+                "publication_date": self.convert_bs_to_ad(ap.get("filing_date", "")),
+            }
+            if source := self.get_or_create_source(source_data):
+                sources.append(source)
+                case_no = ap.get("case_number", "N/A")
+                evidence.append(
+                    {
+                        "source_id": source.source_id,
+                        "description": f"AG Charge Sheet - {case_no}",
                     }
                 )
 
@@ -375,8 +394,12 @@ class CIAADraftCaseService:
                 return source
 
         # Create new source
+        publication_date = source_data.get("publication_date")
         source = DocumentSource.objects.create(
-            title=title, url=url_list, source_type=source_type
+            title=title,
+            url=url_list,
+            source_type=source_type,
+            publication_date=publication_date,
         )
         self.stats["sources_created"] += 1
         logger.debug(f"Created source: {title}")
