@@ -14,6 +14,7 @@ from rest_framework.authtoken.models import Token
 from rest_framework.authtoken.admin import TokenAdmin as BaseTokenAdmin
 from .models import (
     Case,
+    ChatUserIdentity,
     DocumentSource,
     DocumentSourceUpload,
     JawafEntity,
@@ -1378,3 +1379,25 @@ except admin.sites.NotRegistered:
 @admin.register(Token)
 class CustomTokenAdmin(UserFullNameAdminMixin, BaseTokenAdmin):
     raw_id_fields = ()
+
+
+@admin.register(ChatUserIdentity)
+class ChatUserIdentityAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
+    list_display = ("owui_user_id", "user", "created_at")
+    search_fields = ("owui_user_id", "user__username", "user__email")
+    list_filter = ("created_at",)
+    autocomplete_fields = ("user",)
+    readonly_fields = ("created_at",)
+
+    fieldsets = (
+        (
+            "Identity Mapping",
+            {
+                "fields": (
+                    "owui_user_id",
+                    "user",
+                    "created_at",
+                ),
+            },
+        ),
+    )
