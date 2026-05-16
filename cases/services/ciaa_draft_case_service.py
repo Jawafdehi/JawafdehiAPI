@@ -1,6 +1,7 @@
 """Service for creating draft cases from CIAA JSON data with deduplication."""
 
 import logging
+import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
@@ -302,9 +303,22 @@ class CIAADraftCaseService:
 
         # Process abhiyogPatras (AG charge sheets)
         for ap in ciaa_json.get("ciaa", {}).get("abhiyogPatras", []):
+            pdf_url = ap.get("pdf_url", "")
+            encoded_url = pdf_url
+            if pdf_url and isinstance(pdf_url, str) and pdf_url.strip():
+                parsed = urllib.parse.urlsplit(pdf_url.strip())
+                encoded_url = urllib.parse.urlunsplit(
+                    (
+                        parsed.scheme,
+                        parsed.netloc,
+                        urllib.parse.quote(parsed.path, safe="/"),
+                        urllib.parse.quote(parsed.query, safe="=&"),
+                        urllib.parse.quote(parsed.fragment, safe=""),
+                    )
+                )
             source_data = {
                 "title": ap.get("title", "AG Charge Sheet")[:300],
-                "url": ap.get("pdf_url", ""),
+                "url": [encoded_url] if encoded_url else [],
                 "source_type": SourceType.OFFICIAL_GOVERNMENT,
                 "publication_date": self.convert_bs_to_ad(ap.get("filing_date", "")),
             }
