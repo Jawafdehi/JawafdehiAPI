@@ -12,7 +12,6 @@ from django.shortcuts import get_object_or_404
 from config.auth import (
     SERVICE_ACCOUNT_USERNAME,
     JAWAFDEHI_USER_ID_HEADER,
-    ChatServiceAccountAuthentication,
     resolve_or_create_identity,
 )
 from .models import MCPServer, Skill, Summary, Draft, DraftVersion, LLMProvider

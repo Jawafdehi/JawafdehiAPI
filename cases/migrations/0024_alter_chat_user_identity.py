@@ -8,29 +8,48 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('cases', '0023_chat_user_identity'),
+        ("cases", "0023_chat_user_identity"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='chatuseridentity',
-            name='owui_user_name',
-            field=models.CharField(blank=True, default='', help_text='Display name from the chat system', max_length=255),
+            model_name="chatuseridentity",
+            name="owui_user_name",
+            field=models.CharField(
+                blank=True,
+                default="",
+                help_text="Display name from the chat system",
+                max_length=255,
+            ),
         ),
         migrations.AlterField(
-            model_name='chatuseridentity',
-            name='created_at',
-            field=models.DateTimeField(auto_now_add=True, help_text='When this identity mapping was created'),
+            model_name="chatuseridentity",
+            name="created_at",
+            field=models.DateTimeField(
+                auto_now_add=True, help_text="When this identity mapping was created"
+            ),
         ),
         migrations.AlterField(
-            model_name='chatuseridentity',
-            name='owui_user_id',
-            field=models.CharField(db_index=True, help_text='Chat system user identifier (e.g., OpenWebUI user ID)', max_length=255, unique=True),
+            model_name="chatuseridentity",
+            name="owui_user_id",
+            field=models.CharField(
+                db_index=True,
+                help_text="Chat system user identifier (e.g., OpenWebUI user ID)",
+                max_length=255,
+                unique=True,
+            ),
         ),
         migrations.AlterField(
-            model_name='chatuseridentity',
-            name='user',
-            field=models.ForeignKey(blank=True, help_text='Django user associated with this chat identity (must be mapped for authorization)', null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='chat_identities', to=settings.AUTH_USER_MODEL),
+            model_name="chatuseridentity",
+            name="user",
+            field=models.ForeignKey(
+                blank=True,
+                help_text="Django user associated with this chat identity (must be mapped for authorization)",
+                null=True,
+                on_delete=django.db.models.deletion.SET_NULL,
+                related_name="chat_identities",
+                to=settings.AUTH_USER_MODEL,
+            ),
         ),
     ]
