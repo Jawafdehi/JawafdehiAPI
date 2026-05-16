@@ -1,8 +1,5 @@
-import pytest
-
 from cases.models import (
     Case,
-    DocumentSource,
     SourceType,
 )
 from cases.services.ciaa_draft_case_service import CIAADraftCaseService
