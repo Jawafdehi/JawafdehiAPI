@@ -84,7 +84,9 @@ class Command(BaseCommand):
         if use_llm and llm_base_url:
             if not llm_api_key:
                 self.stderr.write(
-                    self.style.ERROR("--llm-api-key is required when --llm-base-url is set")
+                    self.style.ERROR(
+                        "--llm-api-key is required when --llm-base-url is set"
+                    )
                 )
                 return
             llm_client = self._build_llm_client(llm_base_url, llm_api_key, llm_model)
