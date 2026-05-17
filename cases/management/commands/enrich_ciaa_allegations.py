@@ -14,20 +14,27 @@ Environment variables::
     LLM_PROXY_URL      — optional base URL for an OpenAI-compatible proxy
 """
 
+import hashlib
 import json
 import logging
 import os
 import re
 import tempfile
 import time
-from urllib.parse import urlparse
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any
 
-import requests
 from django.core.management.base import BaseCommand, CommandError
 
-from cases.models import Case, CaseState, DocumentSource
+from cases.models import Case, CaseState, DocumentSource, SourceType
 
 logger = logging.getLogger(__name__)
+
+MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
+DOWNLOAD_CHUNK_SIZE = 16 * 1024
 
 SYSTEM_PROMPT = """You are a Nepali legal analyst extracting structured key allegations
 from CIAA (Commission for the Investigation of Abuse of Authority) press releases.
@@ -96,6 +103,73 @@ IMPORTANT: Return ONLY a valid JSON object with an "allegations" key.
 Example:
 {{"allegations": ["पहिलो मुख्य आरोप...", "दोस्रो मुख्य आरोप..."]}}
 No explanations, no markdown, no text outside the JSON object."""
+
+
+def _sanitize_download_filename(filename: str | None, source_id: str) -> str:
+    raw = (filename or "").strip()
+    if not raw:
+        return f"{source_id}.bin"
+
+    decoded = urllib.parse.unquote(raw)
+    candidate = Path(decoded).name.strip()
+
+    if candidate in {"", ".", ".."}:
+        return f"{source_id}.bin"
+
+    candidate = candidate.replace("\x00", "")
+    candidate = re.sub(r"[<>:\"/\\|?*]+", "_", candidate).rstrip(" .")
+    if candidate in {"", ".", ".."}:
+        return f"{source_id}.bin"
+
+    max_len = 200
+    if len(candidate) <= max_len:
+        return candidate
+
+    suffix = "".join(Path(candidate).suffixes)
+    stem = candidate[: -len(suffix)] if suffix else candidate
+    digest = hashlib.sha256(candidate.encode("utf-8")).hexdigest()[:10]
+
+    stem_budget = max_len - len(suffix) - len(digest) - 1
+    if stem_budget < 1:
+        return f"{source_id}-{digest}{suffix}"[:max_len]
+
+    truncated_stem = stem[:stem_budget].rstrip(" .-_")
+    if not truncated_stem:
+        truncated_stem = source_id
+
+    return f"{truncated_stem}-{digest}{suffix}"
+
+
+def _confined_output_path(output_dir: Path, filename: str) -> Path:
+    output_dir_resolved = output_dir.resolve()
+    out_path = (output_dir / filename).resolve()
+    if output_dir_resolved not in out_path.parents:
+        raise CommandError(
+            f"Refusing to write outside output directory: '{filename}'"
+        )
+    return out_path
+
+
+def _copy_stream_to_path_with_limit(in_file: Any, out_path: Path) -> None:
+    total_bytes = 0
+    try:
+        with out_path.open("wb") as out_file:
+            while True:
+                chunk = in_file.read(DOWNLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+                total_bytes += len(chunk)
+                if total_bytes > MAX_DOWNLOAD_BYTES:
+                    raise CommandError(
+                        f"Downloaded source exceeds max size of {MAX_DOWNLOAD_BYTES} bytes."
+                    )
+                out_file.write(chunk)
+    except OSError:
+        out_path.unlink(missing_ok=True)
+        raise
+    except CommandError:
+        out_path.unlink(missing_ok=True)
+        raise
 
 
 class Command(BaseCommand):
@@ -243,7 +317,7 @@ class Command(BaseCommand):
             source.source_id: source
             for source in DocumentSource.objects.filter(
                 source_id__in=source_ids, is_deleted=False
-            )
+            ).prefetch_related("uploaded_files")
         }
         logger.debug(f"Cached {len(self._source_lookup)} DocumentSource records")
 
@@ -255,8 +329,38 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING("  SKIPPED: No evidence"))
             return
 
-        press_release_text = self._collect_press_release_content(case)
-        if not press_release_text:
+        source = self._select_press_release_source(case)
+        if not source:
+            self.stats["cases_no_content"] += 1
+            if not dry_run:
+                note = (
+                    "enrich_ciaa_allegations: No press release source found in evidence"
+                )
+                current = case.missing_details or ""
+                if note not in current:
+                    case.missing_details = f"{current}\n{note}" if current else note
+                    case.save(update_fields=["missing_details"])
+            self.stdout.write(
+                self.style.WARNING("  SKIPPED: No press release source found")
+            )
+            return
+
+        try:
+            press_release_text = self._convert_source_to_markdown(source)
+        except Exception as e:
+            self.stats["cases_no_content"] += 1
+            if not dry_run:
+                note = f"enrich_ciaa_allegations: Failed to convert source to markdown: {e!s}"
+                current = case.missing_details or ""
+                if note not in current:
+                    case.missing_details = f"{current}\n{note}" if current else note
+                    case.save(update_fields=["missing_details"])
+            self.stdout.write(
+                self.style.WARNING(f"  SKIPPED: Failed to convert source to markdown: {e!s}")
+            )
+            return
+
+        if not press_release_text or len(press_release_text.strip()) < 50:
             self.stats["cases_no_content"] += 1
             if not dry_run:
                 note = (
@@ -321,116 +425,152 @@ class Command(BaseCommand):
                 )
             )
 
-    ALLOWED_HOSTS = frozenset({"ngm-store.jawafdehi.org"})
-
-    @classmethod
-    def _is_safe_url(cls, url):
-        try:
-            parsed = urlparse(url)
-        except Exception:
-            return False
-        if parsed.scheme not in ("http", "https"):
-            return False
-        if not parsed.hostname:
-            return False
-        if parsed.hostname not in cls.ALLOWED_HOSTS:
-            return False
-        return True
-
-    def _collect_press_release_content(self, case):
-        texts = []
-        if not case.evidence:
-            return ""
-
-        for entry in case.evidence:
-            source_id = entry.get("source_id")
-            if not source_id:
-                continue
-
-            source = self._source_lookup.get(source_id)
-            if not source:
-                continue
-
-            urls = (
-                source.url
-                if isinstance(source.url, list)
-                else [source.url] if source.url else []
-            )
-
-            for url in urls:
-                if not isinstance(url, str):
-                    continue
-                if not self._is_safe_url(url):
-                    logger.debug(f"Skipping non-allowlisted URL: {url}")
-                    continue
-                content = self._fetch_and_convert_content(url)
-                if content:
-                    texts.append(content)
-                    break
-
-        return "\n\n".join(texts)
-
-    def _fetch_and_convert_content(self, url):
-        try:
-            resp = requests.get(url, timeout=60)
-            resp.raise_for_status()
-        except requests.exceptions.Timeout:
-            logger.warning(f"Timeout fetching {url}")
-            return None
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"Failed to fetch {url}: {e}")
+    def _select_press_release_source(self, case: Case) -> DocumentSource | None:
+        source_ids = [
+            item["source_id"]
+            for item in (case.evidence or [])
+            if isinstance(item, dict) and isinstance(item.get("source_id"), str)
+        ]
+        if not source_ids:
             return None
 
-        content_type = resp.headers.get("content-type", "").lower()
+        sources = [
+            s
+            for s in (self._source_lookup.get(sid) for sid in source_ids)
+            if s is not None
+        ]
+        if not sources:
+            return None
 
-        if "text/plain" in content_type or url.endswith(".md"):
-            content = resp.text
-            if len(content) < 50:
-                logger.debug(f"Content too short from {url}: {len(content)} chars")
-                return None
-            return content
+        ranked = sorted(
+            ((self._score_source_for_press_release(s), s) for s in sources),
+            key=lambda row: row[0],
+            reverse=True,
+        )
+        best_score, best_source = ranked[0]
+        return best_source if best_score > 0 else None
 
-        ext = ".tmp"
-        if url.lower().endswith(".pdf"):
-            ext = ".pdf"
-        elif url.lower().endswith(".docx"):
-            ext = ".docx"
-        elif url.lower().endswith(".doc"):
-            ext = ".doc"
-        elif "text/html" in content_type:
-            ext = ".html"
+    def _score_source_for_press_release(self, source: DocumentSource) -> int:
+        upload_names = [
+            file.filename or Path(file.file.name).name
+            for file in source.uploaded_files.all()
+        ]
+        url_text = " ".join(source.url or [])
+        corpus = " ".join(
+            [
+                source.title or "",
+                source.description or "",
+                source.uploaded_filename or "",
+                url_text,
+                " ".join(upload_names),
+            ]
+        ).lower()
 
-        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
-            tmp.write(resp.content)
-            tmp_path = tmp.name
+        score = 0
+        press_keywords = [
+            "press release",
+            "pressrelease",
+            "press-release",
+            "प्रेस विज्ञप्ति",
+            "विज्ञप्ति",
+        ]
+        ciaa_keywords = ["ciaa", "अख्तियार"]
 
+        if any(keyword in corpus for keyword in press_keywords):
+            score += 5
+        if any(keyword in corpus for keyword in ciaa_keywords):
+            score += 3
+        if source.source_type == SourceType.OFFICIAL_GOVERNMENT:
+            score += 1
+        return score
+
+    def _convert_source_to_markdown(self, source: DocumentSource) -> str:
         try:
             from markitdown import MarkItDown
+        except ImportError as exc:
+            raise CommandError(
+                "markitdown is required for allegation enrichment conversion. "
+                "Install conversion dependencies (markitdown + likhit plugin)."
+            ) from exc
 
-            md = MarkItDown()
-            result = md.convert(tmp_path)
-            if (
-                result
-                and result.text_content
-                and len(result.text_content.strip()) >= 50
-            ):
-                return result.text_content.strip()
-            logger.debug(f"MarkItDown conversion returned short content from {url}")
+        converter = MarkItDown(enable_plugins=True)
+        with tempfile.TemporaryDirectory(prefix="allegation-enrichment-") as tmp_dir:
+            temp_path = self._download_source_to_path(source, Path(tmp_dir))
+            if temp_path:
+                result = converter.convert_uri(temp_path.resolve().as_uri())
+                return result.markdown
+
+            source_url = self._pick_source_url(source)
+            if not source_url:
+                raise CommandError(
+                    f"No downloadable source found for source_id={source.source_id}."
+                )
+            source_url = self._validate_url_scheme(source_url)
+            result = converter.convert_uri(source_url)
+            return result.markdown
+
+    def _download_source_to_path(
+        self, source: DocumentSource, output_dir: Path
+    ) -> Path | None:
+        if source.uploaded_file:
+            filename = _sanitize_download_filename(
+                source.uploaded_filename or source.uploaded_file.name,
+                source.source_id,
+            )
+            out_path = _confined_output_path(output_dir, filename)
+            with source.uploaded_file.open("rb") as in_file:
+                _copy_stream_to_path_with_limit(in_file, out_path)
+            return out_path
+
+        uploaded = source.uploaded_files.first()
+        if uploaded and uploaded.file:
+            filename = _sanitize_download_filename(
+                uploaded.filename or uploaded.file.name,
+                source.source_id,
+            )
+            out_path = _confined_output_path(output_dir, filename)
+            with uploaded.file.open("rb") as in_file:
+                _copy_stream_to_path_with_limit(in_file, out_path)
+            return out_path
+
+        source_url = self._pick_source_url(source)
+        if not source_url:
             return None
-        except ImportError:
-            logger.warning("markitdown/likhit not installed, falling back to raw text")
-            try:
-                return resp.text
-            except Exception:
-                return None
-        except Exception as e:
-            logger.warning(f"likhit conversion failed for {url}: {e}")
+
+        source_url = self._validate_url_scheme(source_url)
+        parsed = urllib.parse.urlparse(source_url)
+        guessed_name = _sanitize_download_filename(parsed.path, source.source_id)
+        out_path = _confined_output_path(output_dir, guessed_name)
+        try:
+            request = urllib.request.Request(
+                source_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+                },
+            )
+            with urllib.request.urlopen(request, timeout=30) as response:
+                _copy_stream_to_path_with_limit(response, out_path)
+            return out_path
+        except (urllib.error.URLError, OSError):
+            out_path.unlink(missing_ok=True)
             return None
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+        except CommandError:
+            out_path.unlink(missing_ok=True)
+            raise
+
+    def _pick_source_url(self, source: DocumentSource) -> str | None:
+        urls = [
+            url for url in (source.url or []) if isinstance(url, str) and url.strip()
+        ]
+        return urls[0].strip() if urls else None
+
+    def _validate_url_scheme(self, url: str) -> str:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            return url
+        raise ValueError(
+            f"Invalid URL '{url}'. Only http and https URLs are allowed with a host."
+        )
 
     def _call_llm(self, client, model, prompt):
         max_retries = 3
