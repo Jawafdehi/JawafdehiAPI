@@ -743,7 +743,7 @@ def _collect_case_text(case: Case) -> str:
     return " ".join(parts).lower()
 
 
-def _collect_evidence_text(case: Case) -> str:
+def _collect_evidence_text(case: Case) -> str:  # noqa
     """Build a text blob from evidence entries, using actual file content when available.
 
     Priority:
@@ -794,9 +794,24 @@ def _collect_evidence_text(case: Case) -> str:
     )
 
     sources = list(high_value) + list(other)
+
+    source_ids_for_uploads = [s.id for s in sources]
+    pre_fetched_uploads = {}
+    if source_ids_for_uploads:
+        try:
+            all_uploads = DocumentSourceUpload.objects.filter(
+                source_id__in=source_ids_for_uploads
+            )
+            for upload in all_uploads:
+                pre_fetched_uploads.setdefault(upload.source_id, []).append(upload)
+        except Exception as e:
+            logger.debug(f"Failed to prefetch DocumentSourceUpload: {e}")
+
     source_count = 0
     for src in sources:
-        file_text = _convert_source_file(src)
+        file_text = _convert_source_file(
+            src, pre_fetched_uploads.get(src.id, [])
+        )
         if file_text:
             parts.append(file_text)
             source_count += 1
@@ -822,13 +837,18 @@ except ImportError:
 _DOCUMENT_EXTENSIONS = frozenset({".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png"})
 
 
-def _convert_source_file(src: DocumentSource) -> str:
+def _convert_source_file(  # noqa
+    src: DocumentSource, pre_fetched_uploads=None
+) -> str:
     """Convert a DocumentSource's files to text using MarkItDown.
 
     Checks sources in order:
     1. Remote URLs in src.url (download .pdf/.doc/.docx, convert, clean up)
     2. Local uploaded_file on src
     3. Local DocumentSourceUpload files
+
+    When pre_fetched_uploads is provided (list of DocumentSourceUpload),
+    those are used directly instead of issuing a per-source DB query.
 
     Returns file content as markdown text, or empty string if conversion fails.
     """
@@ -843,13 +863,20 @@ def _convert_source_file(src: DocumentSource) -> str:
     if src.uploaded_file and hasattr(src.uploaded_file, "path"):
         files_to_try.append(src.uploaded_file.path)
 
-    try:
-        uploads = DocumentSourceUpload.objects.filter(source_id=src.id)
-        for upload in uploads:
+    if pre_fetched_uploads is not None:
+        for upload in pre_fetched_uploads:
             if upload.file and hasattr(upload.file, "path"):
                 files_to_try.append(upload.file.path)
-    except Exception as e:
-        logger.debug(f"Failed to fetch DocumentSourceUpload for src.id={src.id}: {e}")
+    else:
+        try:
+            uploads = DocumentSourceUpload.objects.filter(source_id=src.id)
+            for upload in uploads:
+                if upload.file and hasattr(upload.file, "path"):
+                    files_to_try.append(upload.file.path)
+        except Exception as e:
+            logger.debug(
+                f"Failed to fetch DocumentSourceUpload for src.id={src.id}: {e}"
+            )
 
     for filepath in files_to_try:
         try:
@@ -887,7 +914,7 @@ def _is_public_hostname(hostname: str) -> bool:
     return True
 
 
-def _convert_urls(src: DocumentSource) -> str:
+def _convert_urls(src: DocumentSource) -> str:  # noqa
     """Download remote document URLs from src.url, convert via MarkItDown.
 
     SSRF-safe: only http/https schemes, public hostnames, timeout + size limit.
@@ -961,7 +988,7 @@ def _convert_urls(src: DocumentSource) -> str:
     return ""
 
 
-def _match_keywords(text: str, keyword_map: dict[str, list[str]]) -> list[str]:
+def _match_keywords(text: str, keyword_map: dict[str, list[str]]) -> list[str]:  # noqa
     """Match text against keyword maps. Returns matched tag names."""
     matched = []
     for tag, keywords in keyword_map.items():
@@ -1005,7 +1032,7 @@ def _detect_court_context(case: Case) -> list[str]:
     return tags
 
 
-def classify_case_rules(case: Case) -> list[str]:
+def classify_case_rules(case: Case) -> list[str]:  # noqa
     """Rule-based tag classification for a CIAA case."""
     text = _collect_case_text(case)
     tags = []
@@ -1121,7 +1148,7 @@ def parse_llm_response(response: str) -> list[str]:
         response = "\n".join(line for line in lines if not line.startswith("```"))
         response = response.strip()
 
-    for match in re.finditer(r"\[.*?\]", response, re.DOTALL):
+    for match in re.finditer(r"\[[^\]]*\]", response):
         try:
             tags = json.loads(match.group())
             if isinstance(tags, list) and all(isinstance(t, str) for t in tags):
@@ -1183,7 +1210,7 @@ class TagEnricher:
         llm = self._llm_service.get_llm()
         return self._llm_service._call_llm(llm, prompt)
 
-    def enrich_case(self, case: Case, force: bool = False) -> dict:
+    def enrich_case(self, case: Case, force: bool = False) -> dict:  # noqa
         """Enrich a single case with tags. Returns dict with status, tags, and tier."""
         logger.info(f"Processing {case.case_id}...")
 
@@ -1318,5 +1345,5 @@ class TagEnricher:
                     logger.info(f"Enriched {case.case_id} ({tier}): {result['tags']}")
             except Exception as e:
                 stats["failed"] += 1
-                logger.error(f"Failed to enrich {case.case_id}: {e}")
+                logger.exception(f"Failed to enrich {case.case_id}: {e}")
         return stats

@@ -67,7 +67,7 @@ class Command(BaseCommand):
             help="LLM model name (default: gpt-4.5)",
         )
 
-    def handle(self, *args, **options):
+    def handle(self, *args, **options):  # noqa
         dry_run = options["dry_run"]
         case_id = options.get("case_id")
         use_llm = not options["no_llm"]
