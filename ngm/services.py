@@ -160,7 +160,13 @@ def execute_select_query(query: str, timeout_seconds: float) -> dict:
             rows = cursor.fetchall()
             columns = [col[0] for col in (cursor.description or [])]
     except DatabaseError as exc:
-        logger.exception("NGM database query failed")
+        logger.exception(
+            "NGM database query failed",
+            extra={
+                "query_preview": query[:500],
+                "timeout_seconds": timeout_seconds,
+            },
+        )
         raise ValueError("Database query failed") from exc
 
     query_time_ms = int((time.perf_counter() - start_time) * 1000)
