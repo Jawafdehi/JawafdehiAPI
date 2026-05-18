@@ -296,9 +296,7 @@ def _apply_db_ssl_options(db_config):
     if ssl_mode:
         options.setdefault("sslmode", ssl_mode)
 
-    ca_cert = os.getenv("DATABASE_SSL_CA_CERT_FILE") or os.getenv(
-        "SSL_CA_CERT_FILE"
-    )
+    ca_cert = os.getenv("DATABASE_SSL_CA_CERT_FILE") or os.getenv("SSL_CA_CERT_FILE")
     if ca_cert:
         options.setdefault("sslrootcert", ca_cert)
 
