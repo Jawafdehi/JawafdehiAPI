@@ -568,6 +568,7 @@ class Command(BaseCommand):
                 },
             )
             context = ssl.create_default_context()
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
             with urllib.request.urlopen(request, timeout=30, context=context) as response:
                 _copy_stream_to_path_with_limit(response, out_path)
             return out_path
