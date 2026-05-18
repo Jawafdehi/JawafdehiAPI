@@ -144,6 +144,21 @@ def _format_llm_http_error(status: int, body_snippet: str) -> str:
     return msg
 
 
+def _extract_fenced_block(raw: str) -> str | None:
+    if not raw.startswith("```"):
+        return None
+    lines = raw.split("\n")
+    end_idx = None
+    for i in range(1, len(lines)):
+        if lines[i].strip().startswith("```"):
+            end_idx = i
+            break
+    if end_idx is None:
+        return None
+    inner = "\n".join(lines[1:end_idx]).strip()
+    return inner if inner else None
+
+
 SYSTEM_PROMPT = """You are a Nepali legal analyst extracting structured key allegations
 from CIAA (Commission for the Investigation of Abuse of Authority) press releases.
 
@@ -856,9 +871,9 @@ class Command(BaseCommand):
 
     def _extract_json_body(self, raw):
         raw = raw.strip()
-        json_match = re.search(r"```(?:json)?\s*(.*?)\s*```", raw, re.DOTALL)
-        if json_match:
-            return json_match.group(1).strip()
+        body = _extract_fenced_block(raw)
+        if body is not None:
+            return body
         brace_start = raw.find("{")
         brace_end = raw.rfind("}")
         if brace_start != -1 and brace_end != -1:
