@@ -57,9 +57,9 @@ def normalize_base_url(url: str | None) -> str:
     if url and url.strip():
         url = url.strip().rstrip("/")
     else:
-        url = os.environ.get(
-            "JAWAFDEHI_LLM_PROXY_URL", DEFAULT_OPENCODE_BASE
-        ).rstrip("/")
+        url = os.environ.get("JAWAFDEHI_LLM_PROXY_URL", DEFAULT_OPENCODE_BASE).rstrip(
+            "/"
+        )
     if url.endswith("/zen/v1"):
         url = url.replace("/zen/v1", "/zen/go/v1")
     elif url.endswith("/zen/go"):
@@ -266,9 +266,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--llm-model",
             type=str,
-            default=os.environ.get(
-                "JAWAFDEHI_ALLEGATION_MODEL", "claude-sonnet-4-5"
-            ),
+            default=os.environ.get("JAWAFDEHI_ALLEGATION_MODEL", "claude-sonnet-4-5"),
             help="Model id (accepts opencode-go/ prefix, defaults to claude-sonnet-4-5)",
         )
         parser.add_argument(
@@ -312,10 +310,7 @@ class Command(BaseCommand):
             "--base-url",
             type=str,
             default=None,
-            help=(
-                "Deprecated: use --llm-base-url instead. "
-                "Base URL for LLM API."
-            ),
+            help=("Deprecated: use --llm-base-url instead. " "Base URL for LLM API."),
         )
 
     def handle(self, *args, **options):
@@ -446,9 +441,7 @@ class Command(BaseCommand):
             except urllib.error.HTTPError as e:
                 last_status = e.code
                 try:
-                    last_body_snippet = e.read().decode("utf-8", errors="replace")[
-                        :500
-                    ]
+                    last_body_snippet = e.read().decode("utf-8", errors="replace")[:500]
                 except Exception:
                     last_body_snippet = "<unreadable>"
 
@@ -537,7 +530,9 @@ class Command(BaseCommand):
         }
         logger.debug(f"Cached {len(self._source_lookup)} DocumentSource records")
 
-    def _process_case(self, case, model, base_url, api_key, timeout, is_opencode, dry_run):
+    def _process_case(
+        self, case, model, base_url, api_key, timeout, is_opencode, dry_run
+    ):
         self.stats["cases_processed"] += 1
 
         if not case.evidence:
@@ -564,14 +559,10 @@ class Command(BaseCommand):
         )
 
         if is_opencode:
-            raw = self._call_llm_opencode(
-                model, base_url, api_key, timeout, prompt
-            )
+            raw = self._call_llm_opencode(model, base_url, api_key, timeout, prompt)
             if not raw:
                 self.stats["cases_failed"] += 1
-                self.stdout.write(
-                    self.style.ERROR("  FAILED: No LLM response")
-                )
+                self.stdout.write(self.style.ERROR("  FAILED: No LLM response"))
                 return
             allegations = self._parse_allegations(raw)
         else:

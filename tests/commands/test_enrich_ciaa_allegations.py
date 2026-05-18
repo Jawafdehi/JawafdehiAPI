@@ -431,8 +431,7 @@ def test_convert_source_no_url_no_file():
 @pytest.mark.django_db
 @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True)
 @patch(
-    "cases.management.commands.enrich_ciaa_allegations.Command."
-    "_call_llm_opencode",
+    "cases.management.commands.enrich_ciaa_allegations.Command." "_call_llm_opencode",
     return_value='{"allegations": ["Test allegation from opencode"]}',
 )
 @patch(
@@ -631,11 +630,7 @@ def test_call_llm_opencode_success_standard_model(mock_urlopen):
     mock_resp.read.return_value = json.dumps(
         {
             "choices": [
-                {
-                    "message": {
-                        "content": '{"allegations": ["Test allegation content"]}'
-                    }
-                }
+                {"message": {"content": '{"allegations": ["Test allegation content"]}'}}
             ]
         }
     ).encode("utf-8")
@@ -695,18 +690,14 @@ def test_llm_timeout_cli_wins():
     assert _llm_timeout(60) == 60
 
 
-@patch.dict(
-    os.environ, {"JAWAFDEHI_LLM_TIMEOUT_SECONDS": "120"}, clear=True
-)
+@patch.dict(os.environ, {"JAWAFDEHI_LLM_TIMEOUT_SECONDS": "120"}, clear=True)
 def test_llm_timeout_from_env():
     from cases.management.commands.enrich_ciaa_allegations import _llm_timeout
 
     assert _llm_timeout(None) == 120
 
 
-@patch.dict(
-    os.environ, {"JAWAFDEHI_LLM_TIMEOUT_SECONDS": "notanumber"}, clear=True
-)
+@patch.dict(os.environ, {"JAWAFDEHI_LLM_TIMEOUT_SECONDS": "notanumber"}, clear=True)
 def test_llm_timeout_invalid_env_fallback():
     from cases.management.commands.enrich_ciaa_allegations import _llm_timeout
 
@@ -747,13 +738,11 @@ def test_call_llm_opencode_429_includes_usage_hint(mock_urlopen):
 @pytest.mark.django_db
 @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True)
 @patch(
-    "cases.management.commands.enrich_ciaa_allegations.Command."
-    "_call_llm_opencode",
+    "cases.management.commands.enrich_ciaa_allegations.Command." "_call_llm_opencode",
     return_value='{"allegations": ["Jawafdehi proxy route test"]}',
 )
 @patch(
-    "cases.management.commands.enrich_ciaa_allegations.Command."
-    "_call_llm_anthropic",
+    "cases.management.commands.enrich_ciaa_allegations.Command." "_call_llm_anthropic",
 )
 @patch(
     "cases.management.commands.enrich_ciaa_allegations.Command."
@@ -799,13 +788,11 @@ def test_jawafdehi_proxy_routes_to_opencode(
 @pytest.mark.django_db
 @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True)
 @patch(
-    "cases.management.commands.enrich_ciaa_allegations.Command."
-    "_call_llm_anthropic",
+    "cases.management.commands.enrich_ciaa_allegations.Command." "_call_llm_anthropic",
     return_value=["Anthropic route test"],
 )
 @patch(
-    "cases.management.commands.enrich_ciaa_allegations.Command."
-    "_call_llm_opencode",
+    "cases.management.commands.enrich_ciaa_allegations.Command." "_call_llm_opencode",
 )
 @patch(
     "cases.management.commands.enrich_ciaa_allegations.Command."
