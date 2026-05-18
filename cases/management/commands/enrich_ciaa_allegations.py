@@ -104,6 +104,46 @@ def _llm_timeout(cli_timeout: int | None = None) -> int:
     return DEFAULT_LLM_TIMEOUT
 
 
+def _build_llm_opencode_body(
+    normalized_model: str, is_minimax: bool, prompt: str
+) -> str:
+    if is_minimax:
+        body = {
+            "model": normalized_model,
+            "max_tokens": 3000,
+            "system": SYSTEM_PROMPT,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.1,
+        }
+    else:
+        body = {
+            "model": normalized_model,
+            "max_tokens": 3000,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+        }
+    return json.dumps(body)
+
+
+def _parse_llm_opencode_response(payload: dict, is_minimax: bool) -> str:
+    if is_minimax:
+        return payload.get("content", [{}])[0].get("text", "")
+    return payload.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+
+def _format_llm_http_error(status: int, body_snippet: str) -> str:
+    msg = f"LLM HTTP {status}: {body_snippet[:300]}"
+    if status == 429:
+        msg += (
+            " Hint: OpenCode Go usage limits may apply. "
+            "Try reducing --limit or switching models."
+        )
+    return msg
+
+
 SYSTEM_PROMPT = """You are a Nepali legal analyst extracting structured key allegations
 from CIAA (Commission for the Investigation of Abuse of Authority) press releases.
 
@@ -385,31 +425,8 @@ class Command(BaseCommand):
         endpoint = _llm_endpoint(base_url, model)
         normalized_model = normalize_model(model)
         headers = self._build_llm_headers(api_key)
-
         is_minimax = normalized_model in MINIMAX_MODELS
-
-        if is_minimax:
-            body = json.dumps(
-                {
-                    "model": normalized_model,
-                    "max_tokens": 3000,
-                    "system": SYSTEM_PROMPT,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.1,
-                }
-            )
-        else:
-            body = json.dumps(
-                {
-                    "model": normalized_model,
-                    "max_tokens": 3000,
-                    "messages": [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "temperature": 0.1,
-                }
-            )
+        body = _build_llm_opencode_body(normalized_model, is_minimax, prompt)
 
         last_status = None
         last_body_snippet = ""
@@ -423,18 +440,10 @@ class Command(BaseCommand):
                     method="POST",
                 )
                 ctx = ssl.create_default_context()
+                ctx.minimum_version = ssl.TLSVersion.TLSv1_2
                 resp = urllib.request.urlopen(req, timeout=timeout, context=ctx)
                 payload = json.loads(resp.read().decode("utf-8"))
-
-                if is_minimax:
-                    raw = payload.get("content", [{}])[0].get("text", "")
-                else:
-                    raw = (
-                        payload.get("choices", [{}])[0]
-                        .get("message", {})
-                        .get("content", "")
-                    )
-
+                raw = _parse_llm_opencode_response(payload, is_minimax)
                 logger.debug(f"LLM response: {raw[:500]}...")
                 return raw
 
@@ -444,48 +453,53 @@ class Command(BaseCommand):
                     last_body_snippet = e.read().decode("utf-8", errors="replace")[:500]
                 except Exception:
                     last_body_snippet = "<unreadable>"
-
-                if attempt < MAX_LLM_RETRIES and (last_status in (429, 503)):
-                    wait = 2**attempt
-                    hint = ""
-                    if last_status == 429:
-                        hint = (
-                            " (OpenCode Go usage limits may apply; "
-                            "consider reducing --limit or using a different model)"
-                        )
-                    self.stdout.write(
-                        self.style.WARNING(
-                            f"  LLM {last_status} on attempt {attempt}, "
-                            f"retrying in {wait}s...{hint}"
-                        )
-                    )
-                    time.sleep(wait)
+                if self._should_retry_llm_http(attempt, last_status):
                     continue
-
-                msg = f"LLM HTTP {last_status}: {last_body_snippet[:300]}"
-                if last_status == 429:
-                    msg += (
-                        " Hint: OpenCode Go usage limits may apply. "
-                        "Try reducing --limit or switching models."
-                    )
-                raise CommandError(msg)
+                raise CommandError(
+                    _format_llm_http_error(last_status, last_body_snippet)
+                )
 
             except (urllib.error.URLError, OSError, ssl.SSLError) as e:
-                if attempt < MAX_LLM_RETRIES:
-                    wait = 2**attempt
-                    self.stdout.write(
-                        self.style.WARNING(
-                            f"  LLM connection error on attempt {attempt} "
-                            f"({e}), retrying in {wait}s..."
-                        )
-                    )
-                    time.sleep(wait)
+                if self._should_retry_llm_network(attempt, e):
                     continue
                 raise CommandError(
                     f"LLM connection failed after {MAX_LLM_RETRIES} attempts: {e}"
                 )
 
         return None
+
+    def _should_retry_llm_http(self, attempt: int, status: int) -> bool:
+        if attempt >= MAX_LLM_RETRIES:
+            return False
+        if status not in (429, 503):
+            return False
+        wait = 2**attempt
+        hint = ""
+        if status == 429:
+            hint = (
+                " (OpenCode Go usage limits may apply; "
+                "consider reducing --limit or using a different model)"
+            )
+        self.stdout.write(
+            self.style.WARNING(
+                f"  LLM {status} on attempt {attempt}, " f"retrying in {wait}s...{hint}"
+            )
+        )
+        time.sleep(wait)
+        return True
+
+    def _should_retry_llm_network(self, attempt: int, error: Exception) -> bool:
+        if attempt >= MAX_LLM_RETRIES:
+            return False
+        wait = 2**attempt
+        self.stdout.write(
+            self.style.WARNING(
+                f"  LLM connection error on attempt {attempt} "
+                f"({error}), retrying in {wait}s..."
+            )
+        )
+        time.sleep(wait)
+        return True
 
     def _get_eligible_cases(self, limit, force, case_id):
         queryset = Case.objects.filter(state=CaseState.DRAFT)
