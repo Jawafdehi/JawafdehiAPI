@@ -1,11 +1,11 @@
 (function () {
   "use strict";
 
-  var TURNDOWN_CDN =
+  const TURNDOWN_CDN =
     "https://unpkg.com/turndown@7.2.4/dist/turndown.js";
 
   function loadScript(src, callback) {
-    var script = document.createElement("script");
+    const script = document.createElement("script");
     script.src = src;
     script.onload = callback;
     script.onerror = function () {
@@ -18,22 +18,22 @@
 
   function initClipboardHandler() {
     document.addEventListener("paste", function (event) {
-      var target = event.target;
+      const target = event.target;
       if (!target.classList.contains("markdownx-editor")) return;
 
-      var clipboardData = event.clipboardData;
+      const clipboardData = event.clipboardData;
       if (!clipboardData) return;
 
       if (clipboardData.files && clipboardData.files.length > 0) return;
 
-      var html = clipboardData.getData("text/html");
+      const html = clipboardData.getData("text/html");
       if (!html || html.trim().length === 0) return;
 
       if (typeof TurndownService === "undefined") return;
 
       event.preventDefault();
 
-      var turndownService = new TurndownService({
+      const turndownService = new TurndownService({
         headingStyle: "atx",
         hr: "---",
         bulletListMarker: "-",
@@ -44,11 +44,11 @@
       // Remove Word-specific cruft while preserving text
       turndownService.remove(["style", "script", "meta", "link"]);
 
-      var markdown = turndownService.turndown(html);
+      const markdown = turndownService.turndown(html);
 
-      var start = target.selectionStart;
-      var end = target.selectionEnd;
-      var text = target.value;
+      const start = target.selectionStart;
+      const end = target.selectionEnd;
+      const text = target.value;
 
       target.value =
         text.substring(0, start) + markdown + text.substring(end);
