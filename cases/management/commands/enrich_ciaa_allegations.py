@@ -474,12 +474,12 @@ class Command(BaseCommand):
                     _format_llm_http_error(last_status, last_body_snippet)
                 )
 
-            except (urllib.error.URLError, OSError, ssl.SSLError) as e:
+            except (urllib.error.URLError, OSError) as e:
                 if self._should_retry_llm_network(attempt, e):
                     continue
                 raise CommandError(
                     f"LLM connection failed after {MAX_LLM_RETRIES} attempts: {e}"
-                )
+                ) from e
 
         return None
 
@@ -759,20 +759,28 @@ class Command(BaseCommand):
             ) from exc
 
         converter = MarkItDown(enable_plugins=True)
-        with tempfile.TemporaryDirectory(prefix="allegation-enrichment-") as tmp_dir:
-            temp_path = self._download_source_to_path(source, Path(tmp_dir))
-            if temp_path:
-                result = converter.convert_uri(temp_path.resolve().as_uri())
-                return result.markdown
+        try:
+            with tempfile.TemporaryDirectory(
+                prefix="allegation-enrichment-"
+            ) as tmp_dir:
+                temp_path = self._download_source_to_path(source, Path(tmp_dir))
+                if temp_path:
+                    result = converter.convert_uri(temp_path.resolve().as_uri())
+                    return result.markdown
 
-            source_url = self._pick_source_url(source)
-            if not source_url:
-                raise CommandError(
-                    f"No downloadable source found for source_id={source.source_id}."
-                )
-            source_url = self._validate_url_scheme(source_url)
-            result = converter.convert_uri(source_url)
-            return result.markdown
+                source_url = self._pick_source_url(source)
+                if not source_url:
+                    raise CommandError(
+                        f"No downloadable source found for source_id={source.source_id}."
+                    )
+                source_url = self._validate_url_scheme(source_url)
+                result = converter.convert_uri(source_url)
+                return result.markdown
+        finally:
+            try:
+                converter.close()
+            except Exception:
+                pass
 
     def _download_source_to_path(
         self, source: DocumentSource, output_dir: Path
