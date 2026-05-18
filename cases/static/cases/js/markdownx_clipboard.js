@@ -2,7 +2,7 @@
   "use strict";
 
   var TURNDOWN_CDN =
-    "https://unpkg.com/turndown@7.2.0/dist/turndown.js";
+    "https://unpkg.com/turndown@7.2.4/dist/turndown.js";
 
   function loadScript(src, callback) {
     var script = document.createElement("script");
