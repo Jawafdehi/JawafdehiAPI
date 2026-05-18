@@ -34,6 +34,7 @@ from typing import Any
 from django.core.management.base import BaseCommand, CommandError
 
 from cases.models import Case, CaseState, DocumentSource, SourceType
+from cases.services.priority_case_loader import filter_by_priority, load_priority_cases
 
 logger = logging.getLogger(__name__)
 
@@ -362,6 +363,17 @@ class Command(BaseCommand):
             help="Process a specific case by case_id",
         )
         parser.add_argument(
+            "--priority",
+            action="store_true",
+            help="Enrich only cases in the priority case list",
+        )
+        parser.add_argument(
+            "--all",
+            action="store_true",
+            dest="all_cases",
+            help="Enrich all DRAFT CIAA cases (explicit, same as default)",
+        )
+        parser.add_argument(
             "--base-url",
             type=str,
             default=None,
@@ -378,6 +390,24 @@ class Command(BaseCommand):
         verbose = options["verbose"]
         force = options["force"]
         case_id = options.get("case_id")
+        priority = options["priority"]
+        all_cases_flag = options.get("all_cases")
+
+        if priority and case_id:
+            self.stderr.write(
+                self.style.ERROR(
+                    "--priority and --case-id are mutually exclusive"
+                )
+            )
+            return
+
+        if not priority and not all_cases_flag:
+            self.stdout.write(
+                self.style.NOTICE(
+                    "Processing all DRAFT CIAA cases (default). "
+                    "Use --all to make this explicit or --priority to filter."
+                )
+            )
 
         if verbose:
             logger.setLevel(logging.DEBUG)
@@ -393,7 +423,7 @@ class Command(BaseCommand):
             )
         )
 
-        cases = self._get_eligible_cases(limit, force, case_id)
+        cases = self._get_eligible_cases(limit, force, case_id, priority)
         self.stdout.write(f"Found {len(cases)} eligible CIAA DRAFT case(s) to process")
 
         self._fetch_source_cache(cases)
@@ -516,11 +546,19 @@ class Command(BaseCommand):
         time.sleep(wait)
         return True
 
-    def _get_eligible_cases(self, limit, force, case_id):
+    def _get_eligible_cases(self, limit, force, case_id, priority=False):
         queryset = Case.objects.filter(state=CaseState.DRAFT)
 
         if case_id:
             queryset = queryset.filter(case_id=case_id)
+
+        if priority:
+            priority_list = load_priority_cases()
+            logger.info(
+                "Priority mode: loaded %d case numbers across all fiscal years",
+                len(priority_list),
+            )
+            queryset = filter_by_priority(queryset, priority_list)
 
         eligible = self._filter_eligible(list(queryset), force)
 
