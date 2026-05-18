@@ -7,6 +7,7 @@ from django.core.management.base import BaseCommand
 from django.db.models import Q
 
 from cases.models import Case, CaseType, CaseState
+from cases.services.priority_case_loader import filter_by_priority, load_priority_cases
 from cases.services.tag_enricher import TagEnricher
 
 logging.basicConfig(
@@ -31,6 +32,17 @@ class Command(BaseCommand):
             "--case-id",
             type=str,
             help="Process a specific case by case_id",
+        )
+        parser.add_argument(
+            "--priority",
+            action="store_true",
+            help="Enrich only cases in the priority case list",
+        )
+        parser.add_argument(
+            "--all",
+            action="store_true",
+            dest="all_cases",
+            help="Enrich all DRAFT CIAA cases (explicit, same as default)",
         )
         parser.add_argument(
             "--no-llm",
@@ -70,12 +82,22 @@ class Command(BaseCommand):
     def handle(self, *args, **options):  # noqa
         dry_run = options["dry_run"]
         case_id = options.get("case_id")
+        priority = options["priority"]
+        all_cases_flag = options.get("all_cases")
         use_llm = not options["no_llm"]
         force = options["force"]
         limit = options.get("limit")
         llm_base_url = (options.get("llm_base_url") or "").strip() or None
         llm_api_key = (options.get("llm_api_key") or "").strip() or None
         llm_model = options.get("llm_model", "gpt-4.5")
+
+        if priority and case_id:
+            self.stderr.write(
+                self.style.ERROR(
+                    "--priority and --case-id are mutually exclusive"
+                )
+            )
+            return
 
         if dry_run:
             logger.warning("DRY-RUN MODE: No changes will be saved")
@@ -101,6 +123,19 @@ class Command(BaseCommand):
                 case_type=CaseType.CORRUPTION,
                 state__in=[CaseState.DRAFT],
             ).order_by("created_at")
+
+            if priority:
+                priority_list = load_priority_cases()
+                logger.info(
+                    "Priority mode: loaded %d case numbers across all fiscal years",
+                    len(priority_list),
+                )
+                cases = filter_by_priority(cases, priority_list)
+            elif not all_cases_flag:
+                logger.info(
+                    "Processing all DRAFT CIAA cases (default). "
+                    "Use --all to make this explicit or --priority to filter."
+                )
 
             if not force:
                 cases = cases.filter(Q(tags__isnull=True) | Q(tags=[]))
