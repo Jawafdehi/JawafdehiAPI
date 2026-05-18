@@ -809,9 +809,7 @@ def _collect_evidence_text(case: Case) -> str:  # noqa
 
     source_count = 0
     for src in sources:
-        file_text = _convert_source_file(
-            src, pre_fetched_uploads.get(src.id, [])
-        )
+        file_text = _convert_source_file(src, pre_fetched_uploads.get(src.id, []))
         if file_text:
             parts.append(file_text)
             source_count += 1
@@ -837,9 +835,7 @@ except ImportError:
 _DOCUMENT_EXTENSIONS = frozenset({".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png"})
 
 
-def _convert_source_file(  # noqa
-    src: DocumentSource, pre_fetched_uploads=None
-) -> str:
+def _convert_source_file(src: DocumentSource, pre_fetched_uploads=None) -> str:  # noqa
     """Convert a DocumentSource's files to text using MarkItDown.
 
     Checks sources in order:
