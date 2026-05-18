@@ -618,37 +618,38 @@ class Command(BaseCommand):
                     )
                     return None
 
-    def _parse_allegations(self, raw):
+    def _extract_json_body(self, raw):
         raw = raw.strip()
         json_match = re.search(r"```(?:json)?\s*(.*?)\s*```", raw, re.DOTALL)
         if json_match:
-            raw = json_match.group(1).strip()
-        else:
-            brace_start = raw.find("{")
-            brace_end = raw.rfind("}")
-            if brace_start != -1 and brace_end != -1:
-                raw = raw[brace_start : brace_end + 1]
+            return json_match.group(1).strip()
+        brace_start = raw.find("{")
+        brace_end = raw.rfind("}")
+        if brace_start != -1 and brace_end != -1:
+            return raw[brace_start : brace_end + 1]
+        return raw
 
-        try:
-            data = json.loads(raw)
-            if isinstance(data, list):
-                allegations = data
-            elif isinstance(data, dict):
-                allegations = data.get("allegations", data.get("response", []))
-                if not isinstance(allegations, list):
-                    allegations = [str(allegations)]
-            else:
-                allegations = []
-        except json.JSONDecodeError:
-            lines = [
-                line.strip().lstrip("0123456789.-) ")
-                for line in raw.split("\n")
-                if line.strip()
-            ]
-            allegations = [line for line in lines if len(line) > 10]
-            if not allegations:
-                return None
+    def _parse_json_to_allegations(self, raw):
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            result = data.get("allegations", data.get("response", []))
+            if not isinstance(result, list):
+                return [str(result)]
+            return result
+        return []
 
+    def _parse_fallback_allegations(self, raw):
+        lines = [
+            line.strip().lstrip("0123456789.-) ")
+            for line in raw.split("\n")
+            if line.strip()
+        ]
+        allegations = [line for line in lines if len(line) > 10]
+        return allegations if allegations else None
+
+    def _flatten_allegation_items(self, allegations):
         flat = []
         for a in allegations:
             if isinstance(a, str) and a.strip():
@@ -657,7 +658,16 @@ class Command(BaseCommand):
                 vals = [str(v) for v in a.values() if v]
                 if vals:
                     flat.append("; ".join(vals))
+        return flat
 
+    def _parse_allegations(self, raw):
+        body = self._extract_json_body(raw)
+        try:
+            allegations = self._parse_json_to_allegations(body)
+        except json.JSONDecodeError:
+            return self._parse_fallback_allegations(body)
+
+        flat = self._flatten_allegation_items(allegations)
         if not flat:
             return None
         return flat[:5]
