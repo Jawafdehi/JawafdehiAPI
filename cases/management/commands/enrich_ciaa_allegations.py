@@ -145,9 +145,7 @@ def _confined_output_path(output_dir: Path, filename: str) -> Path:
     output_dir_resolved = output_dir.resolve()
     out_path = (output_dir / filename).resolve()
     if output_dir_resolved not in out_path.parents:
-        raise CommandError(
-            f"Refusing to write outside output directory: '{filename}'"
-        )
+        raise CommandError(f"Refusing to write outside output directory: '{filename}'")
     return out_path
 
 
@@ -569,7 +567,9 @@ class Command(BaseCommand):
             )
             context = ssl.create_default_context()
             context.minimum_version = ssl.TLSVersion.TLSv1_2
-            with urllib.request.urlopen(request, timeout=30, context=context) as response:
+            with urllib.request.urlopen(
+                request, timeout=30, context=context
+            ) as response:
                 _copy_stream_to_path_with_limit(response, out_path)
             return out_path
         except OSError:

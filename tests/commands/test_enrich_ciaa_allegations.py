@@ -222,7 +222,10 @@ def test_acquire_press_release_text_from_source():
         return_value="Converted markdown content for testing with enough characters to pass the minimum length check of fifty characters easily met",
     ):
         result = cmd._acquire_press_release_text(case, dry_run=False)
-    assert result == "Converted markdown content for testing with enough characters to pass the minimum length check of fifty characters easily met"
+    assert (
+        result
+        == "Converted markdown content for testing with enough characters to pass the minimum length check of fifty characters easily met"
+    )
 
 
 @pytest.mark.django_db
