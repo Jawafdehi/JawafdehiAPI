@@ -517,8 +517,10 @@ class _FakeHTTPError(urllib.error.HTTPError):
         super().__init__(url, code, "", headers or {}, fp)
         self._body = body.encode("utf-8")
 
-    def read(self):
-        return self._body
+    def read(self, n=-1):
+        if n == -1:
+            return self._body
+        return self._body[:n]
 
     def readinto(self, buf):
         data = self._body
