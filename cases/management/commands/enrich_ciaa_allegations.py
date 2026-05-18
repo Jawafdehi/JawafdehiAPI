@@ -250,7 +250,7 @@ class Command(BaseCommand):
                 "No API key provided. Set the ANTHROPIC_API_KEY environment variable."
             )
 
-        client = self._init_client(api_key, base_url, model)
+        client = self._init_client(api_key, base_url)
 
         cases = self._get_eligible_cases(limit, force, case_id)
         self.stdout.write(f"Found {len(cases)} eligible CIAA DRAFT case(s) to process")
@@ -270,7 +270,7 @@ class Command(BaseCommand):
 
         self._print_summary(dry_run)
 
-    def _init_client(self, api_key, base_url, model):
+    def _init_client(self, api_key, base_url):
         import anthropic
 
         if base_url:
@@ -286,17 +286,7 @@ class Command(BaseCommand):
         if case_id:
             queryset = queryset.filter(case_id=case_id)
 
-        cases = list(queryset)
-        eligible = []
-        for case in cases:
-            if not force and case.key_allegations:
-                continue
-            if case.court_cases and isinstance(case.court_cases, list):
-                has_ciaa = any(ref.startswith("special:") for ref in case.court_cases)
-                if has_ciaa:
-                    eligible.append(case)
-            else:
-                eligible.append(case)
+        eligible = self._filter_eligible(list(queryset), force)
 
         if limit is not None:
             if limit < 0:
@@ -304,6 +294,18 @@ class Command(BaseCommand):
             eligible = eligible[:limit] if limit > 0 else []
 
         return eligible
+
+    def _filter_eligible(self, cases, force):
+        result = []
+        for case in cases:
+            if not force and case.key_allegations:
+                continue
+            if case.court_cases and isinstance(case.court_cases, list):
+                if any(ref.startswith("special:") for ref in case.court_cases):
+                    result.append(case)
+            else:
+                result.append(case)
+        return result
 
     def _fetch_source_cache(self, cases):
         source_ids = set()
@@ -329,51 +331,8 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING("  SKIPPED: No evidence"))
             return
 
-        source = self._select_press_release_source(case)
-        if not source:
-            self.stats["cases_no_content"] += 1
-            if not dry_run:
-                note = (
-                    "enrich_ciaa_allegations: No press release source found in evidence"
-                )
-                current = case.missing_details or ""
-                if note not in current:
-                    case.missing_details = f"{current}\n{note}" if current else note
-                    case.save(update_fields=["missing_details"])
-            self.stdout.write(
-                self.style.WARNING("  SKIPPED: No press release source found")
-            )
-            return
-
-        try:
-            press_release_text = self._convert_source_to_markdown(source)
-        except Exception as e:
-            self.stats["cases_no_content"] += 1
-            if not dry_run:
-                note = f"enrich_ciaa_allegations: Failed to convert source to markdown: {e!s}"
-                current = case.missing_details or ""
-                if note not in current:
-                    case.missing_details = f"{current}\n{note}" if current else note
-                    case.save(update_fields=["missing_details"])
-            self.stdout.write(
-                self.style.WARNING(f"  SKIPPED: Failed to convert source to markdown: {e!s}")
-            )
-            return
-
-        if not press_release_text or len(press_release_text.strip()) < 50:
-            self.stats["cases_no_content"] += 1
-            if not dry_run:
-                note = (
-                    "enrich_ciaa_allegations: No press release markdown content "
-                    "available for LLM extraction"
-                )
-                current = case.missing_details or ""
-                if note not in current:
-                    case.missing_details = f"{current}\n{note}" if current else note
-                    case.save(update_fields=["missing_details"])
-            self.stdout.write(
-                self.style.WARNING("  SKIPPED: No press release markdown content")
-            )
+        press_release_text = self._acquire_press_release_text(case, dry_run)
+        if press_release_text is None:
             return
 
         bigo = case.bigo
@@ -396,19 +355,8 @@ class Command(BaseCommand):
             self.stdout.write(self.style.ERROR("  FAILED: No allegations extracted"))
             return
 
-        if len(allegations) < 2:
-            self.stdout.write(
-                self.style.WARNING(
-                    f"  WARNING: Only {len(allegations)} allegation(s) extracted (want 2-5)"
-                )
-            )
-        if len(allegations) > 5:
-            allegations = allegations[:5]
-            self.stdout.write(self.style.WARNING("  Truncated to 5 allegations"))
-
-        self.stdout.write(f"  Extracted {len(allegations)} allegation(s):")
-        for a in allegations:
-            self.stdout.write(f"    - {a}")
+        allegations = self._trim_allegations(allegations)
+        self._report_allegations(allegations)
 
         if not dry_run:
             case.key_allegations = allegations
@@ -424,6 +372,76 @@ class Command(BaseCommand):
                     f"  [DRY RUN] Would save {len(allegations)} allegation(s)"
                 )
             )
+
+    def _record_missing_details(self, case, note):
+        if not note:
+            return
+        current = case.missing_details or ""
+        if note not in current:
+            case.missing_details = f"{current}\n{note}" if current else note
+            case.save(update_fields=["missing_details"])
+
+    def _acquire_press_release_text(self, case, dry_run):
+        source = self._select_press_release_source(case)
+        if not source:
+            self.stats["cases_no_content"] += 1
+            if not dry_run:
+                self._record_missing_details(
+                    case,
+                    "enrich_ciaa_allegations: No press release source found in evidence",
+                )
+            self.stdout.write(
+                self.style.WARNING("  SKIPPED: No press release source found")
+            )
+            return None
+
+        try:
+            press_release_text = self._convert_source_to_markdown(source)
+        except Exception as e:
+            self.stats["cases_no_content"] += 1
+            if not dry_run:
+                self._record_missing_details(
+                    case,
+                    f"enrich_ciaa_allegations: Failed to convert source to markdown: {e!s}",
+                )
+            self.stdout.write(
+                self.style.WARNING(
+                    f"  SKIPPED: Failed to convert source to markdown: {e!s}"
+                )
+            )
+            return None
+
+        if not press_release_text or len(press_release_text.strip()) < 50:
+            self.stats["cases_no_content"] += 1
+            if not dry_run:
+                self._record_missing_details(
+                    case,
+                    "enrich_ciaa_allegations: No press release markdown content "
+                    "available for LLM extraction",
+                )
+            self.stdout.write(
+                self.style.WARNING("  SKIPPED: No press release markdown content")
+            )
+            return None
+
+        return press_release_text
+
+    def _trim_allegations(self, allegations):
+        if len(allegations) < 2:
+            self.stdout.write(
+                self.style.WARNING(
+                    f"  WARNING: Only {len(allegations)} allegation(s) extracted (want 2-5)"
+                )
+            )
+        if len(allegations) > 5:
+            allegations = allegations[:5]
+            self.stdout.write(self.style.WARNING("  Truncated to 5 allegations"))
+        return allegations
+
+    def _report_allegations(self, allegations):
+        self.stdout.write(f"  Extracted {len(allegations)} allegation(s):")
+        for a in allegations:
+            self.stdout.write(f"    - {a}")
 
     def _select_press_release_source(self, case: Case) -> DocumentSource | None:
         source_ids = [
@@ -551,7 +569,7 @@ class Command(BaseCommand):
             with urllib.request.urlopen(request, timeout=30) as response:
                 _copy_stream_to_path_with_limit(response, out_path)
             return out_path
-        except (urllib.error.URLError, OSError):
+        except OSError:
             out_path.unlink(missing_ok=True)
             return None
         except CommandError:
@@ -613,7 +631,14 @@ class Command(BaseCommand):
 
         try:
             data = json.loads(raw)
-            allegations = data.get("allegations", []) if isinstance(data, dict) else []
+            if isinstance(data, list):
+                allegations = data
+            elif isinstance(data, dict):
+                allegations = data.get("allegations", data.get("response", []))
+                if not isinstance(allegations, list):
+                    allegations = [str(allegations)]
+            else:
+                allegations = []
         except json.JSONDecodeError:
             lines = [
                 line.strip().lstrip("0123456789.-) ")
@@ -621,11 +646,21 @@ class Command(BaseCommand):
                 if line.strip()
             ]
             allegations = [line for line in lines if len(line) > 10]
+            if not allegations:
+                return None
 
-        allegations = [
-            a.strip() for a in allegations if isinstance(a, str) and a.strip()
-        ]
-        return allegations[:5]
+        flat = []
+        for a in allegations:
+            if isinstance(a, str) and a.strip():
+                flat.append(a.strip())
+            elif isinstance(a, dict):
+                vals = [str(v) for v in a.values() if v]
+                if vals:
+                    flat.append("; ".join(vals))
+
+        if not flat:
+            return None
+        return flat[:5]
 
     def _print_summary(self, dry_run):
         self.stdout.write("\n" + "=" * 60)
