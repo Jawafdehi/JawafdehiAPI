@@ -94,13 +94,13 @@ def test_parse_invalid_json_fallback():
     assert len(result) == 2
 
 
-def test_parse_empty_array():
+def test_parse_empty_array_returns_none():
     from cases.management.commands.enrich_ciaa_allegations import Command
 
     cmd = Command()
     raw = '{"allegations": []}'
     result = cmd._parse_allegations(raw)
-    assert result == []
+    assert result is None
 
 
 def test_parse_truncates_over_max():
