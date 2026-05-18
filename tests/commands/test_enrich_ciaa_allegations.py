@@ -190,18 +190,18 @@ def test_get_eligible_cases_respects_case_id():
 
 
 @pytest.mark.django_db
-def test_collect_content_no_evidence():
+def test_acquire_press_release_text_no_source_returns_none():
     from cases.management.commands.enrich_ciaa_allegations import Command
 
     case = _make_case(case_id="no-evidence", evidence=None)
     cmd = Command()
     cmd._source_lookup = {}
-    result = cmd._collect_press_release_content(case)
-    assert result == ""
+    result = cmd._acquire_press_release_text(case, dry_run=False)
+    assert result is None
 
 
 @pytest.mark.django_db
-def test_collect_content_from_url():
+def test_acquire_press_release_text_from_source():
     from cases.management.commands.enrich_ciaa_allegations import Command
 
     src = _make_source(
@@ -218,16 +218,15 @@ def test_collect_content_from_url():
 
     with patch.object(
         cmd,
-        "_fetch_and_convert_content",
-        return_value="Converted markdown content for testing",
-    ) as mock:
-        result = cmd._collect_press_release_content(case)
-        mock.assert_called_once_with("https://ngm-store.jawafdehi.org/case/file.md")
-    assert result == "Converted markdown content for testing"
+        "_convert_source_to_markdown",
+        return_value="Converted markdown content for testing with enough characters to pass the minimum length check of fifty characters easily met",
+    ):
+        result = cmd._acquire_press_release_text(case, dry_run=False)
+    assert result == "Converted markdown content for testing with enough characters to pass the minimum length check of fifty characters easily met"
 
 
 @pytest.mark.django_db
-def test_collect_content_empty_evidence_entries():
+def test_acquire_press_release_text_empty_evidence_returns_none():
     from cases.management.commands.enrich_ciaa_allegations import Command
 
     case = _make_case(
@@ -236,8 +235,8 @@ def test_collect_content_empty_evidence_entries():
     )
     cmd = Command()
     cmd._source_lookup = {}
-    result = cmd._collect_press_release_content(case)
-    assert result == ""
+    result = cmd._acquire_press_release_text(case, dry_run=False)
+    assert result is None
 
 
 # ── Dry-run safety test ────────────────────────────────────────
@@ -253,8 +252,8 @@ def test_collect_content_empty_evidence_entries():
     return_value=["Test allegation"],
 )
 @patch(
-    "cases.management.commands.enrich_ciaa_allegations.Command._fetch_and_convert_content",
-    return_value="Mocked press release content for dry-run test with enough chars",
+    "cases.management.commands.enrich_ciaa_allegations.Command._convert_source_to_markdown",
+    return_value="Mocked press release content for dry-run test with enough characters to pass the minimum length check",
 )
 def test_dry_run_does_not_save(mock_fetch, mock_llm, mock_client):
     _make_source(
