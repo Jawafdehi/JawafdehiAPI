@@ -10,8 +10,11 @@ Usage::
 
 Environment variables::
 
-    ANTHROPIC_API_KEY  — API key for Anthropic (required)
-    LLM_PROXY_URL      — optional base URL for an OpenAI-compatible proxy
+    ANTHROPIC_API_KEY        — API key for Anthropic (fallback)
+    JAWAFDEHI_LLM_API_KEY    — API key for Jawafdehi LLM proxy
+    JAWAFDEHI_LLM_PROXY_URL  — base URL for Jawafdehi LLM proxy
+    JAWAFDEHI_LLM_TIMEOUT_SECONDS — timeout in seconds (default 300)
+    OPENCODE_API_KEY         — API key for OpenCode Go
 """
 
 import hashlib
@@ -36,6 +39,70 @@ logger = logging.getLogger(__name__)
 
 MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
 DOWNLOAD_CHUNK_SIZE = 16 * 1024
+DEFAULT_OPENCODE_BASE = "https://opencode.ai/zen/go/v1"
+DEFAULT_LLM_TIMEOUT = 300
+MAX_LLM_RETRIES = 3
+MINIMAX_MODELS = frozenset({"minimax-m2.5", "minimax-m2.7"})
+
+
+def normalize_model(model: str) -> str:
+    model = model.strip()
+    for prefix in ("opencode-go/", "openai:"):
+        if model.startswith(prefix):
+            model = model[len(prefix) :]
+    return model
+
+
+def normalize_base_url(url: str | None) -> str:
+    if url and url.strip():
+        url = url.strip().rstrip("/")
+    else:
+        url = os.environ.get(
+            "JAWAFDEHI_LLM_PROXY_URL", DEFAULT_OPENCODE_BASE
+        ).rstrip("/")
+    if url.endswith("/zen/v1"):
+        url = url.replace("/zen/v1", "/zen/go/v1")
+    elif url.endswith("/zen/go"):
+        url += "/v1"
+    return url
+
+
+def resolve_api_key(cli_key: str | None = None) -> str:
+    if cli_key and cli_key.strip():
+        return cli_key.strip()
+    for env_var in (
+        "JAWAFDEHI_LLM_API_KEY",
+        "OPENCODE_API_KEY",
+        "ANTHROPIC_API_KEY",
+    ):
+        val = os.environ.get(env_var)
+        if val:
+            return val
+    raise CommandError(
+        "No API key provided. Set --llm-api-key, JAWAFDEHI_LLM_API_KEY, "
+        "OPENCODE_API_KEY, or ANTHROPIC_API_KEY."
+    )
+
+
+def _llm_endpoint(base_url: str, model: str) -> str:
+    normalized = normalize_model(model)
+    base = base_url.rstrip("/")
+    if normalized in MINIMAX_MODELS:
+        return f"{base}/messages"
+    return f"{base}/chat/completions"
+
+
+def _llm_timeout(cli_timeout: int | None = None) -> int:
+    if cli_timeout is not None:
+        return cli_timeout
+    env = os.environ.get("JAWAFDEHI_LLM_TIMEOUT_SECONDS")
+    if env is not None:
+        try:
+            return int(env)
+        except ValueError:
+            pass
+    return DEFAULT_LLM_TIMEOUT
+
 
 SYSTEM_PROMPT = """You are a Nepali legal analyst extracting structured key allegations
 from CIAA (Commission for the Investigation of Abuse of Authority) press releases.
@@ -199,14 +266,31 @@ class Command(BaseCommand):
         parser.add_argument(
             "--llm-model",
             type=str,
-            default=os.environ.get("JAWAFDEHI_ALLEGATION_MODEL", "claude-sonnet-4-5"),
-            help="Anthropic model name (default: claude-sonnet-4-5)",
+            default=os.environ.get(
+                "JAWAFDEHI_ALLEGATION_MODEL", "claude-sonnet-4-5"
+            ),
+            help="Model id (accepts opencode-go/ prefix, defaults to claude-sonnet-4-5)",
         )
         parser.add_argument(
-            "--base-url",
+            "--llm-base-url",
             type=str,
             default=None,
-            help="Base URL for LLM proxy (env: LLM_PROXY_URL)",
+            help="Base URL for LLM API (env: JAWAFDEHI_LLM_PROXY_URL, "
+            "default: https://opencode.ai/zen/go/v1)",
+        )
+        parser.add_argument(
+            "--llm-api-key",
+            type=str,
+            default=None,
+            help="API key (env: JAWAFDEHI_LLM_API_KEY, OPENCODE_API_KEY, "
+            "ANTHROPIC_API_KEY)",
+        )
+        parser.add_argument(
+            "--llm-timeout",
+            type=int,
+            default=None,
+            help="LLM request timeout in seconds (env: JAWAFDEHI_LLM_TIMEOUT_SECONDS, "
+            "default: 300)",
         )
         parser.add_argument(
             "--verbose",
@@ -224,12 +308,23 @@ class Command(BaseCommand):
             default=None,
             help="Process a specific case by case_id",
         )
+        parser.add_argument(
+            "--base-url",
+            type=str,
+            default=None,
+            help=(
+                "Deprecated: use --llm-base-url instead. "
+                "Base URL for LLM API."
+            ),
+        )
 
     def handle(self, *args, **options):
         dry_run = options["dry_run"]
         limit = options["limit"]
         model = options["llm_model"]
-        base_url = options["base_url"] or os.environ.get("LLM_PROXY_URL")
+        base_url = options["llm_base_url"] or options.get("base_url")
+        llm_api_key = options.get("llm_api_key")
+        llm_timeout = options.get("llm_timeout")
         verbose = options["verbose"]
         force = options["force"]
         case_id = options.get("case_id")
@@ -237,31 +332,32 @@ class Command(BaseCommand):
         if verbose:
             logger.setLevel(logging.DEBUG)
 
+        model = normalize_model(model)
+        base_url = normalize_base_url(base_url)
+        api_key = resolve_api_key(llm_api_key)
+        timeout = _llm_timeout(llm_timeout)
+
         self.stdout.write(
             self.style.WARNING(
                 f"{'[DRY RUN] ' if dry_run else ''}Starting CIAA allegation enrichment..."
             )
         )
 
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
-            raise CommandError(
-                "No API key provided. Set the ANTHROPIC_API_KEY environment variable."
-            )
-
-        client = self._init_client(api_key, base_url)
-
         cases = self._get_eligible_cases(limit, force, case_id)
         self.stdout.write(f"Found {len(cases)} eligible CIAA DRAFT case(s) to process")
 
         self._fetch_source_cache(cases)
+
+        is_opencode = "anthropic.com" not in base_url
 
         for idx, case in enumerate(cases, 1):
             try:
                 self.stdout.write(
                     f"\n[{idx}/{len(cases)}] {case.case_id} - {case.title[:80]}..."
                 )
-                self._process_case(case, client, model, dry_run)
+                self._process_case(
+                    case, model, base_url, api_key, timeout, is_opencode, dry_run
+                )
             except Exception as e:
                 self.stats["cases_failed"] += 1
                 logger.exception(f"Error processing {case.case_id}: {e}")
@@ -270,14 +366,133 @@ class Command(BaseCommand):
         self._print_summary(dry_run)
 
     def _init_client(self, api_key, base_url):
-        import anthropic
+        if "anthropic.com" in (base_url or ""):
+            import anthropic
 
-        if base_url:
-            return anthropic.Anthropic(
-                api_key=api_key,
-                base_url=base_url,
+            return anthropic.Anthropic(api_key=api_key, base_url=base_url or None)
+        return None
+
+    def _build_llm_headers(self, api_key: str) -> dict:
+        return {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "JawafdehiAPI/1.0 enrich_ciaa_allegations",
+        }
+
+    def _call_llm_opencode(
+        self,
+        model: str,
+        base_url: str,
+        api_key: str,
+        timeout: int,
+        prompt: str,
+    ) -> str | None:
+        endpoint = _llm_endpoint(base_url, model)
+        normalized_model = normalize_model(model)
+        headers = self._build_llm_headers(api_key)
+
+        is_minimax = normalized_model in MINIMAX_MODELS
+
+        if is_minimax:
+            body = json.dumps(
+                {
+                    "model": normalized_model,
+                    "max_tokens": 3000,
+                    "system": SYSTEM_PROMPT,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                }
             )
-        return anthropic.Anthropic(api_key=api_key)
+        else:
+            body = json.dumps(
+                {
+                    "model": normalized_model,
+                    "max_tokens": 3000,
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.1,
+                }
+            )
+
+        last_status = None
+        last_body_snippet = ""
+
+        for attempt in range(1, MAX_LLM_RETRIES + 1):
+            try:
+                req = urllib.request.Request(
+                    endpoint,
+                    data=body.encode("utf-8"),
+                    headers=headers,
+                    method="POST",
+                )
+                ctx = ssl.create_default_context()
+                resp = urllib.request.urlopen(req, timeout=timeout, context=ctx)
+                payload = json.loads(resp.read().decode("utf-8"))
+
+                if is_minimax:
+                    raw = payload.get("content", [{}])[0].get("text", "")
+                else:
+                    raw = (
+                        payload.get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
+                    )
+
+                logger.debug(f"LLM response: {raw[:500]}...")
+                return raw
+
+            except urllib.error.HTTPError as e:
+                last_status = e.code
+                try:
+                    last_body_snippet = e.read().decode("utf-8", errors="replace")[
+                        :500
+                    ]
+                except Exception:
+                    last_body_snippet = "<unreadable>"
+
+                if attempt < MAX_LLM_RETRIES and (last_status in (429, 503)):
+                    wait = 2**attempt
+                    hint = ""
+                    if last_status == 429:
+                        hint = (
+                            " (OpenCode Go usage limits may apply; "
+                            "consider reducing --limit or using a different model)"
+                        )
+                    self.stdout.write(
+                        self.style.WARNING(
+                            f"  LLM {last_status} on attempt {attempt}, "
+                            f"retrying in {wait}s...{hint}"
+                        )
+                    )
+                    time.sleep(wait)
+                    continue
+
+                msg = f"LLM HTTP {last_status}: {last_body_snippet[:300]}"
+                if last_status == 429:
+                    msg += (
+                        " Hint: OpenCode Go usage limits may apply. "
+                        "Try reducing --limit or switching models."
+                    )
+                raise CommandError(msg)
+
+            except (urllib.error.URLError, OSError, ssl.SSLError) as e:
+                if attempt < MAX_LLM_RETRIES:
+                    wait = 2**attempt
+                    self.stdout.write(
+                        self.style.WARNING(
+                            f"  LLM connection error on attempt {attempt} "
+                            f"({e}), retrying in {wait}s..."
+                        )
+                    )
+                    time.sleep(wait)
+                    continue
+                raise CommandError(
+                    f"LLM connection failed after {MAX_LLM_RETRIES} attempts: {e}"
+                )
+
+        return None
 
     def _get_eligible_cases(self, limit, force, case_id):
         queryset = Case.objects.filter(state=CaseState.DRAFT)
@@ -322,7 +537,7 @@ class Command(BaseCommand):
         }
         logger.debug(f"Cached {len(self._source_lookup)} DocumentSource records")
 
-    def _process_case(self, case, client, model, dry_run):
+    def _process_case(self, case, model, base_url, api_key, timeout, is_opencode, dry_run):
         self.stats["cases_processed"] += 1
 
         if not case.evidence:
@@ -348,7 +563,20 @@ class Command(BaseCommand):
             f"  Sending to LLM ({len(press_release_text)} chars of content)..."
         )
 
-        allegations = self._call_llm(client, model, prompt)
+        if is_opencode:
+            raw = self._call_llm_opencode(
+                model, base_url, api_key, timeout, prompt
+            )
+            if not raw:
+                self.stats["cases_failed"] += 1
+                self.stdout.write(
+                    self.style.ERROR("  FAILED: No LLM response")
+                )
+                return
+            allegations = self._parse_allegations(raw)
+        else:
+            client = self._init_client(api_key, base_url)
+            allegations = self._call_llm_anthropic(client, model, prompt)
         if not allegations:
             self.stats["cases_failed"] += 1
             self.stdout.write(self.style.ERROR("  FAILED: No allegations extracted"))
@@ -593,7 +821,7 @@ class Command(BaseCommand):
             f"Invalid URL '{url}'. Only http and https URLs are allowed with a host."
         )
 
-    def _call_llm(self, client, model, prompt):
+    def _call_llm_anthropic(self, client, model, prompt):
         max_retries = 3
         for attempt in range(max_retries):
             try:

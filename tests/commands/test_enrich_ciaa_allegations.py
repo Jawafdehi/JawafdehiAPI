@@ -3,10 +3,13 @@
 import io
 import json
 import os
-from unittest.mock import patch
+import urllib.error
+import urllib.request
+from unittest.mock import MagicMock, patch
 
 import pytest
 from django.core.management import call_command, load_command_class
+from django.core.management.base import CommandError
 
 from cases.models import Case, CaseState, CaseType, DocumentSource
 
@@ -51,6 +54,206 @@ def _make_source(
         ),
         source_type=None,
     )
+
+
+# ── Model normalization tests ──────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "input_model,expected",
+    [
+        ("qwen3.5-plus", "qwen3.5-plus"),
+        ("opencode-go/qwen3.5-plus", "qwen3.5-plus"),
+        ("openai:qwen3.5-plus", "qwen3.5-plus"),
+        ("opencode-go/claude-sonnet-4-5", "claude-sonnet-4-5"),
+        ("openai:gpt-4o", "gpt-4o"),
+        ("  opencode-go/minimax-m2.5  ", "minimax-m2.5"),
+        ("minimax-m2.5", "minimax-m2.5"),
+        ("minimax-m2.7", "minimax-m2.7"),
+        ("claude-sonnet-4-5", "claude-sonnet-4-5"),
+    ],
+)
+def test_normalize_model(input_model, expected):
+    from cases.management.commands.enrich_ciaa_allegations import normalize_model
+
+    assert normalize_model(input_model) == expected
+
+
+def test_normalize_model_no_prefix_change():
+    from cases.management.commands.enrich_ciaa_allegations import normalize_model
+
+    assert normalize_model("bare-model-id") == "bare-model-id"
+
+
+def test_normalize_model_empty_string():
+    from cases.management.commands.enrich_ciaa_allegations import normalize_model
+
+    assert normalize_model("") == ""
+    assert normalize_model("  ") == ""
+
+
+# ── Base URL normalization tests ────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "input_url,expected",
+    [
+        ("https://opencode.ai/zen/go/v1", "https://opencode.ai/zen/go/v1"),
+        ("https://opencode.ai/zen/v1", "https://opencode.ai/zen/go/v1"),
+        ("https://opencode.ai/zen/go", "https://opencode.ai/zen/go/v1"),
+        (
+            "https://opencode.ai/zen/v1/",
+            "https://opencode.ai/zen/go/v1",
+        ),
+        (
+            "https://opencode.ai/zen/go/",
+            "https://opencode.ai/zen/go/v1",
+        ),
+        ("https://custom.proxy/v1", "https://custom.proxy/v1"),
+        (
+            "https://custom.proxy/v1/",
+            "https://custom.proxy/v1",
+        ),
+    ],
+)
+def test_normalize_base_url_explicit(input_url, expected):
+    from cases.management.commands.enrich_ciaa_allegations import normalize_base_url
+
+    assert normalize_base_url(input_url) == expected
+
+
+@patch.dict(
+    os.environ,
+    {},
+    clear=True,
+)
+def test_normalize_base_url_default_no_env():
+    from cases.management.commands.enrich_ciaa_allegations import normalize_base_url
+
+    result = normalize_base_url(None)
+    assert result == "https://opencode.ai/zen/go/v1"
+
+
+@patch.dict(
+    os.environ,
+    {"JAWAFDEHI_LLM_PROXY_URL": "https://llm-proxy.jawafdehi.org/v1"},
+    clear=True,
+)
+def test_normalize_base_url_from_env():
+    from cases.management.commands.enrich_ciaa_allegations import normalize_base_url
+
+    result = normalize_base_url(None)
+    assert result == "https://llm-proxy.jawafdehi.org/v1"
+
+
+@patch.dict(
+    os.environ,
+    {"JAWAFDEHI_LLM_PROXY_URL": "https://opencode.ai/zen/v1"},
+    clear=True,
+)
+def test_normalize_base_url_env_canonicalized():
+    from cases.management.commands.enrich_ciaa_allegations import normalize_base_url
+
+    result = normalize_base_url(None)
+    assert result == "https://opencode.ai/zen/go/v1"
+
+
+# ── Endpoint selection tests ────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "model,expected_suffix",
+    [
+        ("qwen3.5-plus", "/chat/completions"),
+        ("opencode-go/qwen3.5-plus", "/chat/completions"),
+        ("claude-sonnet-4-5", "/chat/completions"),
+        ("minimax-m2.5", "/messages"),
+        ("minimax-m2.7", "/messages"),
+        ("opencode-go/minimax-m2.5", "/messages"),
+    ],
+)
+def test_llm_endpoint_routing(model, expected_suffix):
+    from cases.management.commands.enrich_ciaa_allegations import _llm_endpoint
+
+    base = "https://opencode.ai/zen/go/v1"
+    endpoint = _llm_endpoint(base, model)
+    assert endpoint == f"{base}{expected_suffix}"
+
+
+def test_llm_endpoint_base_trailing_slash():
+    from cases.management.commands.enrich_ciaa_allegations import _llm_endpoint
+
+    base = "https://opencode.ai/zen/go/v1/"
+    endpoint = _llm_endpoint(base, "minimax-m2.5")
+    assert endpoint == "https://opencode.ai/zen/go/v1/messages"
+
+
+# ── API key precedence tests ────────────────────────────────────
+
+
+@patch.dict(
+    os.environ,
+    {
+        "JAWAFDEHI_LLM_API_KEY": "env-jawafdehi-key",
+        "OPENCODE_API_KEY": "env-opencode-key",
+        "ANTHROPIC_API_KEY": "env-anthropic-key",
+    },
+    clear=True,
+)
+def test_resolve_api_key_cli_wins():
+    from cases.management.commands.enrich_ciaa_allegations import resolve_api_key
+
+    assert resolve_api_key("cli-key") == "cli-key"
+
+
+@patch.dict(
+    os.environ,
+    {
+        "JAWAFDEHI_LLM_API_KEY": "env-jawafdehi-key",
+        "OPENCODE_API_KEY": "env-opencode-key",
+        "ANTHROPIC_API_KEY": "env-anthropic-key",
+    },
+    clear=True,
+)
+def test_resolve_api_key_jawafdehi_env():
+    from cases.management.commands.enrich_ciaa_allegations import resolve_api_key
+
+    assert resolve_api_key(None) == "env-jawafdehi-key"
+
+
+@patch.dict(
+    os.environ,
+    {
+        "OPENCODE_API_KEY": "env-opencode-key",
+        "ANTHROPIC_API_KEY": "env-anthropic-key",
+    },
+    clear=True,
+)
+def test_resolve_api_key_opencode_env():
+    from cases.management.commands.enrich_ciaa_allegations import resolve_api_key
+
+    assert resolve_api_key(None) == "env-opencode-key"
+
+
+@patch.dict(
+    os.environ,
+    {
+        "ANTHROPIC_API_KEY": "env-anthropic-key",
+    },
+    clear=True,
+)
+def test_resolve_api_key_anthropic_fallback():
+    from cases.management.commands.enrich_ciaa_allegations import resolve_api_key
+
+    assert resolve_api_key(None) == "env-anthropic-key"
+
+
+@patch.dict(os.environ, {}, clear=True)
+def test_resolve_api_key_none_available():
+    from cases.management.commands.enrich_ciaa_allegations import resolve_api_key
+
+    with pytest.raises(CommandError, match="No API key provided"):
+        resolve_api_key(None)
 
 
 # ── Parser tests ─────────────────────────────────────────────────
@@ -186,82 +389,75 @@ def test_get_eligible_cases_respects_case_id():
     assert cases[0].case_id == "target"
 
 
-# ── Press release content tests ──────────────────────────────────
+# ── Source scoring tests ───────────────────────────────────
+
+
+def test_score_source_for_press_release():
+    from cases.management.commands.enrich_ciaa_allegations import Command
+
+    cmd = Command()
+    source = MagicMock()
+    source.title = "CIAA Press Release FY 080/81"
+    source.description = "Press release regarding corruption case"
+    source.uploaded_filename = None
+    source.url = ["https://ciaa.gov.np/pressrelease/3173"]
+    source.uploaded_files.all.return_value = []
+    source.source_type = None
+
+    score = cmd._score_source_for_press_release(source)
+    assert score >= 8
+
+
+# ── Content conversion tests ────────────────────────────────
 
 
 @pytest.mark.django_db
-def test_acquire_press_release_text_no_source_returns_none():
+def test_convert_source_no_url_no_file():
     from cases.management.commands.enrich_ciaa_allegations import Command
 
-    case = _make_case(case_id="no-evidence", evidence=None)
-    cmd = Command()
-    cmd._source_lookup = {}
-    result = cmd._acquire_press_release_text(case, dry_run=False)
-    assert result is None
-
-
-@pytest.mark.django_db
-def test_acquire_press_release_text_from_source():
-    from cases.management.commands.enrich_ciaa_allegations import Command
-
-    src = _make_source(
-        source_id="source:url-test",
-        description="",
-        url=["https://ngm-store.jawafdehi.org/case/file.md"],
-    )
-    case = _make_case(
-        case_id="test-url",
-        evidence=[{"source_id": "source:url-test", "description": "PR"}],
+    source = DocumentSource.objects.create(
+        source_id="source:empty",
+        title="Empty Source",
+        url=[],
     )
     cmd = Command()
-    cmd._source_lookup = {"source:url-test": src}
-
-    with patch.object(
-        cmd,
-        "_convert_source_to_markdown",
-        return_value="Converted markdown content for testing with enough characters to pass the minimum length check of fifty characters easily met",
-    ):
-        result = cmd._acquire_press_release_text(case, dry_run=False)
-    assert (
-        result
-        == "Converted markdown content for testing with enough characters to pass the minimum length check of fifty characters easily met"
-    )
-
-
-@pytest.mark.django_db
-def test_acquire_press_release_text_empty_evidence_returns_none():
-    from cases.management.commands.enrich_ciaa_allegations import Command
-
-    case = _make_case(
-        case_id="empty-evidence",
-        evidence=[{}, {"source_id": ""}],
-    )
-    cmd = Command()
-    cmd._source_lookup = {}
-    result = cmd._acquire_press_release_text(case, dry_run=False)
-    assert result is None
+    with pytest.raises(CommandError, match="No downloadable source found"):
+        cmd._convert_source_to_markdown(source)
 
 
 # ── Dry-run safety test ────────────────────────────────────────
 
 
 @pytest.mark.django_db
-@patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
+@patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True)
 @patch(
-    "cases.management.commands.enrich_ciaa_allegations.Command._init_client",
+    "cases.management.commands.enrich_ciaa_allegations.Command."
+    "_call_llm_opencode",
+    return_value='{"allegations": ["Test allegation from opencode"]}',
 )
 @patch(
-    "cases.management.commands.enrich_ciaa_allegations.Command._call_llm",
-    return_value=["Test allegation"],
+    "cases.management.commands.enrich_ciaa_allegations.Command."
+    "_convert_source_to_markdown",
+    return_value="Mocked press release content for dry-run test with enough chars",
 )
 @patch(
-    "cases.management.commands.enrich_ciaa_allegations.Command._convert_source_to_markdown",
-    return_value="Mocked press release content for dry-run test with enough characters to pass the minimum length check",
+    "cases.management.commands.enrich_ciaa_allegations.resolve_api_key",
+    return_value="test-key",
 )
-def test_dry_run_does_not_save(mock_fetch, mock_llm, mock_client):
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.normalize_base_url",
+    return_value="https://opencode.ai/zen/go/v1",
+)
+def test_dry_run_does_not_save(
+    mock_norm_url,
+    mock_resolve_key,
+    mock_convert,
+    mock_llm,
+):
     _make_source(
         source_id="source:dry",
-        description="Dry run test content " * 10,
+        title="Press Release Dry",
+        url=["https://example.com/pr.md"],
     )
     _make_case(
         case_id="dry-run-test",
@@ -276,6 +472,7 @@ def test_dry_run_does_not_save(mock_fetch, mock_llm, mock_client):
         stdout=out,
     )
 
+    mock_llm.assert_called_once()
     case = Case.objects.get(case_id="dry-run-test")
     assert case.key_allegations == []
 
@@ -295,10 +492,13 @@ def test_command_help():
         "--dry-run",
         "--limit",
         "--llm-model",
-        "--base-url",
+        "--llm-base-url",
+        "--llm-api-key",
+        "--llm-timeout",
         "--verbose",
         "--force",
         "--case-id",
+        "--base-url",
     ],
 )
 def test_cli_flags_registered(flag):
@@ -308,3 +508,341 @@ def test_cli_flags_registered(flag):
         if flag in action.option_strings:
             return
     pytest.fail(f"Flag {flag} not found in command arguments")
+
+
+# ── Retry behaviour (429/5xx) tests ─────────────────────────
+
+
+class _FakeHTTPError(urllib.error.HTTPError):
+    def __init__(self, url, code, body, headers=None, fp=None):
+        self.url = url
+        self.code = code
+        self._body = body.encode("utf-8")
+        self.headers = headers or {}
+        self.fp = fp
+        self.msg = ""
+
+    def read(self):
+        return self._body
+
+    def readinto(self, buf):
+        data = self._body
+        buf[: len(data)] = data
+        return len(data)
+
+
+@patch("urllib.request.urlopen")
+def test_call_llm_opencode_retries_on_429(mock_urlopen):
+    from cases.management.commands.enrich_ciaa_allegations import Command
+
+    cmd = Command()
+
+    url = "https://opencode.ai/zen/go/v1/chat/completions"
+    error = _FakeHTTPError(url, 429, '{"error":"rate limited"}')
+    mock_urlopen.side_effect = error
+
+    with patch("time.sleep", return_value=None) as mock_sleep:
+        with pytest.raises(CommandError, match="LLM HTTP 429"):
+            cmd._call_llm_opencode(
+                model="claude-sonnet-4-5",
+                base_url="https://opencode.ai/zen/go/v1",
+                api_key="test-key",
+                timeout=30,
+                prompt="Test prompt",
+            )
+
+    assert mock_urlopen.call_count == 3
+    assert mock_sleep.call_count == 2
+
+
+@patch("urllib.request.urlopen")
+def test_call_llm_opencode_retries_on_503(mock_urlopen):
+    from cases.management.commands.enrich_ciaa_allegations import Command
+
+    cmd = Command()
+
+    url = "https://opencode.ai/zen/go/v1/chat/completions"
+    error = _FakeHTTPError(url, 503, '{"error":"service unavailable"}')
+    mock_urlopen.side_effect = error
+
+    with patch("time.sleep", return_value=None) as mock_sleep:
+        with pytest.raises(CommandError, match="LLM HTTP 503"):
+            cmd._call_llm_opencode(
+                model="claude-sonnet-4-5",
+                base_url="https://opencode.ai/zen/go/v1",
+                api_key="test-key",
+                timeout=30,
+                prompt="Test prompt",
+            )
+
+    assert mock_urlopen.call_count == 3
+    assert mock_sleep.call_count == 2
+
+
+@patch("urllib.request.urlopen")
+def test_call_llm_opencode_no_retry_on_400(mock_urlopen):
+    from cases.management.commands.enrich_ciaa_allegations import Command
+
+    cmd = Command()
+
+    url = "https://opencode.ai/zen/go/v1/chat/completions"
+    error = _FakeHTTPError(url, 400, '{"error":"bad request"}')
+    mock_urlopen.side_effect = error
+
+    with pytest.raises(CommandError, match="LLM HTTP 400"):
+        cmd._call_llm_opencode(
+            model="claude-sonnet-4-5",
+            base_url="https://opencode.ai/zen/go/v1",
+            api_key="test-key",
+            timeout=30,
+            prompt="Test prompt",
+        )
+
+    assert mock_urlopen.call_count == 1
+
+
+@patch("urllib.request.urlopen")
+def test_call_llm_opencode_error_contains_body_snippet(mock_urlopen):
+    from cases.management.commands.enrich_ciaa_allegations import Command
+
+    cmd = Command()
+
+    url = "https://opencode.ai/zen/go/v1/chat/completions"
+    error = _FakeHTTPError(url, 502, '{"error":"gateway timeout","trace":"abc123"}')
+    mock_urlopen.side_effect = error
+
+    with pytest.raises(CommandError, match="gateway timeout"):
+        cmd._call_llm_opencode(
+            model="claude-sonnet-4-5",
+            base_url="https://opencode.ai/zen/go/v1",
+            api_key="test-key",
+            timeout=30,
+            prompt="Test prompt",
+        )
+
+
+@patch("urllib.request.urlopen")
+def test_call_llm_opencode_success_standard_model(mock_urlopen):
+    from cases.management.commands.enrich_ciaa_allegations import Command
+
+    cmd = Command()
+
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = json.dumps(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"allegations": ["Test allegation content"]}'
+                    }
+                }
+            ]
+        }
+    ).encode("utf-8")
+    mock_urlopen.return_value = mock_resp
+
+    result = cmd._call_llm_opencode(
+        model="opencode-go/qwen3.5-plus",
+        base_url="https://opencode.ai/zen/go/v1",
+        api_key="test-key",
+        timeout=30,
+        prompt="Test prompt",
+    )
+
+    assert "allegations" in result
+    assert mock_urlopen.call_count == 1
+
+
+@patch("urllib.request.urlopen")
+def test_call_llm_opencode_success_minimax_model(mock_urlopen):
+    from cases.management.commands.enrich_ciaa_allegations import Command
+
+    cmd = Command()
+
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = json.dumps(
+        {"content": [{"text": '{"allegations": ["Minimax allegation"]}'}]}
+    ).encode("utf-8")
+    mock_urlopen.return_value = mock_resp
+
+    result = cmd._call_llm_opencode(
+        model="minimax-m2.5",
+        base_url="https://opencode.ai/zen/go/v1",
+        api_key="test-key",
+        timeout=30,
+        prompt="Test prompt",
+    )
+
+    assert "allegations" in result
+    assert mock_urlopen.call_count == 1
+    called_url = mock_urlopen.call_args[0][0].full_url
+    assert "/messages" in called_url
+
+
+# ── LLM timeout tests ──────────────────────────────────────
+
+
+@patch.dict(os.environ, {}, clear=True)
+def test_llm_timeout_default():
+    from cases.management.commands.enrich_ciaa_allegations import _llm_timeout
+
+    assert _llm_timeout(None) == 300
+
+
+def test_llm_timeout_cli_wins():
+    from cases.management.commands.enrich_ciaa_allegations import _llm_timeout
+
+    assert _llm_timeout(60) == 60
+
+
+@patch.dict(
+    os.environ, {"JAWAFDEHI_LLM_TIMEOUT_SECONDS": "120"}, clear=True
+)
+def test_llm_timeout_from_env():
+    from cases.management.commands.enrich_ciaa_allegations import _llm_timeout
+
+    assert _llm_timeout(None) == 120
+
+
+@patch.dict(
+    os.environ, {"JAWAFDEHI_LLM_TIMEOUT_SECONDS": "notanumber"}, clear=True
+)
+def test_llm_timeout_invalid_env_fallback():
+    from cases.management.commands.enrich_ciaa_allegations import _llm_timeout
+
+    assert _llm_timeout(None) == 300
+
+
+# ── 429 hint message test ───────────────────────────────────
+
+
+@patch("urllib.request.urlopen")
+def test_call_llm_opencode_429_includes_usage_hint(mock_urlopen):
+    from cases.management.commands.enrich_ciaa_allegations import Command
+
+    cmd = Command()
+
+    url = "https://opencode.ai/zen/go/v1/chat/completions"
+    error = _FakeHTTPError(url, 429, '{"error":"too many requests"}')
+    mock_urlopen.side_effect = error
+
+    with patch("time.sleep", return_value=None):
+        with pytest.raises(CommandError) as exc_info:
+            cmd._call_llm_opencode(
+                model="claude-sonnet-4-5",
+                base_url="https://opencode.ai/zen/go/v1",
+                api_key="test-key",
+                timeout=30,
+                prompt="Test prompt",
+            )
+
+    error_msg = str(exc_info.value)
+    assert "429" in error_msg
+    assert "usage limits" in error_msg.lower() or "limit" in error_msg.lower()
+
+
+# ── OpenCode Go vs Anthropic routing tests ───────────────────
+
+
+@pytest.mark.django_db
+@patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True)
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.Command."
+    "_call_llm_opencode",
+    return_value='{"allegations": ["Jawafdehi proxy route test"]}',
+)
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.Command."
+    "_call_llm_anthropic",
+)
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.Command."
+    "_convert_source_to_markdown",
+    return_value="Mocked press release content for proxy routing test with enough chars for LLM.",
+)
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.resolve_api_key",
+    return_value="test-key",
+)
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.normalize_base_url",
+    return_value="https://llm-proxy.jawafdehi.org/v1",
+)
+def test_jawafdehi_proxy_routes_to_opencode(
+    mock_norm_url,
+    mock_resolve_key,
+    mock_convert,
+    mock_llm_anthropic,
+    mock_llm_opencode,
+):
+    _make_source(
+        source_id="source:proxy-test",
+        title="Press Release Proxy",
+        url=["https://example.com/pr.md"],
+    )
+    _make_case(
+        case_id="proxy-test",
+        evidence=[{"source_id": "source:proxy-test", "description": "PR"}],
+    )
+
+    out = io.StringIO()
+    call_command(
+        "enrich_ciaa_allegations",
+        "--case-id=proxy-test",
+        stdout=out,
+    )
+
+    mock_llm_opencode.assert_called_once()
+    mock_llm_anthropic.assert_not_called()
+
+
+@pytest.mark.django_db
+@patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True)
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.Command."
+    "_call_llm_anthropic",
+    return_value=["Anthropic route test"],
+)
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.Command."
+    "_call_llm_opencode",
+)
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.Command."
+    "_convert_source_to_markdown",
+    return_value="Mocked press release content for anthropic routing test with enough chars for LLM.",
+)
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.resolve_api_key",
+    return_value="test-key",
+)
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.normalize_base_url",
+    return_value="https://api.anthropic.com",
+)
+def test_anthropic_com_routes_to_anthropic_sdk(
+    mock_norm_url,
+    mock_resolve_key,
+    mock_convert,
+    mock_llm_opencode,
+    mock_llm_anthropic,
+):
+    _make_source(
+        source_id="source:anthropic-test",
+        title="Press Release Anthropic",
+        url=["https://example.com/pr.md"],
+    )
+    _make_case(
+        case_id="anthropic-test",
+        evidence=[{"source_id": "source:anthropic-test", "description": "PR"}],
+    )
+
+    out = io.StringIO()
+    call_command(
+        "enrich_ciaa_allegations",
+        "--case-id=anthropic-test",
+        stdout=out,
+    )
+
+    mock_llm_anthropic.assert_called_once()
+    mock_llm_opencode.assert_not_called()
