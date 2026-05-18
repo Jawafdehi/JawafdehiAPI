@@ -419,7 +419,11 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
     inlines = [CaseEntityRelationshipInline]
 
     class Media:
-        js = ("cases/js/widgets.js", "admin/js/case_admin.js")
+        js = (
+            "cases/js/widgets.js",
+            "cases/js/markdownx_clipboard.js",
+            "admin/js/case_admin.js",
+        )
         css = {"all": ("cases/css/widgets.css", "admin/css/case_admin.css")}
 
     list_display = [
