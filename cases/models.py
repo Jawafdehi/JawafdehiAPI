@@ -1053,3 +1053,38 @@ class Feedback(models.Model):
         """Enforce model-level validation before saving."""
         self.full_clean(validate_unique=False)
         super().save(*args, **kwargs)
+
+
+class ChatUserIdentity(models.Model):
+    owui_user_id = models.CharField(
+        max_length=255,
+        unique=True,
+        db_index=True,
+        help_text="Chat system user identifier (e.g., OpenWebUI user ID)",
+    )
+    owui_user_name = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Display name from the chat system",
+    )
+    user = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="chat_identities",
+        help_text="Django user associated with this chat identity (must be mapped for authorization)",
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        help_text="When this identity mapping was created",
+    )
+
+    class Meta:
+        verbose_name = "Chat User Identity"
+        verbose_name_plural = "Chat User Identities"
+
+    def __str__(self):
+        user_display = self.user.get_username() if self.user else "(unmapped)"
+        return f"{self.owui_user_id} -> {user_display}"

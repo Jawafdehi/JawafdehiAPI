@@ -23,7 +23,7 @@ COPY caseworker ./caseworker
 COPY static ./static
 
 # Collect static files
-RUN python manage.py collectstatic --noinput
+RUN DEBUG=False SECRET_KEY=foo-bar ALLOWED_HOSTS=portal.jawafdehi.org python manage.py collectstatic --noinput
 
 EXPOSE 8080
 

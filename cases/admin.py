@@ -5,16 +5,16 @@ from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.contrib.auth import get_user_model
 from django import forms
 from django.db import models
-from django.urls import reverse
 from django.utils.html import format_html
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.forms.models import BaseInlineFormSet
 from django.template.response import TemplateResponse
-from markdownx.widgets import MarkdownxWidget
+from cases.widgets import EasyMDEWidget
 from rest_framework.authtoken.models import Token
 from rest_framework.authtoken.admin import TokenAdmin as BaseTokenAdmin
 from .models import (
     Case,
+    ChatUserIdentity,
     DocumentSource,
     DocumentSourceUpload,
     JawafEntity,
@@ -154,8 +154,8 @@ class CaseAdminForm(forms.ModelForm):
             "unified_entities"
         ]  # Exclude unified_entities as it's managed through the inline
         widgets = {
-            "description": MarkdownxWidget(attrs={"cols": 80, "rows": 30}),
-            "notes": MarkdownxWidget(attrs={"cols": 80, "rows": 20}),
+            "description": EasyMDEWidget(),
+            "notes": EasyMDEWidget(),
             "state": forms.RadioSelect(),
             "case_start_date": forms.DateInput(attrs={"type": "date"}),
             "case_end_date": forms.DateInput(attrs={"type": "date"}),
@@ -423,10 +423,10 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         css = {"all": ("cases/css/widgets.css", "admin/css/case_admin.css")}
 
     list_display = [
-        "case_actions",
-        "title",
+        "title_with_view_link",
         "case_type",
         "state_badge",
+        "contributors_list",
         "created_at",
         "updated_at",
     ]
@@ -443,7 +443,7 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         "description",
     ]
 
-    list_display_links = ("title",)
+    list_display_links = ("title_with_view_link",)
 
     readonly_fields = [
         "case_id",
@@ -530,48 +530,36 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
 
     state_badge.short_description = "State"
 
-    def case_actions(self, obj):
-        """
-        Display Edit and View on Site action buttons for each case row.
+    def contributors_list(self, obj):
+        """Display contributors as a comma-separated list of full names."""
+        contributors = obj.contributors.all()
+        if not contributors:
+            return "—"
+        names = []
+        for user in contributors:
+            full_name = user.get_full_name()
+            if full_name:
+                names.append(f"{full_name} ({user.username})")
+            else:
+                names.append(user.username)
+        return ", ".join(names)
 
-        Edit button: Always active, navigates to admin edit page
-        View on Site button: Only active for PUBLISHED or IN_REVIEW cases with slug, opens public URL
-        """
-        edit_url = reverse("admin:cases_case_change", args=[obj.pk])
+    contributors_list.short_description = "Contributors"
 
-        # Edit button (always active)
-        edit_button = format_html(
-            '<a href="{}" class="button case-action-button case-action-button--edit">Edit</a>',
-            edit_url,
-        )
-
-        # View on Site button (conditional)
+    def title_with_view_link(self, obj):
+        """Display the case title with a View on Site link right after it."""
         viewable_states = [CaseState.PUBLISHED, CaseState.IN_REVIEW]
         if obj.state in viewable_states and obj.slug:
             public_url = f"https://jawafdehi.org/case/{obj.slug}"
-            view_button = format_html(
-                '<a href="{}" target="_blank" rel="noopener noreferrer" '
+            return format_html(
+                '{} <a href="{}" target="_blank" rel="noopener noreferrer" '
                 'class="button case-action-button case-action-button--view">View on Site</a>',
+                obj.title,
                 public_url,
             )
-        else:
-            # Determine tooltip message based on what's missing
-            if obj.state not in viewable_states and not obj.slug:
-                tooltip = "Requires PUBLISHED or IN_REVIEW state and a slug"
-            elif obj.state not in viewable_states:
-                tooltip = "Only PUBLISHED or IN_REVIEW cases can be viewed publicly"
-            else:  # obj.slug is missing
-                tooltip = "Case needs a slug to be viewed publicly"
+        return obj.title
 
-            view_button = format_html(
-                '<span class="button case-action-button case-action-button--disabled" '
-                'title="{}" aria-disabled="true">View on Site</span>',
-                tooltip,
-            )
-
-        return format_html("{}{}", edit_button, view_button)
-
-    case_actions.short_description = "Actions"
+    title_with_view_link.short_description = "Title"
 
     def version_info_display(self, obj):
         """Display version info in a readable format."""
@@ -1391,3 +1379,26 @@ except admin.sites.NotRegistered:
 @admin.register(Token)
 class CustomTokenAdmin(UserFullNameAdminMixin, BaseTokenAdmin):
     raw_id_fields = ()
+
+
+@admin.register(ChatUserIdentity)
+class ChatUserIdentityAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
+    list_display = ("owui_user_id", "owui_user_name", "user", "created_at")
+    search_fields = ("owui_user_id", "owui_user_name", "user__username", "user__email")
+    list_filter = ("created_at",)
+    autocomplete_fields = ("user",)
+    readonly_fields = ("created_at",)
+
+    fieldsets = (
+        (
+            "Identity Mapping",
+            {
+                "fields": (
+                    "owui_user_id",
+                    "owui_user_name",
+                    "user",
+                    "created_at",
+                ),
+            },
+        ),
+    )
