@@ -514,12 +514,8 @@ def test_cli_flags_registered(flag):
 
 class _FakeHTTPError(urllib.error.HTTPError):
     def __init__(self, url, code, body, headers=None, fp=None):
-        self.url = url
-        self.code = code
+        super().__init__(url, code, "", headers or {}, fp)
         self._body = body.encode("utf-8")
-        self.headers = headers or {}
-        self.fp = fp
-        self.msg = ""
 
     def read(self):
         return self._body
