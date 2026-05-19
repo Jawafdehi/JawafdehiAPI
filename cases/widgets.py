@@ -12,7 +12,9 @@ from json import JSONDecodeError
 class EasyMDEWidget(Textarea):
     class Media:
         css = {
-            "all": ("https://cdn.jsdelivr.net/npm/easymde@2.19.0/dist/easymde.min.css",)
+            "all": (
+                "https://cdn.jsdelivr.net/npm/easymde@2.19.0/dist/easymde.min.css",
+            )
         }
         js = ("https://cdn.jsdelivr.net/npm/easymde@2.19.0/dist/easymde.min.js",)
 
@@ -58,6 +60,86 @@ class EasyMDEWidget(Textarea):
             minHeight: "400px",
             maxHeight: "600px",
         }});
+    }}
+}})();
+</script>
+"""
+        return mark_safe(textarea_html + init_script)
+
+
+class ToastUIEditorWidget(Textarea):
+    """
+    Rich text Markdown editor powered by Toast UI Editor (TOAST UI Editor 3.x).
+    Renders a WYSIWYG editing surface that auto-syncs Markdown to a hidden
+    <textarea> on form submit. Drop-in replacement for EasyMDEWidget with
+    native Word / Office copy-paste handling.
+    """
+
+    class Media:
+        css = {
+            "all": (
+                "https://uicdn.toast.com/editor/latest/toastui-editor.min.css",
+            )
+        }
+        js = (
+            "https://uicdn.toast.com/editor/latest/toastui-editor-all.min.js",
+        )
+
+    def __init__(self, attrs=None):
+        default_attrs = {
+            "rows": 1,
+            "data-toastui-editor": "true",
+        }
+        if attrs:
+            default_attrs.update(attrs)
+        super().__init__(default_attrs)
+
+    def render(self, name, value, attrs=None, renderer=None):
+        textarea_html = super().render(name, value, attrs, renderer)
+        final_attrs = self.build_attrs(self.attrs, attrs)
+        widget_id = final_attrs.get("id", f"id_{name}")
+        editor_container_id = f"{widget_id}_editor"
+        initial_md = json.dumps(value if value else "")
+
+        init_script = f"""
+<div id="{editor_container_id}"></div>
+<script>
+(function() {{
+    var containerEl = document.getElementById({json.dumps(editor_container_id)});
+    var textareaEl = document.getElementById({json.dumps(widget_id)});
+    if (containerEl && textareaEl && !containerEl._tui_initialized) {{
+        containerEl._tui_initialized = true;
+
+        var editor = new toastui.Editor({{
+            el: containerEl,
+            height: '500px',
+            minHeight: '400px',
+            initialEditType: 'wysiwyg',
+            previewStyle: 'vertical',
+            initialValue: {initial_md},
+            usageStatistics: false,
+            toolbarItems: [
+                ['heading', 'bold', 'italic', 'strike'],
+                ['hr', 'quote'],
+                ['ul', 'ol', 'task', 'indent', 'outdent'],
+                ['table', 'image', 'link'],
+                ['code', 'codeblock'],
+                ['scrollSync'],
+            ],
+            plugins: [],
+            placeholder: 'Write in Markdown\u2026',
+            autofocus: false,
+            previewHighlight: true,
+        }});
+
+        textareaEl.style.display = 'none';
+
+        var form = textareaEl.closest('form');
+        if (form) {{
+            form.addEventListener('submit', function() {{
+                textareaEl.value = editor.getMarkdown();
+            }});
+        }}
     }}
 }})();
 </script>
