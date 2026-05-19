@@ -74,14 +74,7 @@ REGION_TAGS = [
     "Bhaktapur",
 ]
 
-AMOUNT_TIER_TAGS = [
-    "Under 1M NPR",
-    "1M-10M NPR",
-    "10M-100M NPR",
-    "100M-1B NPR",
-    "Over 1B NPR",
-    "Unknown Amount",
-]
+AMOUNT_TIER_TAGS = []  # Dynamic — generated from bigo field, not a fixed vocabulary
 
 CONTEXT_TAGS = [
     "CIAA",
@@ -878,7 +871,7 @@ def _convert_source_file(src: DocumentSource, pre_fetched_uploads=None) -> str: 
         try:
             result = _MD_CONVERTER.convert(filepath)
             if result and result.text_content:
-                return result.text_content[:16000]
+                return result.text_content[:1200]
         except Exception as e:
             logger.debug(f"MarkItDown conversion failed for {filepath}: {e}")
             continue
@@ -980,7 +973,7 @@ def _convert_urls(src: DocumentSource) -> str:  # noqa
         socket.setdefaulttimeout(saved_timeout)
 
     if parts:
-        return " ".join(parts)[:16000]
+        return " ".join(parts)[:1200]
     return ""
 
 
@@ -1000,18 +993,40 @@ def _match_keywords(text: str, keyword_map: dict[str, list[str]]) -> list[str]: 
     return matched
 
 
-def _detect_amount_tier(bigo) -> str:
+def _detect_amount_tier(bigo) -> str | None:
+    """Return human-readable Nepali amount string, or None if bigo is unknown.
+
+    Examples:
+        50000       → "~50 Hazar"
+        477899      → "~4 Lakh 77 Hazar"
+        49012323    → "~4 Crore 90 Lakh"
+        1470000000  → "~147 Crore"
+    """
     if bigo is None:
-        return "Unknown Amount"
-    if bigo < 1_000_000:
-        return "Under 1M NPR"
-    if bigo < 10_000_000:
-        return "1M-10M NPR"
-    if bigo < 100_000_000:
-        return "10M-100M NPR"
-    if bigo < 1_000_000_000:
-        return "100M-1B NPR"
-    return "Over 1B NPR"
+        return None
+
+    arab = int(bigo // 1_000_000_000)
+    remainder = bigo % 1_000_000_000
+    crore = int(remainder // 10_000_000)
+    remainder = remainder % 10_000_000
+    lakh = int(remainder // 100_000)
+    remainder = remainder % 100_000
+    hazar = int(remainder // 1_000)
+
+    parts = []
+    if arab:
+        parts.append(f"{arab} Arab")
+    if crore:
+        parts.append(f"{crore} Crore")
+    if lakh and not arab:  # skip lakh if arab-level
+        parts.append(f"{lakh} Lakh")
+    if hazar and not arab and not crore:  # skip hazar if crore-level or above
+        parts.append(f"{hazar} Hazar")
+
+    if not parts:
+        return "Under 1 Hazar"
+
+    return "~" + " ".join(parts)
 
 
 def _detect_court_context(case: Case) -> list[str]:
@@ -1043,7 +1058,8 @@ def classify_case_rules(case: Case) -> list[str]:  # noqa
     tags.extend(regions[:2])
 
     amount_tier = _detect_amount_tier(case.bigo)
-    tags.append(amount_tier)
+    if amount_tier is not None:
+        tags.append(amount_tier)
 
     context_tags = _detect_court_context(case)
     tags.extend(context_tags)
@@ -1083,13 +1099,12 @@ def build_llm_classification_prompt(case: Case) -> str:
     lines.append(f"Sector (choose 1-3): {', '.join(SECTOR_TAGS)}")
     lines.append(f"Corruption Type (choose 1-3): {', '.join(CORRUPTION_TYPE_TAGS)}")
     lines.append(f"Region (choose 1-2): {', '.join(REGION_TAGS)}")
-    lines.append(f"Amount Tier (choose 1): {', '.join(AMOUNT_TIER_TAGS)}")
     lines.append("")
     lines.append("Always include: CIAA, Corruption")
     lines.append("")
     lines.append("Return ONLY a JSON array of tag strings, nothing else.")
     lines.append(
-        'Example: ["CIAA", "Corruption", "Local Government", "Bribery", "Kathmandu Valley", "10M-100M NPR"]'
+        'Example: ["CIAA", "Corruption", "Local Government", "Bribery", "Kathmandu Valley"]'
     )
     return "\n".join(lines)
 
@@ -1107,8 +1122,8 @@ def build_llm_classification_prompt_from_sources(case: Case, evidence_text: str)
     lines.append(f"Case Title: {case.title}")
     lines.append("")
     lines.append("Source Documents (press releases, court orders, evidence):")
-    truncated = evidence_text[:8000]
-    if len(evidence_text) > 8000:
+    truncated = evidence_text[:1200]
+    if len(evidence_text) > 1200:
         truncated += " [truncated]"
     lines.append(truncated)
     lines.append("")
@@ -1125,13 +1140,12 @@ def build_llm_classification_prompt_from_sources(case: Case, evidence_text: str)
     lines.append(f"Sector (choose 1-3): {', '.join(SECTOR_TAGS)}")
     lines.append(f"Corruption Type (choose 1-3): {', '.join(CORRUPTION_TYPE_TAGS)}")
     lines.append(f"Region (choose 1-2): {', '.join(REGION_TAGS)}")
-    lines.append(f"Amount Tier (choose 1): {', '.join(AMOUNT_TIER_TAGS)}")
     lines.append("")
     lines.append("Always include: CIAA, Corruption")
     lines.append("")
     lines.append("Return ONLY a JSON array of tag strings, nothing else.")
     lines.append(
-        'Example: ["CIAA", "Corruption", "Local Government", "Bribery", "Kathmandu Valley", "10M-100M NPR"]'
+        'Example: ["CIAA", "Corruption", "Local Government", "Bribery", "Kathmandu Valley"]'
     )
     return "\n".join(lines)
 
@@ -1155,13 +1169,15 @@ def parse_llm_response(response: str) -> list[str]:
 
 
 def validate_tags(tags: list[str]) -> list[str]:
-    """Filter tags to only include valid controlled vocabulary and deduplicate."""
+    """Filter tags to only include valid controlled vocabulary and deduplicate.
+
+    Amount tier tags (~X Crore Y Lakh etc.) are dynamic and always pass through.
+    """
     all_valid = set()
     for tag_list in [
         SECTOR_TAGS,
         CORRUPTION_TYPE_TAGS,
         REGION_TAGS,
-        AMOUNT_TIER_TAGS,
         CONTEXT_TAGS,
     ]:
         all_valid.update(tag_list)
@@ -1169,7 +1185,9 @@ def validate_tags(tags: list[str]) -> list[str]:
     valid = []
     seen = set()
     for t in tags:
-        if t in all_valid and t not in seen:
+        # Amount tags are dynamic (e.g. "~4 Crore 90 Lakh") — always valid
+        is_amount = t.startswith("~") or t == "Under 1 Hazar"
+        if (t in all_valid or is_amount) and t not in seen:
             seen.add(t)
             valid.append(t)
     return valid
@@ -1206,9 +1224,26 @@ class TagEnricher:
         llm = self._llm_service.get_llm()
         return self._llm_service._call_llm(llm, prompt)
 
-    def enrich_case(self, case: Case, force: bool = False) -> dict:  # noqa
+    def enrich_case(self, case: Case, force: bool = False, case_num: int = 0, total_cases: int = 0) -> dict:  # noqa
         """Enrich a single case with tags. Returns dict with status, tags, and tier."""
-        logger.info(f"Processing {case.case_id}...")
+        # Extract case number from court_cases field (format: "special:080-CR-0007")
+        case_number = None
+        if case.court_cases:
+            for entry in case.court_cases:
+                if isinstance(entry, str) and ":" in entry:
+                    case_number = entry.split(":", 1)[1]
+                    break
+        
+        if case_num and total_cases:
+            case_num_str = f" (#{case_number})" if case_number else ""
+            logger.info(f"[{case_num}/{total_cases}] Processing {case.case_id}{case_num_str} — {case.title[:70] if case.title else 'No title'}")
+        else:
+            logger.info(f"Processing {case.case_id}...")
+        
+        logger.info(f"  Title: {case.title[:70] if case.title else 'No title'}")
+        if case_number:
+            logger.info(f"  Case Number: {case_number}")
+        logger.info(f"  Bigo:  bigo={case.bigo}")
 
         if case.tags and len(case.tags) > 0 and not force:
             logger.info("  Already tagged, skipping")
@@ -1248,6 +1283,10 @@ class TagEnricher:
                         logger.info(
                             f"+ Enriched {case.case_id} (source_llm): {all_tags}"
                         )
+                        # Always append bigo amount tag if available
+                        amount_tag = _detect_amount_tier(case.bigo)
+                        if amount_tag and amount_tag not in all_tags:
+                            all_tags.append(amount_tag)
                         return {
                             "status": "enriched",
                             "tags": all_tags,
@@ -1295,6 +1334,10 @@ class TagEnricher:
             tier = "metadata_llm"
         else:
             tier = "rule_based"
+        # Always append bigo amount tag if available and not already present
+        amount_tag = _detect_amount_tier(case.bigo)
+        if amount_tag and amount_tag not in all_tags:
+            all_tags.append(amount_tag)
         logger.info(f"+ Enriched {case.case_id} ({tier}): {all_tags}")
         return {"status": "enriched", "tags": all_tags, "tier": tier, "reason": ""}
 
@@ -1323,10 +1366,15 @@ class TagEnricher:
             "metadata_llm": 0,
             "rule_based": 0,
         }
-        for case in cases:
+        
+        # Convert to list to get total count for progress logging
+        cases_list = list(cases)
+        total_cases = len(cases_list)
+        
+        for idx, case in enumerate(cases_list, start=1):
             stats["total"] += 1
             try:
-                result = self.enrich_case(case, force=force)
+                result = self.enrich_case(case, force=force, case_num=idx, total_cases=total_cases)
                 if result["status"] == "skipped":
                     stats["skipped"] += 1
                     logger.debug(f"Skipped {case.case_id}: {result['reason']}")
@@ -1338,7 +1386,9 @@ class TagEnricher:
                     if not dry_run:
                         case.tags = result["tags"]
                         case.save(update_fields=["tags", "updated_at"])
-                    logger.info(f"Enriched {case.case_id} ({tier}): {result['tags']}")
+                        logger.info(f"✓ Saved {case.case_id} with {len(result['tags'])} tags")
+                    else:
+                        logger.info(f"  [DRY RUN] Would save: {result['tags']}")
             except Exception as e:
                 stats["failed"] += 1
                 logger.exception(f"Failed to enrich {case.case_id}: {e}")
