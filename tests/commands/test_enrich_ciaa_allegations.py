@@ -28,9 +28,13 @@ def _make_case(
         "title": title,
         "case_type": CaseType.CORRUPTION,
         "state": state,
-        "court_cases": court_cases or ["special:081-CR-0123"],
+        "court_cases": (
+            court_cases
+            if court_cases is not None
+            else ["special:081-CR-0123"]
+        ),
         "bigo": bigo,
-        "evidence": evidence or [],
+        "evidence": evidence if evidence is not None else [],
     }
     if key_allegations is not None:
         kwargs["key_allegations"] = key_allegations
