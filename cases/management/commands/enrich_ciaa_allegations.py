@@ -24,7 +24,6 @@ import os
 import re
 import tempfile
 import time
-import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -68,14 +67,15 @@ def normalize_base_url(url: str | None) -> str:
     return url
 
 
-def resolve_api_key(cli_key: str | None = None) -> str:
+def resolve_api_key(cli_key: str | None = None, is_anthropic: bool = False) -> str:
     if cli_key and cli_key.strip():
         return cli_key.strip()
-    for env_var in (
-        "JAWAFDEHI_LLM_API_KEY",
-        "OPENCODE_API_KEY",
-        "ANTHROPIC_API_KEY",
-    ):
+    env_vars = (
+        ("ANTHROPIC_API_KEY", "JAWAFDEHI_LLM_API_KEY", "OPENCODE_API_KEY")
+        if is_anthropic
+        else ("JAWAFDEHI_LLM_API_KEY", "OPENCODE_API_KEY", "ANTHROPIC_API_KEY")
+    )
+    for env_var in env_vars:
         val = os.environ.get(env_var)
         if val:
             return val
@@ -424,7 +424,8 @@ class Command(BaseCommand):
 
         model = normalize_model(model)
         base_url = normalize_base_url(base_url)
-        api_key = resolve_api_key(llm_api_key)
+        is_opencode = "anthropic.com" not in base_url
+        api_key = resolve_api_key(llm_api_key, is_anthropic=not is_opencode)
         timeout = _llm_timeout(llm_timeout)
 
         self.stdout.write(
@@ -437,8 +438,6 @@ class Command(BaseCommand):
         self.stdout.write(f"Found {len(cases)} eligible CIAA DRAFT case(s) to process")
 
         self._fetch_source_cache(cases)
-
-        is_opencode = "anthropic.com" not in base_url
 
         for idx, case in enumerate(cases, 1):
             try:
@@ -494,9 +493,7 @@ class Command(BaseCommand):
                     headers=headers,
                     method="POST",
                 )
-                ctx = ssl.create_default_context()
-                ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-                resp = urllib.request.urlopen(req, timeout=timeout, context=ctx)
+                resp = urllib.request.urlopen(req, timeout=timeout)
                 payload = json.loads(resp.read().decode("utf-8"))
                 raw = _parse_llm_opencode_response(payload, is_minimax)
                 logger.debug(f"LLM response: {raw[:500]}...")
@@ -887,10 +884,8 @@ class Command(BaseCommand):
                     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
                 },
             )
-            context = ssl.create_default_context()
-            context.minimum_version = ssl.TLSVersion.TLSv1_2
             with urllib.request.urlopen(
-                request, timeout=30, context=context
+                request, timeout=30
             ) as response:
                 _copy_stream_to_path_with_limit(response, out_path)
             return out_path
