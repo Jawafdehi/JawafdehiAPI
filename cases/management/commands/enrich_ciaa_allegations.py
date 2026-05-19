@@ -94,15 +94,30 @@ def _llm_endpoint(base_url: str, model: str) -> str:
 
 
 def _llm_timeout(cli_timeout: int | None = None) -> int:
+    def _validate(val: int) -> int:
+        if val <= 0:
+            raise CommandError(f"--llm-timeout must be > 0, got {val}")
+        return val
+
     if cli_timeout is not None:
-        return cli_timeout
+        return _validate(cli_timeout)
     env = os.environ.get("JAWAFDEHI_LLM_TIMEOUT_SECONDS")
     if env is not None:
         try:
-            return int(env)
+            return _validate(int(env))
         except ValueError:
             pass
     return DEFAULT_LLM_TIMEOUT
+
+
+_FATAL_CMDER_MSG_FRAGMENTS = frozenset(
+    {"markitdown", "path confinement", "Refusing to write", "exceeds max size"}
+)
+
+
+def _is_missing_content_cmderror(exc: CommandError) -> bool:
+    msg = str(exc)
+    return not any(fragment in msg for fragment in _FATAL_CMDER_MSG_FRAGMENTS)
 
 
 def _build_llm_opencode_body(
@@ -579,10 +594,13 @@ class Command(BaseCommand):
     def _fetch_source_cache(self, cases):
         source_ids = set()
         for case in cases:
-            if case.evidence:
-                for entry in case.evidence:
-                    if sid := entry.get("source_id"):
-                        source_ids.add(sid)
+            if not case.evidence or not isinstance(case.evidence, (list, tuple)):
+                continue
+            for entry in case.evidence:
+                if not isinstance(entry, dict):
+                    continue
+                if sid := entry.get("source_id"):
+                    source_ids.add(sid)
 
         self._source_lookup = {
             source.source_id: source
@@ -677,7 +695,22 @@ class Command(BaseCommand):
 
         try:
             press_release_text = self._convert_source_to_markdown(source)
-        except (CommandError, ValueError, OSError) as e:
+        except CommandError as e:
+            if not _is_missing_content_cmderror(e):
+                raise
+            self.stats["cases_no_content"] += 1
+            if not dry_run:
+                self._record_missing_details(
+                    case,
+                    f"enrich_ciaa_allegations: Failed to convert source to markdown: {e!s}",
+                )
+            self.stdout.write(
+                self.style.WARNING(
+                    f"  SKIPPED: Failed to convert source to markdown: {e!s}"
+                )
+            )
+            return None
+        except (ValueError, OSError) as e:
             self.stats["cases_no_content"] += 1
             if not dry_run:
                 self._record_missing_details(
