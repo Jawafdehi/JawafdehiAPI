@@ -395,9 +395,7 @@ class Command(BaseCommand):
 
         if priority and case_id:
             self.stderr.write(
-                self.style.ERROR(
-                    "--priority and --case-id are mutually exclusive"
-                )
+                self.style.ERROR("--priority and --case-id are mutually exclusive")
             )
             return
 
