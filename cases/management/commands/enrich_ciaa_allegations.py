@@ -394,10 +394,7 @@ class Command(BaseCommand):
         all_cases_flag = options.get("all_cases")
 
         if priority and case_id:
-            self.stderr.write(
-                self.style.ERROR("--priority and --case-id are mutually exclusive")
-            )
-            return
+            raise CommandError("--priority and --case-id are mutually exclusive")
 
         if not priority and not all_cases_flag:
             self.stdout.write(
@@ -632,7 +629,7 @@ class Command(BaseCommand):
             allegations = self._parse_allegations(raw)
         else:
             client = self._init_client(api_key, base_url)
-            allegations = self._call_llm_anthropic(client, model, prompt)
+            allegations = self._call_llm_anthropic(client, model, prompt, timeout)
         if not allegations:
             self.stats["cases_failed"] += 1
             self.stdout.write(self.style.ERROR("  FAILED: No allegations extracted"))
@@ -680,7 +677,7 @@ class Command(BaseCommand):
 
         try:
             press_release_text = self._convert_source_to_markdown(source)
-        except Exception as e:
+        except (CommandError, ValueError, OSError) as e:
             self.stats["cases_no_content"] += 1
             if not dry_run:
                 self._record_missing_details(
@@ -885,7 +882,7 @@ class Command(BaseCommand):
             f"Invalid URL '{url}'. Only http and https URLs are allowed with a host."
         )
 
-    def _call_llm_anthropic(self, client, model, prompt):
+    def _call_llm_anthropic(self, client, model, prompt, timeout=DEFAULT_LLM_TIMEOUT):
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -895,6 +892,7 @@ class Command(BaseCommand):
                     system=SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.1,
+                    timeout=timeout,
                 )
                 raw = response.content[0].text
                 logger.debug(f"LLM response: {raw[:500]}...")

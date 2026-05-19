@@ -839,22 +839,19 @@ def test_anthropic_com_routes_to_anthropic_sdk(
 
 @pytest.mark.django_db
 def test_priority_and_case_id_mutually_exclusive():
+    from django.core.management import CommandError
+
     _make_case(
         case_id="prio-mutex",
         court_cases=["special:080-CR-0007"],
     )
 
-    out = io.StringIO()
-    call_command(
-        "enrich_ciaa_allegations",
-        "--priority",
-        "--case-id=prio-mutex",
-        stdout=out,
-        stderr=out,
-    )
-
-    output = out.getvalue()
-    assert "mutually exclusive" in output
+    with pytest.raises(CommandError, match="mutually exclusive"):
+        call_command(
+            "enrich_ciaa_allegations",
+            "--priority",
+            "--case-id=prio-mutex",
+        )
 
 
 @pytest.mark.django_db
