@@ -2853,7 +2853,7 @@ scraping = ["google-auth (>=2.23.0,<3.0.0)", "google-cloud-aiplatform (>=1.38.0,
 type = "git"
 url = "https://github.com/Jawafdehi/NepalEntityService.git"
 reference = "HEAD"
-resolved_reference = "020bfc4c91b5934e526bf39168725ef985abe9e9"
+resolved_reference = "160a8766f40f5f92a15145b10550854c461097d8"
 
 [[package]]
 name = "nepali"
@@ -6002,4 +6002,4 @@ s3 = ["cloudpathlib"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.12"
-content-hash = "577c970a63e8772ff98a891b677ca5427b7af9dff31a97a098e106cc799e6929"
+content-hash = "4b0fe745f6dc666f1f77fafcd42d946f7b6ae446855b31ea32db04cc41eb0e19"
