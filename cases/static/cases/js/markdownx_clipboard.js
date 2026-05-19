@@ -26,6 +26,11 @@
     document.addEventListener(
       "paste",
       function (event) {
+        console.debug("[easymde_clipboard] paste event on", event.target.tagName,
+          "| .CodeMirror:", !!event.target.closest(".CodeMirror"),
+          "| html:", !!(event.clipboardData && event.clipboardData.getData("text/html")),
+          "| target:", event.target);
+
         const cmElement = event.target.closest(".CodeMirror");
         if (!cmElement) return;
 
@@ -43,10 +48,10 @@
 
         console.debug("[easymde_clipboard] Paste intercepted, converting HTML to Markdown...");
 
-        event.preventDefault();
-        event.stopPropagation();
-
         try {
+          event.preventDefault();
+          event.stopPropagation();
+
           const turndownService = new TurndownService({
             headingStyle: "atx",
             hr: "---",
@@ -65,11 +70,6 @@
           }
         } catch (e) {
           console.warn("[easymde_clipboard] Conversion failed, falling back to plain text:", e);
-          const plainText = clipboardData.getData("text/plain");
-          const cm = cmElement.CodeMirror;
-          if (cm && plainText) {
-            cm.replaceSelection(plainText);
-          }
         }
       },
       true
