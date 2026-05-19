@@ -500,7 +500,7 @@ class Command(BaseCommand):
                     continue
                 raise CommandError(
                     _format_llm_http_error(last_status, last_body_snippet)
-                )
+                ) from e
 
             except (urllib.error.URLError, OSError) as e:
                 if self._should_retry_llm_network(attempt, e):
@@ -816,7 +816,7 @@ class Command(BaseCommand):
             try:
                 converter.close()
             except Exception:
-                pass
+                logger.debug("Failed to close markitdown converter", exc_info=True)
 
     def _download_source_to_path(
         self, source: DocumentSource, output_dir: Path

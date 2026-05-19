@@ -431,12 +431,11 @@ def test_convert_source_no_url_no_file():
 @pytest.mark.django_db
 @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True)
 @patch(
-    "cases.management.commands.enrich_ciaa_allegations.Command." "_call_llm_opencode",
+    "cases.management.commands.enrich_ciaa_allegations.Command._call_llm_opencode",
     return_value='{"allegations": ["Test allegation from opencode"]}',
 )
 @patch(
-    "cases.management.commands.enrich_ciaa_allegations.Command."
-    "_convert_source_to_markdown",
+    "cases.management.commands.enrich_ciaa_allegations.Command._convert_source_to_markdown",
     return_value="Mocked press release content for dry-run test with enough chars",
 )
 @patch(
@@ -738,15 +737,14 @@ def test_call_llm_opencode_429_includes_usage_hint(mock_urlopen):
 @pytest.mark.django_db
 @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True)
 @patch(
-    "cases.management.commands.enrich_ciaa_allegations.Command." "_call_llm_opencode",
+    "cases.management.commands.enrich_ciaa_allegations.Command._call_llm_opencode",
     return_value='{"allegations": ["Jawafdehi proxy route test"]}',
 )
 @patch(
-    "cases.management.commands.enrich_ciaa_allegations.Command." "_call_llm_anthropic",
+    "cases.management.commands.enrich_ciaa_allegations.Command._call_llm_anthropic",
 )
 @patch(
-    "cases.management.commands.enrich_ciaa_allegations.Command."
-    "_convert_source_to_markdown",
+    "cases.management.commands.enrich_ciaa_allegations.Command._convert_source_to_markdown",
     return_value="Mocked press release content for proxy routing test with enough chars for LLM.",
 )
 @patch(
@@ -788,15 +786,14 @@ def test_jawafdehi_proxy_routes_to_opencode(
 @pytest.mark.django_db
 @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True)
 @patch(
-    "cases.management.commands.enrich_ciaa_allegations.Command." "_call_llm_anthropic",
+    "cases.management.commands.enrich_ciaa_allegations.Command._call_llm_anthropic",
     return_value=["Anthropic route test"],
 )
 @patch(
-    "cases.management.commands.enrich_ciaa_allegations.Command." "_call_llm_opencode",
+    "cases.management.commands.enrich_ciaa_allegations.Command._call_llm_opencode",
 )
 @patch(
-    "cases.management.commands.enrich_ciaa_allegations.Command."
-    "_convert_source_to_markdown",
+    "cases.management.commands.enrich_ciaa_allegations.Command._convert_source_to_markdown",
     return_value="Mocked press release content for anthropic routing test with enough chars for LLM.",
 )
 @patch(
@@ -861,12 +858,11 @@ def test_priority_and_case_id_mutually_exclusive():
 @pytest.mark.django_db
 @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True)
 @patch(
-    "cases.management.commands.enrich_ciaa_allegations.Command." "_call_llm_opencode",
+    "cases.management.commands.enrich_ciaa_allegations.Command._call_llm_opencode",
     return_value='{"allegations": ["Priority test"]}',
 )
 @patch(
-    "cases.management.commands.enrich_ciaa_allegations.Command."
-    "_convert_source_to_markdown",
+    "cases.management.commands.enrich_ciaa_allegations.Command._convert_source_to_markdown",
     return_value="Mocked press release content for priority flag test with enough chars for LLM.",
 )
 @patch(
@@ -917,12 +913,11 @@ def test_priority_flag_filters_to_loader_cases(
 @pytest.mark.django_db
 @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True)
 @patch(
-    "cases.management.commands.enrich_ciaa_allegations.Command." "_call_llm_opencode",
+    "cases.management.commands.enrich_ciaa_allegations.Command._call_llm_opencode",
     return_value='{"allegations": ["All test"]}',
 )
 @patch(
-    "cases.management.commands.enrich_ciaa_allegations.Command."
-    "_convert_source_to_markdown",
+    "cases.management.commands.enrich_ciaa_allegations.Command._convert_source_to_markdown",
     return_value="Mocked press release content for all flag test with enough chars for LLM.",
 )
 @patch(
