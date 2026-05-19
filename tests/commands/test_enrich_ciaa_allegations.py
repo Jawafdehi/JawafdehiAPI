@@ -423,7 +423,7 @@ def test_convert_source_no_url_no_file():
         url=[],
     )
     cmd = Command()
-    with pytest.raises(CommandError, match="No downloadable source found"):
+    with pytest.raises(CommandError, match="Unable to download source"):
         cmd._convert_source_to_markdown(source)
 
 
