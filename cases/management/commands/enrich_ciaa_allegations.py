@@ -494,10 +494,14 @@ class Command(BaseCommand):
             )
         )
 
+        start_time = time.time()
+
         cases = self._get_eligible_cases(limit, force, case_id, priority)
         self.stdout.write(f"Found {len(cases)} eligible CIAA DRAFT case(s) to process")
 
         self._fetch_source_cache(cases)
+
+        is_opencode = "anthropic.com" not in base_url
 
         for idx, case in enumerate(cases, 1):
             try:
@@ -512,7 +516,10 @@ class Command(BaseCommand):
                 logger.exception(f"Error processing {case.case_id}: {e}")
                 self.stdout.write(self.style.ERROR(f"FAILED: {case.case_id} - {e}"))
 
-        self._print_summary(dry_run)
+        elapsed = time.time() - start_time
+        mins, secs = divmod(int(elapsed), 60)
+        elapsed_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+        self._print_summary(dry_run, elapsed_str)
 
     def _init_client(self, api_key, base_url):
         if "anthropic.com" in (base_url or ""):
@@ -1058,12 +1065,13 @@ class Command(BaseCommand):
             return None
         return flat[:5]
 
-    def _print_summary(self, dry_run):
+    def _print_summary(self, dry_run, elapsed_str="0s"):
         self.stdout.write("\n" + "=" * 60)
         self.stdout.write(
             self.style.WARNING(f"{'[DRY RUN] ' if dry_run else ''}SUMMARY")
         )
         self.stdout.write("=" * 60)
+        self.stdout.write(f"Total time:       {elapsed_str}")
         self.stdout.write(f"Cases processed:  {self.stats['cases_processed']}")
         self.stdout.write(
             self.style.SUCCESS(f"Cases enriched:   {self.stats['cases_enriched']}")
