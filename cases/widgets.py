@@ -12,9 +12,7 @@ from json import JSONDecodeError
 class EasyMDEWidget(Textarea):
     class Media:
         css = {
-            "all": (
-                "https://cdn.jsdelivr.net/npm/easymde@2.19.0/dist/easymde.min.css",
-            )
+            "all": ("https://cdn.jsdelivr.net/npm/easymde@2.19.0/dist/easymde.min.css",)
         }
         js = ("https://cdn.jsdelivr.net/npm/easymde@2.19.0/dist/easymde.min.js",)
 
@@ -76,14 +74,8 @@ class ToastUIEditorWidget(Textarea):
     """
 
     class Media:
-        css = {
-            "all": (
-                "https://uicdn.toast.com/editor/latest/toastui-editor.min.css",
-            )
-        }
-        js = (
-            "https://uicdn.toast.com/editor/latest/toastui-editor-all.min.js",
-        )
+        css = {"all": ("https://uicdn.toast.com/editor/3.2.2/toastui-editor.min.css",)}
+        js = ("https://uicdn.toast.com/editor/3.2.2/toastui-editor-all.min.js",)
 
     def __init__(self, attrs=None):
         default_attrs = {
