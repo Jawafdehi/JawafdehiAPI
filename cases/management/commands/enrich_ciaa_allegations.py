@@ -483,7 +483,6 @@ class Command(BaseCommand):
                     method="POST",
                 )
                 ctx = ssl.create_default_context()
-                ctx.minimum_version = ssl.TLSVersion.TLSv1_2
                 resp = urllib.request.urlopen(req, timeout=timeout, context=ctx)
                 payload = json.loads(resp.read().decode("utf-8"))
                 raw = _parse_llm_opencode_response(payload, is_minimax)
@@ -858,7 +857,6 @@ class Command(BaseCommand):
                 },
             )
             context = ssl.create_default_context()
-            context.minimum_version = ssl.TLSVersion.TLSv1_2
             with urllib.request.urlopen(
                 request, timeout=30, context=context
             ) as response:
