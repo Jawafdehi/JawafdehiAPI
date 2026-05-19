@@ -666,7 +666,7 @@ class Command(BaseCommand):
             for entry in case.evidence:
                 if not isinstance(entry, dict):
                     continue
-                if sid := entry.get("source_id"):
+                if isinstance((sid := entry.get("source_id")), str) and sid.strip():
                     source_ids.add(sid)
 
         self._source_lookup = {
@@ -899,17 +899,12 @@ class Command(BaseCommand):
                 prefix="allegation-enrichment-"
             ) as tmp_dir:
                 temp_path = self._download_source_to_path(source, Path(tmp_dir))
-                if temp_path:
-                    result = converter.convert_uri(temp_path.resolve().as_uri())
-                    return result.markdown
-
-                source_url = self._pick_source_url(source)
-                if not source_url:
+                if not temp_path:
                     raise CommandError(
-                        f"No downloadable source found for source_id={source.source_id}."
+                        f"Unable to download source {source.source_id} "
+                        f"(case {source.source_id}): downloader returned no path."
                     )
-                source_url = self._validate_url_scheme(source_url)
-                result = converter.convert_uri(source_url)
+                result = converter.convert_uri(temp_path.resolve().as_uri())
                 return result.markdown
         finally:
             try:
