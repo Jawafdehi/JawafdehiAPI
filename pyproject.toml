@@ -41,7 +41,7 @@ langchain-core = "^1.3.3"
 sentry-sdk = {extras = ["django", "structlog"], version = "^2.47.0"}
 structlog = "^24.4.0"
 likhit = {git = "https://github.com/Jawafdehi/likhit.git", rev = "d4409e0f72722f1c554dbc8a2a7aa0634ec5407c"}
-markitdown = {extras = ["pdf", "docx"], version = "^0.1.0"}
+markitdown = {extras = ["docx", "pdf"], version = "^0.1.5"}
 
 [tool.poetry.extras]
 llm-all = ["langchain", "langchain-openai", "langchain-google-genai", "openai"]
