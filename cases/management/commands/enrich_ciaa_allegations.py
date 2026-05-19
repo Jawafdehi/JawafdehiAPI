@@ -46,11 +46,16 @@ DEFAULT_LLM_TIMEOUT = 300
 MAX_LLM_RETRIES = 3
 MINIMAX_MODELS = frozenset({"minimax-m2.5", "minimax-m2.7"})
 
+# SSRF protection: block well-known internal/metadata endpoints.
+# These are not configurable infrastructure — they are RFC-defined
+# special-purpose addresses used by all major cloud providers.
+_CLOUD_METADATA_IP = "169.254.169.254"  # NOSONAR — link-local, not configurable
+
 _SSRF_BLOCKED_HOSTNAMES = frozenset(
     {
         "localhost",
         "metadata.google.internal",
-        "169.254.169.254",
+        _CLOUD_METADATA_IP,
         "metadata",
         "0.0.0.0",
     }
