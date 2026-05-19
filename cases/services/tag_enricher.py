@@ -1043,6 +1043,32 @@ def _detect_court_context(case: Case) -> list[str]:
     return tags
 
 
+def _append_amount_tag(tags: list[str], bigo) -> list[str]:
+    """Append bigo amount tag to tags list if available and not already present."""
+    amount_tag = _detect_amount_tier(bigo)
+    if amount_tag and amount_tag not in tags:
+        tags.append(amount_tag)
+    return tags
+
+
+def _build_tag_selection_instructions() -> list[str]:
+    """Build the common tag selection instructions for LLM prompts."""
+    lines = []
+    lines.append("Select the most appropriate tags from each category:")
+    lines.append("")
+    lines.append(f"Sector (choose 1-3): {', '.join(SECTOR_TAGS)}")
+    lines.append(f"Corruption Type (choose 1-3): {', '.join(CORRUPTION_TYPE_TAGS)}")
+    lines.append(f"Region (choose 1-2): {', '.join(REGION_TAGS)}")
+    lines.append("")
+    lines.append("Always include: CIAA, Corruption")
+    lines.append("")
+    lines.append("Return ONLY a JSON array of tag strings, nothing else.")
+    lines.append(
+        'Example: ["CIAA", "Corruption", "Local Government", "Bribery", "Kathmandu Valley"]'
+    )
+    return lines
+
+
 def classify_case_rules(case: Case) -> list[str]:  # noqa
     """Rule-based tag classification for a CIAA case."""
     text = _collect_case_text(case)
@@ -1094,18 +1120,7 @@ def build_llm_classification_prompt(case: Case) -> str:
     if case.bigo is not None:
         lines.append(f"Bigo (Disputed Amount): NPR {case.bigo:,}")
     lines.append("")
-    lines.append("Select the most appropriate tags from each category:")
-    lines.append("")
-    lines.append(f"Sector (choose 1-3): {', '.join(SECTOR_TAGS)}")
-    lines.append(f"Corruption Type (choose 1-3): {', '.join(CORRUPTION_TYPE_TAGS)}")
-    lines.append(f"Region (choose 1-2): {', '.join(REGION_TAGS)}")
-    lines.append("")
-    lines.append("Always include: CIAA, Corruption")
-    lines.append("")
-    lines.append("Return ONLY a JSON array of tag strings, nothing else.")
-    lines.append(
-        'Example: ["CIAA", "Corruption", "Local Government", "Bribery", "Kathmandu Valley"]'
-    )
+    lines.extend(_build_tag_selection_instructions())
     return "\n".join(lines)
 
 
@@ -1135,18 +1150,7 @@ def build_llm_classification_prompt_from_sources(case: Case, evidence_text: str)
     if case.bigo is not None:
         lines.append(f"Bigo (Disputed Amount): NPR {case.bigo:,}")
     lines.append("")
-    lines.append("Select the most appropriate tags from each category:")
-    lines.append("")
-    lines.append(f"Sector (choose 1-3): {', '.join(SECTOR_TAGS)}")
-    lines.append(f"Corruption Type (choose 1-3): {', '.join(CORRUPTION_TYPE_TAGS)}")
-    lines.append(f"Region (choose 1-2): {', '.join(REGION_TAGS)}")
-    lines.append("")
-    lines.append("Always include: CIAA, Corruption")
-    lines.append("")
-    lines.append("Return ONLY a JSON array of tag strings, nothing else.")
-    lines.append(
-        'Example: ["CIAA", "Corruption", "Local Government", "Bribery", "Kathmandu Valley"]'
-    )
+    lines.extend(_build_tag_selection_instructions())
     return "\n".join(lines)
 
 
@@ -1288,9 +1292,7 @@ class TagEnricher:
                             f"+ Enriched {case.case_id} (source_llm): {all_tags}"
                         )
                         # Always append bigo amount tag if available
-                        amount_tag = _detect_amount_tier(case.bigo)
-                        if amount_tag and amount_tag not in all_tags:
-                            all_tags.append(amount_tag)
+                        all_tags = _append_amount_tag(all_tags, case.bigo)
                         return {
                             "status": "enriched",
                             "tags": all_tags,
@@ -1339,9 +1341,7 @@ class TagEnricher:
         else:
             tier = "rule_based"
         # Always append bigo amount tag if available and not already present
-        amount_tag = _detect_amount_tier(case.bigo)
-        if amount_tag and amount_tag not in all_tags:
-            all_tags.append(amount_tag)
+        all_tags = _append_amount_tag(all_tags, case.bigo)
         logger.info(f"+ Enriched {case.case_id} ({tier}): {all_tags}")
         return {"status": "enriched", "tags": all_tags, "tier": tier, "reason": ""}
 
