@@ -377,7 +377,7 @@ class Command(BaseCommand):
             "--base-url",
             type=str,
             default=None,
-            help=("Deprecated: use --llm-base-url instead. " "Base URL for LLM API."),
+            help="Deprecated: use --llm-base-url instead. Base URL for LLM API.",
         )
 
     def handle(self, *args, **options):
@@ -483,6 +483,7 @@ class Command(BaseCommand):
                     method="POST",
                 )
                 ctx = ssl.create_default_context()
+                ctx.minimum_version = ssl.TLSVersion.TLSv1_2
                 resp = urllib.request.urlopen(req, timeout=timeout, context=ctx)
                 payload = json.loads(resp.read().decode("utf-8"))
                 raw = _parse_llm_opencode_response(payload, is_minimax)
@@ -501,7 +502,7 @@ class Command(BaseCommand):
                     _format_llm_http_error(last_status, last_body_snippet)
                 ) from e
 
-            except (urllib.error.URLError, OSError) as e:
+            except OSError as e:
                 if self._should_retry_llm_network(attempt, e):
                     continue
                 raise CommandError(
@@ -524,7 +525,7 @@ class Command(BaseCommand):
             )
         self.stdout.write(
             self.style.WARNING(
-                f"  LLM {status} on attempt {attempt}, " f"retrying in {wait}s...{hint}"
+                f"  LLM {status} on attempt {attempt}, retrying in {wait}s...{hint}"
             )
         )
         time.sleep(wait)
@@ -857,6 +858,7 @@ class Command(BaseCommand):
                 },
             )
             context = ssl.create_default_context()
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
             with urllib.request.urlopen(
                 request, timeout=30, context=context
             ) as response:
