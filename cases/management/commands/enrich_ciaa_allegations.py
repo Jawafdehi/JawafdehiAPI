@@ -18,10 +18,12 @@ Environment variables::
 """
 
 import hashlib
+import ipaddress
 import json
 import logging
 import os
 import re
+import socket
 import tempfile
 import time
 import urllib.error
@@ -43,6 +45,59 @@ DEFAULT_OPENCODE_BASE = "https://opencode.ai/zen/go/v1"
 DEFAULT_LLM_TIMEOUT = 300
 MAX_LLM_RETRIES = 3
 MINIMAX_MODELS = frozenset({"minimax-m2.5", "minimax-m2.7"})
+
+_SSRF_BLOCKED_HOSTNAMES = frozenset(
+    {
+        "localhost",
+        "metadata.google.internal",
+        "169.254.169.254",
+        "metadata",
+        "0.0.0.0",
+    }
+)
+
+
+def _validate_host_safety(hostname: str) -> None:
+    host = hostname.lower().rstrip(".")
+    if host in _SSRF_BLOCKED_HOSTNAMES:
+        raise ValueError(
+            f"Blocked internal host: {hostname!r}. "
+            "Download sources must target public hosts only."
+        )
+    try:
+        addrinfo = socket.getaddrinfo(host, None)
+    except socket.gaierror as exc:
+        raise ValueError(
+            f"Cannot resolve host: {hostname!r}. "
+            "Only resolvable public hosts are allowed for source downloads."
+        ) from exc
+    for info in addrinfo:
+        addr = ipaddress.ip_address(info[4][0])
+        if (
+            addr.is_loopback
+            or addr.is_private
+            or addr.is_link_local
+            or addr.is_reserved
+        ):
+            raise ValueError(
+                f"Blocked internal address: {hostname!r} → {addr}. "
+                "Download sources must target public IPs only."
+            )
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urllib.parse.urlparse(newurl)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise urllib.error.HTTPError(
+                req.full_url,
+                code,
+                f"Unsafe redirect scheme/host to {newurl}",
+                headers,
+                fp,
+            )
+        _validate_host_safety(parsed.hostname)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def normalize_model(model: str) -> str:
@@ -582,7 +637,10 @@ class Command(BaseCommand):
             if not force and case.key_allegations:
                 continue
             if case.court_cases and isinstance(case.court_cases, list):
-                if any(ref.startswith("special:") for ref in case.court_cases):
+                if any(
+                    isinstance(ref, str) and ref.startswith("special:")
+                    for ref in case.court_cases
+                ):
                     result.append(case)
             else:
                 result.append(case)
@@ -783,7 +841,9 @@ class Command(BaseCommand):
             file.filename or Path(file.file.name).name
             for file in source.uploaded_files.all()
         ]
-        url_text = " ".join(source.url or [])
+        url_text = " ".join(
+            url for url in (source.url or []) if isinstance(url, str) and url.strip()
+        )
         corpus = " ".join(
             [
                 source.title or "",
@@ -884,7 +944,8 @@ class Command(BaseCommand):
                     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
                 },
             )
-            with urllib.request.urlopen(request, timeout=30) as response:
+            opener = urllib.request.build_opener(_SafeRedirectHandler())
+            with opener.open(request, timeout=30) as response:
                 _copy_stream_to_path_with_limit(response, out_path)
             return out_path
         except OSError:
@@ -903,6 +964,7 @@ class Command(BaseCommand):
     def _validate_url_scheme(self, url: str) -> str:
         parsed = urllib.parse.urlparse(url)
         if parsed.scheme in {"http", "https"} and parsed.netloc:
+            _validate_host_safety(parsed.hostname)
             return url
         raise ValueError(
             f"Invalid URL '{url}'. Only http and https URLs are allowed with a host."
