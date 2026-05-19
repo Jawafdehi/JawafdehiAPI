@@ -884,9 +884,7 @@ class Command(BaseCommand):
                     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
                 },
             )
-            with urllib.request.urlopen(
-                request, timeout=30
-            ) as response:
+            with urllib.request.urlopen(request, timeout=30) as response:
                 _copy_stream_to_path_with_limit(response, out_path)
             return out_path
         except OSError:
