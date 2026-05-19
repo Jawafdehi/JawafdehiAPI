@@ -497,6 +497,8 @@ def test_command_help():
         "--verbose",
         "--force",
         "--case-id",
+        "--priority",
+        "--all",
         "--base-url",
     ],
 )
@@ -831,3 +833,129 @@ def test_anthropic_com_routes_to_anthropic_sdk(
 
     mock_llm_anthropic.assert_called_once()
     mock_llm_opencode.assert_not_called()
+
+
+# ── Priority/all flags tests ─────────────────────────────────
+
+
+@pytest.mark.django_db
+def test_priority_and_case_id_mutually_exclusive():
+    _make_case(
+        case_id="prio-mutex",
+        court_cases=["special:080-CR-0007"],
+    )
+
+    out = io.StringIO()
+    call_command(
+        "enrich_ciaa_allegations",
+        "--priority",
+        "--case-id=prio-mutex",
+        stdout=out,
+        stderr=out,
+    )
+
+    output = out.getvalue()
+    assert "mutually exclusive" in output
+
+
+@pytest.mark.django_db
+@patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True)
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.Command." "_call_llm_opencode",
+    return_value='{"allegations": ["Priority test"]}',
+)
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.Command."
+    "_convert_source_to_markdown",
+    return_value="Mocked press release content for priority flag test with enough chars for LLM.",
+)
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.resolve_api_key",
+    return_value="test-key",
+)
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.normalize_base_url",
+    return_value="https://opencode.ai/zen/go/v1",
+)
+def test_priority_flag_filters_to_loader_cases(
+    mock_norm_url,
+    mock_resolve_key,
+    mock_convert,
+    mock_llm,
+):
+    _make_source(
+        source_id="source:prio",
+        title="Priority Press Release",
+        url=["https://example.com/pr.md"],
+    )
+    # Create one case in the priority list and one outside
+    _make_case(
+        case_id="prio-yes",
+        court_cases=["special:080-CR-0007"],
+        evidence=[{"source_id": "source:prio", "description": "PR"}],
+    )
+    _make_case(
+        case_id="prio-no",
+        court_cases=["special:999-WC-0001"],
+        evidence=[{"source_id": "source:prio", "description": "PR"}],
+    )
+
+    out = io.StringIO()
+    call_command(
+        "enrich_ciaa_allegations",
+        "--priority",
+        stdout=out,
+    )
+
+    # Only the priority case should have been processed
+    case_yes = Case.objects.get(case_id="prio-yes")
+    case_no = Case.objects.get(case_id="prio-no")
+    assert case_yes.key_allegations == ["Priority test"]
+    assert case_no.key_allegations == []
+
+
+@pytest.mark.django_db
+@patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True)
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.Command." "_call_llm_opencode",
+    return_value='{"allegations": ["All test"]}',
+)
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.Command."
+    "_convert_source_to_markdown",
+    return_value="Mocked press release content for all flag test with enough chars for LLM.",
+)
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.resolve_api_key",
+    return_value="test-key",
+)
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.normalize_base_url",
+    return_value="https://opencode.ai/zen/go/v1",
+)
+def test_all_flag_processes_all_not_just_priority(
+    mock_norm_url,
+    mock_resolve_key,
+    mock_convert,
+    mock_llm,
+):
+    _make_source(
+        source_id="source:all",
+        title="All Press Release",
+        url=["https://example.com/pr.md"],
+    )
+    ev = [{"source_id": "source:all", "description": "PR"}]
+    _make_case(case_id="all-a", court_cases=["special:080-CR-0007"], evidence=ev)
+    _make_case(case_id="all-b", court_cases=["special:999-WC-0001"], evidence=ev)
+
+    out = io.StringIO()
+    call_command(
+        "enrich_ciaa_allegations",
+        "--all",
+        stdout=out,
+    )
+
+    case_a = Case.objects.get(case_id="all-a")
+    case_b = Case.objects.get(case_id="all-b")
+    assert case_a.key_allegations == ["All test"]
+    assert case_b.key_allegations == ["All test"]
