@@ -10,53 +10,53 @@
     script.onload = callback;
     script.onerror = function () {
       console.warn(
-        "[markdownx_clipboard] Failed to load Turndown. HTML-to-Markdown paste conversion disabled."
+        "[easymde_clipboard] Failed to load Turndown. HTML-to-Markdown paste conversion disabled."
       );
     };
     document.head.appendChild(script);
   }
 
   function initClipboardHandler() {
-    document.addEventListener("paste", function (event) {
-      const target = event.target;
-      if (!target.classList.contains("markdownx-editor")) return;
+    document.addEventListener(
+      "paste",
+      function (event) {
+        const cmElement = event.target.closest(".CodeMirror");
+        if (!cmElement) return;
 
-      const clipboardData = event.clipboardData;
-      if (!clipboardData) return;
+        if (!cmElement.closest(".EasyMDEContainer")) return;
 
-      if (clipboardData.files && clipboardData.files.length > 0) return;
+        const clipboardData = event.clipboardData;
+        if (!clipboardData) return;
 
-      const html = clipboardData.getData("text/html");
-      if (!html || html.trim().length === 0) return;
+        if (clipboardData.files && clipboardData.files.length > 0) return;
 
-      if (typeof TurndownService === "undefined") return;
+        const html = clipboardData.getData("text/html");
+        if (!html || html.trim().length === 0) return;
 
-      event.preventDefault();
+        if (typeof TurndownService === "undefined") return;
 
-      const turndownService = new TurndownService({
-        headingStyle: "atx",
-        hr: "---",
-        bulletListMarker: "-",
-        codeBlockStyle: "fenced",
-        emDelimiter: "*",
-      });
+        event.preventDefault();
+        event.stopPropagation();
 
-      // Remove Word-specific cruft while preserving text
-      turndownService.remove(["style", "script", "meta", "link"]);
+        const turndownService = new TurndownService({
+          headingStyle: "atx",
+          hr: "---",
+          bulletListMarker: "-",
+          codeBlockStyle: "fenced",
+          emDelimiter: "*",
+        });
 
-      const markdown = turndownService.turndown(html);
+        turndownService.remove(["style", "script", "meta", "link"]);
 
-      const start = target.selectionStart;
-      const end = target.selectionEnd;
-      const text = target.value;
+        const markdown = turndownService.turndown(html);
 
-      target.value =
-        text.substring(0, start) + markdown + text.substring(end);
-      target.selectionStart = target.selectionEnd =
-        start + markdown.length;
-
-      target.dispatchEvent(new Event("input", { bubbles: true }));
-    });
+        const cm = cmElement.CodeMirror;
+        if (cm) {
+          cm.replaceSelection(markdown);
+        }
+      },
+      true
+    );
   }
 
   if (typeof TurndownService === "undefined") {
