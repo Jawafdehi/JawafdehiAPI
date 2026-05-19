@@ -1224,7 +1224,9 @@ class TagEnricher:
         llm = self._llm_service.get_llm()
         return self._llm_service._call_llm(llm, prompt)
 
-    def enrich_case(self, case: Case, force: bool = False, case_num: int = 0, total_cases: int = 0) -> dict:  # noqa
+    def enrich_case(
+        self, case: Case, force: bool = False, case_num: int = 0, total_cases: int = 0
+    ) -> dict:  # noqa
         """Enrich a single case with tags. Returns dict with status, tags, and tier."""
         # Extract case number from court_cases field (format: "special:080-CR-0007")
         case_number = None
@@ -1233,13 +1235,15 @@ class TagEnricher:
                 if isinstance(entry, str) and ":" in entry:
                     case_number = entry.split(":", 1)[1]
                     break
-        
+
         if case_num and total_cases:
             case_num_str = f" (#{case_number})" if case_number else ""
-            logger.info(f"[{case_num}/{total_cases}] Processing {case.case_id}{case_num_str} — {case.title[:70] if case.title else 'No title'}")
+            logger.info(
+                f"[{case_num}/{total_cases}] Processing {case.case_id}{case_num_str} — {case.title[:70] if case.title else 'No title'}"
+            )
         else:
             logger.info(f"Processing {case.case_id}...")
-        
+
         logger.info(f"  Title: {case.title[:70] if case.title else 'No title'}")
         if case_number:
             logger.info(f"  Case Number: {case_number}")
@@ -1366,15 +1370,17 @@ class TagEnricher:
             "metadata_llm": 0,
             "rule_based": 0,
         }
-        
+
         # Convert to list to get total count for progress logging
         cases_list = list(cases)
         total_cases = len(cases_list)
-        
+
         for idx, case in enumerate(cases_list, start=1):
             stats["total"] += 1
             try:
-                result = self.enrich_case(case, force=force, case_num=idx, total_cases=total_cases)
+                result = self.enrich_case(
+                    case, force=force, case_num=idx, total_cases=total_cases
+                )
                 if result["status"] == "skipped":
                     stats["skipped"] += 1
                     logger.debug(f"Skipped {case.case_id}: {result['reason']}")
@@ -1386,7 +1392,9 @@ class TagEnricher:
                     if not dry_run:
                         case.tags = result["tags"]
                         case.save(update_fields=["tags", "updated_at"])
-                        logger.info(f"✓ Saved {case.case_id} with {len(result['tags'])} tags")
+                        logger.info(
+                            f"✓ Saved {case.case_id} with {len(result['tags'])} tags"
+                        )
                     else:
                         logger.info(f"  [DRY RUN] Would save: {result['tags']}")
             except Exception as e:
