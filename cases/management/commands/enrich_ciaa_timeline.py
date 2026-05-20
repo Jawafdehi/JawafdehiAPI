@@ -24,23 +24,17 @@ Usage::
 """
 
 import logging
-import sys
 from typing import Optional
 
 from django.core.management.base import BaseCommand
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.db.models import Q
 
 from cases.models import Case, CaseType, CaseState
 from cases.services.priority_case_loader import filter_by_priority, load_priority_cases
 from ngm.services import get_court_case_details
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(levelname)s: %(message)s",
-    stream=sys.stdout,
-    force=True,
-)
 logger = logging.getLogger(__name__)
 
 TITLE_CASE_REGISTERED = "मुद्दा दर्ता"
@@ -63,7 +57,6 @@ class Command(BaseCommand):
             "cases_no_court_case": 0,
             "cases_ngm_error": 0,
             "cases_already_populated": 0,
-            "cases_no_hearings": 0,
             "total_timeline_entries": 0,
         }
 
@@ -179,9 +172,9 @@ class Command(BaseCommand):
                 )
 
             if not force:
-                from django.db.models import Q
-
+                total_before = cases.count()
                 cases = cases.filter(Q(timeline__isnull=True) | Q(timeline=[]))
+                self.stats["cases_already_populated"] = total_before - cases.count()
 
         if limit is not None:
             cases = cases[:limit]
@@ -206,10 +199,18 @@ class Command(BaseCommand):
 
         try:
             case_details = get_court_case_details(court_identifier, case_number)
-        except Exception as exc:
+        except (OSError, ConnectionError, RuntimeError) as exc:
             self.stats["cases_ngm_error"] += 1
             self.stdout.write(
                 self.style.ERROR(f"  NGM query failed: {exc}")
+            )
+            return
+        except Exception:
+            self.stats["cases_ngm_error"] += 1
+            logger.exception(
+                "Unexpected error fetching NGM data for %s:%s",
+                court_identifier,
+                case_number,
             )
             return
 

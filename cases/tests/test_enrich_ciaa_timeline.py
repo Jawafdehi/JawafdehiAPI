@@ -148,7 +148,6 @@ class TestEnrichCiaaTimeline:
             "cases_no_court_case": 0,
             "cases_ngm_error": 0,
             "cases_already_populated": 0,
-            "cases_no_hearings": 0,
             "total_timeline_entries": 0,
         }
 
@@ -172,7 +171,6 @@ class TestEnrichCiaaTimeline:
             "cases_no_court_case": 0,
             "cases_ngm_error": 0,
             "cases_already_populated": 0,
-            "cases_no_hearings": 0,
             "total_timeline_entries": 0,
         }
 
