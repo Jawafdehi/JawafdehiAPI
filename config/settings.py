@@ -372,10 +372,7 @@ if DATABASES["default"].get("ENGINE") == _POSTGRESQL_ENGINE:
     DATABASES["default"]["CONN_MAX_AGE"] = 60
     DATABASES["default"]["CONN_HEALTH_CHECKS"] = True
 
-if (
-    "ngm" in DATABASES
-    and DATABASES["ngm"].get("ENGINE") == _POSTGRESQL_ENGINE
-):
+if "ngm" in DATABASES and DATABASES["ngm"].get("ENGINE") == _POSTGRESQL_ENGINE:
     DATABASES["ngm"]["CONN_MAX_AGE"] = 60
     DATABASES["ngm"]["CONN_HEALTH_CHECKS"] = True
 
