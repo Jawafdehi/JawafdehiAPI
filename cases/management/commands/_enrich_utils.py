@@ -12,7 +12,7 @@ import time
 from datetime import date
 from pathlib import Path
 from typing import Optional, Union
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 from django.core.management.base import CommandError
@@ -85,6 +85,13 @@ def call_llm(
             response.raise_for_status()
         except requests.RequestException as exc:
             last_exc = exc
+            if isinstance(exc, requests.HTTPError) and exc.response is not None:
+                status = exc.response.status_code
+                if 400 <= status < 500:
+                    raise CommandError(
+                        f"LLM API client error (HTTP {status}): "
+                        f"{exc.response.text[:500]}"
+                    ) from exc
             if attempt < max_retries:
                 wait = 2**attempt
                 logger.warning(
@@ -153,16 +160,35 @@ def convert_to_markdown(url: str, session: requests.Session) -> Optional[str]:
         logger.warning("Refusing to fetch untrusted host: %s", url)
         return None
 
-    try:
-        response = session.get(url, timeout=120, stream=True)
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        logger.warning("Failed to download %s: %s", url, exc)
-        return None
+    current_url = url
+    for hop in range(5):
+        try:
+            response = session.get(current_url, timeout=120, stream=True,
+                                   allow_redirects=False)
+        except requests.RequestException as exc:
+            logger.warning("Failed to download %s: %s", current_url, exc)
+            return None
 
-    final_hostname = urlparse(response.url).hostname
-    if final_hostname not in ALLOWED_HOSTS:
-        logger.warning("Redirected to untrusted host: %s", response.url)
+        if response.status_code in (301, 302, 303, 307, 308):
+            location = response.headers.get("Location")
+            if not location:
+                logger.warning("Redirect with no Location header: %s", current_url)
+                return None
+            next_url = urljoin(current_url, location)
+            next_hostname = urlparse(next_url).hostname
+            if next_hostname not in ALLOWED_HOSTS:
+                logger.warning(
+                    "Redirect target host not allowed: %s -> %s",
+                    current_url, next_url,
+                )
+                return None
+            current_url = next_url
+            continue
+
+        response.raise_for_status()
+        break
+    else:
+        logger.warning("Too many redirects: %s", url)
         return None
 
     content_type = response.headers.get("content-type", "").lower()

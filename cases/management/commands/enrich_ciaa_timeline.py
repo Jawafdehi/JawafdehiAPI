@@ -204,6 +204,19 @@ class Command(BaseCommand):
         dry_run = options["dry_run"]
         case_id = options.get("case_id")
         limit = options.get("limit")
+
+        if limit is not None:
+            try:
+                limit_int = int(limit)
+            except (ValueError, TypeError):
+                raise CommandError(
+                    f"Invalid --limit value: {limit}. Must be a positive integer."
+                )
+            if limit_int <= 0:
+                raise CommandError(
+                    f"Invalid --limit: {limit_int}. Must be a positive integer."
+                )
+            limit = limit_int
         llm_model = options["llm_model"]
         llm_base_url = options["llm_base_url"]
         llm_api_key = options.get("llm_api_key")
@@ -292,25 +305,32 @@ class Command(BaseCommand):
         queryset = Case.objects.filter(state="DRAFT")
         if case_id:
             queryset = queryset.filter(case_id=case_id)
-        if not force:
-            self.stats["cases_already_populated"] = queryset.exclude(
-                timeline=[]
-            ).count()
-            queryset = queryset.filter(timeline=[])
 
         if priority:
             priority_list = load_priority_cases()
             queryset = filter_by_priority(queryset, priority_list)
 
         all_cases = []
+        candidate_count = 0
         for case in queryset.order_by("case_id"):
             if not self._is_ciaa_special_court_case(case):
                 continue
             if fiscal_year and not self._matches_fiscal_year(case, fiscal_year):
                 continue
+            candidate_count += 1
+            if not force and case.timeline:
+                continue
             all_cases.append(case)
             if limit and len(all_cases) >= limit:
                 break
+
+        if not force:
+            self.stats["cases_already_populated"] = sum(
+                1 for c in queryset
+                if self._is_ciaa_special_court_case(c)
+                and (not fiscal_year or self._matches_fiscal_year(c, fiscal_year))
+                and c.timeline
+            )
         return all_cases
 
     @staticmethod
@@ -355,16 +375,18 @@ class Command(BaseCommand):
         self.stdout.write(f"\n[{idx}/{total}] {case.case_id} — {case.title[:80]}")
 
         source_text = self._get_source_content(case, session)
-        if not source_text:
+        ngm_data = self._get_ngm_data(case)
+
+        if not source_text and not ngm_data:
             self.stats["cases_no_content"] += 1
             self.stdout.write(
                 self.style.WARNING("  No source content found — skipping")
             )
             return
 
-        self.stdout.write(f"  Source content: {len(source_text)} chars")
+        if source_text:
+            self.stdout.write(f"  Source content: {len(source_text)} chars")
 
-        ngm_data = self._get_ngm_data(case)
         if ngm_data:
             self.stats["cases_ngm_used"] += 1
             self.stdout.write(

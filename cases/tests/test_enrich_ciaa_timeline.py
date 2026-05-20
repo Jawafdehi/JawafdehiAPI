@@ -356,6 +356,18 @@ class TestEnrichCiaaTimeline:
         assert result[0]["title"] == "Alt field test"
         assert result[0]["description"] == "Alt desc"
 
+    def test_parse_rejects_non_iso_dates_in_alternate_fields(self):
+        """Entries with non-ISO dates in fallback fields are dropped."""
+        cmd = Command()
+        entries = [
+            {"date": "2023-08-15", "title": "Valid entry"},
+            {"date_bs": "15-08-2023", "event": "Bad date format"},
+            {"date_bs": "2080-04-32", "event": "Invalid calendar date"},
+        ]
+        result = cmd._parse_timeline_response(json.dumps(entries))
+        assert len(result) == 1
+        assert result[0]["date"] == "2023-08-15"
+
     def test_parse_nested_timeline_key(self):
         """Response with 'timeline' wrapper key is extracted."""
         cmd = Command()
