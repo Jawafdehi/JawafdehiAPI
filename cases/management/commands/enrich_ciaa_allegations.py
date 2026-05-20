@@ -28,11 +28,15 @@ import requests
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
+from cases.management.commands._enrich_utils import (
+    ALLOWED_HOSTS,
+    call_llm,
+    convert_to_markdown,
+    resolve_api_key,
+)
 from cases.models import Case, DocumentSource
 
 logger = logging.getLogger(__name__)
-
-_ALLOWED_HOSTS = frozenset({"ciaa.gov.np", "ngm-store.jawafdehi.org"})
 
 EXTRACTION_SYSTEM_PROMPT = """\
 You are a Nepali legal analyst extracting structured key allegations from \
@@ -163,6 +167,12 @@ class Command(BaseCommand):
             "cases_llm_error": 0,
             "cases_already_populated": 0,
         }
+        self._http_session: Optional[requests.Session] = None
+
+    def _get_session(self) -> requests.Session:
+        if self._http_session is None:
+            self._http_session = requests.Session()
+        return self._http_session
 
     def handle(self, *args, **options):
         """Orchestrate the enrichment pipeline: discover cases, extract press release content, call LLM, persist results."""
@@ -186,7 +196,7 @@ class Command(BaseCommand):
         if dry_run:
             self.stdout.write(self.style.WARNING("[DRY RUN] No changes will be saved."))
 
-        api_key = self._resolve_api_key(llm_api_key)
+        api_key = resolve_api_key(llm_api_key)
         if not dry_run and not api_key:
             raise CommandError(
                 "No LLM API key provided. Set JAWAFDEHI_LLM_API_KEY or "
@@ -200,6 +210,7 @@ class Command(BaseCommand):
             f"Found {total} CIAA draft cases to process. " f"Model: {llm_model}"
         )
 
+        session = self._get_session()
         for idx, case in enumerate(cases, 1):
             self._process_case(
                 case=case,
@@ -209,17 +220,10 @@ class Command(BaseCommand):
                 llm_model=llm_model,
                 llm_base_url=llm_base_url,
                 llm_api_key=api_key,
+                session=session,
             )
 
         self._print_summary(dry_run)
-
-    def _resolve_api_key(self, cli_key: Optional[str]) -> Optional[str]:
-        """Resolve LLM API key from CLI argument or environment variables."""
-        if cli_key:
-            return cli_key
-        return os.environ.get("JAWAFDEHI_LLM_API_KEY") or os.environ.get(
-            "ANTHROPIC_API_KEY"
-        )
 
     def _get_ciaa_cases(
         self, case_id: Optional[str] = None, limit: Optional[int] = None
@@ -250,12 +254,13 @@ class Command(BaseCommand):
         llm_model: str,
         llm_base_url: str,
         llm_api_key: Optional[str],
+        session: requests.Session,
     ):
         """Process a single case: acquire content, extract allegations via LLM, persist or dry-run."""
         self.stats["cases_processed"] += 1
         self.stdout.write(f"\n[{idx}/{total}] {case.case_id} — {case.title[:80]}")
 
-        press_release_text = self._get_press_release_content(case)
+        press_release_text = self._get_press_release_content(case, session)
         if not press_release_text:
             self.stats["cases_no_content"] += 1
             self.stdout.write(
@@ -278,6 +283,7 @@ class Command(BaseCommand):
                 llm_model=llm_model,
                 llm_base_url=llm_base_url,
                 llm_api_key=llm_api_key,
+                session=session,
             )
         except (
             requests.RequestException,
@@ -310,7 +316,9 @@ class Command(BaseCommand):
             self._save_allegations(case, allegations)
             self.stats["cases_enriched"] += 1
 
-    def _get_press_release_content(self, case: Case) -> Optional[str]:
+    def _get_press_release_content(
+        self, case: Case, session: requests.Session
+    ) -> Optional[str]:
         """Extract press release text for a CIAA case.
 
         Strategy:
@@ -361,8 +369,8 @@ class Command(BaseCommand):
             if isinstance(source.url, list):
                 for url in source.url:
                     parsed = urlparse(url)
-                    if parsed.hostname and parsed.hostname in _ALLOWED_HOSTS:
-                        content = self._convert_to_markdown(url)
+                    if parsed.hostname and parsed.hostname in ALLOWED_HOSTS:
+                        content = convert_to_markdown(url, session)
                         if content and len(content) > 200:
                             press_release_parts.append(content)
                             break
@@ -385,81 +393,9 @@ class Command(BaseCommand):
         if isinstance(source.url, list):
             for url in source.url:
                 parsed = urlparse(url)
-                if parsed.hostname and parsed.hostname in _ALLOWED_HOSTS:
+                if parsed.hostname and parsed.hostname in ALLOWED_HOSTS:
                     return True
         return False
-
-    def _convert_to_markdown(self, url: str) -> Optional[str]:
-        """Download file from URL and convert to markdown using likhit.
-
-        Pipeline: URL download -> temp file -> likhit/markitdown -> Nepali markdown.
-        Returns None when conversion fails or produces insufficient content.
-        """
-        import tempfile
-        from pathlib import Path
-
-        try:
-            response = requests.get(url, timeout=120, stream=True)
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            logger.warning("  Failed to download %s: %s", url, exc)
-            return None
-
-        final_hostname = urlparse(response.url).hostname
-        if final_hostname not in _ALLOWED_HOSTS:
-            logger.warning("  Redirected to untrusted host: %s", response.url)
-            return None
-
-        content_type = response.headers.get("content-type", "").lower()
-
-        if "text/plain" in content_type or "application/json" in content_type:
-            response.encoding = "utf-8"
-            text = response.text
-            if len(text) > 200:
-                return text
-            return None
-
-        suffix = ""
-        if "pdf" in content_type:
-            suffix = ".pdf"
-        elif "html" in content_type:
-            suffix = ".html"
-        elif any(kw in content_type for kw in ("document", "word", "docx", "msword")):
-            suffix = ".docx"
-
-        tmp_path = None
-        try:
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-                tmp_path = tmp.name
-                for chunk in response.iter_content(chunk_size=8192):
-                    tmp.write(chunk)
-
-            import likhit  # noqa: F401 — registers Nepali converters
-            from markitdown import MarkItDown
-
-            md = MarkItDown(enable_plugins=True)
-            result = md.convert(tmp_path)
-
-            if (
-                result
-                and result.text_content
-                and len(result.text_content.strip()) > 200
-            ):
-                return result.text_content.strip()
-
-            logger.warning(
-                "  Likhit conversion produced insufficient content for %s", url
-            )
-            return None
-        except Exception as exc:
-            logger.warning("  Likhit conversion failed for %s: %s", url, exc)
-            return None
-        finally:
-            if tmp_path:
-                try:
-                    Path(tmp_path).unlink(missing_ok=True)
-                except Exception:
-                    pass
 
     def _extract_allegations(
         self,
@@ -468,6 +404,7 @@ class Command(BaseCommand):
         llm_model: str,
         llm_base_url: str,
         llm_api_key: Optional[str],
+        session: requests.Session,
     ) -> Optional[list[str]]:
         """Call LLM to extract key allegations from press release text."""
         prompt = EXTRACTION_USER_PROMPT.format(
@@ -475,54 +412,16 @@ class Command(BaseCommand):
             press_release_text=press_release_text[:30000],
         )
 
-        response_text = self._call_llm(
+        response_text = call_llm(
             system_prompt=EXTRACTION_SYSTEM_PROMPT,
             user_prompt=prompt,
             model=llm_model,
             base_url=llm_base_url,
             api_key=llm_api_key,
+            session=session,
         )
 
         return self._parse_allegations_response(response_text)
-
-    def _call_llm(
-        self,
-        system_prompt: str,
-        user_prompt: str,
-        model: str,
-        base_url: str,
-        api_key: Optional[str],
-    ) -> str:
-        """Call LLM API via OpenAI-compatible chat completions endpoint."""
-        url = f"{base_url.rstrip('/')}/chat/completions"
-
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        }
-
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": 0.1,
-            "max_tokens": 3000,
-        }
-
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=120)
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            raise CommandError(f"LLM API request failed: {exc}") from exc
-
-        data = response.json()
-        choices = data.get("choices", [])
-        if not choices:
-            raise CommandError("LLM API returned no choices")
-
-        return choices[0]["message"]["content"]
 
     def _parse_allegations_response(self, response_text: str) -> Optional[list[str]]:
         """Parse the LLM response to extract the JSON array of allegations."""
