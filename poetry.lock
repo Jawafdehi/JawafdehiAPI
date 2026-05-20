@@ -2866,6 +2866,18 @@ reference = "HEAD"
 resolved_reference = "160a8766f40f5f92a15145b10550854c461097d8"
 
 [[package]]
+name = "nepali"
+version = "1.2.0"
+description = "nepalidatetime compatible with python's datetime feature. Converting nepali date to english, parsing nepali datetime, nepali timezone, and timedelta support in nepali datetime"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "nepali-1.2.0-py3-none-any.whl", hash = "sha256:1f9244b2fcb51e6b9e710cc1c483024f8600954d545a9a12a2accf53213911b1"},
+    {file = "nepali-1.2.0.tar.gz", hash = "sha256:75a9d0bd4b3e95d72c7045539b63e84077686ffa12dff5db3fffe6579cbb511d"},
+]
+
+[[package]]
 name = "nepali-date-utils"
 version = "0.3.1"
 description = "Convert Nepali to English Dates: Easily switch between Nepali and English dates with this Python package."
@@ -6011,4 +6023,4 @@ llm-all = ["langchain", "langchain-google-genai", "langchain-openai", "openai"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.12"
-content-hash = "3c95b34db88f10ae926a3f7adb7ba8b06e4d489f95f2edde4e8f981d58d966b1"
+content-hash = "283a5685b8f88897f42d784e4b655389d37f27720b53688fada6da161972b3a7"
