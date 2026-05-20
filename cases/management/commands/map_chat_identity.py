@@ -66,14 +66,19 @@ class Command(BaseCommand):
 
     def _list_all(self):
         """List all ChatUserIdentity records."""
-        identities = ChatUserIdentity.objects.select_related("user").all().order_by("owui_user_name")
+        identities = list(
+            ChatUserIdentity.objects.select_related("user")
+            .prefetch_related("user__groups")
+            .all()
+            .order_by("owui_user_name")
+        )
 
         self.stdout.write(f"\n{'OWUI User ID':<40} {'OWUI Name':<25} {'Mapped To':<25} {'Roles'}")
         self.stdout.write("-" * 110)
 
         for ident in identities:
             if ident.user:
-                roles = list(ident.user.groups.values_list("name", flat=True))
+                roles = [g.name for g in ident.user.groups.all()]
                 mapped_to = ident.user.get_username()
                 roles_str = ", ".join(roles) if roles else "(none)"
             else:
@@ -84,4 +89,4 @@ class Command(BaseCommand):
                 f"{ident.owui_user_id:<40} {ident.owui_user_name:<25} {mapped_to:<25} {roles_str}"
             )
 
-        self.stdout.write(f"\nTotal: {identities.count()} identity records")
+        self.stdout.write(f"\nTotal: {len(identities)} identity records")
