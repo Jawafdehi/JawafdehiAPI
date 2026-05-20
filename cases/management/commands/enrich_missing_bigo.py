@@ -38,6 +38,14 @@ BIGO_CONTEXT_KEYWORDS = (
 _NEPALI_TO_ASCII_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
 
 
+def _first_env(*names: str, default: str | None = None) -> str | None:
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value
+    return default
+
+
 class Command(BaseCommand):
     help = (
         "Find DRAFT cases with missing BIGO, extract amount from CIAA press release "
@@ -60,7 +68,19 @@ class Command(BaseCommand):
         parser.add_argument(
             "--dry-run",
             action="store_true",
-            help="Preview enrichment results without PATCHing cases.",
+            help=(
+                "Preview eligible cases and selected source without downloading, "
+                "calling the LLM, or PATCHing cases. Use --dry-run-extract to "
+                "also run source conversion and LLM extraction."
+            ),
+        )
+        parser.add_argument(
+            "--dry-run-extract",
+            action="store_true",
+            help=(
+                "With --dry-run, run source download/conversion and LLM extraction, "
+                "but still do not PATCH cases."
+            ),
         )
         parser.add_argument(
             "--allow-production",
@@ -80,22 +100,62 @@ class Command(BaseCommand):
             help="Jawafdehi API token. Defaults to JAWAFDEHI_API_TOKEN.",
         )
         parser.add_argument(
+            "--llm-api-key",
+            type=str,
+            default=os.getenv("JAWAFDEHI_LLM_API_KEY"),
+            help="LLM API key for native Anthropic or the OpenAI-compatible proxy. Defaults to JAWAFDEHI_LLM_API_KEY.",
+        )
+        parser.add_argument(
             "--anthropic-api-key",
             type=str,
             default=os.getenv("ANTHROPIC_API_KEY"),
-            help="Anthropic API key (or LLM proxy API key if using --llm-base-url). Defaults to ANTHROPIC_API_KEY.",
+            help="Deprecated alias for --llm-api-key. Defaults to ANTHROPIC_API_KEY.",
         )
         parser.add_argument(
             "--llm-model",
             type=str,
-            default=os.getenv("BIGO_ENRICHMENT_MODEL", "claude-sonnet-4-5"),
-            help="LLM model used for BIGO extraction.",
+            default=_first_env(
+                "BIGO_ENRICHMENT_MODEL",
+                "JAWAFDEHI_CASEWORK_MODEL",
+                default="claude-sonnet-4-5",
+            ),
+            help=(
+                "LLM model used for BIGO extraction. Defaults to BIGO_ENRICHMENT_MODEL, "
+                "JAWAFDEHI_CASEWORK_MODEL, or claude-sonnet-4-5."
+            ),
         )
         parser.add_argument(
             "--llm-base-url",
             type=str,
-            default=os.getenv("JAWAFDEHI_CASEWORK_BASE_URL"),
-            help="LLM API base URL (for OpenAI-compatible proxy). Defaults to JAWAFDEHI_CASEWORK_BASE_URL.",
+            default=_first_env(
+                "BIGO_ENRICHMENT_LLM_BASE_URL",
+                "BIGO_ENRICHMENT_BASE_URL",
+                "JAWAFDEHI_CASEWORK_BASE_URL",
+                "JAWAFDEHI_LLM_PROXY_URL",
+            ),
+            help=(
+                "LLM API base URL (for OpenAI-compatible proxy). Defaults to "
+                "BIGO_ENRICHMENT_LLM_BASE_URL, BIGO_ENRICHMENT_BASE_URL, "
+                "JAWAFDEHI_CASEWORK_BASE_URL, or JAWAFDEHI_LLM_PROXY_URL."
+            ),
+        )
+        parser.add_argument(
+            "--llm-timeout",
+            type=float,
+            default=float(os.getenv("BIGO_ENRICHMENT_LLM_TIMEOUT", "120")),
+            help="LLM request timeout in seconds. Defaults to BIGO_ENRICHMENT_LLM_TIMEOUT or 120.",
+        )
+        parser.add_argument(
+            "--llm-max-tokens",
+            type=int,
+            default=int(os.getenv("BIGO_ENRICHMENT_LLM_MAX_TOKENS", "2000")),
+            help="LLM response token budget. Defaults to BIGO_ENRICHMENT_LLM_MAX_TOKENS or 2000.",
+        )
+        parser.add_argument(
+            "--download-timeout",
+            type=float,
+            default=float(os.getenv("BIGO_ENRICHMENT_DOWNLOAD_TIMEOUT", "30")),
+            help="Source download timeout in seconds. Defaults to BIGO_ENRICHMENT_DOWNLOAD_TIMEOUT or 30.",
         )
         parser.add_argument(
             "--verbose",
@@ -121,9 +181,12 @@ class Command(BaseCommand):
         self._log_info(
             "Starting BIGO enrichment run "
             f"(limit={options['limit']}, dry_run={options['dry_run']}, "
+            f"dry_run_extract={options['dry_run_extract']}, "
             f"case_id={options['case_id'] or 'ALL'}, min_confidence={options['min_confidence']})",
             always=True,
         )
+
+        llm_api_key = self._resolve_llm_api_key(options)
 
         priority = options["priority"]
         case_id = options.get("case_id")
@@ -167,20 +230,58 @@ class Command(BaseCommand):
                     continue
 
                 self._log_info(
-                    f"Selected source {source.source_id} for case {case.case_id}"
+                    f"Selected source {source.source_id} for case {case.case_id}; "
+                    f"court_cases={case.court_cases or []}; title={source.title!r}"
                 )
-                markdown = self._convert_source_to_markdown(source)
+                self._log_source_diagnostics(source)
+                if options["dry_run"] and not options["dry_run_extract"]:
+                    skipped += 1
+                    self.stdout.write(
+                        self.style.WARNING(
+                            f"[DRY-RUN] {case.case_id}: selected source={source.source_id}; "
+                            "would download/convert, extract BIGO with LLM, and PATCH if a "
+                            "reliable BIGO is found. Use --dry-run-extract to run external "
+                            "download and LLM extraction."
+                        )
+                    )
+                    continue
+
+                markdown = self._convert_source_to_markdown(
+                    source,
+                    download_timeout=options["download_timeout"],
+                )
                 self._log_info(
                     f"Converted source {source.source_id} to markdown ({len(markdown)} chars)"
                 )
-                bigo = self._extract_bigo_from_markdown(
-                    markdown=markdown,
-                    case=case,
-                    model=options["llm_model"],
-                    anthropic_api_key=options["anthropic_api_key"],
-                    min_confidence=options["min_confidence"],
-                    llm_base_url=options.get("llm_base_url"),
-                )
+                bigo = self._extract_bigo_from_source_metadata(source)
+                if bigo is not None:
+                    self._log_info(
+                        f"Extracted BIGO from source metadata for {case.case_id}: {bigo}"
+                    )
+                else:
+                    self._log_info(
+                        f"No explicit BIGO found in source metadata for {case.case_id}; "
+                        "checking converted markdown."
+                    )
+                    bigo = self._extract_explicit_bigo_from_markdown(markdown)
+                    if bigo is not None:
+                        self._log_info(
+                            f"Extracted BIGO from converted markdown scan for {case.case_id}: {bigo}"
+                        )
+
+                if bigo is None:
+                    self._log_bigo_snippets(markdown)
+                    bigo = self._extract_bigo_from_markdown(
+                        markdown=markdown,
+                        case=case,
+                        source=source,
+                        model=options["llm_model"],
+                        anthropic_api_key=llm_api_key,
+                        min_confidence=options["min_confidence"],
+                        llm_base_url=options.get("llm_base_url"),
+                        llm_timeout=options["llm_timeout"],
+                        llm_max_tokens=options["llm_max_tokens"],
+                    )
                 self._log_info(f"Extracted BIGO candidate for {case.case_id}: {bigo}")
                 if bigo is None:
                     skipped += 1
@@ -224,6 +325,42 @@ class Command(BaseCommand):
         if always or getattr(self, "_verbose", False):
             self.stdout.write(f"[INFO] {message}")
 
+    def _log_source_diagnostics(self, source: DocumentSource) -> None:
+        if not getattr(self, "_verbose", False):
+            return
+        urls = [
+            urllib.parse.unquote(url)
+            for url in (source.url or [])
+            if isinstance(url, str)
+        ]
+        upload_names = self._source_upload_names(source)
+        self._log_info(
+            "Source diagnostics: "
+            f"type={source.source_type}; description={source.description!r}; "
+            f"uploaded_filename={source.uploaded_filename!r}; urls={urls}; uploads={upload_names}"
+        )
+
+    def _log_bigo_snippets(self, markdown: str) -> None:
+        if not getattr(self, "_verbose", False):
+            return
+        normalized = markdown.translate(_NEPALI_TO_ASCII_DIGITS)
+        matches = list(
+            re.finditer(
+                r"बिगो|मागदाबी|हानि|हानी|नोक्सानी|क्षति",
+                normalized,
+                flags=re.IGNORECASE,
+            )
+        )
+        if not matches:
+            self._log_info("No BIGO-context keywords found in converted markdown.")
+            return
+        snippets = []
+        for match in matches[:5]:
+            start = max(0, match.start() - 120)
+            end = min(len(normalized), match.end() + 180)
+            snippets.append(re.sub(r"\s+", " ", normalized[start:end]).strip())
+        self._log_info("BIGO-context markdown snippets: " + " || ".join(snippets))
+
     def _validate_guardrails(self, options: dict[str, Any]) -> None:
         limit = options["limit"]
         if limit < 1 or limit > MAX_LIMIT:
@@ -235,17 +372,31 @@ class Command(BaseCommand):
             )
 
     def _validate_runtime_inputs(self, options: dict[str, Any]) -> None:
-        if options["dry_run"]:
+        if options["dry_run_extract"] and not options["dry_run"]:
+            raise CommandError("--dry-run-extract requires --dry-run.")
+
+        if options["download_timeout"] <= 0:
+            raise CommandError("--download-timeout must be greater than 0.")
+        if options["llm_timeout"] <= 0:
+            raise CommandError("--llm-timeout must be greater than 0.")
+        if options["llm_max_tokens"] <= 0:
+            raise CommandError("--llm-max-tokens must be greater than 0.")
+
+        if options["dry_run"] and not options["dry_run_extract"]:
             return
 
-        if not options["api_token"]:
+        if not options["api_token"] and not options["dry_run"]:
             raise CommandError(
                 "JAWAFDEHI API token is required. Set --api-token or JAWAFDEHI_API_TOKEN."
             )
-        if not options["anthropic_api_key"]:
+        if not self._resolve_llm_api_key(options):
             raise CommandError(
-                "Anthropic API key is required. Set --anthropic-api-key or ANTHROPIC_API_KEY."
+                "LLM API key is required. Set --llm-api-key, JAWAFDEHI_LLM_API_KEY, "
+                "--anthropic-api-key, or ANTHROPIC_API_KEY."
             )
+
+    def _resolve_llm_api_key(self, options: dict[str, Any]) -> str | None:
+        return options.get("llm_api_key") or options.get("anthropic_api_key")
 
     def _select_press_release_source(self, case: Case) -> DocumentSource | None:
         source_ids = [
@@ -274,20 +425,21 @@ class Command(BaseCommand):
             reverse=True,
         )
         best_score, best_source = ranked[0]
-        
+
         # If we have a positive score, return the best match
         if best_score > 0:
             return best_source
-        
+
         # Fallback: if there's only one source and it has a PDF, use it
         # This handles cases where the source isn't properly labeled
         if len(sources) == 1:
             source = sources[0]
             # Check if it has an uploaded PDF file
             has_pdf = (
-                source.uploaded_file and source.uploaded_file.name.lower().endswith('.pdf')
+                source.uploaded_file
+                and source.uploaded_file.name.lower().endswith(".pdf")
             ) or any(
-                f.file.name.lower().endswith('.pdf') 
+                f.file.name.lower().endswith(".pdf")
                 for f in source.uploaded_files.all()
             )
             if has_pdf:
@@ -296,7 +448,7 @@ class Command(BaseCommand):
                     "(no press release keywords found, but only one source available)"
                 )
                 return source
-        
+
         return None
 
     def _score_source_for_press_release(self, source: DocumentSource) -> int:
@@ -333,7 +485,12 @@ class Command(BaseCommand):
             score += 1
         return score
 
-    def _convert_source_to_markdown(self, source: DocumentSource) -> str:
+    def _convert_source_to_markdown(
+        self,
+        source: DocumentSource,
+        *,
+        download_timeout: float = 30,
+    ) -> str:
         try:
             from markitdown import MarkItDown
         except ImportError as exc:  # pragma: no cover - env dependent
@@ -344,22 +501,25 @@ class Command(BaseCommand):
 
         converter = MarkItDown(enable_plugins=True)
         with tempfile.TemporaryDirectory(prefix="bigo-enrichment-") as tmp_dir:
-            temp_path = self._download_source_to_path(source, Path(tmp_dir))
+            temp_path = self._download_source_to_path(
+                source,
+                Path(tmp_dir),
+                timeout=download_timeout,
+            )
             if temp_path:
                 result = converter.convert_uri(temp_path.resolve().as_uri())
                 return result.markdown
 
-            source_url = self._pick_source_url(source)
-            if not source_url:
-                raise CommandError(
-                    f"No downloadable source found for source_id={source.source_id}."
-                )
-            source_url = self._validate_url_scheme(source_url)
-            result = converter.convert_uri(source_url)
-            return result.markdown
+            raise CommandError(
+                f"No downloadable source found for source_id={source.source_id}."
+            )
 
     def _download_source_to_path(
-        self, source: DocumentSource, output_dir: Path
+        self,
+        source: DocumentSource,
+        output_dir: Path,
+        *,
+        timeout: float = 30,
     ) -> Path | None:
         if source.uploaded_file:
             filename = self._sanitize_download_filename(
@@ -397,11 +557,20 @@ class Command(BaseCommand):
                     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
                 },
             )
-            with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
+            with urllib.request.urlopen(
+                request, timeout=timeout
+            ) as response:  # noqa: S310
+                headers = getattr(response, "headers", {})
+                content_length = headers.get("Content-Length")
+                if content_length and int(content_length) > MAX_DOWNLOAD_BYTES:
+                    raise CommandError(
+                        f"Source is too large ({content_length} bytes); max is {MAX_DOWNLOAD_BYTES} bytes."
+                    )
                 self._copy_stream_to_path_with_limit(response, out_path)
             return out_path
-        except (urllib.error.URLError, OSError):
+        except (TimeoutError, urllib.error.URLError, OSError) as exc:
             out_path.unlink(missing_ok=True)
+            self._log_info(f"Download failed for {source.source_id}: {exc}")
             return None
         except CommandError:
             out_path.unlink(missing_ok=True)
@@ -430,9 +599,36 @@ class Command(BaseCommand):
 
     def _pick_source_url(self, source: DocumentSource) -> str | None:
         urls = [
-            url for url in (source.url or []) if isinstance(url, str) and url.strip()
+            url.strip()
+            for url in (source.url or [])
+            if isinstance(url, str) and url.strip()
         ]
-        return urls[0].strip() if urls else None
+        if not urls:
+            return None
+
+        # Prefer direct downloadable files over CIAA HTML pressrelease pages. CIAA pages
+        # can be summaries with a "Download" button; the BIGO text is usually in the
+        # linked PDF/DOCX, and NGM-mapped URLs often point directly to that file.
+        direct_file_urls = [url for url in urls if self._is_direct_document_url(url)]
+        if direct_file_urls:
+            return sorted(
+                direct_file_urls, key=self._source_url_priority, reverse=True
+            )[0]
+
+        return urls[0]
+
+    def _is_direct_document_url(self, url: str) -> bool:
+        parsed = urllib.parse.urlparse(url)
+        path = urllib.parse.unquote(parsed.path).lower()
+        return path.endswith((".pdf", ".doc", ".docx"))
+
+    def _source_url_priority(self, url: str) -> tuple[int, int]:
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.netloc.lower()
+        path = urllib.parse.unquote(parsed.path).lower()
+        is_ngm_store = int(host == "ngm-store.jawafdehi.org")
+        is_pdf = int(path.endswith(".pdf"))
+        return (is_ngm_store, is_pdf)
 
     def _validate_url_scheme(self, url: str) -> str:
         parsed = urllib.parse.urlparse(url)
@@ -490,38 +686,170 @@ class Command(BaseCommand):
             )
         return out_path
 
+    def _extract_bigo_from_source_metadata(self, source: DocumentSource) -> int | None:
+        """Extract BIGO from source title/URL/file metadata when explicitly labeled.
+
+        NGM-store press-release URLs commonly preserve the CIAA filename, e.g.
+        "...उपर बिगो रु. २,००,००० कायम...pdf". Prefer this deterministic signal
+        before asking the LLM to read potentially noisy PDF conversion output.
+        """
+        snippets = [
+            source.title or "",
+            source.description or "",
+            source.uploaded_filename or "",
+        ]
+        snippets.extend(str(url) for url in (source.url or []) if isinstance(url, str))
+        snippets.extend(self._source_upload_names(source))
+
+        for snippet in snippets:
+            bigo = self._extract_explicit_bigo_from_text(snippet)
+            if bigo is not None:
+                return bigo
+        return None
+
+    def _extract_explicit_bigo_from_text(self, text: str | None) -> int | None:
+        if not text:
+            return None
+
+        normalized = self._normalize_text_for_bigo(text)
+        return self._best_bigo_candidate(
+            self._collect_explicit_bigo_candidates(normalized)
+        )
+
+    def _normalize_text_for_bigo(self, text: str | None) -> str:
+        decoded = urllib.parse.unquote(str(text or ""))
+        embedded_http = re.search(r"https?://", decoded)
+        if embedded_http and not decoded.lstrip().lower().startswith(
+            ("http://", "https://")
+        ):
+            decoded = decoded[embedded_http.start() :]
+        return decoded.translate(_NEPALI_TO_ASCII_DIGITS)
+
+    def _collect_explicit_bigo_candidates(self, text: str) -> list[tuple[int, int]]:
+        candidates: list[tuple[int, int]] = []
+        strong_patterns = [
+            (
+                r"बिगो\s*(?:रू\.|रु\.|रू|रु|rs\.?|npr)\s*[.:：]?\s*[:\-–—]?\s*([0-9][0-9,]*(?:/[0-9]+)?)",
+                120,
+            ),
+            (
+                r"(?:damage claim|loss amount|corruption loss)\s*(?:rs\.?|npr)\s*[.:：]?\s*[:\-–—]?\s*([0-9][0-9,]*(?:/[0-9]+)?)",
+                100,
+            ),
+        ]
+        for pattern, base_score in strong_patterns:
+            for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+                candidate = self._bigo_candidate_from_amount(
+                    amount_text=match.group(1),
+                    context=text[max(0, match.start() - 80) : match.end() + 80],
+                    base_score=base_score,
+                )
+                if candidate is not None:
+                    candidates.append(candidate)
+
+        for marker in re.finditer(r"बिगो", text, flags=re.IGNORECASE):
+            window = text[marker.start() : marker.start() + 220]
+            for amount_match in re.finditer(r"[0-9][0-9,]*(?:/[0-9]+)?", window):
+                prefix = window[: amount_match.start()]
+                if not re.search(
+                    r"रू\.?|रु\.?|rs\.?|npr|कायम|मागदाबी|दायर",
+                    prefix,
+                    flags=re.IGNORECASE,
+                ):
+                    continue
+                candidate = self._bigo_candidate_from_amount(
+                    amount_text=amount_match.group(0),
+                    context=window,
+                    base_score=60,
+                )
+                if candidate is not None:
+                    candidates.append(candidate)
+        return candidates
+
+    def _bigo_candidate_from_amount(
+        self,
+        amount_text: str,
+        context: str,
+        base_score: int,
+    ) -> tuple[int, int] | None:
+        amount_before_paisa = amount_text.split("/", 1)[0]
+        digits_only = re.sub(r"[^\d]", "", amount_before_paisa)
+        if not digits_only:
+            return None
+        bigo = int(digits_only)
+        if not self._is_plausible_deterministic_bigo(bigo):
+            return None
+
+        score = base_score + min(len(digits_only), 12)
+        if "," in amount_before_paisa:
+            score += 20
+        if re.search(r"कायम|मागदाबी|दायर|प्रतिवादीउपर", context, flags=re.IGNORECASE):
+            score += 15
+        return score, bigo
+
+    def _is_plausible_deterministic_bigo(self, bigo: int) -> bool:
+        return bigo >= 1000
+
+    def _best_bigo_candidate(self, candidates: list[tuple[int, int]]) -> int | None:
+        if not candidates:
+            return None
+        return max(candidates, key=lambda candidate: candidate[0])[1]
+
+    def _extract_explicit_bigo_from_markdown(self, markdown: str) -> int | None:
+        normalized = self._normalize_text_for_bigo(markdown)
+        candidates = self._collect_explicit_bigo_candidates(normalized)
+
+        table_patterns = [
+            r"बिगो\s*(?:रू\.|रु\.|रू|रु)?[^\n\d]{0,40}\n\s*([0-9][0-9,]*(?:/[0-9]+)?)",
+            r"बिगो\s*(?:रू\.|रु\.|रू|रु)?[^0-9]{0,80}([0-9][0-9,]*(?:/[0-9]+)?)",
+        ]
+        for pattern in table_patterns:
+            for match in re.finditer(pattern, normalized, flags=re.IGNORECASE):
+                candidate = self._bigo_candidate_from_amount(
+                    amount_text=match.group(1),
+                    context=normalized[max(0, match.start() - 80) : match.end() + 80],
+                    base_score=80,
+                )
+                if candidate is not None:
+                    candidates.append(candidate)
+        return self._best_bigo_candidate(candidates)
+
     def _extract_bigo_from_markdown(
         self,
         markdown: str,
         case: Case,
+        source: DocumentSource | None,
         model: str,
         anthropic_api_key: str,
         min_confidence: str,
         llm_base_url: str | None = None,
+        llm_timeout: float = 120,
+        llm_max_tokens: int = 2000,
     ) -> int | None:
-        prompt = self._build_bigo_prompt(markdown=markdown, case=case)
+        prompt = self._build_bigo_prompt(markdown=markdown, case=case, source=source)
 
         # Use OpenAI-compatible client if base_url provided (Jawafdehi proxy)
         if llm_base_url:
-            from openai import OpenAI, AuthenticationError
-
             try:
-                client = OpenAI(api_key=anthropic_api_key, base_url=llm_base_url)
-                # Strip "openai:" prefix if present in model name
-                model_name = model.replace("openai:", "") if "openai:" in model else model
+                from openai import OpenAI
+
+                client = OpenAI(
+                    api_key=anthropic_api_key,
+                    base_url=llm_base_url,
+                    timeout=llm_timeout,
+                )
                 response = client.chat.completions.create(
-                    model=model_name,
-                    max_tokens=500,
+                    model=model,
+                    max_tokens=llm_max_tokens,
                     temperature=0,
+                    response_format={"type": "json_object"},
                     messages=[{"role": "user", "content": prompt}],
                 )
                 text = self._openai_response_text(response)
-            except AuthenticationError as exc:
-                raise CommandError(
-                    f"LLM proxy authentication failed at {llm_base_url}. "
-                    f"The API key provided via --anthropic-api-key is invalid for this proxy. "
-                    f"Original error: {exc}"
-                ) from exc
+            except CommandError:
+                raise
+            except Exception as exc:
+                self._raise_llm_proxy_command_error(exc, llm_base_url, model)
         else:
             # Use native Anthropic client
             import anthropic
@@ -529,7 +857,7 @@ class Command(BaseCommand):
             client = anthropic.Anthropic(api_key=anthropic_api_key)
             response = client.messages.create(
                 model=model,
-                max_tokens=500,
+                max_tokens=llm_max_tokens,
                 temperature=0,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -553,42 +881,149 @@ class Command(BaseCommand):
 
         return self._coerce_bigo_int(payload.get("bigo"))
 
+    def _raise_llm_proxy_command_error(
+        self,
+        exc: Exception,
+        llm_base_url: str,
+        model: str,
+    ) -> None:
+        exc_name = type(exc).__name__
+        status_code = getattr(exc, "status_code", None)
+        if status_code is None:
+            response = getattr(exc, "response", None)
+            status_code = getattr(response, "status_code", None)
+
+        if status_code in {401, 403} or exc_name in {
+            "AuthenticationError",
+            "PermissionDeniedError",
+        }:
+            raise CommandError(
+                f"LLM proxy authentication/authorization failed at {llm_base_url}. "
+                "Use a key authorized for the proxy via --llm-api-key or "
+                "JAWAFDEHI_LLM_API_KEY, and verify that the requested model is allowed. "
+                f"Requested model: {model}. Original error: {exc}"
+            ) from exc
+
+        if status_code is not None:
+            raise CommandError(
+                f"LLM proxy request failed at {llm_base_url} "
+                f"(status {status_code}). Requested model: {model}. "
+                f"Original error: {exc}"
+            ) from exc
+
+        raise CommandError(
+            f"LLM proxy request failed at {llm_base_url}. Requested model: {model}. "
+            f"Original error: {exc}"
+        ) from exc
+
     def _openai_response_text(self, response: Any) -> str:
         if not response:
             raise CommandError("OpenAI-compatible LLM response was empty.")
 
-        choices = getattr(response, "choices", None)
-        if not isinstance(choices, list) or not choices:
+        output_text = self._value(response, "output_text")
+        text = self._text_from_content(output_text)
+        if text:
+            return text
+
+        choices = self._value(response, "choices")
+        if not isinstance(choices, (list, tuple)) or not choices:
             raise CommandError(
                 "OpenAI-compatible LLM response missing choices content."
             )
 
         first_choice = choices[0]
-        message = getattr(first_choice, "message", None)
-        content = getattr(message, "content", None) if message is not None else None
+        message = self._value(first_choice, "message")
+        if message is not None:
+            content = self._value(message, "content")
+            text = self._text_from_content(content)
+            if text:
+                return text
+
+            # Some OpenAI-compatible proxies expose final answer text under
+            # additional message fields instead of message.content. Do not use
+            # reasoning_content as the final answer; reasoning-only text often
+            # contains no strict JSON and should fail with a clear parse error.
+            for field_name in ("text", "output_text"):
+                text = self._text_from_content(self._value(message, field_name))
+                if text:
+                    return text
+
+        # Legacy completion-shaped responses and some proxy adapters can put
+        # text directly on the choice instead of choice.message.content.
+        for field_name in ("text", "content", "output_text"):
+            text = self._text_from_content(self._value(first_choice, field_name))
+            if text:
+                return text
+
+        finish_reason = self._value(first_choice, "finish_reason")
+        message_keys = self._keys_for_debug(message) if message is not None else "none"
+        choice_keys = self._keys_for_debug(first_choice)
+        raise CommandError(
+            "OpenAI-compatible LLM response missing text content "
+            f"(finish_reason={finish_reason or 'unknown'}, "
+            f"message_keys={message_keys}, choice_keys={choice_keys})."
+        )
+
+    def _value(self, obj: Any, key: str) -> Any:
+        if isinstance(obj, dict):
+            return obj.get(key)
+        return getattr(obj, key, None)
+
+    def _keys_for_debug(self, obj: Any) -> str:
+        if isinstance(obj, dict):
+            keys = sorted(str(key) for key in obj.keys())
+        else:
+            keys = sorted(
+                key
+                for key in dir(obj)
+                if not key.startswith("_") and not callable(getattr(obj, key, None))
+            )
+        return ",".join(keys[:12]) or "none"
+
+    def _text_from_content(self, content: Any) -> str | None:
+        if content is None:
+            return None
 
         if isinstance(content, str):
             text = content.strip()
-            if text:
-                return text
+            return text or None
 
-        if isinstance(content, list):
+        if isinstance(content, dict):
+            for field_name in ("text", "content", "output_text"):
+                text = self._text_from_content(content.get(field_name))
+                if text:
+                    return text
+            return None
+
+        if isinstance(content, (list, tuple)):
             parts: list[str] = []
             for block in content:
-                if isinstance(block, dict) and isinstance(block.get("text"), str):
-                    parts.append(block["text"])
-                    continue
-                block_text = getattr(block, "text", None)
-                if isinstance(block_text, str):
-                    parts.append(block_text)
-            text = "".join(parts).strip()
-            if text:
-                return text
+                text = self._text_from_content(block)
+                if text:
+                    parts.append(text)
+            joined = "".join(parts).strip()
+            return joined or None
 
-        raise CommandError("OpenAI-compatible LLM response missing text content.")
+        block_text = self._value(content, "text")
+        text = self._text_from_content(block_text)
+        if text:
+            return text
 
-    def _build_bigo_prompt(self, markdown: str, case: Case) -> str:
-        return f"""You extract BIGO (बिगो) amount from CIAA press release content.
+        block_content = self._value(content, "content")
+        text = self._text_from_content(block_content)
+        if text:
+            return text
+
+        return None
+
+    def _build_bigo_prompt(
+        self,
+        markdown: str,
+        case: Case,
+        source: DocumentSource | None = None,
+    ) -> str:
+        source_context = self._build_source_context(source)
+        return f"""You extract BIGO (बिगो), the damage claim amount / मागदाबी, from CIAA press release content.
 
 Return STRICT JSON only with this schema:
 {{
@@ -653,10 +1088,40 @@ Word-amount parsing of Nepali number words is error-prone and CIAA's structured 
 
 Case ID: {case.case_id}
 Case title: {case.title}
+Source metadata (title, description, filenames, URLs):
+{source_context}
 
 Press release markdown:
 {markdown[:100000]}
 """
+
+    def _build_source_context(self, source: DocumentSource | None) -> str:
+        if source is None:
+            return ""
+
+        parts = [
+            f"source_id: {source.source_id}",
+            f"title: {source.title or ''}",
+            f"description: {source.description or ''}",
+            f"uploaded_filename: {source.uploaded_filename or ''}",
+        ]
+        parts.extend(
+            f"url: {urllib.parse.unquote(url)}"
+            for url in (source.url or [])
+            if isinstance(url, str)
+        )
+        parts.extend(
+            f"uploaded_file: {name}" for name in self._source_upload_names(source)
+        )
+        return "\n".join(parts)[:20000]
+
+    def _source_upload_names(self, source: DocumentSource) -> list[str]:
+        if not source.pk:
+            return []
+        return [
+            upload.filename or Path(upload.file.name).name
+            for upload in source.uploaded_files.all()
+        ]
 
     def _is_explicit_bigo_context(self, evidence_quote: Any) -> bool:
         if not isinstance(evidence_quote, str):
@@ -675,13 +1140,25 @@ Press release markdown:
         except json.JSONDecodeError:
             pass
 
-        match = re.search(r"\{.*\}", content, re.DOTALL)
-        if not match:
-            raise ValueError("LLM response did not contain a JSON object.")
-        parsed = json.loads(match.group(0))
-        if not isinstance(parsed, dict):
-            raise ValueError("LLM response JSON root must be an object.")
-        return parsed
+        fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
+        candidates = [fenced.group(1)] if fenced else []
+        candidates.extend(
+            re.findall(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", content, re.DOTALL)
+        )
+
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+
+        preview = re.sub(r"\s+", " ", content)[:200]
+        raise ValueError(
+            "LLM response did not contain a JSON object. "
+            f"Response preview: {preview!r}"
+        )
 
     def _confidence_rank(self, confidence: str) -> int:
         rank = {"low": 1, "medium": 2, "high": 3}
@@ -711,7 +1188,7 @@ Press release markdown:
         api_base_url: str,
         api_token: str,
     ) -> None:
-        url = self._case_patch_url(api_base_url, case.id)
+        url = self._case_patch_url(api_base_url, case.slug)
         payload = [{"op": "replace", "path": "/bigo", "value": bigo}]
         data = json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(
@@ -738,7 +1215,7 @@ Press release markdown:
                 f"PATCH failed for case {case.case_id}: {exc.reason}"
             ) from exc
 
-    def _case_patch_url(self, api_base_url: str, case_db_id: int) -> str:
+    def _case_patch_url(self, api_base_url: str, case_slug: str) -> str:
         parsed = urllib.parse.urlparse((api_base_url or "").strip())
         if parsed.scheme not in {"http", "https"}:
             raise ValueError(
@@ -750,6 +1227,7 @@ Press release markdown:
             )
         path = parsed.path.rstrip("/")
         base = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
+        quoted_slug = urllib.parse.quote(str(case_slug).strip(), safe="")
         if base.endswith("/api"):
-            return f"{base}/cases/{case_db_id}/"
-        return f"{base}/api/cases/{case_db_id}/"
+            return f"{base}/cases/{quoted_slug}/"
+        return f"{base}/api/cases/{quoted_slug}/"

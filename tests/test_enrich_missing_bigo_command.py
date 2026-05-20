@@ -105,7 +105,7 @@ def test_enriches_only_draft_cases_with_missing_bigo():
 
 
 @pytest.mark.django_db
-def test_dry_run_does_not_patch_cases():
+def test_dry_run_previews_without_external_work():
     source = _create_source(
         source_id="source:test:press-002",
         title="CIAA Press Release",
@@ -125,12 +125,10 @@ def test_dry_run_does_not_patch_cases():
     with (
         patch(
             "cases.management.commands.enrich_missing_bigo.Command._convert_source_to_markdown",
-            return_value="# Press Release\nबिगो रु. 123456",
-        ),
+        ) as convert_source,
         patch(
             "cases.management.commands.enrich_missing_bigo.Command._extract_bigo_from_markdown",
-            return_value=123456,
-        ),
+        ) as extract_bigo,
         patch(
             "cases.management.commands.enrich_missing_bigo.Command._patch_case_bigo",
         ) as patch_case,
@@ -146,8 +144,196 @@ def test_dry_run_does_not_patch_cases():
             stdout=out,
         )
 
+    convert_source.assert_not_called()
+    extract_bigo.assert_not_called()
     patch_case.assert_not_called()
-    assert "DRY-RUN" in out.getvalue()
+    output = out.getvalue()
+    assert "DRY-RUN" in output
+    assert "selected source=" in output
+
+
+@pytest.mark.django_db
+def test_dry_run_extract_runs_extraction_but_does_not_patch_cases():
+    source = _create_source(
+        source_id="source:test:press-002-extract",
+        title="CIAA Press Release",
+        url="https://example.com/press-release-2-extract.pdf",
+    )
+    _create_case(
+        case_id="case-draft-missing-bigo-extract",
+        title="Draft Missing BIGO Extract",
+        state=CaseState.DRAFT,
+        bigo=None,
+        evidence=[
+            {"source_id": source.source_id, "description": "Press release evidence"}
+        ],
+    )
+
+    out = StringIO()
+    with (
+        patch(
+            "cases.management.commands.enrich_missing_bigo.Command._convert_source_to_markdown",
+            return_value="# Press Release\nConverted press release text without deterministic BIGO marker",
+        ) as convert_source,
+        patch(
+            "cases.management.commands.enrich_missing_bigo.Command._extract_bigo_from_markdown",
+            return_value=123456,
+        ) as extract_bigo,
+        patch(
+            "cases.management.commands.enrich_missing_bigo.Command._patch_case_bigo",
+        ) as patch_case,
+    ):
+        call_command(
+            "enrich_missing_bigo",
+            "--allow-production",
+            "--dry-run",
+            "--dry-run-extract",
+            "--api-token",
+            "test-token",
+            "--anthropic-api-key",
+            "test-key",
+            stdout=out,
+        )
+
+    convert_source.assert_called_once()
+    extract_bigo.assert_called_once()
+    patch_case.assert_not_called()
+    assert "would PATCH BIGO=123456" in out.getvalue()
+
+
+@pytest.mark.django_db
+def test_llm_api_key_alias_is_used_for_extraction():
+    source = _create_source(
+        source_id="source:test:press-llm-key",
+        title="CIAA Press Release",
+        url="https://example.com/press-release-llm-key.pdf",
+    )
+    _create_case(
+        case_id="case-draft-missing-bigo-llm-key",
+        title="Draft Missing BIGO LLM Key",
+        state=CaseState.DRAFT,
+        bigo=None,
+        evidence=[
+            {"source_id": source.source_id, "description": "Press release evidence"}
+        ],
+    )
+
+    with (
+        patch(
+            "cases.management.commands.enrich_missing_bigo.Command._convert_source_to_markdown",
+            return_value="# Press Release\nConverted press release text without deterministic BIGO marker",
+        ),
+        patch(
+            "cases.management.commands.enrich_missing_bigo.Command._extract_bigo_from_markdown",
+            return_value=123456,
+        ) as extract_bigo,
+    ):
+        call_command(
+            "enrich_missing_bigo",
+            "--allow-production",
+            "--dry-run",
+            "--dry-run-extract",
+            "--llm-api-key",
+            "provider-neutral-key",
+        )
+
+    assert extract_bigo.call_args.kwargs["anthropic_api_key"] == "provider-neutral-key"
+
+
+@pytest.mark.django_db
+def test_generic_llm_model_and_base_url_env_defaults_are_forwarded(monkeypatch):
+    monkeypatch.setenv("JAWAFDEHI_CASEWORK_MODEL", "deepseek-v4-pro")
+    monkeypatch.setenv("JAWAFDEHI_LLM_PROXY_URL", "https://opencode.ai/zen/go/v1")
+    monkeypatch.delenv("BIGO_ENRICHMENT_MODEL", raising=False)
+    monkeypatch.delenv("BIGO_ENRICHMENT_LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("BIGO_ENRICHMENT_BASE_URL", raising=False)
+    monkeypatch.delenv("JAWAFDEHI_CASEWORK_BASE_URL", raising=False)
+
+    source = _create_source(
+        source_id="source:test:generic-llm-env",
+        title="CIAA Press Release",
+        url="https://example.com/press-release-generic-llm-env.pdf",
+    )
+    _create_case(
+        case_id="case-draft-generic-llm-env",
+        title="Draft Generic LLM Env",
+        state=CaseState.DRAFT,
+        bigo=None,
+        evidence=[
+            {"source_id": source.source_id, "description": "Press release evidence"}
+        ],
+    )
+
+    with (
+        patch(
+            "cases.management.commands.enrich_missing_bigo.Command._convert_source_to_markdown",
+            return_value="# Press Release\nConverted press release text without deterministic BIGO marker",
+        ),
+        patch(
+            "cases.management.commands.enrich_missing_bigo.Command._extract_bigo_from_markdown",
+            return_value=123456,
+        ) as extract_bigo,
+    ):
+        call_command(
+            "enrich_missing_bigo",
+            "--allow-production",
+            "--dry-run",
+            "--dry-run-extract",
+            "--llm-api-key",
+            "provider-neutral-key",
+        )
+
+    assert extract_bigo.call_args.kwargs["model"] == "deepseek-v4-pro"
+    assert (
+        extract_bigo.call_args.kwargs["llm_base_url"] == "https://opencode.ai/zen/go/v1"
+    )
+
+
+@pytest.mark.django_db
+def test_cli_llm_model_and_base_url_override_generic_env_defaults(monkeypatch):
+    monkeypatch.setenv("BIGO_ENRICHMENT_MODEL", "env-model")
+    monkeypatch.setenv("BIGO_ENRICHMENT_LLM_BASE_URL", "https://env.example/v1")
+
+    source = _create_source(
+        source_id="source:test:generic-llm-cli",
+        title="CIAA Press Release",
+        url="https://example.com/press-release-generic-llm-cli.pdf",
+    )
+    _create_case(
+        case_id="case-draft-generic-llm-cli",
+        title="Draft Generic LLM CLI",
+        state=CaseState.DRAFT,
+        bigo=None,
+        evidence=[
+            {"source_id": source.source_id, "description": "Press release evidence"}
+        ],
+    )
+
+    with (
+        patch(
+            "cases.management.commands.enrich_missing_bigo.Command._convert_source_to_markdown",
+            return_value="# Press Release\nConverted press release text without deterministic BIGO marker",
+        ),
+        patch(
+            "cases.management.commands.enrich_missing_bigo.Command._extract_bigo_from_markdown",
+            return_value=123456,
+        ) as extract_bigo,
+    ):
+        call_command(
+            "enrich_missing_bigo",
+            "--allow-production",
+            "--dry-run",
+            "--dry-run-extract",
+            "--llm-api-key",
+            "provider-neutral-key",
+            "--llm-model",
+            "cli-model",
+            "--llm-base-url",
+            "https://cli.example/v1",
+        )
+
+    assert extract_bigo.call_args.kwargs["model"] == "cli-model"
+    assert extract_bigo.call_args.kwargs["llm_base_url"] == "https://cli.example/v1"
 
 
 def test_build_bigo_prompt_mentions_multiple_amounts_and_damage_claim_focus():
@@ -297,14 +483,118 @@ def test_download_source_to_path_sanitizes_dot_filename_and_confines_output():
         assert out_path.read_bytes() == b"test-bytes"
 
 
+def test_case_patch_url_uses_slug_not_numeric_database_id():
+    command = Command()
+
+    assert (
+        command._case_patch_url("https://api.example.com", "case-slug-abc123")
+        == "https://api.example.com/api/cases/case-slug-abc123/"
+    )
+    assert (
+        command._case_patch_url("https://api.example.com/api", "case slug")
+        == "https://api.example.com/api/cases/case%20slug/"
+    )
+
+
 def test_case_patch_url_rejects_non_http_base_url():
     command = Command()
 
     with pytest.raises(ValueError, match="http or https"):
-        command._case_patch_url("ftp://example.com", 42)
+        command._case_patch_url("ftp://example.com", "case-slug")
 
     with pytest.raises(ValueError, match="must include a host"):
-        command._case_patch_url("https:///api", 42)
+        command._case_patch_url("https:///api", "case-slug")
+
+
+def test_extract_bigo_from_source_metadata_reads_ngm_filename():
+    command = Command()
+    filename = "2413. जिल्ला मोरङ, सुन्दरहरैचा नगरपालिकाका लेखा अधिकृत शेखर ढकालउपर बिगो रु. २,००,०००.– कायम - 2.pdf"  # noqa: RUF001
+    encoded_filename = urllib.parse.quote(filename, safe="")
+    source = DocumentSource(
+        source_id="source:test:ngm-metadata-bigo",
+        title="CIAA Press Release",
+        source_type=SourceType.OFFICIAL_GOVERNMENT,
+        url=[
+            f"https://ngm-store.jawafdehi.org/uploads/ciaa/press-releases/files/{encoded_filename}"
+        ],
+    )
+
+    assert command._extract_bigo_from_source_metadata(source) == 200000
+
+
+def test_extract_bigo_from_source_metadata_reads_direct_ngm_url_for_case_a4a309dd9ebc():
+    command = Command()
+    url = "https://ngm-store.jawafdehi.org/uploads/ciaa/press-releases/files/2681.%20%E0%A4%9C%E0%A4%BF%E0%A4%B2%E0%A5%8D%E0%A4%B2%E0%A4%BE%20%E0%A4%B2%E0%A4%B2%E0%A4%BF%E0%A4%A4%E0%A4%AA%E0%A5%81%E0%A4%B0%2C%20%E0%A4%97%E0%A5%8B%E0%A4%A6%E0%A4%BE%E0%A4%B5%E0%A4%B0%E0%A5%80%20%E0%A4%A8%E0%A4%97%E0%A4%B0%E0%A4%AA%E0%A4%BE%E0%A4%B2%E0%A4%BF%E0%A4%95%E0%A4%BE%E0%A4%95%E0%A4%BE%20%E0%A4%A4%E0%A4%A4%E0%A5%8D%E0%A4%95%E0%A4%BE%E0%A4%B2%E0%A5%80%E0%A4%A8%20%E0%A4%A8%E0%A4%97%E0%A4%B0%E0%A4%AA%E0%A5%8D%E0%A4%B0%E0%A4%AE%E0%A5%81%E0%A4%96%20%E0%A4%97%E0%A4%9C%E0%A5%87%E0%A4%A8%E0%A5%8D%E0%A4%A6%E0%A5%8D%E0%A4%B0%20%E0%A4%AE%E0%A4%B9%E0%A4%B0%E0%A5%8D%E0%A4%9C%E0%A4%A8%2C%20%E0%A4%A4%E0%A4%A4%E0%A5%8D%E0%A4%95%E0%A4%BE%E0%A4%B2%E0%A5%80%E0%A4%A8%20%E0%A4%A8%E0%A4%97%E0%A4%B0%20%E0%A4%89%E0%A4%AA%E0%A4%AA%E0%A5%8D%E0%A4%B0%E0%A4%AE%E0%A5%81%E0%A4%96%20%E0%A4%AE%E0%A5%81%E0%A4%A8%E0%A4%BE%20%E0%A4%85%E0%A4%A7%E0%A4%BF%E0%A4%95%E0%A4%BE%E0%A4%B0%E0%A5%80%E0%A4%B8%E0%A4%AE%E0%A5%87%E0%A4%A4%20%E0%A5%AE%20%E0%A4%9C%E0%A4%A8%E0%A4%BE%E0%A4%B0%E0%A4%B5%E0%A4%BF%E0%A4%B0%E0%A5%81%E0%A4%A6%E0%A5%8D%E0%A4%A7%20%E0%A4%AC%E0%A4%BF%E0%A4%97%E0%A5%8B%20%E0%A4%B0%E0%A5%81.%20%E0%A5%A8%E0%A5%AC%2C%E0%A5%AC%E0%A5%A9%2C%E0%A5%A9%E0%A5%AD%2C%E0%A5%A9%E0%A5%AF%E0%A5%AE%20%E0%A4%95%E0%A4%BE%E0%A4%AF%E0%A4%AE%20%E0%A4%97%E0%A4%B0%E0%A5%80%20%E0%A4%AD%E0%A5%8D%E0%A4%B0%E0%A4%B7%E0%A5%8D%E0%A4%9F%E0%A4%BE%E0%A4%9A%E0%A4%BE%E0%A4%B0%20%E0%A4%AE%E0%A5%81%E0%A4%A6%E0%A5%8D%E0%A4%A6%E0%A4%BE%20%E0%A4%A6%E0%A4%BE%E0%A4%AF%E0%A4%B0%20-%202.pdf"
+    source = DocumentSource(
+        source_id="source:test:case-a4a309dd9ebc",
+        title="CIAA Press Release",
+        source_type=SourceType.OFFICIAL_GOVERNMENT,
+        url=[url],
+    )
+
+    assert command._extract_bigo_from_source_metadata(source) == 266337398
+
+
+def test_extract_explicit_bigo_from_text_ignores_noisy_small_candidate():
+    command = Command()
+
+    extracted = command._extract_explicit_bigo_from_text(
+        "बिगो विवरण 1 प्रतिवादीउपर बिगो रु. २६,६३,३७,३९८ कायम गरी मुद्दा दायर।"
+    )
+
+    assert extracted == 266337398
+
+
+def test_extract_explicit_bigo_from_text_rejects_only_noisy_small_candidate():
+    command = Command()
+
+    assert command._extract_explicit_bigo_from_text("बिगो विवरण 1") is None
+
+
+def test_build_bigo_prompt_includes_source_metadata():
+    command = Command()
+    case = SimpleNamespace(case_id="case-prompt-source", title="Case")
+    source = DocumentSource(
+        source_id="source:test:prompt-source",
+        title="CIAA Press Release बिगो रु. ३८६,७१७,६४० कायम",
+        source_type=SourceType.OFFICIAL_GOVERNMENT,
+        url=["https://ngm-store.jawafdehi.org/test.pdf"],
+    )
+
+    prompt = command._build_bigo_prompt(
+        markdown="Converted PDF content",
+        case=case,
+        source=source,
+    )
+
+    assert "Source metadata" in prompt
+    assert "बिगो रु. ३८६,७१७,६४० कायम" in prompt
+    assert "https://ngm-store.jawafdehi.org/test.pdf" in prompt
+
+
+def test_extract_explicit_bigo_from_markdown_handles_paisa_and_dotted_rupee_marker():
+    command = Command()
+
+    extracted = command._extract_explicit_bigo_from_markdown(
+        "प्रतिवादीउपर बिगो रु. ३८,६७,१७,६४०/९० कायम गरी सजाय मागदाबी गरिएको छ।"
+    )
+
+    assert extracted == 386717640
+
+
+def test_log_bigo_snippets_reports_context_when_verbose():
+    command = Command()
+    command._verbose = True
+    out = StringIO()
+    command.stdout = out
+
+    command._log_bigo_snippets(
+        "कुल आय १००० थियो। प्रतिवादीउपर बिगो रु. २,५०,००० कायम गरी मागदाबी गरिएको।"
+    )
+
+    output = out.getvalue()
+    assert "BIGO-context markdown snippets" in output
+    assert "बिगो रु. 2,50,000" in output
 
 
 def test_extract_bigo_from_markdown_openai_missing_content_raises_command_error(
@@ -314,12 +604,22 @@ def test_extract_bigo_from_markdown_openai_missing_content_raises_command_error(
     case = SimpleNamespace(case_id="case-openai-001", title="Case")
 
     class FakeOpenAIClient:
-        def __init__(self, api_key: str, base_url: str):
+        init_kwargs = {}
+        call_kwargs = {}
+
+        def __init__(self, api_key: str, base_url: str, timeout: float):
+            self.__class__.init_kwargs = {
+                "api_key": api_key,
+                "base_url": base_url,
+                "timeout": timeout,
+            }
             self.chat = SimpleNamespace(
-                completions=SimpleNamespace(
-                    create=lambda **kwargs: SimpleNamespace(choices=[])
-                )
+                completions=SimpleNamespace(create=self._create)
             )
+
+        def _create(self, **kwargs):
+            self.__class__.call_kwargs = kwargs
+            return SimpleNamespace(choices=[])
 
     monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAIClient))
 
@@ -327,11 +627,19 @@ def test_extract_bigo_from_markdown_openai_missing_content_raises_command_error(
         command._extract_bigo_from_markdown(
             markdown="sample markdown",
             case=case,
+            source=None,
             model="openai:claude-sonnet-4-6",
             anthropic_api_key="test-key",
             min_confidence="low",
             llm_base_url="https://llm-proxy.jawafdehi.org/v1",
+            llm_timeout=7,
+            llm_max_tokens=1234,
         )
+
+    assert FakeOpenAIClient.call_kwargs["model"] == "openai:claude-sonnet-4-6"
+    assert FakeOpenAIClient.call_kwargs["max_tokens"] == 1234
+    assert FakeOpenAIClient.call_kwargs["response_format"] == {"type": "json_object"}
+    assert FakeOpenAIClient.init_kwargs["timeout"] == 7
 
 
 def test_extract_bigo_from_markdown_rejects_non_bigo_context_evidence_quote(
@@ -341,7 +649,7 @@ def test_extract_bigo_from_markdown_rejects_non_bigo_context_evidence_quote(
     case = SimpleNamespace(case_id="case-openai-002", title="Case")
 
     class FakeOpenAIClient:
-        def __init__(self, api_key: str, base_url: str):
+        def __init__(self, api_key: str, base_url: str, timeout: float):
             self.chat = SimpleNamespace(
                 completions=SimpleNamespace(
                     create=lambda **kwargs: SimpleNamespace(
@@ -361,6 +669,7 @@ def test_extract_bigo_from_markdown_rejects_non_bigo_context_evidence_quote(
     extracted = command._extract_bigo_from_markdown(
         markdown="sample markdown",
         case=case,
+        source=None,
         model="openai:claude-sonnet-4-6",
         anthropic_api_key="test-key",
         min_confidence="low",
@@ -375,7 +684,7 @@ def test_extract_bigo_from_markdown_accepts_explicit_bigo_context_quote(monkeypa
     case = SimpleNamespace(case_id="case-openai-003", title="Case")
 
     class FakeOpenAIClient:
-        def __init__(self, api_key: str, base_url: str):
+        def __init__(self, api_key: str, base_url: str, timeout: float):
             self.chat = SimpleNamespace(
                 completions=SimpleNamespace(
                     create=lambda **kwargs: SimpleNamespace(
@@ -395,6 +704,7 @@ def test_extract_bigo_from_markdown_accepts_explicit_bigo_context_quote(monkeypa
     extracted = command._extract_bigo_from_markdown(
         markdown="sample markdown",
         case=case,
+        source=None,
         model="openai:claude-sonnet-4-6",
         anthropic_api_key="test-key",
         min_confidence="low",
@@ -402,6 +712,68 @@ def test_extract_bigo_from_markdown_accepts_explicit_bigo_context_quote(monkeypa
     )
 
     assert extracted == 13000
+
+
+def test_openai_response_text_extracts_dict_message_content():
+    command = Command()
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "content": {
+                        "text": '{"bigo": 13000, "confidence": "high", "evidence_quote": "बिगो रु.१३,००० कायम"}'
+                    }
+                }
+            }
+        ]
+    }
+
+    assert command._openai_response_text(response).startswith('{"bigo": 13000')
+
+
+def test_openai_response_text_extracts_choice_text():
+    command = Command()
+    response = {
+        "choices": [
+            {
+                "text": '{"bigo": 25000, "confidence": "high", "evidence_quote": "मागदाबी रु.२५,०००"}'
+            }
+        ]
+    }
+
+    assert command._openai_response_text(response).startswith('{"bigo": 25000')
+
+
+def test_openai_response_text_error_includes_response_shape():
+    command = Command()
+    response = {
+        "choices": [
+            {
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "tool_calls": []},
+            }
+        ]
+    }
+
+    with pytest.raises(CommandError, match="message_keys=.*role"):
+        command._openai_response_text(response)
+
+
+def test_parse_json_response_extracts_fenced_json():
+    command = Command()
+
+    parsed = command._parse_json_response(
+        'Here is the extraction:\n```json\n{"bigo": 25000, "confidence": "high"}\n```'
+    )
+
+    assert parsed == {"bigo": 25000, "confidence": "high"}
+
+
+def test_parse_json_response_error_includes_preview():
+    command = Command()
+
+    with pytest.raises(ValueError, match="Response preview"):
+        command._parse_json_response("I could not find a BIGO amount in this text.")
 
 
 @pytest.mark.django_db
@@ -445,3 +817,63 @@ def test_download_source_to_path_enforces_max_bytes_and_cleans_partial_file():
                 command._download_source_to_path(source, output_dir)
 
         assert not out_file.exists()
+
+
+@pytest.mark.django_db
+def test_download_source_to_path_passes_configured_timeout():
+    command = Command()
+    source = _create_source(
+        source_id="source-test-timeout",
+        title="CIAA Press Release",
+        url="https://example.com/press-release-timeout.pdf",
+    )
+
+    class StreamingResponse:
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, _size: int = -1) -> bytes:
+            return b""
+
+    with tempfile.TemporaryDirectory(prefix="bigo-test-") as tmp_dir:
+        with patch(
+            "urllib.request.urlopen", return_value=StreamingResponse()
+        ) as urlopen:
+            command._download_source_to_path(source, Path(tmp_dir), timeout=3.5)
+
+    assert urlopen.call_args.kwargs["timeout"] == 3.5
+
+
+def test_extract_bigo_from_markdown_wraps_openai_403(monkeypatch):
+    command = Command()
+    case = SimpleNamespace(case_id="case-openai-403", title="Case")
+
+    class FakeOpenAIClient:
+        def __init__(self, api_key: str, base_url: str, timeout: float):
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(create=self._create)
+            )
+
+        def _create(self, **_kwargs):
+            response = SimpleNamespace(status_code=403)
+            exc = Exception("Your request was blocked.")
+            exc.response = response
+            raise exc
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAIClient))
+
+    with pytest.raises(CommandError, match="authentication/authorization failed"):
+        command._extract_bigo_from_markdown(
+            markdown="sample markdown",
+            case=case,
+            source=None,
+            model="openai:gpt-5.4",
+            anthropic_api_key="test-key",
+            min_confidence="low",
+            llm_base_url="https://llm-proxy.jawafdehi.org/v1",
+        )
