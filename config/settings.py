@@ -249,6 +249,71 @@ WSGI_APPLICATION = "config.wsgi.application"
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
+# SSL-related PostgreSQL connection parameters that dj_database_url may place
+# at the top level of the config dict when they appear as URL query params
+# (e.g. ?sslmode=verify-ca&sslrootcert=/path/to/ca.pem). These need to be
+# moved into OPTIONS for Django / psycopg2 to interpret them correctly.
+_SSL_PARAMS = frozenset(
+    {
+        "sslmode",
+        "sslrootcert",
+        "sslcert",
+        "sslkey",
+        "sslcrl",
+        "sslpassword",
+        "sslcompression",
+        "sslsni",
+    }
+)
+
+
+def _apply_db_ssl_options(db_config):
+    """Apply SSL options to a PostgreSQL database config.
+
+    Sources (in priority order — first wins):
+    1. URL query parameters already in the config dict
+       (dj_database_url places them at the top level)
+    2. Environment variables:
+       - DATABASE_SSL_MODE            → sslmode
+       - DATABASE_SSL_CA_CERT_FILE    → sslrootcert
+       - DATABASE_SSL_CLIENT_CERT_FILE → sslcert
+       - DATABASE_SSL_CLIENT_KEY_FILE  → sslkey
+
+    If the engine is not PostgreSQL this is a no-op.
+    """
+    if db_config.get("ENGINE") != "django.db.backends.postgresql":
+        return db_config
+
+    options = db_config.setdefault("OPTIONS", {})
+
+    # Move SSL params that came in via URL query string into OPTIONS.
+    for param in _SSL_PARAMS:
+        if param in db_config:
+            options.setdefault(param, db_config.pop(param))
+
+    # Apply from environment variables (won't override URL-provided values).
+    ssl_mode = os.getenv("DATABASE_SSL_MODE")
+    if ssl_mode:
+        options.setdefault("sslmode", ssl_mode)
+
+    ca_cert = os.getenv("DATABASE_SSL_CA_CERT_FILE") or os.getenv("SSL_CA_CERT_FILE")
+    if ca_cert:
+        options.setdefault("sslrootcert", ca_cert)
+
+    client_cert = os.getenv("DATABASE_SSL_CLIENT_CERT_FILE") or os.getenv(
+        "SSL_CLIENT_CERT_FILE"
+    )
+    if client_cert:
+        options.setdefault("sslcert", client_cert)
+
+    client_key = os.getenv("DATABASE_SSL_CLIENT_KEY_FILE") or os.getenv(
+        "SSL_CLIENT_KEY_FILE"
+    )
+    if client_key:
+        options.setdefault("sslkey", client_key)
+
+    return db_config
+
 
 # Handle secret interpolation for database URLs
 def interpolate_db_url(url_env_name):
@@ -280,8 +345,6 @@ if db_password:
         )
         if db_url and "${DATABASE_PASSWORD}" in db_url:
             DATABASES[db_key]["PASSWORD"] = db_password
-            # Re-configure with dj_database_url if needed, but usually just setting PASSWORD works if the URL had a placeholder
-            # Better approach: replace placeholder in URL before parsing
             new_url = db_url.replace("${DATABASE_PASSWORD}", db_password)
             DATABASES[db_key] = dj_database_url.parse(new_url)
 
@@ -292,6 +355,12 @@ if os.getenv("NGM_DATABASE_URL"):
             "${DATABASE_PASSWORD}", db_password
         )
         DATABASES["ngm"] = dj_database_url.parse(new_url)
+
+# Apply SSL options to all PostgreSQL databases.
+# Must run after password interpolation so that re-parsed configs also
+# receive SSL options.
+for db_key in DATABASES:
+    _apply_db_ssl_options(DATABASES[db_key])
 
 # Configure connection pooling for PostgreSQL only
 if DATABASES["default"].get("ENGINE") == "django.db.backends.postgresql":
