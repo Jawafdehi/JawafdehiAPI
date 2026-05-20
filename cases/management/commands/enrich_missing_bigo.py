@@ -18,6 +18,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db.models import Q
 
 from cases.models import Case, CaseState, DocumentSource, SourceType
+from cases.services.priority_case_loader import filter_by_priority, load_priority_cases
 
 MAX_LIMIT = 1000
 MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
@@ -91,18 +92,34 @@ class Command(BaseCommand):
             default="medium",
             help="Minimum accepted extraction confidence.",
         )
+        parser.add_argument(
+            "--priority",
+            action="store_true",
+            help="Enrich only cases in the priority case list.",
+        )
 
     def handle(self, *args, **options):
         self._validate_guardrails(options)
         self._validate_runtime_inputs(options)
+
+        priority = options["priority"]
+        case_id = options.get("case_id")
+        if priority and case_id:
+            self.stderr.write(
+                self.style.ERROR("--priority and --case-id are mutually exclusive")
+            )
+            return
 
         queryset = (
             Case.objects.filter(state=CaseState.DRAFT)
             .filter(Q(bigo__isnull=True) | Q(bigo=0))
             .order_by("-created_at")
         )
-        if options["case_id"]:
-            queryset = queryset.filter(case_id=options["case_id"])
+        if case_id:
+            queryset = queryset.filter(case_id=case_id)
+        elif priority:
+            priority_list = load_priority_cases()
+            queryset = filter_by_priority(queryset, priority_list)
 
         cases = list(queryset[: options["limit"]])
         if not cases:
