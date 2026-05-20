@@ -24,7 +24,9 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("owui_user_id", nargs="?", help="OpenWebUI user ID")
-        parser.add_argument("django_username", nargs="?", help="Django username to map to")
+        parser.add_argument(
+            "django_username", nargs="?", help="Django username to map to"
+        )
         parser.add_argument(
             "--list",
             action="store_true",
@@ -40,7 +42,9 @@ class Command(BaseCommand):
         django_username = options["django_username"]
 
         if not owui_user_id or not django_username:
-            raise CommandError("Both owui_user_id and django_username are required (or use --list)")
+            raise CommandError(
+                "Both owui_user_id and django_username are required (or use --list)"
+            )
 
         try:
             user = User.objects.get(username=django_username)
@@ -73,7 +77,9 @@ class Command(BaseCommand):
             .order_by("owui_user_name")
         )
 
-        self.stdout.write(f"\n{'OWUI User ID':<40} {'OWUI Name':<25} {'Mapped To':<25} {'Roles'}")
+        self.stdout.write(
+            f"\n{'OWUI User ID':<40} {'OWUI Name':<25} {'Mapped To':<25} {'Roles'}"
+        )
         self.stdout.write("-" * 110)
 
         for ident in identities:
