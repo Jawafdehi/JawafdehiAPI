@@ -74,8 +74,16 @@ class ToastUIEditorWidget(Textarea):
     """
 
     class Media:
-        css = {"all": ("https://uicdn.toast.com/editor/3.2.2/toastui-editor.min.css",)}
-        js = ("https://uicdn.toast.com/editor/3.2.2/toastui-editor-all.min.js",)
+        css = {
+            "all": (
+                "https://uicdn.toast.com/editor/3.2.2/toastui-editor.min.css",
+                "https://uicdn.toast.com/editor-plugin-table-merged-cell/3.0.2/toastui-editor-plugin-table-merged-cell.min.css",
+            )
+        }
+        js = (
+            "https://uicdn.toast.com/editor/3.2.2/toastui-editor-all.min.js",
+            "https://uicdn.toast.com/editor-plugin-table-merged-cell/3.0.2/toastui-editor-plugin-table-merged-cell.min.js",
+        )
 
     def __init__(self, attrs=None):
         default_attrs = {
@@ -118,7 +126,7 @@ class ToastUIEditorWidget(Textarea):
                 ['code', 'codeblock'],
                 ['scrollSync'],
             ],
-            plugins: [],
+            plugins: [toastui.Editor.plugin.tableMergedCell],
             placeholder: 'Write in Markdown\u2026',
             autofocus: false,
             previewHighlight: true,
