@@ -590,6 +590,31 @@ class TestEnrichCiaaTimeline:
         output = out.getvalue()
         assert "LLM errors:             1" in output
 
+    def test_llm_malformed_response_increments_counter(self):
+        """LLM response without 'content' key is counted as LLM error and
+        command continues processing remaining cases."""
+        pr_source = self._create_source()
+        case = self._create_case(
+            evidence=[{"source_id": pr_source.source_id, "description": "test"}],
+        )
+
+        with self._mock_call_llm_error(
+            exc=CommandError("LLM API returned a malformed response")
+        ):
+            out = StringIO()
+            call_command(
+                "enrich_ciaa_timeline",
+                f"--case-id={case.case_id}",
+                "--llm-api-key=test-key",
+                "--dry-run",
+                stdout=out,
+            )
+
+        output = out.getvalue()
+        assert "LLM errors:             1" in output
+        assert "Cases processed:        1" in output
+        assert "Cases enriched:         0" in output
+
     def test_no_content_counted(self):
         """Cases without usable source content count as 'No source content'."""
         self._create_case(
@@ -801,7 +826,7 @@ class TestEnrichCiaaTimeline:
 
         with patch(
             "cases.management.commands.enrich_ciaa_timeline.get_court_case_details",
-            side_effect=Exception("Database error"),
+            side_effect=ValueError("Database error"),
         ):
             with self._mock_call_llm():
                 out = StringIO()
@@ -831,14 +856,12 @@ class TestEnrichCiaaTimeline:
     def test_priority_and_case_id_mutually_exclusive(self):
         """--priority and --case-id cannot be used together."""
         out = StringIO()
-        with patch("sys.stderr", new_callable=StringIO) as stderr:
+        with pytest.raises(CommandError) as exc_info:
             call_command(
                 "enrich_ciaa_timeline",
                 "--priority",
                 "--case-id=case-001",
                 "--dry-run",
                 stdout=out,
-                stderr=stderr,
             )
-            output = stderr.getvalue()
-        assert "mutually exclusive" in output
+        assert "mutually exclusive" in str(exc_info.value)

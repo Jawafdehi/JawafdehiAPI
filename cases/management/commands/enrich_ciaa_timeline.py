@@ -20,7 +20,6 @@ Usage::
     python manage.py enrich_ciaa_timeline --force
 """
 
-import json
 import logging
 import os
 import re
@@ -30,6 +29,7 @@ from urllib.parse import urlparse
 import requests
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
+from django.utils import timezone
 
 from cases.management.commands._enrich_utils import (
     ALLOWED_HOSTS,
@@ -234,12 +234,11 @@ class Command(BaseCommand):
                 "ANTHROPIC_API_KEY environment variable, or use --llm-api-key."
             )
 
-        if fiscal_year:
-            if not re.match(r"^\d{2,3}$", fiscal_year):
-                raise CommandError(
-                    f"Invalid fiscal year: {fiscal_year}. "
-                    "Use 2- or 3-digit format, e.g., '80' or '080'."
-                )
+        if fiscal_year and not re.match(r"^\d{2,3}$", fiscal_year):
+            raise CommandError(
+                f"Invalid fiscal year: {fiscal_year}. "
+                "Use 2- or 3-digit format, e.g., '80' or '080'."
+            )
 
         cases = self._get_ciaa_cases(
             case_id=case_id,
@@ -251,7 +250,7 @@ class Command(BaseCommand):
         total = len(cases)
 
         self.stdout.write(
-            f"Found {total} CIAA draft cases to process. " f"Model: {llm_model}"
+            f"Found {total} CIAA draft cases to process. Model: {llm_model}"
         )
         if force:
             self.stdout.write(
@@ -396,7 +395,6 @@ class Command(BaseCommand):
             requests.RequestException,
             CommandError,
             ValueError,
-            json.JSONDecodeError,
         ) as exc:
             self.stats["cases_llm_error"] += 1
             self.stdout.write(self.style.ERROR(f"  LLM extraction failed: {exc}"))
@@ -410,22 +408,11 @@ class Command(BaseCommand):
             return
 
         entry_count = len(timeline_entries)
-        invalid_count = sum(
-            1 for e in timeline_entries if not is_valid_iso_date(e.get("date", ""))
-        )
-        self.stdout.write(
-            self.style.SUCCESS(
-                f"  Extracted {entry_count} entry(s)"
-                + (f" ({invalid_count} invalid date(s))" if invalid_count else "")
-            )
-        )
+        self.stdout.write(self.style.SUCCESS(f"  Extracted {entry_count} entry(s)"))
         for i, entry in enumerate(timeline_entries, 1):
-            date_flag = ""
-            if not is_valid_iso_date(entry.get("date", "")):
-                date_flag = " [INVALID DATE]"
             self.stdout.write(
                 f"    {i}. {entry.get('date', '?')} — "
-                f"{entry.get('title', '?')[:80]}{date_flag}"
+                f"{entry.get('title', '?')[:80]}"
             )
 
         if dry_run:
@@ -566,7 +553,7 @@ class Command(BaseCommand):
                 logger.debug("  NGM: no case found for %s", special_ref)
                 return None
             return ngm_data
-        except Exception as exc:
+        except ValueError as exc:
             logger.warning("  NGM query failed for %s: %s", special_ref, exc)
             return None
 
@@ -707,6 +694,7 @@ class Command(BaseCommand):
                 locked = locked.filter(timeline=[])
             updated = locked.update(
                 timeline=entries,
+                updated_at=timezone.now(),
             )
             if not updated:
                 raise CommandError(

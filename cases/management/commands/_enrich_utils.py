@@ -58,6 +58,9 @@ def call_llm(
 
     Implements retry with exponential backoff for transient failures.
     """
+    if max_retries < 1:
+        raise ValueError("max_retries must be >= 1")
+
     url = f"{base_url.rstrip('/')}/chat/completions"
 
     headers = {
@@ -85,7 +88,7 @@ def call_llm(
             if attempt < max_retries:
                 wait = 2**attempt
                 logger.warning(
-                    "LLM API request failed (attempt %d/%d): %s. " "Retrying in %ds...",
+                    "LLM API request failed (attempt %d/%d): %s. Retrying in %ds...",
                     attempt,
                     max_retries,
                     exc,
@@ -107,10 +110,6 @@ def call_llm(
             raise CommandError("LLM API returned empty content")
 
         return content
-
-    raise CommandError(
-        f"LLM API request failed after {max_retries} attempts: {last_exc}"
-    )
 
 
 def convert_to_markdown(url: str, session: requests.Session) -> Optional[str]:
