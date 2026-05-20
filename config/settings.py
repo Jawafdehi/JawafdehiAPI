@@ -253,7 +253,6 @@ WSGI_APPLICATION = "config.wsgi.application"
 # at the top level of the config dict when they appear as URL query params
 # (e.g. ?sslmode=verify-ca&sslrootcert=/path/to/ca.pem). These need to be
 # moved into OPTIONS for Django / psycopg2 to interpret them correctly.
-_POSTGRESQL_ENGINE = "django.db.backends.postgresql"
 _SSL_PARAMS = frozenset(
     {
         "sslmode",
@@ -282,7 +281,7 @@ def _apply_db_ssl_options(db_config):
 
     If the engine is not PostgreSQL this is a no-op.
     """
-    if db_config.get("ENGINE") != _POSTGRESQL_ENGINE:
+    if db_config.get("ENGINE") != "django.db.backends.postgresql":
         return db_config
 
     options = db_config.setdefault("OPTIONS", {})
@@ -318,11 +317,6 @@ def _apply_db_ssl_options(db_config):
 
 # Handle secret interpolation for database URLs
 def interpolate_db_url(url_env_name):
-    """Replace ${DATABASE_PASSWORD} placeholder in a URL env var with its real value.
-
-    This allows database URLs to use a template-style placeholder so the
-    password can be injected at runtime from Google Secret Manager.
-    """
     url = os.getenv(url_env_name)
     if not url:
         return
@@ -350,6 +344,7 @@ if db_password:
             "DATABASE_URL"
         )
         if db_url and "${DATABASE_PASSWORD}" in db_url:
+            DATABASES[db_key]["PASSWORD"] = db_password
             new_url = db_url.replace("${DATABASE_PASSWORD}", db_password)
             DATABASES[db_key] = dj_database_url.parse(new_url)
 
@@ -368,11 +363,14 @@ for db_key in DATABASES:
     _apply_db_ssl_options(DATABASES[db_key])
 
 # Configure connection pooling for PostgreSQL only
-if DATABASES["default"].get("ENGINE") == _POSTGRESQL_ENGINE:
+if DATABASES["default"].get("ENGINE") == "django.db.backends.postgresql":
     DATABASES["default"]["CONN_MAX_AGE"] = 60
     DATABASES["default"]["CONN_HEALTH_CHECKS"] = True
 
-if "ngm" in DATABASES and DATABASES["ngm"].get("ENGINE") == _POSTGRESQL_ENGINE:
+if (
+    "ngm" in DATABASES
+    and DATABASES["ngm"].get("ENGINE") == "django.db.backends.postgresql"
+):
     DATABASES["ngm"]["CONN_MAX_AGE"] = 60
     DATABASES["ngm"]["CONN_HEALTH_CHECKS"] = True
 
