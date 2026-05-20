@@ -213,10 +213,7 @@ class Command(BaseCommand):
         verbose = options.get("verbose")
 
         if priority and case_id:
-            self.stderr.write(
-                self.style.ERROR("--priority and --case-id are mutually exclusive")
-            )
-            return
+            raise CommandError("--priority and --case-id are mutually exclusive")
 
         if verbose:
             logger.setLevel(logging.DEBUG)
@@ -238,10 +235,10 @@ class Command(BaseCommand):
             )
 
         if fiscal_year:
-            if not re.match(r"^\d{3}$", fiscal_year):
+            if not re.match(r"^\d{2,3}$", fiscal_year):
                 raise CommandError(
                     f"Invalid fiscal year: {fiscal_year}. "
-                    "Use 3-digit format, e.g., '080' or '081'."
+                    "Use 2- or 3-digit format, e.g., '80' or '080'."
                 )
 
         cases = self._get_ciaa_cases(
@@ -277,6 +274,7 @@ class Command(BaseCommand):
                 llm_base_url=llm_base_url,
                 llm_api_key=api_key,
                 session=session,
+                force=force,
             )
 
         self._print_summary(dry_run)
@@ -307,12 +305,24 @@ class Command(BaseCommand):
 
         all_cases = []
         for case in queryset.order_by("case_id"):
+            if not self._is_ciaa_special_court_case(case):
+                continue
             if fiscal_year and not self._matches_fiscal_year(case, fiscal_year):
                 continue
             all_cases.append(case)
             if limit and len(all_cases) >= limit:
                 break
         return all_cases
+
+    @staticmethod
+    def _is_ciaa_special_court_case(case: Case) -> bool:
+        """Return True if the case references Special Court in court_cases."""
+        if case.court_cases and isinstance(case.court_cases, list):
+            return any(
+                isinstance(ref, str) and ref.startswith("special:")
+                for ref in case.court_cases
+            )
+        return False
 
     def _matches_fiscal_year(self, case: Case, fiscal_year: str) -> bool:
         """Check if a case's court_cases reference matches the given fiscal year."""
@@ -340,6 +350,7 @@ class Command(BaseCommand):
         llm_base_url: str,
         llm_api_key: Optional[str],
         session: requests.Session,
+        force: bool = False,
     ):
         self.stats["cases_processed"] += 1
         self.stdout.write(f"\n[{idx}/{total}] {case.case_id} — {case.title[:80]}")
@@ -422,8 +433,12 @@ class Command(BaseCommand):
                 self.style.WARNING("  [DRY RUN] Would save but --dry-run is set")
             )
         else:
-            self._save_timeline(case, timeline_entries)
-            self.stats["cases_enriched"] += 1
+            try:
+                self._save_timeline(case, timeline_entries, force=force)
+                self.stats["cases_enriched"] += 1
+            except CommandError as exc:
+                self.stats["cases_llm_error"] += 1
+                self.stdout.write(self.style.ERROR(f"  Failed to save timeline: {exc}"))
 
     # ── source acquisition with tiered fallback ──────────────────────────
 
@@ -661,27 +676,42 @@ class Command(BaseCommand):
             if desc_val and str(desc_val).strip():
                 entry["description"] = str(desc_val).strip()
 
+            if not is_valid_iso_date(entry["date"]):
+                logger.warning(
+                    "  Dropping non-ISO date format: %s",
+                    entry["date"],
+                )
+                continue
+
             clean.append(entry)
 
         if not clean:
             return None
 
-        for entry in clean:
-            if not is_valid_iso_date(entry.get("date", "")):
-                logger.warning(
-                    "  Non-ISO date format: %s — may need manual review",
-                    entry.get("date"),
-                )
-
         return clean
 
     # ── persistence ─────────────────────────────────────────────────────
 
-    def _save_timeline(self, case: Case, entries: list[dict]):
-        """Persist timeline entries to the database."""
+    def _save_timeline(self, case: Case, entries: list[dict], force: bool = False):
+        """Persist timeline entries to the database.
+
+        Uses select_for_update to guard against concurrent writes.
+        When force=False, skips cases whose timeline was populated
+        by another process since the initial read.
+        """
         with transaction.atomic():
-            case.timeline = entries
-            case.save(update_fields=["timeline", "updated_at"])
+            locked = (
+                Case.objects.select_for_update().filter(pk=case.pk).only("timeline")
+            )
+            if not force:
+                locked = locked.filter(timeline=[])
+            updated = locked.update(
+                timeline=entries,
+            )
+            if not updated:
+                raise CommandError(
+                    f"Case {case.case_id} was populated concurrently; skipping save."
+                )
         logger.info("  Saved %d timeline entries to %s", len(entries), case.case_id)
 
     # ── summary ──────────────────────────────────────────────────────────

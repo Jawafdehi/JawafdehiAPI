@@ -32,6 +32,7 @@ from cases.management.commands._enrich_utils import (
     ALLOWED_HOSTS,
     call_llm,
     convert_to_markdown,
+    parse_extraction_response,
     resolve_api_key,
 )
 from cases.models import Case, DocumentSource
@@ -425,31 +426,10 @@ class Command(BaseCommand):
 
     def _parse_allegations_response(self, response_text: str) -> Optional[list[str]]:
         """Parse the LLM response to extract the JSON array of allegations."""
-        text = response_text.strip()
-
-        json_start = text.find("[")
-        json_end = text.rfind("]")
-
-        if json_start == -1 or json_end == -1 or json_end <= json_start:
-            logger.warning("  Could not find JSON array in LLM response")
-            logger.debug("  Response: %s", text[:500])
-            return None
-
-        json_str = text[json_start : json_end + 1]
-
-        try:
-            allegations = json.loads(json_str)
-        except json.JSONDecodeError as exc:
-            logger.warning("  Failed to parse JSON from LLM response: %s", exc)
-            logger.debug("  JSON string: %s", json_str[:500])
-            return None
-
-        if isinstance(allegations, dict) and isinstance(
-            allegations.get("allegations"), list
-        ):
-            allegations = allegations["allegations"]
-        if not isinstance(allegations, list):
-            logger.warning("  LLM returned non-list: %s", type(allegations).__name__)
+        allegations = parse_extraction_response(
+            response_text, wrapper_keys={"allegations"}
+        )
+        if allegations is None:
             return None
 
         clean = []

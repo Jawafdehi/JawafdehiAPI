@@ -32,11 +32,14 @@ def resolve_api_key(cli_key: Optional[str]) -> Optional[str]:
 
 
 def is_valid_iso_date(date_str: str) -> bool:
-    """Validate that a string is a logically valid YYYY-MM-DD ISO date."""
+    """Validate that a string is a strictly formatted YYYY-MM-DD ISO date."""
     if not isinstance(date_str, str):
         return False
+    candidate = date_str.strip()
+    if len(candidate) != 10 or candidate[4] != "-" or candidate[7] != "-":
+        return False
     try:
-        date.fromisoformat(date_str.strip())
+        date.fromisoformat(candidate)
         return True
     except (ValueError, TypeError):
         return False
@@ -94,12 +97,18 @@ def call_llm(
                 f"LLM API request failed after {max_retries} attempts: {last_exc}"
             ) from exc
 
-        data = response.json()
-        choices = data.get("choices", [])
-        if not choices:
-            raise CommandError("LLM API returned no choices")
+        try:
+            data = response.json()
+            content = data["choices"][0]["message"]["content"]
+        except (ValueError, KeyError, TypeError, IndexError) as exc:
+            raise CommandError(
+                "LLM API returned a malformed response"
+            ) from exc
 
-        return choices[0]["message"]["content"]
+        if not content:
+            raise CommandError("LLM API returned empty content")
+
+        return content
 
     raise CommandError(
         f"LLM API request failed after {max_retries} attempts: {last_exc}"
@@ -112,6 +121,11 @@ def convert_to_markdown(url: str, session: requests.Session) -> Optional[str]:
     Pipeline: URL download -> temp file -> likhit/markitdown -> markdown.
     Returns None when conversion fails or produces insufficient content.
     """
+    initial_hostname = urlparse(url).hostname
+    if initial_hostname not in ALLOWED_HOSTS:
+        logger.warning("Refusing to fetch untrusted host: %s", url)
+        return None
+
     try:
         response = session.get(url, timeout=120, stream=True)
         response.raise_for_status()
