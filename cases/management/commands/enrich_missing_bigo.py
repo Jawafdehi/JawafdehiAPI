@@ -569,7 +569,7 @@ class Command(BaseCommand):
                     )
                 self._copy_stream_to_path_with_limit(response, out_path)
             return out_path
-        except (TimeoutError, urllib.error.URLError, OSError) as exc:
+        except (urllib.error.URLError, OSError) as exc:
             out_path.unlink(missing_ok=True)
             self._log_info(f"Download failed for {source.source_id}: {exc}")
             return None
@@ -612,9 +612,7 @@ class Command(BaseCommand):
         # linked PDF/DOCX, and NGM-mapped URLs often point directly to that file.
         direct_file_urls = [url for url in urls if self._is_direct_document_url(url)]
         if direct_file_urls:
-            return sorted(
-                direct_file_urls, key=self._source_url_priority, reverse=True
-            )[0]
+            return max(direct_file_urls, key=self._source_url_priority)
 
         return urls[0]
 
@@ -1159,7 +1157,7 @@ Press release markdown:
         except json.JSONDecodeError:
             pass
 
-        fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
+        fenced = re.search(r"```(?:json)?\s*(\{[^}]*\})\s*```", content, re.DOTALL)
         candidates = [fenced.group(1)] if fenced else []
         candidates.extend(
             re.findall(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", content, re.DOTALL)
@@ -1236,11 +1234,13 @@ Press release markdown:
 
     def _case_patch_url(self, api_base_url: str, case_slug: str) -> str:
         parsed = urllib.parse.urlparse((api_base_url or "").strip())
-        if parsed.scheme == "https":
-            pass
-        elif parsed.scheme == "http" and self._is_loopback_host(parsed.hostname):
-            pass
-        else:
+        if not (
+            parsed.scheme == "https"
+            or (
+                parsed.scheme == "http"
+                and self._is_loopback_host(parsed.hostname)
+            )
+        ):
             raise ValueError(
                 f"Invalid api_base_url '{api_base_url}': use https for non-local hosts."
             )

@@ -859,7 +859,7 @@ def test_download_source_to_path_passes_configured_timeout():
         ) as urlopen:
             command._download_source_to_path(source, Path(tmp_dir), timeout=3.5)
 
-    assert urlopen.call_args.kwargs["timeout"] == 3.5
+    assert urlopen.call_args.kwargs["timeout"] == pytest.approx(3.5)  # noqa: S1244
 
 
 def test_extract_bigo_from_markdown_wraps_openai_403(monkeypatch):
@@ -867,6 +867,9 @@ def test_extract_bigo_from_markdown_wraps_openai_403(monkeypatch):
     case = SimpleNamespace(case_id="case-openai-403", title="Case")
 
     class FakeOpenAIClient:
+        class _APIError(Exception):
+            pass
+
         def __init__(self, api_key: str, base_url: str, timeout: float):
             self.chat = SimpleNamespace(
                 completions=SimpleNamespace(create=self._create)
@@ -874,7 +877,7 @@ def test_extract_bigo_from_markdown_wraps_openai_403(monkeypatch):
 
         def _create(self, **_kwargs):
             response = SimpleNamespace(status_code=403)
-            exc = Exception("Your request was blocked.")
+            exc = FakeOpenAIClient._APIError("Your request was blocked.")
             exc.response = response
             raise exc
 
