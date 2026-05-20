@@ -40,6 +40,7 @@ from cases.management.commands._enrich_utils import (
     resolve_api_key,
 )
 from cases.models import Case, DocumentSource, SourceType
+from cases.services.priority_case_loader import filter_by_priority, load_priority_cases
 from ngm.services import get_court_case_details
 
 logger = logging.getLogger(__name__)
@@ -151,6 +152,11 @@ class Command(BaseCommand):
             help="Filter by fiscal year (e.g., '080' or '081')",
         )
         parser.add_argument(
+            "--priority",
+            action="store_true",
+            help="Enrich only cases in the priority case list",
+        )
+        parser.add_argument(
             "--llm-model",
             type=str,
             default="claude-sonnet-4-20250514",
@@ -203,7 +209,14 @@ class Command(BaseCommand):
         llm_api_key = options.get("llm_api_key")
         force = options.get("force")
         fiscal_year = options.get("fiscal_year")
+        priority = options.get("priority")
         verbose = options.get("verbose")
+
+        if priority and case_id:
+            self.stderr.write(
+                self.style.ERROR("--priority and --case-id are mutually exclusive")
+            )
+            return
 
         if verbose:
             logger.setLevel(logging.DEBUG)
@@ -232,7 +245,11 @@ class Command(BaseCommand):
                 )
 
         cases = self._get_ciaa_cases(
-            case_id=case_id, limit=limit, force=force, fiscal_year=fiscal_year
+            case_id=case_id,
+            limit=limit,
+            force=force,
+            fiscal_year=fiscal_year,
+            priority=priority,
         )
         total = len(cases)
 
@@ -245,6 +262,9 @@ class Command(BaseCommand):
             )
         if fiscal_year:
             self.stdout.write(f"  Fiscal year filter: {fiscal_year}")
+        if priority:
+            priority_list = load_priority_cases()
+            self.stdout.write(f"  Priority mode: {len(priority_list)} cases")
 
         session = self._get_session()
         for idx, case in enumerate(cases, 1):
@@ -269,6 +289,7 @@ class Command(BaseCommand):
         limit: Optional[int] = None,
         force: bool = False,
         fiscal_year: Optional[str] = None,
+        priority: bool = False,
     ) -> list[Case]:
         """Return DRAFT cases with empty timeline that are candidates for enrichment."""
         queryset = Case.objects.filter(state="DRAFT")
@@ -279,6 +300,10 @@ class Command(BaseCommand):
                 timeline=[]
             ).count()
             queryset = queryset.filter(timeline=[])
+
+        if priority:
+            priority_list = load_priority_cases()
+            queryset = filter_by_priority(queryset, priority_list)
 
         all_cases = []
         for case in queryset.order_by("case_id"):

@@ -814,3 +814,31 @@ class TestEnrichCiaaTimeline:
 
         output = out.getvalue()
         assert "NGM data: none" in output
+
+    # ── --priority flag ──────────────────────────────────────────────────
+
+    def test_cli_priority_flag_registered(self):
+        """--priority flag is properly registered."""
+        parser = MagicMock()
+        cmd = Command()
+        cmd.add_arguments(parser)
+        parser.add_argument.assert_any_call(
+            "--priority",
+            action="store_true",
+            help="Enrich only cases in the priority case list",
+        )
+
+    def test_priority_and_case_id_mutually_exclusive(self):
+        """--priority and --case-id cannot be used together."""
+        out = StringIO()
+        with patch("sys.stderr", new_callable=StringIO) as stderr:
+            call_command(
+                "enrich_ciaa_timeline",
+                "--priority",
+                "--case-id=case-001",
+                "--dry-run",
+                stdout=out,
+                stderr=stderr,
+            )
+            output = stderr.getvalue()
+        assert "mutually exclusive" in output
