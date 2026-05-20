@@ -102,11 +102,35 @@ def call_llm(
 
         try:
             data = response.json()
-            content = data["choices"][0]["message"]["content"]
-        except (ValueError, KeyError, TypeError, IndexError) as exc:
-            raise CommandError("LLM API returned a malformed response") from exc
+        except (ValueError, TypeError) as exc:
+            raise CommandError(f"LLM API returned invalid JSON: {exc}") from exc
 
-        if not content:
+        choices = data.get("choices")
+        if not choices or not isinstance(choices, list):
+            raise CommandError("LLM API returned no choices")
+
+        message = choices[0].get("message")
+        if not message or not isinstance(message, dict):
+            raise CommandError("LLM API returned message missing or invalid")
+
+        content = message.get("content")
+        if content is None:
+            if "refusal" in message:
+                raise CommandError(
+                    f"LLM refused: {str(message['refusal'])[:200]}"
+                ) from None
+            if "tool_calls" in message:
+                raise CommandError(
+                    "LLM returned tool_calls instead of content"
+                ) from None
+            raise CommandError("LLM message missing required 'content' key") from None
+
+        if not isinstance(content, str):
+            raise CommandError(
+                f"LLM content is not a string: {type(content).__name__}"
+            ) from None
+
+        if not content.strip():
             raise CommandError("LLM API returned empty content")
 
         return content

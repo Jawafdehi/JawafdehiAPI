@@ -87,6 +87,22 @@ class TestEnrichCiaaTimeline:
             side_effect=exc,
         )
 
+    def _mock_call_llm_missing_content(
+        self,
+        message: str = "LLM refused: I cannot help",
+    ):
+        """Patch call_llm to raise CommandError simulating a missing-content LLM response.
+
+        When the LLM returns a response where choices[0].message lacks a 'content'
+        key (e.g. 'refusal' or 'tool_calls' instead), call_llm raises CommandError
+        with a descriptive message. This helper simulates that production failure
+        mode so the test exercises the caller's error-handling path.
+        """
+        return patch(
+            "cases.management.commands.enrich_ciaa_timeline.call_llm",
+            side_effect=CommandError(message),
+        )
+
     def _mock_ngm_data(self, hearings=None, case_overrides=None):
         """Create mock NGM data dict."""
         data = {
@@ -594,25 +610,38 @@ class TestEnrichCiaaTimeline:
         """LLM response without 'content' key is counted as LLM error and
         command continues processing remaining cases."""
         pr_source = self._create_source()
-        case = self._create_case(
+        self._create_case(
+            case_id="missing-content-1",
             evidence=[{"source_id": pr_source.source_id, "description": "test"}],
+            timeline=[],
+        )
+        self._create_case(
+            case_id="missing-content-2",
+            evidence=[{"source_id": pr_source.source_id, "description": "test"}],
+            timeline=[],
         )
 
-        with self._mock_call_llm_error(
-            exc=CommandError("LLM API returned a malformed response")
+        side_effects = [
+            CommandError("LLM refused: I cannot help"),
+            self._mock_llm_response(
+                [{"date": "2023-08-15", "title": "Recovered", "description": ""}]
+            ),
+        ]
+        with patch(
+            "cases.management.commands.enrich_ciaa_timeline.call_llm",
+            side_effect=side_effects,
         ):
             out = StringIO()
             call_command(
                 "enrich_ciaa_timeline",
-                f"--case-id={case.case_id}",
-                "--llm-api-key=test-key",
                 "--dry-run",
+                "--llm-api-key=test-key",
                 stdout=out,
             )
 
         output = out.getvalue()
         assert "LLM errors:             1" in output
-        assert "Cases processed:        1" in output
+        assert "Cases processed:        2" in output
         assert "Cases enriched:         0" in output
 
     def test_no_content_counted(self):
