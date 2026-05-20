@@ -49,6 +49,11 @@ class TestEnrichCiaaTimeline:
         defaults.update(overrides)
         return DocumentSource.objects.create(**defaults)
 
+    def _session(self):
+        """Create a mock requests.Session for direct method tests."""
+        session = MagicMock(spec=requests.Session)
+        return session
+
     def _mock_llm_response(self, entries=None):
         if entries is None:
             entries = [
@@ -64,12 +69,23 @@ class TestEnrichCiaaTimeline:
                 },
                 {"date": "2024-03-10", "title": "फैसला सुनाइएको", "description": ""},
             ]
-        mock_response = MagicMock()
-        mock_response.raise_for_status.return_value = None
-        mock_response.json.return_value = {
-            "choices": [{"message": {"content": json.dumps(entries)}}]
-        }
-        return mock_response
+        return json.dumps(entries)
+
+    def _mock_call_llm(self, entries=None):
+        """Patch call_llm in the enrich_ciaa_timeline namespace."""
+        return patch(
+            "cases.management.commands.enrich_ciaa_timeline.call_llm",
+            return_value=self._mock_llm_response(entries),
+        )
+
+    def _mock_call_llm_error(self, exc=None):
+        """Patch call_llm to raise an error."""
+        if exc is None:
+            exc = requests.ConnectionError("Connection refused")
+        return patch(
+            "cases.management.commands.enrich_ciaa_timeline.call_llm",
+            side_effect=exc,
+        )
 
     # ── 1. Idempotency ──────────────────────────────────────────────────
 
@@ -95,9 +111,7 @@ class TestEnrichCiaaTimeline:
             evidence=[{"source_id": pr_source.source_id, "description": "test"}],
         )
 
-        with patch("requests.post") as mock_post:
-            mock_post.return_value = self._mock_llm_response()
-
+        with self._mock_call_llm():
             out = StringIO()
             call_command(
                 "enrich_ciaa_timeline",
@@ -122,9 +136,7 @@ class TestEnrichCiaaTimeline:
             evidence=[{"source_id": pr_source.source_id, "description": "test"}],
         )
 
-        with patch("requests.post") as mock_post:
-            mock_post.return_value = self._mock_llm_response()
-
+        with self._mock_call_llm():
             out = StringIO()
             call_command(
                 "enrich_ciaa_timeline",
@@ -321,7 +333,8 @@ class TestEnrichCiaaTimeline:
         )
 
         cmd = Command()
-        content = cmd._get_source_content(case)
+        session = self._session()
+        content = cmd._get_source_content(case, session)
 
         assert content is not None
         assert "Detailed case information" in content
@@ -331,7 +344,8 @@ class TestEnrichCiaaTimeline:
         case = self._create_case(evidence=[])
 
         cmd = Command()
-        content = cmd._get_source_content(case)
+        session = self._session()
+        content = cmd._get_source_content(case, session)
 
         assert content is None
 
@@ -348,10 +362,12 @@ class TestEnrichCiaaTimeline:
         )
 
         cmd = Command()
-        with patch.object(
-            cmd, "_convert_to_markdown", return_value="Extracted text. " * 50
+        session = self._session()
+        with patch(
+            "cases.management.commands.enrich_ciaa_timeline.convert_to_markdown",
+            return_value="Extracted text. " * 50,
         ):
-            content = cmd._get_source_content(case)
+            content = cmd._get_source_content(case, session)
 
         assert content is not None
         assert "Extracted text" in content
@@ -378,7 +394,8 @@ class TestEnrichCiaaTimeline:
         )
 
         cmd = Command()
-        content = cmd._get_source_content(case)
+        session = self._session()
+        content = cmd._get_source_content(case, session)
 
         assert content is not None
         assert "Press release content" in content
@@ -395,9 +412,7 @@ class TestEnrichCiaaTimeline:
             evidence=[{"source_id": pr_source.source_id, "description": "test"}],
         )
 
-        with patch("requests.post") as mock_post:
-            mock_post.return_value = self._mock_llm_response()
-
+        with self._mock_call_llm():
             out = StringIO()
             call_command(
                 "enrich_ciaa_timeline",
@@ -417,12 +432,11 @@ class TestEnrichCiaaTimeline:
             evidence=[{"source_id": pr_source.source_id, "description": "test"}],
         )
 
-        with patch("requests.post") as mock_post:
-            mock_post.return_value = self._mock_llm_response(
-                entries=[
-                    {"date": "2023-08-15", "title": "Saved event"},
-                ]
-            )
+        with self._mock_call_llm(
+            entries=[
+                {"date": "2023-08-15", "title": "Saved event"},
+            ]
+        ):
 
             out = StringIO()
             call_command(
@@ -502,9 +516,7 @@ class TestEnrichCiaaTimeline:
                 timeline=[],
             )
 
-        with patch("requests.post") as mock_post:
-            mock_post.return_value = self._mock_llm_response()
-
+        with self._mock_call_llm():
             out = StringIO()
             call_command(
                 "enrich_ciaa_timeline",
@@ -536,9 +548,7 @@ class TestEnrichCiaaTimeline:
             evidence=[{"source_id": pr_source.source_id, "description": "test"}],
         )
 
-        with patch("requests.post") as mock_post:
-            mock_post.side_effect = requests.ConnectionError("Connection refused")
-
+        with self._mock_call_llm_error():
             out = StringIO()
             call_command(
                 "enrich_ciaa_timeline",
@@ -590,9 +600,7 @@ class TestEnrichCiaaTimeline:
             evidence=[{"source_id": pr_source.source_id, "description": "test"}],
         )
 
-        with patch("requests.post") as mock_post:
-            mock_post.return_value = self._mock_llm_response()
-
+        with self._mock_call_llm():
             out = StringIO()
             call_command(
                 "enrich_ciaa_timeline",

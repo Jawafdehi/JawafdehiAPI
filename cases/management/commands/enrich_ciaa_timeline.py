@@ -31,11 +31,17 @@ import requests
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
+from cases.management.commands._enrich_utils import (
+    ALLOWED_HOSTS,
+    call_llm,
+    convert_to_markdown,
+    is_valid_iso_date,
+    parse_extraction_response,
+    resolve_api_key,
+)
 from cases.models import Case, DocumentSource, SourceType
 
 logger = logging.getLogger(__name__)
-
-_ALLOWED_HOSTS = frozenset({"ciaa.gov.np", "ngm-store.jawafdehi.org"})
 
 EXTRACTION_SYSTEM_PROMPT = """\
 You are a Nepali legal analyst extracting structured timeline entries from \
@@ -54,10 +60,10 @@ Each entry must be a JSON object with:
 All three fields must be written in Nepali (देवनागरी लिपि).
 
 KEY EVENTS TO EXTRACT (when available in sources):
-1. CIAA investigation initiation / filing decision date ("अख्तियारले अनुसन्धान शुरु गरेको" or "मुद्दा दायर गर्ने निर्णय")
-2. Case filed to Special Court date ("विशेष अदालतमा मुद्दा दायर")
-3. Court hearing dates ("पेशी / सुनुवाइ मिति")
-4. Verdict / judgment date ("फैसला मिति")
+1. CIAA investigation initiation / filing decision date
+2. Case filed to Special Court date
+3. Court hearing dates
+4. Verdict / judgment date
 5. Case registration at CIAA (if different from investigation start)
 6. Any other significant dates mentioned in the source
 
@@ -65,9 +71,6 @@ DATE CONVERSION RULES (CRITICAL):
 - The source documents use Bikram Sambat (BS) dates
 - You MUST convert all BS dates to AD (Gregorian) before outputting
 - BS to AD offset: subtract 56 years and 8 months 17 days as baseline
-- Example: 2080-04-15 BS ≈ 2023-08-02 AD
-- Example: 2081-01-01 BS ≈ 2024-04-13 AD
-- When only a BS year is mentioned, use mid-year: BS 2080 → 2023-08, BS 2081 → 2024-04
 - ALWAYS output in YYYY-MM-DD format
 
 QUALITY RULES:
@@ -100,15 +103,6 @@ Source documents:
 
 {source_text}
 """
-
-ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-
-
-def _is_valid_iso_date(date_str: str) -> bool:
-    """Validate that a string is in YYYY-MM-DD ISO date format."""
-    if not isinstance(date_str, str):
-        return False
-    return bool(ISO_DATE_RE.match(date_str.strip()))
 
 
 class Command(BaseCommand):
@@ -179,6 +173,12 @@ class Command(BaseCommand):
             "cases_llm_error": 0,
             "cases_already_populated": 0,
         }
+        self._http_session: Optional[requests.Session] = None
+
+    def _get_session(self) -> requests.Session:
+        if self._http_session is None:
+            self._http_session = requests.Session()
+        return self._http_session
 
     def handle(self, *args, **options):
         dry_run = options["dry_run"]
@@ -203,7 +203,7 @@ class Command(BaseCommand):
         if dry_run:
             self.stdout.write(self.style.WARNING("[DRY RUN] No changes will be saved."))
 
-        api_key = self._resolve_api_key(llm_api_key)
+        api_key = resolve_api_key(llm_api_key)
         if not dry_run and not api_key:
             raise CommandError(
                 "No LLM API key provided. Set JAWAFDEHI_LLM_API_KEY or "
@@ -232,6 +232,7 @@ class Command(BaseCommand):
         if fiscal_year:
             self.stdout.write(f"  Fiscal year filter: {fiscal_year}")
 
+        session = self._get_session()
         for idx, case in enumerate(cases, 1):
             self._process_case(
                 case=case,
@@ -241,18 +242,12 @@ class Command(BaseCommand):
                 llm_model=llm_model,
                 llm_base_url=llm_base_url,
                 llm_api_key=api_key,
+                session=session,
             )
 
         self._print_summary(dry_run)
 
     # ── helpers ──────────────────────────────────────────────────────────
-
-    def _resolve_api_key(self, cli_key: Optional[str]) -> Optional[str]:
-        if cli_key:
-            return cli_key
-        return os.environ.get("JAWAFDEHI_LLM_API_KEY") or os.environ.get(
-            "ANTHROPIC_API_KEY"
-        )
 
     def _get_ciaa_cases(
         self,
@@ -262,22 +257,22 @@ class Command(BaseCommand):
         fiscal_year: Optional[str] = None,
     ) -> list[Case]:
         """Return DRAFT cases with empty timeline that are candidates for enrichment."""
-        all_cases = []
         queryset = Case.objects.filter(state="DRAFT")
-
         if case_id:
             queryset = queryset.filter(case_id=case_id)
+        if not force:
+            self.stats["cases_already_populated"] = queryset.exclude(
+                timeline=[]
+            ).count()
+            queryset = queryset.filter(timeline=[])
 
+        all_cases = []
         for case in queryset.order_by("case_id"):
             if fiscal_year and not self._matches_fiscal_year(case, fiscal_year):
-                continue
-            if not force and case.timeline:
-                self.stats["cases_already_populated"] += 1
                 continue
             all_cases.append(case)
             if limit and len(all_cases) >= limit:
                 break
-
         return all_cases
 
     def _matches_fiscal_year(self, case: Case, fiscal_year: str) -> bool:
@@ -305,11 +300,12 @@ class Command(BaseCommand):
         llm_model: str,
         llm_base_url: str,
         llm_api_key: Optional[str],
+        session: requests.Session,
     ):
         self.stats["cases_processed"] += 1
         self.stdout.write(f"\n[{idx}/{total}] {case.case_id} — {case.title[:80]}")
 
-        source_text = self._get_source_content(case)
+        source_text = self._get_source_content(case, session)
         if not source_text:
             self.stats["cases_no_content"] += 1
             self.stdout.write(
@@ -332,6 +328,7 @@ class Command(BaseCommand):
                 llm_model=llm_model,
                 llm_base_url=llm_base_url,
                 llm_api_key=llm_api_key,
+                session=session,
             )
         except (
             requests.RequestException,
@@ -352,7 +349,7 @@ class Command(BaseCommand):
 
         entry_count = len(timeline_entries)
         invalid_count = sum(
-            1 for e in timeline_entries if not _is_valid_iso_date(e.get("date", ""))
+            1 for e in timeline_entries if not is_valid_iso_date(e.get("date", ""))
         )
         self.stdout.write(
             self.style.SUCCESS(
@@ -362,7 +359,7 @@ class Command(BaseCommand):
         )
         for i, entry in enumerate(timeline_entries, 1):
             date_flag = ""
-            if not _is_valid_iso_date(entry.get("date", "")):
+            if not is_valid_iso_date(entry.get("date", "")):
                 date_flag = " [INVALID DATE]"
             self.stdout.write(
                 f"    {i}. {entry.get('date', '?')} — "
@@ -379,7 +376,9 @@ class Command(BaseCommand):
 
     # ── source acquisition with tiered fallback ──────────────────────────
 
-    def _get_source_content(self, case: Case) -> Optional[str]:
+    def _get_source_content(
+        self, case: Case, session: requests.Session
+    ) -> Optional[str]:
         """Acquire source document text for timeline extraction.
 
         Priority order:
@@ -414,19 +413,26 @@ class Command(BaseCommand):
 
         content_parts = []
 
-        # Tier 1: LEGAL_PROCEDURAL sources
         self._append_source_content(
-            source_ids, source_by_id, SourceType.LEGAL_PROCEDURAL, content_parts
+            source_ids,
+            source_by_id,
+            SourceType.LEGAL_PROCEDURAL,
+            content_parts,
+            session,
         )
-
-        # Tier 2: LEGAL_COURT_ORDER sources
         self._append_source_content(
-            source_ids, source_by_id, SourceType.LEGAL_COURT_ORDER, content_parts
+            source_ids,
+            source_by_id,
+            SourceType.LEGAL_COURT_ORDER,
+            content_parts,
+            session,
         )
-
-        # Tier 3: OFFICIAL_GOVERNMENT sources
         self._append_source_content(
-            source_ids, source_by_id, SourceType.OFFICIAL_GOVERNMENT, content_parts
+            source_ids,
+            source_by_id,
+            SourceType.OFFICIAL_GOVERNMENT,
+            content_parts,
+            session,
         )
 
         if not content_parts:
@@ -441,6 +447,7 @@ class Command(BaseCommand):
         source_by_id: dict,
         source_type: str,
         content_parts: list[str],
+        session: requests.Session,
     ):
         """Try to get content from sources of a specific type and append to parts."""
         for sid in source_ids:
@@ -458,85 +465,11 @@ class Command(BaseCommand):
             if isinstance(source.url, list):
                 for url in source.url:
                     parsed = urlparse(url)
-                    if parsed.hostname and parsed.hostname in _ALLOWED_HOSTS:
-                        content = self._convert_to_markdown(url)
+                    if parsed.hostname and parsed.hostname in ALLOWED_HOSTS:
+                        content = convert_to_markdown(url, session)
                         if content and len(content) > 200:
                             content_parts.append(content)
                             break
-
-    # ── URL download + markdown conversion ───────────────────────────────
-
-    def _convert_to_markdown(self, url: str) -> Optional[str]:
-        """Download file from URL and convert to markdown using likhit.
-
-        Pipeline: URL download -> temp file -> likhit/markitdown -> markdown.
-        Returns None when conversion fails or produces insufficient content.
-        """
-        import tempfile
-        from pathlib import Path
-
-        try:
-            response = requests.get(url, timeout=120, stream=True)
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            logger.warning("  Failed to download %s: %s", url, exc)
-            return None
-
-        final_hostname = urlparse(response.url).hostname
-        if final_hostname not in _ALLOWED_HOSTS:
-            logger.warning("  Redirected to untrusted host: %s", response.url)
-            return None
-
-        content_type = response.headers.get("content-type", "").lower()
-
-        if "text/plain" in content_type or "application/json" in content_type:
-            response.encoding = "utf-8"
-            text = response.text
-            if len(text) > 200:
-                return text
-            return None
-
-        suffix = ""
-        if "pdf" in content_type:
-            suffix = ".pdf"
-        elif "html" in content_type:
-            suffix = ".html"
-        elif any(kw in content_type for kw in ("document", "word", "docx", "msword")):
-            suffix = ".docx"
-
-        tmp_path = None
-        try:
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-                tmp_path = tmp.name
-                for chunk in response.iter_content(chunk_size=8192):
-                    tmp.write(chunk)
-
-            import likhit  # noqa: F401
-            from markitdown import MarkItDown
-
-            md = MarkItDown(enable_plugins=True)
-            result = md.convert(tmp_path)
-
-            if (
-                result
-                and result.text_content
-                and len(result.text_content.strip()) > 200
-            ):
-                return result.text_content.strip()
-
-            logger.warning(
-                "  Likhit conversion produced insufficient content for %s", url
-            )
-            return None
-        except Exception as exc:
-            logger.warning("  Likhit conversion failed for %s: %s", url, exc)
-            return None
-        finally:
-            if tmp_path:
-                try:
-                    Path(tmp_path).unlink(missing_ok=True)
-                except Exception:
-                    pass
 
     # ── LLM extraction ───────────────────────────────────────────────────
 
@@ -547,6 +480,7 @@ class Command(BaseCommand):
         llm_model: str,
         llm_base_url: str,
         llm_api_key: Optional[str],
+        session: requests.Session,
     ) -> Optional[list[dict]]:
         """Call LLM to extract timeline entries from source text."""
         prompt = EXTRACTION_USER_PROMPT.format(
@@ -554,82 +488,23 @@ class Command(BaseCommand):
             source_text=source_text[:40000],
         )
 
-        response_text = self._call_llm(
+        response_text = call_llm(
             system_prompt=EXTRACTION_SYSTEM_PROMPT,
             user_prompt=prompt,
             model=llm_model,
             base_url=llm_base_url,
             api_key=llm_api_key,
+            session=session,
         )
 
         return self._parse_timeline_response(response_text)
 
-    def _call_llm(
-        self,
-        system_prompt: str,
-        user_prompt: str,
-        model: str,
-        base_url: str,
-        api_key: Optional[str],
-    ) -> str:
-        """Call LLM API via OpenAI-compatible chat completions endpoint."""
-        url = f"{base_url.rstrip('/')}/chat/completions"
-
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        }
-
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": 0.1,
-            "max_tokens": 4000,
-        }
-
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=120)
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            raise CommandError(f"LLM API request failed: {exc}") from exc
-
-        data = response.json()
-        choices = data.get("choices", [])
-        if not choices:
-            raise CommandError("LLM API returned no choices")
-
-        return choices[0]["message"]["content"]
-
     def _parse_timeline_response(self, response_text: str) -> Optional[list[dict]]:
-        """Parse the LLM response to extract the JSON array of timeline entries."""
-        text = response_text.strip()
-
-        json_start = text.find("[")
-        json_end = text.rfind("]")
-
-        if json_start == -1 or json_end == -1 or json_end <= json_start:
-            logger.warning("  Could not find JSON array in LLM response")
-            logger.debug("  Response: %s", text[:500])
-            return None
-
-        json_str = text[json_start : json_end + 1]
-
-        try:
-            entries = json.loads(json_str)
-        except json.JSONDecodeError as exc:
-            logger.warning("  Failed to parse JSON from LLM response: %s", exc)
-            logger.debug("  JSON string: %s", json_str[:500])
-            return None
-
-        if isinstance(entries, dict) and isinstance(entries.get("timeline"), list):
-            entries = entries["timeline"]
-        if isinstance(entries, dict) and isinstance(entries.get("entries"), list):
-            entries = entries["entries"]
-        if not isinstance(entries, list):
-            logger.warning("  LLM returned non-list: %s", type(entries).__name__)
+        """Parse the LLM response to extract timeline entries with field mapping."""
+        entries = parse_extraction_response(
+            response_text, wrapper_keys={"timeline", "entries"}
+        )
+        if entries is None:
             return None
 
         clean = []
@@ -659,10 +534,8 @@ class Command(BaseCommand):
         if not clean:
             return None
 
-        # Warn but don't block on date format (LLM may still produce BS dates
-        # despite prompt instructions; we capture the flag for human review)
         for entry in clean:
-            if not _is_valid_iso_date(entry.get("date", "")):
+            if not is_valid_iso_date(entry.get("date", "")):
                 logger.warning(
                     "  Non-ISO date format: %s — may need manual review",
                     entry.get("date"),
@@ -682,7 +555,6 @@ class Command(BaseCommand):
     # ── summary ──────────────────────────────────────────────────────────
 
     def _print_summary(self, dry_run: bool):
-        """Print final statistics table summarizing the enrichment run."""
         self.stdout.write("\n" + "=" * 60)
         self.stdout.write(
             self.style.SUCCESS(
