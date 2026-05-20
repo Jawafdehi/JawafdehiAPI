@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -632,11 +633,29 @@ class Command(BaseCommand):
 
     def _validate_url_scheme(self, url: str) -> str:
         parsed = urllib.parse.urlparse(url)
-        if parsed.scheme in {"http", "https"} and parsed.netloc:
+        if parsed.scheme == "https" and parsed.netloc:
+            return url
+        if (
+            parsed.scheme == "http"
+            and parsed.netloc
+            and self._is_loopback_host(parsed.hostname)
+        ):
             return url
         raise ValueError(
-            f"Invalid URL '{url}'. Only http and https URLs are allowed with a host."
+            f"Invalid URL '{url}'. Only https URLs are allowed for non-local hosts."
         )
+
+    @staticmethod
+    def _is_loopback_host(hostname: str | None) -> bool:
+        if not hostname:
+            return False
+        host = hostname.lower().rstrip(".")
+        if host == "localhost":
+            return True
+        try:
+            return ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            return False
 
     def _sanitize_download_filename(self, filename: str | None, source_id: str) -> str:
         raw = (filename or "").strip()
@@ -1217,9 +1236,13 @@ Press release markdown:
 
     def _case_patch_url(self, api_base_url: str, case_slug: str) -> str:
         parsed = urllib.parse.urlparse((api_base_url or "").strip())
-        if parsed.scheme not in {"http", "https"}:
+        if parsed.scheme == "https":
+            pass
+        elif parsed.scheme == "http" and self._is_loopback_host(parsed.hostname):
+            pass
+        else:
             raise ValueError(
-                f"Invalid api_base_url '{api_base_url}': scheme must be http or https."
+                f"Invalid api_base_url '{api_base_url}': use https for non-local hosts."
             )
         if not parsed.netloc:
             raise ValueError(

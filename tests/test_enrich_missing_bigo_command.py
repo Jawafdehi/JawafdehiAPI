@@ -414,7 +414,7 @@ def test_limit_guardrail_rejects_over_max():
         call_command("enrich_missing_bigo", "--limit", "1001")
 
 
-def test_validate_url_scheme_allows_http_and_https_only():
+def test_validate_url_scheme_allows_https_and_local_http():
     command = Command()
 
     assert (
@@ -422,14 +422,27 @@ def test_validate_url_scheme_allows_http_and_https_only():
         == "https://example.com/press-release.pdf"
     )
     assert (
-        command._validate_url_scheme("http://example.com/press-release.pdf")
-        == "http://example.com/press-release.pdf"
+        command._validate_url_scheme("http://localhost/press-release.pdf")
+        == "http://localhost/press-release.pdf"
+    )
+    assert (
+        command._validate_url_scheme("http://127.0.0.1/press-release.pdf")
+        == "http://127.0.0.1/press-release.pdf"
     )
 
-    with pytest.raises(ValueError, match="Only http and https URLs are allowed"):
+    with pytest.raises(
+        ValueError, match="Only https URLs are allowed for non-local hosts"
+    ):
+        command._validate_url_scheme("http://example.com/press-release.pdf")
+
+    with pytest.raises(
+        ValueError, match="Only https URLs are allowed for non-local hosts"
+    ):
         command._validate_url_scheme("file:///tmp/press-release.pdf")
 
-    with pytest.raises(ValueError, match="Only http and https URLs are allowed"):
+    with pytest.raises(
+        ValueError, match="Only https URLs are allowed for non-local hosts"
+    ):
         command._validate_url_scheme("press-release.pdf")
 
 
@@ -499,7 +512,7 @@ def test_case_patch_url_uses_slug_not_numeric_database_id():
 def test_case_patch_url_rejects_non_http_base_url():
     command = Command()
 
-    with pytest.raises(ValueError, match="http or https"):
+    with pytest.raises(ValueError, match="https for non-local hosts"):
         command._case_patch_url("ftp://example.com", "case-slug")
 
     with pytest.raises(ValueError, match="must include a host"):
