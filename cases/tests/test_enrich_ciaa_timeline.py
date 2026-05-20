@@ -87,6 +87,32 @@ class TestEnrichCiaaTimeline:
             side_effect=exc,
         )
 
+    def _mock_ngm_data(self, hearings=None, case_overrides=None):
+        """Create mock NGM data dict."""
+        data = {
+            "case": {
+                "registration_date_ad": "2023-09-20",
+                "verdict_date_ad": "2024-03-10",
+                "case_status": "फैसला भएको",
+                "verdict_judge": "Hon. Judge Name",
+                **(case_overrides or {}),
+            },
+            "hearings": hearings
+            or [
+                {
+                    "hearing_date_ad": "2023-11-15",
+                    "decision_type": "पेशी",
+                    "remarks": "सुनुवाइ भएको",
+                },
+                {
+                    "hearing_date_ad": "2024-01-20",
+                    "decision_type": "पेशी",
+                    "remarks": "अन्तिम सुनुवाइ",
+                },
+            ],
+        }
+        return data
+
     # ── 1. Idempotency ──────────────────────────────────────────────────
 
     def test_skips_cases_with_populated_timeline(self):
@@ -174,6 +200,7 @@ class TestEnrichCiaaTimeline:
             "cases_no_content": 0,
             "cases_llm_error": 0,
             "cases_already_populated": 0,
+            "cases_ngm_used": 0,
         }
 
         cases = cmd._get_ciaa_cases(fiscal_year="080")
@@ -198,6 +225,7 @@ class TestEnrichCiaaTimeline:
                 "cases_no_content",
                 "cases_llm_error",
                 "cases_already_populated",
+                "cases_ngm_used",
             ],
             0,
         )
@@ -240,6 +268,7 @@ class TestEnrichCiaaTimeline:
                 "cases_no_content",
                 "cases_llm_error",
                 "cases_already_populated",
+                "cases_ngm_used",
             ],
             0,
         )
@@ -578,6 +607,7 @@ class TestEnrichCiaaTimeline:
                 "cases_no_content",
                 "cases_llm_error",
                 "cases_already_populated",
+                "cases_ngm_used",
             ],
             0,
         )
@@ -616,6 +646,7 @@ class TestEnrichCiaaTimeline:
         assert "No source content:" in output
         assert "LLM errors:" in output
         assert "Already populated:" in output
+        assert "NGM data used:" in output
         assert "Timeline extraction complete" in output
 
     def test_responds_to_missing_api_key_in_production(self):
@@ -632,3 +663,154 @@ class TestEnrichCiaaTimeline:
                     f"--case-id={case.case_id}",
                 )
         assert "No LLM API key" in str(exc_info.value)
+
+    # ── NGM structured hearing data ─────────────────────────────────────
+
+    def test_get_ngm_data_returns_data_for_special_ref(self):
+        """_get_ngm_data queries NGM when special: ref exists in court_cases."""
+        case = self._create_case(
+            court_cases=["special:080-CR-0111"],
+        )
+        mock_data = self._mock_ngm_data()
+
+        cmd = Command()
+        with patch(
+            "cases.management.commands.enrich_ciaa_timeline.get_court_case_details",
+            return_value=mock_data,
+        ):
+            result = cmd._get_ngm_data(case)
+
+        assert result is not None
+        assert result["case"]["registration_date_ad"] == "2023-09-20"
+        assert len(result["hearings"]) == 2
+
+    def test_get_ngm_data_returns_none_without_special_ref(self):
+        """_get_ngm_data returns None when no special: ref in court_cases."""
+        case = self._create_case(
+            court_cases=["supreme:123"],
+        )
+
+        cmd = Command()
+        result = cmd._get_ngm_data(case)
+
+        assert result is None
+
+    def test_get_ngm_data_returns_none_empty_court_cases(self):
+        """_get_ngm_data returns None when court_cases is empty."""
+        case = self._create_case(court_cases=[])
+
+        cmd = Command()
+        result = cmd._get_ngm_data(case)
+
+        assert result is None
+
+    def test_get_ngm_data_queries_database(self):
+        """_get_ngm_data fetches real data from NGM when available."""
+        case = self._create_case(
+            court_cases=["special:080-CR-0111"],
+        )
+        mock_data = self._mock_ngm_data()
+
+        cmd = Command()
+        with patch(
+            "cases.management.commands.enrich_ciaa_timeline.get_court_case_details",
+            return_value=mock_data,
+        ):
+            result = cmd._get_ngm_data(case)
+
+        assert result is not None
+        assert result["case"]["registration_date_ad"] == "2023-09-20"
+        assert len(result["hearings"]) == 2
+
+    def test_format_ngm_section_with_data(self):
+        """_format_ngm_section produces structured text from NGM data."""
+        mock_data = self._mock_ngm_data()
+
+        cmd = Command()
+        section = cmd._format_ngm_section(mock_data)
+
+        assert "NGM STRUCTURED HEARING DATA" in section
+        assert "2023-09-20" in section
+        assert "2024-03-10" in section
+        assert "2023-11-15" in section
+        assert "सुनुवाइ भएको" in section
+
+    def test_format_ngm_section_empty(self):
+        """_format_ngm_section returns empty string for None/empty data."""
+        cmd = Command()
+        assert cmd._format_ngm_section(None) == ""
+        assert cmd._format_ngm_section({}) == ""
+
+    def test_ngm_data_passed_to_extract_timeline(self):
+        """NGM data is used in the extraction prompt."""
+        pr_source = self._create_source()
+        case = self._create_case(
+            court_cases=["special:080-CR-0111"],
+            evidence=[{"source_id": pr_source.source_id, "description": "test"}],
+        )
+        mock_ngm = self._mock_ngm_data()
+
+        with patch(
+            "cases.management.commands.enrich_ciaa_timeline.get_court_case_details",
+            return_value=mock_ngm,
+        ):
+            with self._mock_call_llm():
+                out = StringIO()
+                call_command(
+                    "enrich_ciaa_timeline",
+                    f"--case-id={case.case_id}",
+                    "--dry-run",
+                    stdout=out,
+                )
+
+        output = out.getvalue()
+        assert "NGM data: 2 hearing(s)" in output
+
+    def test_ngm_counter_incremented(self):
+        """cases_ngm_used stat is incremented when NGM data is available."""
+        pr_source = self._create_source()
+        case = self._create_case(
+            court_cases=["special:080-CR-0111"],
+            evidence=[{"source_id": pr_source.source_id, "description": "test"}],
+        )
+        mock_ngm = self._mock_ngm_data()
+
+        with patch(
+            "cases.management.commands.enrich_ciaa_timeline.get_court_case_details",
+            return_value=mock_ngm,
+        ):
+            with self._mock_call_llm():
+                out = StringIO()
+                call_command(
+                    "enrich_ciaa_timeline",
+                    f"--case-id={case.case_id}",
+                    "--dry-run",
+                    stdout=out,
+                )
+
+        output = out.getvalue()
+        assert "NGM data used:          1" in output
+
+    def test_ngm_query_failure_handled_gracefully(self):
+        """NGM query failures are caught and logged without crashing."""
+        pr_source = self._create_source()
+        case = self._create_case(
+            court_cases=["special:080-CR-0111"],
+            evidence=[{"source_id": pr_source.source_id, "description": "test"}],
+        )
+
+        with patch(
+            "cases.management.commands.enrich_ciaa_timeline.get_court_case_details",
+            side_effect=Exception("Database error"),
+        ):
+            with self._mock_call_llm():
+                out = StringIO()
+                call_command(
+                    "enrich_ciaa_timeline",
+                    f"--case-id={case.case_id}",
+                    "--dry-run",
+                    stdout=out,
+                )
+
+        output = out.getvalue()
+        assert "NGM data: none" in output

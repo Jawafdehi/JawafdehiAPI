@@ -40,13 +40,14 @@ from cases.management.commands._enrich_utils import (
     resolve_api_key,
 )
 from cases.models import Case, DocumentSource, SourceType
+from ngm.services import get_court_case_details
 
 logger = logging.getLogger(__name__)
 
 EXTRACTION_SYSTEM_PROMPT = """\
 You are a Nepali legal analyst extracting structured timeline entries from \
 CIAA (Commission for the Investigation of Abuse of Authority) press releases, \
-court orders, and charge sheets.
+court orders, charge sheets, and NGM court hearing records.
 
 Your task is to reconstruct the chronological progression of a corruption case \
 from available source documents.
@@ -68,38 +69,50 @@ KEY EVENTS TO EXTRACT (when available in sources):
 6. Any other significant dates mentioned in the source
 
 DATE CONVERSION RULES (CRITICAL):
-- The source documents use Bikram Sambat (BS) dates
-- You MUST convert all BS dates to AD (Gregorian) before outputting
+- Document text sources use Bikram Sambat (BS) dates — convert to AD
+- NGM structured data contains reliable AD dates — use EXACTLY as-is
 - BS to AD offset: subtract 56 years and 8 months 17 days as baseline
 - ALWAYS output in YYYY-MM-DD format
+
+NGM DATE PRIORITY (CRITICAL):
+- NGM structured hearing data (if provided) contains ground-truth AD dates
+- For any event that exists in BOTH NGM data and document text,
+  use the NGM date exactly — do not convert or adjust it
+- Use document text to add narrative context (title, description) to
+  NGM-dated events, and to extract any additional events not in NGM
+- NGM dates are already in AD format — treat them as authoritative
 
 QUALITY RULES:
 - Minimum 3 timeline entries when sufficient source material exists
 - Entries must be in chronological order (earliest first)
-- Each entry must be factually grounded in the provided source text
+- Each entry must be factually grounded in the provided sources
 - Do NOT fabricate dates or events not mentioned in the sources
 - If the source text is insufficient, return fewer entries or an empty array
 """
 
 EXTRACTION_USER_PROMPT = """\
 Extract chronological timeline entries from the provided CIAA case source \
-documents.
+documents and NGM structured hearing data.
 
 Case title: {case_title}
 
 Instructions:
 - Each entry must have "date" (YYYY-MM-DD in AD) and "title" in Nepali
 - "description" is optional but encouraged when source provides details
-- Convert all BS (Bikram Sambat) dates to AD (Gregorian) before outputting
+- For NGM dates: use them exactly as-is — they are authoritative ground-truth
+- For document-text dates: convert from BS to AD before outputting
+- Use document text for narrative context (titles, descriptions)
 - Order entries chronologically from earliest to latest
-- Only include events explicitly mentioned or clearly inferred from the source
+- Only include events explicitly mentioned or clearly inferred from the sources
 - If sources are insufficient, return fewer entries
 
 IMPORTANT: Return ONLY a valid JSON array of timeline entry objects.
 Format: [{{"date": "YYYY-MM-DD", "title": "नेपाली शीर्षक", "description": "विवरण"}}]
 No explanations, no markdown, no text outside the JSON array.
 
-Source documents:
+{ngm_section}
+
+DOCUMENT TEXT (use for context, narrative, and any dates not in NGM):
 
 {source_text}
 """
@@ -172,6 +185,7 @@ class Command(BaseCommand):
             "cases_no_content": 0,
             "cases_llm_error": 0,
             "cases_already_populated": 0,
+            "cases_ngm_used": 0,
         }
         self._http_session: Optional[requests.Session] = None
 
@@ -315,6 +329,17 @@ class Command(BaseCommand):
 
         self.stdout.write(f"  Source content: {len(source_text)} chars")
 
+        ngm_data = self._get_ngm_data(case)
+        if ngm_data:
+            self.stats["cases_ngm_used"] += 1
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"  NGM data: {len(ngm_data.get('hearings', []))} hearing(s)"
+                )
+            )
+        else:
+            self.stdout.write("  NGM data: none")
+
         if dry_run and not llm_api_key:
             self.stdout.write(
                 self.style.WARNING("  [DRY RUN] No API key — skipping LLM extraction")
@@ -329,6 +354,7 @@ class Command(BaseCommand):
                 llm_base_url=llm_base_url,
                 llm_api_key=llm_api_key,
                 session=session,
+                ngm_data=ngm_data,
             )
         except (
             requests.RequestException,
@@ -471,6 +497,84 @@ class Command(BaseCommand):
                             content_parts.append(content)
                             break
 
+    # ── NGM structured hearing data ──────────────────────────────────────
+
+    def _get_ngm_data(self, case: Case) -> Optional[dict]:
+        """Query NGM database for structured hearing records.
+
+        Extracts the special court case number from case.court_cases
+        and fetches ground-truth dates, hearing records, and verdict info.
+        Returns None if no special court reference or NGM query fails.
+        """
+        if not case.court_cases:
+            return None
+
+        special_ref = next(
+            (
+                ref.split(":", 1)[1]
+                for ref in case.court_cases
+                if isinstance(ref, str) and ref.startswith("special:")
+            ),
+            None,
+        )
+        if not special_ref:
+            return None
+
+        try:
+            ngm_data = get_court_case_details("special", special_ref)
+            if ngm_data is None:
+                logger.debug("  NGM: no case found for %s", special_ref)
+                return None
+            return ngm_data
+        except Exception as exc:
+            logger.warning("  NGM query failed for %s: %s", special_ref, exc)
+            return None
+
+    def _format_ngm_section(self, ngm_data: Optional[dict]) -> str:
+        """Format NGM hearing data as a structured section for the LLM prompt.
+
+        Returns an empty string if no NGM data available.
+        """
+        if not ngm_data:
+            return ""
+
+        lines = [
+            "NGM STRUCTURED HEARING DATA (ground-truth dates — use these dates EXACTLY as-is):",
+            "",
+        ]
+
+        case_data = ngm_data.get("case") or {}
+        reg_date = case_data.get("registration_date_ad")
+        verdict_date = case_data.get("verdict_date_ad")
+        case_status = case_data.get("case_status", "")
+
+        if reg_date:
+            lines.append(f"- Case registration: {reg_date}")
+        if case_status:
+            lines.append(f"- Case status: {case_status}")
+
+        hearings = ngm_data.get("hearings") or []
+        if hearings:
+            lines.append(f"- Hearings ({len(hearings)} records):")
+            for h in hearings:
+                h_date = h.get("hearing_date_ad", "")
+                h_decision = h.get("decision_type") or ""
+                h_remarks = (h.get("remarks") or "")[:200]
+                line = f"  * {h_date}"
+                if h_decision:
+                    line += f" — {h_decision}"
+                if h_remarks:
+                    line += f" — {h_remarks}"
+                lines.append(line)
+
+        if verdict_date:
+            lines.append(f"- Verdict date: {verdict_date}")
+            verdict_judge = case_data.get("verdict_judge")
+            if verdict_judge:
+                lines.append(f"  Judge: {verdict_judge}")
+
+        return "\n".join(lines) + "\n"
+
     # ── LLM extraction ───────────────────────────────────────────────────
 
     def _extract_timeline(
@@ -481,10 +585,13 @@ class Command(BaseCommand):
         llm_base_url: str,
         llm_api_key: Optional[str],
         session: requests.Session,
+        ngm_data: Optional[dict] = None,
     ) -> Optional[list[dict]]:
-        """Call LLM to extract timeline entries from source text."""
+        """Call LLM to extract timeline entries from source text and NGM data."""
+        ngm_section = self._format_ngm_section(ngm_data)
         prompt = EXTRACTION_USER_PROMPT.format(
             case_title=case_title,
+            ngm_section=ngm_section,
             source_text=source_text[:40000],
         )
 
@@ -566,6 +673,7 @@ class Command(BaseCommand):
         self.stdout.write(f"  Cases skipped:          {self.stats['cases_skipped']}")
         self.stdout.write(f"  No source content:      {self.stats['cases_no_content']}")
         self.stdout.write(f"  LLM errors:             {self.stats['cases_llm_error']}")
+        self.stdout.write(f"  NGM data used:          {self.stats['cases_ngm_used']}")
         self.stdout.write(
             f"  Already populated:      {self.stats['cases_already_populated']}"
         )
