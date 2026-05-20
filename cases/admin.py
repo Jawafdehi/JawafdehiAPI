@@ -450,6 +450,7 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         "created_at",
         "updated_at",
         "version_info_display",
+        "public_case_url",
     ]
 
     fieldsets = (
@@ -459,6 +460,7 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
                 "fields": (
                     "case_id",
                     "slug",
+                    "public_case_url",
                     "title",
                     "short_description",
                     "thumbnail_url",
@@ -560,6 +562,25 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         return obj.title
 
     title_with_view_link.short_description = "Title"
+
+    def public_case_url(self, obj):
+        """Display the public case URL with a note about accessibility."""
+        if not obj.slug:
+            return "—"
+        public_url = f"https://jawafdehi.org/case/{obj.slug}"
+        viewable_states = [CaseState.PUBLISHED, CaseState.IN_REVIEW]
+        if obj.state in viewable_states:
+            return format_html(
+                '<a href="{}" target="_blank" rel="noopener noreferrer">{}</a>',
+                public_url,
+                public_url,
+            )
+        return format_html(
+            '{}<br><small style="color: #999;">Accessible only when case is in review or published.</small>',
+            public_url,
+        )
+
+    public_case_url.short_description = "Public URL"
 
     def version_info_display(self, obj):
         """Display version info in a readable format."""
