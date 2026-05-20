@@ -743,6 +743,21 @@ s3 = ["boto3 (>=1.4.4)"]
 sftp = ["paramiko (>=1.15)"]
 
 [[package]]
+name = "django-tinymce"
+version = "5.0.0"
+description = "A Django application that contains a widget to render a"
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "django_tinymce-5.0.0-py3-none-any.whl", hash = "sha256:c2e9c5efd2cc6c036f4c57e602b133180433e2bd1513b897089d3c4fb4e20579"},
+    {file = "django_tinymce-5.0.0.tar.gz", hash = "sha256:6257669ed596accf5fa967ff3061276b2c5352baac1bbc658fcd8252b12ca38a"},
+]
+
+[package.dependencies]
+django = ">=4.2"
+
+[[package]]
 name = "djangorestframework"
 version = "3.16.1"
 description = "Web APIs for Django, made easy."
@@ -2147,9 +2162,10 @@ xai = ["langchain-xai"]
 name = "langchain-core"
 version = "1.3.3"
 description = "Building applications with LLMs through composability"
-optional = false
+optional = true
 python-versions = "<4.0.0,>=3.10.0"
 groups = ["main"]
+markers = "extra == \"llm-all\""
 files = [
     {file = "langchain_core-1.3.3-py3-none-any.whl", hash = "sha256:18aae8506f37da7f74398492279a7d6efcee4f8e23c4c41c7af080eeb7ef7bd1"},
     {file = "langchain_core-1.3.3.tar.gz", hash = "sha256:fa510a5db8efdc0c6ff41c0939fb5c00a0183c11f6b84233e892e3227ff69182"},
@@ -2207,9 +2223,10 @@ tiktoken = ">=0.7.0,<1.0.0"
 name = "langchain-protocol"
 version = "0.0.15"
 description = "Python bindings for the LangChain agent streaming protocol"
-optional = false
+optional = true
 python-versions = "<4.0.0,>=3.10.0"
 groups = ["main"]
+markers = "extra == \"llm-all\""
 files = [
     {file = "langchain_protocol-0.0.15-py3-none-any.whl", hash = "sha256:461eb794358f83d5e42635a5797799ffec7b4702314e34edf73ac21e75d3ef79"},
     {file = "langchain_protocol-0.0.15.tar.gz", hash = "sha256:9ab2d11ee73944754f10e037e717098d3a6796f0e58afa9cadda6154e7655ade"},
@@ -2294,9 +2311,10 @@ orjson = ">=3.11.5"
 name = "langsmith"
 version = "0.7.22"
 description = "Client library to connect to the LangSmith Observability and Evaluation Platform."
-optional = false
+optional = true
 python-versions = ">=3.10"
 groups = ["main"]
+markers = "extra == \"llm-all\""
 files = [
     {file = "langsmith-0.7.22-py3-none-any.whl", hash = "sha256:6e9d5148314d74e86748cb9d3898632cad0320c9323d95f70f969e5bc078eee4"},
     {file = "langsmith-0.7.22.tar.gz", hash = "sha256:35bfe795d648b069958280760564632fd28ebc9921c04f3e209c0db6a6c7dc04"},
@@ -2848,18 +2866,6 @@ reference = "HEAD"
 resolved_reference = "160a8766f40f5f92a15145b10550854c461097d8"
 
 [[package]]
-name = "nepali"
-version = "1.2.0"
-description = "nepalidatetime compatible with python's datetime feature. Converting nepali date to english, parsing nepali datetime, nepali timezone, and timedelta support in nepali datetime"
-optional = false
-python-versions = ">=3.10"
-groups = ["main"]
-files = [
-    {file = "nepali-1.2.0-py3-none-any.whl", hash = "sha256:1f9244b2fcb51e6b9e710cc1c483024f8600954d545a9a12a2accf53213911b1"},
-    {file = "nepali-1.2.0.tar.gz", hash = "sha256:75a9d0bd4b3e95d72c7045539b63e84077686ffa12dff5db3fffe6579cbb511d"},
-]
-
-[[package]]
 name = "nepali-date-utils"
 version = "0.3.1"
 description = "Convert Nepali to English Dates: Easily switch between Nepali and English dates with this Python package."
@@ -3102,10 +3108,10 @@ et-xmlfile = "*"
 name = "orjson"
 version = "3.11.7"
 description = "Fast, correct Python JSON library supporting dataclasses, datetimes, and numpy"
-optional = false
+optional = true
 python-versions = ">=3.10"
 groups = ["main"]
-markers = "platform_python_implementation != \"PyPy\" or extra == \"llm-all\""
+markers = "extra == \"llm-all\""
 files = [
     {file = "orjson-3.11.7-cp310-cp310-macosx_10_15_x86_64.macosx_11_0_arm64.macosx_10_15_universal2.whl", hash = "sha256:a02c833f38f36546ba65a452127633afce4cf0dd7296b753d3bb54e55e5c0174"},
     {file = "orjson-3.11.7-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:b63c6e6738d7c3470ad01601e23376aa511e50e1f3931395b9f9c722406d1a67"},
@@ -4505,9 +4511,10 @@ use-chardet-on-py3 = ["chardet (>=3.0.2,<6)"]
 name = "requests-toolbelt"
 version = "1.0.0"
 description = "A utility belt for advanced users of python-requests"
-optional = false
+optional = true
 python-versions = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*"
 groups = ["main"]
+markers = "extra == \"llm-all\""
 files = [
     {file = "requests-toolbelt-1.0.0.tar.gz", hash = "sha256:7681a0a3d047012b5bdc0ee37d7f8f07ebe76ab08caeccfc3921ce23c88d5bc6"},
     {file = "requests_toolbelt-1.0.0-py2.py3-none-any.whl", hash = "sha256:cccfdd665f0a24fcf4726e690f65639d272bb0637b9b92dfd91a5568ccf6bd06"},
@@ -4913,7 +4920,6 @@ files = [
 
 [package.dependencies]
 certifi = "*"
-django = {version = ">=1.8", optional = true, markers = "extra == \"django\""}
 urllib3 = ">=1.26.11"
 
 [package.extras]
@@ -5246,7 +5252,7 @@ blobfile = ["blobfile (>=2)"]
 name = "tqdm"
 version = "4.67.3"
 description = "Fast, Extensible Progress Meter"
-optional = false
+optional = true
 python-versions = ">=3.7"
 groups = ["main"]
 markers = "extra == \"bigo-enrichment\" or extra == \"llm-all\""
@@ -5358,9 +5364,10 @@ zstd = ["zstandard (>=0.18.0)"]
 name = "uuid-utils"
 version = "0.14.1"
 description = "Fast, drop-in replacement for Python's uuid module, powered by Rust."
-optional = false
+optional = true
 python-versions = ">=3.9"
 groups = ["main"]
+markers = "extra == \"llm-all\""
 files = [
     {file = "uuid_utils-0.14.1-cp39-abi3-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl", hash = "sha256:93a3b5dc798a54a1feb693f2d1cb4cf08258c32ff05ae4929b5f0a2ca624a4f0"},
     {file = "uuid_utils-0.14.1-cp39-abi3-macosx_10_12_x86_64.whl", hash = "sha256:ccd65a4b8e83af23eae5e56d88034b2fe7264f465d3e830845f10d1591b81741"},
@@ -5725,9 +5732,10 @@ files = [
 name = "xxhash"
 version = "3.6.0"
 description = "Python binding for xxHash"
-optional = false
+optional = true
 python-versions = ">=3.7"
 groups = ["main"]
+markers = "extra == \"llm-all\""
 files = [
     {file = "xxhash-3.6.0-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:87ff03d7e35c61435976554477a7f4cd1704c3596a89a8300d5ce7fc83874a71"},
     {file = "xxhash-3.6.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:f572dfd3d0e2eb1a57511831cf6341242f5a9f8298a45862d085f5b93394a27d"},
@@ -5875,9 +5883,10 @@ files = [
 name = "zstandard"
 version = "0.25.0"
 description = "Zstandard bindings for Python"
-optional = false
+optional = true
 python-versions = ">=3.9"
 groups = ["main"]
+markers = "extra == \"llm-all\""
 files = [
     {file = "zstandard-0.25.0-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:e59fdc271772f6686e01e1b3b74537259800f57e24280be3f29c8a0deb1904dd"},
     {file = "zstandard-0.25.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:4d441506e9b372386a5271c64125f72d5df6d2a8e8a2a45a0ae09b03cb781ef7"},
@@ -5986,9 +5995,8 @@ cffi = ["cffi (>=1.17,<2.0) ; platform_python_implementation != \"PyPy\" and pyt
 [extras]
 bigo-enrichment = ["likhit", "markitdown"]
 llm-all = ["langchain", "langchain-google-genai", "langchain-openai", "openai"]
-s3 = ["cloudpathlib"]
 
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.12"
-content-hash = "2153792bb1260502d4c4da5ea3c6465b911a1370529de3cf0a3810ead066f4dc"
+content-hash = "d367760a50ed63572bb0187020aa50ffdd08cfaaa41673fb85ead8a8e09cd451"
