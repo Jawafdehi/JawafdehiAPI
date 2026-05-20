@@ -101,9 +101,7 @@ def call_llm(
             data = response.json()
             content = data["choices"][0]["message"]["content"]
         except (ValueError, KeyError, TypeError, IndexError) as exc:
-            raise CommandError(
-                "LLM API returned a malformed response"
-            ) from exc
+            raise CommandError("LLM API returned a malformed response") from exc
 
         if not content:
             raise CommandError("LLM API returned empty content")
