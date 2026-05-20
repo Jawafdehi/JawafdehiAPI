@@ -77,12 +77,12 @@ class ToastUIEditorWidget(Textarea):
         css = {
             "all": (
                 "https://uicdn.toast.com/editor/3.2.2/toastui-editor.min.css",
-                "https://uicdn.toast.com/editor-plugin-table-merged-cell/latest/toastui-editor-plugin-table-merged-cell.min.css",
+                "https://uicdn.toast.com/editor-plugin-table-merged-cell/3.0.2/toastui-editor-plugin-table-merged-cell.min.css",
             )
         }
         js = (
             "https://uicdn.toast.com/editor/3.2.2/toastui-editor-all.min.js",
-            "https://uicdn.toast.com/editor-plugin-table-merged-cell/latest/toastui-editor-plugin-table-merged-cell.min.js",
+            "https://uicdn.toast.com/editor-plugin-table-merged-cell/3.0.2/toastui-editor-plugin-table-merged-cell.min.js",
         )
 
     def __init__(self, attrs=None):
