@@ -105,12 +105,18 @@ def call_llm(
         except (ValueError, TypeError) as exc:
             raise CommandError(f"LLM API returned invalid JSON: {exc}") from exc
 
+        if not isinstance(data, dict):
+            raise CommandError("LLM API returned non-dictionary JSON root")
+
         choices = data.get("choices")
-        if not choices or not isinstance(choices, list):
+        if not isinstance(choices, list) or not choices:
             raise CommandError("LLM API returned no choices")
 
+        if not isinstance(choices[0], dict):
+            raise CommandError("LLM API returned malformed choice object")
+
         message = choices[0].get("message")
-        if not message or not isinstance(message, dict):
+        if not isinstance(message, dict):
             raise CommandError("LLM API returned message missing or invalid")
 
         content = message.get("content")
