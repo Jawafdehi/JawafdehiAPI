@@ -346,7 +346,7 @@ def test_build_bigo_prompt_mentions_multiple_amounts_and_damage_claim_focus():
             बिगो रु. 1,50,000 रहेको छ।
             जरिवाना रु. 20,000 छ।
         """,
-        case=case,
+        case=case,  # type: ignore[arg-type]
     )
 
     assert "When multiple monetary amounts appear" in prompt
@@ -576,7 +576,7 @@ def test_build_bigo_prompt_includes_source_metadata():
 
     prompt = command._build_bigo_prompt(
         markdown="Converted PDF content",
-        case=case,
+        case=case,  # type: ignore[arg-type]
         source=source,
     )
 

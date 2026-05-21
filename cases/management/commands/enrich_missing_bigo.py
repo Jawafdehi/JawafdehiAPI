@@ -558,7 +558,7 @@ class Command(BaseCommand):
                     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
                 },
             )
-            with urllib.request.urlopen(
+            with urllib.request.urlopen(  # NOSONAR
                 request, timeout=timeout
             ) as response:  # noqa: S310
                 headers = getattr(response, "headers", {})
@@ -764,7 +764,7 @@ class Command(BaseCommand):
 
         for marker in re.finditer(r"बिगो", text, flags=re.IGNORECASE):
             window = text[marker.start() : marker.start() + 220]
-            for amount_match in re.finditer(r"[0-9][0-9,]*(?:/[0-9]+)?", window):
+            for amount_match in re.finditer(r"\d[\d,]*(?:/\d+)?", window):
                 prefix = window[: amount_match.start()]
                 if not re.search(
                     r"रू\.?|रु\.?|rs\.?|npr|कायम|मागदाबी|दायर",
@@ -1218,7 +1218,7 @@ Press release markdown:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=30):  # noqa: S310
+            with urllib.request.urlopen(request, timeout=30):  # NOSONAR / noqa: S310
                 return
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
