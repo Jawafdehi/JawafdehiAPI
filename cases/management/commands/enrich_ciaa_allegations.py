@@ -885,6 +885,10 @@ class Command(BaseCommand):
         return score
 
     def _convert_source_to_markdown(self, source: DocumentSource) -> str:
+        if source.description and len(source.description.strip()) >= 50:
+            logger.debug(f"Using source.description for {source.source_id}")
+            return source.description
+
         try:
             from markitdown import MarkItDown
         except ImportError as exc:
@@ -899,18 +903,68 @@ class Command(BaseCommand):
                 prefix="allegation-enrichment-"
             ) as tmp_dir:
                 temp_path = self._download_source_to_path(source, Path(tmp_dir))
-                if not temp_path:
+                if temp_path:
+                    result = converter.convert_uri(temp_path.resolve().as_uri())
+                    if result.markdown and len(result.markdown.strip()) >= 50:
+                        return result.markdown
+
+                ranked_urls = self._ranked_source_urls(source)
+
+                last_error = None
+                for url in ranked_urls:
+                    try:
+                        temp_path = self._download_url_to_path(
+                            url, source.source_id, Path(tmp_dir)
+                        )
+                        if not temp_path:
+                            last_error = f"download failed for {url}"
+                            continue
+                        result = converter.convert_uri(temp_path.resolve().as_uri())
+                        if result.markdown and len(result.markdown.strip()) >= 50:
+                            return result.markdown
+                        last_error = f"insufficient content from {url}"
+                    except (OSError, ValueError) as e:
+                        last_error = f"{url}: {e}"
+                        continue
+
+                if not ranked_urls:
                     raise CommandError(
-                        f"Unable to download source {source.source_id} "
-                        f"(case {source.source_id}): downloader returned no path."
+                        f"No downloadable URLs found for source {source.source_id}"
                     )
-                result = converter.convert_uri(temp_path.resolve().as_uri())
-                return result.markdown
+
+                raise CommandError(
+                    f"Unable to convert source {source.source_id}: {last_error}"
+                )
         finally:
             try:
                 converter.close()
             except Exception:
                 logger.debug("Failed to close markitdown converter", exc_info=True)
+
+    def _download_url_to_path(
+        self, url: str, source_id: str, output_dir: Path
+    ) -> Path | None:
+        url = self._validate_url_scheme(url)
+        parsed = urllib.parse.urlparse(url)
+        guessed_name = _sanitize_download_filename(parsed.path, source_id)
+        out_path = _confined_output_path(output_dir, guessed_name)
+        try:
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+                },
+            )
+            opener = urllib.request.build_opener(_SafeRedirectHandler())
+            with opener.open(request, timeout=30) as response:
+                _copy_stream_to_path_with_limit(response, out_path)
+            return out_path
+        except OSError:
+            out_path.unlink(missing_ok=True)
+            return None
+        except CommandError:
+            out_path.unlink(missing_ok=True)
+            raise
 
     def _download_source_to_path(
         self, source: DocumentSource, output_dir: Path
@@ -936,37 +990,39 @@ class Command(BaseCommand):
                 _copy_stream_to_path_with_limit(in_file, out_path)
             return out_path
 
-        source_url = self._pick_source_url(source)
-        if not source_url:
-            return None
-
-        source_url = self._validate_url_scheme(source_url)
-        parsed = urllib.parse.urlparse(source_url)
-        guessed_name = _sanitize_download_filename(parsed.path, source.source_id)
-        out_path = _confined_output_path(output_dir, guessed_name)
-        try:
-            request = urllib.request.Request(
-                source_url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
-                },
-            )
-            opener = urllib.request.build_opener(_SafeRedirectHandler())
-            with opener.open(request, timeout=30) as response:
-                _copy_stream_to_path_with_limit(response, out_path)
-            return out_path
-        except OSError:
-            out_path.unlink(missing_ok=True)
-            return None
-        except CommandError:
-            out_path.unlink(missing_ok=True)
-            raise
+        return None
 
     def _pick_source_url(self, source: DocumentSource) -> str | None:
+        urls = self._ranked_source_urls(source)
+        return urls[0] if urls else None
+
+    def _ranked_source_urls(self, source: DocumentSource) -> list[str]:
         urls = [
-            url for url in (source.url or []) if isinstance(url, str) and url.strip()
+            url.strip()
+            for url in (source.url or [])
+            if isinstance(url, str) and url.strip()
         ]
-        return urls[0].strip() if urls else None
+        if not urls:
+            return []
+
+        direct_urls = [url for url in urls if self._is_direct_document_url(url)]
+        non_direct_urls = [url for url in urls if url not in direct_urls]
+
+        direct_urls.sort(key=self._source_url_priority, reverse=True)
+        return direct_urls + non_direct_urls
+
+    def _is_direct_document_url(self, url: str) -> bool:
+        parsed = urllib.parse.urlparse(url)
+        path = urllib.parse.unquote(parsed.path).lower()
+        return path.endswith((".pdf", ".doc", ".docx"))
+
+    def _source_url_priority(self, url: str) -> tuple[int, int]:
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.netloc.lower()
+        path = urllib.parse.unquote(parsed.path).lower()
+        is_ngm_store = int(host == "ngm-store.jawafdehi.org")
+        is_pdf = int(path.endswith(".pdf"))
+        return (is_ngm_store, is_pdf)
 
     def _validate_url_scheme(self, url: str) -> str:
         parsed = urllib.parse.urlparse(url)
