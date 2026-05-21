@@ -296,7 +296,7 @@ def test_parse_invalid_json_fallback():
     cmd = Command()
     raw = "1. First allegation\n2. Second allegation\n"
     result = cmd._parse_allegations(raw)
-    assert len(result) == 2
+    assert result == ["First allegation", "Second allegation"]
 
 
 def test_parse_empty_array_returns_none():
@@ -644,8 +644,9 @@ class _FakeHTTPError(urllib.error.HTTPError):
 
     def readinto(self, buf):
         data = self._body
-        buf[: len(data)] = data
-        return len(data)
+        n = min(len(buf), len(data))
+        buf[:n] = data[:n]
+        return n
 
 
 @patch("urllib.request.urlopen")
@@ -847,7 +848,7 @@ def test_call_llm_opencode_429_includes_usage_hint(mock_urlopen):
 
     error_msg = str(exc_info.value)
     assert "429" in error_msg
-    assert "usage limits" in error_msg.lower() or "limit" in error_msg.lower()
+    assert "usage limits" in error_msg.lower()
 
 
 # ── OpenCode Go vs Anthropic routing tests ───────────────────
@@ -975,7 +976,7 @@ def test_priority_and_case_id_mutually_exclusive():
 @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True)
 @patch(
     "cases.management.commands.enrich_ciaa_allegations.Command._call_llm_opencode",
-    return_value='{"allegations": ["Priority test"]}',
+    return_value='{"allegations": ["Priority test A", "Priority test B"]}',
 )
 @patch(
     "cases.management.commands.enrich_ciaa_allegations.Command._convert_source_to_markdown",
@@ -1022,7 +1023,7 @@ def test_priority_flag_filters_to_loader_cases(
     # Only the priority case should have been processed
     case_yes = Case.objects.get(case_id="prio-yes")
     case_no = Case.objects.get(case_id="prio-no")
-    assert case_yes.key_allegations == ["Priority test"]
+    assert case_yes.key_allegations == ["Priority test A", "Priority test B"]
     assert case_no.key_allegations == []
 
 
@@ -1030,7 +1031,7 @@ def test_priority_flag_filters_to_loader_cases(
 @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}, clear=True)
 @patch(
     "cases.management.commands.enrich_ciaa_allegations.Command._call_llm_opencode",
-    return_value='{"allegations": ["All test"]}',
+    return_value='{"allegations": ["All test A", "All test B"]}',
 )
 @patch(
     "cases.management.commands.enrich_ciaa_allegations.Command._convert_source_to_markdown",
@@ -1068,5 +1069,5 @@ def test_all_flag_processes_all_not_just_priority(
 
     case_a = Case.objects.get(case_id="all-a")
     case_b = Case.objects.get(case_id="all-b")
-    assert case_a.key_allegations == ["All test"]
-    assert case_b.key_allegations == ["All test"]
+    assert case_a.key_allegations == ["All test A", "All test B"]
+    assert case_b.key_allegations == ["All test A", "All test B"]

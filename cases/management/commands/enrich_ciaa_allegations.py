@@ -734,6 +734,14 @@ class Command(BaseCommand):
 
         allegations = self._trim_allegations(allegations)
         count = len(allegations)
+        if count < 2 or count > 5:
+            self.stats["cases_failed"] += 1
+            self.stdout.write(
+                self.style.ERROR(
+                    f"  FAILED: {count} allegation(s) extracted; expected 2-5"
+                )
+            )
+            return
         self.stats["allegation_counts"][count] = (
             self.stats["allegation_counts"].get(count, 0) + 1
         )
