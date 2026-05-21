@@ -163,8 +163,9 @@ def convert_to_markdown(url: str, session: requests.Session) -> Optional[str]:
     current_url = url
     for hop in range(5):
         try:
-            response = session.get(current_url, timeout=120, stream=True,
-                                   allow_redirects=False)
+            response = session.get(
+                current_url, timeout=120, stream=True, allow_redirects=False
+            )
         except requests.RequestException as exc:
             logger.warning("Failed to download %s: %s", current_url, exc)
             return None
@@ -179,7 +180,8 @@ def convert_to_markdown(url: str, session: requests.Session) -> Optional[str]:
             if next_hostname not in ALLOWED_HOSTS:
                 logger.warning(
                     "Redirect target host not allowed: %s -> %s",
-                    current_url, next_url,
+                    current_url,
+                    next_url,
                 )
                 return None
             current_url = next_url

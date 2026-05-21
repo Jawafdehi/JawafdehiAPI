@@ -326,7 +326,8 @@ class Command(BaseCommand):
 
         if not force:
             self.stats["cases_already_populated"] = sum(
-                1 for c in queryset
+                1
+                for c in queryset
                 if self._is_ciaa_special_court_case(c)
                 and (not fiscal_year or self._matches_fiscal_year(c, fiscal_year))
                 and c.timeline
