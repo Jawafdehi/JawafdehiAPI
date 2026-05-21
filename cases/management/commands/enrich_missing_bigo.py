@@ -569,7 +569,7 @@ class Command(BaseCommand):
                     )
                 self._copy_stream_to_path_with_limit(response, out_path)
             return out_path
-        except (urllib.error.URLError, OSError) as exc:
+        except OSError as exc:
             out_path.unlink(missing_ok=True)
             self._log_info(f"Download failed for {source.source_id}: {exc}")
             return None
