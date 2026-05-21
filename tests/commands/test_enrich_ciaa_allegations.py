@@ -423,8 +423,126 @@ def test_convert_source_no_url_no_file():
         url=[],
     )
     cmd = Command()
-    with pytest.raises(CommandError, match="Unable to download source"):
+    with pytest.raises(CommandError, match="No downloadable URLs found"):
         cmd._convert_source_to_markdown(source)
+
+
+@pytest.mark.django_db
+def test_convert_source_uses_description_first():
+    from cases.management.commands.enrich_ciaa_allegations import Command
+
+    source = DocumentSource.objects.create(
+        source_id="source:desc",
+        title="With Description",
+        description="This is a long enough description text that should be used "
+        "directly without downloading any URLs. It has more than fifty characters.",
+        url=["https://ciaa.gov.np/pressrelease/1"],
+    )
+    cmd = Command()
+    result = cmd._convert_source_to_markdown(source)
+    assert "long enough description" in result
+
+
+def test_ranked_source_urls_prioritizes_ngm_pdf():
+    from cases.management.commands.enrich_ciaa_allegations import Command
+
+    source = DocumentSource(
+        source_id="source:ngm",
+        title="NGM Source",
+        url=[
+            "https://ciaa.gov.np/pressrelease/3173",
+            "https://ngm-store.jawafdehi.org/ciaa/2024/123.pdf",
+            "https://other.example.com/doc.docx",
+        ],
+    )
+    cmd = Command()
+    ranked = cmd._ranked_source_urls(source)
+    # NGM-store PDF should be first
+    assert "ngm-store.jawafdehi.org" in ranked[0]
+    assert ranked[0].endswith(".pdf")
+    # Direct docs (PDF/DOCX) come before non-direct URLs
+    assert len(ranked) == 3
+
+
+def test_ranked_source_urls_no_direct_urls():
+    from cases.management.commands.enrich_ciaa_allegations import Command
+
+    source = DocumentSource(
+        source_id="source:web",
+        title="Web Only Source",
+        url=[
+            "https://ciaa.gov.np/pressrelease/1",
+            "https://other.gov.np/page",
+        ],
+    )
+    cmd = Command()
+    ranked = cmd._ranked_source_urls(source)
+    # All URLs returned in source order when no direct docs
+    assert len(ranked) == 2
+    assert ranked[0] == "https://ciaa.gov.np/pressrelease/1"
+
+
+@pytest.mark.django_db
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.Command._download_url_to_path",
+)
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.Command._download_source_to_path",
+    return_value=None,
+)
+def test_convert_source_tries_prioritized_urls_first(
+    mock_download_file, mock_download_url
+):
+    from cases.management.commands.enrich_ciaa_allegations import Command
+
+    source = DocumentSource.objects.create(
+        source_id="source:ngm-pdf",
+        title="NGM Mapped Source",
+        url=[
+            "https://ciaa.gov.np/pressrelease/3173",
+            "https://ngm-store.jawafdehi.org/ciaa/2024/123.pdf",
+        ],
+    )
+    cmd = Command()
+    with pytest.raises(CommandError, match="Unable to convert source"):
+        cmd._convert_source_to_markdown(source)
+
+    # Verify that download was attempted first for the NGM PDF
+    assert mock_download_url.call_count >= 2
+    first_url = mock_download_url.call_args_list[0][0][0]
+    assert "ngm-store.jawafdehi.org" in first_url
+    assert first_url.endswith(".pdf")
+
+
+@pytest.mark.django_db
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.Command._download_url_to_path",
+)
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.Command._download_source_to_path",
+    return_value=None,
+)
+def test_convert_source_fallback_to_next_url(
+    mock_download_file, mock_download_url
+):
+    from cases.management.commands.enrich_ciaa_allegations import Command
+
+    source = DocumentSource.objects.create(
+        source_id="source:fallback",
+        title="Fallback Source",
+        url=[
+            "https://ngm-store.jawafdehi.org/ciaa/2024/broken.pdf",
+            "https://ciaa.gov.np/pressrelease/3173",
+        ],
+    )
+    mock_download_url.return_value = None
+
+    cmd = Command()
+    with pytest.raises(CommandError, match="Unable to convert source"):
+        cmd._convert_source_to_markdown(source)
+
+    # Both URLs should have been attempted for fallback
+    assert mock_download_url.call_count >= 2
 
 
 # ── Dry-run safety test ────────────────────────────────────────
