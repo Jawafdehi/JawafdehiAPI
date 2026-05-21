@@ -380,6 +380,7 @@ class Command(BaseCommand):
             "cases_skipped": 0,
             "cases_failed": 0,
             "cases_no_content": 0,
+            "allegation_counts": {},
         }
 
     def add_arguments(self, parser):
@@ -563,7 +564,7 @@ class Command(BaseCommand):
                 resp = urllib.request.urlopen(req, timeout=timeout)
                 payload = json.loads(resp.read().decode("utf-8"))
                 raw = _parse_llm_opencode_response(payload, is_minimax)
-                logger.debug(f"LLM response: {raw[:500]}...")
+                logger.debug(f"LLM response: {raw[:100]}...")
                 return raw
 
             except urllib.error.HTTPError as e:
@@ -713,14 +714,29 @@ class Command(BaseCommand):
                 return
             allegations = self._parse_allegations(raw)
         else:
+            raw = None
             client = self._init_client(api_key, base_url)
             allegations = self._call_llm_anthropic(client, model, prompt, timeout)
         if not allegations:
             self.stats["cases_failed"] += 1
-            self.stdout.write(self.style.ERROR("  FAILED: No allegations extracted"))
+            if raw:
+                self.stdout.write(
+                    self.style.ERROR(
+                        f"  FAILED: No allegations extracted. "
+                        f"Raw response: {raw[:200]}..."
+                    )
+                )
+            else:
+                self.stdout.write(
+                    self.style.ERROR("  FAILED: No allegations extracted")
+                )
             return
 
         allegations = self._trim_allegations(allegations)
+        count = len(allegations)
+        self.stats["allegation_counts"][count] = (
+            self.stats["allegation_counts"].get(count, 0) + 1
+        )
         self._report_allegations(allegations)
 
         if not dry_run:
@@ -759,6 +775,8 @@ class Command(BaseCommand):
                 self.style.WARNING("  SKIPPED: No press release source found")
             )
             return None
+
+        self.stdout.write(f"  Source: {self._describe_source(source)}")
 
         try:
             press_release_text = self._convert_source_to_markdown(source)
@@ -847,6 +865,21 @@ class Command(BaseCommand):
         )
         best_score, best_source = ranked[0]
         return best_source if best_score > 0 else None
+
+    def _describe_source(self, source: DocumentSource) -> str:
+        if source.description and len(source.description.strip()) >= 50:
+            return f"description ({source.source_id} — {source.title[:120]})"
+        if source.uploaded_file:
+            name = source.uploaded_filename or source.uploaded_file.name
+            return f"uploaded file: {name} ({source.source_id})"
+        uploaded = source.uploaded_files.first()
+        if uploaded and uploaded.file:
+            name = uploaded.filename or uploaded.file.name
+            return f"uploaded file: {name} ({source.source_id})"
+        urls = self._ranked_source_urls(source)
+        if urls:
+            return f"URL: {urls[0]} ({source.source_id})"
+        return f"{source.source_id} (no content)"
 
     def _score_source_for_press_release(self, source: DocumentSource) -> int:
         upload_names = [
@@ -1046,7 +1079,7 @@ class Command(BaseCommand):
                     timeout=timeout,
                 )
                 raw = response.content[0].text
-                logger.debug(f"LLM response: {raw[:500]}...")
+                logger.debug(f"LLM response: {raw[:100]}...")
                 return self._parse_allegations(raw)
             except Exception as e:
                 logger.warning(f"LLM call attempt {attempt + 1} failed: {e}")
@@ -1137,6 +1170,12 @@ class Command(BaseCommand):
             self.stdout.write(
                 self.style.ERROR(f"Cases failed:     {self.stats['cases_failed']}")
             )
+        if self.stats["allegation_counts"]:
+            self.stdout.write("Allegations per case:")
+            for count in sorted(self.stats["allegation_counts"]):
+                self.stdout.write(
+                    f"  {count} allegation(s): {self.stats['allegation_counts'][count]}"
+                )
         self.stdout.write("=" * 60)
 
         if dry_run:
