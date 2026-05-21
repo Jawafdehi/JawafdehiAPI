@@ -523,9 +523,7 @@ def test_convert_source_tries_prioritized_urls_first(
     "cases.management.commands.enrich_ciaa_allegations.Command._download_source_to_path",
     return_value=None,
 )
-def test_convert_source_fallback_to_next_url(
-    mock_download_file, mock_download_url
-):
+def test_convert_source_fallback_to_next_url(mock_download_file, mock_download_url):
     from cases.management.commands.enrich_ciaa_allegations import Command
 
     source = DocumentSource.objects.create(
