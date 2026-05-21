@@ -64,6 +64,13 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
+        migrations.AlterField(
+            model_name="case",
+            name="description",
+            field=models.TextField(
+                blank=True, help_text="Markdown description of the case"
+            ),
+        ),
         migrations.RunPython(
             backfill_null_slugs,
             reverse_code=reverse_backfill,
