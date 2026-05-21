@@ -698,6 +698,7 @@ class Command(BaseCommand):
         if not clean:
             return None
 
+        clean.sort(key=lambda entry: entry["date"])
         return clean
 
     # ── persistence ─────────────────────────────────────────────────────
