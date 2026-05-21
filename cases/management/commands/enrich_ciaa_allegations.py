@@ -34,6 +34,10 @@ from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError
 
+from cases.management.commands._enrich_utils import (
+    parse_extraction_response,
+    resolve_api_key,
+)
 from cases.models import Case, CaseState, DocumentSource, SourceType
 from cases.services.priority_case_loader import filter_by_priority, load_priority_cases
 
@@ -125,24 +129,6 @@ def normalize_base_url(url: str | None) -> str:
     elif url.endswith("/zen/go"):
         url += "/v1"
     return url
-
-
-def resolve_api_key(cli_key: str | None = None, is_anthropic: bool = False) -> str:
-    if cli_key and cli_key.strip():
-        return cli_key.strip()
-    env_vars = (
-        ("ANTHROPIC_API_KEY", "JAWAFDEHI_LLM_API_KEY", "OPENCODE_API_KEY")
-        if is_anthropic
-        else ("JAWAFDEHI_LLM_API_KEY", "OPENCODE_API_KEY", "ANTHROPIC_API_KEY")
-    )
-    for env_var in env_vars:
-        val = os.environ.get(env_var)
-        if val:
-            return val
-    raise CommandError(
-        "No API key provided. Set --llm-api-key, JAWAFDEHI_LLM_API_KEY, "
-        "OPENCODE_API_KEY, or ANTHROPIC_API_KEY."
-    )
 
 
 def _llm_endpoint(base_url: str, model: str) -> str:
@@ -487,6 +473,11 @@ class Command(BaseCommand):
         base_url = normalize_base_url(base_url)
         is_opencode = "anthropic.com" not in base_url
         api_key = resolve_api_key(llm_api_key, is_anthropic=not is_opencode)
+        if not api_key:
+            raise CommandError(
+                "No API key provided. Set --llm-api-key, JAWAFDEHI_LLM_API_KEY, "
+                "OPENCODE_API_KEY, or ANTHROPIC_API_KEY."
+            )
         timeout = _llm_timeout(llm_timeout)
 
         self.stdout.write(
@@ -1113,31 +1104,7 @@ class Command(BaseCommand):
         body = _extract_fenced_block(raw)
         if body is not None:
             return body
-        brace_start = raw.find("{")
-        brace_end = raw.rfind("}")
-        if brace_start != -1 and brace_end != -1:
-            return raw[brace_start : brace_end + 1]
         return raw
-
-    def _parse_json_to_allegations(self, raw):
-        data = json.loads(raw)
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict):
-            result = data.get("allegations", data.get("response", []))
-            if not isinstance(result, list):
-                return [str(result)]
-            return result
-        return []
-
-    def _parse_fallback_allegations(self, raw):
-        lines = [
-            line.strip().lstrip("0123456789.-) ")
-            for line in raw.split("\n")
-            if line.strip()
-        ]
-        allegations = [line for line in lines if len(line) > 10]
-        return allegations if allegations else None
 
     def _flatten_allegation_items(self, allegations):
         flat = []
@@ -1151,13 +1118,11 @@ class Command(BaseCommand):
         return flat
 
     def _parse_allegations(self, raw):
-        body = self._extract_json_body(raw)
-        try:
-            allegations = self._parse_json_to_allegations(body)
-        except json.JSONDecodeError:
-            return self._parse_fallback_allegations(body)
+        entries = parse_extraction_response(raw, wrapper_keys={"allegations"})
+        if entries is None:
+            return None
 
-        flat = self._flatten_allegation_items(allegations)
+        flat = self._flatten_allegation_items(entries)
         if not flat:
             return None
         return flat[:5]

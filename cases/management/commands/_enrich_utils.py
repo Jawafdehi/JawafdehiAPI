@@ -22,13 +22,27 @@ logger = logging.getLogger(__name__)
 ALLOWED_HOSTS = frozenset({"ciaa.gov.np", "ngm-store.jawafdehi.org"})
 
 
-def resolve_api_key(cli_key: Optional[str]) -> Optional[str]:
-    """Resolve LLM API key from CLI argument or environment variables."""
-    if cli_key:
-        return cli_key
-    return os.environ.get("JAWAFDEHI_LLM_API_KEY") or os.environ.get(
-        "ANTHROPIC_API_KEY"
-    )
+def resolve_api_key(
+    cli_key: Optional[str] = None, is_anthropic: bool = False
+) -> Optional[str]:
+    """Resolve LLM API key from CLI argument or environment variables.
+
+    When is_anthropic is True, prefers ANTHROPIC_API_KEY first.
+    Otherwise prefers JAWAFDEHI_LLM_API_KEY and OPENCODE_API_KEY first.
+    """
+    if cli_key and cli_key.strip():
+        return cli_key.strip()
+    if is_anthropic:
+        for var in ("ANTHROPIC_API_KEY", "JAWAFDEHI_LLM_API_KEY", "OPENCODE_API_KEY"):
+            val = os.environ.get(var)
+            if val:
+                return val
+    else:
+        for var in ("JAWAFDEHI_LLM_API_KEY", "OPENCODE_API_KEY", "ANTHROPIC_API_KEY"):
+            val = os.environ.get(var)
+            if val:
+                return val
+    return None
 
 
 def is_valid_iso_date(date_str: str) -> bool:
