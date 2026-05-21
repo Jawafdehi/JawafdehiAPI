@@ -503,11 +503,12 @@ def test_convert_source_tries_prioritized_urls_first(
             "https://ngm-store.jawafdehi.org/ciaa/2024/123.pdf",
         ],
     )
+    mock_download_url.return_value = None
+
     cmd = Command()
     with pytest.raises(CommandError, match="Unable to convert source"):
         cmd._convert_source_to_markdown(source)
 
-    # Verify that download was attempted first for the NGM PDF
     assert mock_download_url.call_count >= 2
     first_url = mock_download_url.call_args_list[0][0][0]
     assert "ngm-store.jawafdehi.org" in first_url
