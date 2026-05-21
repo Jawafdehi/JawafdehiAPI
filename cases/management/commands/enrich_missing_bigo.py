@@ -736,9 +736,7 @@ class Command(BaseCommand):
     def _normalize_text_for_bigo(self, text: str | None) -> str:
         decoded = urllib.parse.unquote(str(text or ""))
         embedded_http = re.search(r"https?://", decoded)
-        if embedded_http and not decoded.lstrip().lower().startswith(
-            ("http://", "https://")
-        ):
+        if embedded_http and not decoded.lstrip().lower().startswith("http"):
             decoded = decoded[embedded_http.start() :]
         return decoded.translate(_NEPALI_TO_ASCII_DIGITS)
 

@@ -433,7 +433,7 @@ def test_validate_url_scheme_allows_https_and_local_http():
     with pytest.raises(
         ValueError, match="Only https URLs are allowed for non-local hosts"
     ):
-        command._validate_url_scheme("http://example.com/press-release.pdf")
+        command._validate_url_scheme("http://example.com/press-release.pdf")  # NOSONAR
 
     with pytest.raises(
         ValueError, match="Only https URLs are allowed for non-local hosts"
@@ -513,7 +513,7 @@ def test_case_patch_url_rejects_non_http_base_url():
     command = Command()
 
     with pytest.raises(ValueError, match="https for non-local hosts"):
-        command._case_patch_url("ftp://example.com", "case-slug")
+        command._case_patch_url("ftp://example.com", "case-slug")  # NOSONAR
 
     with pytest.raises(ValueError, match="must include a host"):
         command._case_patch_url("https:///api", "case-slug")
