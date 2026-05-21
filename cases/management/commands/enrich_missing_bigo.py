@@ -1236,10 +1236,7 @@ Press release markdown:
         parsed = urllib.parse.urlparse((api_base_url or "").strip())
         if not (
             parsed.scheme == "https"
-            or (
-                parsed.scheme == "http"
-                and self._is_loopback_host(parsed.hostname)
-            )
+            or (parsed.scheme == "http" and self._is_loopback_host(parsed.hostname))
         ):
             raise ValueError(
                 f"Invalid api_base_url '{api_base_url}': use https for non-local hosts."
