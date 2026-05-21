@@ -868,7 +868,8 @@ class Command(BaseCommand):
 
     def _describe_source(self, source: DocumentSource) -> str:
         if source.description and len(source.description.strip()) >= 50:
-            return f"description ({source.source_id} — {source.title[:120]})"
+            title = (source.title or "<untitled>").strip()[:120]
+            return f"description ({source.source_id} — {title})"
         if source.uploaded_file:
             name = source.uploaded_filename or source.uploaded_file.name
             return f"uploaded file: {name} ({source.source_id})"
@@ -878,7 +879,11 @@ class Command(BaseCommand):
             return f"uploaded file: {name} ({source.source_id})"
         urls = self._ranked_source_urls(source)
         if urls:
-            return f"URL: {urls[0]} ({source.source_id})"
+            parsed = urllib.parse.urlsplit(urls[0])
+            redacted = urllib.parse.urlunsplit(
+                (parsed.scheme, parsed.netloc, parsed.path, "", "")
+            )
+            return f"URL: {redacted} ({source.source_id})"
         return f"{source.source_id} (no content)"
 
     def _score_source_for_press_release(self, source: DocumentSource) -> int:
