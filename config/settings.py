@@ -363,23 +363,17 @@ for db_key in DATABASES:
     _apply_db_ssl_options(DATABASES[db_key])
 
 # Configure connection pooling for PostgreSQL only.
-# CONN_MAX_AGE is kept low (20s) because the production database runs on
-# a db-f1-micro tier with limited connection slots (~25). With Cloud Run
-# scaling to 2 instances x 2 gunicorn workers x 4 threads, peak connection
-# demand can exceed the database's capacity. Reducing CONN_MAX_AGE from 60s
-# to 20s releases idle connections faster and prevents connection exhaustion
-# under load. A proper long-term fix is to upgrade the database tier or add
-# pgBouncer connection pooling.
-if DATABASES["default"].get("ENGINE") == "django.db.backends.postgresql":
-    DATABASES["default"]["CONN_MAX_AGE"] = 20
-    DATABASES["default"]["CONN_HEALTH_CHECKS"] = True
-
-if (
-    "ngm" in DATABASES
-    and DATABASES["ngm"].get("ENGINE") == "django.db.backends.postgresql"
-):
-    DATABASES["ngm"]["CONN_MAX_AGE"] = 20
-    DATABASES["ngm"]["CONN_HEALTH_CHECKS"] = True
+# CONN_MAX_AGE defaults to 20s to prevent connection exhaustion on small
+# database tiers. The value can be overridden per environment via the
+# DATABASE_CONN_MAX_AGE environment variable.
+# Historical note: portal.jawafdehi.org experienced a ~2-minute outage on
+# 2026-05-22 when the db-f1-micro instance (~25 connection slots) was
+# exhausted under load. The DB tier has since been upgraded to db-g1-small.
+_conn_max_age = int(os.getenv("DATABASE_CONN_MAX_AGE", 20))
+for db_config in DATABASES.values():
+    if db_config.get("ENGINE") == "django.db.backends.postgresql":
+        db_config["CONN_MAX_AGE"] = _conn_max_age
+        db_config["CONN_HEALTH_CHECKS"] = True
 
 
 # Password validation
