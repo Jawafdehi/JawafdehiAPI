@@ -875,9 +875,6 @@ class Command(BaseCommand):
         return best_source if best_score > 0 else None
 
     def _describe_source(self, source: DocumentSource) -> str:
-        if source.description and len(source.description.strip()) >= 50:
-            title = (source.title or "<untitled>").strip()[:120]
-            return f"description ({source.source_id} — {title})"
         if source.uploaded_file:
             name = source.uploaded_filename or source.uploaded_file.name
             return f"uploaded file: {name} ({source.source_id})"
@@ -892,6 +889,9 @@ class Command(BaseCommand):
                 (parsed.scheme, parsed.netloc, parsed.path, "", "")
             )
             return f"URL: {redacted} ({source.source_id})"
+        if source.description and len(source.description.strip()) >= 500:
+            title = (source.title or "<untitled>").strip()[:120]
+            return f"description fallback ({source.source_id} — {title})"
         return f"{source.source_id} (no content)"
 
     def _score_source_for_press_release(self, source: DocumentSource) -> int:
@@ -931,10 +931,6 @@ class Command(BaseCommand):
         return score
 
     def _convert_source_to_markdown(self, source: DocumentSource) -> str:
-        if source.description and len(source.description.strip()) >= 50:
-            logger.debug(f"Using source.description for {source.source_id}")
-            return source.description
-
         try:
             from markitdown import MarkItDown
         except ImportError as exc:
@@ -950,6 +946,9 @@ class Command(BaseCommand):
             ) as tmp_dir:
                 temp_path = self._download_source_to_path(source, Path(tmp_dir))
                 if temp_path:
+                    logger.debug(
+                        "Converting uploaded source file for %s", source.source_id
+                    )
                     result = converter.convert_uri(temp_path.resolve().as_uri())
                     if result.markdown and len(result.markdown.strip()) >= 50:
                         return result.markdown
@@ -959,6 +958,9 @@ class Command(BaseCommand):
                 last_error = None
                 for url in ranked_urls:
                     try:
+                        logger.debug(
+                            "Converting source URL for %s: %s", source.source_id, url
+                        )
                         temp_path = self._download_url_to_path(
                             url, source.source_id, Path(tmp_dir)
                         )
@@ -972,6 +974,13 @@ class Command(BaseCommand):
                     except (OSError, ValueError) as e:
                         last_error = f"{url}: {e}"
                         continue
+
+                if source.description and len(source.description.strip()) >= 500:
+                    logger.debug(
+                        "Using long source.description fallback for %s",
+                        source.source_id,
+                    )
+                    return source.description
 
                 if not ranked_urls:
                     raise CommandError(
@@ -1062,13 +1071,14 @@ class Command(BaseCommand):
         path = urllib.parse.unquote(parsed.path).lower()
         return path.endswith((".pdf", ".doc", ".docx"))
 
-    def _source_url_priority(self, url: str) -> tuple[int, int]:
+    def _source_url_priority(self, url: str) -> tuple[int, int, int]:
         parsed = urllib.parse.urlparse(url)
         host = parsed.netloc.lower()
         path = urllib.parse.unquote(parsed.path).lower()
         is_ngm_store = int(host == "ngm-store.jawafdehi.org")
         is_pdf = int(path.endswith(".pdf"))
-        return (is_ngm_store, is_pdf)
+        is_direct_document = int(path.endswith((".pdf", ".doc", ".docx")))
+        return (is_ngm_store, is_pdf, is_direct_document)
 
     def _validate_url_scheme(self, url: str) -> str:
         parsed = urllib.parse.urlparse(url)

@@ -3,8 +3,11 @@
 import io
 import json
 import os
+import tempfile
 import urllib.error
 import urllib.request
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -428,19 +431,60 @@ def test_convert_source_no_url_no_file():
 
 
 @pytest.mark.django_db
-def test_convert_source_uses_description_first():
+def test_convert_source_uses_long_description_only_as_final_fallback():
     from cases.management.commands.enrich_ciaa_allegations import Command
 
     source = DocumentSource.objects.create(
         source_id="source:desc",
         title="With Description",
-        description="This is a long enough description text that should be used "
-        "directly without downloading any URLs. It has more than fifty characters.",
-        url=["https://ciaa.gov.np/pressrelease/1"],
+        description="Full press release fallback text. " * 30,
+        url=[],
     )
     cmd = Command()
     result = cmd._convert_source_to_markdown(source)
-    assert "long enough description" in result
+    assert "Full press release fallback text" in result
+
+
+@pytest.mark.django_db
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.Command._download_url_to_path",
+)
+@patch(
+    "cases.management.commands.enrich_ciaa_allegations.Command._download_source_to_path",
+    return_value=None,
+)
+def test_convert_source_prefers_ngm_pdf_over_short_description(
+    mock_download_file, mock_download_url
+):
+    from cases.management.commands.enrich_ciaa_allegations import Command
+
+    source = DocumentSource.objects.create(
+        source_id="source:short-desc-ngm-pdf",
+        title="NGM PDF with Short Description",
+        description="This short metadata description is longer than fifty characters.",
+        url=[
+            "https://ciaa.gov.np/pressrelease/3173",
+            "https://ngm-store.jawafdehi.org/ciaa/2024/3173.pdf",
+        ],
+    )
+
+    with tempfile.NamedTemporaryFile(suffix=".pdf") as temp_file:
+        mock_download_url.return_value = Path(temp_file.name)
+        converted_markdown = "Full press release markdown from NGM PDF. " * 30
+        mock_converter = MagicMock()
+        mock_converter.convert_uri.return_value = SimpleNamespace(
+            markdown=converted_markdown
+        )
+
+        with patch("markitdown.MarkItDown", return_value=mock_converter):
+            cmd = Command()
+            result = cmd._convert_source_to_markdown(source)
+
+    assert result == converted_markdown
+    assert result != source.description
+    first_url = mock_download_url.call_args_list[0][0][0]
+    assert first_url == "https://ngm-store.jawafdehi.org/ciaa/2024/3173.pdf"
+    mock_converter.convert_uri.assert_called_once()
 
 
 def test_ranked_source_urls_prioritizes_ngm_pdf():
