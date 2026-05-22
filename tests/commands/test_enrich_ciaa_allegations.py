@@ -318,7 +318,30 @@ def test_parse_truncates_over_max():
     items = [f"Allegation {i}" for i in range(10)]
     raw = json.dumps({"allegations": items})
     result = cmd._parse_allegations(raw)
-    assert len(result) == 5
+    assert len(result) == 3
+
+
+def test_prompt_instructs_reviewed_allegation_style():
+    from cases.management.commands.enrich_ciaa_allegations import (
+        SYSTEM_PROMPT,
+        USER_PROMPT_TEMPLATE,
+    )
+
+    user_prompt = USER_PROMPT_TEMPLATE.format(
+        case_title="टेस्ट मुद्दा",
+        bigo="रू ३८,६७,१७,६४०",
+        press_release="प्रेस विज्ञप्ति पाठ",
+    )
+
+    assert "Extract 2-3 key allegation" in user_prompt
+    assert "exactly one" in user_prompt
+    assert "उल्लेख छ" in user_prompt
+    assert "first allegation a descriptive overview" in user_prompt
+    assert "shorter supporting allegations" in user_prompt
+    assert "एक निजी कम्पनी" in user_prompt
+    assert "रु. ३८ करोडभन्दा बढी" in user_prompt
+    assert "Return 2-3 allegations" in SYSTEM_PROMPT
+    assert "End allegations with attribution phrases" in SYSTEM_PROMPT
 
 
 # ── Case filtering tests ──────────────────────────────────
@@ -739,6 +762,15 @@ def test_call_llm_opencode_retries_on_503(mock_urlopen):
 
     assert mock_urlopen.call_count == 3
     assert mock_sleep.call_count == 2
+
+
+def test_trim_allegations_limits_to_three():
+    from cases.management.commands.enrich_ciaa_allegations import Command
+
+    cmd = Command()
+    result = cmd._trim_allegations(["A", "B", "C", "D"])
+
+    assert result == ["A", "B", "C"]
 
 
 @patch("urllib.request.urlopen")

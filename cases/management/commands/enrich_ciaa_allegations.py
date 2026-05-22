@@ -241,14 +241,18 @@ from CIAA (Commission for the Investigation of Abuse of Authority) press release
 Every allegation MUST:
 1. Be factually grounded in the provided press release — NO fabrication
 2. Be written in professional, accessible Nepali (नेपाली)
-3. Name the persons involved and their official positions
-4. Describe the specific misconduct mechanism (what was done and how)
-5. Include the disputed amount (बिगो) when mentioned in the source
-6. Include the time period (date range or fiscal year) when specified
-7. Be self-contained — understandable without additional context
-8. Follow the established Jawafdehi allegation style (see examples below)
+3. Focus on the accused entities and their alleged acts, not on listing related entities
+4. Describe related entities by role when possible (for example, "एक निजी कम्पनी", "निर्माण व्यवसायी", or "सम्बन्धित उपभोक्ता समिति") unless the press release makes a name essential
+5. Describe the specific misconduct mechanism (what was done and how)
+6. Include the disputed amount (बिगो) when mentioned in the source, using readable Nepali-scale wording when possible (for example, "रु. ३८ करोडभन्दा बढी" instead of "रु. ३८,६७,१७,६४०")
+7. Include the time period (date range or fiscal year) when specified
+8. Be self-contained — understandable without additional context
+9. Follow the established Jawafdehi allegation style (see examples below)
 
-Each allegation is 1-3 complete sentences. Use formal but clear Nepali.
+Return 2-3 allegations. Each allegation MUST be exactly one sentence.
+The first allegation MUST be the most descriptive overview of the primary allegation.
+The second and third allegations, if present, MUST be shorter supporting allegations.
+Use formal but clear Nepali.
 
 DO NOT:
 - Fabricate or embellish beyond the source text
@@ -256,10 +260,16 @@ DO NOT:
 - State legal conclusions about guilt or innocence
 - Write vague statements like "भ्रष्टाचार गरेको"
 - Mix multiple unrelated misconducts into one allegation
+- End allegations with attribution phrases such as "उल्लेख छ", "भनिएको छ", "जनाइएको छ", or "देखिन्छ"
+- Include multiple sentences in one allegation
+- List related entity names when a descriptive role is enough
+- Use long comma-formatted Nepali amounts when a readable crore/lakh approximation is clearer
 
-STRUCTURE each allegation in Nepali as:
+STRUCTURE the first allegation in Nepali as:
 "कसले — के गर्यो — कसरी — कति रकम — कुन अवधिमा"
 (Who — did what — how — what amount — during what period)
+
+STRUCTURE supporting allegations as shorter statements describing secondary mechanisms, supporting acts, or specific misuse patterns.
 
 REFERENCE EXAMPLES from published Jawafdehi cases:
 
@@ -283,15 +293,20 @@ Example 4 (Embezzlement):
 बैङ्क दाखिला नगरी अपचलन गरी हिनामिना गरेको।"
 """
 
-USER_PROMPT_TEMPLATE = """Extract 2-5 key allegation statements from this CIAA press release.
+USER_PROMPT_TEMPLATE = """Extract 2-4 key allegation statements from this CIAA press release.
 
 Case title: {case_title}
 Bigo amount: {bigo}
 
 Instructions:
-- Each allegation must be a complete, self-contained statement in Nepali
-- Follow the Jawafdehi allegation style shown in the system prompt
-- Include names, positions, amounts, and time periods when available
+- Each allegation must be exactly one complete, self-contained sentence in Nepali
+- Do not end any allegation with attribution wording such as "उल्लेख छ", "भनिएको छ", "जनाइएको छ", or "देखिन्छ"
+- Make the first allegation a descriptive overview of the primary allegation
+- Make the second and third allegations shorter supporting allegations
+- Focus on accused entities and their acts; do not include related entity names unless essential
+- Prefer role descriptions for related entities, such as "एक निजी कम्पनी", "निर्माण व्यवसायी", or "सम्बन्धित उपभोक्ता समिति"
+- Include names and positions of accused entities when available
+- Include amounts and time periods when available, but express large amounts readably in Nepali scale when possible, such as "रु. ३८ करोडभन्दा बढी" instead of "रु. ३८,६७,१७,६४०"
 - Extract distinct allegations, not variations of the same claim
 
 Press release text:
@@ -734,11 +749,11 @@ class Command(BaseCommand):
 
         allegations = self._trim_allegations(allegations)
         count = len(allegations)
-        if count < 2 or count > 5:
+        if count < 2 or count > 3:
             self.stats["cases_failed"] += 1
             self.stdout.write(
                 self.style.ERROR(
-                    f"  FAILED: {count} allegation(s) extracted; expected 2-5"
+                    f"  FAILED: {count} allegation(s) extracted; expected 2-3"
                 )
             )
             return
@@ -836,12 +851,12 @@ class Command(BaseCommand):
         if len(allegations) < 2:
             self.stdout.write(
                 self.style.WARNING(
-                    f"  WARNING: Only {len(allegations)} allegation(s) extracted (want 2-5)"
+                    f"  WARNING: Only {len(allegations)} allegation(s) extracted (want 2-3)"
                 )
             )
-        if len(allegations) > 5:
-            allegations = allegations[:5]
-            self.stdout.write(self.style.WARNING("  Truncated to 5 allegations"))
+        if len(allegations) > 3:
+            allegations = allegations[:3]
+            self.stdout.write(self.style.WARNING("  Truncated to 3 allegations"))
         return allegations
 
     def _report_allegations(self, allegations):
@@ -1170,7 +1185,7 @@ class Command(BaseCommand):
         flat = self._flatten_allegation_items(allegations)
         if not flat:
             return None
-        return flat[:5]
+        return flat[:3]
 
     def _print_summary(self, dry_run, elapsed_str="0s"):
         self.stdout.write("\n" + "=" * 60)
