@@ -293,7 +293,7 @@ Example 4 (Embezzlement):
 बैङ्क दाखिला नगरी अपचलन गरी हिनामिना गरेको।"
 """
 
-USER_PROMPT_TEMPLATE = """Extract 2-4 key allegation statements from this CIAA press release.
+USER_PROMPT_TEMPLATE = """Extract 2-3 key allegation statements from this CIAA press release.
 
 Case title: {case_title}
 Bigo amount: {bigo}
