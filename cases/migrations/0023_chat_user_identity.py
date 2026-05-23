@@ -8,7 +8,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("cases", "0022_alter_case_description"),
+        ("cases", "0021_enforce_slug_not_null"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
