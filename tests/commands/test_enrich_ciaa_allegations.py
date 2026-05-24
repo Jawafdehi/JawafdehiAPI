@@ -17,6 +17,7 @@ from django.core.management.base import CommandError
 
 from cases.models import Case, CaseState, CaseType, DocumentSource
 
+
 @pytest.fixture(autouse=True)
 def _stub_markitdown_if_missing(monkeypatch):
     if "markitdown" not in sys.modules:
