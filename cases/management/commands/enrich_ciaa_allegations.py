@@ -247,7 +247,9 @@ class Command(BaseCommand):
         )
 
     def _get_ciaa_cases(
-        self, case_id: Optional[str] = None, limit: Optional[int] = None,
+        self,
+        case_id: Optional[str] = None,
+        limit: Optional[int] = None,
         priority: bool = False,
     ) -> list[Case]:
         """Return DRAFT cases with empty key_allegations that are candidates for enrichment."""
