@@ -26,7 +26,7 @@ from urllib.parse import urlparse
 
 import requests
 from django.core.management.base import BaseCommand, CommandError
-from django.db import transaction
+from django.db import close_old_connections, transaction
 
 from cases.models import Case, DocumentSource
 from cases.services.priority_case_loader import filter_by_priority, load_priority_cases
@@ -465,6 +465,7 @@ class Command(BaseCommand):
 
         tmp_path = None
         try:
+            close_old_connections()
             with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
                 tmp_path = tmp.name
                 for chunk in response.iter_content(chunk_size=8192):
@@ -496,6 +497,7 @@ class Command(BaseCommand):
                     Path(tmp_path).unlink(missing_ok=True)
                 except Exception:
                     pass
+            close_old_connections()
 
     def _extract_allegations(
         self,
