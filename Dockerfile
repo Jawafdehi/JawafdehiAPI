@@ -8,6 +8,12 @@ RUN apt-get update && apt-get install -y \
     postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
+# Cloud SQL server CA certificate for TLS database connections.
+COPY cloudsql-ca.pem /etc/ssl/certs/cloudsql-ca.pem
+
+ENV DATABASE_SSL_CA_CERT_FILE=/etc/ssl/certs/cloudsql-ca.pem
+ENV DATABASE_SSL_MODE=verify-ca
+
 RUN pip install poetry
 
 COPY pyproject.toml poetry.lock ./
