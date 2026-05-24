@@ -189,14 +189,9 @@ class Command(BaseCommand):
         verbose = options.get("verbose")
 
         if priority and case_id:
-            self.stderr.write(
-                self.style.ERROR(
-                    "--priority and --case-id are mutually exclusive"
-                )
-            )
-            return
+            raise CommandError("--priority and --case-id are mutually exclusive")
 
-        if not priority and not all_cases_flag:
+        if not any([priority, all_cases_flag, case_id]):
             self.stdout.write(
                 self.style.NOTICE(
                     "Processing all DRAFT CIAA cases (default). "
