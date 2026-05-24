@@ -834,6 +834,7 @@ def test_call_llm_opencode_success_standard_model(mock_urlopen):
             ]
         }
     ).encode("utf-8")
+    mock_resp.__enter__.return_value = mock_resp
     mock_urlopen.return_value = mock_resp
 
     result = cmd._call_llm_opencode(
@@ -858,6 +859,7 @@ def test_call_llm_opencode_success_minimax_model(mock_urlopen):
     mock_resp.read.return_value = json.dumps(
         {"content": [{"text": '{"allegations": ["Minimax allegation"]}'}]}
     ).encode("utf-8")
+    mock_resp.__enter__.return_value = mock_resp
     mock_urlopen.return_value = mock_resp
 
     result = cmd._call_llm_opencode(
