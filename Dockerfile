@@ -9,10 +9,10 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Cloud SQL server CA certificate for TLS database connections.
-# Downloaded from: gcloud sql instances describe nepal-entity-service-db --project=newnepal2 --format="value(serverCaCert.cert)"
 COPY cloudsql-ca.pem /etc/ssl/certs/cloudsql-ca.pem
 
 ENV DATABASE_SSL_CA_CERT_FILE=/etc/ssl/certs/cloudsql-ca.pem
+ENV DATABASE_SSL_MODE=verify-ca
 
 RUN pip install poetry
 
