@@ -496,7 +496,7 @@ def test_convert_source_prefers_ngm_pdf_over_short_description(
         converted_markdown = "Full press release markdown from NGM PDF. " * 30
         mock_converter = MagicMock()
         mock_converter.convert_uri.return_value = SimpleNamespace(
-            markdown=converted_markdown
+            text_content=converted_markdown
         )
 
         with patch("markitdown.MarkItDown", return_value=mock_converter):

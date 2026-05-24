@@ -576,8 +576,8 @@ class Command(BaseCommand):
                     headers=headers,
                     method="POST",
                 )
-                resp = urllib.request.urlopen(req, timeout=timeout)
-                payload = json.loads(resp.read().decode("utf-8"))
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    payload = json.loads(resp.read().decode("utf-8"))
                 raw = _parse_llm_opencode_response(payload, is_minimax)
                 logger.debug(f"LLM response: {raw[:100]}...")
                 return raw
@@ -955,61 +955,55 @@ class Command(BaseCommand):
             ) from exc
 
         converter = MarkItDown(enable_plugins=True)
-        try:
-            with tempfile.TemporaryDirectory(
-                prefix="allegation-enrichment-"
-            ) as tmp_dir:
-                temp_path = self._download_source_to_path(source, Path(tmp_dir))
-                if temp_path:
-                    logger.debug(
-                        "Converting uploaded source file for %s", source.source_id
-                    )
-                    result = converter.convert_uri(temp_path.resolve().as_uri())
-                    if result.markdown and len(result.markdown.strip()) >= 50:
-                        return result.markdown
-
-                ranked_urls = self._ranked_source_urls(source)
-
-                last_error = None
-                for url in ranked_urls:
-                    try:
-                        logger.debug(
-                            "Converting source URL for %s: %s", source.source_id, url
-                        )
-                        temp_path = self._download_url_to_path(
-                            url, source.source_id, Path(tmp_dir)
-                        )
-                        if not temp_path:
-                            last_error = f"download failed for {url}"
-                            continue
-                        result = converter.convert_uri(temp_path.resolve().as_uri())
-                        if result.markdown and len(result.markdown.strip()) >= 50:
-                            return result.markdown
-                        last_error = f"insufficient content from {url}"
-                    except (OSError, ValueError) as e:
-                        last_error = f"{url}: {e}"
-                        continue
-
-                if source.description and len(source.description.strip()) >= 500:
-                    logger.debug(
-                        "Using long source.description fallback for %s",
-                        source.source_id,
-                    )
-                    return source.description
-
-                if not ranked_urls:
-                    raise CommandError(
-                        f"No downloadable URLs found for source {source.source_id}"
-                    )
-
-                raise CommandError(
-                    f"Unable to convert source {source.source_id}: {last_error}"
+        with tempfile.TemporaryDirectory(
+            prefix="allegation-enrichment-"
+        ) as tmp_dir:
+            temp_path = self._download_source_to_path(source, Path(tmp_dir))
+            if temp_path:
+                logger.debug(
+                    "Converting uploaded source file for %s", source.source_id
                 )
-        finally:
-            try:
-                converter.close()
-            except Exception:
-                logger.debug("Failed to close markitdown converter", exc_info=True)
+                result = converter.convert_uri(temp_path.resolve().as_uri())
+                if result.text_content and len(result.text_content.strip()) >= 50:
+                    return result.text_content
+
+            ranked_urls = self._ranked_source_urls(source)
+
+            last_error = None
+            for url in ranked_urls:
+                try:
+                    logger.debug(
+                        "Converting source URL for %s: %s", source.source_id, url
+                    )
+                    temp_path = self._download_url_to_path(
+                        url, source.source_id, Path(tmp_dir)
+                    )
+                    if not temp_path:
+                        last_error = f"download failed for {url}"
+                        continue
+                    result = converter.convert_uri(temp_path.resolve().as_uri())
+                    if result.text_content and len(result.text_content.strip()) >= 50:
+                        return result.text_content
+                    last_error = f"insufficient content from {url}"
+                except (OSError, ValueError) as e:
+                    last_error = f"{url}: {e}"
+                    continue
+
+            if source.description and len(source.description.strip()) >= 500:
+                logger.debug(
+                    "Using long source.description fallback for %s",
+                    source.source_id,
+                )
+                return source.description
+
+            if not ranked_urls:
+                raise CommandError(
+                    f"No downloadable URLs found for source {source.source_id}"
+                )
+
+            raise CommandError(
+                f"Unable to convert source {source.source_id}: {last_error}"
+            )
 
     def _download_url_to_path(
         self, url: str, source_id: str, output_dir: Path
