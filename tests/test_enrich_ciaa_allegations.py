@@ -5,6 +5,7 @@ import requests
 
 from cases.management.commands import enrich_ciaa_allegations
 from cases.management.commands.enrich_ciaa_allegations import Command
+from cases.models import Case
 
 
 class FakeResponse:
@@ -37,11 +38,6 @@ class FakeMarkItDown:
     def convert(self, path):
         assert path
         return SimpleNamespace(text_content="x" * 201)
-
-
-class FakeCase:
-    case_id = "CASE-1"
-    title = "Case title"
 
 
 def test_convert_to_markdown_closes_old_db_connections(monkeypatch):
@@ -162,7 +158,7 @@ def test_process_case_closes_old_db_connections_after_llm_before_save(monkeypatc
     )
 
     command._process_case(
-        case=FakeCase(),
+        case=Case(case_id="CASE-1", title="Case title"),
         idx=1,
         total=1,
         dry_run=False,
