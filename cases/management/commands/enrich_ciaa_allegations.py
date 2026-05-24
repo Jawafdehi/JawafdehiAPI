@@ -210,6 +210,20 @@ def _parse_llm_opencode_response(payload: dict, is_minimax: bool) -> str:
     return payload.get("choices", [{}])[0].get("message", {}).get("content", "")
 
 
+def _parse_llm_response_json(raw_text: str) -> dict:
+    decoder = json.JSONDecoder()
+    idx = 0
+    while idx < len(raw_text):
+        try:
+            obj, end = decoder.raw_decode(raw_text, idx)
+        except json.JSONDecodeError:
+            break
+        if isinstance(obj, dict) and ("choices" in obj or "content" in obj):
+            return obj
+        idx = end
+    return decoder.raw_decode(raw_text)[0]
+
+
 def _format_llm_http_error(status: int, body_snippet: str) -> str:
     msg = f"LLM HTTP {status}: {body_snippet[:300]}"
     if status == 429:
@@ -578,7 +592,7 @@ class Command(BaseCommand):
                 )
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     raw_text = resp.read().decode("utf-8")
-                payload, _ = json.JSONDecoder().raw_decode(raw_text)
+                payload = _parse_llm_response_json(raw_text)
                 raw = _parse_llm_opencode_response(payload, is_minimax)
                 logger.debug(f"LLM response: {raw[:100]}...")
                 return raw
