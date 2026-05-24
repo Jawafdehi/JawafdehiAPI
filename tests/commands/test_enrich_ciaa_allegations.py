@@ -345,7 +345,13 @@ def test_prompt_instructs_reviewed_allegation_style():
     assert "shorter supporting allegations" in user_prompt
     assert "एक निजी कम्पनी" in user_prompt
     assert "रु. ३८ करोडभन्दा बढी" in user_prompt
+    assert "group them by role" in user_prompt
+    assert "name lists dominate" in user_prompt
+    assert "remedies or procedural outcomes" in user_prompt
     assert "Return 2-3 allegations" in SYSTEM_PROMPT
+    assert "long comma-separated list of accused names" in SYSTEM_PROMPT
+    assert "asset-return demands" in SYSTEM_PROMPT
+    assert "role group" in SYSTEM_PROMPT
     assert "End allegations with attribution phrases" in SYSTEM_PROMPT
 
 

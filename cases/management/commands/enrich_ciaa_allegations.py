@@ -186,7 +186,7 @@ def _build_llm_opencode_body(
     if is_minimax:
         body = {
             "model": normalized_model,
-            "max_tokens": 3000,
+            "max_tokens": 6000,
             "system": SYSTEM_PROMPT,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.1,
@@ -194,7 +194,7 @@ def _build_llm_opencode_body(
     else:
         body = {
             "model": normalized_model,
-            "max_tokens": 3000,
+            "max_tokens": 6000,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
@@ -255,17 +255,19 @@ from CIAA (Commission for the Investigation of Abuse of Authority) press release
 Every allegation MUST:
 1. Be factually grounded in the provided press release — NO fabrication
 2. Be written in professional, accessible Nepali (नेपाली)
-3. Focus on the accused entities and their alleged acts, not on listing related entities
-4. Describe related entities by role when possible (for example, "एक निजी कम्पनी", "निर्माण व्यवसायी", or "सम्बन्धित उपभोक्ता समिति") unless the press release makes a name essential
-5. Describe the specific misconduct mechanism (what was done and how)
-6. Include the disputed amount (बिगो) when mentioned in the source, using readable Nepali-scale wording when possible (for example, "रु. ३८ करोडभन्दा बढी" instead of "रु. ३८,६७,१७,६४०")
-7. Include the time period (date range or fiscal year) when specified
-8. Be self-contained — understandable without additional context
-9. Follow the established Jawafdehi allegation style (see examples below)
+3. Focus on accused entities and alleged acts, not long name lists
+4. Group accused people by office/role when many names appear, naming only the principal accused or role group when enough
+5. Describe related entities by role when possible (for example, "एक निजी कम्पनी", "निर्माण व्यवसायी", or "सम्बन्धित उपभोक्ता समिति") unless the press release makes a name essential
+6. Describe the specific misconduct mechanism (what was done and how)
+7. Include the disputed amount (बिगो) when mentioned in the source, using readable Nepali-scale wording when possible (for example, "रु. ३८ करोडभन्दा बढी" instead of "रु. ३८,६७,१७,६४०")
+8. Include the time period (date range or fiscal year) when specified
+9. Be self-contained — understandable without additional context
+10. Follow the established Jawafdehi allegation style (see examples below)
 
 Return 2-3 allegations. Each allegation MUST be exactly one sentence.
 The first allegation MUST be the most descriptive overview of the primary allegation.
-The second and third allegations, if present, MUST be shorter supporting allegations.
+The first allegation MUST mention the core institution/property/transaction, the alleged scheme, and the financial harm; it MUST NOT spend most of the sentence listing accused names.
+The second and third allegations, if present, MUST be shorter supporting allegations that add a different mechanism or actor role; they MUST NOT restate the first allegation with different wording.
 Use formal but clear Nepali.
 
 DO NOT:
@@ -274,16 +276,21 @@ DO NOT:
 - State legal conclusions about guilt or innocence
 - Write vague statements like "भ्रष्टाचार गरेको"
 - Mix multiple unrelated misconducts into one allegation
-- End allegations with attribution phrases such as "उल्लेख छ", "भनिएको छ", "जनाइएको छ", or "देखिन्छ"
+- Start with a long comma-separated list of accused names when a role group can carry the allegation
+- Produce near-duplicate allegations that repeat the same accused list and same misconduct
+- Write remedies, requests, or procedural outcomes as allegations, such as asset-return demands, confiscation requests, charge filing, or punishment requests
+- End allegations with attribution phrases such as "उल्लेख छ", "भनिएको छ", "जनाइएको छ", "देखिन्छ", or "आरोप छ"
 - Include multiple sentences in one allegation
 - List related entity names when a descriptive role is enough
 - Use long comma-formatted Nepali amounts when a readable crore/lakh approximation is clearer
 
 STRUCTURE the first allegation in Nepali as:
-"कसले — के गर्यो — कसरी — कति रकम — कुन अवधिमा"
-(Who — did what — how — what amount — during what period)
+"मुख्य पदाधिकारी/भूमिका समूहले — कुन संस्था/सम्पत्ति/कारोबारमा — के योजना/कृत्य गरे — कसरी — कति रकम/हानि — कुन अवधिमा"
+(Principal role group — institution/property/transaction — alleged scheme/action — mechanism — amount/harm — period)
 
 STRUCTURE supporting allegations as shorter statements describing secondary mechanisms, supporting acts, or specific misuse patterns.
+Each supporting allegation MUST still describe alleged misconduct by an accused actor, not a legal remedy or requested court outcome.
+If the source lists many accused names, compress them into a role group such as "तत्कालीन अध्यक्ष र सञ्चालक समिति सदस्यहरू" unless one person's name is necessary to identify the case.
 
 REFERENCE EXAMPLES from published Jawafdehi cases:
 
@@ -314,12 +321,16 @@ Bigo amount: {bigo}
 
 Instructions:
 - Each allegation must be exactly one complete, self-contained sentence in Nepali
-- Do not end any allegation with attribution wording such as "उल्लेख छ", "भनिएको छ", "जनाइएको छ", or "देखिन्छ"
+- Do not end any allegation with attribution wording such as "उल्लेख छ", "भनिएको छ", "जनाइएको छ", "देखिन्छ", or "आरोप छ"
 - Make the first allegation a descriptive overview of the primary allegation
+- Make the first allegation about substance: institution/property/transaction, alleged scheme, mechanism, amount or harm, and period when available
 - Make the second and third allegations shorter supporting allegations
+- Make each allegation distinct; do not repeat the same accused list and same misconduct in multiple sentences
+- Each allegation must describe alleged misconduct by accused actors, not remedies or procedural outcomes such as asset-return demands, confiscation requests, charge filing, or punishment requests
 - Focus on accused entities and their acts; do not include related entity names unless essential
 - Prefer role descriptions for related entities, such as "एक निजी कम्पनी", "निर्माण व्यवसायी", or "सम्बन्धित उपभोक्ता समिति"
-- Include names and positions of accused entities when available
+- When many accused names are listed, group them by role such as "तत्कालीन अध्यक्ष र सञ्चालक समिति सदस्यहरू"; include individual names only when needed to identify the principal accused or a distinct act
+- Include names and positions of accused entities when available, but do not let name lists dominate the allegation
 - Include amounts and time periods when available, but express large amounts readably in Nepali scale when possible, such as "रु. ३८ करोडभन्दा बढी" instead of "रु. ३८,६७,१७,६४०"
 - Extract distinct allegations, not variations of the same claim
 
@@ -1115,7 +1126,7 @@ class Command(BaseCommand):
             try:
                 response = client.messages.create(
                     model=model,
-                    max_tokens=3000,
+                    max_tokens=6000,
                     system=SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.1,
