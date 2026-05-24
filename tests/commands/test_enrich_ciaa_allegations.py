@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import sys
 import tempfile
 import urllib.error
 import urllib.request
@@ -15,6 +16,10 @@ from django.core.management import call_command, load_command_class
 from django.core.management.base import CommandError
 
 from cases.models import Case, CaseState, CaseType, DocumentSource
+
+_patch_markitdown = None
+if "markitdown" not in sys.modules:
+    sys.modules["markitdown"] = MagicMock()
 
 
 def _make_case(
