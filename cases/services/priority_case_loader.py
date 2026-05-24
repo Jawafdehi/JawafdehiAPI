@@ -28,7 +28,7 @@ def load_priority_cases() -> list[str]:
         data = json.load(f)
 
     cases = []
-    for fy, case_list in data.get("fiscal_years", {}).items():
+    for _, case_list in data.get("fiscal_years", {}).items():
         cases.extend(case_list)
     return cases
 
