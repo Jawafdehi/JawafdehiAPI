@@ -29,6 +29,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from cases.models import Case, DocumentSource
+from cases.services.priority_case_loader import filter_by_priority, load_priority_cases
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +124,17 @@ class Command(BaseCommand):
             help="Process a specific case by case_id",
         )
         parser.add_argument(
+            "--priority",
+            action="store_true",
+            help="Enrich only cases in the priority case list",
+        )
+        parser.add_argument(
+            "--all",
+            action="store_true",
+            dest="all_cases",
+            help="Enrich all DRAFT CIAA cases (explicit, same as default)",
+        )
+        parser.add_argument(
             "--limit",
             type=int,
             help="Maximum number of cases to process",
@@ -168,11 +180,24 @@ class Command(BaseCommand):
         """Orchestrate the enrichment pipeline: discover cases, extract press release content, call LLM, persist results."""
         dry_run = options["dry_run"]
         case_id = options.get("case_id")
+        priority = options["priority"]
+        all_cases_flag = options.get("all_cases")
         limit = options.get("limit")
         llm_model = options["llm_model"]
         llm_base_url = options["llm_base_url"]
         llm_api_key = options.get("llm_api_key")
         verbose = options.get("verbose")
+
+        if priority and case_id:
+            raise CommandError("--priority and --case-id are mutually exclusive")
+
+        if not any([priority, all_cases_flag, case_id]):
+            self.stdout.write(
+                self.style.NOTICE(
+                    "Processing all DRAFT CIAA cases (default). "
+                    "Use --all to make this explicit or --priority to filter."
+                )
+            )
 
         if verbose:
             logger.setLevel(logging.DEBUG)
@@ -193,7 +218,7 @@ class Command(BaseCommand):
                 "ANTHROPIC_API_KEY environment variable, or use --llm-api-key."
             )
 
-        cases = self._get_ciaa_cases(case_id=case_id, limit=limit)
+        cases = self._get_ciaa_cases(case_id=case_id, limit=limit, priority=priority)
         total = len(cases)
 
         self.stdout.write(
@@ -222,7 +247,10 @@ class Command(BaseCommand):
         )
 
     def _get_ciaa_cases(
-        self, case_id: Optional[str] = None, limit: Optional[int] = None
+        self,
+        case_id: Optional[str] = None,
+        limit: Optional[int] = None,
+        priority: bool = False,
     ) -> list[Case]:
         """Return DRAFT cases with empty key_allegations that are candidates for enrichment."""
         all_cases = []
@@ -230,6 +258,14 @@ class Command(BaseCommand):
 
         if case_id:
             queryset = queryset.filter(case_id=case_id)
+
+        if priority:
+            priority_list = load_priority_cases()
+            logger.info(
+                "Priority mode: loaded %d case numbers across all fiscal years",
+                len(priority_list),
+            )
+            queryset = filter_by_priority(queryset, priority_list)
 
         for case in queryset.order_by("case_id"):
             if case.key_allegations:
