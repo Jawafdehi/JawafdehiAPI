@@ -17,9 +17,10 @@ from django.core.management.base import CommandError
 
 from cases.models import Case, CaseState, CaseType, DocumentSource
 
-_patch_markitdown = None
-if "markitdown" not in sys.modules:
-    sys.modules["markitdown"] = MagicMock()
+@pytest.fixture(autouse=True)
+def _stub_markitdown_if_missing(monkeypatch):
+    if "markitdown" not in sys.modules:
+        monkeypatch.setitem(sys.modules, "markitdown", MagicMock())
 
 
 def _make_case(
