@@ -343,6 +343,7 @@ class Command(BaseCommand):
                 self.style.WARNING("  [DRY RUN] Would save but --dry-run is set")
             )
         else:
+            close_old_connections()
             self._save_allegations(case, allegations)
             self.stats["cases_enriched"] += 1
 
@@ -434,38 +435,35 @@ class Command(BaseCommand):
         import tempfile
         from pathlib import Path
 
+        tmp_path = None
         try:
             response = requests.get(url, timeout=120, stream=True)
             response.raise_for_status()
-        except requests.RequestException as exc:
-            logger.warning("  Failed to download %s: %s", url, exc)
-            return None
 
-        final_hostname = urlparse(response.url).hostname
-        if final_hostname not in _ALLOWED_HOSTS:
-            logger.warning("  Redirected to untrusted host: %s", response.url)
-            return None
+            final_hostname = urlparse(response.url).hostname
+            if final_hostname not in _ALLOWED_HOSTS:
+                logger.warning("  Redirected to untrusted host: %s", response.url)
+                return None
 
-        content_type = response.headers.get("content-type", "").lower()
+            content_type = response.headers.get("content-type", "").lower()
 
-        if "text/plain" in content_type or "application/json" in content_type:
-            response.encoding = "utf-8"
-            text = response.text
-            if len(text) > 200:
-                return text
-            return None
+            if "text/plain" in content_type or "application/json" in content_type:
+                response.encoding = "utf-8"
+                text = response.text
+                if len(text) > 200:
+                    return text
+                return None
 
-        suffix = ""
-        if "pdf" in content_type:
-            suffix = ".pdf"
-        elif "html" in content_type:
-            suffix = ".html"
-        elif any(kw in content_type for kw in ("document", "word", "docx", "msword")):
-            suffix = ".docx"
+            suffix = ""
+            if "pdf" in content_type:
+                suffix = ".pdf"
+            elif "html" in content_type:
+                suffix = ".html"
+            elif any(
+                kw in content_type for kw in ("document", "word", "docx", "msword")
+            ):
+                suffix = ".docx"
 
-        tmp_path = None
-        try:
-            close_old_connections()
             with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
                 tmp_path = tmp.name
                 for chunk in response.iter_content(chunk_size=8192):
@@ -487,6 +485,9 @@ class Command(BaseCommand):
             logger.warning(
                 "  Likhit conversion produced insufficient content for %s", url
             )
+            return None
+        except requests.RequestException as exc:
+            logger.warning("  Failed to download %s: %s", url, exc)
             return None
         except Exception as exc:
             logger.warning("  Likhit conversion failed for %s: %s", url, exc)
