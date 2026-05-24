@@ -955,14 +955,10 @@ class Command(BaseCommand):
             ) from exc
 
         converter = MarkItDown(enable_plugins=True)
-        with tempfile.TemporaryDirectory(
-            prefix="allegation-enrichment-"
-        ) as tmp_dir:
+        with tempfile.TemporaryDirectory(prefix="allegation-enrichment-") as tmp_dir:
             temp_path = self._download_source_to_path(source, Path(tmp_dir))
             if temp_path:
-                logger.debug(
-                    "Converting uploaded source file for %s", source.source_id
-                )
+                logger.debug("Converting uploaded source file for %s", source.source_id)
                 result = converter.convert_uri(temp_path.resolve().as_uri())
                 if result.text_content and len(result.text_content.strip()) >= 50:
                     return result.text_content
