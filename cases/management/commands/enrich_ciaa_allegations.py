@@ -577,7 +577,8 @@ class Command(BaseCommand):
                     method="POST",
                 )
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    payload = json.loads(resp.read().decode("utf-8"))
+                    raw_text = resp.read().decode("utf-8")
+                payload, _ = json.JSONDecoder().raw_decode(raw_text)
                 raw = _parse_llm_opencode_response(payload, is_minimax)
                 logger.debug(f"LLM response: {raw[:100]}...")
                 return raw
