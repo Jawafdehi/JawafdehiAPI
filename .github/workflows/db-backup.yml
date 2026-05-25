@@ -37,7 +37,7 @@ jobs:
 
     steps:
       - name: Start Cloud SQL Proxy
-        uses: Jawafdehi/gce-cloudsql-proxy-action@main
+        uses: Jawafdehi/gce-cloudsql-proxy-action@master
         with:
           creds: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
           instance: ${{ secrets.CLOUD_SQL_INSTANCE }}
