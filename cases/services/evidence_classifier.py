@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from enum import StrEnum
+from enum import Enum
 
 from cases.services.likhit_util import evidence_content_hash, idempotency_key
 
 
-class EvidenceSection(StrEnum):
+class EvidenceSection(str, Enum):
     OVERVIEW = "overview"
     KEY_ALLEGATIONS = "key_allegations"
     TIMELINE = "timeline"

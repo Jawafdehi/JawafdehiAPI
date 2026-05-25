@@ -30,9 +30,7 @@ class DjangoLLMClient:
     ) -> str:
         def call():
             prompt = f"{system_prompt}\n\n{user_prompt}"
-            text = self.service.invoke(prompt)
-            json.loads(text)
-            return text
+            return self.service.invoke(prompt)
 
         return await asyncio.to_thread(call)
 

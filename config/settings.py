@@ -644,13 +644,11 @@ if REDIS_URL:
 
     def _redis_db_url(base_url: str, db: int) -> str:
         parsed = urlparse(base_url)
-        qs = parse_qs(parsed.query)
-        qs["db"] = [str(db)]
-        return urlunparse(
-            parsed._replace(
-                path=parsed.path.rstrip("/") or "/", query=urlencode(qs, doseq=True)
-            )
-        )
+        path = parsed.path.rstrip("/") or "/"
+        if not path.endswith("/"):
+            path += "/"
+        path += str(db)
+        return urlunparse(parsed._replace(path=path))
 
     _default_cache = {
         "BACKEND": "django.core.cache.backends.redis.RedisCache",

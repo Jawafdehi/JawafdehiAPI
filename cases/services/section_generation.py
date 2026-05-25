@@ -7,7 +7,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from enum import StrEnum
+from enum import Enum
 from typing import Protocol
 
 from asgiref.sync import sync_to_async
@@ -392,7 +392,7 @@ CORE_SECTION_KEYS: tuple[str, ...] = ("short_description", "ka", "kha", "ga")
 ALL_SECTION_KEYS: tuple[str, ...] = CORE_SECTION_KEYS + COURT_STAGE_KEYS
 
 
-class CourtStage(StrEnum):
+class CourtStage(str, Enum):
     CHARGE_SHEET = "charge_sheet"
     SPECIAL_COURT = "special_court"
     APPEAL = "appeal"
@@ -626,7 +626,16 @@ def parse_llm_response(raw: str) -> tuple[str, str]:
         text = text.removeprefix("```json").removeprefix("```").strip()
     if text.endswith("```"):
         text = text[:-3].strip()
-    data = json.loads(text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        # Fallback: extract JSON between first { and last }
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            data = json.loads(text[start : end + 1])
+        else:
+            raise
     html = data["html"]
     confidence = data.get("confidence", "low")
     if confidence not in {"high", "medium", "low"}:
@@ -729,10 +738,17 @@ class SectionGenerationService:
             and cached.get("evidence_hash") == eh
             and cached.get("model") == self.model
         ):
-            validate_section_html(cached["html"], heading=spec.heading)
-            return SectionGenerationResult(
-                spec.key, cached["html"], cached["confidence"], True
-            )
+            try:
+                validate_section_html(cached["html"], heading=spec.heading)
+            except SectionQualityError:
+                logger.warning(
+                    "Cached section %s failed validation, regenerating",
+                    spec.key,
+                )
+            else:
+                return SectionGenerationResult(
+                    spec.key, cached["html"], cached["confidence"], True
+                )
 
         user_prompt = build_section_prompt(case, spec, evidence)
         l4_key = f"llm:{prompt_hash(self.model, SYSTEM_PROMPT, user_prompt)}"
@@ -770,7 +786,9 @@ def extract_case_evidence(
     case: Case, *, convert_documents: bool = False
 ) -> list[SectionEvidence]:
     source_ids = [
-        item.get("source_id") for item in case.evidence or [] if item.get("source_id")
+        item.get("source_id")
+        for item in case.evidence or []
+        if isinstance(item, dict) and item.get("source_id")
     ]
     sources = DocumentSource.objects.filter(
         source_id__in=source_ids, is_deleted=False
