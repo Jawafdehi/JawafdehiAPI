@@ -7,8 +7,9 @@ See: .kiro/specs/accountability-platform-core/design.md
 from django.db import models
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.core.validators import URLValidator
+from django.core.validators import URLValidator, MinValueValidator, MaxValueValidator
 from django.utils import timezone
+import hashlib
 import mimetypes
 import uuid
 
@@ -1088,3 +1089,209 @@ class ChatUserIdentity(models.Model):
     def __str__(self):
         user_display = self.user.get_username() if self.user else "(unmapped)"
         return f"{self.owui_user_id} -> {user_display}"
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: Continuous Improvement — enrichment quality infrastructure
+# ---------------------------------------------------------------------------
+
+
+class EnrichmentRunType(models.TextChoices):
+    TAG = "tag", "Tag Enrichment"
+    ALLEGATION = "allegation", "Allegation Enrichment"
+    BIGO = "bigo", "Bigo Enrichment"
+    NEWS = "news", "News Article Enrichment"
+    SECTION = "section", "Section Generation"
+
+
+class PromptVariant(models.Model):
+    name = models.CharField(max_length=200, unique=True)
+    run_type = models.CharField(max_length=20, choices=EnrichmentRunType.choices)
+    template = models.TextField(help_text="Prompt template with {placeholders}")
+    template_hash = models.CharField(max_length=64, db_index=True, editable=False)
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["run_type", "-created_at"]
+        unique_together = ["name", "run_type"]
+
+    def save(self, *args, **kwargs):
+        if not self.template_hash:
+            self.template_hash = hashlib.sha256(self.template.encode()).hexdigest()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.name} ({self.run_type})"
+
+
+class ABTestConfig(models.Model):
+    config_id = models.CharField(max_length=100, unique=True, db_index=True)
+    variant_a = models.ForeignKey(
+        PromptVariant, on_delete=models.PROTECT, related_name="ab_tests_as_a"
+    )
+    variant_b = models.ForeignKey(
+        PromptVariant, on_delete=models.PROTECT, related_name="ab_tests_as_b"
+    )
+    run_type = models.CharField(max_length=20, choices=EnrichmentRunType.choices)
+    traffic_split = models.FloatField(
+        default=0.5, help_text="Fraction routed to variant A (0.0-1.0)"
+    )
+    is_active = models.BooleanField(default=True, db_index=True)
+    sample_size = models.PositiveIntegerField(
+        null=True, blank=True, help_text="Target sample size; null=indefinite"
+    )
+    started_at = models.DateTimeField(null=True, blank=True)
+    ended_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(traffic_split__gte=0, traffic_split__lte=1),
+                name="ab_test_traffic_split_range",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(variant_a=models.F("variant_b")),
+                name="ab_test_variants_must_differ",
+            ),
+        ]
+
+    def __str__(self):
+        return f"AB: {self.config_id} ({self.run_type})"
+
+
+class EnrichmentRun(models.Model):
+    run_id = models.CharField(max_length=100, unique=True, db_index=True)
+    run_type = models.CharField(max_length=20, choices=EnrichmentRunType.choices)
+    prompt_variant = models.ForeignKey(
+        PromptVariant,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="runs",
+    )
+    ab_test = models.ForeignKey(
+        ABTestConfig,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="runs",
+    )
+    total_cases = models.PositiveIntegerField(default=0)
+    enriched_count = models.PositiveIntegerField(default=0)
+    skipped_count = models.PositiveIntegerField(default=0)
+    failed_count = models.PositiveIntegerField(default=0)
+    llm_call_count = models.PositiveIntegerField(default=0)
+    total_input_tokens = models.PositiveBigIntegerField(default=0)
+    total_output_tokens = models.PositiveBigIntegerField(default=0)
+    total_cost_usd = models.DecimalField(max_digits=10, decimal_places=6, default=0)
+    avg_latency_ms = models.FloatField(null=True, blank=True)
+    tier_breakdown = models.JSONField(default=dict, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["run_type", "-created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.run_id} ({self.run_type})"
+
+
+class EditorFeedbackType(models.TextChoices):
+    CORRECT = "correct", "Correct"
+    INCORRECT = "incorrect", "Incorrect"
+    PARTIALLY_CORRECT = "partially_correct", "Partially Correct"
+    MISSING = "missing", "Missing Content"
+    IRRELEVANT = "irrelevant", "Irrelevant Output"
+
+
+class EditorFeedback(models.Model):
+    case = models.ForeignKey(
+        "Case", on_delete=models.CASCADE, related_name="enrichment_feedback"
+    )
+    enrichment_run = models.ForeignKey(
+        EnrichmentRun,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="editor_feedback",
+    )
+    run_type = models.CharField(max_length=20, choices=EnrichmentRunType.choices)
+    feedback_type = models.CharField(
+        max_length=30, choices=EditorFeedbackType.choices
+    )
+    original_output = models.JSONField(
+        help_text="Enrichment output presented to the editor"
+    )
+    corrected_output = models.JSONField(
+        null=True, blank=True, help_text="Editor-corrected version"
+    )
+    comment = models.TextField(blank=True, max_length=2000)
+    editor = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL
+    )
+    quality_score = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(1), MaxValueValidator(5)],
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["case", "run_type"]),
+            models.Index(fields=["feedback_type", "-created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.case.case_id} — {self.run_type} ({self.feedback_type})"
+
+
+class FewShotExample(models.Model):
+    run_type = models.CharField(max_length=20, choices=EnrichmentRunType.choices)
+    input_snapshot = models.JSONField(help_text="Case data snapshot used as input")
+    expected_output = models.JSONField(help_text="Expected/correct enrichment output")
+    source_feedback = models.ForeignKey(
+        EditorFeedback,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        help_text="Derived from this editor correction",
+    )
+    is_validated = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="Moderator-validated for inclusion in prompts",
+    )
+    usage_count = models.PositiveIntegerField(
+        default=0, help_text="Times this example was injected into prompts"
+    )
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    notes = models.TextField(blank=True, max_length=1000)
+    created_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["run_type", "-created_at"]
+        indexes = [
+            models.Index(fields=["run_type", "is_validated"]),
+        ]
+
+    def __str__(self):
+        return f"FewShot {self.id} ({self.run_type}) [{self.is_validated}]"

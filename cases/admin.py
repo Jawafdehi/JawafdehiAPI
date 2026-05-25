@@ -13,14 +13,19 @@ from cases.widgets import ToastUIEditorWidget
 from rest_framework.authtoken.models import Token
 from rest_framework.authtoken.admin import TokenAdmin as BaseTokenAdmin
 from .models import (
+    ABTestConfig,
     Case,
     ChatUserIdentity,
     DocumentSource,
     DocumentSourceUpload,
+    EditorFeedback,
+    EnrichmentRun,
+    FewShotExample,
     JawafEntity,
     CaseState,
     Feedback,
     CaseEntityRelationship,
+    PromptVariant,
     RelationshipType,
 )
 from .services import EntityMergeError, analyze_merge_impact, merge_entities_by_ids
@@ -1423,3 +1428,84 @@ class ChatUserIdentityAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
             },
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: Continuous Improvement — enrichment quality admin
+# ---------------------------------------------------------------------------
+
+
+@admin.register(PromptVariant)
+class PromptVariantAdmin(admin.ModelAdmin):
+    list_display = ("name", "run_type", "is_active", "created_at")
+    list_filter = ("run_type", "is_active")
+    search_fields = ("name", "description")
+    readonly_fields = ("template_hash", "created_at", "updated_at")
+
+
+@admin.register(ABTestConfig)
+class ABTestConfigAdmin(admin.ModelAdmin):
+    list_display = (
+        "config_id",
+        "run_type",
+        "variant_a",
+        "variant_b",
+        "traffic_split",
+        "is_active",
+        "created_at",
+    )
+    list_filter = ("run_type", "is_active")
+    search_fields = ("config_id",)
+    raw_id_fields = ("variant_a", "variant_b")
+
+
+@admin.register(EnrichmentRun)
+class EnrichmentRunAdmin(admin.ModelAdmin):
+    list_display = (
+        "run_id",
+        "run_type",
+        "enriched_count",
+        "failed_count",
+        "total_cost_usd",
+        "completed_at",
+    )
+    list_filter = ("run_type", "created_at")
+    search_fields = ("run_id",)
+    readonly_fields = ("run_id", "created_at")
+
+
+@admin.register(EditorFeedback)
+class EditorFeedbackAdmin(admin.ModelAdmin):
+    list_display = (
+        "case",
+        "run_type",
+        "feedback_type",
+        "quality_score",
+        "editor",
+        "created_at",
+    )
+    list_filter = ("run_type", "feedback_type", "created_at")
+    search_fields = ("case__case_id", "comment")
+    raw_id_fields = ("case", "editor", "enrichment_run")
+
+
+@admin.register(FewShotExample)
+class FewShotExampleAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "run_type",
+        "is_validated",
+        "usage_count",
+        "created_at",
+    )
+    list_filter = ("run_type", "is_validated")
+    search_fields = ("notes",)
+    raw_id_fields = ("source_feedback", "created_by")
+    actions = ("validate_selected",)
+
+    @admin.action(description="Mark selected examples as validated")
+    def validate_selected(self, request, queryset):
+        updated = queryset.update(is_validated=True)
+        self.message_user(
+            request, f"{updated} example(s) marked as validated."
+        )
