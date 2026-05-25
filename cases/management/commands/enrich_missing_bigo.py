@@ -149,8 +149,8 @@ class Command(BaseCommand):
         parser.add_argument(
             "--llm-max-tokens",
             type=int,
-            default=int(os.getenv("BIGO_ENRICHMENT_LLM_MAX_TOKENS", "2000")),
-            help="LLM response token budget. Defaults to BIGO_ENRICHMENT_LLM_MAX_TOKENS or 2000.",
+            default=int(os.getenv("BIGO_ENRICHMENT_LLM_MAX_TOKENS", "800")),
+            help="LLM response token budget. Defaults to BIGO_ENRICHMENT_LLM_MAX_TOKENS or 800.",
         )
         parser.add_argument(
             "--download-timeout",

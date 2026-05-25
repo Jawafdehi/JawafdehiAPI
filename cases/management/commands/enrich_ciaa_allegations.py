@@ -186,7 +186,7 @@ def _build_llm_opencode_body(
     if is_minimax:
         body = {
             "model": normalized_model,
-            "max_tokens": 6000,
+            "max_tokens": 2000,
             "system": SYSTEM_PROMPT,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.1,
@@ -194,7 +194,7 @@ def _build_llm_opencode_body(
     else:
         body = {
             "model": normalized_model,
-            "max_tokens": 6000,
+            "max_tokens": 2000,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
@@ -1126,7 +1126,7 @@ class Command(BaseCommand):
             try:
                 response = client.messages.create(
                     model=model,
-                    max_tokens=6000,
+                    max_tokens=1500,
                     system=SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.1,

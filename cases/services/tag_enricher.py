@@ -1120,6 +1120,12 @@ def build_llm_classification_prompt(case: Case) -> str:
     if case.bigo is not None:
         lines.append(f"Bigo (Disputed Amount): NPR {case.bigo:,}")
     lines.append("")
+    lines.append(
+        "FEW-SHOT EXAMPLE: Case about municipality engineer illegal property — "
+        "tags: [\"CIAA\", \"Corruption\", \"Special Court\", \"Local Government\", "
+        "\"Illegal Property Acquisition\", \"Public Office Abuse\", \"Bagmati\"]"
+    )
+    lines.append("")
     lines.extend(_build_tag_selection_instructions())
     return "\n".join(lines)
 
@@ -1149,6 +1155,12 @@ def build_llm_classification_prompt_from_sources(case: Case, evidence_text: str)
         )
     if case.bigo is not None:
         lines.append(f"Bigo (Disputed Amount): NPR {case.bigo:,}")
+    lines.append("")
+    lines.append(
+        "FEW-SHOT EXAMPLE: Case about municipality engineer illegal property — "
+        "tags: [\"CIAA\", \"Corruption\", \"Special Court\", \"Local Government\", "
+        "\"Illegal Property Acquisition\", \"Public Office Abuse\", \"Bagmati\"]"
+    )
     lines.append("")
     lines.extend(_build_tag_selection_instructions())
     return "\n".join(lines)

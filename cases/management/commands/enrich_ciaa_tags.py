@@ -192,7 +192,7 @@ class Command(BaseCommand):
             api_key=api_key,
             model=model,
             temperature=0.3,
-            max_tokens=1024,
+            max_tokens=512,
         )
 
     def _log_summary(self, stats: dict, dry_run: bool):
