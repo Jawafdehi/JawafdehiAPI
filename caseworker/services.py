@@ -143,6 +143,29 @@ class LLMService:
             )
             return False
 
+    def generate(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        temperature: float = 0.1,
+        timeout: int = 180,
+    ) -> str:
+        """Generate a response with separate system/user prompts and explicit params."""
+        llm = self.get_llm()
+        if hasattr(llm, "generate"):
+            return llm.generate(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                timeout=timeout,
+            )
+        # Fallback: concatenate prompts for old-style LLMs
+        combined = f"{system_prompt}\n\n{user_prompt}"
+        return self._call_llm(llm, combined)
+
     def _call_llm(self, llm, prompt):
         """Call LLM with compatibility for both old (predict) and new (invoke) APIs."""
         if hasattr(llm, "invoke"):
@@ -160,7 +183,7 @@ class LLMService:
 
 
 class AnthropicWrapper:
-    """Thin wrapper around the Anthropic SDK with a predict() interface."""
+    """Thin wrapper around the Anthropic SDK with predict() and generate() interfaces."""
 
     def __init__(self, api_key, model="claude-opus-4-6", max_tokens=2000):
         import anthropic
@@ -174,6 +197,24 @@ class AnthropicWrapper:
             model=self._model,
             max_tokens=self._max_tokens,
             messages=[{"role": "user", "content": prompt}],
+        )
+        return response.content[0].text
+
+    def generate(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        temperature: float = 0.1,
+        timeout: int = 180,
+    ) -> str:
+        response = self._client.with_options(timeout=timeout).messages.create(
+            model=self._model,
+            system=system_prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            messages=[{"role": "user", "content": user_prompt}],
         )
         return response.content[0].text
 
