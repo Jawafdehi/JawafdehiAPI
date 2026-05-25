@@ -21,7 +21,9 @@ class FakeLLMClient:
     def __init__(self):
         self.calls = []
 
-    async def generate(self, *, system_prompt: str, user_prompt: str, max_tokens: int) -> str:
+    async def generate(
+        self, *, system_prompt: str, user_prompt: str, max_tokens: int
+    ) -> str:
         self.calls.append(
             {
                 "system_prompt": system_prompt,
@@ -36,9 +38,13 @@ class FakeLLMClient:
         elif "प्रमाणको सार" in user_prompt:
             html = "<h2>ग) प्रमाणको सार संक्षेप (अभियोजन पक्षले दाबी गरेको)</h2><p>दस्तावेजी प्रमाण पेश गरिएको छ।</p>"
         elif "अभियुक्तको बयान" in user_prompt:
-            html = "<h2>घ) अभियुक्तको बयान</h2><p>प्रतिवादीले आरोप अस्वीकार गरेका छन्।</p>"
+            html = (
+                "<h2>घ) अभियुक्तको बयान</h2><p>प्रतिवादीले आरोप अस्वीकार गरेका छन्।</p>"
+            )
         elif "विशेष अदालतको फैसला" in user_prompt:
-            html = "<h2>ङ) विशेष अदालतको फैसला</h2><p>विशेष अदालतले दोषी ठहर गरेको छ।</p>"
+            html = (
+                "<h2>ङ) विशेष अदालतको फैसला</h2><p>विशेष अदालतले दोषी ठहर गरेको छ।</p>"
+            )
         elif "पुनरावेदन" in user_prompt:
             html = "<h2>च) पुनरावेदन</h2><p>उच्च अदालतमा पुनरावेदन विचाराधीन छ।</p>"
         elif "सर्वोच्च अदालत" in user_prompt:
@@ -291,7 +297,9 @@ async def test_generate_all_sections_without_conditional_is_core_only():
     llm = FakeLLMClient()
     service = SectionGenerationService(llm)
 
-    results = await service.generate_all_sections(case, evidence, include_conditional=False)
+    results = await service.generate_all_sections(
+        case, evidence, include_conditional=False
+    )
 
     assert set(results) == set(CORE_SECTION_KEYS)
 
@@ -307,6 +315,7 @@ def test_all_section_keys_includes_all_8():
 def test_court_stage_section_specs_have_required_fields():
     for key in COURT_STAGE_KEYS:
         from cases.services.section_generation import SECTION_SPECS
+
         spec = SECTION_SPECS[key]
         assert spec.key == key
         assert spec.heading is not None, f"{key} missing heading"

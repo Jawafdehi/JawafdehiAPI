@@ -90,8 +90,14 @@ class EvidenceClassifier:
     }
 
     UNTYPED_HEURISTICS = (
-        (re.compile(r"\bpress[-_ ]?release\b|\bciaa\b|विज्ञप्ति|अख्तियार", re.I), "press_release"),
-        (re.compile(r"\bcourt\b|\border\b|\bjudgment\b|फैसला|अदालत", re.I), "court_order"),
+        (
+            re.compile(r"\bpress[-_ ]?release\b|\bciaa\b|विज्ञप्ति|अख्तियार", re.I),
+            "press_release",
+        ),
+        (
+            re.compile(r"\bcourt\b|\border\b|\bjudgment\b|फैसला|अदालत", re.I),
+            "court_order",
+        ),
         (re.compile(r"\bnews\b|\barticle\b|समाचार", re.I), "news_article"),
     )
 
@@ -163,7 +169,9 @@ class EvidenceClassifier:
                 return inferred_type
         return None
 
-    def _append(self, sections: list[EvidenceSection], section: EvidenceSection) -> None:
+    def _append(
+        self, sections: list[EvidenceSection], section: EvidenceSection
+    ) -> None:
         if section not in sections:
             sections.append(section)
 
