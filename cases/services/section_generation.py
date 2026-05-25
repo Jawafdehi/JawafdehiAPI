@@ -67,8 +67,9 @@ class SectionGenerationResult:
 
 
 class SectionLLMClient(Protocol):
-    async def generate(self, *, system_prompt: str, user_prompt: str, max_tokens: int) -> str:
-        ...
+    async def generate(
+        self, *, system_prompt: str, user_prompt: str, max_tokens: int
+    ) -> str: ...
 
 
 class HTMLValidationParser(html.parser.HTMLParser):
@@ -184,7 +185,10 @@ RULES:
         heading="ख) आकर्षित कानुनी व्यवस्था",
         max_tokens=1200,
         evidence_budget=12000,
-        priority_source_types=(SourceType.LEGAL_PROCEDURAL, SourceType.OFFICIAL_GOVERNMENT),
+        priority_source_types=(
+            SourceType.LEGAL_PROCEDURAL,
+            SourceType.OFFICIAL_GOVERNMENT,
+        ),
         instructions="""TASK: List and explain the legal provisions cited in the charge sheet.
 
 STRUCTURE:
@@ -238,7 +242,11 @@ RULES:
         heading="घ) अभियुक्तको बयान",
         max_tokens=1200,
         evidence_budget=12000,
-        priority_source_types=(SourceType.LEGAL_PROCEDURAL, SourceType.OFFICIAL_GOVERNMENT, SourceType.MEDIA_NEWS),
+        priority_source_types=(
+            SourceType.LEGAL_PROCEDURAL,
+            SourceType.OFFICIAL_GOVERNMENT,
+            SourceType.MEDIA_NEWS,
+        ),
         instructions="""TASK: Summarize the accused's statement or defense position.
 
 STRUCTURE:
@@ -263,7 +271,11 @@ RULES:
         heading="ङ) विशेष अदालतको फैसला",
         max_tokens=2000,
         evidence_budget=20000,
-        priority_source_types=(SourceType.LEGAL_PROCEDURAL, SourceType.LEGAL_COURT_ORDER, SourceType.OFFICIAL_GOVERNMENT),
+        priority_source_types=(
+            SourceType.LEGAL_PROCEDURAL,
+            SourceType.LEGAL_COURT_ORDER,
+            SourceType.OFFICIAL_GOVERNMENT,
+        ),
         instructions="""TASK: Summarize the Special Court's verdict and reasoning.
 
 STRUCTURE:
@@ -290,7 +302,11 @@ RULES:
         heading="च) पुनरावेदन",
         max_tokens=1200,
         evidence_budget=12000,
-        priority_source_types=(SourceType.LEGAL_PROCEDURAL, SourceType.LEGAL_COURT_ORDER, SourceType.OFFICIAL_GOVERNMENT),
+        priority_source_types=(
+            SourceType.LEGAL_PROCEDURAL,
+            SourceType.LEGAL_COURT_ORDER,
+            SourceType.OFFICIAL_GOVERNMENT,
+        ),
         instructions="""TASK: Summarize the appeal proceedings and status.
 
 STRUCTURE:
@@ -315,7 +331,11 @@ RULES:
         heading="छ) सर्वोच्च अदालत",
         max_tokens=2000,
         evidence_budget=20000,
-        priority_source_types=(SourceType.LEGAL_COURT_ORDER, SourceType.LEGAL_PROCEDURAL, SourceType.OFFICIAL_GOVERNMENT),
+        priority_source_types=(
+            SourceType.LEGAL_COURT_ORDER,
+            SourceType.LEGAL_PROCEDURAL,
+            SourceType.OFFICIAL_GOVERNMENT,
+        ),
         instructions="""TASK: Summarize Supreme Court proceedings and final disposition.
 
 STRUCTURE:
@@ -340,7 +360,11 @@ RULES:
         heading="ज) अवलोकन",
         max_tokens=800,
         evidence_budget=8000,
-        priority_source_types=(SourceType.MEDIA_NEWS, SourceType.LEGAL_PROCEDURAL, SourceType.OFFICIAL_GOVERNMENT),
+        priority_source_types=(
+            SourceType.MEDIA_NEWS,
+            SourceType.LEGAL_PROCEDURAL,
+            SourceType.OFFICIAL_GOVERNMENT,
+        ),
         instructions="""TASK: Provide analytical observations about the case.
 
 STRUCTURE:
@@ -382,20 +406,37 @@ COURT_IDENTIFIER_STAGE: dict[str, CourtStage] = {
 
 EVIDENCE_STAGE_KEYWORDS: dict[CourtStage, tuple[str, ...]] = {
     CourtStage.CHARGE_SHEET: (
-        "बयान", "बक्तव्य", "कागज", "बयान गर", "statement", "बचाउ",
-        "accused statement", "defense", "प्रतिवादीको बयान", "अभियुक्त",
+        "बयान",
+        "बक्तव्य",
+        "कागज",
+        "बयान गर",
+        "statement",
+        "बचाउ",
+        "accused statement",
+        "defense",
+        "प्रतिवादीको बयान",
+        "अभियुक्त",
     ),
     CourtStage.SPECIAL_COURT: (
-        "विशेष अदालत", "special court", "विशेष अदालतको फैसला",
-        "special court verdict", "special court judgment",
+        "विशेष अदालत",
+        "special court",
+        "विशेष अदालतको फैसला",
+        "special court verdict",
+        "special court judgment",
     ),
     CourtStage.APPEAL: (
-        "पुनरावेदन", "appeal", "उच्च अदालत",
-        "high court", "appellate", "पुनरावेदक",
+        "पुनरावेदन",
+        "appeal",
+        "उच्च अदालत",
+        "high court",
+        "appellate",
+        "पुनरावेदक",
     ),
     CourtStage.SUPREME_COURT: (
-        "सर्वोच्च अदालत", "supreme court",
-        "सर्वोच्च अदालतको फैसला", "supreme court verdict",
+        "सर्वोच्च अदालत",
+        "supreme court",
+        "सर्वोच्च अदालतको फैसला",
+        "supreme court verdict",
         "supreme court judgment",
     ),
 }
@@ -492,7 +533,9 @@ class SectionReadinessCheck:
         return core + court
 
 
-def build_readiness_check(case: Case, evidence: list[SectionEvidence]) -> SectionReadinessCheck:
+def build_readiness_check(
+    case: Case, evidence: list[SectionEvidence]
+) -> SectionReadinessCheck:
     court_cases = case.court_cases if isinstance(case.court_cases, list) else []
     evidence_text = " ".join(e.text for e in evidence)
     return SectionReadinessCheck(court_cases=court_cases, evidence_text=evidence_text)
@@ -508,7 +551,9 @@ def evidence_hash(evidence: list[SectionEvidence]) -> str:
 
 
 def prompt_hash(model: str, system_prompt: str, user_prompt: str) -> str:
-    return hashlib.sha256(f"{model}\0{system_prompt}\0{user_prompt}".encode()).hexdigest()
+    return hashlib.sha256(
+        f"{model}\0{system_prompt}\0{user_prompt}".encode()
+    ).hexdigest()
 
 
 def validate_section_html(html: str, *, heading: str | None = None) -> None:
@@ -517,25 +562,33 @@ def validate_section_html(html: str, *, heading: str | None = None) -> None:
 
     # Check for markdown fence leakage (common LLM mistake)
     if html.strip().startswith("```") or html.strip().endswith("```"):
-        raise SectionQualityError("section output contains markdown code fences — LLM output formatting error")
+        raise SectionQualityError(
+            "section output contains markdown code fences — LLM output formatting error"
+        )
 
     parser = HTMLValidationParser()
     parser.feed(html)
     if parser.invalid_tags:
-        raise SectionQualityError(f"disallowed HTML tags: {sorted(set(parser.invalid_tags))}")
+        raise SectionQualityError(
+            f"disallowed HTML tags: {sorted(set(parser.invalid_tags))}"
+        )
     if parser.stack:
         raise SectionQualityError(f"unclosed HTML tags: {parser.stack}")
 
     text = TAG_RE.sub("", html).strip()
     if not text:
-        raise SectionQualityError("section output contains no text after stripping HTML tags")
+        raise SectionQualityError(
+            "section output contains no text after stripping HTML tags"
+        )
 
     chars = [ch for ch in text if not ch.isspace()]
     if not chars:
         raise SectionQualityError("section output contains only whitespace")
 
     if len(chars) < 50:
-        raise SectionQualityError(f"section output too short ({len(chars)} chars) — minimum 50 non-whitespace chars required")
+        raise SectionQualityError(
+            f"section output too short ({len(chars)} chars) — minimum 50 non-whitespace chars required"
+        )
 
     nepali_ratio = sum(1 for ch in chars if DEVANAGARI_RE.match(ch)) / len(chars)
     if nepali_ratio < 0.15:
@@ -550,7 +603,9 @@ def validate_section_html(html: str, *, heading: str | None = None) -> None:
     # Detect empty structural elements
     for tag in ("<ul></ul>", "<ol></ol>", "<table></table>"):
         if tag in html:
-            raise SectionQualityError(f"empty {tag[1:tag.index('>')]} element in output")
+            raise SectionQualityError(
+                f"empty {tag[1:tag.index('>')]} element in output"
+            )
 
     # Detect placeholder patterns
     placeholder_patterns = [
@@ -559,7 +614,9 @@ def validate_section_html(html: str, *, heading: str | None = None) -> None:
     ]
     for pattern in placeholder_patterns:
         if re.search(pattern, html, re.IGNORECASE):
-            raise SectionQualityError("placeholder text detected — LLM failed to generate real content")
+            raise SectionQualityError(
+                "placeholder text detected — LLM failed to generate real content"
+            )
 
 
 def parse_llm_response(raw: str) -> tuple[str, str]:
@@ -577,7 +634,9 @@ def parse_llm_response(raw: str) -> tuple[str, str]:
     return html, confidence
 
 
-def build_section_prompt(case: Case, spec: SectionSpec, evidence: list[SectionEvidence]) -> str:
+def build_section_prompt(
+    case: Case, spec: SectionSpec, evidence: list[SectionEvidence]
+) -> str:
     evidence_chunks: list[str] = []
     remaining = spec.evidence_budget
     for item in prioritize_evidence(evidence, spec):
@@ -606,13 +665,19 @@ def build_section_prompt(case: Case, spec: SectionSpec, evidence: list[SectionEv
     return "\n\n".join(parts)
 
 
-def prioritize_evidence(evidence: list[SectionEvidence], spec: SectionSpec) -> list[SectionEvidence]:
-    priority = {source_type: i for i, source_type in enumerate(spec.priority_source_types)}
+def prioritize_evidence(
+    evidence: list[SectionEvidence], spec: SectionSpec
+) -> list[SectionEvidence]:
+    priority = {
+        source_type: i for i, source_type in enumerate(spec.priority_source_types)
+    }
     return sorted(evidence, key=lambda item: priority.get(item.source_type or "", 999))
 
 
 class SectionGenerationService:
-    def __init__(self, llm_client: SectionLLMClient, *, model: str = "claude-opus-4-7") -> None:
+    def __init__(
+        self, llm_client: SectionLLMClient, *, model: str = "claude-opus-4-7"
+    ) -> None:
         self.llm_client = llm_client
         self.model = model
 
@@ -623,7 +688,10 @@ class SectionGenerationService:
         *,
         section_keys: tuple[str, ...] = ("short_description", "ka", "kha", "ga"),
     ) -> dict[str, SectionGenerationResult]:
-        tasks = [self.generate_section(case, SECTION_SPECS[key], evidence) for key in section_keys]
+        tasks = [
+            self.generate_section(case, SECTION_SPECS[key], evidence)
+            for key in section_keys
+        ]
         results = await asyncio.gather(*tasks)
         return {result.key: result for result in results}
 
@@ -635,12 +703,18 @@ class SectionGenerationService:
         include_conditional: bool = True,
     ) -> dict[str, SectionGenerationResult]:
         readiness = build_readiness_check(case, evidence)
-        keys = readiness.all_active_keys() if include_conditional else list(CORE_SECTION_KEYS)
+        keys = (
+            readiness.all_active_keys()
+            if include_conditional
+            else list(CORE_SECTION_KEYS)
+        )
         if include_conditional:
             skipped = [k for k in COURT_STAGE_KEYS if k not in keys]
             if skipped:
                 logger.info("Skipping inactive sections: %s", skipped)
-        tasks = [self.generate_section(case, SECTION_SPECS[key], evidence) for key in keys]
+        tasks = [
+            self.generate_section(case, SECTION_SPECS[key], evidence) for key in keys
+        ]
         results = await asyncio.gather(*tasks)
         return {result.key: result for result in results}
 
@@ -650,9 +724,15 @@ class SectionGenerationService:
         eh = evidence_hash(evidence)
         db_cache = (case.versionInfo or {}).get("section_generation_cache", {})
         cached = db_cache.get(spec.key)
-        if cached and cached.get("evidence_hash") == eh and cached.get("model") == self.model:
+        if (
+            cached
+            and cached.get("evidence_hash") == eh
+            and cached.get("model") == self.model
+        ):
             validate_section_html(cached["html"], heading=spec.heading)
-            return SectionGenerationResult(spec.key, cached["html"], cached["confidence"], True)
+            return SectionGenerationResult(
+                spec.key, cached["html"], cached["confidence"], True
+            )
 
         user_prompt = build_section_prompt(case, spec, evidence)
         l4_key = f"llm:{prompt_hash(self.model, SYSTEM_PROMPT, user_prompt)}"
@@ -671,7 +751,8 @@ class SectionGenerationService:
         return SectionGenerationResult(spec.key, html, confidence, False)
 
     async def _store_section_cache(
-        self, case: Case, key: str, eh: str, html: str, confidence: str) -> None:
+        self, case: Case, key: str, eh: str, html: str, confidence: str
+    ) -> None:
         version_info = dict(case.versionInfo or {})
         cache_data = dict(version_info.get("section_generation_cache", {}))
         cache_data[key] = {
@@ -685,21 +766,43 @@ class SectionGenerationService:
         await sync_to_async(case.save)(update_fields=["versionInfo", "updated_at"])
 
 
-def extract_case_evidence(case: Case) -> list[SectionEvidence]:
-    source_ids = [item.get("source_id") for item in case.evidence or [] if item.get("source_id")]
-    sources = DocumentSource.objects.filter(source_id__in=source_ids, is_deleted=False).prefetch_related(
-        "uploaded_files"
-    )
+def extract_case_evidence(
+    case: Case, *, convert_documents: bool = False
+) -> list[SectionEvidence]:
+    source_ids = [
+        item.get("source_id") for item in case.evidence or [] if item.get("source_id")
+    ]
+    sources = DocumentSource.objects.filter(
+        source_id__in=source_ids, is_deleted=False
+    ).prefetch_related("uploaded_files")
     evidence = []
     for source in sources:
-        text_parts = [source.title, source.description]
+        text_parts = [source.title, source.description or ""]
         for upload in source.uploaded_files.all():
             if upload.filename:
                 text_parts.append(upload.filename)
+            if upload.converted_text:
+                text_parts.append(upload.converted_text)
+            elif convert_documents and upload.file:
+                try:
+                    from cases.services.likhit_util import convert_bytes_to_markdown
+
+                    content = upload.file.read()
+                    result = convert_bytes_to_markdown(
+                        content, filename=upload.filename or "source.bin"
+                    )
+                    text_parts.append(result.markdown)
+                except Exception:
+                    logger.warning(
+                        "Failed to convert %s for case %s",
+                        upload.filename,
+                        case.case_id,
+                        exc_info=True,
+                    )
         evidence.append(
             SectionEvidence(
                 source_id=source.source_id,
-                title=source.title,
+                title=source.title or "(untitled)",
                 source_type=source.source_type,
                 text="\n".join(part for part in text_parts if part),
             )

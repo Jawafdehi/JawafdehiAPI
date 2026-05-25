@@ -1122,8 +1122,8 @@ def build_llm_classification_prompt(case: Case) -> str:
     lines.append("")
     lines.append(
         "FEW-SHOT EXAMPLE: Case about municipality engineer illegal property — "
-        "tags: [\"CIAA\", \"Corruption\", \"Special Court\", \"Local Government\", "
-        "\"Illegal Property Acquisition\", \"Public Office Abuse\", \"Bagmati\"]"
+        'tags: ["CIAA", "Corruption", "Special Court", "Local Government", '
+        '"Illegal Property Acquisition", "Public Office Abuse", "Bagmati"]'
     )
     lines.append("")
     lines.extend(_build_tag_selection_instructions())
@@ -1158,8 +1158,8 @@ def build_llm_classification_prompt_from_sources(case: Case, evidence_text: str)
     lines.append("")
     lines.append(
         "FEW-SHOT EXAMPLE: Case about municipality engineer illegal property — "
-        "tags: [\"CIAA\", \"Corruption\", \"Special Court\", \"Local Government\", "
-        "\"Illegal Property Acquisition\", \"Public Office Abuse\", \"Bagmati\"]"
+        'tags: ["CIAA", "Corruption", "Special Court", "Local Government", '
+        '"Illegal Property Acquisition", "Public Office Abuse", "Bagmati"]'
     )
     lines.append("")
     lines.extend(_build_tag_selection_instructions())
