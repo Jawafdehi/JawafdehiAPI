@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 
-from asgiref.sync import sync_to_async
 from django.core.cache import cache
 
 from cases.models import Case, DocumentSource, SourceType
@@ -533,8 +532,12 @@ def validate_section_html(html: str, *, heading: str | None = None) -> None:
                 "section output does not contain enough Nepali text"
             )
 
-    if heading and f"<h2>{heading}</h2>" not in html:
-        raise SectionQualityError(f"section heading missing: {heading}")
+    if heading:
+        heading_re = re.compile(
+            rf"<h2[^>]*>\s*{re.escape(heading)}\s*</h2>", re.IGNORECASE
+        )
+        if not heading_re.search(html):
+            raise SectionQualityError(f"section heading missing: {heading}")
 
 
 def parse_llm_response(raw: str) -> tuple[str, str]:
@@ -680,7 +683,7 @@ class SectionGenerationService:
             }
             version_info["section_generation_cache"] = cache_data
             case.versionInfo = version_info
-            await sync_to_async(case.save)(update_fields=["versionInfo", "updated_at"])
+            await case.asave(update_fields=["versionInfo", "updated_at"])
 
 
 def extract_case_evidence(case: Case) -> list[SectionEvidence]:

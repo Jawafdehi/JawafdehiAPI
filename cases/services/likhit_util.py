@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import BinaryIO
 
 from django.core.cache import caches
-from django.core.management.base import CommandError
 
 MAX_CONVERSION_BYTES = 25 * 1024 * 1024
 DOC_CONV_CACHE_ALIAS = "doc_conv"
@@ -45,7 +44,7 @@ def convert_bytes_to_markdown(
     converter=None,
 ) -> ConversionResult:
     if len(content) > MAX_CONVERSION_BYTES:
-        raise CommandError(
+        raise ValueError(
             f"Source is too large ({len(content)} bytes); max is {MAX_CONVERSION_BYTES} bytes."
         )
 
@@ -98,7 +97,7 @@ def _convert_uncached(content: bytes, *, filename: str, converter=None) -> str:
         try:
             from markitdown import MarkItDown
         except ImportError as exc:
-            raise CommandError(
+            raise ImportError(
                 "markitdown is required for evidence conversion. "
                 "Install conversion dependencies (markitdown + likhit plugin)."
             ) from exc
