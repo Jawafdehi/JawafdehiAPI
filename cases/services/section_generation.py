@@ -554,6 +554,7 @@ class SectionGenerationService:
         evidence: list[SectionEvidence],
         *,
         include_conditional: bool = True,
+        section_delay: float = 0.5,
     ) -> dict[str, SectionGenerationResult]:
         readiness = build_readiness_check(case, evidence)
         keys = readiness.all_active_keys() if include_conditional else list(CORE_SECTION_KEYS)
@@ -561,9 +562,13 @@ class SectionGenerationService:
             skipped = [k for k in COURT_STAGE_KEYS if k not in keys]
             if skipped:
                 logger.info("Skipping inactive sections: %s", skipped)
-        tasks = [self.generate_section(case, SECTION_SPECS[key], evidence) for key in keys]
-        results = await asyncio.gather(*tasks)
-        return {result.key: result for result in results}
+        results: dict[str, SectionGenerationResult] = {}
+        for i, key in enumerate(keys):
+            if i > 0 and section_delay > 0:
+                await asyncio.sleep(section_delay)
+            result = await self.generate_section(case, SECTION_SPECS[key], evidence)
+            results[result.key] = result
+        return results
 
     async def generate_section(
         self, case: Case, spec: SectionSpec, evidence: list[SectionEvidence]
