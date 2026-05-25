@@ -4,14 +4,18 @@ import asyncio
 import hashlib
 import html.parser
 import json
+import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Protocol
 
 from asgiref.sync import sync_to_async
 from django.core.cache import cache
 
 from cases.models import Case, DocumentSource, SourceType
+
+logger = logging.getLogger(__name__)
 
 
 DEVANAGARI_RE = re.compile(r"[ऀ-ॿ]")
@@ -197,7 +201,256 @@ RULES:
 - Group evidence by type, not by source.
 - Omit evidence-type subsections with no evidence.""",
     ),
+    "gha": SectionSpec(
+        key="gha",
+        title="घ) अभियुक्तको बयान",
+        heading="घ) अभियुक्तको बयान",
+        max_tokens=1000,
+        evidence_budget=10000,
+        priority_source_types=(SourceType.LEGAL_PROCEDURAL, SourceType.OFFICIAL_GOVERNMENT, SourceType.MEDIA_NEWS),
+        instructions="""TASK: Summarize the accused's statement or defense position.
+
+STRUCTURE:
+<h2>घ) अभियुक्तको बयान</h2>
+<h3>मुख्य बयान</h3>
+<p>Core statement or defense position of the accused.</p>
+<h3>बचाउका आधारहरू</h3>
+<ul><li>Defense argument or denial point</li></ul>
+
+RULES:
+- Only state facts from evidence; do not editorialize.
+- If the accused denies all charges, state that clearly.
+- Distinguish between what the accused asserts and what evidence shows.""",
+    ),
+    "nga": SectionSpec(
+        key="nga",
+        title="ङ) विशेष अदालतको फैसला",
+        heading="ङ) विशेष अदालतको फैसला",
+        max_tokens=1500,
+        evidence_budget=15000,
+        priority_source_types=(SourceType.LEGAL_PROCEDURAL, SourceType.LEGAL_COURT_ORDER, SourceType.OFFICIAL_GOVERNMENT),
+        instructions="""TASK: Summarize the Special Court's verdict and reasoning.
+
+STRUCTURE:
+<h2>ङ) विशेष अदालतको फैसला</h2>
+<h3>फैसलाको सार</h3>
+<p>Verdict summary — conviction, acquittal, or partial.</p>
+<h3>अदालतको तर्क</h3>
+<p>Court's key reasoning in 1-2 paragraphs.</p>
+<h3>सजाय निर्धारण</h3>
+<p>Sentencing: imprisonment amount, fine amount, confiscation orders.</p>
+<h3>फैसला मिति</h3>
+<p>Judgment date and case number.</p>
+
+RULES:
+- State whether the accused was convicted or acquitted per charge.
+- Note if the Special Court verdict is under appeal.""",
+    ),
+    "cha": SectionSpec(
+        key="cha",
+        title="च) पुनरावेदन",
+        heading="च) पुनरावेदन",
+        max_tokens=1200,
+        evidence_budget=12000,
+        priority_source_types=(SourceType.LEGAL_PROCEDURAL, SourceType.LEGAL_COURT_ORDER, SourceType.OFFICIAL_GOVERNMENT),
+        instructions="""TASK: Summarize the appeal proceedings and status.
+
+STRUCTURE:
+<h2>च) पुनरावेदन</h2>
+<h3>पुनरावेदनको आधार</h3>
+<p>Who appealed, on what grounds.</p>
+<h3>पुनरावेदन अदालतको निर्णय</h3>
+<p>Appeal court decision, if rendered.</p>
+<h3>वर्तमान स्थिति</h3>
+<p>Current appeal status: pending, decided, further appeal filed.</p>
+
+RULES:
+- Note which party filed the appeal (convict or prosecution).
+- If multiple appeals exist, list each separately.
+- If the appeal is still pending, state that clearly.""",
+    ),
+    "chha": SectionSpec(
+        key="chha",
+        title="छ) सर्वोच्च अदालत",
+        heading="छ) सर्वोच्च अदालत",
+        max_tokens=1500,
+        evidence_budget=15000,
+        priority_source_types=(SourceType.LEGAL_COURT_ORDER, SourceType.LEGAL_PROCEDURAL, SourceType.OFFICIAL_GOVERNMENT),
+        instructions="""TASK: Summarize Supreme Court proceedings and final disposition.
+
+STRUCTURE:
+<h2>छ) सर्वोच्च अदालत</h2>
+<h3>सर्वोच्चमा पुग्ने आधार</h3>
+<p>How and why the case reached Supreme Court.</p>
+<h3>सर्वोच्चको फैसला</h3>
+<p>Supreme Court's final decision and reasoning.</p>
+<h3>अन्तिम स्थिति</h3>
+<p>Final case status after Supreme Court ruling.</p>
+
+RULES:
+- This is the final appellate court; note if its ruling is final.
+- Reference the Special Court verdict when comparing outcomes.
+- Include case citation number if available.""",
+    ),
+    "ja": SectionSpec(
+        key="ja",
+        title="ज) अवलोकन",
+        heading="ज) अवलोकन",
+        max_tokens=800,
+        evidence_budget=8000,
+        priority_source_types=(SourceType.MEDIA_NEWS, SourceType.LEGAL_PROCEDURAL, SourceType.OFFICIAL_GOVERNMENT),
+        instructions="""TASK: Provide analytical observations about the case.
+
+STRUCTURE:
+<h2>ज) अवलोकन</h2>
+<h3>मुद्दाको महत्व</h3>
+<p>Why this case matters — public interest, precedent, systemic issue.</p>
+<h3>मुख्य टिप्पणी</h3>
+<p>2-3 key takeaways or notable aspects of the case.</p>
+
+RULES:
+- Keep observations grounded in evidence; avoid speculation.
+- Note any unusual procedural aspects or legal significance.
+- Be concise and analytical, not editorial.""",
+    ),
 }
+
+
+COURT_STAGE_KEYS: tuple[str, ...] = ("gha", "nga", "cha", "chha", "ja")
+
+CORE_SECTION_KEYS: tuple[str, ...] = ("short_description", "ka", "kha", "ga")
+
+ALL_SECTION_KEYS: tuple[str, ...] = CORE_SECTION_KEYS + COURT_STAGE_KEYS
+
+
+class CourtStage(StrEnum):
+    CHARGE_SHEET = "charge_sheet"
+    SPECIAL_COURT = "special_court"
+    APPEAL = "appeal"
+    SUPREME_COURT = "supreme_court"
+
+
+COURT_IDENTIFIER_STAGE: dict[str, CourtStage] = {
+    "special": CourtStage.SPECIAL_COURT,
+    "supreme": CourtStage.SUPREME_COURT,
+}
+
+EVIDENCE_STAGE_KEYWORDS: dict[CourtStage, tuple[str, ...]] = {
+    CourtStage.CHARGE_SHEET: (
+        "बयान", "बक्तव्य", "कागज", "बयान गर", "statement", "बचाउ",
+        "accused statement", "defense", "प्रतिवादीको बयान", "अभियुक्त",
+    ),
+    CourtStage.SPECIAL_COURT: (
+        "विशेष अदालत", "special court", "विशेष अदालतको फैसला",
+        "special court verdict", "special court judgment",
+    ),
+    CourtStage.APPEAL: (
+        "पुनरावेदन", "appeal", "उच्च अदालत",
+        "high court", "appellate", "पुनरावेदक",
+    ),
+    CourtStage.SUPREME_COURT: (
+        "सर्वोच्च अदालत", "supreme court",
+        "सर्वोच्च अदालतको फैसला", "supreme court verdict",
+        "supreme court judgment",
+    ),
+}
+
+
+@dataclass(frozen=True)
+class SectionReadinessResult:
+    key: str
+    active: bool
+    reason: str
+    court_stage: CourtStage | None = None
+
+
+@dataclass
+class SectionReadinessCheck:
+    court_cases: list[str] = field(default_factory=list)
+    evidence_text: str = ""
+
+    def check_section(self, key: str) -> SectionReadinessResult:
+        spec = SECTION_SPECS.get(key)
+        if spec is None:
+            return SectionReadinessResult(key, False, f"unknown section key: {key}")
+        if key in CORE_SECTION_KEYS:
+            return SectionReadinessResult(key, True, "core section — always active")
+        return self._check_court_stage_section(key)
+
+    def _check_court_stage_section(self, key: str) -> SectionReadinessResult:
+        court_stages = self._detect_court_stages()
+        evidence = self._detect_stages_from_evidence()
+
+        stage_map: dict[str, CourtStage] = {
+            "gha": CourtStage.CHARGE_SHEET,
+            "nga": CourtStage.SPECIAL_COURT,
+            "cha": CourtStage.APPEAL,
+            "chha": CourtStage.SUPREME_COURT,
+        }
+
+        if key == "ja":
+            can_generate = len(court_stages | evidence) >= 2
+            reason = (
+                f"observation {'active' if can_generate else 'inactive'} — "
+                f"{len(court_stages | evidence)} stages detected"
+            )
+            return SectionReadinessResult(key, can_generate, reason)
+
+        required_stage = stage_map.get(key)
+        if required_stage is None:
+            return SectionReadinessResult(key, False, f"no stage mapping for {key}")
+
+        stage_active = required_stage in (court_stages | evidence)
+        reason_parts = []
+        if required_stage in court_stages:
+            reason_parts.append("court_cases field")
+        if required_stage in evidence:
+            reason_parts.append("evidence keyword match")
+        reason = (
+            f"{'active' if stage_active else 'inactive'} — {' + '.join(reason_parts)}"
+            if reason_parts
+            else f"no court_cases entry or evidence keyword match for {required_stage.value}"
+        )
+        return SectionReadinessResult(key, stage_active, reason, required_stage)
+
+    def _detect_court_stages(self) -> set[CourtStage]:
+        if not self.court_cases:
+            return set()
+        stages: set[CourtStage] = set()
+        for entry in self.court_cases:
+            if not isinstance(entry, str) or ":" not in entry:
+                continue
+            identifier = entry.split(":", 1)[0].lower()
+            stage = COURT_IDENTIFIER_STAGE.get(identifier)
+            if stage is not None:
+                stages.add(stage)
+        if CourtStage.SPECIAL_COURT in stages:
+            stages.add(CourtStage.CHARGE_SHEET)
+        return stages
+
+    def _detect_stages_from_evidence(self) -> set[CourtStage]:
+        if not self.evidence_text:
+            return set()
+        corpus = self.evidence_text.lower()
+        stages: set[CourtStage] = set()
+        for stage, keywords in EVIDENCE_STAGE_KEYWORDS.items():
+            if any(kw.lower() in corpus for kw in keywords):
+                stages.add(stage)
+        return stages
+
+    def active_court_stage_keys(self) -> list[str]:
+        return [k for k in COURT_STAGE_KEYS if self.check_section(k).active]
+
+    def all_active_keys(self) -> list[str]:
+        core = list(CORE_SECTION_KEYS)
+        court = self.active_court_stage_keys()
+        return core + court
+
+
+def build_readiness_check(case: Case, evidence: list[SectionEvidence]) -> SectionReadinessCheck:
+    court_cases = case.court_cases if isinstance(case.court_cases, list) else []
+    evidence_text = " ".join(e.text for e in evidence)
+    return SectionReadinessCheck(court_cases=court_cases, evidence_text=evidence_text)
 
 
 class SectionQualityError(ValueError):
@@ -292,6 +545,23 @@ class SectionGenerationService:
         section_keys: tuple[str, ...] = ("short_description", "ka", "kha", "ga"),
     ) -> dict[str, SectionGenerationResult]:
         tasks = [self.generate_section(case, SECTION_SPECS[key], evidence) for key in section_keys]
+        results = await asyncio.gather(*tasks)
+        return {result.key: result for result in results}
+
+    async def generate_all_sections(
+        self,
+        case: Case,
+        evidence: list[SectionEvidence],
+        *,
+        include_conditional: bool = True,
+    ) -> dict[str, SectionGenerationResult]:
+        readiness = build_readiness_check(case, evidence)
+        keys = readiness.all_active_keys() if include_conditional else list(CORE_SECTION_KEYS)
+        if include_conditional:
+            skipped = [k for k in COURT_STAGE_KEYS if k not in keys]
+            if skipped:
+                logger.info("Skipping inactive sections: %s", skipped)
+        tasks = [self.generate_section(case, SECTION_SPECS[key], evidence) for key in keys]
         results = await asyncio.gather(*tasks)
         return {result.key: result for result in results}
 
