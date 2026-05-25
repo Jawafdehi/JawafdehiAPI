@@ -140,7 +140,8 @@ class EvidenceClassifier:
             sections.append(EvidenceSection.SOURCE_DOCUMENTS)
             reasons.append("default:source_documents")
 
-        confidence = self._confidence(sections, normalized_type or inferred, reasons)
+        has_type_signal = bool(inferred or normalized_type in self.TYPE_ROUTING)
+        confidence = self._confidence(sections, has_type_signal, reasons)
         return EvidenceClassification(
             case_id=case_id,
             content_hash=content_hash,
@@ -174,10 +175,10 @@ class EvidenceClassifier:
         return kw_lower in corpus
 
     def _confidence(
-        self, sections: list[EvidenceSection], inferred_type: str | None, reasons: list[str]
+        self, sections: list[EvidenceSection], has_type_signal: bool, reasons: list[str]
     ) -> float:
         score = 0.35
-        if inferred_type:
+        if has_type_signal:
             score += 0.2
         score += min(0.35, 0.1 * len(reasons))
         if sections != [EvidenceSection.SOURCE_DOCUMENTS]:
