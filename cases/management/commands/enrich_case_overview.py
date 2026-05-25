@@ -18,144 +18,26 @@ Environment variables::
 
 from __future__ import annotations
 
-import hashlib
-import ipaddress
 import logging
 import os
-import re
-import socket
 import tempfile
-import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError
 
+from cases.management.commands._enrich_utils import (
+    SafeRedirectHandler,
+    confined_output_path,
+    copy_stream_to_path_with_limit,
+    sanitize_download_filename,
+    validate_host_safety,
+)
 from cases.models import Case, CaseState, DocumentSource, SourceType
 from cases.services.priority_case_loader import filter_by_priority, load_priority_cases
 
 logger = logging.getLogger(__name__)
-
-MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
-DOWNLOAD_CHUNK_SIZE = 16 * 1024
-
-# SSRF protection: block well-known internal/metadata endpoints.
-_CLOUD_METADATA_IP = "169.254.169.254"  # NOSONAR — link-local, not configurable
-
-_SSRF_BLOCKED_HOSTNAMES = frozenset(
-    {
-        "localhost",
-        "metadata.google.internal",
-        _CLOUD_METADATA_IP,
-        "metadata",
-        "0.0.0.0",
-    }
-)
-
-
-def _validate_host_safety(hostname: str) -> None:
-    host = hostname.lower().rstrip(".")
-    if host in _SSRF_BLOCKED_HOSTNAMES:
-        raise ValueError(
-            f"Blocked internal host: {hostname!r}. "
-            "Download sources must target public hosts only."
-        )
-    try:
-        addrinfo = socket.getaddrinfo(host, None)
-    except socket.gaierror as exc:
-        raise ValueError(
-            f"Cannot resolve host: {hostname!r}. "
-            "Only resolvable public hosts are allowed for source downloads."
-        ) from exc
-    for info in addrinfo:
-        addr = ipaddress.ip_address(info[4][0])
-        if addr.is_loopback or addr.is_private or addr.is_link_local or addr.is_reserved:
-            raise ValueError(
-                f"Blocked internal address: {hostname!r} → {addr}. "
-                "Download sources must target public IPs only."
-            )
-
-
-class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        parsed = urllib.parse.urlparse(newurl)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise urllib.error.HTTPError(
-                req.full_url,
-                code,
-                f"Unsafe redirect scheme/host to {newurl}",
-                headers,
-                fp,
-            )
-        _validate_host_safety(parsed.hostname)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-
-def _sanitize_download_filename(filename: str | None, source_id: str) -> str:
-    raw = (filename or "").strip()
-    if not raw:
-        return f"{source_id}.bin"
-
-    decoded = urllib.parse.unquote(raw)
-    candidate = Path(decoded).name.strip()
-
-    if candidate in {"", ".", ".."}:
-        return f"{source_id}.bin"
-
-    candidate = candidate.replace("\x00", "")
-    candidate = re.sub(r"[<>:\"/\\|?*]+", "_", candidate).rstrip(" .")
-    if candidate in {"", ".", ".."}:
-        return f"{source_id}.bin"
-
-    max_len = 200
-    if len(candidate) <= max_len:
-        return candidate
-
-    suffix = "".join(Path(candidate).suffixes)
-    stem = candidate[: -len(suffix)] if suffix else candidate
-    digest = hashlib.sha256(candidate.encode("utf-8")).hexdigest()[:10]
-
-    stem_budget = max_len - len(suffix) - len(digest) - 1
-    if stem_budget < 1:
-        return f"{source_id}-{digest}{suffix}"[:max_len]
-
-    truncated_stem = stem[:stem_budget].rstrip(" .-_")
-    if not truncated_stem:
-        truncated_stem = source_id
-
-    return f"{truncated_stem}-{digest}{suffix}"
-
-
-def _confined_output_path(output_dir: Path, filename: str) -> Path:
-    output_dir_resolved = output_dir.resolve()
-    out_path = (output_dir / filename).resolve()
-    if output_dir_resolved not in out_path.parents:
-        raise CommandError(f"Refusing to write outside output directory: '{filename}'")
-    return out_path
-
-
-def _copy_stream_to_path_with_limit(in_file: Any, out_path: Path) -> None:
-    total_bytes = 0
-    try:
-        with out_path.open("wb") as out_file:
-            while True:
-                chunk = in_file.read(DOWNLOAD_CHUNK_SIZE)
-                if not chunk:
-                    break
-                total_bytes += len(chunk)
-                if total_bytes > MAX_DOWNLOAD_BYTES:
-                    raise CommandError(
-                        f"Downloaded source exceeds max size of {MAX_DOWNLOAD_BYTES} bytes."
-                    )
-                out_file.write(chunk)
-    except OSError:
-        out_path.unlink(missing_ok=True)
-        raise
-    except CommandError:
-        out_path.unlink(missing_ok=True)
-        raise
 
 
 class Command(BaseCommand):
@@ -242,7 +124,6 @@ class Command(BaseCommand):
         priority = options["priority"]
         all_cases_flag = options.get("all_cases")
         verbose = options["verbose"]
-        force = options["force"]
 
         if priority and case_id:
             raise CommandError("--priority and --case-id are mutually exclusive")
@@ -257,7 +138,7 @@ class Command(BaseCommand):
             )
         )
 
-        cases = self._get_eligible_cases(limit, force, case_id, priority)
+        cases = self._get_eligible_cases(limit, case_id, priority)
         if not all_cases_flag and not priority and not case_id:
             self.stdout.write(
                 self.style.NOTICE(
@@ -275,7 +156,7 @@ class Command(BaseCommand):
                 self.stdout.write(
                     f"\n[{idx}/{len(cases)}] {case.case_id} - {case.title[:80]}..."
                 )
-                self._process_case(case, dry_run, options)
+                self._process_case(case, dry_run)
             except Exception as e:
                 self.stats["cases_failed"] += 1
                 logger.exception(f"Error processing {case.case_id}: {e}")
@@ -287,7 +168,7 @@ class Command(BaseCommand):
     # Query / source cache
     # ------------------------------------------------------------------
 
-    def _get_eligible_cases(self, limit, force, case_id, priority=False):
+    def _get_eligible_cases(self, limit, case_id, priority=False):
         queryset = Case.objects.filter(state=CaseState.DRAFT)
 
         if case_id:
@@ -301,14 +182,16 @@ class Command(BaseCommand):
             )
             queryset = filter_by_priority(queryset, priority_list)
 
-        eligible = list(queryset)
-
+        # Slice at DB level before fetching to avoid loading unused rows
         if limit is not None:
             if limit < 0:
                 raise CommandError(f"--limit must be >= 0, got {limit}")
-            eligible = eligible[:limit] if limit > 0 else []
+            if limit > 0:
+                queryset = queryset[:limit]
+            else:
+                return []
 
-        return eligible
+        return list(queryset)
 
     def _fetch_source_cache(self, cases):
         source_ids = set()
@@ -333,7 +216,7 @@ class Command(BaseCommand):
     # Per-case processing
     # ------------------------------------------------------------------
 
-    def _process_case(self, case, dry_run, options):
+    def _process_case(self, case, dry_run):
         self.stats["cases_processed"] += 1
 
         if not case.evidence:
@@ -516,7 +399,7 @@ class Command(BaseCommand):
         return (is_ngm_store, is_pdf)
 
     # ------------------------------------------------------------------
-    # Likhit conversion (source document → markdown)
+    # Likhit conversion (source document -> markdown)
     # ------------------------------------------------------------------
 
     def _convert_source_to_markdown(self, source: DocumentSource) -> str:
@@ -533,9 +416,15 @@ class Command(BaseCommand):
             temp_path = self._download_source_to_path(source, Path(tmp_dir))
             if temp_path:
                 logger.debug("Converting uploaded source file for %s", source.source_id)
-                result = converter.convert_uri(temp_path.resolve().as_uri())
-                if result.text_content and len(result.text_content.strip()) >= 50:
-                    return result.text_content
+                try:
+                    result = converter.convert_uri(temp_path.resolve().as_uri())
+                    if result.text_content and len(result.text_content.strip()) >= 50:
+                        return result.text_content
+                except Exception:
+                    logger.debug(
+                        "Uploaded source conversion failed for %s, falling back to URLs",
+                        source.source_id,
+                    )
 
             ranked_urls = self._ranked_source_urls(source)
 
@@ -572,24 +461,24 @@ class Command(BaseCommand):
         self, source: DocumentSource, output_dir: Path
     ) -> Path | None:
         if source.uploaded_file:
-            filename = _sanitize_download_filename(
+            filename = sanitize_download_filename(
                 source.uploaded_filename or source.uploaded_file.name,
                 source.source_id,
             )
-            out_path = _confined_output_path(output_dir, filename)
+            out_path = confined_output_path(output_dir, filename)
             with source.uploaded_file.open("rb") as in_file:
-                _copy_stream_to_path_with_limit(in_file, out_path)
+                copy_stream_to_path_with_limit(in_file, out_path)
             return out_path
 
         uploaded = source.uploaded_files.first()
         if uploaded and uploaded.file:
-            filename = _sanitize_download_filename(
+            filename = sanitize_download_filename(
                 uploaded.filename or uploaded.file.name,
                 source.source_id,
             )
-            out_path = _confined_output_path(output_dir, filename)
+            out_path = confined_output_path(output_dir, filename)
             with uploaded.file.open("rb") as in_file:
-                _copy_stream_to_path_with_limit(in_file, out_path)
+                copy_stream_to_path_with_limit(in_file, out_path)
             return out_path
 
         return None
@@ -599,8 +488,8 @@ class Command(BaseCommand):
     ) -> Path | None:
         url = self._validate_url_scheme(url)
         parsed = urllib.parse.urlparse(url)
-        guessed_name = _sanitize_download_filename(parsed.path, source_id)
-        out_path = _confined_output_path(output_dir, guessed_name)
+        guessed_name = sanitize_download_filename(parsed.path, source_id)
+        out_path = confined_output_path(output_dir, guessed_name)
         try:
             request = urllib.request.Request(
                 url,
@@ -612,9 +501,9 @@ class Command(BaseCommand):
                     )
                 },
             )
-            opener = urllib.request.build_opener(_SafeRedirectHandler())
+            opener = urllib.request.build_opener(SafeRedirectHandler())
             with opener.open(request, timeout=30) as response:
-                _copy_stream_to_path_with_limit(response, out_path)
+                copy_stream_to_path_with_limit(response, out_path)
             return out_path
         except OSError:
             out_path.unlink(missing_ok=True)
@@ -626,7 +515,7 @@ class Command(BaseCommand):
     def _validate_url_scheme(self, url: str) -> str:
         parsed = urllib.parse.urlparse(url)
         if parsed.scheme in {"http", "https"} and parsed.netloc:
-            _validate_host_safety(parsed.hostname)
+            validate_host_safety(parsed.hostname)
             return url
         raise ValueError(
             f"Invalid URL '{url}'. Only http and https URLs are allowed with a host."
