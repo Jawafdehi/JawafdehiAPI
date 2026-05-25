@@ -640,13 +640,11 @@ _doc_conv_cache = {
 }
 
 if REDIS_URL:
-    from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
+    from urllib.parse import urlparse, urlunparse
 
     def _redis_db_url(base_url: str, db: int) -> str:
         parsed = urlparse(base_url)
-        qs = parse_qs(parsed.query)
-        qs["db"] = [str(db)]
-        return urlunparse(parsed._replace(path=parsed.path.rstrip("/") or "/", query=urlencode(qs, doseq=True)))
+        return urlunparse(parsed._replace(path=f"/{db}"))
 
     _default_cache = {
         "BACKEND": "django.core.cache.backends.redis.RedisCache",

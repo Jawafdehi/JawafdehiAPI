@@ -106,14 +106,15 @@ def _convert_uncached(content: bytes, *, filename: str, converter=None) -> str:
         converter = MarkItDown(enable_plugins=True)
 
     suffix = "".join(Path(filename).suffixes) or ".bin"
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp.write(content)
-        tmp_path = Path(tmp.name)
-
+    tmp_path = None
     try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = Path(tmp.name)
         result = converter.convert_uri(tmp_path.resolve().as_uri())
     finally:
-        tmp_path.unlink(missing_ok=True)
+        if tmp_path:
+            tmp_path.unlink(missing_ok=True)
 
     markdown = getattr(result, "markdown", None) or getattr(result, "text_content", "")
     return markdown or ""
