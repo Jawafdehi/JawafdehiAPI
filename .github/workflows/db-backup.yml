@@ -2,14 +2,17 @@
 #
 # This workflow:
 # 1. Runs daily at 02:00 UTC via cron schedule
-# 2. Dumps the PostgreSQL database using pg_dump
-# 3. Compresses the dump with gzip
-# 4. Uploads the compressed dump to the "jawafdehi-admin" Cloudflare R2 bucket
+# 2. Starts a Cloud SQL Proxy to connect to the database securely
+# 3. Dumps the PostgreSQL database using pg_dump
+# 4. Compresses the dump with gzip
+# 5. Uploads the compressed dump to the "jawafdehi-admin" Cloudflare R2 bucket
 #
 # Backups are stored at: backups/jawafdehi-<YYYY-MM-DD>.sql.gz
 #
 # Required environment secrets (GitHub Environment: "DB backup"):
-#   DATABASE_URL          - PostgreSQL connection string (for example: postgresql://user:pass@host:port/db)
+#   DATABASE_URL_PROXY    - PostgreSQL connection string via proxy (postgresql://user:pass@127.0.0.1:5432/db)
+#   GOOGLE_APPLICATION_CREDENTIALS - Service Account JSON key with Cloud SQL Client role
+#   CLOUD_SQL_INSTANCE    - Cloud SQL instance connection name (e.g. project:region:instance)
 #   R2_ACCESS_KEY_ID      - Cloudflare R2 Access Key ID
 #   R2_SECRET_ACCESS_KEY  - Cloudflare R2 Secret Access Key
 #   R2_ACCOUNT_ID         - Cloudflare Account ID (used to build the R2 endpoint URL)
@@ -33,6 +36,13 @@ jobs:
     environment: "DB backup"
 
     steps:
+      - name: Start Cloud SQL Proxy
+        uses: Jawafdehi/gce-cloudsql-proxy-action@main
+        with:
+          creds: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
+          instance: ${{ secrets.CLOUD_SQL_INSTANCE }}
+          port: 5432
+
       - name: Install PostgreSQL 18 client and AWS CLI
         run: |
           sudo apt-get update -qq
@@ -69,7 +79,7 @@ jobs:
 
       - name: Dump database
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL_PROXY }}
         run: |
           set -o pipefail
 
