@@ -90,9 +90,9 @@ class EvidenceClassifier:
     }
 
     UNTYPED_HEURISTICS = (
-        (re.compile(r"press[-_ ]?release|विज्ञप्ति|ciaa|अख्तियार", re.I), "press_release"),
-        (re.compile(r"court|order|judgment|फैसला|अदालत", re.I), "court_order"),
-        (re.compile(r"news|article|समाचार", re.I), "news_article"),
+        (re.compile(r"\bpress[-_ ]?release\b|\bciaa\b|विज्ञप्ति|अख्तियार", re.I), "press_release"),
+        (re.compile(r"\bcourt\b|\border\b|\bjudgment\b|फैसला|अदालत", re.I), "court_order"),
+        (re.compile(r"\bnews\b|\barticle\b|समाचार", re.I), "news_article"),
     )
 
     HEURISTIC_ROUTING = {
@@ -132,7 +132,7 @@ class EvidenceClassifier:
                 reasons.append(f"heuristic:{inferred}->{section.value}")
 
         for section, keywords in self.SECTION_RULES.items():
-            if any(keyword.lower() in corpus for keyword in keywords):
+            if any(self._keyword_match(kw, corpus) for kw in keywords):
                 self._append(sections, section)
                 reasons.append(f"keyword:{section.value}")
 
@@ -165,6 +165,13 @@ class EvidenceClassifier:
     def _append(self, sections: list[EvidenceSection], section: EvidenceSection) -> None:
         if section not in sections:
             sections.append(section)
+
+    @staticmethod
+    def _keyword_match(keyword: str, corpus: str) -> bool:
+        kw_lower = keyword.lower()
+        if kw_lower.isascii():
+            return bool(re.search(r"\b" + re.escape(kw_lower) + r"\b", corpus))
+        return kw_lower in corpus
 
     def _confidence(
         self, sections: list[EvidenceSection], inferred_type: str | None, reasons: list[str]
