@@ -34,6 +34,7 @@ from langchain_core.tools import tool
 from case_workflows.encoding_tool import create_fix_encoding_tool
 from case_workflows.registry import register
 from case_workflows.workflow import Workflow, WorkflowStep
+from case_workflows.workflows.ciaa_caseworker.quality_gate import write_quality_gate_report
 
 if TYPE_CHECKING:
     from case_workflows.models import CaseWorkflowRun
@@ -127,6 +128,27 @@ def download_file(url: str, output_path: str) -> str:
 
 # Instantiate the fix_encoding tool for use in all steps
 fix_encoding = create_fix_encoding_tool()
+
+
+@tool
+def quality_gate(case_dir: str) -> str:
+    """Run the quality gate against draft.md in the case directory.
+
+    Evaluates 10 checks: Nepali script presence, English leakage, HTML validity,
+    no empty sections, cross-section consistency, hallucination detection,
+    section ordering, Nepali numbering, content overlap detection, and
+    missing critical sections.
+
+    Writes a quality-gate.json report and returns the routing decision
+    (auto_publish / soft_flag / hard_block) and overall confidence.
+
+    Args:
+        case_dir: Absolute path to the case work directory.
+
+    Returns:
+        A summary line with route, confidence, and report path.
+    """
+    return write_quality_gate_report(case_dir)
 
 
 @tool
@@ -281,9 +303,12 @@ class CIAACaseworkerWorkflow(Workflow):
     2. fetch-source-documents   — download CIAA press release, charge sheet, bolpatra; convert to markdown
     3. fetch-news-articles      — web search for news articles
     4. draft-case               — prepare local case draft
-    5. create-case              — create a basic Jawafdehi case via the API
-    6. create-update-entities   — create or update Jawafdehi entities linked to the case
-    7. update-case-details      — populate remaining case details collected during research
+    5. review-draft             — structured review against sources and template
+    6. revise-draft             — address critical and major review findings
+    7. quality-gate             — automated 10-check quality evaluation with confidence scoring
+    8. create-case              — create a basic Jawafdehi case via the API
+    9. create-update-entities   — create or update Jawafdehi entities linked to the case
+    10. update-case-details     — populate remaining case details collected during research
     """
 
     @property
@@ -445,6 +470,39 @@ Execution requirements:
 4. Before finishing, confirm the file exists and includes substantive content in every required template section.
 
 Save the final draft to {case_dir}/draft.md.
+
+Few-shot examples for each section:
+
+### Description (प्रतिवेदन)
+Example:
+{example_begin}
+नेपाल सरकारको उच्च अदालत पाटनमा कार्यरत तत्कालीन कर्मचारी सुरेश श्रेष्ठले आर्थिक वर्ष २०७८/७९ मा कम्प्युटर उपकरण खरिदमा अनियमितता गरी भ्रष्टाचार गरेको अभियोग अख्तियार दुरुपयोग अनुसन्धान आयोगले विशेष अदालतमा दायर गरेको छ।
+
+प्रतिवादीले खरिद ऐन, २०६३ को दफा ८ विपरीत सार्वजनिक खरिद प्रक्रियामा अनियमितता गरी पूर्वनिर्धारित आपूर्तिकर्तालाई लाभ पुर्याएको देखिन्छ। अनुसन्धानबाट प्रतिवादीले रु. १,५८,८०,००० (एक करोड अठ्ठाउन्न लाख असी हजार) बराबरको गैरकानूनी लाभ लिएको पुष्टि भएको छ।
+
+आयोगले भ्रष्टाचार निवारण ऐन, २०५९ को दफा १३ र २४ बमोजिम विशेष अदालतमा मुद्दा दायर गरेको हो। मुद्दा हाल विचाराधीन अवस्थामा रहेको छ।
+{example_end}
+
+### Key Allegations (मुख्य आरोपहरू)
+Example:
+{example_begin}
+- खरिद ऐन, २०६३ को दफा ८ विपरीत प्रतिस्पर्धा सीमित गरी निश्चित आपूर्तिकर्तालाई लाभ पुर्याएको
+- specification विपरीत कम गुणस्तरको उपकरण आपूर्ति गर्दा रु. १,५८,८०,००० को गैरकानूनी लाभ
+- सार्वजनिक खरिद अनुगमन कार्यालयको स्वीकृति बिना अतिरिक्त रकम भुक्तानी
+{example_end}
+
+### Timeline (समयरेखा)
+Example:
+{example_begin}
+### मुद्दा दायर — २०८१-०१-१५ (2024-04-28)
+अख्तियार दुरुपयोग अनुसन्धान आयोगले विशेष अदालतमा भ्रष्टाचार मुद्दा दायर गरेको।
+
+### पहिलो पेशी — २०८१-०३-१० (2024-06-23)
+विशेष अदालतमा मुद्दाको पहिलो पेशी भएको। प्रतिवादीहरूको बयान लिइएको।
+
+### थुनछेक आदेश — २०८१-०३-२५ (2024-07-08)
+विशेष अदालतले प्रतिवादीलाई धरौटीमा रिहा गर्न आदेश दिएको। धरौटी रकम रु. ५०,००,००० तोकिएको।
+{example_end}
 """,
                 tools=[fix_encoding],
                 required_outputs={"draft.md": 100},
@@ -530,6 +588,49 @@ missing bigo amount, fixed template fields").
 """,
                 tools=[fix_encoding],
                 required_outputs={"draft.md": 100},
+                system_prompt=_SYSTEM_PROMPT,
+            ),
+            WorkflowStep(
+                name="quality-gate",
+                prompt_fn=lambda case_dir: f"""\
+The Jawafdehi case ID / CIAA case number is: {case_dir.name}
+
+Run the automated quality gate against the draft at {case_dir}/draft.md.
+
+Execution requirements:
+1. Call the `quality_gate` tool with case_dir={case_dir} to evaluate the draft.
+2. Read {case_dir}/quality-gate.json and review the findings, routing decision, and confidence scores.
+3. Write a summary to {case_dir}/logs/quality-gate-summary.md:
+   - Overall route (auto_publish / soft_flag / hard_block) and confidence
+   - Which checks passed and failed
+   - Any hard-block findings that must be resolved before submission
+   - Any soft-flag findings that should be reviewed
+
+Routing rules:
+- **auto_publish**: draft passes all gates — proceed to create-case step.
+- **soft_flag**: non-blocking issues found — apply automated fixes where possible:
+  - Section ordering violations → reorder sections to match the template
+  - English leakage → replace leaked English words with Nepali equivalents
+  - Nepali numbering issues → convert ASCII numbering to Devanagari digits
+  - Content overlap → reduce redundancy between overlapping sections
+  After fixing, re-run `quality_gate` to confirm the route improves to auto_publish.
+- **hard_block**: the draft cannot proceed — record the blocking findings,
+  fix the issues in draft.md, then re-run `quality_gate`. Repeat until the
+  route is auto_publish or soft_flag with only minor findings.
+  Common hard-block fixes:
+  - Empty sections → populate every critical section with content
+  - Missing sections → add all required template sections
+  - HTML validity → fix unmatched or unclosed HTML tags
+  - Hallucination → remove unsourced dates/amounts or source them properly
+  - Nepali script → rewrite sections with low Devanagari density in Nepali
+  - Cross-section consistency → align bigo amounts and dates across sections
+
+Before moving on, verify that:
+- quality-gate.json exists with route=auto_publish (or soft_flag with documented acceptance)
+- logs/quality-gate-summary.md is written
+- MEMORY.md is updated with quality gate outcome
+""",
+                tools=[fix_encoding, quality_gate],
                 system_prompt=_SYSTEM_PROMPT,
             ),
             WorkflowStep(

@@ -120,6 +120,7 @@ class TestWorkflowRegistry:
         wf = get_workflow("ciaa_caseworker")
         names = [s.name for s in wf.steps]
         assert "initialize-casework" in names
+        assert "quality-gate" in names
 
     def test_step_prompt_fns_callable(self, tmp_path):
         wf = get_workflow("ciaa_caseworker")
