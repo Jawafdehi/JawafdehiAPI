@@ -6,7 +6,10 @@ import sys
 from django.core.management.base import BaseCommand
 
 from cases.models import Case, CaseType
-from cases.services.section_generation import SectionGenerationService, extract_case_evidence
+from cases.services.section_generation import (
+    SectionGenerationService,
+    extract_case_evidence,
+)
 from caseworker.services import LLMService
 
 logging.basicConfig(
@@ -22,7 +25,9 @@ class DjangoLLMClient:
     def __init__(self):
         self.service = LLMService()
 
-    async def generate(self, *, system_prompt: str, user_prompt: str, max_tokens: int) -> str:
+    async def generate(
+        self, *, system_prompt: str, user_prompt: str, max_tokens: int
+    ) -> str:
         def call():
             prompt = f"{system_prompt}\n\n{user_prompt}"
             text = self.service.invoke(prompt)
@@ -68,7 +73,9 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        case = Case.objects.get(case_id=options["case_id"], case_type=CaseType.CORRUPTION)
+        case = Case.objects.get(
+            case_id=options["case_id"], case_type=CaseType.CORRUPTION
+        )
         if options["force"]:
             version_info = dict(case.versionInfo or {})
             version_info.pop("section_generation_cache", None)
@@ -95,7 +102,9 @@ class Command(BaseCommand):
 
         if options["core_only"]:
             results = asyncio.run(
-                service.generate_core_sections(case, evidence, section_keys=CORE_SECTION_KEYS)
+                service.generate_core_sections(
+                    case, evidence, section_keys=CORE_SECTION_KEYS
+                )
             )
         else:
             results = asyncio.run(
@@ -145,10 +154,16 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS("Section Readiness Report"))
         self.stdout.write(f"  court_cases: {readiness.court_cases or '[]'}")
-        self.stdout.write(f"  evidence text length: {len(readiness.evidence_text)} chars")
+        self.stdout.write(
+            f"  evidence text length: {len(readiness.evidence_text)} chars"
+        )
         self.stdout.write("")
         for key in ALL_SECTION_KEYS:
             result = readiness.check_section(key)
-            status = self.style.SUCCESS("ACTIVE  ") if result.active else self.style.WARNING("INACTIVE")
+            status = (
+                self.style.SUCCESS("ACTIVE  ")
+                if result.active
+                else self.style.WARNING("INACTIVE")
+            )
             stage = f" [{result.court_stage.value}]" if result.court_stage else ""
             self.stdout.write(f"  {status} {key}{stage} — {result.reason}")

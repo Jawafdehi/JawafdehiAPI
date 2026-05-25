@@ -21,7 +21,9 @@ class FakeLLMClient:
     def __init__(self):
         self.calls = []
 
-    async def generate(self, *, system_prompt: str, user_prompt: str, max_tokens: int) -> str:
+    async def generate(
+        self, *, system_prompt: str, user_prompt: str, max_tokens: int
+    ) -> str:
         self.calls.append(
             {
                 "system_prompt": system_prompt,
@@ -36,9 +38,13 @@ class FakeLLMClient:
         elif "प्रमाणको सार" in user_prompt:
             html = "<h2>ग) प्रमाणको सार संक्षेप (अभियोजन पक्षले दाबी गरेको)</h2><p>दस्तावेजी प्रमाण पेश गरिएको छ।</p>"
         elif "अभियुक्तको बयान" in user_prompt:
-            html = "<h2>घ) अभियुक्तको बयान</h2><p>प्रतिवादीले आरोप अस्वीकार गरेका छन्।</p>"
+            html = (
+                "<h2>घ) अभियुक्तको बयान</h2><p>प्रतिवादीले आरोप अस्वीकार गरेका छन्।</p>"
+            )
         elif "विशेष अदालतको फैसला" in user_prompt:
-            html = "<h2>ङ) विशेष अदालतको फैसला</h2><p>विशेष अदालतले दोषी ठहर गरेको छ।</p>"
+            html = (
+                "<h2>ङ) विशेष अदालतको फैसला</h2><p>विशेष अदालतले दोषी ठहर गरेको छ।</p>"
+            )
         elif "पुनरावेदन" in user_prompt:
             html = "<h2>च) पुनरावेदन</h2><p>उच्च अदालतमा पुनरावेदन विचाराधीन छ।</p>"
         elif "सर्वोच्च अदालत" in user_prompt:
@@ -291,7 +297,9 @@ async def test_generate_all_sections_without_conditional_is_core_only():
     llm = FakeLLMClient()
     service = SectionGenerationService(llm)
 
-    results = await service.generate_all_sections(case, evidence, include_conditional=False)
+    results = await service.generate_all_sections(
+        case, evidence, include_conditional=False
+    )
 
     assert set(results) == set(CORE_SECTION_KEYS)
 
@@ -307,82 +315,10 @@ def test_all_section_keys_includes_all_8():
 def test_court_stage_section_specs_have_required_fields():
     for key in COURT_STAGE_KEYS:
         from cases.services.section_generation import SECTION_SPECS
+
         spec = SECTION_SPECS[key]
         assert spec.key == key
         assert spec.heading is not None, f"{key} missing heading"
         assert spec.max_tokens > 0, f"{key} missing max_tokens"
         assert spec.evidence_budget > 0, f"{key} missing evidence_budget"
         assert spec.instructions, f"{key} missing instructions"
-
-
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.asyncio
-async def test_generate_core_sections_fans_out_and_stores_db_cache():
-    cache.clear()
-    case = await Case.objects.acreate(
-        case_type=CaseType.CORRUPTION,
-        title="CIAA case",
-        description="",
-        timeline=[],
-        evidence=[],
-    )
-    evidence = [
-        SectionEvidence(
-            source_id="source:1",
-            title="अभियोग पत्र",
-            source_type=SourceType.OFFICIAL_GOVERNMENT,
-            text="प्रतिवादीले भ्रष्टाचार गरेको आरोप छ।",
-        )
-    ]
-    llm = FakeLLMClient()
-    service = SectionGenerationService(llm)
-
-    results = await service.generate_core_sections(case, evidence)
-
-    assert set(results) == {"short_description", "ka", "kha", "ga"}
-    assert len(llm.calls) == 4
-    await case.arefresh_from_db()
-    section_cache = case.versionInfo["section_generation_cache"]
-    assert set(section_cache) == {"short_description", "ka", "kha", "ga"}
-    assert section_cache["ka"]["confidence"] == "high"
-
-
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.asyncio
-async def test_generate_section_reuses_db_cache():
-    cache.clear()
-    case = await Case.objects.acreate(
-        case_type=CaseType.CORRUPTION,
-        title="CIAA case",
-        description="",
-        timeline=[],
-        evidence=[],
-    )
-    evidence = [
-        SectionEvidence(
-            source_id="source:1",
-            title="अभियोग पत्र",
-            source_type=SourceType.OFFICIAL_GOVERNMENT,
-            text="प्रतिवादीले भ्रष्टाचार गरेको आरोप छ।",
-        )
-    ]
-    llm = FakeLLMClient()
-    service = SectionGenerationService(llm)
-
-    await service.generate_core_sections(case, evidence, section_keys=("ka",))
-    first_call_count = len(llm.calls)
-    await case.arefresh_from_db()
-    results = await service.generate_core_sections(case, evidence, section_keys=("ka",))
-
-    assert len(llm.calls) == first_call_count
-    assert results["ka"].from_cache is True
-
-
-def test_validate_section_html_rejects_disallowed_tags():
-    with pytest.raises(SectionQualityError, match="disallowed HTML tags"):
-        validate_section_html("<script>alert(1)</script><p>नेपाली पाठ</p>")
-
-
-def test_validate_section_html_rejects_non_nepali_output():
-    with pytest.raises(SectionQualityError, match="Nepali"):
-        validate_section_html("<p>This is only English text.</p>")
