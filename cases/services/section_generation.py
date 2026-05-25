@@ -480,7 +480,7 @@ def validate_section_html(html: str, *, heading: str | None = None) -> None:
     text = TAG_RE.sub("", html)
     chars = [ch for ch in text if not ch.isspace()]
     if chars:
-        nepali_ratio = sum(1 for ch in chars if DEVANAGARI_RE.match(ch)) / len(chars)
+        nepali_ratio = len(DEVANAGARI_RE.findall(text)) / len(chars)
         if nepali_ratio < 0.20:
             raise SectionQualityError("section output does not contain enough Nepali text")
 
@@ -593,17 +593,21 @@ class SectionGenerationService:
 
     async def _store_section_cache(
         self, case: Case, key: str, eh: str, html: str, confidence: str) -> None:
-        version_info = dict(case.versionInfo or {})
-        cache_data = dict(version_info.get("section_generation_cache", {}))
-        cache_data[key] = {
-            "model": self.model,
-            "evidence_hash": eh,
-            "html": html,
-            "confidence": confidence,
-        }
-        version_info["section_generation_cache"] = cache_data
-        case.versionInfo = version_info
-        await sync_to_async(case.save)(update_fields=["versionInfo", "updated_at"])
+        if not hasattr(self, "_store_lock"):
+            self._store_lock = asyncio.Lock()
+        async with self._store_lock:
+            await case.arefresh_from_db(fields=["versionInfo"])
+            version_info = dict(case.versionInfo or {})
+            cache_data = dict(version_info.get("section_generation_cache", {}))
+            cache_data[key] = {
+                "model": self.model,
+                "evidence_hash": eh,
+                "html": html,
+                "confidence": confidence,
+            }
+            version_info["section_generation_cache"] = cache_data
+            case.versionInfo = version_info
+            await sync_to_async(case.save)(update_fields=["versionInfo", "updated_at"])
 
 
 def extract_case_evidence(case: Case) -> list[SectionEvidence]:
