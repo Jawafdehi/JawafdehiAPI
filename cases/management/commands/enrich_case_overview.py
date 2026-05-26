@@ -31,7 +31,7 @@ from pathlib import Path
 from django.core.management.base import BaseCommand, CommandError
 
 from cases.management.commands._enrich_utils import (
-    SafeRedirectHandler,
+    build_pinned_opener,
     confined_output_path,
     copy_stream_to_path_with_limit,
     sanitize_download_filename,
@@ -77,13 +77,15 @@ class DjangoSyncLLMClient:
     async def generate(
         self, *, system_prompt: str, user_prompt: str, max_tokens: int
     ) -> str:
+        from asgiref.sync import sync_to_async
+
         def call():
             prompt = f"{system_prompt}\n\n{user_prompt}"
             text = self.service.invoke(prompt)
             json.loads(text)
             return text
 
-        return await asyncio.to_thread(call)
+        return await sync_to_async(call)()
 
 
 class Command(BaseCommand):
@@ -450,7 +452,8 @@ class Command(BaseCommand):
                         )
                     },
                 )
-                opener = urllib.request.build_opener(SafeRedirectHandler())
+                pinned_addrs = validate_host_safety(parsed.hostname, parsed.port or 0)
+                opener = build_pinned_opener(url, pinned_addrs)
                 with opener.open(request, timeout=30) as response:
                     copy_stream_to_path_with_limit(response, out_path)
             except OSError:
@@ -473,7 +476,7 @@ class Command(BaseCommand):
     def _validate_url_scheme(self, url: str) -> str:
         parsed = urllib.parse.urlparse(url)
         if parsed.scheme in {"http", "https"} and parsed.netloc:
-            validate_host_safety(parsed.hostname)
+            validate_host_safety(parsed.hostname, parsed.port or 0)
             return url
         raise ValueError(
             f"Invalid URL '{url}'. Only http and https URLs are allowed with a host."

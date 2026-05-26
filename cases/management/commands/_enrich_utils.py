@@ -7,6 +7,7 @@ that is common across enrich_* management commands.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import ipaddress
 import re
 import socket
@@ -35,7 +36,8 @@ _SSRF_BLOCKED_HOSTNAMES = frozenset(
 )
 
 
-def validate_host_safety(hostname: str | None) -> None:
+def validate_host_safety(hostname: str | None, port: int = 0) -> list[tuple[str, int]]:
+    """Resolve hostname once, reject internal IPs, return pinned addresses."""
     host = (hostname or "").lower().rstrip(".")
     if not host:
         raise ValueError("No hostname provided for download URL.")
@@ -45,12 +47,14 @@ def validate_host_safety(hostname: str | None) -> None:
             "Download sources must target public hosts only."
         )
     try:
-        addrinfo = socket.getaddrinfo(host, None)
+        addrinfo = socket.getaddrinfo(host, port)
     except socket.gaierror as exc:
         raise ValueError(
             f"Cannot resolve host: {hostname!r}. "
             "Only resolvable public hosts are allowed for source downloads."
         ) from exc
+
+    pinned: list[tuple[str, int]] = []
     for info in addrinfo:
         addr = ipaddress.ip_address(info[4][0])
         if (
@@ -60,14 +64,101 @@ def validate_host_safety(hostname: str | None) -> None:
             or addr.is_reserved
         ):
             raise ValueError(
-                f"Blocked internal address: {hostname!r} → {addr}. "
+                f"Blocked internal address: {hostname!r} -> {addr}. "
                 "Download sources must target public IPs only."
             )
+        resolved_port = info[4][1] if len(info[4]) > 1 else port
+        pinned.append((str(addr), resolved_port))
+    return pinned
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """HTTPConnection that connects to a pre-resolved IP, pinning DNS."""
+
+    _pinned_addr: str | None = None
+    _pinned_port: int = 0
+
+    def connect(self):
+        if self._pinned_addr is None:
+            return super().connect()
+        self.sock = socket.create_connection(
+            (self._pinned_addr, self._pinned_port or 80), self.timeout
+        )
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPSConnection that connects to a pre-resolved IP, pinning DNS."""
+
+    _pinned_addr: str | None = None
+    _pinned_port: int = 0
+
+    def connect(self):
+        if self._pinned_addr is None:
+            return super().connect()
+        sock = socket.create_connection(
+            (self._pinned_addr, self._pinned_port or 443), self.timeout
+        )
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+class PinnedHTTPHandler(urllib.request.HTTPHandler):
+    """HTTP handler that pins connections to pre-validated IP addresses."""
+
+    def __init__(self, pinned_addrs: list[tuple[str, int]], host: str):
+        super().__init__()
+        self._pinned = pinned_addrs
+        self._host = host
+
+    def http_open(self, req):
+        return self.do_open(self._make_connection, req)
+
+    def _make_connection(self, host, timeout=None, **kwargs):
+        conn = _PinnedHTTPConnection(host, timeout=timeout, **kwargs)
+        if self._pinned:
+            conn._pinned_addr, conn._pinned_port = self._pinned[0]
+        return conn
+
+
+class PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    """HTTPS handler that pins connections to pre-validated IP addresses."""
+
+    def __init__(self, pinned_addrs: list[tuple[str, int]], host: str):
+        super().__init__()
+        self._pinned = pinned_addrs
+        self._host = host
+
+    def https_open(self, req):
+        return self.do_open(self._make_connection, req)
+
+    def _make_connection(self, host, timeout=None, **kwargs):
+        conn = _PinnedHTTPSConnection(host, timeout=timeout, **kwargs)
+        if self._pinned:
+            conn._pinned_addr, conn._pinned_port = self._pinned[0]
+        return conn
+
+
+def build_pinned_opener(
+    url: str, pinned_addrs: list[tuple[str, int]]
+) -> urllib.request.OpenerDirector:
+    """Build a urllib opener that pins DNS for *url* to *pinned_addrs*."""
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.hostname or ""
+
+    if parsed.scheme == "https":
+        handler = PinnedHTTPSHandler(pinned_addrs, host)
+    else:
+        handler = PinnedHTTPHandler(pinned_addrs, host)
+
+    return urllib.request.build_opener(handler, SafeRedirectHandler(host))
 
 
 class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def __init__(self, host: str):
+        self._host = host.lower().rstrip(".")
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         parsed = urllib.parse.urlparse(newurl)
+        redirect_host = (parsed.hostname or "").lower().rstrip(".")
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise urllib.error.HTTPError(
                 req.full_url,
@@ -76,7 +167,15 @@ class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
                 headers,
                 fp,
             )
-        validate_host_safety(parsed.hostname)
+        if redirect_host != self._host:
+            raise urllib.error.HTTPError(
+                req.full_url,
+                code,
+                f"Refusing cross-host redirect to {newurl}",
+                headers,
+                fp,
+            )
+        validate_host_safety(redirect_host, parsed.port or 0)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 

@@ -626,6 +626,7 @@ class SectionGenerationService:
     ) -> None:
         self.llm_client = llm_client
         self.model = model
+        self._store_lock = asyncio.Lock()
 
     async def generate_core_sections(
         self,
@@ -699,8 +700,6 @@ class SectionGenerationService:
     async def _store_section_cache(
         self, case: Case, key: str, eh: str, html: str, confidence: str
     ) -> None:
-        if not hasattr(self, "_store_lock"):
-            self._store_lock = asyncio.Lock()
         async with self._store_lock:
             await case.arefresh_from_db(fields=["versionInfo"])
             version_info = dict(case.versionInfo or {})
