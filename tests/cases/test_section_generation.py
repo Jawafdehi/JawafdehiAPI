@@ -34,17 +34,15 @@ class FakeLLMClient:
         if "अभियोगपत्रको सार" in user_prompt:
             html = "<h2>क) अभियोगपत्रको सार</h2><p>अख्तियारले भ्रष्टाचारको आरोप दाबी गरेको छ।</p>"
         elif "कानुनी व्यवस्था" in user_prompt:
-            html = "<h2>ख) आकर्षित कानुनी व्यवस्था</h2><p>दफा अनुसार कारबाही माग गरिएको छ।</p>"
+            html = (
+                "<h2>ख) आकर्षित कानुनी व्यवस्था</h2><p>दफा अनुसार कारबाही माग गरिएको छ।</p>"
+            )
         elif "प्रमाणको सार" in user_prompt:
             html = "<h2>ग) प्रमाणको सार संक्षेप (अभियोजन पक्षले दाबी गरेको)</h2><p>दस्तावेजी प्रमाण पेश गरिएको छ।</p>"
         elif "अभियुक्तको बयान" in user_prompt:
-            html = (
-                "<h2>घ) अभियुक्तको बयान</h2><p>प्रतिवादीले आरोप अस्वीकार गरेका छन्।</p>"
-            )
+            html = "<h2>घ) अभियुक्तको बयान</h2><p>प्रतिवादीले आरोप अस्वीकार गरेका छन्।</p>"
         elif "विशेष अदालतको फैसला" in user_prompt:
-            html = (
-                "<h2>ङ) विशेष अदालतको फैसला</h2><p>विशेष अदालतले दोषी ठहर गरेको छ।</p>"
-            )
+            html = "<h2>ङ) विशेष अदालतको फैसला</h2><p>विशेष अदालतले दोषी ठहर गरेको छ।</p>"
         elif "पुनरावेदन" in user_prompt:
             html = "<h2>च) पुनरावेदन</h2><p>उच्च अदालतमा पुनरावेदन विचाराधीन छ।</p>"
         elif "सर्वोच्च अदालत" in user_prompt:
@@ -111,11 +109,15 @@ async def test_generate_section_reuses_db_cache():
     service = SectionGenerationService(llm)
 
     await service.generate_core_sections(case, evidence, section_keys=("ka",))
-    first_call_count = len(llm.calls)
     await case.arefresh_from_db()
-    results = await service.generate_core_sections(case, evidence, section_keys=("ka",))
 
-    assert len(llm.calls) == first_call_count
+    llm2 = FakeLLMClient()
+    service2 = SectionGenerationService(llm2)
+    results = await service2.generate_core_sections(
+        case, evidence, section_keys=("ka",)
+    )
+
+    assert len(llm2.calls) == 0
     assert results["ka"].from_cache is True
 
 

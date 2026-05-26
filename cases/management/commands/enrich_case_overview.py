@@ -19,9 +19,7 @@ Environment variables::
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import os
 import sys
 import tempfile
 import urllib.parse
@@ -37,11 +35,9 @@ from cases.management.commands._enrich_utils import (
     sanitize_download_filename,
     validate_host_safety,
 )
-from cases.models import Case, CaseState, DocumentSource, SourceType
+from cases.models import Case, CaseState, DocumentSource
 from cases.services.likhit_util import (
-    ConversionResult,
     convert_bytes_to_markdown,
-    evidence_content_hash,
 )
 from cases.services.section_generation import (
     ALL_SECTION_KEYS,
@@ -52,8 +48,6 @@ from cases.services.section_generation import (
     SectionEvidence,
     SectionGenerationResult,
     SectionGenerationService,
-    SectionLLMClient,
-    SectionQualityError,
     build_readiness_check,
     extract_case_evidence,
 )
@@ -81,9 +75,7 @@ class DjangoSyncLLMClient:
 
         def call():
             prompt = f"{system_prompt}\n\n{user_prompt}"
-            text = self.service.invoke(prompt)
-            json.loads(text)
-            return text
+            return self.service.invoke(prompt)
 
         return await sync_to_async(call)()
 
@@ -160,8 +152,7 @@ class Command(BaseCommand):
 
         self.stdout.write(
             self.style.WARNING(
-                f"{'[DRY RUN] ' if dry_run else ''}"
-                "Starting case overview enrichment..."
+                f"{'[DRY RUN] ' if dry_run else ''}Starting case overview enrichment..."
             )
         )
 
@@ -266,11 +257,15 @@ class Command(BaseCommand):
 
         if not evidence_items:
             self.stats["cases_no_content"] += 1
-            self.stdout.write(self.style.WARNING("  SKIPPED: No evidence after gathering"))
+            self.stdout.write(
+                self.style.WARNING("  SKIPPED: No evidence after gathering")
+            )
             return
 
         total_chars = sum(len(e.text) for e in evidence_items)
-        self.stdout.write(f"  Evidence: {len(evidence_items)} sources ({total_chars} chars)")
+        self.stdout.write(
+            f"  Evidence: {len(evidence_items)} sources ({total_chars} chars)"
+        )
 
         # Step 2: Section readiness
         readiness = build_readiness_check(case, evidence_items)
@@ -363,40 +358,20 @@ class Command(BaseCommand):
         return evidence_items
 
     def _convert_source(self, source: DocumentSource) -> str | None:
-        """Convert source files to markdown via Likhit/MarkItDown, return text or None."""
         results: list[str] = []
 
-        # Try uploaded file
         if source.uploaded_file:
-            try:
-                with source.uploaded_file.open("rb") as f:
-                    content = f.read()
-                result = convert_bytes_to_markdown(
-                    content,
-                    filename=source.uploaded_filename or source.uploaded_file.name,
-                )
-                if result.markdown and len(result.markdown.strip()) >= 50:
-                    results.append(result.markdown)
-            except Exception as e:
-                logger.debug("Uploaded file conversion failed for %s: %s", source.source_id, e)
+            md = self._try_convert_file(
+                source.uploaded_file,
+                source.uploaded_filename or source.uploaded_file.name,
+                source.source_id,
+                "Uploaded file",
+            )
+            if md:
+                results.append(md)
 
-        # Try uploaded_files (DocumentSourceUpload)
-        for upload in source.uploaded_files.all():
-            if not upload.file:
-                continue
-            try:
-                with upload.file.open("rb") as f:
-                    content = f.read()
-                result = convert_bytes_to_markdown(
-                    content,
-                    filename=upload.filename or upload.file.name,
-                )
-                if result.markdown and len(result.markdown.strip()) >= 50:
-                    results.append(result.markdown)
-            except Exception as e:
-                logger.debug("Upload conversion failed for %s: %s", source.source_id, e)
+        results.extend(self._try_convert_uploads(source))
 
-        # Try URLs
         for url in self._ranked_source_urls(source):
             try:
                 text = self._download_url_text(url, source.source_id)
@@ -406,6 +381,33 @@ class Command(BaseCommand):
                 logger.debug("URL download failed for %s: %s", source.source_id, e)
 
         return "\n\n".join(results) if results else None
+
+    @staticmethod
+    def _try_convert_file(file_field, filename, source_id, label):
+        try:
+            with file_field.open("rb") as f:
+                content = f.read()
+            result = convert_bytes_to_markdown(content, filename=filename)
+            if result.markdown and len(result.markdown.strip()) >= 50:
+                return result.markdown
+        except Exception as e:
+            logger.debug("%s conversion failed for %s: %s", label, source_id, e)
+        return None
+
+    def _try_convert_uploads(self, source):
+        results = []
+        for upload in source.uploaded_files.all():
+            if not upload.file:
+                continue
+            md = self._try_convert_file(
+                upload.file,
+                upload.filename or upload.file.name,
+                source.source_id,
+                "Upload",
+            )
+            if md:
+                results.append(md)
+        return results
 
     def _ranked_source_urls(self, source: DocumentSource) -> list[str]:
         urls = [
@@ -538,9 +540,7 @@ class Command(BaseCommand):
             self.style.WARNING(f"Cases skipped:    {self.stats['cases_skipped']}")
         )
         self.stdout.write(
-            self.style.WARNING(
-                f"Cases no content:  {self.stats['cases_no_content']}"
-            )
+            self.style.WARNING(f"Cases no content:  {self.stats['cases_no_content']}")
         )
         if self.stats["cases_failed"] > 0:
             self.stdout.write(

@@ -619,7 +619,7 @@ SECTION INSTRUCTIONS:
 {spec.instructions}
 
 EVIDENCE:
-{'\n\n---\n\n'.join(evidence_chunks)}
+{"\n\n---\n\n".join(evidence_chunks)}
 """
 
 

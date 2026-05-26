@@ -28,6 +28,9 @@ class EvidenceClassification:
     reasons: tuple[str, ...] = field(default_factory=tuple)
 
 
+MAX_CLASSIFY_CHARS = 50_000
+
+
 class EvidenceClassifier:
     SECTION_RULES = {
         EvidenceSection.BIGO: (
@@ -122,7 +125,9 @@ class EvidenceClassifier:
     ) -> EvidenceClassification:
         content_hash = evidence_content_hash(evidence_text)
         normalized_type = self._normalize_source_type(source_type)
-        corpus = f"{title}\n{filename}\n{evidence_text}".lower()
+        corpus = (
+            f"{title}\n{filename}\n{evidence_text[: self.MAX_CLASSIFY_CHARS]}".lower()
+        )
         sections: list[EvidenceSection] = []
         reasons: list[str] = []
 

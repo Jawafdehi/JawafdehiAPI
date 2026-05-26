@@ -236,9 +236,6 @@ def copy_stream_to_path_with_limit(in_file: Any, out_path: Path) -> None:
                         f"Downloaded source exceeds max size of {MAX_DOWNLOAD_BYTES} bytes."
                     )
                 out_file.write(chunk)
-    except OSError:
-        out_path.unlink(missing_ok=True)
-        raise
-    except CommandError:
+    except BaseException:
         out_path.unlink(missing_ok=True)
         raise
