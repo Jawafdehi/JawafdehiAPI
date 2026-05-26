@@ -501,7 +501,7 @@ class Command(BaseCommand):
         if html_parts:
             case.description = "\n\n".join(html_parts)
 
-        case.save(update_fields=["short_description", "description", "versionInfo", "updated_at"])
+        case.save(update_fields=["short_description", "description", "updated_at"])
 
     # ------------------------------------------------------------------
     # Reports

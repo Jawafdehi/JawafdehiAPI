@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+from django.core.cache import caches
 from django.test import override_settings
 
 from cases.services.likhit_util import convert_bytes_to_markdown, idempotency_key
@@ -23,6 +24,7 @@ class FakeConverter:
     }
 )
 def test_likhit_conversion_uses_doc_conv_cache():
+    caches["doc_conv"].clear()
     converter = FakeConverter()
 
     first = convert_bytes_to_markdown(

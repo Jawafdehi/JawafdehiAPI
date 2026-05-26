@@ -561,7 +561,7 @@ def validate_section_html(html: str, *, heading: str | None = None) -> None:
     chars = [ch for ch in text if not ch.isspace()]
     if chars:
         nepali_ratio = len(DEVANAGARI_RE.findall(text)) / len(chars)
-        if nepali_ratio < 0.20:
+        if nepali_ratio < 0.50:
             raise SectionQualityError(
                 "section output does not contain enough Nepali text"
             )
@@ -571,8 +571,20 @@ def validate_section_html(html: str, *, heading: str | None = None) -> None:
 
 
 def parse_llm_response(raw: str) -> tuple[str, str]:
-    data = json.loads(raw)
-    html = data["html"]
+    raw = raw.strip()
+    if raw.startswith("```"):
+        lines = raw.split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        raw = "\n".join(lines).strip()
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        logger.warning("Malformed LLM response, raw: %s", raw[:500])
+        return "", "low"
+    html = data.get("html", "")
     confidence = data.get("confidence", "low")
     if confidence not in {"high", "medium", "low"}:
         confidence = "low"
