@@ -126,7 +126,7 @@ class EvidenceClassifier:
         content_hash = evidence_content_hash(evidence_text)
         normalized_type = self._normalize_source_type(source_type)
         corpus = (
-            f"{title}\n{filename}\n{evidence_text[: self.MAX_CLASSIFY_CHARS]}".lower()
+            f"{title}\n{filename}\n{evidence_text[:MAX_CLASSIFY_CHARS]}".lower()
         )
         sections: list[EvidenceSection] = []
         reasons: list[str] = []
