@@ -625,12 +625,43 @@ CASE_WORKFLOWS_WORK_DIR = (
 )
 
 # Cache Configuration
-CACHES = {
-    "default": {
-        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-        "LOCATION": "jawafdehi-cache",
-        "TIMEOUT": 300,  # 5 minutes default
+REDIS_URL = os.getenv("REDIS_URL")
+
+_default_cache = {
+    "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+    "LOCATION": "jawafdehi-cache",
+    "TIMEOUT": 300,  # 5 minutes default
+}
+
+_doc_conv_cache = {
+    "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+    "LOCATION": "jawafdehi-doc-conv-cache",
+    "TIMEOUT": None,  # Never expire document conversion cache
+}
+
+if REDIS_URL:
+    from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
+
+    def _redis_db_url(base_url: str, db: int) -> str:
+        parsed = urlparse(base_url)
+        qs = parse_qs(parsed.query)
+        qs["db"] = [str(db)]
+        return urlunparse(parsed._replace(path=parsed.path.rstrip("/") or "/", query=urlencode(qs, doseq=True)))
+
+    _default_cache = {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": _redis_db_url(REDIS_URL, 0),
+        "TIMEOUT": 300,
     }
+    _doc_conv_cache = {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": _redis_db_url(REDIS_URL, 1),
+        "TIMEOUT": None,
+    }
+
+CACHES = {
+    "default": _default_cache,
+    "doc_conv": _doc_conv_cache,
 }
 
 # Jazzmin Configuration
