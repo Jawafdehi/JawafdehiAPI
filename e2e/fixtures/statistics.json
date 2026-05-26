@@ -1,0 +1,12 @@
+{
+  "total_cases": 42,
+  "published_cases": 35,
+  "in_review_cases": 5,
+  "draft_cases": 2,
+  "total_sources": 128,
+  "total_entities": 89,
+  "cases_by_type": {
+    "CORRUPTION": 30,
+    "PROMISES": 5
+  }
+}
