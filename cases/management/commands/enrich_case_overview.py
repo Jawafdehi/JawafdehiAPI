@@ -364,6 +364,15 @@ class Command(BaseCommand):
         timeout = _llm_timeout(options.get("llm_timeout"))
         dry_run = options["dry_run"]
 
+        logger.info(
+            "enrich_case_overview START | dry_run=%s model=%s base_url=%s limit=%s case_id=%s force=%s",
+            dry_run,
+            model,
+            base_url,
+            options.get("limit"),
+            options.get("case_id"),
+            options.get("force"),
+        )
         self.stdout.write(
             self.style.WARNING(
                 f"{'[DRY RUN] ' if dry_run else ''}Starting case overview enrichment..."
@@ -373,13 +382,19 @@ class Command(BaseCommand):
         cases = self._get_eligible_cases(
             options["limit"], options["force"], options.get("case_id")
         )
+        logger.info("Found %d eligible CIAA DRAFT cases", len(cases))
         self.stdout.write(f"Found {len(cases)} eligible CIAA DRAFT case(s) to process")
         self._fetch_source_cache(cases)
+        logger.info(
+            "Fetched source cache for %d unique source IDs",
+            len(getattr(self, "_source_lookup", {})),
+        )
 
         for idx, case in enumerate(cases, 1):
             self.stdout.write(
                 f"\n[{idx}/{len(cases)}] {case.case_id} - {case.title[:80]}..."
             )
+            logger.info("[%d/%d] Processing case %s", idx, len(cases), case.case_id)
             try:
                 self._process_case(
                     case, model, base_url, api_key, timeout, is_opencode, dry_run
@@ -390,6 +405,17 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.ERROR(f"FAILED: {case.case_id} - {exc}"))
 
         elapsed = int(time.time() - started)
+        logger.info(
+            "enrich_case_overview END | elapsed=%ds processed=%d enriched=%d skipped=%d no_content=%d failed=%d extraction_fail=%d formatting_fail=%d",
+            elapsed,
+            self.stats["cases_processed"],
+            self.stats["cases_enriched"],
+            self.stats["cases_skipped"],
+            self.stats["cases_no_content"],
+            self.stats["cases_failed"],
+            self.stats["llm_extraction_failures"],
+            self.stats["llm_formatting_failures"],
+        )
         self._print_summary(
             dry_run,
             f"{elapsed // 60}m {elapsed % 60}s" if elapsed >= 60 else f"{elapsed}s",
@@ -506,8 +532,14 @@ class Command(BaseCommand):
     def _convert_one_source(self, source):
         """Convert a single source to text, returning None on failure."""
         try:
-            return self._convert_source_to_markdown(source)
-        except (CommandError, ValueError, OSError):
+            result = self._convert_source_to_markdown(source)
+            if result:
+                logger.debug(
+                    "Source %s: converted — %d chars", source.source_id, len(result)
+                )
+            return result
+        except (CommandError, ValueError, OSError) as exc:
+            logger.warning("Source %s: conversion failed — %s", source.source_id, exc)
             return None
 
     # ── Per-case processing ───────────────────────────────────────
@@ -516,13 +548,29 @@ class Command(BaseCommand):
         self, case, model, base_url, api_key, timeout, is_opencode, dry_run
     ):
         self.stats["cases_processed"] += 1
+        logger.info(
+            "Case %s: evidence entries=%d", case.case_id, len(case.evidence or [])
+        )
         if not case.evidence:
             self.stats["cases_skipped"] += 1
+            logger.warning("Case %s: skipped — no evidence", case.case_id)
             self.stdout.write(self.style.WARNING("  SKIPPED: No evidence"))
             return
 
         # Gather all sources
         gathered = self._gather_case_sources(case)
+        logger.info(
+            "Case %s: gathered sources — charge_sheet=%s press_releases=%d court_orders=%d investigative=%d financial=%d procedural=%d media=%d other=%d",
+            case.case_id,
+            bool(gathered["charge_sheet"]),
+            len(gathered["press_releases"]),
+            len(gathered["court_orders"]),
+            len(gathered["investigative_reports"]),
+            len(gathered["financial_docs"]),
+            len(gathered["procedural_docs"]),
+            len(gathered["media_sources"]),
+            len(gathered["other_docs"]),
+        )
         if not gathered["charge_sheet"] and not gathered["press_releases"]:
             self._skip_no_content(
                 case, "No charge sheet or press release source found", dry_run
@@ -531,6 +579,15 @@ class Command(BaseCommand):
 
         # Convert all sources to texts
         source_texts = self._convert_sources_to_texts(gathered)
+        logger.info(
+            "Case %s: converted texts — charge_sheet=%d press_releases=%d court_orders=%d investigative=%d financial=%d",
+            case.case_id,
+            len(source_texts["charge_sheet"]),
+            len(source_texts["press_releases"]),
+            len(source_texts["court_orders"]),
+            len(source_texts["investigative_reports"]),
+            len(source_texts["financial_docs"]),
+        )
 
         # Need at least a charge sheet or press release
         if not source_texts["charge_sheet"] and not source_texts["press_releases"]:
@@ -614,6 +671,13 @@ class Command(BaseCommand):
             f"  [1/2] Extracting structured data "
             f"(charge_sheet={len(source_texts['charge_sheet'])} chars)..."
         )
+        logger.info(
+            "Case %s: LLM extraction call — charge_sheet=%d chars, press_releases=%d, court_orders=%d",
+            case.case_id,
+            len(source_texts["charge_sheet"]),
+            len(source_texts["press_releases"]),
+            len(source_texts["court_orders"]),
+        )
 
         raw = self._call_llm(
             model,
@@ -631,16 +695,28 @@ class Command(BaseCommand):
         if not isinstance(extracted_json, dict):
             self.stats["llm_extraction_failures"] += 1
             self.stats["cases_failed"] += 1
+            logger.error(
+                "Case %s: extraction returned invalid JSON (raw_len=%d)",
+                case.case_id,
+                len(raw or ""),
+            )
             self.stdout.write(
                 self.style.ERROR("  FAILED: Extraction returned invalid JSON")
             )
             return
+
+        logger.info(
+            "Case %s: extraction succeeded — keys=%s",
+            case.case_id,
+            list(extracted_json.keys()),
+        )
 
         # LLM Call #2: Format into Markdown overview
         fmt_prompt = FORMATTING_USER_PROMPT.format(
             extracted_json=json.dumps(extracted_json, ensure_ascii=False, indent=2)
         )
         self.stdout.write("  [2/2] Formatting Markdown overview...")
+        logger.info("Case %s: LLM formatting call", case.case_id)
         raw = self._call_llm(
             model,
             base_url,
@@ -657,6 +733,11 @@ class Command(BaseCommand):
         if not isinstance(formatted, dict):
             self.stats["llm_formatting_failures"] += 1
             self.stats["cases_failed"] += 1
+            logger.error(
+                "Case %s: formatting returned invalid JSON (raw_len=%d)",
+                case.case_id,
+                len(raw or ""),
+            )
             self.stdout.write(
                 self.style.ERROR("  FAILED: Formatting returned invalid JSON")
             )
@@ -665,11 +746,22 @@ class Command(BaseCommand):
         short_description = (formatted.get("short_description") or "").strip()
         description = (formatted.get("description") or "").strip()
 
+        logger.info(
+            "Case %s: formatted — short_description=%d chars, description=%d chars",
+            case.case_id,
+            len(short_description),
+            len(description),
+        )
+
         valid, issues = self._validate_overview(short_description, description)
         for issue in issues:
             self.stdout.write(self.style.WARNING(f"  Quality issue: {issue}"))
+            logger.warning("Case %s: quality issue — %s", case.case_id, issue)
         if not valid:
             self.stats["cases_failed"] += 1
+            logger.error(
+                "Case %s: failed quality gates — %s", case.case_id, "; ".join(issues)
+            )
             self.stdout.write(
                 self.style.ERROR("  FAILED: Overview failed required quality gates")
             )
@@ -677,6 +769,9 @@ class Command(BaseCommand):
 
         if dry_run:
             self.stats["cases_enriched"] += 1
+            logger.info(
+                "Case %s: dry run — would save %d chars", case.case_id, len(description)
+            )
             self.stdout.write(
                 self.style.SUCCESS(
                     f"  [DRY RUN] Would save overview ({len(description)} chars)"
@@ -688,6 +783,12 @@ class Command(BaseCommand):
         case.description = description
         case.save(update_fields=["short_description", "description", "updated_at"])
         self.stats["cases_enriched"] += 1
+        logger.info(
+            "Case %s: saved — short_description=%d chars, description=%d chars",
+            case.case_id,
+            len(short_description),
+            len(description),
+        )
         self.stdout.write(
             self.style.SUCCESS(f"  ENRICHED: Saved overview ({len(description)} chars)")
         )
@@ -697,6 +798,14 @@ class Command(BaseCommand):
     def _call_llm(
         self, model, base_url, api_key, timeout, is_opencode, system_prompt, prompt
     ):
+        backend = "opencode" if is_opencode else "anthropic"
+        logger.info(
+            "LLM call: backend=%s model=%s prompt_len=%d timeout=%d",
+            backend,
+            model,
+            len(prompt),
+            timeout,
+        )
         if is_opencode:
             return self._call_llm_opencode(
                 model, base_url, api_key, timeout, system_prompt, prompt
@@ -745,6 +854,9 @@ class Command(BaseCommand):
                 if is_minimax:
                     content_list = payload.get("content", [])
                     if not content_list:
+                        logger.warning(
+                            "LLM opencode: attempt %d — empty content list", attempt
+                        )
                         self.stdout.write(
                             self.style.WARNING("  LLM returned empty content list")
                         )
@@ -753,14 +865,28 @@ class Command(BaseCommand):
                 else:
                     choices = payload.get("choices", [])
                     if not choices:
+                        logger.warning(
+                            "LLM opencode: attempt %d — empty choices list", attempt
+                        )
                         self.stdout.write(
                             self.style.WARNING("  LLM returned empty choices list")
                         )
                         continue
                     message = choices[0].get("message", {})
                     raw = message.get("content", "")
+                logger.info(
+                    "LLM opencode: attempt %d succeeded — response_len=%d",
+                    attempt,
+                    len(raw),
+                )
                 return _extract_json_body(raw)
             except urllib.error.HTTPError as exc:
+                logger.warning(
+                    "LLM opencode: attempt %d — HTTP %d: %s",
+                    attempt,
+                    exc.code,
+                    exc.read().decode("utf-8", errors="replace")[:300],
+                )
                 if attempt < MAX_LLM_RETRIES and exc.code in (429, 503):
                     wait = 2**attempt
                     self.stdout.write(
@@ -775,6 +901,7 @@ class Command(BaseCommand):
                     f"LLM HTTP {exc.code}: {body_snippet[:300]}"
                 ) from exc
             except OSError as exc:
+                logger.warning("LLM opencode: attempt %d — OSError: %s", attempt, exc)
                 if attempt < MAX_LLM_RETRIES:
                     wait = 2**attempt
                     self.stdout.write(
@@ -809,8 +936,20 @@ class Command(BaseCommand):
                     temperature=0.1,
                     timeout=timeout,
                 )
-                return _extract_json_body(response.content[0].text)
+                raw = response.content[0].text
+                logger.info(
+                    "LLM anthropic: attempt %d succeeded — response_len=%d",
+                    attempt + 1,
+                    len(raw),
+                )
+                return _extract_json_body(raw)
             except Exception as exc:
+                logger.warning(
+                    "LLM anthropic: attempt %d — %s: %s",
+                    attempt + 1,
+                    type(exc).__name__,
+                    exc,
+                )
                 if attempt < MAX_LLM_RETRIES - 1:
                     wait = 2**attempt
                     self.stdout.write(self.style.WARNING(f"  Retrying in {wait}s..."))
@@ -978,6 +1117,7 @@ class Command(BaseCommand):
 
     def _skip_no_content(self, case, note, dry_run):
         self.stats["cases_no_content"] += 1
+        logger.warning("Case %s: skipped — %s", case.case_id, note)
         if not dry_run:
             self._record_missing_details(case, f"enrich_case_overview: {note}")
         self.stdout.write(self.style.WARNING(f"  SKIPPED: {note}"))
