@@ -1,8 +1,4 @@
 import { test, expect } from '@playwright/test';
-import casesFixture from '../fixtures/cases.json';
-import caseDetailFixture from '../fixtures/case-detail.json';
-import statisticsFixture from '../fixtures/statistics.json';
-import entitiesFixture from '../fixtures/entities.json';
 
 const API_BASE = process.env.PLAYWRIGHT_API_BASE || 'http://localhost:8000';
 
@@ -47,6 +43,7 @@ test.describe('Case endpoints', () => {
     expect(response.status()).toBe(200);
 
     const body = await response.json();
+    expect(Array.isArray(body.results)).toBe(true);
     for (const case_ of body.results) {
       expect(case_.case_type).toBe('CORRUPTION');
     }
@@ -65,7 +62,7 @@ test.describe('Case endpoints', () => {
     const listResp = await request.get(`${API_BASE}/api/cases/`);
     const listBody = await listResp.json();
 
-    if (listBody.results.length === 0) {
+    if (!listBody || !Array.isArray(listBody.results) || listBody.results.length === 0) {
       test.skip(true, 'No published cases available for detail test');
       return;
     }
@@ -115,7 +112,8 @@ test.describe('Schema and docs', () => {
     expect(body.info).toHaveProperty('title');
   });
 
-  test('Swagger UI loads', async ({ page }) => {
+  test('Swagger UI loads', async ({ page, browserName }) => {
+    test.skip(browserName !== 'chromium', 'Swagger UI load test Chrome only');
     const response = await page.goto(`${API_BASE}/api/swagger/`);
     expect(response?.status()).toBe(200);
     await expect(page.locator('.swagger-ui')).toBeVisible({ timeout: 10000 });

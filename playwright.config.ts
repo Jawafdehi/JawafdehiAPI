@@ -28,12 +28,10 @@ export default defineConfig({
     {
       name: 'firefox',
       use: { ...devices['Desktop Firefox'] },
-      testIgnore: /swagger/, // Swagger UI load test Chrome only
     },
     {
       name: 'webkit',
       use: { ...devices['Desktop Safari'] },
-      testIgnore: /swagger/,
     },
   ],
   webServer: process.env.CI
