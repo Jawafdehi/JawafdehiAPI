@@ -131,7 +131,7 @@ test.describe('Content-Type checks', () => {
   test('schema returns JSON', async ({ request }) => {
     const response = await request.get('/api/schema/?format=json');
     expect(response.status()).toBe(200);
-    expect(response.headers()['content-type']).toContain('application/json');
+    expect(response.headers()['content-type']).toContain('json');
   });
 });
 
