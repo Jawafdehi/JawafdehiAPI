@@ -113,8 +113,8 @@ test.describe('Schema and docs', () => {
     expect(body.info).toHaveProperty('title');
   });
 
-  test('Swagger UI loads', async ({ page, browserName }) => {
-    test.skip(browserName !== 'chromium', 'Swagger UI load test Chrome only');
+  test.skip(({ browserName }) => browserName !== 'chromium', 'Swagger UI load test Chrome only');
+  test('Swagger UI loads', async ({ page }) => {
     const response = await page.goto('/api/swagger/');
     expect(response?.status()).toBe(200);
     await expect(page.locator('.swagger-ui')).toBeVisible({ timeout: 10000 });
