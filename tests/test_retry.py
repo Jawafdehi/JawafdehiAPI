@@ -64,6 +64,6 @@ class TestRetryableHelpers:
         assert retryable_http_status(500) is False
 
     def test_retryable_network_error(self):
-        assert retryable_network_error(TimeoutError("timeout")) is True
         assert retryable_network_error(ConnectionError("refused")) is True
+        assert retryable_network_error(ConnectionResetError("reset")) is True
         assert retryable_network_error(ValueError("not a network error")) is False

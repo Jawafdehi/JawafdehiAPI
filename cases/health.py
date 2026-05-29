@@ -12,7 +12,7 @@ from django.views.decorators.http import require_http_methods
 
 from cases.observability import (
     circuit_breaker_trips,
-    export_textfile,
+    export_textfile_to_string,
     likhit_failures,
     llm_call,
     nepali_script_coverage,
@@ -29,7 +29,10 @@ def enrichment_health(request: HttpRequest) -> JsonResponse:
     cb_snap = circuit_breaker_trips.snapshot()
 
     total_llm_calls = llm_snap["total"]
-    llm_failures = llm_snap.get("by_label", {}).get('outcome="failure"', 0)
+    llm_failures = sum(
+        val for label, val in llm_snap.get("by_label", {}).items()
+        if 'outcome="failure"' in label
+    )
 
     # Circuit is unhealthy if any trips have been recorded
     circuit_ok = cb_snap["total"] == 0
@@ -73,19 +76,6 @@ def enrichment_health(request: HttpRequest) -> JsonResponse:
 @require_http_methods(["GET"])
 def enrichment_metrics(request: HttpRequest) -> HttpResponse:
     """Prometheus textfile export endpoint for node_exporter scraping."""
-    import tempfile
-    import os
-
-    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".prom", delete=False)
-    try:
-        tmp.close()
-        export_textfile(tmp.name)
-        with open(tmp.name) as f:
-            content = f.read()
-    finally:
-        try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
-
-    return HttpResponse(content, content_type="text/plain; charset=utf-8")
+    return HttpResponse(
+        export_textfile_to_string(), content_type="text/plain; charset=utf-8"
+    )

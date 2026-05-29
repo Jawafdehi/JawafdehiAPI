@@ -1229,6 +1229,9 @@ class TagEnricher:
     and Prometheus-compatible metrics recording.
     """
 
+    _source_llm_cb = None
+    _metadata_llm_cb = None
+
     def __init__(self, use_llm: bool = True, llm_client=None, model: str = "unknown"):
         self.use_llm = use_llm
         self._llm_client = llm_client
@@ -1237,8 +1240,9 @@ class TagEnricher:
 
         from cases.circuit_breaker import CircuitBreaker
 
-        self._source_llm_cb = CircuitBreaker(name="source_llm")
-        self._metadata_llm_cb = CircuitBreaker(name="metadata_llm")
+        if TagEnricher._source_llm_cb is None:
+            TagEnricher._source_llm_cb = CircuitBreaker(name="source_llm")
+            TagEnricher._metadata_llm_cb = CircuitBreaker(name="metadata_llm")
 
     def _invoke_llm(self, prompt: str, circuit_name: str = "unknown") -> str:
         from cases.observability import record_llm_outcome
@@ -1402,7 +1406,7 @@ class TagEnricher:
     def _classify_with_llm(self, case: Case) -> list[str]:
         """Use LLM to classify a case from metadata. Returns list of tag strings."""
         prompt = build_llm_classification_prompt(case)
-        response = self._metadata_llm_cb.call(
+        response = TagEnricher._metadata_llm_cb.call(
             lambda: self._invoke_llm(prompt, circuit_name="metadata_llm")
         )
         return parse_llm_response(response)
@@ -1412,7 +1416,7 @@ class TagEnricher:
     ) -> list[str]:
         """Use LLM to classify a case from source documents. Returns tag strings."""
         prompt = build_llm_classification_prompt_from_sources(case, evidence_text)
-        response = self._source_llm_cb.call(
+        response = TagEnricher._source_llm_cb.call(
             lambda: self._invoke_llm(prompt, circuit_name="source_llm")
         )
         return parse_llm_response(response)

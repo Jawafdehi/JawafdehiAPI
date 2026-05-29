@@ -79,15 +79,27 @@ def retryable_http_status(status: int) -> bool:
 
 def retryable_network_error(exc: Exception) -> bool:
     """Return True for common transient network errors."""
-    name = type(exc).__name__
-    return name in (
-        "Timeout",
-        "TimeoutError",
-        "ConnectionError",
-        "ConnectionResetError",
-        "ConnectionRefusedError",
-        "RemoteDisconnected",
-        "ReadTimeout",
-        "ConnectTimeout",
-        "ChunkedEncodingError",
+    from requests.exceptions import (
+        ChunkedEncodingError,
+        ConnectionError as RequestsConnectionError,
+        ConnectTimeout,
+        ReadTimeout,
     )
+    from urllib3.exceptions import (
+        ProtocolError,
+        ReadTimeoutError as Urllib3ReadTimeout,
+    )
+
+    _retryable = (
+        TimeoutError,
+        ConnectionError,
+        ConnectionResetError,
+        ConnectionRefusedError,
+        RequestsConnectionError,
+        ConnectTimeout,
+        ReadTimeout,
+        ChunkedEncodingError,
+        ProtocolError,
+        Urllib3ReadTimeout,
+    )
+    return isinstance(exc, _retryable)

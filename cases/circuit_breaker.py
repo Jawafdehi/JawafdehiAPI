@@ -6,8 +6,9 @@ and records a metric each time it opens.
 
 from __future__ import annotations
 
+import threading
 import time as _time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from cases.observability import record_circuit_breaker_trip
 
@@ -26,9 +27,10 @@ class CircuitBreaker:
     failure_threshold: int = 3
     cooldown_seconds: float = 60.0
 
-    _failure_count: int = 0
-    _last_failure_time: float = 0.0
-    _state: str = "closed"
+    _failure_count: int = field(default=0, repr=False)
+    _last_failure_time: float = field(default=0.0, repr=False)
+    _state: str = field(default="closed", repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     @property
     def state(self) -> str:
@@ -42,13 +44,14 @@ class CircuitBreaker:
         Raises ``CircuitBreakerOpenError`` if the circuit is open.
         Re-raises the original exception on failure after recording the failure.
         """
-        self._maybe_reset()
-        if self._state == "open":
-            elapsed = _time.monotonic() - self._last_failure_time
-            remaining = max(0.0, self.cooldown_seconds - elapsed)
-            raise CircuitBreakerOpenError(
-                f"Circuit '{self.name}' is open. " f"Retry in {remaining:.0f}s."
-            )
+        with self._lock:
+            self._maybe_reset()
+            if self._state == "open":
+                elapsed = _time.monotonic() - self._last_failure_time
+                remaining = max(0.0, self.cooldown_seconds - elapsed)
+                raise CircuitBreakerOpenError(
+                    f"Circuit '{self.name}' is open. Retry in {remaining:.0f}s."
+                )
         try:
             result = fn(*args, **kwargs)
         except Exception:
@@ -59,17 +62,19 @@ class CircuitBreaker:
             return result
 
     def _record_failure(self) -> None:
-        self._failure_count += 1
-        self._last_failure_time = _time.monotonic()
-        if self._failure_count >= self.failure_threshold:
-            was_closed = self._state != "open"
-            self._state = "open"
-            if was_closed:
-                record_circuit_breaker_trip(self.name)
+        with self._lock:
+            self._failure_count += 1
+            self._last_failure_time = _time.monotonic()
+            if self._state == "half-open" or self._failure_count >= self.failure_threshold:
+                was_closed = self._state != "open"
+                self._state = "open"
+                if was_closed:
+                    record_circuit_breaker_trip(self.name)
 
     def _record_success(self) -> None:
-        self._failure_count = 0
-        self._state = "closed"
+        with self._lock:
+            self._failure_count = 0
+            self._state = "closed"
 
     def _maybe_reset(self) -> None:
         if self._state == "open":

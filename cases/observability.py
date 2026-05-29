@@ -24,9 +24,6 @@ from dataclasses import dataclass, field
 # client_textfile exporter can be added later with `prometheus-client`).
 # ---------------------------------------------------------------------------
 
-_LOCK = threading.Lock()
-
-
 @dataclass
 class _Histogram:
     name: str
@@ -35,12 +32,13 @@ class _Histogram:
     _buckets: list[float] = field(
         default_factory=lambda: [0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300]
     )
-    _sum: float = 0.0
-    _count: int = 0
-    _bucket_counts: dict[str, int] = field(default_factory=dict)
+    _sum: float = field(default=0.0, repr=False)
+    _count: int = field(default=0, repr=False)
+    _bucket_counts: dict[str, int] = field(default_factory=dict, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def observe(self, value: float, labels: dict | None = None) -> None:
-        with _LOCK:
+        with self._lock:
             self._sum += value
             self._count += 1
             for boundary in sorted(set(self._buckets)):
@@ -51,7 +49,7 @@ class _Histogram:
             self._bucket_counts[key] = self._bucket_counts.get(key, 0) + 1
 
     def snapshot(self) -> dict:
-        with _LOCK:
+        with self._lock:
             return {
                 "sum": self._sum,
                 "count": self._count,
@@ -64,17 +62,18 @@ class _Counter:
     name: str
     help: str
     labelnames: list[str] = field(default_factory=list)
-    _value: float = 0.0
-    _labels: dict[str, float] = field(default_factory=dict)
+    _value: float = field(default=0.0, repr=False)
+    _labels: dict[str, float] = field(default_factory=dict, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def inc(self, amount: float = 1, labels: dict | None = None) -> None:
-        with _LOCK:
+        with self._lock:
             self._value += amount
             key = _label_str(labels)
             self._labels[key] = self._labels.get(key, 0) + amount
 
     def snapshot(self) -> dict:
-        with _LOCK:
+        with self._lock:
             return {"total": self._value, "by_label": dict(self._labels)}
 
 
@@ -83,22 +82,23 @@ class _Gauge:
     name: str
     help: str
     labelnames: list[str] = field(default_factory=list)
-    _value: float = 0.0
+    _value: float = field(default=0.0, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def set(self, value: float) -> None:
-        with _LOCK:
+        with self._lock:
             self._value = value
 
     def inc(self, amount: float = 1) -> None:
-        with _LOCK:
+        with self._lock:
             self._value += amount
 
     def dec(self, amount: float = 1) -> None:
-        with _LOCK:
+        with self._lock:
             self._value -= amount
 
     def snapshot(self) -> float:
-        with _LOCK:
+        with self._lock:
             return self._value
 
 
@@ -180,6 +180,12 @@ _GAUGES: dict[str, _Gauge] = {
 
 def export_textfile(path: str) -> None:
     """Write all current metric snapshots to *path* in Prometheus exposition format."""
+    with open(path, "w") as f:
+        f.write(export_textfile_to_string())
+
+
+def export_textfile_to_string() -> str:
+    """Return all current metric snapshots as a Prometheus exposition string."""
     lines: list[str] = []
 
     for metric in [
@@ -217,8 +223,7 @@ def export_textfile(path: str) -> None:
         lines.append(f"{name} {gauge.snapshot()}")
 
     lines.append("")
-    with open(path, "w") as f:
-        f.write("\n".join(lines))
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

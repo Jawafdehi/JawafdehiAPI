@@ -60,14 +60,19 @@ class Command(BaseCommand):
             )
         )
 
-        cases = list(
-            Case.objects.filter(state=CaseState.DRAFT).order_by("?")[:case_count]
-        )
-        if not cases:
+        from django.db.models.functions import Random
+
+        total = Case.objects.filter(state=CaseState.DRAFT).count()
+        if total == 0:
             self.stdout.write(self.style.ERROR("No DRAFT cases found."))
             return
-
-        self.stdout.write(f"Loaded {len(cases)} DRAFT cases for testing.")
+        sample_size = min(case_count, total)
+        cases = list(
+            Case.objects.filter(state=CaseState.DRAFT)
+            .annotate(_rand=Random())
+            .order_by("_rand")[:sample_size]
+        )
+        self.stdout.write(f"Loaded {len(cases)} DRAFT cases for testing (out of {total} total).")
 
         enricher = TagEnricher(use_llm=use_llm)
 
