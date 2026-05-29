@@ -1,0 +1,75 @@
+name: E2E Tests
+on:
+  push:
+    branches: ['main*']
+  pull_request:
+    branches: ['main*']
+jobs:
+  e2e:
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_jawafdehi_e2e
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_jawafdehi_e2e
+      DJANGO_SETTINGS_MODULE: config.settings
+      SECRET_KEY: e2e-test-key-not-for-production
+      DEBUG: 'True'
+      ALLOWED_HOSTS: localhost,127.0.0.1
+      TESTING: 'true'
+      PLAYWRIGHT_BASE_URL: http://localhost:8000
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Python + Poetry
+        uses: ./.github/actions/setup-poetry-python
+        with:
+          python-version: '3.12'
+          extras: 'llm-all'
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium firefox webkit
+
+      - name: Start Django and run Playwright
+        run: |
+          poetry run python manage.py migrate
+          poetry run python manage.py runserver 0.0.0.0:8000 &
+          npx wait-on http://localhost:8000 --timeout 30000
+          npx playwright test --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: playwright-report-${{ matrix.shard }}
+          path: playwright-report/
+
+      - name: Upload test artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: playwright-traces-${{ matrix.shard }}
+          path: test-results/
