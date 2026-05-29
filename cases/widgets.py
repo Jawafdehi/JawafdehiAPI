@@ -134,6 +134,18 @@ class ToastUIEditorWidget(Textarea):
 
         textareaEl.style.display = 'none';
 
+        containerEl.addEventListener('paste', function(e) {{
+            var html = (e.clipboardData || window.clipboardData).getData('text/html');
+            if (html && /\\bcolspan\\b|\\browspan\\b/i.test(html)) {{
+                alert(
+                    '\\u26a0\\ufe0f Merged cells detected\\n\\n' +
+                    'The table you pasted contains merged cells (colspan/rowspan). ' +
+                    'Markdown does not support merged cells, so column counts may be wrong.\\n\\n' +
+                    'Workaround: Unmerge cells in Word before copying, or recreate the table inside the editor.'
+                );
+            }}
+        }});
+
         var form = textareaEl.closest('form');
         if (form) {{
             form.addEventListener('submit', function() {{
