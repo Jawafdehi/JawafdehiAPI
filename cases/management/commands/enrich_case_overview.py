@@ -143,6 +143,12 @@ Rules:
 
 
 def _validate_host_safety(hostname: str) -> None:
+    # DNS rebinding note: _validate_host_safety resolves once, urlopen resolves
+    # again. Full DNS pinning (custom HTTPConnection) would be disproportionate
+    # here — URLs originate from DocumentSource records in our own DB, not from
+    # untrusted user input, and the validation→connect window is sub-millisecond,
+    # making a TOCTOU race infeasible. If this command later accepts ad-hoc URLs,
+    # pin the resolved IPs and set the Host header on a custom opener.
     if hostname is None:
         raise ValueError("Cannot validate host: hostname is None (malformed URL)")
     host = hostname.lower().rstrip(".")
@@ -936,6 +942,21 @@ class Command(BaseCommand):
                     temperature=0.1,
                     timeout=timeout,
                 )
+                if not response.content:
+                    logger.warning(
+                        "LLM anthropic: attempt %d — empty response content",
+                        attempt + 1,
+                    )
+                    self.stdout.write(
+                        self.style.WARNING("  LLM returned empty response")
+                    )
+                    if attempt < MAX_LLM_RETRIES - 1:
+                        wait = 2**attempt
+                        time.sleep(wait)
+                        continue
+                    raise CommandError(
+                        f"LLM returned empty response after {MAX_LLM_RETRIES} attempts"
+                    )
                 raw = response.content[0].text
                 logger.info(
                     "LLM anthropic: attempt %d succeeded — response_len=%d",
@@ -979,7 +1000,11 @@ class Command(BaseCommand):
                     if result.text_content and len(result.text_content.strip()) >= 50:
                         return result.text_content
             except Exception:
-                pass  # Per-source isolation: try next method
+                logger.debug(
+                    "Failed to convert uploaded file for %s",
+                    source.source_id,
+                    exc_info=True,
+                )
             # Try URLs
             last_error = None
             for url in self._ranked_source_urls(source):
@@ -996,6 +1021,12 @@ class Command(BaseCommand):
                             return result.text_content
                     last_error = f"insufficient content from {url}"
                 except Exception:
+                    logger.debug(
+                        "Failed to convert URL %s for %s",
+                        url,
+                        source.source_id,
+                        exc_info=True,
+                    )
                     continue
             # Fall back to description text
             if source.description and len(source.description.strip()) >= 500:
