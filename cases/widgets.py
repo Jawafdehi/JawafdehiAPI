@@ -140,15 +140,19 @@ class ToastUIEditorWidget(Textarea):
                 return;
             }}
             var html = clipboardData.getData('text/html');
-            if (html && /\\bcolspan\\b|\\browspan\\b/i.test(html)) {{
-                setTimeout(function() {{
-                    alert(
-                        '\\u26a0\\ufe0f Merged cells detected\\n\\n' +
-                        'The table you pasted contains merged cells (colspan/rowspan). ' +
-                        'Markdown does not support merged cells, so column counts may be wrong.\\n\\n' +
-                        'Workaround: Unmerge cells in Word before copying, or recreate the table inside the editor.'
-                    );
-                }}, 0);
+            if (html) {{
+                var parser = new DOMParser();
+                var doc = parser.parseFromString(html, 'text/html');
+                if (doc.querySelector('[colspan], [rowspan]')) {{
+                    setTimeout(function() {{
+                        alert(
+                            '\\u26a0\\ufe0f Merged cells detected\\n\\n' +
+                            'The table you pasted contains merged cells (colspan/rowspan). ' +
+                            'Markdown does not support merged cells, so column counts may be wrong.\\n\\n' +
+                            'Workaround: Unmerge cells in Word before copying, or recreate the table inside the editor.'
+                        );
+                    }}, 0);
+                }}
             }}
         }});
 
