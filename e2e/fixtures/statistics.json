@@ -1,12 +1,7 @@
 {
-  "total_cases": 42,
   "published_cases": 35,
-  "in_review_cases": 5,
-  "draft_cases": 2,
-  "total_sources": 128,
-  "total_entities": 89,
-  "cases_by_type": {
-    "CORRUPTION": 30,
-    "PROMISES": 5
-  }
+  "cases_under_investigation": 7,
+  "cases_closed": 2,
+  "entities_tracked": 89,
+  "last_updated": "2024-03-21T00:00:00Z"
 }

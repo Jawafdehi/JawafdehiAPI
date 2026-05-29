@@ -34,21 +34,19 @@ export default defineConfig({
       use: { ...devices['Desktop Safari'] },
     },
   ],
-  webServer: process.env.CI
-    ? []
-    : [
-        {
-          command: 'poetry run python manage.py runserver 0.0.0.0:8000',
-          port: 8000,
-          timeout: 30_000,
-          reuseExistingServer: true,
-          env: {
-            DJANGO_SETTINGS_MODULE: 'config.settings',
-            DATABASE_URL: 'sqlite:///db.sqlite3',
-            SECRET_KEY: 'playwright-test-key-not-for-production',
-            DEBUG: 'True',
-            ALLOWED_HOSTS: 'localhost,127.0.0.1',
-          },
-        },
-      ],
+  ...(process.env.CI ? {} : {
+    webServer: {
+      command: 'poetry run python manage.py runserver 0.0.0.0:8000',
+      port: 8000,
+      timeout: 30_000,
+      reuseExistingServer: !process.env.CI,
+      env: {
+        DJANGO_SETTINGS_MODULE: 'config.settings',
+        DATABASE_URL: 'sqlite:///db.sqlite3',
+        SECRET_KEY: 'playwright-test-key-not-for-production',
+        DEBUG: 'True',
+        ALLOWED_HOSTS: 'localhost,127.0.0.1',
+      },
+    },
+  }),
 });
