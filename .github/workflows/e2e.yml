@@ -43,7 +43,7 @@ jobs:
           python-version: '3.12'
           extras: 'llm-all'
 
-      - uses: actions/setup-node@cdb1d2b1d72e6390e7d6e71a85570268a01772f2 # v4.6.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22'
 
@@ -62,14 +62,14 @@ jobs:
 
       - name: Upload Playwright report
         if: failure()
-        uses: actions/upload-artifact@4e6e792aac5dfcbf3e8767b581f803125a9e41af # v4.6.1
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: playwright-report-${{ matrix.shard }}
           path: playwright-report/
 
       - name: Upload test artifacts
         if: failure()
-        uses: actions/upload-artifact@4e6e792aac5dfcbf3e8767b581f803125a9e41af # v4.6.1
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: playwright-traces-${{ matrix.shard }}
           path: test-results/
