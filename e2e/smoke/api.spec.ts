@@ -104,7 +104,7 @@ test.describe('Entity endpoints', () => {
 
 test.describe('Schema and docs', () => {
   test('OpenAPI schema is valid JSON', async ({ request }) => {
-    const response = await request.get('/api/schema/');
+    const response = await request.get('/api/schema/?format=json');
     expect(response.status()).toBe(200);
 
     const body = await response.json();
@@ -129,7 +129,7 @@ test.describe('Content-Type checks', () => {
   });
 
   test('schema returns JSON', async ({ request }) => {
-    const response = await request.get('/api/schema/');
+    const response = await request.get('/api/schema/?format=json');
     expect(response.status()).toBe(200);
     expect(response.headers()['content-type']).toContain('application/json');
   });
