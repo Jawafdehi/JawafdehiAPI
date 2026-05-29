@@ -30,7 +30,8 @@ def enrichment_health(request: HttpRequest) -> JsonResponse:
 
     total_llm_calls = llm_snap["total"]
     llm_failures = sum(
-        val for label, val in llm_snap.get("by_label", {}).items()
+        val
+        for label, val in llm_snap.get("by_label", {}).items()
         if 'outcome="failure"' in label
     )
 

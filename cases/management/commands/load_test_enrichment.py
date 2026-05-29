@@ -72,7 +72,9 @@ class Command(BaseCommand):
             .annotate(_rand=Random())
             .order_by("_rand")[:sample_size]
         )
-        self.stdout.write(f"Loaded {len(cases)} DRAFT cases for testing (out of {total} total).")
+        self.stdout.write(
+            f"Loaded {len(cases)} DRAFT cases for testing (out of {total} total)."
+        )
 
         enricher = TagEnricher(use_llm=use_llm)
 

@@ -65,7 +65,10 @@ class CircuitBreaker:
         with self._lock:
             self._failure_count += 1
             self._last_failure_time = _time.monotonic()
-            if self._state == "half-open" or self._failure_count >= self.failure_threshold:
+            if (
+                self._state == "half-open"
+                or self._failure_count >= self.failure_threshold
+            ):
                 was_closed = self._state != "open"
                 self._state = "open"
                 if was_closed:
