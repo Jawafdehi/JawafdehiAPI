@@ -6,26 +6,20 @@
     {
       "id": 1,
       "nes_id": "entity:person/test-official",
-      "name": "Test Official",
-      "entity_type": "person",
-      "created_at": "2024-01-01T00:00:00Z",
-      "updated_at": "2024-01-01T00:00:00Z"
+      "display_name": "Test Official",
+      "related_cases": []
     },
     {
       "id": 2,
       "nes_id": "entity:organization/test-ministry",
-      "name": "Test Ministry",
-      "entity_type": "organization",
-      "created_at": "2024-01-01T00:00:00Z",
-      "updated_at": "2024-01-01T00:00:00Z"
+      "display_name": "Test Ministry",
+      "related_cases": []
     },
     {
       "id": 3,
       "nes_id": "entity:location/district/kathmandu",
-      "name": "Kathmandu",
-      "entity_type": "location",
-      "created_at": "2024-01-01T00:00:00Z",
-      "updated_at": "2024-01-01T00:00:00Z"
+      "display_name": "Kathmandu",
+      "related_cases": []
     }
   ]
 }

@@ -1,15 +1,1 @@
-*.pyc
-__pycache__/
-db.sqlite3
-.env
-.venv/
-*.log
-.DS_Store
-.vscode
-.hypothesis
-staticfiles/
-media/jawafdehi/sources/
-tmp/
-/nes-db
-/media/
-/workflow-runs/
+.node_modules

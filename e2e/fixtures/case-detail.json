@@ -6,6 +6,7 @@
   "description": "A corruption case involving illegal land acquisition in Kathmandu.",
   "case_type": "CORRUPTION",
   "state": "PUBLISHED",
+  "entities": [],
   "key_allegations": [
     "Illegally acquired public land in ward 4",
     "Failed to disclose assets in annual filing"
@@ -29,14 +30,9 @@
       "source_id": "src-001",
       "description": "Land registry document proving illegal transfer",
       "source": {
-        "id": 1,
-        "source_id": "src-001",
         "title": "Land Registry Document",
-        "description": "Official land registry record obtained via RTI request",
         "source_type": "government_record",
-        "url": "https://example.com/land-registry",
-        "created_at": "2024-01-10T00:00:00Z",
-        "updated_at": "2024-01-10T00:00:00Z"
+        "url": ["https://example.com/land-registry"]
       }
     }
   ],
