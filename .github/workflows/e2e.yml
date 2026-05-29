@@ -43,35 +43,33 @@ jobs:
           python-version: '3.12'
           extras: 'llm-all'
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@cdb1d2b1d72e6390e7d6e71a85570268a01772f2 # v4.6.0
         with:
           node-version: '22'
 
       - name: Install Node dependencies
         run: npm ci
 
-      - name: Run migrations
-        run: poetry run python manage.py migrate
-
       - name: Install Playwright browsers
-        run: npx playwright install --with-deps chromium firefox
+        run: npx playwright install --with-deps chromium firefox webkit
 
       - name: Start Django and run Playwright
         run: |
+          poetry run python manage.py migrate
           poetry run python manage.py runserver 0.0.0.0:8000 &
           npx wait-on http://localhost:8000 --timeout 30000
           npx playwright test --shard=${{ matrix.shard }}/${{ strategy.job-total }}
 
       - name: Upload Playwright report
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@4e6e792aac5dfcbf3e8767b581f803125a9e41af # v4.6.1
         with:
           name: playwright-report-${{ matrix.shard }}
           path: playwright-report/
 
       - name: Upload test artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@4e6e792aac5dfcbf3e8767b581f803125a9e41af # v4.6.1
         with:
           name: playwright-traces-${{ matrix.shard }}
           path: test-results/
