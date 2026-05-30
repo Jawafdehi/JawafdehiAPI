@@ -122,9 +122,9 @@ class TestPublicAPIWorkflows:
         assert response.status_code == 200, "Browse endpoint should return 200"
 
         results = response.data.get("results", [])
-        assert (
-            len(results) == 2
-        ), "Should return 2 published cases (not draft or closed)"
+        assert len(results) == 2, (
+            "Should return 2 published cases (not draft or closed)"
+        )
 
         # Verify only published cases appear
         case_titles = [case["title"] for case in results]
@@ -156,9 +156,9 @@ class TestPublicAPIWorkflows:
         corruption_case_result = next(
             (case for case in results if "Land Encroachment" in case["title"]), None
         )
-        assert (
-            corruption_case_result is not None
-        ), "Should find the land encroachment case"
+        assert corruption_case_result is not None, (
+            "Should find the land encroachment case"
+        )
 
         # Step 4: View detailed case information
         case_slug = corruption_case_result["slug"]
@@ -213,15 +213,15 @@ class TestPublicAPIWorkflows:
 
         # Test 2: Draft cases return 404 when accessed directly
         response = self.client.get(f"/api/cases/{self.draft_case.id}/")
-        assert (
-            response.status_code == 404
-        ), "Draft cases should not be accessible via detail endpoint"
+        assert response.status_code == 404, (
+            "Draft cases should not be accessible via detail endpoint"
+        )
 
         # Test 3: Closed cases return 404 when accessed directly
         response = self.client.get(f"/api/cases/{self.closed_case.id}/")
-        assert (
-            response.status_code == 404
-        ), "Closed cases should not be accessible via detail endpoint"
+        assert response.status_code == 404, (
+            "Closed cases should not be accessible via detail endpoint"
+        )
 
         # Test 4: Create an IN_REVIEW case and verify accessibility
         in_review_case = create_case_with_entities(
@@ -235,19 +235,19 @@ class TestPublicAPIWorkflows:
 
         # IN_REVIEW cases are always accessible via detail endpoint
         response = self.client.get(f"/api/cases/{in_review_case.slug}/")
-        assert (
-            response.status_code == 200
-        ), "IN_REVIEW cases should always be accessible via detail endpoint"
-        assert (
-            response.data["state"] == CaseState.IN_REVIEW
-        ), "State field should show IN_REVIEW"
+        assert response.status_code == 200, (
+            "IN_REVIEW cases should always be accessible via detail endpoint"
+        )
+        assert response.data["state"] == CaseState.IN_REVIEW, (
+            "State field should show IN_REVIEW"
+        )
 
         # IN_REVIEW cases should not appear in list endpoint
         response = self.client.get("/api/cases/")
         case_ids = [case["case_id"] for case in response.data.get("results", [])]
-        assert (
-            in_review_case.case_id not in case_ids
-        ), "In Review cases should not appear in list"
+        assert in_review_case.case_id not in case_ids, (
+            "In Review cases should not appear in list"
+        )
 
     def test_notes_field_in_case_detail(self):
         """
@@ -288,9 +288,9 @@ class TestPublicAPIWorkflows:
         ), "Notes content should match what was saved"
 
         # Verify audit_history is NOT included
-        assert (
-            "audit_history" not in case_detail
-        ), "Detail endpoint should not include audit_history"
+        assert "audit_history" not in case_detail, (
+            "Detail endpoint should not include audit_history"
+        )
 
     def test_filter_by_tags_workflow(self):
         """
@@ -414,12 +414,12 @@ class TestPublicAPIWorkflows:
         source_ids = [source["source_id"] for source in results]
 
         # Step 2: Verify only sources from published cases appear
-        assert (
-            self.corruption_source.source_id in source_ids
-        ), "Source from published case should appear"
-        assert (
-            draft_source.source_id not in source_ids
-        ), "Source from draft case should NOT appear"
+        assert self.corruption_source.source_id in source_ids, (
+            "Source from published case should appear"
+        )
+        assert draft_source.source_id not in source_ids, (
+            "Source from draft case should NOT appear"
+        )
 
         # Step 3: Retrieve specific source
         response = self.client.get(f"/api/sources/{self.corruption_source.id}/")
@@ -432,9 +432,9 @@ class TestPublicAPIWorkflows:
 
         # Verify draft source is not accessible directly
         response = self.client.get(f"/api/sources/{draft_source.id}/")
-        assert (
-            response.status_code == 404
-        ), "Source from draft case should not be accessible"
+        assert response.status_code == 404, (
+            "Source from draft case should not be accessible"
+        )
 
     def test_single_row_per_case_in_list(self):
         """
@@ -476,9 +476,9 @@ class TestPublicAPIWorkflows:
         assert len(matching_cases) == 1, "Should only return one row per case_id"
 
         returned_case = matching_cases[0]
-        assert (
-            returned_case["title"] == "Single Row Case - Updated Title"
-        ), "Should return the current (updated) title"
+        assert returned_case["title"] == "Single Row Case - Updated Title", (
+            "Should return the current (updated) title"
+        )
         assert returned_case["description"] == "Updated description"
 
     def test_pagination_workflow(self):

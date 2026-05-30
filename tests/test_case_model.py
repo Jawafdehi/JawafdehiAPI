@@ -32,9 +32,9 @@ def test_new_cases_start_in_draft_state(case_data):
     """
     case = create_case_with_entities(**case_data)
 
-    assert (
-        case.state == CaseState.DRAFT
-    ), f"New case should start in DRAFT state, but got {case.state}"
+    assert case.state == CaseState.DRAFT, (
+        f"New case should start in DRAFT state, but got {case.state}"
+    )
 
 
 # ============================================================================
@@ -135,9 +135,9 @@ def test_draft_submission_transitions_to_in_review(case_data):
     # Submit the draft (this will be a method on the Case model)
     case.submit()
 
-    assert (
-        case.state == CaseState.IN_REVIEW
-    ), f"Submitted case should be in IN_REVIEW state, but got {case.state}"
+    assert case.state == CaseState.IN_REVIEW, (
+        f"Submitted case should be in IN_REVIEW state, but got {case.state}"
+    )
 
 
 # ============================================================================
@@ -232,20 +232,20 @@ def test_soft_delete_sets_state_to_closed(case_data):
     case.delete()
 
     # Verify the case still exists in the database
-    assert Case.objects.filter(
-        id=original_id
-    ).exists(), "Soft-deleted case should still exist in database"
+    assert Case.objects.filter(id=original_id).exists(), (
+        "Soft-deleted case should still exist in database"
+    )
 
     # Verify the state is set to CLOSED
     case.refresh_from_db()
-    assert (
-        case.state == CaseState.CLOSED
-    ), f"Soft-deleted case should have state CLOSED, but got {case.state}"
+    assert case.state == CaseState.CLOSED, (
+        f"Soft-deleted case should have state CLOSED, but got {case.state}"
+    )
 
     # Verify the case_id is unchanged
-    assert (
-        case.case_id == original_case_id
-    ), "Soft-deleted case should retain its case_id"
+    assert case.case_id == original_case_id, (
+        "Soft-deleted case should retain its case_id"
+    )
 
 
 @pytest.mark.django_db
@@ -287,9 +287,9 @@ def test_soft_delete_preserves_all_data(case_data):
         )
         == original_alleged_entities
     ), "Soft-deleted case should preserve alleged entities"
-    assert (
-        case.key_allegations == original_key_allegations
-    ), "Soft-deleted case should preserve key_allegations"
+    assert case.key_allegations == original_key_allegations, (
+        "Soft-deleted case should preserve key_allegations"
+    )
 
 
 # ============================================================================
@@ -381,7 +381,7 @@ def test_multiple_drafts_get_unique_auto_slugs():
         drafts.append(case)
 
     slugs = [d.slug for d in drafts]
-    assert all(
-        s and s.strip() for s in slugs
-    ), "Every draft must have a non-empty auto-generated slug"
+    assert all(s and s.strip() for s in slugs), (
+        "Every draft must have a non-empty auto-generated slug"
+    )
     assert len(set(slugs)) == len(slugs), "Auto-generated slugs must be unique"

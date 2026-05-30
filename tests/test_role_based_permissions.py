@@ -90,9 +90,9 @@ def test_contributors_can_transition_between_draft_and_in_review(
     except ValidationError:
         success = False
 
-    assert (
-        success
-    ), f"Contributor should be able to transition from {case.state} to {target_state}"
+    assert success, (
+        f"Contributor should be able to transition from {case.state} to {target_state}"
+    )
 
 
 @pytest.mark.django_db
@@ -143,9 +143,9 @@ def test_contributors_cannot_transition_to_published_or_closed(
     form = CaseAdminForm(data=form_data, instance=case, request=request)
 
     # Form should not be valid
-    assert (
-        not form.is_valid()
-    ), f"Form should not be valid for transition to {forbidden_state}"
+    assert not form.is_valid(), (
+        f"Form should not be valid for transition to {forbidden_state}"
+    )
     assert "state" in form.errors, "Should have state error"
 
     # Check error message mentions the restriction
@@ -280,22 +280,22 @@ def test_contributor_can_only_access_assigned_cases(case_data, contributor_data)
 
     # Check that contributor has permission for assigned case
     has_permission_assigned = admin.has_change_permission(request, assigned_case)
-    assert (
-        has_permission_assigned
-    ), "Contributor should have change permission for assigned case"
+    assert has_permission_assigned, (
+        "Contributor should have change permission for assigned case"
+    )
 
     # Check that contributor does NOT have permission for unassigned case
     has_permission_unassigned = admin.has_change_permission(request, unassigned_case)
-    assert (
-        not has_permission_unassigned
-    ), "Contributor should NOT have change permission for unassigned case"
+    assert not has_permission_unassigned, (
+        "Contributor should NOT have change permission for unassigned case"
+    )
 
     # Check queryset only includes assigned cases
     queryset = admin.get_queryset(request)
     assert assigned_case in queryset, "Contributor should see assigned case in queryset"
-    assert (
-        unassigned_case not in queryset
-    ), "Contributor should NOT see unassigned case in queryset"
+    assert unassigned_case not in queryset, (
+        "Contributor should NOT see unassigned case in queryset"
+    )
 
 
 @pytest.mark.django_db
@@ -327,9 +327,9 @@ def test_contributor_cannot_modify_unassigned_cases(case_data, contributor_data)
 
     # Check that contributor does NOT have change permission
     has_permission = admin.has_change_permission(request, case)
-    assert (
-        not has_permission
-    ), "Contributor should NOT have change permission for unassigned case"
+    assert not has_permission, (
+        "Contributor should NOT have change permission for unassigned case"
+    )
 
 
 # ============================================================================
@@ -378,9 +378,9 @@ def test_moderators_cannot_manage_other_moderators(moderator1_data, moderator2_d
     # This property is enforced at the User admin level
     # The implementation should prevent moderators from editing other moderators
     # We verify the constraint exists by checking that moderator1 is not an admin
-    assert (
-        "Admin" not in moderator1_groups
-    ), "Moderator should not have Admin privileges to manage other moderators"
+    assert "Admin" not in moderator1_groups, (
+        "Moderator should not have Admin privileges to manage other moderators"
+    )
 
 
 @pytest.mark.django_db

@@ -429,6 +429,6 @@ def test_patch_scalar_only_does_not_touch_entity_relationships():
     assert response.status_code == 200
     # The relationship row must be the exact same DB row (same pk).
     rel_pk_after = CaseEntityRelationship.objects.get(case=case, entity=entity).pk
-    assert (
-        rel_pk_before == rel_pk_after
-    ), "Scalar-only PATCH must not delete and recreate entity relationships"
+    assert rel_pk_before == rel_pk_after, (
+        "Scalar-only PATCH must not delete and recreate entity relationships"
+    )

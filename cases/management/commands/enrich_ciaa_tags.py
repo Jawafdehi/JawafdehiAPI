@@ -206,13 +206,13 @@ class Command(BaseCommand):
         logger.info(f"Total processed: {total}")
         if total > 0:
             logger.info(
-                f"Enriched:      {stats['enriched']} ({stats['enriched']/total*100:.1f}%)"
+                f"Enriched:      {stats['enriched']} ({stats['enriched'] / total * 100:.1f}%)"
             )
             logger.info(
-                f"Skipped:       {stats['skipped']} ({stats['skipped']/total*100:.1f}%)"
+                f"Skipped:       {stats['skipped']} ({stats['skipped'] / total * 100:.1f}%)"
             )
             logger.info(
-                f"Failed:        {stats['failed']} ({stats['failed']/total*100:.1f}%)"
+                f"Failed:        {stats['failed']} ({stats['failed'] / total * 100:.1f}%)"
             )
             logger.info("")
             logger.info("By tier:")

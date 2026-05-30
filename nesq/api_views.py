@@ -143,8 +143,7 @@ class SubmitNESChangeView(APIView):
                 return Response(
                     {
                         "auto_approve": (
-                            "Only Admin and Moderator users can set "
-                            "auto_approve=true."
+                            "Only Admin and Moderator users can set auto_approve=true."
                         )
                     },
                     status=status.HTTP_403_FORBIDDEN,

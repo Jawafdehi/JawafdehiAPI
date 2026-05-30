@@ -103,9 +103,7 @@ class TestGauge:
 
 class TestExport:
     def test_export_textfile(self, tmp_path):
-        pipeline_duration.observe(
-            5.0, labels={"tier": "source_llm", "command": "test"}
-        )
+        pipeline_duration.observe(5.0, labels={"tier": "source_llm", "command": "test"})
         path = tmp_path / "metrics.prom"
         export_textfile(str(path))
         content = path.read_text()

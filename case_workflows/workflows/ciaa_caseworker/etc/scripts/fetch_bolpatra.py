@@ -302,9 +302,9 @@ class BolpatraFetcher:
         Returns:
             dict: {'downloaded': [filepaths], 'failed': [error_dicts]}
         """
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"Fetching bolpatra documents for: {ifb_number}")
-        print(f"{'='*60}\n")
+        print(f"{'=' * 60}\n")
 
         results = {"downloaded": [], "failed": []}
 
@@ -365,13 +365,13 @@ class BolpatraFetcher:
                         }
                     )
 
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(
             f"Downloaded {len(results['downloaded'])} documents to: {self.output_dir}"
         )
         if results["failed"]:
             print(f"Failed: {len(results['failed'])} operations")
-        print(f"{'='*60}\n")
+        print(f"{'=' * 60}\n")
 
         return results
 

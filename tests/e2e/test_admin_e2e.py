@@ -89,9 +89,9 @@ class TestDjangoAdminWorkflows:
         case.save()
 
         # Verify initial state
-        assert (
-            case.state == CaseState.DRAFT
-        ), "New case should start in DRAFT state (Requirement 1.1)"
+        assert case.state == CaseState.DRAFT, (
+            "New case should start in DRAFT state (Requirement 1.1)"
+        )
 
         # Step 2: Contributor edits the draft
         case.title = "Updated Corruption Case"
@@ -103,24 +103,24 @@ class TestDjangoAdminWorkflows:
         case.refresh_from_db()
         assert case.title == "Updated Corruption Case"
         assert len(case.key_allegations) == 2
-        assert (
-            case.state == CaseState.DRAFT
-        ), "Case should remain in DRAFT state after editing"
+        assert case.state == CaseState.DRAFT, (
+            "Case should remain in DRAFT state after editing"
+        )
 
         # Step 3: Contributor submits for review
         case.submit()
 
         # Verify state transition
         case.refresh_from_db()
-        assert (
-            case.state == CaseState.IN_REVIEW
-        ), "Case should transition to IN_REVIEW after submission (Requirement 1.3)"
-        assert (
-            case.versionInfo is not None
-        ), "versionInfo should be updated after submission"
-        assert (
-            case.versionInfo.get("action") == "submitted"
-        ), "versionInfo should record the submission action"
+        assert case.state == CaseState.IN_REVIEW, (
+            "Case should transition to IN_REVIEW after submission (Requirement 1.3)"
+        )
+        assert case.versionInfo is not None, (
+            "versionInfo should be updated after submission"
+        )
+        assert case.versionInfo.get("action") == "submitted", (
+            "versionInfo should record the submission action"
+        )
 
         # Step 4: Moderator reviews the case
         # Verify moderator can access the case
@@ -132,9 +132,9 @@ class TestDjangoAdminWorkflows:
         request.user = self.moderator
 
         queryset = admin_instance.get_queryset(request)
-        assert (
-            case in queryset
-        ), "Moderator should be able to access all cases (Requirement 2.3)"
+        assert case in queryset, (
+            "Moderator should be able to access all cases (Requirement 2.3)"
+        )
 
         has_permission = admin_instance.has_change_permission(request, case)
         assert has_permission, "Moderator should have permission to change the case"
@@ -144,12 +144,12 @@ class TestDjangoAdminWorkflows:
 
         # Verify publication
         case.refresh_from_db()
-        assert (
-            case.state == CaseState.PUBLISHED
-        ), "Case should transition to PUBLISHED after moderator approval (Requirement 2.1, 2.2)"
-        assert (
-            case.versionInfo.get("action") == "published"
-        ), "versionInfo should record the publication action (Requirement 2.4)"
+        assert case.state == CaseState.PUBLISHED, (
+            "Case should transition to PUBLISHED after moderator approval (Requirement 2.1, 2.2)"
+        )
+        assert case.versionInfo.get("action") == "published", (
+            "versionInfo should record the publication action (Requirement 2.4)"
+        )
 
     def test_contributor_assignment_and_access_restrictions(self):
         """
@@ -186,14 +186,14 @@ class TestDjangoAdminWorkflows:
         request1.user = self.contributor1
 
         queryset1 = admin_instance.get_queryset(request1)
-        assert (
-            case in queryset1
-        ), "Contributor1 should see assigned case in queryset (Requirement 3.1)"
+        assert case in queryset1, (
+            "Contributor1 should see assigned case in queryset (Requirement 3.1)"
+        )
 
         has_permission1 = admin_instance.has_change_permission(request1, case)
-        assert (
-            has_permission1
-        ), "Contributor1 should have permission to change assigned case"
+        assert has_permission1, (
+            "Contributor1 should have permission to change assigned case"
+        )
 
         # Contributor1 can edit the case
         case.title = "Updated by Contributor1"
@@ -206,14 +206,14 @@ class TestDjangoAdminWorkflows:
         request2.user = self.contributor2
 
         queryset2 = admin_instance.get_queryset(request2)
-        assert (
-            case not in queryset2
-        ), "Contributor2 should NOT see unassigned case in queryset (Requirement 3.2)"
+        assert case not in queryset2, (
+            "Contributor2 should NOT see unassigned case in queryset (Requirement 3.2)"
+        )
 
         has_permission2 = admin_instance.has_change_permission(request2, case)
-        assert (
-            not has_permission2
-        ), "Contributor2 should NOT have permission to change unassigned case"
+        assert not has_permission2, (
+            "Contributor2 should NOT have permission to change unassigned case"
+        )
 
         # Step 4: Admin assigns contributor2 to the case
         case.contributors.add(self.contributor2)
@@ -221,14 +221,14 @@ class TestDjangoAdminWorkflows:
 
         # Step 5: Verify contributor2 can now access the case
         queryset2_after = admin_instance.get_queryset(request2)
-        assert (
-            case in queryset2_after
-        ), "Contributor2 should now see the case after assignment"
+        assert case in queryset2_after, (
+            "Contributor2 should now see the case after assignment"
+        )
 
         has_permission2_after = admin_instance.has_change_permission(request2, case)
-        assert (
-            has_permission2_after
-        ), "Contributor2 should now have permission to change the case"
+        assert has_permission2_after, (
+            "Contributor2 should now have permission to change the case"
+        )
 
     def test_contributor_can_see_own_created_case_in_list(self):
         """
@@ -274,46 +274,46 @@ class TestDjangoAdminWorkflows:
         admin_instance.save_related(request_contrib1, DummyForm(), [], change=False)
 
         # Step 2: Verify creator is automatically added to contributors
-        assert (
-            self.contributor1 in case.contributors.all()
-        ), "Creator should be automatically added to contributors when creating a case"
+        assert self.contributor1 in case.contributors.all(), (
+            "Creator should be automatically added to contributors when creating a case"
+        )
 
         # Step 3: Contributor performs list query
         queryset = admin_instance.get_queryset(request_contrib1)
 
         # Step 4: Verify the created case appears in their list
-        assert (
-            case in queryset
-        ), "Contributor should see their own created case in list view (Requirement 3.1)"
+        assert case in queryset, (
+            "Contributor should see their own created case in list view (Requirement 3.1)"
+        )
 
         # Verify contributor has access to view and edit
         has_view_permission = admin_instance.has_view_permission(request_contrib1, case)
-        assert (
-            has_view_permission
-        ), "Contributor should have view permission for their own case"
+        assert has_view_permission, (
+            "Contributor should have view permission for their own case"
+        )
 
         has_change_permission = admin_instance.has_change_permission(
             request_contrib1, case
         )
-        assert (
-            has_change_permission
-        ), "Contributor should have change permission for their own case"
+        assert has_change_permission, (
+            "Contributor should have change permission for their own case"
+        )
 
         # Step 5: Verify another contributor cannot see the case
         request_contrib2 = factory.get("/")
         request_contrib2.user = self.contributor2
 
         queryset2 = admin_instance.get_queryset(request_contrib2)
-        assert (
-            case not in queryset2
-        ), "Other contributors should NOT see unassigned cases in list view (Requirement 3.2)"
+        assert case not in queryset2, (
+            "Other contributors should NOT see unassigned cases in list view (Requirement 3.2)"
+        )
 
         has_view_permission2 = admin_instance.has_view_permission(
             request_contrib2, case
         )
-        assert (
-            not has_view_permission2
-        ), "Other contributors should NOT have view permission for unassigned cases"
+        assert not has_view_permission2, (
+            "Other contributors should NOT have view permission for unassigned cases"
+        )
 
     def test_state_transitions_with_validation(self):
         """
@@ -347,9 +347,9 @@ class TestDjangoAdminWorkflows:
 
         # Verify validation error mentions missing fields
         error_dict = exc_info.value.message_dict
-        assert (
-            "key_allegations" in error_dict or "description" in error_dict
-        ), "Validation should fail for IN_REVIEW without required fields (Requirement 1.2)"
+        assert "key_allegations" in error_dict or "description" in error_dict, (
+            "Validation should fail for IN_REVIEW without required fields (Requirement 1.2)"
+        )
 
         # Reset state
         case.state = CaseState.DRAFT
@@ -363,9 +363,9 @@ class TestDjangoAdminWorkflows:
         # Step 4: Successfully transition to IN_REVIEW
         case.submit()
         case.refresh_from_db()
-        assert (
-            case.state == CaseState.IN_REVIEW
-        ), "Case should transition to IN_REVIEW with complete data"
+        assert case.state == CaseState.IN_REVIEW, (
+            "Case should transition to IN_REVIEW with complete data"
+        )
 
         # Step 5: Contributor attempts to publish (should fail)
         from django.test import RequestFactory
@@ -384,9 +384,9 @@ class TestDjangoAdminWorkflows:
             "description": case.description,
         }
         form = CaseAdminForm(data=form_data, instance=case, request=request_contrib)
-        assert (
-            not form.is_valid()
-        ), "Form should not be valid for contributor publishing"
+        assert not form.is_valid(), (
+            "Form should not be valid for contributor publishing"
+        )
         assert "state" in form.errors, "Should have state error"
         assert "Contributors can only transition between DRAFT and IN_REVIEW" in str(
             form.errors["state"]
@@ -398,15 +398,15 @@ class TestDjangoAdminWorkflows:
 
         form_data["state"] = CaseState.PUBLISHED
         form = CaseAdminForm(data=form_data, instance=case, request=request_mod)
-        assert (
-            form.is_valid()
-        ), f"Form should be valid for moderator publishing: {form.errors}"
+        assert form.is_valid(), (
+            f"Form should be valid for moderator publishing: {form.errors}"
+        )
         form.save()
 
         case.refresh_from_db()
-        assert (
-            case.state == CaseState.PUBLISHED
-        ), "Moderator should be able to publish the case (Requirement 2.1)"
+        assert case.state == CaseState.PUBLISHED, (
+            "Moderator should be able to publish the case (Requirement 2.1)"
+        )
 
     def test_in_place_editing_of_published_cases(self):
         """
@@ -487,27 +487,27 @@ class TestDjangoAdminWorkflows:
 
         # Step 3: Verify state is set to CLOSED
         case.refresh_from_db()
-        assert (
-            case.state == CaseState.CLOSED
-        ), "Soft delete should set state to CLOSED (Requirement 7.3)"
+        assert case.state == CaseState.CLOSED, (
+            "Soft delete should set state to CLOSED (Requirement 7.3)"
+        )
 
         # Step 4: Verify case still exists in database
         deleted_case = Case.objects.get(id=case_id)
-        assert (
-            deleted_case is not None
-        ), "Case should still exist in database after soft delete"
-        assert (
-            deleted_case.title == "Case to be Deleted"
-        ), "Case data should be preserved"
+        assert deleted_case is not None, (
+            "Case should still exist in database after soft delete"
+        )
+        assert deleted_case.title == "Case to be Deleted", (
+            "Case data should be preserved"
+        )
 
         # Step 5: Verify versionInfo records the deletion
         assert deleted_case.versionInfo is not None
-        assert (
-            deleted_case.versionInfo.get("action") == "deleted"
-        ), "versionInfo should record the deletion action"
-        assert (
-            "datetime" in deleted_case.versionInfo
-        ), "versionInfo should include deletion timestamp"
+        assert deleted_case.versionInfo.get("action") == "deleted", (
+            "versionInfo should record the deletion action"
+        )
+        assert "datetime" in deleted_case.versionInfo, (
+            "versionInfo should include deletion timestamp"
+        )
 
         # Step 6: Verify case is not visible in public API
         # (This would be tested by checking the API queryset filters)
@@ -569,20 +569,20 @@ class TestDjangoAdminWorkflows:
         assert case2 in queryset, "Admin should see case assigned to contributor2"
 
         # Verify Admin has change permission for all cases
-        assert admin_instance.has_change_permission(
-            request_admin, case1
-        ), "Admin should have permission to change any case (Requirement 5.1)"
-        assert admin_instance.has_change_permission(
-            request_admin, case2
-        ), "Admin should have permission to change any case"
+        assert admin_instance.has_change_permission(request_admin, case1), (
+            "Admin should have permission to change any case (Requirement 5.1)"
+        )
+        assert admin_instance.has_change_permission(request_admin, case2), (
+            "Admin should have permission to change any case"
+        )
 
         # Step 3: Verify Admin can transition cases to any state
         case1.state = CaseState.PUBLISHED
         admin_instance.save_model(request_admin, case1, None, change=True)
         case1.refresh_from_db()
-        assert (
-            case1.state == CaseState.PUBLISHED
-        ), "Admin should be able to publish cases"
+        assert case1.state == CaseState.PUBLISHED, (
+            "Admin should be able to publish cases"
+        )
 
         case2.state = CaseState.CLOSED
         admin_instance.save_model(request_admin, case2, None, change=True)
@@ -599,13 +599,13 @@ class TestDjangoAdminWorkflows:
         user_admin = CustomUserAdmin(User, None)
 
         user_queryset = user_admin.get_queryset(request_admin)
-        assert (
-            self.moderator in user_queryset
-        ), "Admin should be able to see moderator users"
+        assert self.moderator in user_queryset, (
+            "Admin should be able to see moderator users"
+        )
 
-        assert user_admin.has_change_permission(
-            request_admin, self.moderator
-        ), "Admin should be able to change moderator users"
+        assert user_admin.has_change_permission(request_admin, self.moderator), (
+            "Admin should be able to change moderator users"
+        )
 
     def test_moderator_cannot_manage_other_moderators(self):
         """
@@ -637,38 +637,38 @@ class TestDjangoAdminWorkflows:
         user_queryset = user_admin.get_queryset(request_mod)
 
         # Moderator should not see other moderators in queryset
-        assert (
-            moderator2 not in user_queryset
-        ), "Moderator should NOT see other moderators in queryset (Requirement 5.3)"
-        assert (
-            self.moderator not in user_queryset
-        ), "Moderator should NOT see themselves in queryset"
+        assert moderator2 not in user_queryset, (
+            "Moderator should NOT see other moderators in queryset (Requirement 5.3)"
+        )
+        assert self.moderator not in user_queryset, (
+            "Moderator should NOT see themselves in queryset"
+        )
 
         # Step 3: Verify moderator1 cannot change moderator2
         has_permission = user_admin.has_change_permission(request_mod, moderator2)
-        assert (
-            not has_permission
-        ), "Moderator should NOT have permission to change other moderators"
+        assert not has_permission, (
+            "Moderator should NOT have permission to change other moderators"
+        )
 
         # Verify moderator cannot delete other moderators
         has_delete_permission = user_admin.has_delete_permission(
             request_mod, moderator2
         )
-        assert (
-            not has_delete_permission
-        ), "Moderator should NOT have permission to delete other moderators"
+        assert not has_delete_permission, (
+            "Moderator should NOT have permission to delete other moderators"
+        )
 
         # Step 4: Verify moderator can manage contributors
-        assert (
-            self.contributor1 in user_queryset
-        ), "Moderator should be able to see contributors"
+        assert self.contributor1 in user_queryset, (
+            "Moderator should be able to see contributors"
+        )
 
         has_contrib_permission = user_admin.has_change_permission(
             request_mod, self.contributor1
         )
-        assert (
-            has_contrib_permission
-        ), "Moderator should have permission to change contributors"
+        assert has_contrib_permission, (
+            "Moderator should have permission to change contributors"
+        )
 
     def test_complete_edit_publish_workflow(self):
         """
@@ -777,28 +777,28 @@ class TestDjangoAdminWorkflows:
             "description": case.description,
         }
         form = CaseAdminForm(data=form_data, instance=case, request=request_contrib)
-        assert (
-            form.is_valid()
-        ), f"Form should be valid for DRAFT → IN_REVIEW: {form.errors}"
+        assert form.is_valid(), (
+            f"Form should be valid for DRAFT → IN_REVIEW: {form.errors}"
+        )
         form.save()
 
         case.refresh_from_db()
-        assert (
-            case.state == CaseState.IN_REVIEW
-        ), "Contributor should be able to transition DRAFT → IN_REVIEW"
+        assert case.state == CaseState.IN_REVIEW, (
+            "Contributor should be able to transition DRAFT → IN_REVIEW"
+        )
 
         # Step 3: Contributor transitions IN_REVIEW → DRAFT (allowed)
         form_data["state"] = CaseState.DRAFT
         form = CaseAdminForm(data=form_data, instance=case, request=request_contrib)
-        assert (
-            form.is_valid()
-        ), f"Form should be valid for IN_REVIEW → DRAFT: {form.errors}"
+        assert form.is_valid(), (
+            f"Form should be valid for IN_REVIEW → DRAFT: {form.errors}"
+        )
         form.save()
 
         case.refresh_from_db()
-        assert (
-            case.state == CaseState.DRAFT
-        ), "Contributor should be able to transition IN_REVIEW → DRAFT"
+        assert case.state == CaseState.DRAFT, (
+            "Contributor should be able to transition IN_REVIEW → DRAFT"
+        )
 
         # Step 4: Contributor attempts DRAFT → PUBLISHED (should fail)
         form_data["state"] = CaseState.PUBLISHED
@@ -853,33 +853,33 @@ class TestDjangoAdminWorkflows:
 
         # Step 3: Verify source still exists in database
         deleted_source = DocumentSource.objects.get(id=source_id)
-        assert (
-            deleted_source is not None
-        ), "Source should still exist in database after soft delete"
+        assert deleted_source is not None, (
+            "Source should still exist in database after soft delete"
+        )
 
         # Step 4: Verify source is marked as deleted
         assert deleted_source.is_deleted is True, "Source should be marked as deleted"
         assert deleted_source.title == "Test Source", "Source data should be preserved"
-        assert (
-            deleted_source.source_id == source_source_id
-        ), "Source ID should be preserved"
+        assert deleted_source.source_id == source_source_id, (
+            "Source ID should be preserved"
+        )
 
         # Verify we can query all sources including deleted ones
         all_sources = DocumentSource.objects.all()
-        assert (
-            deleted_source in all_sources
-        ), "Deleted source should be queryable with all()"
+        assert deleted_source in all_sources, (
+            "Deleted source should be queryable with all()"
+        )
 
         # Verify filtering by is_deleted works
         deleted_sources = DocumentSource.objects.filter(is_deleted=True)
-        assert (
-            deleted_source in deleted_sources
-        ), "Should be able to filter for deleted sources"
+        assert deleted_source in deleted_sources, (
+            "Should be able to filter for deleted sources"
+        )
 
         active_sources = DocumentSource.objects.filter(is_deleted=False)
-        assert (
-            deleted_source not in active_sources
-        ), "Deleted source should not appear in active sources filter"
+        assert deleted_source not in active_sources, (
+            "Deleted source should not appear in active sources filter"
+        )
 
     def test_contributor_login_create_minimal_case_and_view_workflow(self):
         """
@@ -904,9 +904,9 @@ class TestDjangoAdminWorkflows:
 
         # Verify contributor can access admin
         response = self.client.get("/admin/")
-        assert (
-            response.status_code == 200
-        ), "Contributor should be able to access admin interface"
+        assert response.status_code == 200, (
+            "Contributor should be able to access admin interface"
+        )
 
         # Step 2: Contributor creates a new case with minimal data (title + case type)
         admin_instance = CaseAdmin(Case, None)
@@ -938,15 +938,15 @@ class TestDjangoAdminWorkflows:
 
         # Verify case is created successfully
         assert minimal_case.id is not None, "Case should be saved to database"
-        assert (
-            minimal_case.state == CaseState.DRAFT
-        ), "New case should start in DRAFT state (Requirement 1.1)"
+        assert minimal_case.state == CaseState.DRAFT, (
+            "New case should start in DRAFT state (Requirement 1.1)"
+        )
 
         # Step 4: Verify creator is automatically assigned as contributor
         minimal_case.refresh_from_db()
-        assert (
-            self.contributor1 in minimal_case.contributors.all()
-        ), "Creator should be automatically assigned as contributor"
+        assert self.contributor1 in minimal_case.contributors.all(), (
+            "Creator should be automatically assigned as contributor"
+        )
 
         # Step 5: Contributor views their case list
         request_list = factory.get("/admin/cases/case/")
@@ -955,52 +955,52 @@ class TestDjangoAdminWorkflows:
         queryset = admin_instance.get_queryset(request_list)
 
         # Step 6: Verify the new case appears in their list
-        assert (
-            minimal_case in queryset
-        ), "Contributor should see their newly created case in list (Requirement 3.1)"
+        assert minimal_case in queryset, (
+            "Contributor should see their newly created case in list (Requirement 3.1)"
+        )
 
         # Verify case count
         contributor_cases = queryset.filter(contributors=self.contributor1)
-        assert (
-            contributor_cases.count() >= 1
-        ), "Contributor should have at least one case assigned"
+        assert contributor_cases.count() >= 1, (
+            "Contributor should have at least one case assigned"
+        )
 
         # Step 7: Contributor can access and view the case details
         has_view_permission = admin_instance.has_view_permission(
             request_list, minimal_case
         )
-        assert (
-            has_view_permission
-        ), "Contributor should have view permission for their own case"
+        assert has_view_permission, (
+            "Contributor should have view permission for their own case"
+        )
 
         has_change_permission = admin_instance.has_change_permission(
             request_list, minimal_case
         )
-        assert (
-            has_change_permission
-        ), "Contributor should have change permission for their own case"
+        assert has_change_permission, (
+            "Contributor should have change permission for their own case"
+        )
 
         # Verify case details are accessible
         response = self.client.get(f"/admin/cases/case/{minimal_case.id}/change/")
-        assert (
-            response.status_code == 200
-        ), "Contributor should be able to access case detail page"
+        assert response.status_code == 200, (
+            "Contributor should be able to access case detail page"
+        )
 
         # Verify other contributor cannot see this case
         request_other = factory.get("/admin/cases/case/")
         request_other.user = self.contributor2
 
         queryset_other = admin_instance.get_queryset(request_other)
-        assert (
-            minimal_case not in queryset_other
-        ), "Other contributors should NOT see unassigned cases (Requirement 3.2)"
+        assert minimal_case not in queryset_other, (
+            "Other contributors should NOT see unassigned cases (Requirement 3.2)"
+        )
 
         has_view_permission_other = admin_instance.has_view_permission(
             request_other, minimal_case
         )
-        assert (
-            not has_view_permission_other
-        ), "Other contributors should NOT have view permission for unassigned cases"
+        assert not has_view_permission_other, (
+            "Other contributors should NOT have view permission for unassigned cases"
+        )
 
     def test_new_case_must_be_draft_state(self):
         """
@@ -1034,9 +1034,9 @@ class TestDjangoAdminWorkflows:
             "description": "Test description",
         }
         form = CaseAdminForm(data=form_data, request=request_contrib)
-        assert (
-            not form.is_valid()
-        ), "Form should not be valid for PUBLISHED state on new case"
+        assert not form.is_valid(), (
+            "Form should not be valid for PUBLISHED state on new case"
+        )
         assert "state" in form.errors, "Should have state error"
         assert "New cases must be created in DRAFT state" in str(
             form.errors["state"]
@@ -1046,9 +1046,9 @@ class TestDjangoAdminWorkflows:
         form_data["state"] = CaseState.IN_REVIEW
         form_data["title"] = "New Case - In Review State"
         form = CaseAdminForm(data=form_data, request=request_contrib)
-        assert (
-            not form.is_valid()
-        ), "Form should not be valid for IN_REVIEW state on new case"
+        assert not form.is_valid(), (
+            "Form should not be valid for IN_REVIEW state on new case"
+        )
         assert "state" in form.errors, "Should have state error"
         assert "New cases must be created in DRAFT state" in str(
             form.errors["state"]
@@ -1058,9 +1058,9 @@ class TestDjangoAdminWorkflows:
         form_data["state"] = CaseState.CLOSED
         form_data["title"] = "New Case - Closed State"
         form = CaseAdminForm(data=form_data, request=request_contrib)
-        assert (
-            not form.is_valid()
-        ), "Form should not be valid for CLOSED state on new case"
+        assert not form.is_valid(), (
+            "Form should not be valid for CLOSED state on new case"
+        )
         assert "state" in form.errors, "Should have state error"
         assert "New cases must be created in DRAFT state" in str(
             form.errors["state"]
@@ -1082,9 +1082,9 @@ class TestDjangoAdminWorkflows:
 
         # Step 5: Verify case is created successfully in DRAFT state
         assert case_draft.id is not None, "Case should be saved to database"
-        assert (
-            case_draft.state == CaseState.DRAFT
-        ), "New case should be in DRAFT state (Requirement 1.1)"
+        assert case_draft.state == CaseState.DRAFT, (
+            "New case should be in DRAFT state (Requirement 1.1)"
+        )
 
     def test_admin_entity_id_validation_on_create(self):
         """
@@ -1113,27 +1113,27 @@ class TestDjangoAdminWorkflows:
             field.clean('["invalid-format"]')
 
         error_message = str(exc_info.value)
-        assert (
-            "Invalid entity ID format" in error_message
-        ), f"Error should mention invalid format. Got: {error_message}"
+        assert "Invalid entity ID format" in error_message, (
+            f"Error should mention invalid format. Got: {error_message}"
+        )
 
         # Step 2: Test invalid entity prefix
         with pytest.raises(ValidationError) as exc_info:
             field.clean('["entity:invalid-type/test-slug"]')
 
         error_message = str(exc_info.value)
-        assert (
-            "entity prefix 'invalid-type' is not allowed" in error_message.lower()
-        ), f"Error should mention invalid entity prefix. Got: {error_message}"
+        assert "entity prefix 'invalid-type' is not allowed" in error_message.lower(), (
+            f"Error should mention invalid entity prefix. Got: {error_message}"
+        )
 
         # Step 3: Test invalid slug format (contains invalid characters)
         with pytest.raises(ValidationError) as exc_info:
             field.clean('["entity:person/Invalid Slug With Spaces"]')
 
         error_message = str(exc_info.value)
-        assert (
-            "slug" in error_message.lower() or "format" in error_message.lower()
-        ), f"Error should mention invalid slug format. Got: {error_message}"
+        assert "slug" in error_message.lower() or "format" in error_message.lower(), (
+            f"Error should mention invalid slug format. Got: {error_message}"
+        )
 
         # Step 4: Test empty entity ID
         with pytest.raises(ValidationError) as exc_info:
@@ -1148,21 +1148,21 @@ class TestDjangoAdminWorkflows:
         # Step 5: Test valid entity IDs
         # Valid person entity
         result = field.clean('["entity:person/john-doe"]')
-        assert result == [
-            "entity:person/john-doe"
-        ], "Should accept valid person entity ID"
+        assert result == ["entity:person/john-doe"], (
+            "Should accept valid person entity ID"
+        )
 
         # Valid organization entity
         result = field.clean('["entity:organization/test-org"]')
-        assert result == [
-            "entity:organization/test-org"
-        ], "Should accept valid organization entity ID"
+        assert result == ["entity:organization/test-org"], (
+            "Should accept valid organization entity ID"
+        )
 
         # Valid location entity
         result = field.clean('["entity:location/kathmandu"]')
-        assert result == [
-            "entity:location/kathmandu"
-        ], "Should accept valid location entity ID"
+        assert result == ["entity:location/kathmandu"], (
+            "Should accept valid location entity ID"
+        )
 
         # Multiple valid entity IDs
         result = field.clean(
@@ -1178,9 +1178,9 @@ class TestDjangoAdminWorkflows:
             field.clean('["entity:person/valid-person", "invalid-format"]')
 
         error_message = str(exc_info.value)
-        assert (
-            "Invalid entity ID format" in error_message
-        ), "Should reject when mixing valid and invalid entity IDs"
+        assert "Invalid entity ID format" in error_message, (
+            "Should reject when mixing valid and invalid entity IDs"
+        )
 
     def test_admin_entity_id_validation_on_update(self):
         """
@@ -1216,9 +1216,9 @@ class TestDjangoAdminWorkflows:
             invalid_entity.save()
 
         error_dict = exc_info.value.message_dict
-        assert (
-            "nes_id" in error_dict
-        ), f"Error should be associated with nes_id field. Got: {error_dict}"
+        assert "nes_id" in error_dict, (
+            f"Error should be associated with nes_id field. Got: {error_dict}"
+        )
 
         # Step 4: Update with valid entity IDs
         new_entities = create_entities_from_ids(
@@ -1251,12 +1251,12 @@ class TestDjangoAdminWorkflows:
                 relationship_type=RelationshipType.ALLEGED
             ).values_list("entity__nes_id", flat=True)
         )
-        assert (
-            "entity:person/updated-person" in entity_nes_ids
-        ), "Updated entity ID should be saved"
-        assert (
-            "entity:organization/new-org" in entity_nes_ids
-        ), "New entity ID should be saved"
+        assert "entity:person/updated-person" in entity_nes_ids, (
+            "Updated entity ID should be saved"
+        )
+        assert "entity:organization/new-org" in entity_nes_ids, (
+            "New entity ID should be saved"
+        )
 
     def test_admin_related_entities_validation(self):
         """
@@ -1279,18 +1279,18 @@ class TestDjangoAdminWorkflows:
             field.clean('["invalid-related"]')
 
         error_message = str(exc_info.value)
-        assert (
-            "Invalid entity ID format" in error_message
-        ), f"Error should mention invalid format. Got: {error_message}"
+        assert "Invalid entity ID format" in error_message, (
+            f"Error should mention invalid format. Got: {error_message}"
+        )
 
         # Step 2: Test invalid entity IDs in locations field
         with pytest.raises(ValidationError) as exc_info:
             field.clean('["invalid-location"]')
 
         error_message = str(exc_info.value)
-        assert (
-            "Invalid entity ID format" in error_message
-        ), f"Error should mention invalid format. Got: {error_message}"
+        assert "Invalid entity ID format" in error_message, (
+            f"Error should mention invalid format. Got: {error_message}"
+        )
 
         # Step 3: Test valid entity IDs in all entity fields
         result = field.clean(
@@ -1328,9 +1328,9 @@ class TestDjangoAdminWorkflows:
         case.save()
 
         # Verify case was created successfully
-        assert (
-            case.id is not None
-        ), "Draft case should be created without alleged_entities"
+        assert case.id is not None, (
+            "Draft case should be created without alleged_entities"
+        )
         assert case.state == CaseState.DRAFT
         assert case.entity_relationships.count() == 0
 
@@ -1341,13 +1341,13 @@ class TestDjangoAdminWorkflows:
             case.validate()
 
         error_dict = exc_info.value.message_dict
-        assert (
-            "entities" in error_dict
-        ), f"Should require alleged entities for IN_REVIEW. Got errors: {error_dict}"
+        assert "entities" in error_dict, (
+            f"Should require alleged entities for IN_REVIEW. Got errors: {error_dict}"
+        )
         error_message = str(error_dict["entities"])
-        assert (
-            "IN_REVIEW or PUBLISHED" in error_message
-        ), f"Error message should mention IN_REVIEW/PUBLISHED requirement. Got: {error_message}"
+        assert "IN_REVIEW or PUBLISHED" in error_message, (
+            f"Error message should mention IN_REVIEW/PUBLISHED requirement. Got: {error_message}"
+        )
 
         # Reset state
         case.state = CaseState.DRAFT
@@ -1368,9 +1368,9 @@ class TestDjangoAdminWorkflows:
 
         # Step 4: Verify case transitions to IN_REVIEW
         case.refresh_from_db()
-        assert (
-            case.state == CaseState.IN_REVIEW
-        ), "Case should transition to IN_REVIEW with alleged_entities"
+        assert case.state == CaseState.IN_REVIEW, (
+            "Case should transition to IN_REVIEW with alleged_entities"
+        )
         assert (
             case.entity_relationships.filter(
                 relationship_type=RelationshipType.ACCUSED
@@ -1412,9 +1412,9 @@ class TestDjangoAdminWorkflows:
             case.validate()
 
         error_dict = exc_info.value.message_dict
-        assert (
-            "entities" in error_dict
-        ), f"Should require alleged entities for PUBLISHED. Got errors: {error_dict}"
+        assert "entities" in error_dict, (
+            f"Should require alleged entities for PUBLISHED. Got errors: {error_dict}"
+        )
 
         # Reset state
         case.state = CaseState.DRAFT
@@ -1431,9 +1431,9 @@ class TestDjangoAdminWorkflows:
         case.publish()
 
         case.refresh_from_db()
-        assert (
-            case.state == CaseState.PUBLISHED
-        ), "Case should be published with alleged_entities"
+        assert case.state == CaseState.PUBLISHED, (
+            "Case should be published with alleged_entities"
+        )
         assert (
             case.entity_relationships.filter(
                 relationship_type=RelationshipType.ACCUSED

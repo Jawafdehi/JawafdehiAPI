@@ -4,7 +4,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("cases", "0018_add_slug_court_cases_missing_details_bigo"),
     ]

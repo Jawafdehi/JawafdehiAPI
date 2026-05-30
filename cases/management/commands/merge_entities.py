@@ -41,8 +41,8 @@ class Command(BaseCommand):
         self.stdout.write(self.style.WARNING("\n=== Entities to Merge ===\n"))
         for i, entity in enumerate(impact["entities"], 1):
             self.stdout.write(f"{i}. Entity ID: {entity.id}")
-            self.stdout.write(f'   nes_id: {entity.nes_id or "(not set)"}')
-            self.stdout.write(f'   display_name: {entity.display_name or "(not set)"}')
+            self.stdout.write(f"   nes_id: {entity.nes_id or '(not set)'}")
+            self.stdout.write(f"   display_name: {entity.display_name or '(not set)'}")
             self.stdout.write(f"   String representation: {entity}")
 
             # Show usage statistics
@@ -56,7 +56,7 @@ class Command(BaseCommand):
                 usage_parts.append(f"{source_count} source(s)")
 
             if usage_parts:
-                self.stdout.write(f'   Used in: {", ".join(usage_parts)}')
+                self.stdout.write(f"   Used in: {', '.join(usage_parts)}")
             else:
                 self.stdout.write("   Used in: (no references)")
 
@@ -66,33 +66,33 @@ class Command(BaseCommand):
         self.stdout.write(self.style.WARNING("=== Merged Entity Preview ===\n"))
         target_entity = impact["target_entity"]
         self.stdout.write(f"Target Entity ID: {target_entity.id}")
-        self.stdout.write(f'nes_id: {impact["merged_nes_id"] or "(not set)"}')
+        self.stdout.write(f"nes_id: {impact['merged_nes_id'] or '(not set)'}")
         self.stdout.write(
-            f'display_name: {impact["merged_display_name"] or "(not set)"}'
+            f"display_name: {impact['merged_display_name'] or '(not set)'}"
         )
 
         # Warn about conflicts
         if len(impact["all_nes_ids"]) > 1:
             self.stdout.write(
                 self.style.ERROR(
-                    f'\nWARNING: Multiple nes_ids found: {", ".join(impact["all_nes_ids"])}'
+                    f"\nWARNING: Multiple nes_ids found: {', '.join(impact['all_nes_ids'])}"
                 )
             )
             self.stdout.write(
                 self.style.ERROR(
-                    f'Only the first one will be kept: {impact["merged_nes_id"]}'
+                    f"Only the first one will be kept: {impact['merged_nes_id']}"
                 )
             )
 
         if len(impact["all_display_names"]) > 1:
             self.stdout.write(
                 self.style.WARNING(
-                    f'\nNote: Multiple display_names found: {", ".join(impact["all_display_names"])}'
+                    f"\nNote: Multiple display_names found: {', '.join(impact['all_display_names'])}"
                 )
             )
             self.stdout.write(
                 self.style.WARNING(
-                    f'Using display_name from target entity: {impact["merged_display_name"]}'
+                    f"Using display_name from target entity: {impact['merged_display_name']}"
                 )
             )
 

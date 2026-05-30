@@ -19,6 +19,6 @@ def test_case_auto_generates_slug_on_save():
     )
 
     assert case.slug, "Case should have an auto-generated slug after save"
-    assert case.slug.startswith(
-        "test-case-for-slug-generation"
-    ), "Slug should be derived from the title"
+    assert case.slug.startswith("test-case-for-slug-generation"), (
+        "Slug should be derived from the title"
+    )

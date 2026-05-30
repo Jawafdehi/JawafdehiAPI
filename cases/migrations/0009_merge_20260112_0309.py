@@ -4,7 +4,6 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("cases", "0008_add_case_image_fields"),
         ("cases", "0008_increase_url_max_length"),

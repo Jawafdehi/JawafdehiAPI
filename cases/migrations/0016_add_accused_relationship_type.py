@@ -26,7 +26,6 @@ def reverse_migrate_accused_to_alleged(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("cases", "0015_alter_caseentityrelationship_relationship_type"),
     ]

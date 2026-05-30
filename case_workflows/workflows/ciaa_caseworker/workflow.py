@@ -322,20 +322,23 @@ class CIAACaseworkerWorkflow(Workflow):
         return [
             WorkflowStep(
                 name="initialize-casework",
-                prompt_fn=lambda case_dir: f"""\
+                prompt_fn=lambda case_dir: (
+                    f"""\
 The Jawafdehi case ID is: {case_dir.name}
 
 First read {case_dir}/instructions/INSTRUCTIONS.md for detailed caseworker guidance before proceeding.
 
 Verify this case exists in the NGM database and is eligible for processing as a CIAA Special Court corruption case. Use the ngm_extract_case_data MCP tool with file_path={case_dir}/case_details-{case_dir.name}.md. Ensure the required directories exist: {case_dir}/sources/raw/, {case_dir}/sources/markdown/, {case_dir}/logs/. Write a brief initialization note to {case_dir}/logs/case-summary.md summarising the case number and some basic case details. For example, note the defendant name(s), registration date (both in BS and in AD), and any other key details you find. This information will be useful for searching for related documents and news articles in later steps.
-""",
+"""
+                ),
                 mcp_servers_fn=_jserver,
                 mcp_tool_filter=["ngm_extract_case_data"],
                 system_prompt=_SYSTEM_PROMPT,
             ),
             WorkflowStep(
                 name="fetch-source-documents",
-                prompt_fn=lambda case_dir: f"""\
+                prompt_fn=lambda case_dir: (
+                    f"""\
 The Jawafdehi case ID / court case number is: {case_dir.name}
 
 Step 1 — Read {case_dir}/case_details-{case_dir.name}.md to get the defendant name (primary defendant) and registration date.
@@ -364,7 +367,8 @@ Step 5 — Fetch court order (faisala):
  Save as {case_dir}/sources/raw/court-order-{case_dir.name}-<n>.<ext> and convert to {case_dir}/sources/markdown/court-order-{case_dir.name}-<n>.md.
  If court_identifier is missing, try special then supreme and record what was used in {case_dir}/logs/fetch-summary.md.
 YOU MUST DOWNLOAD the original file (.pdf, .doc, etc) to the {case_dir}/sources/raw/ directory first using the download_file tool. Then, use the `convert_to_markdown` MCP tool to convert each downloaded file. Finally, write a brief summary to {case_dir}/logs/fetch-summary.md listing which documents were found, their urls, and which were skipped.
-""",
+"""
+                ),
                 tools=[download_file, run_command, fix_encoding],
                 mcp_servers=_FETCH_SERVER,
                 mcp_servers_fn=_jserver,
@@ -373,7 +377,8 @@ YOU MUST DOWNLOAD the original file (.pdf, .doc, etc) to the {case_dir}/sources/
             ),
             WorkflowStep(
                 name="fetch-news-articles",
-                prompt_fn=lambda case_dir: f"""\
+                prompt_fn=lambda case_dir: (
+                    f"""\
 The Jawafdehi case ID is: {case_dir.name}.
 
 Search the web for news articles about this corruption case.
@@ -401,7 +406,8 @@ then use `convert_to_markdown` to save it to {case_dir}/sources/markdown/news-<s
 Update {case_dir}/sources/markdown/news-search-progress.md after each search wave and fetch/conversion round with the queries run, URL counts, accepted articles, and any rate-limit fallback used.
 Write a final summary to {case_dir}/logs/news-search-summary.md.
 Update MEMORY.md with any key learnings for later steps.
-""",
+"""
+                ),
                 tools=[download_file, run_command, fix_encoding],
                 mcp_servers={
                     **_FETCH_SERVER,
@@ -431,7 +437,8 @@ Update MEMORY.md with any key learnings for later steps.
             # ),
             WorkflowStep(
                 name="draft-case",
-                prompt_fn=lambda case_dir: f"""\
+                prompt_fn=lambda case_dir: (
+                    f"""\
 The Jawafdehi case ID is: {case_dir.name}
 
 Draft a complete Jawafdehi accountability case using sources in {case_dir}/sources/markdown/ and case details.
@@ -445,7 +452,8 @@ Execution requirements:
 4. Before finishing, confirm the file exists and includes substantive content in every required template section.
 
 Save the final draft to {case_dir}/draft.md.
-""",
+"""
+                ),
                 tools=[fix_encoding],
                 required_outputs={"draft.md": 100},
                 retries=1,
@@ -453,7 +461,8 @@ Save the final draft to {case_dir}/draft.md.
             ),
             WorkflowStep(
                 name="review-draft",
-                prompt_fn=lambda case_dir: f"""\
+                prompt_fn=lambda case_dir: (
+                    f"""\
 The Jawafdehi case ID is: {case_dir.name}
 
 You are performing a structured review of the case draft before it is submitted to the API.
@@ -505,7 +514,8 @@ record indicates, and the revision needed.
 
 End draft-review.md with an overall outcome:
   `approved` | `approved_with_minor_edits` | `needs_revision` | `blocked`
-""",
+"""
+                ),
                 tools=[download_file, fix_encoding],
                 required_outputs={"draft-review.md": 100},
                 retries=1,
@@ -513,7 +523,8 @@ End draft-review.md with an overall outcome:
             ),
             WorkflowStep(
                 name="revise-draft",
-                prompt_fn=lambda case_dir: f"""\
+                prompt_fn=lambda case_dir: (
+                    f"""\
 The Jawafdehi case ID is: {case_dir.name}
 
 Read the review findings at {case_dir}/draft-review.md and the current draft at
@@ -527,14 +538,16 @@ Overwrite {case_dir}/draft.md with the revised, improved version.
 Finally, append a one-line revision note to {case_dir}/logs/case-summary.md summarising
 which categories of issues were addressed (e.g. "Revised: corrected verdict date, added
 missing bigo amount, fixed template fields").
-""",
+"""
+                ),
                 tools=[fix_encoding],
                 required_outputs={"draft.md": 100},
                 system_prompt=_SYSTEM_PROMPT,
             ),
             WorkflowStep(
                 name="create-case",
-                prompt_fn=lambda case_dir: f"""\
+                prompt_fn=lambda case_dir: (
+                    f"""\
 The Jawafdehi case ID is: {case_dir.name}
 
 Read the case draft at {case_dir}/draft.md and create a basic Jawafdehi case via the API
@@ -542,7 +555,8 @@ using the minimum required fields (title, case type, summary). Record the return
 in {case_dir}/MEMORY.md for use in subsequent steps.
 
 NOTE: along with the case title, you MUST update the Key allegations, Timeline, case start, case end dates.
-""",
+"""
+                ),
                 tools=[fix_encoding],
                 mcp_servers_fn=_jserver,
                 mcp_tool_filter=[
@@ -559,7 +573,8 @@ NOTE: along with the case title, you MUST update the Key allegations, Timeline, 
             ),
             WorkflowStep(
                 name="create-update-entities",
-                prompt_fn=lambda case_dir: f"""\
+                prompt_fn=lambda case_dir: (
+                    f"""\
 The Jawafdehi case ID is: {case_dir.name}. The numeric Jawafdehi case ID is in {case_dir}/MEMORY.md.
 
 For each accused, defendant, and related entity listed in {case_dir}/draft.md, link them to the
@@ -586,7 +601,8 @@ Step 4 — Confirm the link.
   Call get_jawaf_entity with the entity ID and verify the returned related_cases field.
 
 Record all entity IDs created or linked in {case_dir}/MEMORY.md.
-""",
+"""
+                ),
                 tools=[fix_encoding],
                 mcp_servers_fn=_jserver,
                 mcp_tool_filter=[
@@ -602,7 +618,8 @@ Record all entity IDs created or linked in {case_dir}/MEMORY.md.
             ),
             WorkflowStep(
                 name="update-case-details",
-                prompt_fn=lambda case_dir: f"""\
+                prompt_fn=lambda case_dir: (
+                    f"""\
 The CIAA case number is: {case_dir.name}. The numeric Jawafdehi case ID is in {case_dir}/MEMORY.md.
 Read MEMORY.md first — do NOT call search_jawafdehi_cases; use the stored ID only.
 
@@ -668,7 +685,8 @@ Then patch missing or incomplete fields from {case_dir}/draft.md:
       section of {case_dir}/draft.md. Omit if all items are checked or the section is empty.
 
 All patch operations for these fields can be combined into a single patch_jawafdehi_case call.
-""",
+"""
+                ),
                 tools=[fix_encoding],
                 mcp_servers_fn=_jserver,
                 mcp_tool_filter=[

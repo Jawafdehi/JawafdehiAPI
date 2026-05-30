@@ -81,8 +81,6 @@ class Command(BaseCommand):
             f"Loaded {len(cases)} DRAFT cases for testing (out of {total} total)."
         )
 
-        enricher = TagEnricher(use_llm=use_llm)
-
         start = time.monotonic()
         completed = 0
         failed = 0
@@ -92,7 +90,7 @@ class Command(BaseCommand):
             for idx, case in enumerate(cases):
                 futures[
                     executor.submit(
-                        self._enrich_one, enricher, case, idx + 1, len(cases)
+                        self._enrich_one, use_llm, case, idx + 1, len(cases)
                     )
                 ] = case
             for future in as_completed(futures):
@@ -128,8 +126,9 @@ class Command(BaseCommand):
             export_textfile(metrics_file)
             self.stdout.write(f"Metrics written to {metrics_file}")
 
-    def _enrich_one(self, enricher, case, case_num, total):
+    def _enrich_one(self, use_llm, case, case_num, total):
         try:
+            enricher = TagEnricher(use_llm=use_llm)
             return enricher.enrich_case(
                 case, force=False, case_num=case_num, total_cases=total
             )

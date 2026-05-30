@@ -54,9 +54,9 @@ def test_moderators_can_publish_cases(case_data, moderator_data):
     case.validate()  # Should not raise
     case.save()
 
-    assert (
-        case.state == CaseState.PUBLISHED
-    ), f"Case should be in PUBLISHED state, but got {case.state}"
+    assert case.state == CaseState.PUBLISHED, (
+        f"Case should be in PUBLISHED state, but got {case.state}"
+    )
 
 
 @pytest.mark.django_db
@@ -89,9 +89,9 @@ def test_moderators_can_close_cases(case_data, moderator_data):
     case.state = CaseState.CLOSED
     case.save()
 
-    assert (
-        case.state == CaseState.CLOSED
-    ), f"Case should be in CLOSED state, but got {case.state}"
+    assert case.state == CaseState.CLOSED, (
+        f"Case should be in CLOSED state, but got {case.state}"
+    )
 
 
 @pytest.mark.django_db
@@ -123,9 +123,9 @@ def test_moderators_can_transition_to_any_state(
     # Check that moderator can transition to target state
     can_transition = can_transition_case_state(moderator, case, target_state)
 
-    assert (
-        can_transition
-    ), f"Moderator should be able to transition case to {target_state} state"
+    assert can_transition, (
+        f"Moderator should be able to transition case to {target_state} state"
+    )
 
 
 # ============================================================================
@@ -158,23 +158,23 @@ def test_transition_to_in_review_updates_version_info(case_data):
     after_transition = timezone.now()
 
     # Check that versionInfo was updated
-    assert (
-        case.versionInfo is not None
-    ), "versionInfo should be updated after state transition"
+    assert case.versionInfo is not None, (
+        "versionInfo should be updated after state transition"
+    )
 
     assert "datetime" in case.versionInfo, "versionInfo should contain datetime field"
 
     assert "action" in case.versionInfo, "versionInfo should contain action field"
 
-    assert (
-        case.versionInfo["action"] == "submitted"
-    ), f"versionInfo action should be 'submitted', but got {case.versionInfo['action']}"
+    assert case.versionInfo["action"] == "submitted", (
+        f"versionInfo action should be 'submitted', but got {case.versionInfo['action']}"
+    )
 
     # Verify datetime is within reasonable range
     version_datetime = datetime.fromisoformat(case.versionInfo["datetime"])
-    assert (
-        before_transition <= version_datetime <= after_transition
-    ), "versionInfo datetime should be within the transition time range"
+    assert before_transition <= version_datetime <= after_transition, (
+        "versionInfo datetime should be within the transition time range"
+    )
 
 
 @pytest.mark.django_db
@@ -203,23 +203,23 @@ def test_transition_to_published_updates_version_info(case_data):
     after_transition = timezone.now()
 
     # Check that versionInfo was updated
-    assert (
-        case.versionInfo is not None
-    ), "versionInfo should be updated after state transition"
+    assert case.versionInfo is not None, (
+        "versionInfo should be updated after state transition"
+    )
 
     assert "datetime" in case.versionInfo, "versionInfo should contain datetime field"
 
     assert "action" in case.versionInfo, "versionInfo should contain action field"
 
-    assert (
-        case.versionInfo["action"] == "published"
-    ), f"versionInfo action should be 'published', but got {case.versionInfo['action']}"
+    assert case.versionInfo["action"] == "published", (
+        f"versionInfo action should be 'published', but got {case.versionInfo['action']}"
+    )
 
     # Verify datetime is within reasonable range
     version_datetime = datetime.fromisoformat(case.versionInfo["datetime"])
-    assert (
-        before_transition <= version_datetime <= after_transition
-    ), "versionInfo datetime should be within the transition time range"
+    assert before_transition <= version_datetime <= after_transition, (
+        "versionInfo datetime should be within the transition time range"
+    )
 
 
 @pytest.mark.django_db
@@ -264,13 +264,13 @@ def test_state_transitions_always_update_version_info(case_data, target_state):
         case.save()
 
     # Check that versionInfo was updated
-    assert (
-        case.versionInfo is not None and len(case.versionInfo) > 0
-    ), f"versionInfo should be updated after transition to {target_state}"
+    assert case.versionInfo is not None and len(case.versionInfo) > 0, (
+        f"versionInfo should be updated after transition to {target_state}"
+    )
 
-    assert (
-        "datetime" in case.versionInfo
-    ), f"versionInfo should contain datetime field after transition to {target_state}"
+    assert "datetime" in case.versionInfo, (
+        f"versionInfo should contain datetime field after transition to {target_state}"
+    )
 
 
 # ============================================================================
@@ -302,9 +302,9 @@ def test_contributor_cannot_publish_case():
     # Check that contributor cannot transition to PUBLISHED
     can_publish = can_transition_case_state(contributor, case, CaseState.PUBLISHED)
 
-    assert (
-        not can_publish
-    ), "Contributor should NOT be able to transition case to PUBLISHED state"
+    assert not can_publish, (
+        "Contributor should NOT be able to transition case to PUBLISHED state"
+    )
 
 
 @pytest.mark.django_db

@@ -10,6 +10,7 @@ import os
 import re
 import socket
 import tempfile
+import threading
 import urllib.request
 from urllib.parse import urlparse
 
@@ -1232,6 +1233,7 @@ class TagEnricher:
     """
 
     _breakers: dict = {}  # {model:circuit_name -> CircuitBreaker}
+    _breakers_lock = threading.Lock()
 
     def __init__(self, use_llm: bool = True, llm_client=None, model: str = "unknown"):
         self.use_llm = use_llm
@@ -1241,12 +1243,13 @@ class TagEnricher:
 
         from cases.circuit_breaker import CircuitBreaker
 
-        for circuit_name in ("source_llm", "metadata_llm"):
-            key = f"{model}:{circuit_name}"
-            if key not in TagEnricher._breakers:
-                TagEnricher._breakers[key] = CircuitBreaker(
-                    name=f"{model}:{circuit_name}"
-                )
+        with TagEnricher._breakers_lock:
+            for circuit_name in ("source_llm", "metadata_llm"):
+                key = f"{model}:{circuit_name}"
+                if key not in TagEnricher._breakers:
+                    TagEnricher._breakers[key] = CircuitBreaker(
+                        name=f"{model}:{circuit_name}"
+                    )
 
     def _invoke_llm(self, prompt: str, circuit_name: str = "unknown") -> str:
         from cases.observability import record_llm_outcome

@@ -67,9 +67,9 @@ def test_document_source_rejects_missing_title(source_data):
 
     # Verify error mentions title
     error_message = str(exc_info.value).lower()
-    assert (
-        "title" in error_message
-    ), f"Validation error should mention 'title', but got: {exc_info.value}"
+    assert "title" in error_message, (
+        f"Validation error should mention 'title', but got: {exc_info.value}"
+    )
 
 
 @pytest.mark.django_db
@@ -203,15 +203,15 @@ def test_document_source_soft_deletion():
     source.save()
 
     # Should still exist in database
-    assert DocumentSource.objects.filter(
-        id=source.id
-    ).exists(), "Soft-deleted source should still exist in database"
+    assert DocumentSource.objects.filter(id=source.id).exists(), (
+        "Soft-deleted source should still exist in database"
+    )
 
     # Verify is_deleted flag is set
     source.refresh_from_db()
-    assert (
-        source.is_deleted is True
-    ), "is_deleted flag should be True after soft deletion"
+    assert source.is_deleted is True, (
+        "is_deleted flag should be True after soft deletion"
+    )
 
 
 @pytest.mark.django_db
@@ -240,9 +240,9 @@ def test_document_source_has_contributors_field():
     assert user in source.contributors.all(), "User should be in source contributors"
 
     # Verify reverse relationship
-    assert (
-        source in user.assigned_sources.all()
-    ), "Source should be in user's assigned_sources"
+    assert source in user.assigned_sources.all(), (
+        "Source should be in user's assigned_sources"
+    )
 
 
 @pytest.mark.django_db

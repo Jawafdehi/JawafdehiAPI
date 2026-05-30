@@ -43,10 +43,9 @@ def valid_entity_id(draw):
         st.text(
             alphabet="abcdefghijklmnopqrstuvwxyz0123456789-", min_size=3, max_size=50
         ).filter(
-            lambda x: x
-            and not x.startswith("-")
-            and not x.endswith("-")
-            and "--" not in x
+            lambda x: (
+                x and not x.startswith("-") and not x.endswith("-") and "--" not in x
+            )
         )
     )
 

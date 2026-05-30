@@ -4,7 +4,6 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("cases", "0013_add_case_entity_relationship"),
         ("cases", "0013_native_file_uploads"),

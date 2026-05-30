@@ -5,7 +5,6 @@ import cases.validators
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("cases", "0017_feedback_attachment"),
     ]
