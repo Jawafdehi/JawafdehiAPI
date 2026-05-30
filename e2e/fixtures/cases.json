@@ -1,0 +1,59 @@
+{
+  "count": 2,
+  "next": null,
+  "previous": null,
+  "results": [
+    {
+      "id": 1,
+      "case_id": "test-case-alpha",
+      "slug": "test-case-alpha",
+      "title": "Test Case Alpha — Land Encroachment",
+      "description": "A corruption case involving illegal land acquisition in Kathmandu.",
+      "case_type": "CORRUPTION",
+      "state": "PUBLISHED",
+      "key_allegations": [
+        "Illegally acquired public land in ward 4",
+        "Failed to disclose assets in annual filing"
+      ],
+      "tags": ["land-encroachment", "public-land"],
+      "timeline": [
+        {
+          "date": "2024-01-15",
+          "title": "Initial complaint filed",
+          "description": "Citizens filed complaint with CIAA"
+        },
+        {
+          "date": "2024-03-20",
+          "title": "Investigation launched",
+          "description": "CIAA begins formal investigation"
+        }
+      ],
+      "evidence": [
+        {
+          "source_id": "src-001",
+          "description": "Land registry document proving illegal transfer"
+        }
+      ]
+      "created_at": "2024-01-10T00:00:00Z",
+      "updated_at": "2024-03-21T00:00:00Z"
+    },
+    {
+      "id": 2,
+      "case_id": "test-case-beta",
+      "slug": "test-case-beta",
+      "title": "Test Case Beta — Infrastructure Broken Promise",
+      "description": "Elected official failed to deliver promised hospital construction.",
+      "case_type": "CORRUPTION",
+      "state": "PUBLISHED",
+      "key_allegations": [
+        "Promised hospital construction during campaign, never started",
+        "Budget allocation disappeared from district records"
+      ],
+      "tags": ["infrastructure", "healthcare", "broken-promise"],
+      "timeline": [],
+      "evidence": [],
+      "created_at": "2024-02-05T00:00:00Z",
+      "updated_at": "2024-02-05T00:00:00Z"
+    }
+  ]
+}
