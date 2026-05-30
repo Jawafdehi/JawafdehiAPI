@@ -1,5 +1,7 @@
 """Service for rule-based and LLM-based tag classification of CIAA cases."""
 
+from __future__ import annotations
+
 import itertools
 import ipaddress
 import json
@@ -1229,7 +1231,7 @@ class TagEnricher:
     and Prometheus-compatible metrics recording.
     """
 
-    _breakers: dict[str, "CircuitBreaker"] = {}
+    _breakers: dict = {}  # {model:circuit_name -> CircuitBreaker}
 
     def __init__(self, use_llm: bool = True, llm_client=None, model: str = "unknown"):
         self.use_llm = use_llm
@@ -1248,7 +1250,7 @@ class TagEnricher:
 
     def _invoke_llm(self, prompt: str, circuit_name: str = "unknown") -> str:
         from cases.observability import record_llm_outcome
-        from cases.retry import retry_with_backoff, retryable_network_error
+        from cases.retry import retry_with_backoff
 
         def _call() -> str:
             if self._llm_client is not None:
