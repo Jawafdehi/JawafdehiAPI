@@ -1278,7 +1278,11 @@ class TagEnricher:
                 retryable_exceptions=(Exception,),
                 on_retry=lambda exc, attempt, wait: logger.warning(
                     "Retry %d/%d after %.1fs for %s: %s",
-                    attempt, 3, wait, circuit_name, exc,
+                    attempt,
+                    3,
+                    wait,
+                    circuit_name,
+                    exc,
                 ),
             )
             record_llm_outcome(True, model=self._model, command=circuit_name)

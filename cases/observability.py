@@ -45,8 +45,12 @@ class _Histogram:
             self._sum += value
             self._count += 1
             label_prefix = _label_str(labels)
-            self._label_sums[label_prefix] = self._label_sums.get(label_prefix, 0.0) + value
-            self._label_counts[label_prefix] = self._label_counts.get(label_prefix, 0) + 1
+            self._label_sums[label_prefix] = (
+                self._label_sums.get(label_prefix, 0.0) + value
+            )
+            self._label_counts[label_prefix] = (
+                self._label_counts.get(label_prefix, 0) + 1
+            )
             for boundary in sorted(set(self._buckets)):
                 if value <= boundary:
                     key = f"{label_prefix}le={boundary}"

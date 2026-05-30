@@ -54,13 +54,9 @@ class Command(BaseCommand):
         metrics_file = options.get("metrics_file")
 
         if concurrency < 1:
-            raise CommandError(
-                f"concurrency must be >= 1, got {concurrency}"
-            )
+            raise CommandError(f"concurrency must be >= 1, got {concurrency}")
         if case_count < 1:
-            raise CommandError(
-                f"case-count must be >= 1, got {case_count}"
-            )
+            raise CommandError(f"case-count must be >= 1, got {case_count}")
 
         self.stdout.write(
             self.style.WARNING(
