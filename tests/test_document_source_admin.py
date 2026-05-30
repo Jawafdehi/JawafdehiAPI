@@ -262,9 +262,9 @@ class TestDocumentSourcePermissions:
         admin_instance.save_related(request, DummyForm(), [], change=False)
 
         # Verify creator is in contributors
-        assert contributor_user in source.contributors.all(), (
-            "Creator should be automatically assigned as contributor"
-        )
+        assert (
+            contributor_user in source.contributors.all()
+        ), "Creator should be automatically assigned as contributor"
 
 
 class TestDocumentSourceAdminForm:
@@ -388,15 +388,15 @@ class TestCaseEvidenceWidget:
         source_id, title, admin_url = test_source_entry
 
         # Verify the URL is an admin URL, not the source.url array
-        assert admin_url.startswith("/admin/cases/documentsource/"), (
-            f"Expected admin URL, got: {admin_url}"
-        )
-        assert admin_url.endswith("/change/"), (
-            f"Expected admin change URL, got: {admin_url}"
-        )
+        assert admin_url.startswith(
+            "/admin/cases/documentsource/"
+        ), f"Expected admin URL, got: {admin_url}"
+        assert admin_url.endswith(
+            "/change/"
+        ), f"Expected admin change URL, got: {admin_url}"
 
         # Verify it's NOT the JSON array from source.url
         assert not isinstance(admin_url, list), "URL should be a string, not a list"
-        assert "https://example.com" not in admin_url, (
-            "URL should not contain the source's external URLs"
-        )
+        assert (
+            "https://example.com" not in admin_url
+        ), "URL should not contain the source's external URLs"

@@ -104,9 +104,9 @@ class TestAPIDocumentationIntegration:
         ]
 
         for field in expected_fields:
-            assert field in case_schema["properties"], (
-                f"Field {field} missing from schema"
-            )
+            assert (
+                field in case_schema["properties"]
+            ), f"Field {field} missing from schema"
 
     def test_schema_reflects_actual_source_structure(self, document_source):
         """Test that the schema accurately reflects the source model structure."""
@@ -128,9 +128,9 @@ class TestAPIDocumentationIntegration:
         ]
 
         for field in expected_fields:
-            assert field in source_schema["properties"], (
-                f"Field {field} missing from schema"
-            )
+            assert (
+                field in source_schema["properties"]
+            ), f"Field {field} missing from schema"
 
     def test_api_endpoints_match_schema(self, published_case, document_source):
         """Test that actual API responses match the schema structure."""

@@ -71,13 +71,13 @@ def test_creator_automatically_added_to_contributors(contributor_user, case_admi
     case_admin.save_related(request, form, [], change=False)
 
     # Verify the creator is in contributors
-    assert case.contributors.filter(id=contributor_user.id).exists(), (
-        "Creator should be automatically added to contributors"
-    )
+    assert case.contributors.filter(
+        id=contributor_user.id
+    ).exists(), "Creator should be automatically added to contributors"
 
-    assert contributor_user in case.contributors.all(), (
-        "Creator should be in the contributors list"
-    )
+    assert (
+        contributor_user in case.contributors.all()
+    ), "Creator should be in the contributors list"
 
 
 @pytest.mark.django_db
@@ -133,9 +133,9 @@ def test_creator_has_change_permission(contributor_user, case_admin):
     # Check change permission
     has_permission = case_admin.has_change_permission(request, case)
 
-    assert has_permission, (
-        "Creator should have change permission for their created case"
-    )
+    assert (
+        has_permission
+    ), "Creator should have change permission for their created case"
 
 
 @pytest.mark.django_db
@@ -204,13 +204,13 @@ def test_creator_can_see_case_in_queryset(
     # Should only see their own case
     assert case1 in queryset, "Creator should see their own case in queryset"
 
-    assert case2 not in queryset, (
-        "Creator should NOT see other contributors' cases in queryset"
-    )
+    assert (
+        case2 not in queryset
+    ), "Creator should NOT see other contributors' cases in queryset"
 
-    assert queryset.count() == 1, (
-        f"Creator should see exactly 1 case, but saw {queryset.count()}"
-    )
+    assert (
+        queryset.count() == 1
+    ), f"Creator should see exactly 1 case, but saw {queryset.count()}"
 
 
 @pytest.mark.django_db
@@ -252,9 +252,9 @@ def test_multiple_cases_by_same_creator(contributor_user, case_admin):
     queryset = case_admin.get_queryset(request)
 
     # Should see all their cases
-    assert queryset.count() == 3, (
-        f"Creator should see all 3 of their cases, but saw {queryset.count()}"
-    )
+    assert (
+        queryset.count() == 3
+    ), f"Creator should see all 3 of their cases, but saw {queryset.count()}"
 
     assert case1 in queryset, "Creator should see case 1"
     assert case2 in queryset, "Creator should see case 2"
@@ -284,20 +284,20 @@ def test_creator_access_persists_after_state_change(contributor_user, case_admin
     request = create_mock_request(contributor_user)
 
     # Check access in DRAFT state
-    assert case_admin.has_view_permission(request, case), (
-        "Creator should have access in DRAFT state"
-    )
+    assert case_admin.has_view_permission(
+        request, case
+    ), "Creator should have access in DRAFT state"
 
     # Change to IN_REVIEW
     case.state = CaseState.IN_REVIEW
     case.save()
 
     # Check access still exists
-    assert case_admin.has_view_permission(request, case), (
-        "Creator should still have access in IN_REVIEW state"
-    )
+    assert case_admin.has_view_permission(
+        request, case
+    ), "Creator should still have access in IN_REVIEW state"
 
     # Verify contributor is still in the list
-    assert contributor_user in case.contributors.all(), (
-        "Creator should still be in contributors after state change"
-    )
+    assert (
+        contributor_user in case.contributors.all()
+    ), "Creator should still be in contributors after state change"

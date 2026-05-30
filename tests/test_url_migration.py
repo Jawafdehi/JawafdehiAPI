@@ -118,9 +118,9 @@ class TestURLMigrationProcess(TransactionTestCase):
         # Verify the data was converted correctly
         source1 = DocumentSource.objects.get(source_id="source:test:001")
         assert isinstance(source1.url, list), "URL should be converted to list"
-        assert source1.url == ["https://example.com/doc1.pdf"], (
-            "URL should be wrapped in list"
-        )
+        assert source1.url == [
+            "https://example.com/doc1.pdf"
+        ], "URL should be wrapped in list"
 
         source2 = DocumentSource.objects.get(source_id="source:test:002")
         assert source2.url == ["https://example.com/doc2.pdf"]
@@ -182,9 +182,9 @@ class TestURLMigrationProcess(TransactionTestCase):
                 ["source:test:001"],
             )
             url_value = cursor.fetchone()[0]
-            assert url_value == "https://example.com/doc1.pdf", (
-                "Should revert to first URL string"
-            )
+            assert (
+                url_value == "https://example.com/doc1.pdf"
+            ), "Should revert to first URL string"
 
     def tearDown(self):
         """Restore DB schema to latest migrations after each test before flush."""

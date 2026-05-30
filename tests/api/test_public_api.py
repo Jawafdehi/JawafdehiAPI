@@ -55,9 +55,9 @@ def test_public_api_only_shows_published_cases(case_data, state):
     response = client.get("/api/cases/")
 
     # API should return 200 OK
-    assert response.status_code == 200, (
-        f"API should return 200 OK, but got {response.status_code}"
-    )
+    assert (
+        response.status_code == 200
+    ), f"API should return 200 OK, but got {response.status_code}"
 
     # Check if case appears in results
     case_ids_in_response = [c.get("case_id") for c in response.data.get("results", [])]
@@ -67,35 +67,35 @@ def test_public_api_only_shows_published_cases(case_data, state):
 
     if should_appear:
         # Cases should appear
-        assert case.case_id in case_ids_in_response, (
-            f"Case {case.case_id} with state={state} should appear in API list response"
-        )
+        assert (
+            case.case_id in case_ids_in_response
+        ), f"Case {case.case_id} with state={state} should appear in API list response"
     else:
         # Cases should NOT appear
-        assert case.case_id not in case_ids_in_response, (
-            f"Case {case.case_id} with state={state} should NOT appear in API list response"
-        )
+        assert (
+            case.case_id not in case_ids_in_response
+        ), f"Case {case.case_id} with state={state} should NOT appear in API list response"
 
     # Test detail endpoint - IN_REVIEW cases always accessible, others match list behavior
     detail_response = client.get(f"/api/cases/{case.slug}/")
 
     if state == CaseState.PUBLISHED:
-        assert detail_response.status_code == 200, (
-            "PUBLISHED case should be accessible via detail endpoint"
-        )
+        assert (
+            detail_response.status_code == 200
+        ), "PUBLISHED case should be accessible via detail endpoint"
     elif state == CaseState.IN_REVIEW:
         # IN_REVIEW cases are ALWAYS accessible via detail endpoint
-        assert detail_response.status_code == 200, (
-            "IN_REVIEW case should always be accessible via detail endpoint"
-        )
-        assert detail_response.data["state"] == CaseState.IN_REVIEW, (
-            "State field should show IN_REVIEW"
-        )
+        assert (
+            detail_response.status_code == 200
+        ), "IN_REVIEW case should always be accessible via detail endpoint"
+        assert (
+            detail_response.data["state"] == CaseState.IN_REVIEW
+        ), "State field should show IN_REVIEW"
     else:
         # DRAFT and CLOSED should never be accessible
-        assert detail_response.status_code == 404, (
-            f"{state} case should NOT be accessible via detail endpoint"
-        )
+        assert (
+            detail_response.status_code == 404
+        ), f"{state} case should NOT be accessible via detail endpoint"
 
 
 # ============================================================================
@@ -141,22 +141,22 @@ def test_evidence_requires_valid_source_references(case_data, source_data):
 
     # Check evidence is included
     evidence_list = response.data.get("evidence", [])
-    assert len(evidence_list) > 0, (
-        "Published case should include evidence in API response"
-    )
+    assert (
+        len(evidence_list) > 0
+    ), "Published case should include evidence in API response"
 
     # Check evidence has required fields
     for evidence_item in evidence_list:
         assert "source_id" in evidence_item, "Evidence should include source_id"
         assert "description" in evidence_item, "Evidence should include description"
-        assert evidence_item["source_id"] == source.source_id, (
-            "Evidence source_id should match created source"
-        )
+        assert (
+            evidence_item["source_id"] == source.source_id
+        ), "Evidence source_id should match created source"
         # Detail endpoint enriches evidence with nested source details
         assert "source" in evidence_item, "Detail endpoint should include nested source"
-        assert evidence_item["source"] is not None, (
-            "Source should not be None when it exists"
-        )
+        assert (
+            evidence_item["source"] is not None
+        ), "Source should not be None when it exists"
         assert evidence_item["source"]["title"] == source.title
         assert "source_type" in evidence_item["source"]
         assert "url" in evidence_item["source"]
@@ -242,9 +242,9 @@ def test_search_functionality_across_fields(case_data, search_term):
 
     # Case should appear in search results
     case_ids_in_response = [c.get("case_id") for c in response.data.get("results", [])]
-    assert case.case_id in case_ids_in_response, (
-        f"Case with '{search_term}' in title should appear in search results"
-    )
+    assert (
+        case.case_id in case_ids_in_response
+    ), f"Case with '{search_term}' in title should appear in search results"
 
 
 @pytest.mark.django_db
@@ -277,15 +277,15 @@ def test_filter_by_case_type(case_data, case_type):
 
     # All returned cases should have the filtered case_type
     for returned_case in response.data.get("results", []):
-        assert returned_case.get("case_type") == case_type, (
-            f"Filtered results should only include case_type={case_type}"
-        )
+        assert (
+            returned_case.get("case_type") == case_type
+        ), f"Filtered results should only include case_type={case_type}"
 
     # Our case should appear in results
     case_ids_in_response = [c.get("case_id") for c in response.data.get("results", [])]
-    assert case.case_id in case_ids_in_response, (
-        f"Case with case_type={case_type} should appear in filtered results"
-    )
+    assert (
+        case.case_id in case_ids_in_response
+    ), f"Case with case_type={case_type} should appear in filtered results"
 
 
 @pytest.mark.django_db
@@ -324,16 +324,16 @@ def test_filter_by_tags(case_data, tag):
 
     # Our case should appear in results
     case_ids_in_response = [c.get("case_id") for c in response.data.get("results", [])]
-    assert case.case_id in case_ids_in_response, (
-        f"Case with tag '{tag}' should appear in filtered results"
-    )
+    assert (
+        case.case_id in case_ids_in_response
+    ), f"Case with tag '{tag}' should appear in filtered results"
 
     # All returned cases should have the tag
     for returned_case in response.data.get("results", []):
         returned_tags = returned_case.get("tags", [])
-        assert tag in returned_tags, (
-            f"Filtered results should only include cases with tag '{tag}'"
-        )
+        assert (
+            tag in returned_tags
+        ), f"Filtered results should only include cases with tag '{tag}'"
 
 
 # ============================================================================
@@ -387,32 +387,32 @@ def test_published_cases_display_complete_data(case_data, source_data):
     # Verify timeline is included
     assert "timeline" in returned_case, "Response should include timeline"
     if case.timeline:
-        assert len(returned_case["timeline"]) == len(case.timeline), (
-            "All timeline entries should be included"
-        )
+        assert len(returned_case["timeline"]) == len(
+            case.timeline
+        ), "All timeline entries should be included"
 
     # Verify evidence is included
     assert "evidence" in returned_case, "Response should include evidence"
     if case.evidence:
-        assert len(returned_case["evidence"]) == len(case.evidence), (
-            "All evidence entries should be included"
-        )
+        assert len(returned_case["evidence"]) == len(
+            case.evidence
+        ), "All evidence entries should be included"
 
         # Verify evidence structure
         for evidence_item in returned_case["evidence"]:
             assert "source_id" in evidence_item, "Evidence should include source_id"
             assert "description" in evidence_item, "Evidence should include description"
             # Detail endpoint includes nested source details
-            assert "source" in evidence_item, (
-                "Detail endpoint should include nested source"
-            )
+            assert (
+                "source" in evidence_item
+            ), "Detail endpoint should include nested source"
 
     # Verify tags are included
     assert "tags" in returned_case, "Response should include tags"
     if case.tags:
-        assert len(returned_case["tags"]) == len(case.tags), (
-            "All tags should be included"
-        )
+        assert len(returned_case["tags"]) == len(
+            case.tags
+        ), "All tags should be included"
 
 
 @pytest.mark.django_db
@@ -450,15 +450,15 @@ def test_published_cases_include_all_entity_fields(case_data):
     ).count()
 
     # Verify entity objects have required fields
-    assert len(alleged_in_response) == alleged_in_db, (
-        "alleged entities count should match"
-    )
+    assert (
+        len(alleged_in_response) == alleged_in_db
+    ), "alleged entities count should match"
 
     for entity in alleged_in_response:
         assert "id" in entity, "Entity should have id field"
-        assert "nes_id" in entity or "display_name" in entity, (
-            "Entity should have nes_id or display_name"
-        )
+        assert (
+            "nes_id" in entity or "display_name" in entity
+        ), "Entity should have nes_id or display_name"
 
     related_in_response = [
         e for e in returned_case["entities"] if e["type"] == "related"
@@ -467,9 +467,9 @@ def test_published_cases_include_all_entity_fields(case_data):
         relationship_type="related"
     ).count()
     if related_in_db > 0:
-        assert len(related_in_response) == related_in_db, (
-            "related entities count should match"
-        )
+        assert (
+            len(related_in_response) == related_in_db
+        ), "related entities count should match"
 
 
 # ============================================================================
@@ -496,9 +496,9 @@ def test_api_returns_empty_list_when_no_published_cases():
     response = client.get("/api/cases/")
 
     assert response.status_code == 200
-    assert len(response.data.get("results", [])) == 0, (
-        "API should return empty list when no published cases exist"
-    )
+    assert (
+        len(response.data.get("results", [])) == 0
+    ), "API should return empty list when no published cases exist"
 
 
 @pytest.mark.django_db
@@ -524,9 +524,9 @@ def test_api_does_not_expose_contributors():
     assert response.status_code == 200
 
     # Contributors should NOT be in response
-    assert "contributors" not in response.data, (
-        "API should not expose contributors field"
-    )
+    assert (
+        "contributors" not in response.data
+    ), "API should not expose contributors field"
 
 
 @pytest.mark.django_db
@@ -577,15 +577,15 @@ def test_public_api_exposes_case_in_review_under_the_retrieve_mode(case_data):
 
     # Test 1: Detail endpoint should ALWAYS show IN_REVIEW cases
     detail_response = client.get(f"/api/cases/{case.slug}/")
-    assert detail_response.status_code == 200, (
-        "IN_REVIEW case should always be accessible via detail endpoint"
-    )
-    assert detail_response.data["state"] == CaseState.IN_REVIEW, (
-        "State field should show IN_REVIEW"
-    )
-    assert detail_response.data["case_id"] == case.case_id, (
-        "Should return the correct case"
-    )
+    assert (
+        detail_response.status_code == 200
+    ), "IN_REVIEW case should always be accessible via detail endpoint"
+    assert (
+        detail_response.data["state"] == CaseState.IN_REVIEW
+    ), "State field should show IN_REVIEW"
+    assert (
+        detail_response.data["case_id"] == case.case_id
+    ), "Should return the correct case"
 
     # Test 2: List endpoint should NOT show IN_REVIEW cases
     list_response = client.get("/api/cases/")
@@ -594,9 +594,9 @@ def test_public_api_exposes_case_in_review_under_the_retrieve_mode(case_data):
     case_ids_in_list = [c.get("case_id") for c in list_response.data.get("results", [])]
 
     # IN_REVIEW cases should NOT appear in list
-    assert case.case_id not in case_ids_in_list, (
-        "IN_REVIEW case should NOT appear in list endpoint"
-    )
+    assert (
+        case.case_id not in case_ids_in_list
+    ), "IN_REVIEW case should NOT appear in list endpoint"
 
 
 @pytest.mark.django_db
@@ -678,20 +678,20 @@ def test_document_source_api_shows_sources_from_published_and_in_review_cases():
     # Check which sources should appear
     source_ids = [s.get("source_id") for s in response.data.get("results", [])]
 
-    assert published_source.source_id in source_ids, (
-        "Source referenced by published case should appear in API"
-    )
-    assert draft_source.source_id not in source_ids, (
-        "Source referenced only by draft case should NOT appear in API"
-    )
-    assert unreferenced_source.source_id not in source_ids, (
-        "Source not referenced by any case should NOT appear in API"
-    )
+    assert (
+        published_source.source_id in source_ids
+    ), "Source referenced by published case should appear in API"
+    assert (
+        draft_source.source_id not in source_ids
+    ), "Source referenced only by draft case should NOT appear in API"
+    assert (
+        unreferenced_source.source_id not in source_ids
+    ), "Source not referenced by any case should NOT appear in API"
 
     # IN_REVIEW sources SHOULD appear (changed behavior)
-    assert in_review_source.source_id in source_ids, (
-        "Source referenced by in-review case should appear in API"
-    )
+    assert (
+        in_review_source.source_id in source_ids
+    ), "Source referenced by in-review case should appear in API"
 
 
 @pytest.mark.django_db

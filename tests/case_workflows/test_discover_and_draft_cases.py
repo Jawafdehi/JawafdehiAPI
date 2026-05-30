@@ -60,9 +60,9 @@ class TestDiscoverAndDraftCasesCreation:
         _run()
         assert Case.objects.count() == len(UNIQUE_CIAA_CASE_NUMBERS)
         for number in UNIQUE_CIAA_CASE_NUMBERS:
-            assert Case.objects.filter(title__icontains=number).exists(), (
-                f"Expected a case with '{number}' in title"
-            )
+            assert Case.objects.filter(
+                title__icontains=number
+            ).exists(), f"Expected a case with '{number}' in title"
 
     @pytest.mark.django_db
     def test_title_format(self):

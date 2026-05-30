@@ -194,9 +194,7 @@ class CaseScraper:
 
         # Set language instruction
         if self.language == "np":
-            language_instruction = (
-                "Provide all responses in Nepali language (नेपाली भाषामा जवाफ दिनुहोस्)."
-            )
+            language_instruction = "Provide all responses in Nepali language (नेपाली भाषामा जवाफ दिनुहोस्)."
         else:
             language_instruction = "Provide all responses in English language."
 
