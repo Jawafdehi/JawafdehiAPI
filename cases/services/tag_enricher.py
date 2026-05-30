@@ -1272,12 +1272,24 @@ class TagEnricher:
             return self._llm_service._call_llm(llm, prompt)
 
         try:
+            from requests.exceptions import (
+                ConnectionError as RequestsConnectionError,
+                ConnectTimeout,
+                ReadTimeout,
+            )
+
             result = retry_with_backoff(
                 _call,
                 max_retries=3,
                 base_seconds=1.0,
                 max_seconds=30.0,
-                retryable_exceptions=(Exception,),
+                retryable_exceptions=(
+                    TimeoutError,
+                    ConnectionError,
+                    RequestsConnectionError,
+                    ConnectTimeout,
+                    ReadTimeout,
+                ),
                 on_retry=lambda exc, attempt, wait: logger.warning(
                     "Retry %d/%d after %.1fs for %s: %s",
                     attempt,
