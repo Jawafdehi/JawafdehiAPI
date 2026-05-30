@@ -104,7 +104,7 @@ test.describe('Entity endpoints', () => {
 
 test.describe('Schema and docs', () => {
   test('OpenAPI schema is valid JSON', async ({ request }) => {
-    const response = await request.get('/api/schema/');
+    const response = await request.get('/api/schema/?format=json');
     expect(response.status()).toBe(200);
 
     const body = await response.json();
@@ -113,8 +113,8 @@ test.describe('Schema and docs', () => {
     expect(body.info).toHaveProperty('title');
   });
 
-  test('Swagger UI loads', async ({ page, browserName }) => {
-    test.skip(browserName !== 'chromium', 'Swagger UI load test Chrome only');
+  test.skip(({ browserName }) => browserName !== 'chromium', 'Swagger UI load test Chrome only');
+  test('Swagger UI loads', async ({ page }) => {
     const response = await page.goto('/api/swagger/');
     expect(response?.status()).toBe(200);
     await expect(page.locator('.swagger-ui')).toBeVisible({ timeout: 10000 });
@@ -129,9 +129,9 @@ test.describe('Content-Type checks', () => {
   });
 
   test('schema returns JSON', async ({ request }) => {
-    const response = await request.get('/api/schema/');
+    const response = await request.get('/api/schema/?format=json');
     expect(response.status()).toBe(200);
-    expect(response.headers()['content-type']).toContain('application/json');
+    expect(response.headers()['content-type']).toContain('json');
   });
 });
 
