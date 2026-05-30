@@ -1119,18 +1119,20 @@ class Command(BaseCommand):
             issues.append("short_description too long (> 1000 chars)")
             valid = False
 
-        # Soft warning: Devanagari ratio
+        # Hard gate: Devanagari ratio ≥80%
         non_ws = re.sub(r"\s+", "", description)
         if non_ws:
             ratio = len(DEVANAGARI_RE.findall(non_ws)) / len(non_ws)
             if ratio < 0.80:
-                issues.append(f"Devanagari ratio {ratio:.2f} below 80% (warning only)")
+                issues.append(f"Devanagari ratio {ratio:.2f} below 80%")
+                valid = False
 
-        # Soft warning: raw HTML tags
+        # Hard gate: no raw HTML tags
         if re.search(
             r"<\s*(h[1-6]|table|tr|td|th|div|p|span|br|ul|ol|li|a)\b", description
         ):
-            issues.append("Raw HTML tags found in description (warning only)")
+            issues.append("Raw HTML tags found in description")
+            valid = False
 
         # Hard gate: no placeholder text
         if any(
