@@ -35,7 +35,7 @@ class _Histogram:
     )
     _sum: float = field(default=0.0, repr=False)
     _count: int = field(default=0, repr=False)
-    _bucket_counts: dict[str, int] = field(default_factory=dict, repr=False)
+    _bucket_counts: dict[tuple[str, str], int] = field(default_factory=dict, repr=False)
     _label_sums: dict[str, float] = field(default_factory=dict, repr=False)
     _label_counts: dict[str, int] = field(default_factory=dict, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -53,9 +53,9 @@ class _Histogram:
             )
             for boundary in sorted(set(self._buckets)):
                 if value <= boundary:
-                    key = f"{label_prefix}le={boundary}"
+                    key = (label_prefix, str(boundary))
                     self._bucket_counts[key] = self._bucket_counts.get(key, 0) + 1
-            key = f"{label_prefix}le=+Inf"
+            key = (label_prefix, "+Inf")
             self._bucket_counts[key] = self._bucket_counts.get(key, 0) + 1
 
     def snapshot(self) -> dict:
@@ -67,6 +67,14 @@ class _Histogram:
                 "label_sums": dict(self._label_sums),
                 "label_counts": dict(self._label_counts),
             }
+
+    def reset(self) -> None:
+        with self._lock:
+            self._sum = 0.0
+            self._count = 0
+            self._bucket_counts.clear()
+            self._label_sums.clear()
+            self._label_counts.clear()
 
 
 @dataclass
@@ -87,6 +95,11 @@ class _Counter:
     def snapshot(self) -> dict:
         with self._lock:
             return {"total": self._value, "by_label": dict(self._labels)}
+
+    def reset(self) -> None:
+        with self._lock:
+            self._value = 0.0
+            self._labels.clear()
 
 
 @dataclass
@@ -113,12 +126,23 @@ class _Gauge:
         with self._lock:
             return self._value
 
+    def reset(self) -> None:
+        with self._lock:
+            self._value = 0.0
+
 
 def _label_str(labels: dict | None) -> str:
     if not labels:
         return ""
     parts = sorted(f'{k}="{v}"' for k, v in labels.items())
     return "{" + ",".join(parts) + "}"
+
+
+def _append_label(label_prefix: str, name: str, value: str) -> str:
+    label = f'{name}="{value}"'
+    if not label_prefix:
+        return "{" + label + "}"
+    return label_prefix[:-1] + "," + label + "}"
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +204,24 @@ nepali_script_coverage = _Gauge(
 )
 
 
+_ALL_METRICS = [
+    pipeline_duration,
+    llm_call,
+    cache_hit,
+    quality_gate,
+    section_confidence,
+    likhit_failures,
+    circuit_breaker_trips,
+    null_source_type,
+    nepali_script_coverage,
+]
+
+
+def reset_metrics() -> None:
+    for metric in _ALL_METRICS:
+        metric.reset()
+
+
 # ---------------------------------------------------------------------------
 # Textfile export (Prometheus node_exporter compatible)
 # ---------------------------------------------------------------------------
@@ -221,8 +263,11 @@ def export_textfile_to_string() -> str:
             if snap.get("label_sums"):
                 lines.append(f"{metric.name}_sum {snap['sum']}")
                 lines.append(f"{metric.name}_count {snap['count']}")
-            for bucket_key, bucket_count in sorted(snap["buckets"].items()):
-                lines.append(f"{metric.name}_bucket_{bucket_key} {bucket_count}")
+            for (label_prefix, boundary), bucket_count in sorted(
+                snap["buckets"].items()
+            ):
+                labels = _append_label(label_prefix, "le", boundary)
+                lines.append(f"{metric.name}_bucket{labels} {bucket_count}")
 
     counters = [
         llm_call,

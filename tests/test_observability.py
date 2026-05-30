@@ -24,7 +24,15 @@ from cases.observability import (
     update_nepali_script_coverage,
     track_pipeline_duration,
     export_textfile,
+    reset_metrics,
 )
+
+
+@pytest.fixture(autouse=True)
+def reset_observability_metrics():
+    reset_metrics()
+    yield
+    reset_metrics()
 
 
 class TestHistogram:
@@ -95,9 +103,17 @@ class TestGauge:
 
 class TestExport:
     def test_export_textfile(self, tmp_path):
+        pipeline_duration.observe(
+            5.0, labels={"tier": "source_llm", "command": "test"}
+        )
         path = tmp_path / "metrics.prom"
         export_textfile(str(path))
         content = path.read_text()
         assert "jawafdehi_enrichment_pipeline_duration_seconds" in content
         assert "jawafdehi_llm_call_total" in content
         assert "jawafdehi_null_source_type_ratio" in content
+        assert (
+            'jawafdehi_enrichment_pipeline_duration_seconds_bucket{command="test",tier="source_llm",le="5"} 1'
+            in content
+        )
+        assert "jawafdehi_enrichment_pipeline_duration_seconds_bucket_" not in content
