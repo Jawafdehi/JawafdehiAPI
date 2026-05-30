@@ -887,11 +887,12 @@ class Command(BaseCommand):
                 )
                 return _extract_json_body(raw)
             except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")
                 logger.warning(
                     "LLM opencode: attempt %d — HTTP %d: %s",
                     attempt,
                     exc.code,
-                    exc.read().decode("utf-8", errors="replace")[:300],
+                    body[:300],
                 )
                 if attempt < MAX_LLM_RETRIES and exc.code in (429, 503):
                     wait = 2**attempt
@@ -902,10 +903,7 @@ class Command(BaseCommand):
                     )
                     time.sleep(wait)
                     continue
-                body_snippet = exc.read().decode("utf-8", errors="replace")[:500]
-                raise CommandError(
-                    f"LLM HTTP {exc.code}: {body_snippet[:300]}"
-                ) from exc
+                raise CommandError(f"LLM HTTP {exc.code}: {body[:300]}") from exc
             except OSError as exc:
                 logger.warning("LLM opencode: attempt %d — OSError: %s", attempt, exc)
                 if attempt < MAX_LLM_RETRIES:
