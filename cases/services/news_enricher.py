@@ -609,10 +609,12 @@ def _parse_llm_json(text: str) -> Optional[dict]:
         # Strip markdown code fences and retry
         cleaned = text.strip()
         if cleaned.startswith("```"):
-            lines = cleaned.splitlines()
-            if lines and lines[0].startswith("```"):
-                lines = lines[1:]
-            cleaned = "\n".join(lines).strip()
+            after_fence = cleaned[3:].lstrip("json ").lstrip()
+            if after_fence:
+                cleaned = after_fence
+            else:
+                lines = cleaned.splitlines()
+                cleaned = "\n".join(lines[1:]).strip()
         if cleaned.endswith("```"):
             cleaned = cleaned[:-3].strip()
         try:
