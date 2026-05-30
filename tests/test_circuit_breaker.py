@@ -7,6 +7,10 @@ import pytest
 from cases.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
 
 
+def _raise_runtime_error():
+    raise RuntimeError("boom")
+
+
 class TestCircuitBreaker:
     def test_closed_on_init(self):
         cb = CircuitBreaker(name="test")
@@ -22,7 +26,7 @@ class TestCircuitBreaker:
         cb = CircuitBreaker(name="test")
         for _ in range(3):
             try:
-                cb.call(lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+                cb.call(_raise_runtime_error)
             except RuntimeError:
                 pass
         assert cb.state == "open"
@@ -30,7 +34,7 @@ class TestCircuitBreaker:
     def test_raises_open_error_when_open(self):
         cb = CircuitBreaker(name="test", failure_threshold=1)
         try:
-            cb.call(lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+            cb.call(_raise_runtime_error)
         except RuntimeError:
             pass
         assert cb.state == "open"
@@ -40,7 +44,7 @@ class TestCircuitBreaker:
     def test_resets_after_cooldown(self):
         cb = CircuitBreaker(name="test", failure_threshold=1, cooldown_seconds=0.01)
         try:
-            cb.call(lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+            cb.call(_raise_runtime_error)
         except RuntimeError:
             pass
         assert cb.state == "open"
@@ -52,7 +56,7 @@ class TestCircuitBreaker:
     def test_half_open_success_closes(self):
         cb = CircuitBreaker(name="test", failure_threshold=1, cooldown_seconds=0.01)
         try:
-            cb.call(lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+            cb.call(_raise_runtime_error)
         except RuntimeError:
             pass
         time.sleep(0.02)
@@ -62,12 +66,12 @@ class TestCircuitBreaker:
     def test_half_open_failure_reopens(self):
         cb = CircuitBreaker(name="test", failure_threshold=1, cooldown_seconds=0.01)
         try:
-            cb.call(lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+            cb.call(_raise_runtime_error)
         except RuntimeError:
             pass
         time.sleep(0.02)
         try:
-            cb.call(lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+            cb.call(_raise_runtime_error)
         except RuntimeError:
             pass
         assert cb.state == "open"

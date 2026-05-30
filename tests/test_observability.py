@@ -1,5 +1,7 @@
 """Tests for observability module: metrics, circuit breaker, retry policies."""
 
+import time
+
 import pytest
 
 from cases.observability import (
@@ -41,7 +43,7 @@ class TestHistogram:
 
     def test_track_pipeline_duration_context(self):
         with track_pipeline_duration(tier="rule_based", command="test"):
-            pass
+            time.sleep(0.001)
         snap = pipeline_duration.snapshot()
         assert snap["count"] >= 1
         assert snap["sum"] >= 0

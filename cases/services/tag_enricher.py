@@ -1251,7 +1251,7 @@ class TagEnricher:
         def _call() -> str:
             if self._llm_client is not None:
                 logger.debug(
-                    "  Using CLI-provided LLM client " "(bypassing DB LLMProvider)"
+                    "  Using CLI-provided LLM client (bypassing DB LLMProvider)"
                 )
                 response = self._llm_client.invoke(prompt)
                 if hasattr(response, "content"):
@@ -1382,7 +1382,7 @@ class TagEnricher:
                     else:
                         all_tags = tags
                         logger.info(
-                            "  - metadata_llm returned no tags, " "using rule-based"
+                            "  - metadata_llm returned no tags, using rule-based"
                         )
                 except Exception as e:
                     logger.warning(f"  - metadata_llm failed: {str(e)[:120]}")
