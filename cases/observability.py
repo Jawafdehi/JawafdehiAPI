@@ -36,17 +36,22 @@ class _Histogram:
     _sum: float = field(default=0.0, repr=False)
     _count: int = field(default=0, repr=False)
     _bucket_counts: dict[str, int] = field(default_factory=dict, repr=False)
+    _label_sums: dict[str, float] = field(default_factory=dict, repr=False)
+    _label_counts: dict[str, int] = field(default_factory=dict, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def observe(self, value: float, labels: dict | None = None) -> None:
         with self._lock:
             self._sum += value
             self._count += 1
+            label_prefix = _label_str(labels)
+            self._label_sums[label_prefix] = self._label_sums.get(label_prefix, 0.0) + value
+            self._label_counts[label_prefix] = self._label_counts.get(label_prefix, 0) + 1
             for boundary in sorted(set(self._buckets)):
                 if value <= boundary:
-                    key = f"{_label_str(labels)}le={boundary}"
+                    key = f"{label_prefix}le={boundary}"
                     self._bucket_counts[key] = self._bucket_counts.get(key, 0) + 1
-            key = f"{_label_str(labels)}le=+Inf"
+            key = f"{label_prefix}le=+Inf"
             self._bucket_counts[key] = self._bucket_counts.get(key, 0) + 1
 
     def snapshot(self) -> dict:
@@ -55,6 +60,8 @@ class _Histogram:
                 "sum": self._sum,
                 "count": self._count,
                 "buckets": dict(self._bucket_counts),
+                "label_sums": dict(self._label_sums),
+                "label_counts": dict(self._label_counts),
             }
 
 
@@ -197,10 +204,21 @@ def export_textfile_to_string() -> str:
         lines.append(f"# HELP {metric.name} {metric.help}")
         lines.append(f"# TYPE {metric.name} histogram")
         if snap["count"] > 0:
-            lines.append(f"{metric.name}_sum {snap['sum']}")
-            lines.append(f"{metric.name}_count {snap['count']}")
+            # Per-label-series sums and counts
+            for label_prefix, label_sum in sorted(snap.get("label_sums", {}).items()):
+                label_count = snap.get("label_counts", {}).get(label_prefix, 0)
+                if label_prefix:
+                    lines.append(f"{metric.name}_sum{label_prefix} {label_sum}")
+                    lines.append(f"{metric.name}_count{label_prefix} {label_count}")
+                else:
+                    lines.append(f"{metric.name}_sum {label_sum}")
+                    lines.append(f"{metric.name}_count {label_count}")
+            # Global totals (for unlabeled aggregation)
+            if snap.get("label_sums"):
+                lines.append(f"{metric.name}_sum {snap['sum']}")
+                lines.append(f"{metric.name}_count {snap['count']}")
             for bucket_key, bucket_count in sorted(snap["buckets"].items()):
-                lines.append(f"{metric.name}_bucket{{{bucket_key}}} {bucket_count}")
+                lines.append(f"{metric.name}_bucket_{bucket_key} {bucket_count}")
 
     counters = [
         llm_call,

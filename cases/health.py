@@ -11,7 +11,6 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.http import require_http_methods
 
 from cases.observability import (
-    circuit_breaker_trips,
     export_textfile_to_string,
     likhit_failures,
     llm_call,
@@ -19,6 +18,15 @@ from cases.observability import (
     null_source_type,
     pipeline_duration,
 )
+from cases.services.tag_enricher import TagEnricher
+
+
+def _breaker_state() -> dict:
+    """Return current circuit breaker states."""
+    breakers = TagEnricher._breakers
+    if not breakers:
+        return {}
+    return {key: cb.state for key, cb in breakers.items()}
 
 
 @require_http_methods(["GET"])
@@ -26,7 +34,7 @@ def enrichment_health(request: HttpRequest) -> JsonResponse:
     """Return enrichment pipeline health status and current metric snapshots."""
     pipeline_snap = pipeline_duration.snapshot()
     llm_snap = llm_call.snapshot()
-    cb_snap = circuit_breaker_trips.snapshot()
+    breaker_states = _breaker_state()
 
     total_llm_calls = llm_snap["total"]
     llm_failures = sum(
@@ -35,8 +43,8 @@ def enrichment_health(request: HttpRequest) -> JsonResponse:
         if 'outcome="failure"' in label
     )
 
-    # Circuit is unhealthy if any trips have been recorded
-    circuit_ok = cb_snap["total"] == 0
+    # Circuit is healthy only if both breakers are closed
+    circuit_ok = all(s == "closed" for s in breaker_states.values())
 
     # LLM success rate
     if total_llm_calls > 0:
@@ -54,7 +62,10 @@ def enrichment_health(request: HttpRequest) -> JsonResponse:
         {
             "status": status,
             "checks": {
-                "circuit_breaker": {"ok": circuit_ok, "trips": int(cb_snap["total"])},
+                "circuit_breaker": {
+                    "ok": circuit_ok,
+                    "breakers": breaker_states,
+                },
                 "llm_success_rate": {
                     "ok": llm_success_rate >= 0.9,
                     "rate": round(llm_success_rate, 4),

@@ -12,7 +12,7 @@ from __future__ import annotations
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 
 from cases.models import Case, CaseState
 from cases.services.tag_enricher import TagEnricher
@@ -52,6 +52,15 @@ class Command(BaseCommand):
         case_count = options["case_count"]
         use_llm = not options["no_llm"]
         metrics_file = options.get("metrics_file")
+
+        if concurrency < 1:
+            raise CommandError(
+                f"concurrency must be >= 1, got {concurrency}"
+            )
+        if case_count < 1:
+            raise CommandError(
+                f"case-count must be >= 1, got {case_count}"
+            )
 
         self.stdout.write(
             self.style.WARNING(

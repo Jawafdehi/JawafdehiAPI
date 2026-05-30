@@ -1229,8 +1229,7 @@ class TagEnricher:
     and Prometheus-compatible metrics recording.
     """
 
-    _source_llm_cb = None
-    _metadata_llm_cb = None
+    _breakers: dict[str, "CircuitBreaker"] = {}
 
     def __init__(self, use_llm: bool = True, llm_client=None, model: str = "unknown"):
         self.use_llm = use_llm
@@ -1240,13 +1239,16 @@ class TagEnricher:
 
         from cases.circuit_breaker import CircuitBreaker
 
-        if TagEnricher._source_llm_cb is None:
-            TagEnricher._source_llm_cb = CircuitBreaker(name="source_llm")
-            TagEnricher._metadata_llm_cb = CircuitBreaker(name="metadata_llm")
+        for circuit_name in ("source_llm", "metadata_llm"):
+            key = f"{model}:{circuit_name}"
+            if key not in TagEnricher._breakers:
+                TagEnricher._breakers[key] = CircuitBreaker(
+                    name=f"{model}:{circuit_name}"
+                )
 
     def _invoke_llm(self, prompt: str, circuit_name: str = "unknown") -> str:
         from cases.observability import record_llm_outcome
-        from cases.retry import retry_with_backoff
+        from cases.retry import retry_with_backoff, retryable_network_error
 
         def _call() -> str:
             if self._llm_client is not None:
@@ -1269,13 +1271,26 @@ class TagEnricher:
 
         try:
             result = retry_with_backoff(
-                _call, max_retries=3, base_seconds=1.0, max_seconds=30.0
+                _call,
+                max_retries=3,
+                base_seconds=1.0,
+                max_seconds=30.0,
+                retryable_exceptions=(Exception,),
+                on_retry=lambda exc, attempt, wait: logger.warning(
+                    "Retry %d/%d after %.1fs for %s: %s",
+                    attempt, 3, wait, circuit_name, exc,
+                ),
             )
             record_llm_outcome(True, model=self._model, command=circuit_name)
             return result
         except Exception:
             record_llm_outcome(False, model=self._model, command=circuit_name)
             raise
+
+    def _get_breaker(self, circuit_name: str):
+        """Return the circuit breaker for *circuit_name* scoped to this model."""
+        key = f"{self._model}:{circuit_name}"
+        return TagEnricher._breakers[key]
 
     def enrich_case(
         self, case: Case, force: bool = False, case_num: int = 0, total_cases: int = 0
@@ -1406,7 +1421,7 @@ class TagEnricher:
     def _classify_with_llm(self, case: Case) -> list[str]:
         """Use LLM to classify a case from metadata. Returns list of tag strings."""
         prompt = build_llm_classification_prompt(case)
-        response = TagEnricher._metadata_llm_cb.call(
+        response = self._get_breaker("metadata_llm").call(
             lambda: self._invoke_llm(prompt, circuit_name="metadata_llm")
         )
         return parse_llm_response(response)
@@ -1416,7 +1431,7 @@ class TagEnricher:
     ) -> list[str]:
         """Use LLM to classify a case from source documents. Returns tag strings."""
         prompt = build_llm_classification_prompt_from_sources(case, evidence_text)
-        response = TagEnricher._source_llm_cb.call(
+        response = self._get_breaker("source_llm").call(
             lambda: self._invoke_llm(prompt, circuit_name="source_llm")
         )
         return parse_llm_response(response)

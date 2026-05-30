@@ -63,7 +63,7 @@ def retry_with_backoff(
                     attempt,
                     max_retries,
                     wait,
-                    fn.__name__,
+                    getattr(fn, "__name__", repr(fn)),
                     exc,
                 )
             _time.sleep(wait)

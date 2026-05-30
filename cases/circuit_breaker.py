@@ -31,11 +31,13 @@ class CircuitBreaker:
     _last_failure_time: float = field(default=0.0, repr=False)
     _state: str = field(default="closed", repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _probe_active: bool = field(default=False, repr=False)
 
     @property
     def state(self) -> str:
-        self._maybe_reset()
-        return self._state
+        with self._lock:
+            self._maybe_reset()
+            return self._state
 
     def call(self, fn, *args, **kwargs):
         """Execute *fn(*args, **kwargs)* with circuit-breaker protection.
@@ -52,6 +54,16 @@ class CircuitBreaker:
                 raise CircuitBreakerOpenError(
                     f"Circuit '{self.name}' is open. Retry in {remaining:.0f}s."
                 )
+            if self._state == "half-open" and self._probe_active:
+                elapsed = _time.monotonic() - self._last_failure_time
+                remaining = max(0.0, self.cooldown_seconds - elapsed)
+                raise CircuitBreakerOpenError(
+                    f"Circuit '{self.name}' is open (probe in progress)."
+                    f" Retry in {remaining:.0f}s."
+                )
+            if self._state == "half-open":
+                self._probe_active = True
+
         try:
             result = fn(*args, **kwargs)
         except Exception:
@@ -65,6 +77,7 @@ class CircuitBreaker:
         with self._lock:
             self._failure_count += 1
             self._last_failure_time = _time.monotonic()
+            self._probe_active = False
             if (
                 self._state == "half-open"
                 or self._failure_count >= self.failure_threshold
@@ -78,6 +91,7 @@ class CircuitBreaker:
         with self._lock:
             self._failure_count = 0
             self._state = "closed"
+            self._probe_active = False
 
     def _maybe_reset(self) -> None:
         if self._state == "open":
