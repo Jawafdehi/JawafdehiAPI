@@ -29,6 +29,8 @@ DEFAULT_LLM_TIMEOUT = 300
 MAX_LLM_RETRIES = 3
 MINIMAX_MODELS = frozenset({"minimax-m2.5", "minimax-m2.7"})
 DEVANAGARI_RE = re.compile(r"[ऀ-ॿ]")
+DEVANAGARI_ALPHABETIC_RE = re.compile(r"[ऄ-हक़-ॡ]")
+ALPHABETIC_RE = re.compile(r"[^\W\d_]", re.UNICODE)
 _CLOUD_METADATA_IP = "169.254.169.254"  # NOSONAR — cloud metadata link-local
 _SSRF_BLOCKED_HOSTNAMES = frozenset(
     {"localhost", "metadata.google.internal", _CLOUD_METADATA_IP, "metadata", "0.0.0.0"}
@@ -1119,17 +1121,21 @@ class Command(BaseCommand):
             issues.append("short_description too long (> 1000 chars)")
             valid = False
 
-        # Hard gate: Devanagari ratio ≥80%
-        non_ws = re.sub(r"\s+", "", description)
-        if non_ws:
-            ratio = len(DEVANAGARI_RE.findall(non_ws)) / len(non_ws)
+        # Hard gate: Devanagari ratio ≥80% of alphabetic characters
+        alphabetic_chars = ALPHABETIC_RE.findall(description)
+        if alphabetic_chars:
+            ratio = len(DEVANAGARI_ALPHABETIC_RE.findall(description)) / len(
+                alphabetic_chars
+            )
             if ratio < 0.80:
-                issues.append(f"Devanagari ratio {ratio:.2f} below 80%")
+                issues.append(f"Devanagari alphabetic ratio {ratio:.2f} below 80%")
                 valid = False
 
         # Hard gate: no raw HTML tags
         if re.search(
-            r"<\s*(h[1-6]|table|tr|td|th|div|p|span|br|ul|ol|li|a)\b", description
+            r"<\s*(h[1-6]|table|tr|td|th|div|p|span|br|ul|ol|li|a)\b",
+            description,
+            re.IGNORECASE,
         ):
             issues.append("Raw HTML tags found in description")
             valid = False
