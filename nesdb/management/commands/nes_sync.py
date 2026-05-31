@@ -1,0 +1,38 @@
+from pathlib import Path
+
+from django.conf import settings
+from django.core.management.base import BaseCommand, CommandError
+
+from nesdb.importer import import_incremental
+
+
+class Command(BaseCommand):
+    help = "Incrementally sync derived NES Postgres tables from the nes-db git diff."
+
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "--path",
+            default=None,
+            help="Path to nes-db/v2. Defaults to settings.NES_DB_PATH.",
+        )
+
+    def handle(self, *args, **options):
+        repo_path = Path(options["path"] or settings.NES_DB_PATH or "")
+        if not repo_path:
+            raise CommandError("NES_DB_PATH is not configured. Pass --path or set NES_DB_PATH.")
+        if not repo_path.exists():
+            raise CommandError(f"NES database path does not exist: {repo_path}")
+        if not (repo_path / ".git").exists() and not (repo_path.parent / ".git").exists():
+            raise CommandError(f"NES database path is not inside a git repository: {repo_path}")
+
+        result = import_incremental(repo_path)
+        self.stdout.write(
+            self.style.SUCCESS(
+                "Synced NES DB: "
+                f"{result.entities_upserted} entities upserted, "
+                f"{result.entities_deleted} entities deleted, "
+                f"{result.relationships_upserted} relationships upserted, "
+                f"{result.relationships_deleted} relationships deleted, "
+                f"commit {result.commit_hash}"
+            )
+        )

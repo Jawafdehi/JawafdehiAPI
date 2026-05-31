@@ -206,6 +206,7 @@ INSTALLED_APPS = [
     "auditlog",
     "rules.apps.AutodiscoverRulesConfig",
     "cases",
+    "nesdb",
     "nesq",
     "ngm",
     "caseworker",
