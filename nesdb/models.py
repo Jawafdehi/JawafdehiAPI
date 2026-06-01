@@ -1,10 +1,9 @@
 """Django models for derived NES Postgres tables.
 
-NesEntity mirrors the NES Pydantic Entity model flattened into relational
-columns + JSON fields for complex nested structures.  NesEntityName is a
-separate table so names can be queried efficiently.  NesRelationship mirrors
-the NES Relationship model.  NesSyncState tracks the git commit watermark
-for incremental imports.
+NesEntity stores generic indexed fields plus the full entity JSON in raw_payload.
+NesEntityName stores concatenated name_en / name_ne per kind for searchability.
+NesRelationship stores generic indexed fields plus the full relationship JSON.
+NesSyncState tracks the git commit watermark for incremental imports.
 
 The on-disk source of truth is the nes-db JSON file database.  These tables
 are a query-optimised read replica.
@@ -21,7 +20,7 @@ class NesSyncState(models.Model):
     """
 
     last_commit_hash = models.CharField(
-        max_length=40,
+        max_length=64,
         help_text="SHA of the last synced commit in the nes-db repository.",
     )
     last_sync_at = models.DateTimeField(
@@ -49,20 +48,14 @@ class NesSyncState(models.Model):
 class NesEntity(models.Model):
     """A Nepal Entity Service entity stored in Postgres.
 
-    The full computed entity ID is stored in ``entity_id`` (e.g.
-    ``entity:person/nepal_govt/john-doe``).  ``entity_prefix`` is the
-    slash-joined classification path (e.g. ``person/nepal_govt``) and
-    ``slug`` is the leaf identifier.
-
-    Complex nested structures (names, version_summary, contacts, etc.) are
-    stored as JSON columns — names are duplicated into the NesEntityName
-    table for efficient querying.
+    Generic indexed columns (entity_id, slug, entity_prefix, tags) are
+    extracted from the NES payload.  The full entity JSON is stored in
+    ``raw_payload`` — prefix-specific fields live there.
     """
 
     entity_id = models.CharField(
         max_length=512,
         unique=True,
-        db_index=True,
         help_text="Full computed entity ID, e.g. 'entity:person/nepal_govt/john-doe'.",
     )
     slug = models.CharField(
@@ -71,18 +64,12 @@ class NesEntity(models.Model):
     )
     entity_prefix = models.CharField(
         max_length=512,
-        db_index=True,
         help_text="Slash-joined classification prefix, e.g. 'person/nepal_govt'.",
     )
-    type = models.CharField(
-        max_length=32,
-        help_text="Entity type: person, organization, location, or project.",
-    )
-    sub_type = models.CharField(
-        max_length=64,
+    tags = models.JSONField(
         null=True,
         blank=True,
-        help_text="Entity subtype (deprecated in NES, use entity_prefix).",
+        help_text="Tags as a list of strings.",
     )
     version_summary = models.JSONField(
         help_text="Latest version summary (VersionSummary as dict).",
@@ -90,45 +77,8 @@ class NesEntity(models.Model):
     created_at = models.DateTimeField(
         help_text="Timestamp from the NES entity record.",
     )
-    identifiers = models.JSONField(
-        null=True,
-        blank=True,
-        help_text="External identifiers (list of dicts).",
-    )
-    tags = models.JSONField(
-        null=True,
-        blank=True,
-        help_text="Tags as a list of strings.",
-    )
-    attributes = models.JSONField(
-        null=True,
-        blank=True,
-        help_text="Additional free-form attributes.",
-    )
-    contacts = models.JSONField(
-        null=True,
-        blank=True,
-        help_text="Contact information (list of dicts).",
-    )
-    short_description = models.JSONField(
-        null=True,
-        blank=True,
-        help_text="Brief description as LangText dict.",
-    )
-    description = models.JSONField(
-        null=True,
-        blank=True,
-        help_text="Detailed description as LangText dict.",
-    )
-    attributions = models.JSONField(
-        null=True,
-        blank=True,
-        help_text="Source attributions (list of dicts).",
-    )
-    pictures = models.JSONField(
-        null=True,
-        blank=True,
-        help_text="Entity pictures (list of dicts).",
+    raw_payload = models.JSONField(
+        help_text="Full NES entity JSON as stored in nes-db.",
     )
     last_modified_at = models.DateTimeField(
         auto_now=True,
@@ -138,7 +88,6 @@ class NesEntity(models.Model):
     class Meta:
         ordering = ["entity_id"]
         indexes = [
-            models.Index(fields=["type"], name="nesdb_entity_type_idx"),
             models.Index(fields=["entity_prefix"], name="nesdb_entity_prefix_idx"),
             models.Index(fields=["slug"], name="nesdb_entity_slug_idx"),
         ]
@@ -152,9 +101,8 @@ class NesEntity(models.Model):
 class NesEntityName(models.Model):
     """A name attached to a NesEntity.
 
-    Mirrors the NES ``Name`` model.  At least one row per entity will have
-    ``kind='PRIMARY'``.  English and Nepali name parts are stored as
-    individual columns for queryability.
+    name_en / name_ne hold the concatenated English and Nepali name parts.
+    At least one row per entity will have ``kind='PRIMARY'``.
     """
 
     class NameKind(models.TextChoices):
@@ -167,6 +115,7 @@ class NesEntityName(models.Model):
         NesEntity,
         on_delete=models.CASCADE,
         related_name="names",
+        db_index=False,
         help_text="The entity this name belongs to.",
     )
     kind = models.CharField(
@@ -174,125 +123,70 @@ class NesEntityName(models.Model):
         choices=NameKind.choices,
         help_text="Type of name.",
     )
-    en_full = models.CharField(
+    name_en = models.CharField(
         max_length=500,
         null=True,
         blank=True,
-        help_text="English/romanised full name.",
+        help_text="Concatenated English/romanised name.",
     )
-    en_given = models.CharField(
-        max_length=200,
-        null=True,
-        blank=True,
-        help_text="English given name.",
-    )
-    en_middle = models.CharField(
-        max_length=200,
-        null=True,
-        blank=True,
-        help_text="English middle name.",
-    )
-    en_family = models.CharField(
-        max_length=200,
-        null=True,
-        blank=True,
-        help_text="English family name.",
-    )
-    en_prefix = models.CharField(
-        max_length=100,
-        null=True,
-        blank=True,
-        help_text="English name prefix.",
-    )
-    en_suffix = models.CharField(
-        max_length=100,
-        null=True,
-        blank=True,
-        help_text="English name suffix.",
-    )
-    ne_full = models.CharField(
+    name_ne = models.CharField(
         max_length=500,
         null=True,
         blank=True,
-        help_text="Nepali (Devanagari) full name.",
-    )
-    ne_given = models.CharField(
-        max_length=200,
-        null=True,
-        blank=True,
-        help_text="Nepali given name.",
-    )
-    ne_middle = models.CharField(
-        max_length=200,
-        null=True,
-        blank=True,
-        help_text="Nepali middle name.",
-    )
-    ne_family = models.CharField(
-        max_length=200,
-        null=True,
-        blank=True,
-        help_text="Nepali family name.",
-    )
-    ne_prefix = models.CharField(
-        max_length=100,
-        null=True,
-        blank=True,
-        help_text="Nepali name prefix.",
-    )
-    ne_suffix = models.CharField(
-        max_length=100,
-        null=True,
-        blank=True,
-        help_text="Nepali name suffix.",
+        help_text="Concatenated Nepali (Devanagari) name.",
     )
 
     class Meta:
         ordering = ["entity", "pk"]
         indexes = [
             models.Index(fields=["entity", "kind"], name="nesdb_name_entity_kind_idx"),
+            models.Index(
+                fields=["name_en"],
+                name="nesdb_name_en_idx",
+                condition=models.Q(name_en__isnull=False),
+            ),
+            models.Index(
+                fields=["name_ne"],
+                name="nesdb_name_ne_idx",
+                condition=models.Q(name_ne__isnull=False),
+            ),
         ]
         verbose_name = "NES Entity Name"
         verbose_name_plural = "NES Entity Names"
 
     def __str__(self):
-        primary = self.en_full or self.ne_full or ""
+        primary = self.name_en or self.name_ne or ""
         return f"{self.kind}: {primary}"
 
 
 class NesRelationship(models.Model):
     """A relationship between two NES entities.
 
-    Mirrors the NES ``Relationship`` model.  ``relationship_id`` is the full
-    computed ID (e.g. ``relationship:person/a:org/b:EMPLOYED_BY``).
+    Generic indexed columns are extracted from the NES payload.  The full
+    relationship JSON is stored in ``raw_payload`` — type-specific fields
+    live there.
     """
 
     relationship_id = models.CharField(
         max_length=1024,
         unique=True,
-        db_index=True,
         help_text="Full computed relationship ID.",
     )
     source_entity_id = models.CharField(
         max_length=512,
-        db_index=True,
         help_text="Entity ID of the relationship source.",
     )
     target_entity_id = models.CharField(
         max_length=512,
-        db_index=True,
         help_text="Entity ID of the relationship target.",
     )
     type = models.CharField(
         max_length=64,
         help_text="Relationship type, e.g. 'EMPLOYED_BY', 'MEMBER_OF'.",
     )
-    start_date = models.DateField(null=True, blank=True)
-    end_date = models.DateField(null=True, blank=True)
-    attributes = models.JSONField(null=True, blank=True)
-    version_summary = models.JSONField(null=True, blank=True)
-    created_at = models.DateTimeField(null=True, blank=True)
-    attributions = models.JSONField(null=True, blank=True)
+    raw_payload = models.JSONField(
+        help_text="Full NES relationship JSON as stored in nes-db.",
+    )
     last_modified_at = models.DateTimeField(auto_now=True)
 
     class Meta:

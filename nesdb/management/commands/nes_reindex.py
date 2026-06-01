@@ -19,11 +19,18 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         repo_path = Path(options["path"] or settings.NES_DB_PATH or "")
         if not repo_path:
-            raise CommandError("NES_DB_PATH is not configured. Pass --path or set NES_DB_PATH.")
+            raise CommandError(
+                "NES_DB_PATH is not configured. Pass --path or set NES_DB_PATH."
+            )
         if not repo_path.exists():
             raise CommandError(f"NES database path does not exist: {repo_path}")
-        if not (repo_path / "entity").exists() and not (repo_path / "relationship").exists():
-            raise CommandError(f"NES database path does not look like nes-db/v2: {repo_path}")
+        if (
+            not (repo_path / "entity").exists()
+            and not (repo_path / "relationship").exists()
+        ):
+            raise CommandError(
+                f"NES database path does not look like nes-db/v2: {repo_path}"
+            )
 
         result = import_full(repo_path)
         self.stdout.write(

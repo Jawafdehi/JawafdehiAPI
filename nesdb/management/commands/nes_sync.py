@@ -1,9 +1,22 @@
+import subprocess
 from pathlib import Path
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
 from nesdb.importer import import_incremental
+
+
+def _is_inside_git_worktree(path: Path) -> bool:
+    try:
+        subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
+            check=True,
+            capture_output=True,
+        )
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
 
 
 class Command(BaseCommand):
@@ -19,11 +32,15 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         repo_path = Path(options["path"] or settings.NES_DB_PATH or "")
         if not repo_path:
-            raise CommandError("NES_DB_PATH is not configured. Pass --path or set NES_DB_PATH.")
+            raise CommandError(
+                "NES_DB_PATH is not configured. Pass --path or set NES_DB_PATH."
+            )
         if not repo_path.exists():
             raise CommandError(f"NES database path does not exist: {repo_path}")
-        if not (repo_path / ".git").exists() and not (repo_path.parent / ".git").exists():
-            raise CommandError(f"NES database path is not inside a git repository: {repo_path}")
+        if not _is_inside_git_worktree(repo_path):
+            raise CommandError(
+                f"NES database path is not inside a git repository: {repo_path}"
+            )
 
         result = import_incremental(repo_path)
         self.stdout.write(

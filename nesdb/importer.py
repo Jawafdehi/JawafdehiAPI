@@ -5,7 +5,7 @@ from pathlib import Path
 
 from django.db import transaction
 
-from nes.core.identifiers import build_relationship_id, break_entity_id
+from nes.core.identifiers import break_entity_id
 from nes.core.models.relationship import Relationship
 from nes.core.utils.entity_utils import entity_from_dict
 
@@ -36,6 +36,7 @@ def changed_json_paths(repo_path: Path, from_commit: str, to_commit: str = "HEAD
             str(repo_path),
             "diff",
             "--name-status",
+            "--no-renames",
             from_commit,
             to_commit,
             "--",
@@ -151,26 +152,16 @@ def upsert_entity(data: dict) -> NesEntity:
     entity_id = payload.pop("id")
     components = break_entity_id(entity_id)
     entity_prefix = payload.get("entity_prefix") or components.prefix
-    type_value = payload["type"]
-    sub_type = payload.get("sub_type")
 
     nes_entity, _ = NesEntity.objects.update_or_create(
         entity_id=entity_id,
         defaults={
             "slug": payload["slug"],
             "entity_prefix": entity_prefix,
-            "type": type_value,
-            "sub_type": sub_type,
+            "tags": payload.get("tags"),
             "version_summary": payload["version_summary"],
             "created_at": payload["created_at"],
-            "identifiers": payload.get("identifiers"),
-            "tags": payload.get("tags"),
-            "attributes": payload.get("attributes"),
-            "contacts": payload.get("contacts"),
-            "short_description": payload.get("short_description"),
-            "description": payload.get("description"),
-            "attributions": payload.get("attributions"),
-            "pictures": payload.get("pictures"),
+            "raw_payload": payload,
         },
     )
     NesEntityName.objects.filter(entity=nes_entity).delete()
@@ -181,24 +172,23 @@ def upsert_entity(data: dict) -> NesEntity:
     return nes_entity
 
 
+def concat_name(name_parts: dict | None) -> str | None:
+    if not name_parts:
+        return None
+    bits = []
+    for key in ("prefix", "given", "middle", "family", "suffix"):
+        v = name_parts.get(key)
+        if v:
+            bits.append(v)
+    return " ".join(bits) or name_parts.get("full") or None
+
+
 def create_name(entity: NesEntity, name: dict) -> NesEntityName:
-    en = name.get("en") or {}
-    ne = name.get("ne") or {}
     return NesEntityName.objects.create(
         entity=entity,
         kind=name["kind"],
-        en_full=en.get("full"),
-        en_given=en.get("given"),
-        en_middle=en.get("middle"),
-        en_family=en.get("family"),
-        en_prefix=en.get("prefix"),
-        en_suffix=en.get("suffix"),
-        ne_full=ne.get("full"),
-        ne_given=ne.get("given"),
-        ne_middle=ne.get("middle"),
-        ne_family=ne.get("family"),
-        ne_prefix=ne.get("prefix"),
-        ne_suffix=ne.get("suffix"),
+        name_en=concat_name(name.get("en")),
+        name_ne=concat_name(name.get("ne")),
     )
 
 
@@ -212,18 +202,13 @@ def upsert_relationship(data: dict) -> NesRelationship:
             "source_entity_id": payload["source_entity_id"],
             "target_entity_id": payload["target_entity_id"],
             "type": payload["type"],
-            "start_date": payload.get("start_date"),
-            "end_date": payload.get("end_date"),
-            "attributes": payload.get("attributes"),
-            "version_summary": payload.get("version_summary"),
-            "created_at": payload.get("created_at"),
-            "attributions": payload.get("attributions"),
+            "raw_payload": payload,
         },
     )[0]
 
 
 def entity_id_from_path(relative_path: str) -> str:
-    return f"entity:{Path(relative_path).with_suffix('').as_posix()[len('entity/') :]}"
+    return f"entity:{Path(relative_path).with_suffix('').as_posix()[len('entity/'):]}"
 
 
 def entities_with_prefix(prefix: str):
