@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-      - uses: docker/setup-qemu-action@4574d27a4764455b0ba2a07d80ad43e6a4a90549
+      - uses: docker/setup-qemu-action@259a565a6f30a57c28f9ea913f2d359b43ff5fc9
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
       - name: Log into DockerHub
         if: github.event_name != 'pull_request'
