@@ -7,7 +7,7 @@ from collections import Counter
 from datetime import datetime
 from typing import Any
 
-from django.db.models import Prefetch, Q
+from django.db.models import Prefetch
 from django.utils import timezone
 
 from cases.models import (
@@ -19,22 +19,14 @@ from cases.models import (
     JawafEntity,
     RelationshipType,
 )
-from cases.rules.predicates import is_admin_or_moderator
 
 ENTITY_TYPE_PATTERN = re.compile(r"^entity:([^/]+)/")
 ENTITY_TYPES = ("person", "organization", "location")
-TYPE_DISPLAY_NAMES = {
-    "case": "Cases",
+ENTITY_TYPE_DISPLAY_NAMES = {
     "person": "People",
     "organization": "Organizations",
     "location": "Locations",
-    "document": "Documents",
-    "unknown": "Unknown entities",
-}
-STATUS_DISPLAY_NAMES = {
-    CaseState.PUBLISHED: "Published",
-    CaseState.IN_REVIEW: "In Review",
-    CaseState.DRAFT: "Draft",
+    "unknown": "Unknown",
 }
 
 
@@ -108,10 +100,10 @@ class UnifiedSearchService:
         request,
         q: str,
         type: str,
-        status: str | None,
-        role: str | None,
-        case_type: str | None,
-        tags: str | None,
+        entity_type: list[str],
+        role: list[str],
+        case_type: list[str],
+        tags: list[str],
         sort: str,
         page: int,
         page_size: int,
@@ -119,7 +111,8 @@ class UnifiedSearchService:
         query = _normalize(q)
         page_size = min(page_size, 50)
 
-        cases = list(self._visible_cases(request))
+        del request  # Public archive search is intentionally published-only.
+        cases = list(self._visible_cases())
         documents = list(self._visible_documents())
         source_case_ids = self._source_case_ids(cases, documents)
         case_entity_ids = {
@@ -139,20 +132,26 @@ class UnifiedSearchService:
 
         records = []
         for case in cases:
-            if self._case_passes_filters(case, status, role, case_type, tags):
+            if self._case_passes_filters(case, entity_type, role, case_type, tags):
                 record = self._case_record(case, query)
                 if record:
                     records.append(record)
         for entity in entities:
             if self._entity_passes_filters(
-                entity, cases_by_id, status, role, case_type, tags
+                entity, cases_by_id, entity_type, role, case_type, tags
             ):
                 record = self._entity_record(entity, query, cases_by_id)
                 if record:
                     records.append(record)
         for source in documents:
             if self._document_passes_filters(
-                source, cases_by_id, source_case_ids, status, role, case_type, tags
+                source,
+                cases_by_id,
+                source_case_ids,
+                entity_type,
+                role,
+                case_type,
+                tags,
             ):
                 record = self._document_record(
                     source, query, cases_by_id, source_case_ids
@@ -182,24 +181,13 @@ class UnifiedSearchService:
             "results": results,
         }
 
-    def _visible_cases(self, request):
-        user = request.user
-        if not (user and user.is_authenticated):
-            queryset = Case.objects.filter(state=CaseState.PUBLISHED)
-        elif is_admin_or_moderator(user):
-            queryset = Case.objects.exclude(state=CaseState.CLOSED)
-        else:
-            queryset = (
-                Case.objects.exclude(state=CaseState.CLOSED)
-                .filter(Q(state=CaseState.PUBLISHED) | Q(contributors=user))
-                .distinct()
-            )
-        return queryset.prefetch_related("entity_relationships__entity")
+    def _visible_cases(self):
+        return Case.objects.filter(state=CaseState.PUBLISHED).prefetch_related(
+            "entity_relationships__entity"
+        )
 
     def _visible_documents(self):
-        visible_cases = Case.objects.filter(
-            state__in=[CaseState.PUBLISHED, CaseState.IN_REVIEW]
-        )
+        visible_cases = Case.objects.filter(state=CaseState.PUBLISHED)
         source_ids = {
             item["source_id"]
             for case in visible_cases
@@ -219,52 +207,68 @@ class UnifiedSearchService:
                     mapping[item["source_id"]].add(case.id)
         return mapping
 
-    def _case_passes_filters(self, case, status, role, case_type, tags):
-        if status and case.state != status:
+    def _case_passes_filters(self, case, entity_types, roles, case_types, tags):
+        relationships = list(case.entity_relationships.all())
+        if case_types and case.case_type not in case_types:
             return False
-        if case_type and case.case_type != case_type:
+        if tags and not any(tag in (case.tags or []) for tag in tags):
             return False
-        if tags and tags not in (case.tags or []):
+        if roles and not any(
+            relationship.relationship_type in roles for relationship in relationships
+        ):
             return False
-        if role and not any(
-            relationship.relationship_type == role
-            for relationship in case.entity_relationships.all()
+        if entity_types and not any(
+            extract_entity_type(relationship.entity.nes_id) in entity_types
+            for relationship in relationships
         ):
             return False
         return True
 
     def _entity_passes_filters(
-        self, entity, cases_by_id, status, role, case_type, tags
+        self, entity, cases_by_id, entity_types, roles, case_types, tags
     ):
-        has_case_filter = any((status, role, case_type, tags))
+        if entity_types and extract_entity_type(entity.nes_id) not in entity_types:
+            return False
+        has_case_filter = any((roles, case_types, tags))
         if not has_case_filter:
             return True
         return any(
             relationship.case_id in cases_by_id
-            and (not role or relationship.relationship_type == role)
-            and self._case_passes_filters(
-                relationship.case, status, None, case_type, tags
-            )
+            and (not roles or relationship.relationship_type in roles)
+            and self._case_passes_filters(relationship.case, [], [], case_types, tags)
             for relationship in entity.case_relationships.all()
         )
 
     def _document_passes_filters(
-        self, source, cases_by_id, source_case_ids, status, role, case_type, tags
+        self,
+        source,
+        cases_by_id,
+        source_case_ids,
+        entity_types,
+        roles,
+        case_types,
+        tags,
     ):
         related_cases = [
             cases_by_id[case_id]
             for case_id in source_case_ids.get(source.source_id, set())
             if case_id in cases_by_id
         ]
-        if any((status, case_type, tags)) and not any(
-            self._case_passes_filters(case, status, None, case_type, tags)
+        if any((case_types, tags)) and not any(
+            self._case_passes_filters(case, [], [], case_types, tags)
             for case in related_cases
         ):
             return False
-        if role:
-            related_entity_ids = {entity.id for entity in source.related_entities.all()}
+        related_entities = self._visible_document_entities(source, cases_by_id)
+        if entity_types and not any(
+            extract_entity_type(entity.nes_id) in entity_types
+            for entity in related_entities
+        ):
+            return False
+        if roles:
+            related_entity_ids = {entity.id for entity in related_entities}
             return any(
-                relationship.relationship_type == role
+                relationship.relationship_type in roles
                 and relationship.entity_id in related_entity_ids
                 for case in related_cases
                 for relationship in case.entity_relationships.all()
@@ -382,16 +386,7 @@ class UnifiedSearchService:
         }
 
     def _document_record(self, source, query, cases_by_id, source_case_ids):
-        visible_entity_ids = {
-            relationship.entity_id
-            for case in cases_by_id.values()
-            for relationship in case.entity_relationships.all()
-        }
-        related_entities = [
-            entity
-            for entity in source.related_entities.all()
-            if entity.id in visible_entity_ids
-        ]
+        related_entities = self._visible_document_entities(source, cases_by_id)
         searchable = {
             "title": source.title,
             "description": source.description,
@@ -502,8 +497,8 @@ class UnifiedSearchService:
         }
 
     def _facets(self, records, cases_by_id):
-        type_counts = Counter(
-            record.get("entity_type", record["kind"]) for record in records
+        entity_type_counts = Counter(
+            record["entity_type"] for record in records if record["kind"] == "entity"
         )
         related_case_ids = set().union(
             *(record["case_ids"] for record in records), set()
@@ -513,8 +508,8 @@ class UnifiedSearchService:
             for case_id in related_case_ids
             if case_id in cases_by_id
         ]
-        status_counts = Counter(case.state for case in related_cases)
         case_type_counts = Counter(case.case_type for case in related_cases)
+        tag_counts = Counter(tag for case in related_cases for tag in (case.tags or []))
         relationships = {
             relationship.id: relationship
             for case in related_cases
@@ -524,24 +519,11 @@ class UnifiedSearchService:
             relationship.relationship_type for relationship in relationships.values()
         )
         return {
-            "type": [
-                self._facet_item(name, TYPE_DISPLAY_NAMES[name], type_counts[name])
-                for name in (
-                    "case",
-                    "person",
-                    "organization",
-                    "location",
-                    "document",
-                    "unknown",
+            "entity_type": [
+                self._facet_item(
+                    name, ENTITY_TYPE_DISPLAY_NAMES[name], entity_type_counts[name]
                 )
-            ],
-            "status": [
-                self._facet_item(name, STATUS_DISPLAY_NAMES[name], status_counts[name])
-                for name in (
-                    CaseState.PUBLISHED,
-                    CaseState.IN_REVIEW,
-                    CaseState.DRAFT,
-                )
+                for name in ("person", "organization", "location", "unknown")
             ],
             "role": [
                 self._facet_item(name, label, role_counts[name])
@@ -551,6 +533,10 @@ class UnifiedSearchService:
                 self._facet_item(name, label, case_type_counts[name])
                 for name, label in CaseType.choices
             ],
+            "tags": [
+                self._facet_item(name, self._display_tag(name), count)
+                for name, count in sorted(tag_counts.items())
+            ],
         }
 
     def _matches_type(self, record, search_type):
@@ -558,10 +544,6 @@ class UnifiedSearchService:
             return True
         if search_type == "entity":
             return record["kind"] == "entity"
-        if search_type in ENTITY_TYPES:
-            return (
-                record["kind"] == "entity" and record.get("entity_type") == search_type
-            )
         return record["kind"] == search_type
 
     def _sort(self, records, sort):
@@ -601,6 +583,21 @@ class UnifiedSearchService:
 
     def _facet_item(self, name, display_name, count):
         return {"name": name, "display_name": display_name, "count": count}
+
+    def _visible_document_entities(self, source, cases_by_id):
+        visible_entity_ids = {
+            relationship.entity_id
+            for case in cases_by_id.values()
+            for relationship in case.entity_relationships.all()
+        }
+        return [
+            entity
+            for entity in source.related_entities.all()
+            if entity.id in visible_entity_ids
+        ]
+
+    def _display_tag(self, tag):
+        return tag.replace("-", " ").capitalize()
 
     def _public_result(self, record):
         return record["result"]
