@@ -42,6 +42,10 @@ class TestRetryWithBackoff:
                 jitter=0,
             )
 
+    def test_rejects_negative_max_retries(self):
+        with pytest.raises(ValueError, match="max_retries must be >= 0"):
+            retry_with_backoff(lambda: None, max_retries=-1)
+
     def test_respects_retryable_filter(self):
         def raises_value_error():
             raise ValueError("bad argument")

@@ -43,8 +43,15 @@ def retry_with_backoff(
         The return value of *fn*.
 
     Raises:
+        ValueError: If max_retries, base_seconds, or max_seconds is negative.
         The last caught exception after exhausting retries.
     """
+    if max_retries < 0:
+        raise ValueError(f"max_retries must be >= 0, got {max_retries}")
+    if base_seconds < 0:
+        raise ValueError(f"base_seconds must be >= 0, got {base_seconds}")
+    if max_seconds < 0:
+        raise ValueError(f"max_seconds must be >= 0, got {max_seconds}")
     last_exc: Exception | None = None
     for attempt in range(1, max_retries + 2):  # 1 initial + N retries
         try:
@@ -55,6 +62,7 @@ def retry_with_backoff(
                 raise
             wait = min(base_seconds * (2 ** (attempt - 1)), max_seconds)
             wait *= 1.0 + random.uniform(-jitter, jitter)  # noqa: S311 — not crypto
+            wait = max(0.0, wait)
             if on_retry is not None:
                 on_retry(exc, attempt, wait)
             else:
@@ -63,7 +71,7 @@ def retry_with_backoff(
                     attempt,
                     max_retries,
                     wait,
-                    fn.__name__,
+                    getattr(fn, "__name__", type(fn).__name__),
                     exc,
                 )
             _time.sleep(wait)
