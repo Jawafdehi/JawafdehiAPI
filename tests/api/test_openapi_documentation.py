@@ -89,6 +89,32 @@ class TestOpenAPIDocumentation:
         assert "/api/sources/" in schema["paths"]
         assert "/api/sources/{id}/" in schema["paths"]
 
+    def test_schema_contains_unified_search_endpoint(self):
+        """Test that the schema documents unified archive search."""
+        client = Client()
+        response = client.get(reverse("schema"))
+
+        import yaml
+
+        schema = yaml.safe_load(response.content)
+
+        assert "/api/search/" in schema["paths"]
+        search = schema["paths"]["/api/search/"]["get"]
+        assert search["summary"] == "Search the accountability archive"
+        assert "search" in search["tags"]
+        parameter_names = [parameter["name"] for parameter in search["parameters"]]
+        assert set(parameter_names) == {
+            "q",
+            "type",
+            "status",
+            "role",
+            "case_type",
+            "tags",
+            "sort",
+            "page",
+            "page_size",
+        }
+
     def test_schema_contains_component_schemas(self):
         """Test that the schema contains component definitions."""
         client = Client()
