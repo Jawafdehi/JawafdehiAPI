@@ -13,6 +13,7 @@ from .api_views import (
     OEmbedView,
     StatisticsView,
     FeedbackView,
+    UnifiedSearchView,
 )
 
 # Create a router and register our viewsets
@@ -22,6 +23,7 @@ router.register(r"sources", DocumentSourceViewSet, basename="documentsource")
 router.register(r"entities", JawafEntityViewSet, basename="jawafentity")
 
 urlpatterns = [
+    path("search/", UnifiedSearchView.as_view(), name="unified-search"),
     path("statistics/", StatisticsView.as_view(), name="statistics"),
     path("feedback/", FeedbackView.as_view(), name="feedback"),
     path("oembed/", OEmbedView.as_view(), name="oembed"),
