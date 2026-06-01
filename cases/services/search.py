@@ -7,7 +7,7 @@ from collections import Counter
 from datetime import datetime
 from typing import Any
 
-from django.db.models import Prefetch
+from django.db.models import Prefetch, Q
 from django.utils import timezone
 
 from cases.models import (
@@ -117,8 +117,8 @@ class UnifiedSearchService:
         page_size = min(page_size, 50)
 
         del request  # Public archive search is intentionally published-only.
-        cases = list(self._visible_cases())
-        documents = list(self._visible_documents())
+        cases = list(self._visible_cases(entity_type, role, case_type))
+        documents = list(self._visible_documents(cases, query))
         source_case_ids = self._source_case_ids(cases, documents)
         case_entity_ids = {
             relationship.entity_id
@@ -153,13 +153,14 @@ class UnifiedSearchService:
                 source,
                 cases_by_id,
                 source_case_ids,
+                case_entity_ids,
                 entity_type,
                 role,
                 case_type,
                 tags,
             ):
                 record = self._document_record(
-                    source, query, cases_by_id, source_case_ids
+                    source, query, cases_by_id, source_case_ids, case_entity_ids
                 )
                 if record:
                     records.append(record)
@@ -186,22 +187,45 @@ class UnifiedSearchService:
             "results": results,
         }
 
-    def _visible_cases(self):
-        return Case.objects.filter(state=CaseState.PUBLISHED).prefetch_related(
-            "entity_relationships__entity"
-        )
+    def _visible_cases(self, entity_types, roles, case_types):
+        queryset = Case.objects.filter(state=CaseState.PUBLISHED)
+        if case_types:
+            queryset = queryset.filter(case_type__in=case_types)
+        if roles:
+            queryset = queryset.filter(
+                entity_relationships__relationship_type__in=roles
+            )
+        if entity_types and "unknown" not in entity_types:
+            entity_filter = Q()
+            for entity_type in entity_types:
+                entity_filter |= Q(
+                    entity_relationships__entity__nes_id__startswith=(
+                        f"entity:{entity_type}/"
+                    )
+                )
+            queryset = queryset.filter(entity_filter)
+        return queryset.prefetch_related("entity_relationships__entity").distinct()
 
-    def _visible_documents(self):
-        visible_cases = Case.objects.filter(state=CaseState.PUBLISHED)
+    def _visible_documents(self, cases, query):
         source_ids = {
             item["source_id"]
-            for case in visible_cases
+            for case in cases
             for item in (case.evidence or [])
             if isinstance(item, dict) and item.get("source_id")
         }
-        return DocumentSource.objects.filter(
+        queryset = DocumentSource.objects.filter(
             source_id__in=source_ids, is_deleted=False
-        ).prefetch_related("related_entities")
+        )
+        for term in query.split():
+            queryset = queryset.filter(
+                Q(title__icontains=term)
+                | Q(description__icontains=term)
+                | Q(source_id__icontains=term)
+                | Q(source_type__icontains=term)
+                | Q(related_entities__display_name__icontains=term)
+                | Q(related_entities__nes_id__icontains=term)
+            )
+        return queryset.prefetch_related("related_entities").distinct()
 
     def _source_case_ids(self, cases, documents):
         source_ids = {source.source_id for source in documents}
@@ -249,6 +273,7 @@ class UnifiedSearchService:
         source,
         cases_by_id,
         source_case_ids,
+        visible_entity_ids,
         entity_types,
         roles,
         case_types,
@@ -264,7 +289,7 @@ class UnifiedSearchService:
             for case in related_cases
         ):
             return False
-        related_entities = self._visible_document_entities(source, cases_by_id)
+        related_entities = self._visible_document_entities(source, visible_entity_ids)
         if entity_types and not any(
             extract_entity_type(entity.nes_id) in entity_types
             for entity in related_entities
@@ -390,8 +415,11 @@ class UnifiedSearchService:
             },
         }
 
-    def _document_record(self, source, query, cases_by_id, source_case_ids):
-        related_entities = self._visible_document_entities(source, cases_by_id)
+    def _document_record(
+        self, source, query, cases_by_id, source_case_ids, visible_entity_ids
+    ):
+        del cases_by_id
+        related_entities = self._visible_document_entities(source, visible_entity_ids)
         searchable = {
             "title": source.title,
             "description": source.description,
@@ -592,12 +620,7 @@ class UnifiedSearchService:
     def _facet_item(self, name, display_name, count):
         return {"name": name, "display_name": display_name, "count": count}
 
-    def _visible_document_entities(self, source, cases_by_id):
-        visible_entity_ids = {
-            relationship.entity_id
-            for case in cases_by_id.values()
-            for relationship in case.entity_relationships.all()
-        }
+    def _visible_document_entities(self, source, visible_entity_ids):
         return [
             entity
             for entity in source.related_entities.all()
