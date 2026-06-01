@@ -67,6 +67,33 @@ class TestRetryableHelpers:
         assert retryable_http_status(200) is False
         assert retryable_http_status(500) is False
 
+    def test_negative_base_seconds_raises_value_error(self):
+        with pytest.raises(ValueError, match="base_seconds must be >= 0"):
+            retry_with_backoff(lambda: None, base_seconds=-0.5)
+
+    def test_wait_clamped_with_large_jitter(self):
+        """jitter >= 1.0 can produce negative wait; clamp prevents ValueError in sleep."""
+        call_count = [0]
+
+        def flaky():
+            call_count[0] += 1
+            if call_count[0] < 2:
+                raise RuntimeError("transient")
+            return "ok"
+
+        result = retry_with_backoff(flaky, max_retries=1, base_seconds=0.1, jitter=2.0)
+        assert result == "ok"
+
+    def test_fn_without_name_attribute(self):
+        """functools.partial and __call__ objects lack __name__ — must not crash."""
+
+        class CallableObj:
+            def __call__(self, x):
+                return x
+
+        result = retry_with_backoff(CallableObj(), 7)
+        assert result == 7
+
     def test_retryable_network_error(self):
         assert retryable_network_error(ConnectionError("refused")) is True
         assert retryable_network_error(ConnectionResetError("reset")) is True
