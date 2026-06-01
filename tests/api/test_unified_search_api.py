@@ -137,6 +137,8 @@ def test_search_supports_repeatable_refinement_filters(archive_records):
     response = APIClient().get(
         "/api/search/",
         [
+            ("type", "case"),
+            ("type", "entity"),
             ("entity_type", "person"),
             ("entity_type", "organization"),
             ("role", "accused"),
@@ -150,7 +152,6 @@ def test_search_supports_repeatable_refinement_filters(archive_records):
     assert {result["result_type"] for result in response.data["results"]} == {
         "case",
         "entity",
-        "document",
     }
     entity_ids = {
         result["id"]
@@ -243,6 +244,14 @@ def test_facets_are_calculated_before_pagination(archive_records):
     assert response.status_code == 200
     assert response.data["count"] == 5
     assert len(response.data["results"]) == 2
+    type_facets = {
+        item["name"]: item["count"] for item in response.data["facets"]["type"]
+    }
+    assert type_facets == {
+        "case": 1,
+        "entity": 3,
+        "document": 1,
+    }
     entity_type_facets = {
         item["name"]: item["count"] for item in response.data["facets"]["entity_type"]
     }

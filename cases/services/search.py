@@ -28,6 +28,11 @@ ENTITY_TYPE_DISPLAY_NAMES = {
     "location": "Locations",
     "unknown": "Unknown",
 }
+TYPE_DISPLAY_NAMES = {
+    "case": "Cases",
+    "entity": "Entities",
+    "document": "Documents",
+}
 
 
 def extract_entity_type(nes_id: str | None) -> str:
@@ -99,7 +104,7 @@ class UnifiedSearchService:
         *,
         request,
         q: str,
-        type: str,
+        type: list[str],
         entity_type: list[str],
         role: list[str],
         case_type: list[str],
@@ -497,6 +502,7 @@ class UnifiedSearchService:
         }
 
     def _facets(self, records, cases_by_id):
+        type_counts = Counter(record["kind"] for record in records)
         entity_type_counts = Counter(
             record["entity_type"] for record in records if record["kind"] == "entity"
         )
@@ -519,6 +525,10 @@ class UnifiedSearchService:
             relationship.relationship_type for relationship in relationships.values()
         )
         return {
+            "type": [
+                self._facet_item(name, TYPE_DISPLAY_NAMES[name], type_counts[name])
+                for name in ("case", "entity", "document")
+            ],
             "entity_type": [
                 self._facet_item(
                     name, ENTITY_TYPE_DISPLAY_NAMES[name], entity_type_counts[name]
@@ -540,11 +550,9 @@ class UnifiedSearchService:
         }
 
     def _matches_type(self, record, search_type):
-        if search_type == "all":
+        if not search_type:
             return True
-        if search_type == "entity":
-            return record["kind"] == "entity"
-        return record["kind"] == search_type
+        return record["kind"] in search_type
 
     def _sort(self, records, sort):
         if sort == "newest":

@@ -67,10 +67,10 @@ logger = logging.getLogger(__name__)
 
 class UnifiedSearchQuerySerializer(serializers.Serializer):
     q = serializers.CharField(required=False, allow_blank=True, default="")
-    type = serializers.ChoiceField(
-        choices=["all", "case", "entity", "document"],
+    type = serializers.ListField(
+        child=serializers.ChoiceField(choices=["case", "entity", "document"]),
         required=False,
-        default="all",
+        default=list,
     )
     entity_type = serializers.ListField(
         child=serializers.ChoiceField(
@@ -107,9 +107,9 @@ class UnifiedSearchQuerySerializer(serializers.Serializer):
     summary="Search the accountability archive",
     description="""
     Search published accountability cases, entities, and evidence documents in
-    one deterministic relevance-ranked result list. Detailed sidebar filters
-    accept repeated query parameters. Entity types are derived locally from NES
-    IDs; this endpoint does not call external services.
+    one deterministic relevance-ranked result list. Sidebar filters accept
+    repeated query parameters, including record type. Entity types are derived
+    locally from NES IDs; this endpoint does not call external services.
     """,
     parameters=[
         OpenApiParameter("q", OpenApiTypes.STR, OpenApiParameter.QUERY, required=False),
@@ -118,7 +118,8 @@ class UnifiedSearchQuerySerializer(serializers.Serializer):
             OpenApiTypes.STR,
             OpenApiParameter.QUERY,
             required=False,
-            enum=["all", "case", "entity", "document"],
+            enum=["case", "entity", "document"],
+            many=True,
         ),
         OpenApiParameter(
             "entity_type",

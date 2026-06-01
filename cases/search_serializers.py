@@ -61,6 +61,7 @@ class SearchDocumentResultSerializer(SearchResultSerializer):
 
 
 class SearchFacetsSerializer(serializers.Serializer):
+    type = SearchFacetItemSerializer(many=True)
     entity_type = SearchFacetItemSerializer(many=True)
     role = SearchFacetItemSerializer(many=True)
     case_type = SearchFacetItemSerializer(many=True)
