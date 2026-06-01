@@ -22,7 +22,7 @@ from drf_spectacular.utils import (
     extend_schema_view,
 )
 from django.db.models import Q
-from rest_framework import filters, mixins, status, viewsets
+from rest_framework import filters, mixins, serializers, status, viewsets
 from rest_framework.authentication import SessionAuthentication, TokenAuthentication
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
@@ -59,8 +59,130 @@ from .serializers import (
     FeedbackSerializer,
     JawafEntitySerializer,
 )
+from .search_serializers import SearchResponseSerializer
+from .services.search import UnifiedSearchService
 
 logger = logging.getLogger(__name__)
+
+
+class UnifiedSearchQuerySerializer(serializers.Serializer):
+    q = serializers.CharField(required=False, allow_blank=True, default="")
+    type = serializers.ChoiceField(
+        choices=[
+            "all",
+            "case",
+            "entity",
+            "document",
+            "person",
+            "organization",
+            "location",
+        ],
+        required=False,
+        default="all",
+    )
+    status = serializers.ChoiceField(
+        choices=[CaseState.PUBLISHED, CaseState.IN_REVIEW, CaseState.DRAFT],
+        required=False,
+        allow_null=True,
+        default=None,
+    )
+    role = serializers.ChoiceField(
+        choices=RelationshipType.values,
+        required=False,
+        allow_null=True,
+        default=None,
+    )
+    case_type = serializers.ChoiceField(
+        choices=["CORRUPTION"], required=False, allow_null=True, default=None
+    )
+    tags = serializers.CharField(
+        required=False, allow_blank=True, allow_null=True, default=None
+    )
+    sort = serializers.ChoiceField(
+        choices=["relevance", "newest", "oldest", "title"],
+        required=False,
+        default="relevance",
+    )
+    page = serializers.IntegerField(required=False, min_value=1, default=1)
+    page_size = serializers.IntegerField(required=False, min_value=1, default=10)
+
+
+@extend_schema(
+    summary="Search the accountability archive",
+    description="""
+    Search visible accountability cases, entities, and evidence documents in one
+    deterministic relevance-ranked result list. Anonymous case search exposes
+    published records only. Entity types are derived locally from NES IDs; this
+    endpoint does not call external services.
+    """,
+    parameters=[
+        OpenApiParameter("q", OpenApiTypes.STR, OpenApiParameter.QUERY, required=False),
+        OpenApiParameter(
+            "type",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            enum=[
+                "all",
+                "case",
+                "entity",
+                "document",
+                "person",
+                "organization",
+                "location",
+            ],
+        ),
+        OpenApiParameter(
+            "status",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            enum=["PUBLISHED", "IN_REVIEW", "DRAFT"],
+        ),
+        OpenApiParameter(
+            "role",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            enum=RelationshipType.values,
+        ),
+        OpenApiParameter(
+            "case_type",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            enum=["CORRUPTION"],
+        ),
+        OpenApiParameter(
+            "tags", OpenApiTypes.STR, OpenApiParameter.QUERY, required=False
+        ),
+        OpenApiParameter(
+            "sort",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            enum=["relevance", "newest", "oldest", "title"],
+        ),
+        OpenApiParameter(
+            "page", OpenApiTypes.INT, OpenApiParameter.QUERY, required=False
+        ),
+        OpenApiParameter(
+            "page_size", OpenApiTypes.INT, OpenApiParameter.QUERY, required=False
+        ),
+    ],
+    responses={200: SearchResponseSerializer},
+    tags=["search"],
+)
+class UnifiedSearchView(APIView):
+    """Expose backend-owned mixed archive discovery."""
+
+    def get(self, request):
+        serializer = UnifiedSearchQuerySerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        response = UnifiedSearchService().search(
+            request=request, **serializer.validated_data
+        )
+        return Response(response)
 
 
 @extend_schema_view(
