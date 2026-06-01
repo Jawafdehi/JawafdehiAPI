@@ -106,7 +106,7 @@ class TestOpenAPIDocumentation:
         assert set(parameter_names) == {
             "q",
             "type",
-            "status",
+            "entity_type",
             "role",
             "case_type",
             "tags",
