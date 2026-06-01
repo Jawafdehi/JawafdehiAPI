@@ -116,7 +116,6 @@ def test_search_returns_one_mixed_normalized_result_list(archive_records):
     [
         ({"type": "case"}, {"case"}),
         ({"type": "entity"}, {"entity"}),
-        ({"type": "person"}, {"entity"}),
         ({"type": "document"}, {"document"}),
         ({"role": "accused"}, {"case", "entity", "document"}),
         ({"case_type": "CORRUPTION"}, {"case", "entity", "document"}),
@@ -131,6 +130,56 @@ def test_search_supports_type_and_relationship_filters(
     assert {result["result_type"] for result in response.data["results"]} == (
         expected_types
     )
+
+
+@pytest.mark.django_db
+def test_search_supports_repeatable_refinement_filters(archive_records):
+    response = APIClient().get(
+        "/api/search/",
+        [
+            ("entity_type", "person"),
+            ("entity_type", "organization"),
+            ("role", "accused"),
+            ("role", "related"),
+            ("case_type", "CORRUPTION"),
+            ("tags", "procurement"),
+        ],
+    )
+
+    assert response.status_code == 200
+    assert {result["result_type"] for result in response.data["results"]} == {
+        "case",
+        "entity",
+        "document",
+    }
+    entity_ids = {
+        result["id"]
+        for result in response.data["results"]
+        if result["result_type"] == "entity"
+    }
+    assert entity_ids == {
+        archive_records["person"].id,
+        archive_records["organization"].id,
+    }
+
+
+@pytest.mark.django_db
+def test_entity_type_refines_mixed_results(archive_records):
+    response = APIClient().get("/api/search/", {"entity_type": "organization"})
+
+    assert response.status_code == 200
+    assert {result["result_type"] for result in response.data["results"]} == {
+        "case",
+        "entity",
+    }
+    entity_results = [
+        result
+        for result in response.data["results"]
+        if result["result_type"] == "entity"
+    ]
+    assert [result["id"] for result in entity_results] == [
+        archive_records["organization"].id
+    ]
 
 
 @pytest.mark.django_db
@@ -184,10 +233,7 @@ def test_public_search_does_not_expose_in_review_only_entities(archive_records):
     response = APIClient().get("/api/search/", {"q": "In-review source"})
 
     assert response.status_code == 200
-    assert [result["result_type"] for result in response.data["results"]] == [
-        "document"
-    ]
-    assert response.data["results"][0]["related_entities"] == []
+    assert response.data["results"] == []
 
 
 @pytest.mark.django_db
@@ -197,15 +243,13 @@ def test_facets_are_calculated_before_pagination(archive_records):
     assert response.status_code == 200
     assert response.data["count"] == 5
     assert len(response.data["results"]) == 2
-    type_facets = {
-        item["name"]: item["count"] for item in response.data["facets"]["type"]
+    entity_type_facets = {
+        item["name"]: item["count"] for item in response.data["facets"]["entity_type"]
     }
-    assert type_facets == {
-        "case": 1,
+    assert entity_type_facets == {
         "person": 1,
         "organization": 1,
         "location": 1,
-        "document": 1,
         "unknown": 0,
     }
     role_facets = {
@@ -214,6 +258,9 @@ def test_facets_are_calculated_before_pagination(archive_records):
     assert role_facets["accused"] == 1
     assert role_facets["related"] == 1
     assert role_facets["location"] == 1
+    assert response.data["facets"]["tags"] == [
+        {"name": "procurement", "display_name": "Procurement", "count": 1}
+    ]
 
 
 @pytest.mark.django_db
