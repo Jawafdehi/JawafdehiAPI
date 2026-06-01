@@ -162,6 +162,11 @@ class TestIncrementalSync:
         (nes_repo / "entity/person/alice.json").rename(
             nes_repo / "entity/person/bob.json"
         )
+        write_json(
+            nes_repo,
+            "entity/person/bob.json",
+            entity_payload("bob", full_name="Bob Person"),
+        )
         head = commit_all(nes_repo, "rename")
 
         result = import_incremental(nes_repo)

@@ -175,12 +175,14 @@ def upsert_entity(data: dict) -> NesEntity:
 def concat_name(name_parts: dict | None) -> str | None:
     if not name_parts:
         return None
+    if name_parts.get("full"):
+        return name_parts["full"]
     bits = []
     for key in ("prefix", "given", "middle", "family", "suffix"):
         v = name_parts.get(key)
         if v:
             bits.append(v)
-    return " ".join(bits) or name_parts.get("full") or None
+    return " ".join(bits) or None
 
 
 def create_name(entity: NesEntity, name: dict) -> NesEntityName:
