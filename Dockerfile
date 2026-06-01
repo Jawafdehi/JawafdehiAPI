@@ -24,6 +24,7 @@ COPY config ./config
 COPY cases ./cases
 COPY case_workflows ./case_workflows
 COPY nesq ./nesq
+COPY nesdb ./nesdb
 COPY ngm ./ngm
 COPY caseworker ./caseworker
 COPY static ./static

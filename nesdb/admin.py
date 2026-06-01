@@ -15,8 +15,8 @@ class NesEntityNameInline(admin.TabularInline):
 
 @admin.register(NesEntity)
 class NesEntityAdmin(admin.ModelAdmin):
-    list_display = ("entity_id", "type", "sub_type", "entity_prefix", "created_at")
-    list_filter = ("type",)
+    list_display = ("entity_id", "entity_prefix", "slug", "created_at")
+    list_filter = ("entity_prefix",)
     search_fields = ("entity_id", "slug", "entity_prefix")
     inlines = [NesEntityNameInline]
 
