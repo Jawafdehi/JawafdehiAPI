@@ -7,7 +7,8 @@ from collections import Counter
 from datetime import datetime
 from typing import Any
 
-from django.db.models import Prefetch, Q
+from django.db.models import Prefetch, Q, TextField
+from django.db.models.functions import Cast
 from django.utils import timezone
 
 from cases.models import (
@@ -117,23 +118,24 @@ class UnifiedSearchService:
         page_size = min(page_size, 50)
 
         del request  # Public archive search is intentionally published-only.
-        cases = list(self._visible_cases(entity_type, role, case_type))
-        documents = list(self._visible_documents(cases, query))
-        source_case_ids = self._source_case_ids(cases, documents)
+        visible_cases = list(self._visible_cases(entity_type, role, case_type))
+        cases = (
+            list(self._visible_cases(entity_type, role, case_type, query))
+            if query
+            else visible_cases
+        )
+        documents = list(self._visible_documents(visible_cases, query))
+        source_case_ids = self._source_case_ids(visible_cases, documents)
         case_entity_ids = {
             relationship.entity_id
-            for case in cases
+            for case in visible_cases
             for relationship in case.entity_relationships.all()
         }
+        visible_case_ids = {case.id for case in visible_cases}
         entities = list(
-            JawafEntity.objects.filter(id__in=case_entity_ids).prefetch_related(
-                Prefetch(
-                    "case_relationships",
-                    queryset=CaseEntityRelationship.objects.select_related("case"),
-                )
-            )
+            self._visible_entities(case_entity_ids, visible_case_ids, query)
         )
-        cases_by_id = {case.id: case for case in cases}
+        cases_by_id = {case.id: case for case in visible_cases}
 
         records = []
         for case in cases:
@@ -187,7 +189,7 @@ class UnifiedSearchService:
             "results": results,
         }
 
-    def _visible_cases(self, entity_types, roles, case_types):
+    def _visible_cases(self, entity_types, roles, case_types, query=""):
         queryset = Case.objects.filter(state=CaseState.PUBLISHED)
         if case_types:
             queryset = queryset.filter(case_type__in=case_types)
@@ -204,7 +206,55 @@ class UnifiedSearchService:
                     )
                 )
             queryset = queryset.filter(entity_filter)
+        queryset = self._filter_cases_by_query(queryset, query)
         return queryset.prefetch_related("entity_relationships__entity").distinct()
+
+    def _filter_cases_by_query(self, queryset, query):
+        if not query:
+            return queryset
+
+        queryset = queryset.annotate(
+            tags_text=Cast("tags", output_field=TextField()),
+            key_allegations_text=Cast("key_allegations", output_field=TextField()),
+            court_cases_text=Cast("court_cases", output_field=TextField()),
+        )
+        for term in query.split():
+            queryset = queryset.filter(
+                Q(title__icontains=term)
+                | Q(short_description__icontains=term)
+                | Q(description__icontains=term)
+                | Q(case_id__icontains=term)
+                | Q(tags_text__icontains=term)
+                | Q(key_allegations_text__icontains=term)
+                | Q(court_cases_text__icontains=term)
+                | Q(entity_relationships__entity__display_name__icontains=term)
+                | Q(entity_relationships__entity__nes_id__icontains=term)
+                | Q(entity_relationships__notes__icontains=term)
+                | Q(entity_relationships__relationship_type__icontains=term)
+            )
+        return queryset
+
+    def _visible_entities(self, entity_ids, visible_case_ids, query):
+        relationships = CaseEntityRelationship.objects.filter(
+            case_id__in=visible_case_ids
+        ).select_related("case")
+        queryset = JawafEntity.objects.filter(id__in=entity_ids)
+        for term in query.split():
+            queryset = queryset.filter(
+                Q(display_name__icontains=term)
+                | Q(nes_id__icontains=term)
+                | (
+                    Q(case_relationships__case_id__in=visible_case_ids)
+                    & (
+                        Q(case_relationships__case__title__icontains=term)
+                        | Q(case_relationships__relationship_type__icontains=term)
+                        | Q(case_relationships__notes__icontains=term)
+                    )
+                )
+            )
+        return queryset.prefetch_related(
+            Prefetch("case_relationships", queryset=relationships)
+        ).distinct()
 
     def _visible_documents(self, cases, query):
         source_ids = {

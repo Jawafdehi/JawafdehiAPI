@@ -203,6 +203,17 @@ def test_search_matches_case_and_entity_fields(archive_records, query):
 
 
 @pytest.mark.django_db
+def test_search_matches_document_fields_without_case_text_match(archive_records):
+    response = APIClient().get("/api/search/", {"q": "CIAA filing"})
+
+    assert response.status_code == 200
+    assert [result["result_type"] for result in response.data["results"]] == [
+        "document"
+    ]
+    assert response.data["results"][0]["id"] == archive_records["source"].id
+
+
+@pytest.mark.django_db
 def test_public_search_does_not_expose_draft_cases(archive_records):
     response = APIClient().get("/api/search/", {"q": "Private draft"})
 
