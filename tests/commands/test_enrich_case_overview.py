@@ -502,11 +502,19 @@ class TestConvertSourcesToTexts:
             )
         assert len(texts["press_releases"][0]) == 5000
 
-    def test_truncates_court_orders_to_5k(self):
+    def test_head_tail_for_long_court_orders(self):
+        from cases.management.commands.enrich_case_overview import (
+            _truncate_long_doc,
+            COURT_ORDER_FULL_MAX,
+            COURT_ORDER_HEAD_CHARS,
+            COURT_ORDER_TAIL_CHARS,
+        )
+
         cmd = Command()
         source = _make_source("src-co-001", "CO", SourceType.LEGAL_COURT_ORDER)
-        long_text = "X" * 10000
-        with patch.object(cmd, "_convert_one_source", return_value=long_text):
+        # Shorter than COURT_ORDER_FULL_MAX → full text preserved
+        short_text = "X" * 10000
+        with patch.object(cmd, "_convert_one_source", return_value=short_text):
             texts = cmd._convert_sources_to_texts(
                 {
                     "charge_sheet": None,
@@ -516,7 +524,26 @@ class TestConvertSourcesToTexts:
                     "financial_docs": [],
                 }
             )
-        assert len(texts["court_orders"][0]) == 5000
+        assert len(texts["court_orders"][0]) == 10000  # short → full
+
+        # Longer than COURT_ORDER_FULL_MAX → head+tail
+        long_text = "X" * (COURT_ORDER_FULL_MAX + 5000)
+        with patch.object(cmd, "_convert_one_source", return_value=long_text):
+            texts2 = cmd._convert_sources_to_texts(
+                {
+                    "charge_sheet": None,
+                    "press_releases": [],
+                    "court_orders": [source],
+                    "investigative_reports": [],
+                    "financial_docs": [],
+                }
+            )
+        truncated = texts2["court_orders"][0]
+        expected_len = COURT_ORDER_HEAD_CHARS + COURT_ORDER_TAIL_CHARS + len(
+            "\n\n[... मध्य भाग संक्षिप्त गरिएको — तल फैसला/सजाय खण्ड ...]\n\n"
+        )
+        assert len(truncated) == expected_len  # long → head+tail
+        assert truncated.startswith("X" * COURT_ORDER_HEAD_CHARS)
 
     def test_truncates_investigative_reports_to_3k(self):
         cmd = Command()

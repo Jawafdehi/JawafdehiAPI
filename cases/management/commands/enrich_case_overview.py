@@ -100,6 +100,9 @@ DOWNLOAD_CHUNK_SIZE = 16 * 1024
 DEFAULT_OPENCODE_BASE = "https://opencode.ai/zen/go/v1"
 DEFAULT_LLM_TIMEOUT = 300
 MAX_LLM_RETRIES = 3
+COURT_ORDER_HEAD_CHARS = 12000
+COURT_ORDER_TAIL_CHARS = 6000
+COURT_ORDER_FULL_MAX = 18000  # if ≤ this, send whole doc; else head+tail
 DEVANAGARI_ALPHABETIC_RE = re.compile(r"[ऄ-हक़-ॡ]")
 ALPHABETIC_RE = re.compile(r"[^\W\d_]", re.UNICODE)
 _CLOUD_METADATA_IP = "169.254.169.254"  # NOSONAR — cloud metadata link-local
@@ -906,11 +909,11 @@ class Command(BaseCommand):
             if t and len(t.strip()) >= 50:
                 # Truncate long press releases
                 texts["press_releases"].append(t[:5000])
-        # Court orders
+        # Court orders — head+tail for long docs (verdict usually at end)
         for src in gathered["court_orders"]:
             t = self._convert_one_source(src)
             if t and len(t.strip()) >= 50:
-                texts["court_orders"].append(t[:5000])
+                texts["court_orders"].append(_truncate_long_doc(t))
         # Investigative reports
         for src in gathered["investigative_reports"]:
             t = self._convert_one_source(src)
@@ -1330,8 +1333,8 @@ class Command(BaseCommand):
                 else "None"
             ),
             bigo=bigo,
-            press_release_texts=press_text[:8000],
-            court_order_texts=court_text[:8000],
+            press_release_texts=press_text[:10000],
+            court_order_texts=court_text[:32000],
             other_texts=(
                 f"Supplementary:\n{investigative_text[:3000]}\n\n{financial_text[:4000]}"
                 if (
@@ -1435,7 +1438,7 @@ class Command(BaseCommand):
             fmt_context["court_case_metadata"] = "(No court case metadata found)"
         if discovery.get("court_order_texts"):
             fmt_context["court_order_texts"] = "\n\n---\n\n".join(
-                f"Court Order {i+1}:\n{t}"
+                f"Court Order {i+1}:\n{t[:5000]}"
                 for i, t in enumerate(discovery["court_order_texts"])
             )
         else:
@@ -1636,8 +1639,8 @@ class Command(BaseCommand):
                     exc.code,
                     body[:300],
                 )
-                if attempt < MAX_LLM_RETRIES and exc.code in (429, 503):
-                    wait = 2**attempt
+                if attempt < MAX_LLM_RETRIES and exc.code in (429, 502, 503, 504, 524):
+                    wait = 2 ** (attempt + 1)  # longer backoff for server-side timeouts
                     self.stdout.write(
                         self.style.WARNING(
                             f"  LLM {exc.code} on attempt {attempt}, retrying in {wait}s..."
@@ -2063,4 +2066,23 @@ def _source_url_priority(url):
         int(parsed.netloc.lower() == "ngm-store.jawafdehi.org"),
         int(path.endswith(".pdf")),
         int(path.endswith((".pdf", ".doc", ".docx"))),
+    )
+
+
+def _truncate_long_doc(text: str) -> str:
+    """Head+tail extraction for long court orders.
+
+    Short docs (≤COURT_ORDER_FULL_MAX): return full text.
+    Long docs: return head (identity, charges, narrative) + tail (verdict, sentencing).
+    Middle sections (witness playback, evidence replay) are skipped — the LLM
+    captures those from the head's summary paragraphs.
+    """
+    if len(text) <= COURT_ORDER_FULL_MAX:
+        return text
+    head = text[:COURT_ORDER_HEAD_CHARS]
+    tail = text[-COURT_ORDER_TAIL_CHARS:]
+    return (
+        head
+        + "\n\n[... मध्य भाग संक्षिप्त गरिएको — तल फैसला/सजाय खण्ड ...]\n\n"
+        + tail
     )
