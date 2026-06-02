@@ -41,6 +41,9 @@ from cases.management.commands.enrich_case_overview import (
     _has_ngm_store_url,
     _is_direct_document_url,
     _source_url_priority,
+    detect_corrupted_text,
+    GARBLED_LEGAL_TERMS,
+    EXCESSIVE_SPACED_CHARS_RE,
     _CLOUD_METADATA_IP,
 )
 from cases.models import Case, CaseState, CaseType, DocumentSource, SourceType
@@ -697,11 +700,10 @@ class TestLlmPromptConstruction:
             case_title=case.title,
             court_cases=json.dumps(case.court_cases, ensure_ascii=False),
             bigo="उल्लेख छैन",
-            charge_sheet_text="(No charge sheet available)",
             press_release_texts="PR text",
             court_order_texts="CO text",
-            investigative_report_texts="(No investigative reports available)",
-            financial_doc_texts="(No financial documents available)",
+            other_texts="(No additional documents)",
+            source_quality_notes_section="",
         )
         assert "081-CR-0123" in prompt
 
@@ -717,11 +719,10 @@ class TestLlmPromptConstruction:
             case_title=case.title,
             court_cases="None",
             bigo="रू 123,456",
-            charge_sheet_text="(No charge sheet available)",
             press_release_texts="PR text",
             court_order_texts="CO text",
-            investigative_report_texts="(No investigative reports available)",
-            financial_doc_texts="(No financial documents available)",
+            other_texts="(No additional documents)",
+            source_quality_notes_section="",
         )
         assert "रू 123,456" in prompt
 
@@ -737,11 +738,10 @@ class TestLlmPromptConstruction:
             case_title=case.title,
             court_cases="None",
             bigo="उल्लेख छैन",
-            charge_sheet_text="(No charge sheet available)",
             press_release_texts="PR text",
             court_order_texts="CO text",
-            investigative_report_texts="(No investigative reports available)",
-            financial_doc_texts="(No financial documents available)",
+            other_texts="(No additional documents)",
+            source_quality_notes_section="",
         )
         assert "None" in prompt or "Known court cases" in prompt
 
@@ -757,11 +757,10 @@ class TestLlmPromptConstruction:
             case_title=case.title,
             court_cases="None",
             bigo="उल्लेख छैन",
-            charge_sheet_text="CS text",
             press_release_texts="(No press releases available)",
             court_order_texts="(No court orders available)",
-            investigative_report_texts="(No investigative reports available)",
-            financial_doc_texts="(No financial documents available)",
+            other_texts="(No additional documents)",
+            source_quality_notes_section="",
         )
         assert "उल्लेख छैन" in prompt
 

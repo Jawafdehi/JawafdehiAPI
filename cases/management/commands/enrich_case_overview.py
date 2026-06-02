@@ -9,7 +9,7 @@ Pipeline (per case)
 2. **Gather** — classify evidence ``DocumentSource`` records by ``source_type`` +
    keyword/URL heuristics into: charge_sheet, press_releases, court_orders,
    investigative_reports, financial_docs, media_sources, other_docs.
-   Gate: at least one press_release or court_order (charge sheet optional).
+   Gate: at least one press_release OR one court_order. (No chargesheet available.)
 3. **Convert** — download each source (uploaded file → URL fallback) and convert
    to plain-text via ``markitdown``. Truncate: press_releases/court_orders 5k chars,
    investigative 3k.
@@ -124,30 +124,69 @@ PRESS_RELEASE_KEYWORDS = [
     "विज्ञप्ति",  # विज्ञप्ति
 ]
 
-EXTRACTION_SYSTEM_PROMPT = """You are a Nepali legal document parser specialized in CIAA case documents.
-You extract structured data from charge sheets, press releases, court orders,
-investigative reports, and financial audit documents.
+GARBLED_LEGAL_TERMS = frozenset({
+    "अख्ततमाय",     # should be अख्तियार
+    "मिज्ञमि",       # should be विज्ञप्ति
+    "रविसतिादी",    # should be प्रतिवादी
+    "सञ्",           # common garbled prefix
+    "गयेकोर",        # should be गरेको
+    "गयेफभोख्जभ",    # garbled बमोजिम
+    "रविस",          # garbled prefix for प्रति-
+    "रविधि",         # garbled prefix for प्रविधि
+    "रविदान",        # garbled प्रदान
+    "रविदेश",        # garbled प्रदेश
+})
+
+EXCESSIVE_SPACED_CHARS_RE = re.compile(
+    r"[ऀ-ॿ](?:\s[ऀ-ॿ]){3,}"  # Devanagari chars separated by single spaces (PDF artifact)
+)
+
+EXTRACTION_SYSTEM_PROMPT = """\
+You are a Nepali legal document parser specialized in CIAA corruption cases.
+Extract structured data from NIAA press releases and court orders. No charge
+sheet is available.
+
+CRITICAL — Nepali text may contain character-level corruption from
+machine-extracted PDF/DOC sources (e.g. "अख्ततमाय" instead of "अख्तियार",
+"रविसतिादी" instead of "प्रतिवादी"). Use context, word position, and standard
+Nepali legal terminology to disambiguate. Cross-reference between sources.
+When a press release conflicts with a court order, trust the court order.
+
+Document quality expectations:
+- Court orders (from .doc/.docx) are typically 95%+ clean. Primary source.
+- Press releases (from .pdf) typically 60—70% character accuracy. Secondary.
+- If a word or name is ambiguous due to corruption, check whether it appears
+  elsewhere in clean form. If unresolvable, record the best reconstruction
+  and note the uncertainty in extraction_quality_notes.
 
 Rules:
-1. Extract ONLY information explicitly present in the source texts. Do NOT fabricate.
-2. Preserve exact names, dates, amounts, and legal citations as written.
-3. For fiscal analysis, extract every fiscal year row separately.
-4. If a field is missing in all sources, set it to null or omit it.
-5. Preserve dates in the original Nepali calendar format.
-6. Cross-reference between sources — prefer charge sheet data for facts,
-   use press releases for narrative context, use court orders for verdict details.
+1. Extract ONLY information explicitly present or reasonably reconstructable
+   from corrupted text. Do NOT fabricate, hallucinate, or infer.
+2. Preserve exact names, dates (in Nepali Vikram Samvat), amounts (in NPR),
+   and act/section citations as they appear in clean text.
+3. For fiscal analysis, extract EVERY fiscal year row separately. If only a
+   total is available, create a single row with fiscal_year="समग्र".
+4. If a field is missing or genuinely unrecoverable, set it to null. Never
+   use placeholder text (no [अज्ञात], N/A, TBD, ...).
+5. Dates MUST remain in original Nepali Vikram Samvat (e.g. २०८१/०३/०९).
+   Do NOT convert to Gregorian.
+6. Amounts: extract exact NPR figures as written (e.g. रु. ३८,६७,१७,६४०/-).
+   Keep commas and decimals.
+7. legal_provisions: extract the full act name, section/dafa number, a plain-
+   Nepali description of what the section prohibits, and the penalty if stated.
 
 Source reliability order (when sources conflict):
-- Charge sheet: most reliable for facts, names, fiscal data
-- Court order: reliable for verdict, sentencing
-- Press release: reliable for case summary, amounts
-- Investigative report: reliable for background findings
-- Financial audit: reliable for fiscal analysis
-- News media: context only, verify against official sources
+- Court order: most reliable — facts, accused identity, verdict, sentencing,
+  legal provisions, dates.
+- Press release: reliable for case narrative, allegation summary, amounts,
+  and timeline.
+- When both are available prefer the court order for all factual fields; use
+  the press release to fill narrative gaps only.
 
-Return valid JSON only. No markdown. No explanation."""
+Return valid JSON only. No markdown. No explanation. No code fences."""
 
-EXTRACTION_USER_PROMPT = """Extract structured case data from these CIAA case documents.
+EXTRACTION_USER_PROMPT = """\
+Extract structured case data from these CIAA case documents.
 
 Case context:
 - Case ID: {case_id}
@@ -155,72 +194,166 @@ Case context:
 - Known court cases: {court_cases}
 - Known bigo amount: {bigo}
 
-PRIMARY SOURCE — Charge Sheet:
-{charge_sheet_text}
+IMPORTANT: Some text below may contain character-level corruption from PDF
+extraction (especially the press releases). Use context and standard Nepali
+legal terminology to disambiguate garbled words. The `source_quality` hints
+indicate expected accuracy per source.
 
-SUPPLEMENTARY SOURCES:
+PRESS RELEASES (source quality: ~60-70%):
 {press_release_texts}
+
+COURT ORDERS (source quality: ~95%+):
 {court_order_texts}
-{investigative_report_texts}
-{financial_doc_texts}
 
-Return JSON with these keys:
-- accused_persons: list of {{name, position, institution, employment_dates, role_in_case}}
-- case_metadata: {{case_number, filing_date, court, charge_sheet_number, complaint_numbers, investigation_period}}
-- fiscal_analysis: list of {{fiscal_year, income, expenditure, balance, source_detail}}
-- legal_provisions: list of {{act, section, description, penalty}}
-- key_events: list of {{date, description}}
-- total_disputed_amount: string or null
+OTHER DOCUMENTS:
+{other_texts}
 
-IMPORTANT: Return ONLY a valid JSON object. No markdown fences. No explanation.
-Prefer charge sheet data when multiple sources conflict on facts."""
+{source_quality_notes_section}
 
-FORMATTING_SYSTEM_PROMPT = """You are a Nepali legal writer for JAWAFDEHI, Nepal's public corruption case archive.
-Format structured CIAA case data into a case overview in Nepali Markdown.
+Return JSON with these exact keys:
+
+{{
+  "accused_persons": [
+    {{
+      "name": "string (required — full name as written)",
+      "position": "string|null (e.g. मुख्य सचिव, तत्कालिन कार्यकारी निर्देशक)",
+      "institution": "string|null (e.g. सञ्चार तथा सूचना प्रविधि मन्त्रालय)",
+      "employment_dates": "string|null",
+      "role_in_case": "string|null (e.g. मुख्य प्रतिवादी, सह-प्रतिवादी)"
+    }}
+  ],
+  "case_metadata": {{
+    "case_number": "string|null (e.g. 080-CR-0196)",
+    "filing_date": "string|null (Vikram Samvat: २०८१/०३/०९)",
+    "court": "string|null (e.g. विशेष अदालत, काठमाडौं)",
+    "verdict_date": "string|null (कसूर ठहर मिति)",
+    "sentencing_date": "string|null (सजाय निर्धारण मिति)",
+    "charge_sheet_number": "string|null",
+    "complaint_numbers": ["string"],
+    "investigation_period": "string|null"
+  }},
+  "fiscal_analysis": [
+    {{
+      "fiscal_year": "string (required)",
+      "income": "string|null",
+      "expenditure": "string|null",
+      "balance": "string|null",
+      "source_detail": "string|null"
+    }}
+  ],
+  "legal_provisions": [
+    {{
+      "act": "string (required, e.g. भ्रष्टाचार निवारण ऐन, २०५९)",
+      "section": "string|null (e.g. दफा ३ को उपदफा (१) को देहाय (झ))",
+      "description": "string|null (plain Nepali: what this provision prohibits or requires)",
+      "penalty": "string|null (e.g. कैद र बिगो बमोजिम जरिवाना)"
+    }}
+  ],
+  "key_events": [
+    {{
+      "date": "string (required, Nepali VS)",
+      "description": "string (required)"
+    }}
+  ],
+  "total_disputed_amount": "string|null (exact NPR: रु. ३८,६७,१७,६४०/-)",
+  "extraction_quality_notes": "string|null (note sections where text corruption made extraction unreliable)"
+}}
+
+IMPORTANT:
+- Return ONLY a valid JSON object. No markdown code fences. No explanation.
+- For missing or irrecoverable data use null. Never use placeholder text.
+- Every accused person MUST have name filled (reconstruct from context if
+  partially garbled; mark quality concern in extraction_quality_notes).
+- Fiscal years: prefer individual year rows. If only total: fiscal_year="समग्र".
+- legal_provisions: include the FULL section hierarchy (दफा + उपदफा + देहाय)
+  exactly as written.
+- key_events: chronological order. Include filing, investigation milestones,
+  verdict, sentencing dates if available.
+- extraction_quality_notes: brief summary if any section relied on heavily
+  garbled text (null if all text was clean).
+- Prefer court order data when multiple sources conflict on facts."""
+
+FORMATTING_SYSTEM_PROMPT = """\
+You are a Nepali legal writer for JAWAFDEHI, Nepal's public corruption case
+archive. Format structured CIAA case data into a Markdown case overview
+entirely in Nepali Devanagari.
 
 Rules:
-- Write entirely in Nepali Devanagari; English only for proper nouns/citation numbers.
-- Transcribe and format; do not summarize away specific details.
-- Use Markdown bold headings, NOT HTML.
-- Use Markdown pipe tables for fiscal data.
-- Return valid JSON: {"short_description": "...", "description": "..."}
-- No placeholder text."""
+1. Write entirely in Nepali Devanagari. English ONLY for: proper nouns
+   (company names, brand names), legal citation numbers (080-CR-0196),
+   and technical terms without a standard Nepali equivalent.
+2. Format and transcribe; do NOT summarize away specific details. Every
+   name, date, amount, and legal citation from the data must appear.
+3. Use Markdown bold (**text**) for headings. NEVER use HTML tags.
+4. Use Markdown pipe tables for fiscal data. Include ALL fiscal year rows.
+5. Return ONLY: {{"short_description": "...", "description": "..."}} —
+   valid JSON, no fences, no explanation.
+6. No placeholder text EVER (no [AI-generated], [draft], [TODO], N/A,
+   TBD, ...). If data is genuinely missing for a section, omit that section.
+7. If extraction_quality_notes indicates corrupted text for a section,
+   prefix with a brief inline marker like "(पाठ आंशिक रूपमा अस्पष्ट)"
+   and present what IS known. Do not fabricate to fill gaps.
+8. Legal style: formal Nepali, passive voice appropriate for legal writing,
+   consistent terminology across cases."""
 
-FORMATTING_USER_PROMPT = """Format this extracted case data into a JAWAFDEHI case overview.
+FORMATTING_USER_PROMPT = """\
+Format this extracted case data into a JAWAFDEHI case overview.
 
-CASE DATA:
+EXTRACTED CASE DATA:
 {extracted_json}
 
 COURT CASE METADATA (from NGM judicial database):
 {court_case_metadata}
 
-ADDITIONAL COURT ORDER TEXTS:
+ADDITIONAL COURT ORDER TEXTS (for enrichment/verification):
 {court_order_texts}
 
-Sections:
+OUTPUT STRUCTURE:
 
-**क) अभियोगदावीको सार**
-- Mandatory.
-- 4-6 paragraph narrative from case data.
-- Include accused persons, positions, institutions, alleged scheme, key dates, complaints, investigation period.
-- Include fiscal analysis table with ALL fiscal year rows if present.
-- Include relevant court case references (case numbers, court names, verdict dates) from the court case metadata above.
-- Use Markdown pipe table: | आर्थिक वर्ष | आय विवरण | आय (रु.) | व्यय विवरण | व्यय (रु.) | बचत/अपुग |
+**क) अभियोगदावीको सार** (MANDATORY)
+- 4-6 paragraphs of formal legal Nepali narrative.
+- Paragraph 1: Open with "प्रस्तुत मुद्दामा". State accused names, positions,
+  institutions, core allegation, and total disputed amount.
+- Paragraph 2: Detail the alleged scheme — what was done, how, when, who.
+- Paragraph 3: Investigation findings — key evidence, audit reports, expert
+  opinions mentioned in the source material.
+- Paragraph 4: Fiscal analysis pipe table (ONLY if fiscal_analysis has data):
 
-**ख) आकर्षित कानुनी व्यवस्था**
-- Only if legal_provisions exist.
-- Explain each provision in plain Nepali.
+  | आर्थिक वर्ष | विवरण | आय (रु.) | व्यय/खर्च (रु.) | फरक/बचत |
+  |-------------|--------|----------|-----------------|----------|
 
-**ग) प्रमाणको संक्षेप**
-- Only if key_events or evidence facts exist.
-- List evidence items and significance.
-- Include court case references and verdict details from the court case metadata.
+- Paragraph 5 (if verdict): Court case status, verdict details, and sentencing.
+- Paragraph 6: Total बिगो and confiscation demands if stated.
 
-Rules:
-- short_description: 2-3 sentence plain Nepali summary; no markdown.
-- description: Full Markdown.
-- Preserve all specific details exactly.
-- Return ONLY valid JSON."""
+**ख) आकर्षित कानुनी व्यवस्था** (CONDITIONAL — only if legal_provisions non-empty)
+Format each provision as: "**{Act}, {section}:** {plain-Nepali description of
+what is prohibited}. {Penalty if stated}."
+Number provisions: १., २., ३., ...
+Example: "**भ्रष्टाचार निवारण ऐन, २०५९ को दफा ३ को उपदफा (१) को देहाय (झ):**
+सार्वजनिक सेवकले गैरकानूनी रुपमा सम्पत्ति आर्जन गर्न नहुने।
+सजाय: कैद र बिगो बमोजिम जरिवाना।"
+
+**ग) प्रमाणको संक्षेप** (CONDITIONAL — only if key_events non-empty)
+- Chronological bullet list with Nepali dates.
+- Include: complaint source, investigation initiation, charge sheet filing date,
+  court hearing dates, verdict date, sentencing date.
+- Evidence types checked: documents examined, witness testimony, expert/financial
+  audit reports.
+- Reference court case numbers and verdict details from the court case metadata.
+
+CRITICAL FORMATTING RULES:
+- short_description: Exactly 2-3 sentences. Plain Nepali text only. No Markdown.
+  Must contain: who (accused name + position + institution), what (allegation
+  type), disputed amount (if known), filing date (if known), current status.
+  Minimum 50 characters. Maximum 500 characters.
+  Example: "विशेष अदालतमा नेपाल सरकारको वादमा [accused], [position],
+  [institution] विरुद्ध [allegation] मुद्दा। दर्ता मिति: [date]। हाल चलिरहेको।"
+- description: Full Markdown per section structure above. Minimum 100 characters.
+  Minimum 80% Devanagari script (excluding numbers and English proper nouns).
+- If extraction_quality_notes warns about corrupted sections, add inline
+  "(पाठ आंशिक रूपमा अस्पष्ट)" where data is uncertain.
+- Preserve ALL specific details from extracted data exactly.
+- Return ONLY {{"short_description": "...", "description": "..."}}."""
 
 
 def _validate_host_safety(hostname: str) -> None:
@@ -799,7 +932,97 @@ class Command(BaseCommand):
             return result
         except (CommandError, ValueError, OSError) as exc:
             logger.warning("Source %s: conversion failed — %s", source.source_id, exc)
+        # Fallback: try OLE-based extraction for legacy .doc files
+        try:
+            result = self._convert_source_via_ole(source)
+            if result:
+                logger.info(
+                    "Source %s: converted via OLE fallback — %d chars",
+                    source.source_id,
+                    len(result),
+                )
+                return result
+        except Exception as exc:
+            logger.debug(
+                "Source %s: OLE fallback also failed — %s",
+                source.source_id,
+                exc,
+            )
+        return None
+
+    @staticmethod
+    def _convert_source_via_ole(source):
+        """Extract Nepali text from legacy .doc (OLE) files via binary parsing.
+
+        Used as a fallback when markitdown cannot convert .doc files on
+        platforms without antiword. Works on Composite Document File V2
+        (.doc) format with UTF-16LE encoded Nepali text.
+        """
+        import struct
+
+        try:
+            import olefile
+        except ImportError:
+            logger.debug("olefile not installed — OLE fallback unavailable")
             return None
+        # Read raw bytes from uploaded_file (Django FieldFile)
+        uploaded = None
+        if hasattr(source, "uploaded_file") and source.uploaded_file:
+            uploaded = source.uploaded_file
+        if not uploaded:
+            uploaded_qs = getattr(source, "uploaded_files", None)
+            if uploaded_qs is not None:
+                first = uploaded_qs.first()
+                if first and hasattr(first, "file"):
+                    uploaded = first.file
+        if not uploaded:
+            return None
+        try:
+            uploaded.open("rb")
+            raw = uploaded.read()
+        except Exception:
+            return None
+        finally:
+            try:
+                uploaded.close()
+            except Exception:
+                pass
+        try:
+            ole = olefile.OleFileIO(raw)
+        except Exception:
+            return None
+        if not ole.exists("WordDocument"):
+            ole.close()
+            return None
+        try:
+            wd = ole.openstream("WordDocument").read()
+        except Exception:
+            ole.close()
+            return None
+        ole.close()
+        # Validate magic: must be 0xA5EC for Word binary
+        if len(wd) < 2 or struct.unpack_from("<H", wd, 0)[0] != 0xA5EC:
+            return None
+        # Walk UTF-16LE stream, collecting Devanagari + ASCII chars
+        result = []
+        RELEVANT_CP = frozenset({
+            0x0020, 0x0964, 0x0965, 0x002E, 0x002C, 0x0028, 0x0029,
+            0x002F, 0x003A, 0x003B, 0x002D, 0x000A, 0x000D,
+        })
+        for i in range(0, len(wd) - 1, 2):
+            cu = struct.unpack_from("<H", wd, i)[0]
+            if (
+                0x0900 <= cu <= 0x097F  # Devanagari
+                or 0x0030 <= cu <= 0x0039  # digits
+                or 0x0041 <= cu <= 0x005A  # A-Z
+                or 0x0061 <= cu <= 0x007A  # a-z
+                or cu in RELEVANT_CP
+            ):
+                result.append(chr(cu))
+        text = "".join(result)
+        if len(text.strip()) < 50:
+            return None
+        return text
 
     def _discover_court_cases(self, case, extracted_json):
         """Query NGM judicial DB for court cases matching the case record.
@@ -1092,12 +1315,19 @@ class Command(BaseCommand):
                 else "None"
             ),
             bigo=bigo,
-            charge_sheet_text=source_texts["charge_sheet"][:60000]
-            or "(No charge sheet available)",
             press_release_texts=press_text[:8000],
-            court_order_texts=court_text[:5000],
-            investigative_report_texts=investigative_text[:3000],
-            financial_doc_texts=financial_text[:5000],
+            court_order_texts=court_text[:8000],
+            other_texts=(
+                f"Supplementary:\n{investigative_text[:3000]}\n\n{financial_text[:4000]}"
+                if (source_texts["investigative_reports"] or source_texts["financial_docs"])
+                else "(No additional documents)"
+            ),
+            source_quality_notes_section=(
+                "NOTE: Press release text may contain character-level corruption "
+                "from PDF extraction (~60-70% accuracy). Court order text is "
+                "typically 95%+ clean. Trust court order over press release when "
+                "they conflict on facts, names, dates, or legal citations."
+            ),
         )
 
         self.stdout.write(
@@ -1489,18 +1719,17 @@ class Command(BaseCommand):
                 temp_path = self._download_source_to_path(source, output_dir)
                 if temp_path:
                     if temp_path.suffix.lower() == ".doc":
-                        logger.warning(
-                            "Source %s: legacy .doc file '%s' cannot be converted on this platform (requires antiword). Skipping uploaded file, trying URLs.",
+                        logger.debug(
+                            "Source %s: legacy .doc file '%s' — markitdown may fail, OLE fallback will attempt next.",
                             source.source_id,
                             temp_path.name,
                         )
-                    else:
-                        result = converter.convert_uri(temp_path.resolve().as_uri())
-                        if (
-                            result.text_content
-                            and len(result.text_content.strip()) >= 50
-                        ):
-                            return result.text_content
+                    result = converter.convert_uri(temp_path.resolve().as_uri())
+                    if (
+                        result.text_content
+                        and len(result.text_content.strip()) >= 50
+                    ):
+                        return result.text_content
             except Exception:
                 logger.debug(
                     "Failed to convert uploaded file for %s",
@@ -1509,27 +1738,18 @@ class Command(BaseCommand):
                 )
             # Try URLs
             for url in self._ranked_source_urls(source):
-                # Pre-check: skip URLs to legacy .doc files on Windows
-                if url.lower().endswith(".doc"):
-                    logger.warning(
-                        "Source %s: URL points to legacy .doc file '%s' which cannot be converted on Windows (requires antiword). Skipping URL.",
-                        source.source_id,
-                        url,
-                    )
-                    continue
                 try:
                     temp_path = self._download_url_to_path(
                         url, source.source_id, output_dir
                     )
                     if temp_path:
-                        # Also check the downloaded file extension
                         if temp_path.suffix.lower() == ".doc":
-                            logger.warning(
-                                "Source %s: downloaded file '%s' is .doc format (antiword unavailable). Skipping.",
+                            logger.debug(
+                                "Source %s: downloaded file '%s' is .doc format — "
+                                "markitdown may fail, OLE fallback will attempt next.",
                                 source.source_id,
                                 temp_path.name,
                             )
-                            continue
                         result = converter.convert_uri(temp_path.resolve().as_uri())
                         if (
                             result.text_content
@@ -1658,13 +1878,25 @@ class Command(BaseCommand):
             issues.append("Raw HTML tags found in description")
             valid = False
 
-        # Hard gate: no placeholder text
+        # Hard gate: no placeholder text (expanded set)
         if any(
             token.lower() in description.lower()
-            for token in ["[insert]", "[tbd]", "[todo]"]
+            for token in [
+                "[insert]", "[tbd]", "[todo]", "[draft]",
+                "[अज्ञात]", "[placeholder]", "[n/a]",
+                "[ai-generated]", "[ai generated]",
+                "[add content]", "[to be written]",
+            ]
         ):
             issues.append("Placeholder text found")
             valid = False
+
+        # Soft gate: detect common PDF-corruption garbling patterns
+        # (non-Devanagari chars in suspicious positions, garbled legal terms)
+        garbled_indicators = detect_corrupted_text(description)
+        for indicator in garbled_indicators:
+            issues.append(f"Corrupted text detected: {indicator}")
+            # Soft gate — does not fail validation, only warns
 
         return valid, issues
 
@@ -1760,6 +1992,28 @@ class Command(BaseCommand):
 def _has_charge_sheet_keywords(source) -> bool:
     corpus = (source.title + " " + (source.description or "")).lower()
     return any(kw in corpus for kw in CHARGE_SHEET_KEYWORDS)
+
+
+def detect_corrupted_text(text: str) -> list:
+    """Detect common PDF-corruption patterns in Nepali legal text.
+
+    Returns a list of human-readable issue strings (empty if clean).
+    These are *soft* gates — they do not cause validation failure,
+    only quality warnings.
+    """
+    issues = []
+    # 1. Known garbled legal terms
+    for term in GARBLED_LEGAL_TERMS:
+        if term in text:
+            issues.append(f"garbled term '{term}' (PDF extraction artifact)")
+    # 2. Excessive single-space-separated Devanagari characters
+    #    (PDF often inserts spaces between adjacent Nepali characters)
+    if EXCESSIVE_SPACED_CHARS_RE.search(text):
+        issues.append(
+            "excessive single-space separation between Devanagari characters "
+            "(likely PDF extraction artifact)"
+        )
+    return issues
 
 
 def _has_press_release_keywords(source) -> bool:
