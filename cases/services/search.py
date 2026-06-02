@@ -193,10 +193,18 @@ class UnifiedSearchService:
         queryset = Case.objects.filter(state=CaseState.PUBLISHED)
         if case_types:
             queryset = queryset.filter(case_type__in=case_types)
+        relationship_filter = self._case_relationship_queryset_filter(
+            entity_types, roles
+        )
+        if relationship_filter:
+            queryset = queryset.filter(relationship_filter)
+        queryset = self._filter_cases_by_query(queryset, query)
+        return queryset.prefetch_related("entity_relationships__entity").distinct()
+
+    def _case_relationship_queryset_filter(self, entity_types, roles):
+        relationship_filter = Q()
         if roles:
-            queryset = queryset.filter(
-                entity_relationships__relationship_type__in=roles
-            )
+            relationship_filter &= Q(entity_relationships__relationship_type__in=roles)
         if entity_types and "unknown" not in entity_types:
             entity_filter = Q()
             for entity_type in entity_types:
@@ -205,9 +213,8 @@ class UnifiedSearchService:
                         f"entity:{entity_type}/"
                     )
                 )
-            queryset = queryset.filter(entity_filter)
-        queryset = self._filter_cases_by_query(queryset, query)
-        return queryset.prefetch_related("entity_relationships__entity").distinct()
+            relationship_filter &= entity_filter
+        return relationship_filter
 
     def _filter_cases_by_query(self, queryset, query):
         if not query:
@@ -292,16 +299,18 @@ class UnifiedSearchService:
             return False
         if tags and not any(tag in (case.tags or []) for tag in tags):
             return False
-        if roles and not any(
-            relationship.relationship_type in roles for relationship in relationships
-        ):
-            return False
-        if entity_types and not any(
-            extract_entity_type(relationship.entity.nes_id) in entity_types
+        if any((roles, entity_types)) and not any(
+            self._relationship_passes_filters(relationship, entity_types, roles)
             for relationship in relationships
         ):
             return False
         return True
+
+    def _relationship_passes_filters(self, relationship, entity_types, roles):
+        return (not roles or relationship.relationship_type in roles) and (
+            not entity_types
+            or extract_entity_type(relationship.entity.nes_id) in entity_types
+        )
 
     def _entity_passes_filters(
         self, entity, cases_by_id, entity_types, roles, case_types, tags
@@ -340,19 +349,16 @@ class UnifiedSearchService:
         ):
             return False
         related_entities = self._visible_document_entities(source, visible_entity_ids)
-        if entity_types and not any(
-            extract_entity_type(entity.nes_id) in entity_types
-            for entity in related_entities
+        if not any((entity_types, roles)):
+            return True
+        related_entity_ids = {entity.id for entity in related_entities}
+        if not any(
+            relationship.entity_id in related_entity_ids
+            and self._relationship_passes_filters(relationship, entity_types, roles)
+            for case in related_cases
+            for relationship in case.entity_relationships.all()
         ):
             return False
-        if roles:
-            related_entity_ids = {entity.id for entity in related_entities}
-            return any(
-                relationship.relationship_type in roles
-                and relationship.entity_id in related_entity_ids
-                for case in related_cases
-                for relationship in case.entity_relationships.all()
-            )
         return True
 
     def _case_record(self, case, query):

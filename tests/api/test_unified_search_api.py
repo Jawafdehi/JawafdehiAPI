@@ -165,6 +165,19 @@ def test_search_supports_repeatable_refinement_filters(archive_records):
 
 
 @pytest.mark.django_db
+def test_role_and_entity_type_filters_match_same_relationship(archive_records):
+    archive_records["source"].related_entities.add(archive_records["organization"])
+
+    response = APIClient().get(
+        "/api/search/", {"role": "accused", "entity_type": "organization"}
+    )
+
+    assert response.status_code == 200
+    assert response.data["results"] == []
+    assert response.data["count"] == 0
+
+
+@pytest.mark.django_db
 def test_entity_type_refines_mixed_results(archive_records):
     response = APIClient().get("/api/search/", {"entity_type": "organization"})
 

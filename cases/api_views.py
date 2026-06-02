@@ -42,6 +42,7 @@ from .models import (
     Case,
     CaseEntityRelationship,
     CaseState,
+    CaseType,
     DocumentSource,
     JawafEntity,
     RelationshipType,
@@ -85,7 +86,7 @@ class UnifiedSearchQuerySerializer(serializers.Serializer):
         default=list,
     )
     case_type = serializers.ListField(
-        child=serializers.ChoiceField(choices=["CORRUPTION"]),
+        child=serializers.ChoiceField(choices=CaseType.values),
         required=False,
         default=list,
     )
@@ -142,7 +143,7 @@ class UnifiedSearchQuerySerializer(serializers.Serializer):
             OpenApiTypes.STR,
             OpenApiParameter.QUERY,
             required=False,
-            enum=["CORRUPTION"],
+            enum=CaseType.values,
             many=True,
         ),
         OpenApiParameter(
