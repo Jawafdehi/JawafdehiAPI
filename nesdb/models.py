@@ -128,12 +128,15 @@ class NesEntityName(models.Model):
         null=True,
         blank=True,
         help_text="Concatenated English/romanised name.",
+        # null=True intentional — conditional indexes (nesdb_name_en_idx) exclude
+        # NULLs so sparse language columns don't bloat the index with empty rows.
     )
     name_ne = models.CharField(
         max_length=500,
         null=True,
         blank=True,
         help_text="Concatenated Nepali (Devanagari) name.",
+        # null=True intentional — same rationale as name_en above.
     )
 
     class Meta:

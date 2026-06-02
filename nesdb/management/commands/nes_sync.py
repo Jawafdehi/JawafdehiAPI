@@ -13,9 +13,10 @@ def _is_inside_git_worktree(path: Path) -> bool:
             ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
             check=True,
             capture_output=True,
+            timeout=30,
         )
         return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
 
@@ -30,11 +31,12 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        repo_path = Path(options["path"] or settings.NES_DB_PATH or "")
-        if not repo_path:
+        configured_path = options["path"] or settings.NES_DB_PATH
+        if not configured_path:
             raise CommandError(
                 "NES_DB_PATH is not configured. Pass --path or set NES_DB_PATH."
             )
+        repo_path = Path(configured_path)
         if not repo_path.exists():
             raise CommandError(f"NES database path does not exist: {repo_path}")
         if not _is_inside_git_worktree(repo_path):
