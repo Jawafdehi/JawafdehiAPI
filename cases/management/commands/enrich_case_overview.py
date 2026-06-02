@@ -124,18 +124,20 @@ PRESS_RELEASE_KEYWORDS = [
     "विज्ञप्ति",  # विज्ञप्ति
 ]
 
-GARBLED_LEGAL_TERMS = frozenset({
-    "अख्ततमाय",     # should be अख्तियार
-    "मिज्ञमि",       # should be विज्ञप्ति
-    "रविसतिादी",    # should be प्रतिवादी
-    "सञ्",           # common garbled prefix
-    "गयेकोर",        # should be गरेको
-    "गयेफभोख्जभ",    # garbled बमोजिम
-    "रविस",          # garbled prefix for प्रति-
-    "रविधि",         # garbled prefix for प्रविधि
-    "रविदान",        # garbled प्रदान
-    "रविदेश",        # garbled प्रदेश
-})
+GARBLED_LEGAL_TERMS = frozenset(
+    {
+        "अख्ततमाय",  # should be अख्तियार
+        "मिज्ञमि",  # should be विज्ञप्ति
+        "रविसतिादी",  # should be प्रतिवादी
+        "सञ्",  # common garbled prefix
+        "गयेकोर",  # should be गरेको
+        "गयेफभोख्जभ",  # garbled बमोजिम
+        "रविस",  # garbled prefix for प्रति-
+        "रविधि",  # garbled prefix for प्रविधि
+        "रविदान",  # garbled प्रदान
+        "रविदेश",  # garbled प्रदेश
+    }
+)
 
 EXCESSIVE_SPACED_CHARS_RE = re.compile(
     r"[ऀ-ॿ](?:\s[ऀ-ॿ]){3,}"  # Devanagari chars separated by single spaces (PDF artifact)
@@ -1005,10 +1007,23 @@ class Command(BaseCommand):
             return None
         # Walk UTF-16LE stream, collecting Devanagari + ASCII chars
         result = []
-        RELEVANT_CP = frozenset({
-            0x0020, 0x0964, 0x0965, 0x002E, 0x002C, 0x0028, 0x0029,
-            0x002F, 0x003A, 0x003B, 0x002D, 0x000A, 0x000D,
-        })
+        RELEVANT_CP = frozenset(
+            {
+                0x0020,
+                0x0964,
+                0x0965,
+                0x002E,
+                0x002C,
+                0x0028,
+                0x0029,
+                0x002F,
+                0x003A,
+                0x003B,
+                0x002D,
+                0x000A,
+                0x000D,
+            }
+        )
         for i in range(0, len(wd) - 1, 2):
             cu = struct.unpack_from("<H", wd, i)[0]
             if (
@@ -1319,7 +1334,10 @@ class Command(BaseCommand):
             court_order_texts=court_text[:8000],
             other_texts=(
                 f"Supplementary:\n{investigative_text[:3000]}\n\n{financial_text[:4000]}"
-                if (source_texts["investigative_reports"] or source_texts["financial_docs"])
+                if (
+                    source_texts["investigative_reports"]
+                    or source_texts["financial_docs"]
+                )
                 else "(No additional documents)"
             ),
             source_quality_notes_section=(
@@ -1725,10 +1743,7 @@ class Command(BaseCommand):
                             temp_path.name,
                         )
                     result = converter.convert_uri(temp_path.resolve().as_uri())
-                    if (
-                        result.text_content
-                        and len(result.text_content.strip()) >= 50
-                    ):
+                    if result.text_content and len(result.text_content.strip()) >= 50:
                         return result.text_content
             except Exception:
                 logger.debug(
@@ -1882,10 +1897,17 @@ class Command(BaseCommand):
         if any(
             token.lower() in description.lower()
             for token in [
-                "[insert]", "[tbd]", "[todo]", "[draft]",
-                "[अज्ञात]", "[placeholder]", "[n/a]",
-                "[ai-generated]", "[ai generated]",
-                "[add content]", "[to be written]",
+                "[insert]",
+                "[tbd]",
+                "[todo]",
+                "[draft]",
+                "[अज्ञात]",
+                "[placeholder]",
+                "[n/a]",
+                "[ai-generated]",
+                "[ai generated]",
+                "[add content]",
+                "[to be written]",
             ]
         ):
             issues.append("Placeholder text found")

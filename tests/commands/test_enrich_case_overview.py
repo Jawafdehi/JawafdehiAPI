@@ -41,9 +41,6 @@ from cases.management.commands.enrich_case_overview import (
     _has_ngm_store_url,
     _is_direct_document_url,
     _source_url_priority,
-    detect_corrupted_text,
-    GARBLED_LEGAL_TERMS,
-    EXCESSIVE_SPACED_CHARS_RE,
     _CLOUD_METADATA_IP,
 )
 from cases.models import Case, CaseState, CaseType, DocumentSource, SourceType
