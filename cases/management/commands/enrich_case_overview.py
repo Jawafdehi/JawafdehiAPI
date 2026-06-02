@@ -2082,7 +2082,5 @@ def _truncate_long_doc(text: str) -> str:
     head = text[:COURT_ORDER_HEAD_CHARS]
     tail = text[-COURT_ORDER_TAIL_CHARS:]
     return (
-        head
-        + "\n\n[... मध्य भाग संक्षिप्त गरिएको — तल फैसला/सजाय खण्ड ...]\n\n"
-        + tail
+        head + "\n\n[... मध्य भाग संक्षिप्त गरिएको — तल फैसला/सजाय खण्ड ...]\n\n" + tail
     )

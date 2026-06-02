@@ -504,7 +504,6 @@ class TestConvertSourcesToTexts:
 
     def test_head_tail_for_long_court_orders(self):
         from cases.management.commands.enrich_case_overview import (
-            _truncate_long_doc,
             COURT_ORDER_FULL_MAX,
             COURT_ORDER_HEAD_CHARS,
             COURT_ORDER_TAIL_CHARS,
@@ -539,8 +538,10 @@ class TestConvertSourcesToTexts:
                 }
             )
         truncated = texts2["court_orders"][0]
-        expected_len = COURT_ORDER_HEAD_CHARS + COURT_ORDER_TAIL_CHARS + len(
-            "\n\n[... मध्य भाग संक्षिप्त गरिएको — तल फैसला/सजाय खण्ड ...]\n\n"
+        expected_len = (
+            COURT_ORDER_HEAD_CHARS
+            + COURT_ORDER_TAIL_CHARS
+            + len("\n\n[... मध्य भाग संक्षिप्त गरिएको — तल फैसला/सजाय खण्ड ...]\n\n")
         )
         assert len(truncated) == expected_len  # long → head+tail
         assert truncated.startswith("X" * COURT_ORDER_HEAD_CHARS)
