@@ -328,8 +328,8 @@ OUTPUT STRUCTURE:
 - Paragraph 6: Total बिगो and confiscation demands if stated.
 
 **ख) आकर्षित कानुनी व्यवस्था** (CONDITIONAL — only if legal_provisions non-empty)
-Format each provision as: "**{Act}, {section}:** {plain-Nepali description of
-what is prohibited}. {Penalty if stated}."
+Format each provision as: "**{{Act}}, {{section}}:** {{plain-Nepali description of
+what is prohibited}}. {{Penalty if stated}}."
 Number provisions: १., २., ३., ...
 Example: "**भ्रष्टाचार निवारण ऐन, २०५९ को दफा ३ को उपदफा (१) को देहाय (झ):**
 सार्वजनिक सेवकले गैरकानूनी रुपमा सम्पत्ति आर्जन गर्न नहुने।
