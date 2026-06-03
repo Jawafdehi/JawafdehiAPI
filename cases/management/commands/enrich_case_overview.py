@@ -1295,14 +1295,18 @@ class Command(BaseCommand):
             else "(No press releases available)"
         )
 
-        court_text = (
-            "\n\n---\n\n".join(
-                f"Court Order {i+1}:\n{t}"
-                for i, t in enumerate(source_texts["court_orders"])
-            )
-            if source_texts["court_orders"]
-            else "(No court orders available)"
-        )
+        truncated_orders = [t[:5000] for t in source_texts["court_orders"]]
+        court_joined = ""
+        court_total = 0
+        for i, t in enumerate(truncated_orders):
+            header = f"Court Order {i+1}:\n"
+            sep = "\n\n---\n\n" if court_joined else ""
+            chunk = sep + header + t
+            if court_total + len(chunk) > 15000:
+                break
+            court_joined += chunk
+            court_total += len(chunk)
+        court_text = court_joined if court_joined else "(No court orders available)"
 
         investigative_text = (
             "\n\n---\n\n".join(
@@ -1437,10 +1441,18 @@ class Command(BaseCommand):
         else:
             fmt_context["court_case_metadata"] = "(No court case metadata found)"
         if discovery.get("court_order_texts"):
-            fmt_context["court_order_texts"] = "\n\n---\n\n".join(
-                f"Court Order {i+1}:\n{t[:5000]}"
-                for i, t in enumerate(discovery["court_order_texts"])
-            )
+            truncated = [t[:5000] for t in discovery["court_order_texts"]]
+            joined = ""
+            total = 0
+            for i, t in enumerate(truncated):
+                header = f"Court Order {i+1}:\n"
+                sep = "\n\n---\n\n" if joined else ""
+                chunk = sep + header + t
+                if total + len(chunk) > 15000:
+                    break
+                joined += chunk
+                total += len(chunk)
+            fmt_context["court_order_texts"] = joined if joined else "(Truncated — no court order texts within aggregate cap)"
         else:
             fmt_context["court_order_texts"] = "(No additional court order texts)"
 
@@ -1569,6 +1581,7 @@ class Command(BaseCommand):
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.1,
+            "stream": True,
         }
         data = json.dumps(body).encode("utf-8")
         logger.debug(
