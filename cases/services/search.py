@@ -137,35 +137,19 @@ class UnifiedSearchService:
         )
         cases_by_id = {case.id: case for case in visible_cases}
 
-        records = []
-        for case in cases:
-            if self._case_passes_filters(case, entity_type, role, case_type, tags):
-                record = self._case_record(case, query)
-                if record:
-                    records.append(record)
-        for entity in entities:
-            if self._entity_passes_filters(
-                entity, cases_by_id, entity_type, role, case_type, tags
-            ):
-                record = self._entity_record(entity, query, cases_by_id)
-                if record:
-                    records.append(record)
-        for source in documents:
-            if self._document_passes_filters(
-                source,
-                cases_by_id,
-                source_case_ids,
-                case_entity_ids,
-                entity_type,
-                role,
-                case_type,
-                tags,
-            ):
-                record = self._document_record(
-                    source, query, cases_by_id, source_case_ids, case_entity_ids
-                )
-                if record:
-                    records.append(record)
+        records = self._build_records(
+            cases,
+            entities,
+            documents,
+            query,
+            entity_type,
+            role,
+            case_type,
+            tags,
+            cases_by_id,
+            source_case_ids,
+            case_entity_ids,
+        )
         counts = self._counts(records)
         facets = self._facets(records, cases_by_id)
         selected_records = [
@@ -292,6 +276,51 @@ class UnifiedSearchService:
                 if isinstance(item, dict) and item.get("source_id") in mapping:
                     mapping[item["source_id"]].add(case.id)
         return mapping
+
+    def _build_records(
+        self,
+        cases,
+        entities,
+        documents,
+        query,
+        entity_type,
+        role,
+        case_type,
+        tags,
+        cases_by_id,
+        source_case_ids,
+        case_entity_ids,
+    ):
+        records = []
+        for case in cases:
+            if self._case_passes_filters(case, entity_type, role, case_type, tags):
+                record = self._case_record(case, query)
+                if record:
+                    records.append(record)
+        for entity in entities:
+            if self._entity_passes_filters(
+                entity, cases_by_id, entity_type, role, case_type, tags
+            ):
+                record = self._entity_record(entity, query, cases_by_id)
+                if record:
+                    records.append(record)
+        for source in documents:
+            if self._document_passes_filters(
+                source,
+                cases_by_id,
+                source_case_ids,
+                case_entity_ids,
+                entity_type,
+                role,
+                case_type,
+                tags,
+            ):
+                record = self._document_record(
+                    source, query, cases_by_id, source_case_ids, case_entity_ids
+                )
+                if record:
+                    records.append(record)
+        return records
 
     def _case_passes_filters(self, case, entity_types, roles, case_types, tags):
         relationships = list(case.entity_relationships.all())
