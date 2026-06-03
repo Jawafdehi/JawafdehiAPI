@@ -1,11 +1,12 @@
 """Tests for map_press_release_files management command."""
 
-import pytest
-from unittest.mock import patch, MagicMock
-from django.core.management import call_command
 from io import StringIO
+from unittest.mock import MagicMock, patch
 
-from cases.models import Case, DocumentSource, CaseState, CaseType, SourceType
+import pytest
+from django.core.management import call_command
+
+from cases.models import Case, CaseState, CaseType, DocumentSource, SourceType
 
 
 @pytest.mark.django_db

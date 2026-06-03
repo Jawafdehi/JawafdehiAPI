@@ -1,6 +1,7 @@
 import logging
-import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import requests
 from django.core.cache import cache
 
 logger = logging.getLogger(__name__)

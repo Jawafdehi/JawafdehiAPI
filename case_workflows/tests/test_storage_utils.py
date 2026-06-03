@@ -10,7 +10,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
 from case_workflows.storage_utils import (
     _EXCLUDED_DIRS,
     _EXCLUDED_FILENAMES,

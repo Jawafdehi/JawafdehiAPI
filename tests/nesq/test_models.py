@@ -21,7 +21,6 @@ See .kiro/specs/nes-queue-system/tasks.md §10.1 for requirements.
 import time
 
 import pytest
-
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 from django.utils import timezone

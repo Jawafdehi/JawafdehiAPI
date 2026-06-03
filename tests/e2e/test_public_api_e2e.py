@@ -7,7 +7,6 @@ Validates: Requirements 6.1, 6.2, 6.3, 8.1, 8.3
 """
 
 import pytest
-
 from rest_framework.test import APIClient
 
 from cases.models import CaseState, CaseType

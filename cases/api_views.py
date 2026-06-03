@@ -6,11 +6,13 @@ See: .kiro/specs/accountability-platform-core/design.md
 
 import logging
 import re
-import jsonpatch
 from xml.etree.ElementTree import Element, SubElement, tostring
+
+import jsonpatch
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db import connection, transaction
+from django.db.models import Q
 from django.http import HttpResponse
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
@@ -21,7 +23,6 @@ from drf_spectacular.utils import (
     extend_schema,
     extend_schema_view,
 )
-from django.db.models import Q
 from rest_framework import filters, mixins, status, viewsets
 from rest_framework.authentication import SessionAuthentication, TokenAuthentication
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
@@ -88,14 +89,14 @@ logger = logging.getLogger(__name__)
           they are explicitly assigned to as contributors.
 
         Results are ordered by creation date (newest first).
-        
+
         **Filtering:**
         - `case_type`: Filter by case type (CORRUPTION)
         - `tags`: Filter cases containing a specific tag
-        
+
         **Search:**
         - `search`: Full-text search across title, description, and key allegations
-        
+
         **Pagination:**
         - Results are paginated with 20 items per page
         - Use `page` parameter to navigate pages
@@ -137,17 +138,17 @@ logger = logging.getLogger(__name__)
         summary="Retrieve a case",
         description="""
         Retrieve detailed information about a specific case.
-        
+
         The endpoint accepts either a numeric ID (deprecated) or a slug (preferred format: kebab-case).
-        
+
         This endpoint includes complete case data (title, description, allegations,
         evidence, timeline) and any internal notes.
-        
+
         **Access control:**
         - PUBLISHED and IN_REVIEW cases: accessible to everyone
         - DRAFT cases: require authorization (admins, moderators, or assigned contributors)
         - CLOSED cases: not accessible via public API
-        
+
         Returns 404 if the case doesn't exist or if the user is not authorized to view it.
         """,
         parameters=[
@@ -563,10 +564,10 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
         summary="List document sources",
         description="""
         Retrieve a paginated list of document sources.
-        
+
         Only sources associated with published or in-review cases are accessible.
         Soft-deleted sources (is_deleted=True) are excluded.
-        
+
         **Pagination:**
         - Results are paginated with 20 items per page
         - Use `page` parameter to navigate pages
@@ -586,10 +587,10 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
         summary="Retrieve a document source",
         description="""
         Retrieve detailed information about a specific document source.
-        
-        The endpoint accepts either the database id (numeric) or the source_id 
+
+        The endpoint accepts either the database id (numeric) or the source_id
         (e.g., 'source:20240115:abc123').
-        
+
         Only sources associated with at least one published or in-review case are accessible.
         """,
         tags=["sources"],
@@ -598,7 +599,7 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
         summary="Create a new document source",
         description="""
         Create a new document source with an optional file upload.
-        
+
         Requires authentication. Accepts multipart form data.
         """,
         tags=["sources"],
@@ -707,15 +708,15 @@ class DocumentSourceViewSet(
         summary="List all entities",
         description="""
         Retrieve a paginated list of all entities in the system.
-        
+
         Entities can have either:
         - `nes_id`: Reference to Nepal Entity Service
         - `display_name`: Custom entity name
         - Both fields (display_name is optional when nes_id is present)
-        
+
         **Search:**
         - `search`: Search across nes_id and display_name
-        
+
         **Pagination:**
         - Results are paginated with 50 items per page
         - Use `page` parameter to navigate pages
@@ -742,7 +743,7 @@ class DocumentSourceViewSet(
         summary="Retrieve an entity",
         description="""
         Retrieve detailed information about a specific entity.
-        
+
         Returns entity with id, nes_id, and display_name.
         """,
         tags=["entities"],
@@ -751,7 +752,7 @@ class DocumentSourceViewSet(
         summary="Create an entity",
         description="""
         Create a new JawafEntity.
-        
+
         Requires authentication.
         """,
         tags=["entities"],
@@ -853,14 +854,14 @@ class JawafEntityViewSet(
     summary="Get case statistics",
     description="""
     Retrieve aggregate statistics about cases in the system.
-    
+
     Returns:
     - `published_cases`: Number of cases with state PUBLISHED
     - `cases_under_investigation`: Number of cases with state DRAFT or IN_REVIEW
     - `cases_closed`: Number of cases with state CLOSED
     - `entities_tracked`: Number of unique entities involved in published cases
     - `last_updated`: Timestamp when statistics were last calculated
-    
+
     **Caching:**
     - Statistics are cached for 5 minutes to optimize performance
     - The cache is automatically refreshed after expiration

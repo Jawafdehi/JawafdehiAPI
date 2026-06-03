@@ -5,7 +5,6 @@ import re
 import sys
 
 from django.core.management.base import BaseCommand
-
 from markdownify import markdownify as md
 
 from cases.models import Case

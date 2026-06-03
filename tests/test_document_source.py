@@ -7,19 +7,17 @@ Validates: Requirements 4.2
 """
 
 import pytest
-
 from django.core.exceptions import ValidationError
 from hypothesis import given, settings
 
-from cases.models import DocumentSource
-from cases.models import SourceType
+from cases.models import DocumentSource, SourceType
 from tests.conftest import create_document_source_with_entities
 from tests.strategies import (
-    valid_source_data,
-    source_data_missing_title,
     source_data_missing_description,
-    source_data_with_empty_title,
+    source_data_missing_title,
     source_data_with_empty_description,
+    source_data_with_empty_title,
+    valid_source_data,
 )
 
 # ============================================================================

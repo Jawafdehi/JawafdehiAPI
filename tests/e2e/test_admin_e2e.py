@@ -7,7 +7,6 @@ Validates: Requirements 1.1, 1.2, 1.3, 1.4, 2.1, 2.2, 2.3, 2.4, 3.1, 3.2, 3.3, 5
 """
 
 import pytest
-
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.test import Client
@@ -369,6 +368,7 @@ class TestDjangoAdminWorkflows:
 
         # Step 5: Contributor attempts to publish (should fail)
         from django.test import RequestFactory
+
         from cases.admin import CaseAdminForm
 
         factory = RequestFactory()
@@ -625,8 +625,9 @@ class TestDjangoAdminWorkflows:
         )
 
         # Step 2: Verify moderator1 cannot see moderator2 in user queryset
-        from cases.admin import CustomUserAdmin
         from django.test import RequestFactory
+
+        from cases.admin import CustomUserAdmin
 
         user_admin = CustomUserAdmin(User, None)
         factory = RequestFactory()
@@ -761,6 +762,7 @@ class TestDjangoAdminWorkflows:
         case.save()
 
         from django.test import RequestFactory
+
         from cases.admin import CaseAdminForm
 
         factory = RequestFactory()
@@ -1016,6 +1018,7 @@ class TestDjangoAdminWorkflows:
         Validates: Requirements 1.1
         """
         from django.test import RequestFactory
+
         from cases.admin import CaseAdminForm
 
         factory = RequestFactory()

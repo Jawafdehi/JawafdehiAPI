@@ -22,9 +22,7 @@ from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from asgiref.sync import sync_to_async
-
 from django.utils import timezone
 
 from nesq.models import NESQueueItem, QueueAction, QueueStatus

@@ -12,6 +12,9 @@ See .kiro/specs/nes-queue-system/ for full specification.
 
 from typing import Any, Dict, List
 
+from nes.core.identifiers.validators import validate_entity_id
+from nes.core.models.base import Name
+from nes.core.utils.entity_utils import entity_from_dict
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -20,10 +23,6 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-
-from nes.core.identifiers.validators import validate_entity_id
-from nes.core.models.base import Name
-from nes.core.utils.entity_utils import entity_from_dict
 
 UPDATE_ENTITY_BLOCKED_PATH_PREFIXES = frozenset(
     {
@@ -213,7 +212,9 @@ class CreateEntityPayload(BaseModel):
         Note: version_summary and created_at must NOT be in the payload - they
         will be added by the processor.
         """
-        from datetime import datetime, timezone as dt_timezone
+        from datetime import datetime
+        from datetime import timezone as dt_timezone
+
         from nes.core.identifiers import build_entity_id_from_prefix
 
         if "entity_prefix" not in v:

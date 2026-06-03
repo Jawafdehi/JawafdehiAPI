@@ -6,15 +6,14 @@ Validates: Requirements 1.5, 3.1
 """
 
 import pytest
-
 from django.contrib.admin.sites import AdminSite
 
 from cases.admin import CaseAdmin
-from cases.models import Case, CaseType, CaseState
+from cases.models import Case, CaseState, CaseType
 from tests.conftest import (
     create_case_with_entities,
-    create_user_with_role,
     create_mock_request,
+    create_user_with_role,
 )
 
 

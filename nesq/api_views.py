@@ -23,7 +23,6 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from cases.rules.predicates import is_admin_or_moderator
-
 from nesq.models import NESQueueItem, QueueAction, QueueStatus
 from nesq.serializers import NESQueueItemSerializer, NESQueueSubmitSerializer
 from nesq.validators import validate_action_payload

@@ -8,7 +8,6 @@ Validates: Requirements 4.1, 6.1, 6.2, 6.3, 8.1, 8.3
 
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
-
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from rest_framework.test import APIClient
@@ -20,6 +19,8 @@ from tests.conftest import (
 )
 from tests.strategies import (
     complete_case_data_with_timeline as complete_case_data,
+)
+from tests.strategies import (
     valid_source_data,
 )
 

@@ -1,8 +1,8 @@
 # Entity Search Redesign
 
-**Status**: Draft  
-**Created**: 2024-12-04  
-**Author**: System  
+**Status**: Draft
+**Created**: 2024-12-04
+**Author**: System
 **Related**: API_DOCUMENTATION.md, ENTITY_MIGRATION_SUMMARY.md
 
 ## Overview
@@ -13,7 +13,7 @@ This document outlines the redesign of entity search functionality in Jawafdehi 
 
 ### Frontend (Jawafdehi)
 - **Entity Source**: Fetches entities from Nepal Entity Service (NES) API
-- **Filtering**: 
+- **Filtering**:
   - Entity type filter (person, political_party)
   - Server-side search via NES API query parameter
   - Client-side filtering by entity IDs that have cases
@@ -94,14 +94,14 @@ useEffect(() => {
     } else {
       setLoadingMore(true);
     }
-    
+
     try {
       // 1. Fetch JawafEntities from JDS API with pagination
       const response = await fetch(`/api/entities/?page=${pageNum}`);
       const data = await response.json();
       const jawafEntities = data.results || [];
       const hasNext = data.next !== null;
-      
+
       // 2. Enrich with NES data for entities that have nes_id
       // TODO: Replace with batch NES API call when available
       const enrichedEntities = await Promise.all(
@@ -118,7 +118,7 @@ useEffect(() => {
           return { jawafEntity };
         })
       );
-      
+
       // 3. Client-side search filtering
       let filtered = enrichedEntities;
       if (debouncedSearchQuery) {
@@ -136,7 +136,7 @@ useEffect(() => {
           return false;
         });
       }
-      
+
       // Append to existing entities
       setAllEntities(prev => pageNum === 1 ? enrichedEntities : [...prev, ...enrichedEntities]);
       setHasMore(hasNext);
@@ -148,7 +148,7 @@ useEffect(() => {
       setLoadingMore(false);
     }
   };
-  
+
   fetchEntities(page);
 }, [page, t]);
 
@@ -162,14 +162,14 @@ useEffect(() => {
       // ... (same as before)
     });
   }
-  
+
   // 4. Sort alphabetically
   const sorted = [...filtered].sort((a, b) => {
     const nameA = a.jawafEntity.display_name || a.jawafEntity.nes_id || '';
     const nameB = b.jawafEntity.display_name || b.jawafEntity.nes_id || '';
     return nameA.localeCompare(nameB);
   });
-  
+
   setEntities(sorted);
 }, [allEntities, debouncedSearchQuery]);
 ```
@@ -271,15 +271,15 @@ describe('Entity Search', () => {
   it('fetches entities from JDS API', () => {
     // Test API call to /api/entities/
   });
-  
+
   it('filters entities by search query', () => {
     // Test client-side search filtering on display_name and nes_id
   });
-  
+
   it('sorts entities alphabetically', () => {
     // Test alphabetical sorting by display_name or nes_id
   });
-  
+
   it('displays all entities without type filter', () => {
     // Test that all entities are shown regardless of type
   });
@@ -302,12 +302,12 @@ describe('Entity Search', () => {
 
 ## Success Metrics
 
-- **Performance**: 
+- **Performance**:
   - Entity list page load time < 1 second
-- **UX**: 
+- **UX**:
   - Search results appear within 500ms of typing (debounced)
   - Simple, clean interface without unnecessary filters
-- **Simplicity**: 
+- **Simplicity**:
   - Reduced code complexity in entity search component
   - JDS-first approach with NES enrichment
   - Backend handles case association filtering
@@ -322,27 +322,27 @@ Update the `JawafEntityViewSet` to only return entities that appear in published
 class JawafEntityViewSet(viewsets.ReadOnlyModelViewSet):
     """
     Public read-only API for JawafEntities.
-    
+
     Only returns entities that appear in published cases.
     """
-    
+
     serializer_class = JawafEntitySerializer
     filter_backends = [filters.SearchFilter]
     search_fields = ['nes_id', 'display_name']
-    
+
     def get_queryset(self):
         """
         Return only entities that appear in published cases.
-        
-        An entity is included if it appears in alleged_entities or 
+
+        An entity is included if it appears in alleged_entities or
         related_entities of at least one published case.
-        
+
         Note: Location entities are excluded from this list.
         """
         from .models import CaseState
 
         published_cases = Case.objects.filter(state=CaseState.PUBLISHED)
-        
+
         # Get entity IDs from case relationships (alleged and related only)
         entity_ids = set()
         for case in published_cases:
@@ -350,7 +350,7 @@ class JawafEntityViewSet(viewsets.ReadOnlyModelViewSet):
             entity_ids.update(case.alleged_entities.values_list('id', flat=True))
             # Add related entities
             entity_ids.update(case.related_entities.values_list('id', flat=True))
-        
+
         # Return entities that appear in cases
         return JawafEntity.objects.filter(id__in=entity_ids).order_by('-created_at')
 ```
@@ -366,33 +366,33 @@ class JawafEntityViewSet(viewsets.ReadOnlyModelViewSet):
     """
     Public read-only API for JawafEntities with caching.
     """
-    
+
     serializer_class = JawafEntitySerializer
     filter_backends = [filters.SearchFilter]
     search_fields = ['nes_id', 'display_name']
-    
+
     def get_queryset(self):
         """
         Return only entities that appear in published cases.
         Uses simple caching to avoid expensive queryset evaluation.
         """
         from .models import CaseState
-        
+
         # Try to get entity IDs from cache
         entity_ids = cache.get('public_entities_list')
-        
+
         if entity_ids is None:
             # Cache miss - compute entity IDs
             published_cases = Case.objects.filter(state=CaseState.PUBLISHED)
-            
+
             entity_ids = set()
             for case in published_cases:
                 entity_ids.update(case.alleged_entities.values_list('id', flat=True))
                 entity_ids.update(case.related_entities.values_list('id', flat=True))
-            
+
             # Cache for 10 minutes - stale cache is acceptable
             cache.set('public_entities_list', entity_ids, timeout=600)
-        
+
         return JawafEntity.objects.filter(id__in=entity_ids).order_by('-created_at')
 ```
 
@@ -473,7 +473,7 @@ Entity cards show "?? Cases" as a placeholder. This will be implemented in futur
 
 ### 1. Batch NES API Endpoint
 
-**Priority**: High  
+**Priority**: High
 **Rationale**: Current implementation makes N API calls to fetch NES data for N entities, causing performance issues.
 
 **Backend Changes (NES)**:
@@ -503,16 +503,16 @@ class JawafEntityDetailSerializer(serializers.ModelSerializer):
     """
     alleged_cases = serializers.SerializerMethodField()
     related_cases = serializers.SerializerMethodField()
-    
+
     class Meta:
         model = JawafEntity
         fields = ['id', 'nes_id', 'display_name', 'alleged_cases', 'related_cases']
-    
+
     def get_alleged_cases(self, obj):
         """Get all cases where this entity is alleged."""
         # Return full case data using CaseSerializer
         pass
-    
+
     def get_related_cases(self, obj):
         """Get all cases where this entity is related or a location."""
         # Return full case data using CaseSerializer
@@ -551,16 +551,16 @@ class JawafEntitySerializer(serializers.ModelSerializer):
     """
     alleged_case_count = serializers.SerializerMethodField()
     related_case_count = serializers.SerializerMethodField()
-    
+
     class Meta:
         model = JawafEntity
         fields = ['id', 'nes_id', 'display_name', 'alleged_case_count', 'related_case_count']
-    
+
     def get_alleged_case_count(self, obj):
         """Count cases where entity is alleged."""
         # Implementation similar to detail serializer
         pass
-    
+
     def get_related_case_count(self, obj):
         """Count cases where entity is related or a location."""
         # Implementation similar to detail serializer

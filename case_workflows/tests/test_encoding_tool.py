@@ -4,7 +4,7 @@ Tests for encoding_tool.fix_file_encoding functionality.
 
 from pathlib import Path
 
-from case_workflows.encoding_tool import fix_file_encoding, create_fix_encoding_tool
+from case_workflows.encoding_tool import create_fix_encoding_tool, fix_file_encoding
 
 
 class TestFixFileEncoding:

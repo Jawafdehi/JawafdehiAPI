@@ -4,7 +4,7 @@ A Django-based public accountability platform for tracking allegations of corrup
 
 ## About the Meta Repository
 
-Contributors to this repository should be aware of the [Jawafdehi meta-repository](https://github.com/Jawafdehi/jawafdehi-meta). The meta repo provides documentation, specs, and other shared resources across the Jawafdehi product family. 
+Contributors to this repository should be aware of the [Jawafdehi meta-repository](https://github.com/Jawafdehi/jawafdehi-meta). The meta repo provides documentation, specs, and other shared resources across the Jawafdehi product family.
 
 **For Jawafdehi team members and interns**: Working from the meta repo setup is strongly encouraged, as it provides rich context for AI-powered development tools (Cursor, Kiro, GitHub Copilot, etc.) and makes cross-service coordination easier.
 
@@ -43,12 +43,12 @@ Contributors to this repository should be aware of the [Jawafdehi meta-repositor
    ```
 
 5. **Configure environment variables**
-   
+
    Copy the example environment file and update it:
    ```bash
    cp .env.example .env
    ```
-   
+
    Edit `.env` with your configuration:
    - `SECRET_KEY`: Django secret key
    - `DEBUG`: Set to `True` for development
@@ -71,18 +71,18 @@ Contributors to this repository should be aware of the [Jawafdehi meta-repositor
    ```bash
    python manage.py createsuperuser
    ```
-   
+
    Follow the prompts to set username, email, and password.
 
 9. **Start the development server**
    ```bash
    python manage.py runserver
    ```
-   
+
    The API will be available at `http://localhost:8000`
 
 10. **Access the admin portal**
-    
+
     Navigate to `http://localhost:8000/admin` and login with your superuser credentials.
 
 ### Seed Data (Optional)
@@ -303,4 +303,3 @@ Contributors cannot access cases they are not assigned to.
 ## License
 
 This project is licensed under the [Hippocratic License Version 3.0 (HL3)](./LICENSE), an [Ethical Source](https://ethicalsource.dev) license. See [LICENSING.md](./LICENSING.md) for more information.
-

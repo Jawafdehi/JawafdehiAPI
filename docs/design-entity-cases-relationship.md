@@ -48,7 +48,7 @@ alleged_cases = Case.objects.filter(
 **Related Cases:**
 ```python
 related_cases = Case.objects.filter(
-    Q(related_entities__contains=[entity_id]) | 
+    Q(related_entities__contains=[entity_id]) |
     Q(location_entities__contains=[entity_id]),
     status__in=['published', 'in_review']
 ).exclude(

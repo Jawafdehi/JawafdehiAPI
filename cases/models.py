@@ -4,20 +4,21 @@ Models for the Jawafdehi accountability platform.
 See: .kiro/specs/accountability-platform-core/design.md
 """
 
-from django.db import models
-from django.contrib.auth import get_user_model
-from django.core.exceptions import ValidationError
-from django.core.validators import URLValidator
-from django.utils import timezone
 import mimetypes
 import uuid
 
+from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
+from django.core.validators import URLValidator
+from django.db import models
+from django.utils import timezone
+
 from .fields import (
+    EvidenceListField,
     TextListField,
     TimelineListField,
-    EvidenceListField,
 )
-from .validators import validate_slug, validate_court_cases
+from .validators import validate_court_cases, validate_slug
 
 User = get_user_model()
 

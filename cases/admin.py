@@ -1,48 +1,49 @@
-from django.contrib import admin
-from django.contrib import messages
-from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
-from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
-from django.contrib.auth import get_user_model
 from django import forms
-from django.db import models
-from django.utils.html import format_html
+from django.contrib import admin, messages
+from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
+from django.contrib.auth import get_user_model
+from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.core.exceptions import PermissionDenied, ValidationError
+from django.db import models
 from django.forms.models import BaseInlineFormSet
 from django.template.response import TemplateResponse
-from cases.widgets import ToastUIEditorWidget
-from rest_framework.authtoken.models import Token
+from django.utils.html import format_html
 from rest_framework.authtoken.admin import TokenAdmin as BaseTokenAdmin
+from rest_framework.authtoken.models import Token
+
+from cases.widgets import ToastUIEditorWidget
+
 from .models import (
     Case,
+    CaseEntityRelationship,
+    CaseState,
     ChatUserIdentity,
     DocumentSource,
     DocumentSourceUpload,
-    JawafEntity,
-    CaseState,
     Feedback,
-    CaseEntityRelationship,
+    JawafEntity,
     RelationshipType,
 )
+from .rules.predicates import (
+    can_change_case,
+    can_change_source,
+    can_manage_user,
+    can_transition_case_state,
+    can_view_case,
+    can_view_source,
+    is_admin,
+    is_admin_or_moderator,
+    is_contributor,
+    is_moderator,
+)
 from .services import EntityMergeError, analyze_merge_impact, merge_entities_by_ids
+from .validators import COURT_CHOICES
 from .widgets import (
+    MultiCourtCaseField,
+    MultiEvidenceField,
     MultiTextField,
     MultiTimelineField,
-    MultiEvidenceField,
     MultiURLField,
-    MultiCourtCaseField,
-)
-from .validators import COURT_CHOICES
-from .rules.predicates import (
-    is_admin,
-    is_moderator,
-    is_contributor,
-    is_admin_or_moderator,
-    can_transition_case_state,
-    can_manage_user,
-    can_view_case,
-    can_change_case,
-    can_view_source,
-    can_change_source,
 )
 
 User = get_user_model()

@@ -1,6 +1,7 @@
-import requests
 import csv
 import os
+
+import requests
 
 INDEX_URL = (
     "https://ngm-store.jawafdehi.org/indices/2026-03-31/index.ciaa-press-releases.json"

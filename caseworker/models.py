@@ -1,5 +1,5 @@
-from django.db import models
 from django.contrib.auth.models import User
+from django.db import models
 
 # Providers that require an API key for authentication
 PROVIDERS_REQUIRING_API_KEY = ["openai", "anthropic", "google", "azure"]
