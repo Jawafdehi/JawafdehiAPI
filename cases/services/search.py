@@ -138,17 +138,17 @@ class UnifiedSearchService:
         cases_by_id = {case.id: case for case in visible_cases}
 
         records = self._build_records(
-            cases,
-            entities,
-            documents,
-            query,
-            entity_type,
-            role,
-            case_type,
-            tags,
-            cases_by_id,
-            source_case_ids,
-            case_entity_ids,
+            cases=cases,
+            entities=entities,
+            documents=documents,
+            query=query,
+            entity_type=entity_type,
+            role=role,
+            case_type=case_type,
+            tags=tags,
+            cases_by_id=cases_by_id,
+            source_case_ids=source_case_ids,
+            case_entity_ids=case_entity_ids,
         )
         counts = self._counts(records)
         facets = self._facets(records, cases_by_id)
@@ -279,18 +279,19 @@ class UnifiedSearchService:
 
     def _build_records(
         self,
-        cases,
-        entities,
-        documents,
-        query,
-        entity_type,
-        role,
-        case_type,
-        tags,
-        cases_by_id,
-        source_case_ids,
-        case_entity_ids,
-    ):
+        *,
+        cases: list,
+        entities: list,
+        documents: list,
+        query: str,
+        entity_type: list[str],
+        role: list[str],
+        case_type: list[str],
+        tags: list[str],
+        cases_by_id: dict,
+        source_case_ids: dict,
+        case_entity_ids: set,
+    ) -> list[dict[str, Any]]:
         records = []
         for case in cases:
             if self._case_passes_filters(case, entity_type, role, case_type, tags):
