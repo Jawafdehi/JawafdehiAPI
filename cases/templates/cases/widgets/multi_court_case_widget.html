@@ -26,7 +26,7 @@
     var courtChoices = {{ court_choices_json|safe }};
     var retryCount = 0;
     var maxRetries = 100; // Try for up to 5 seconds (100 * 50ms)
-    
+
     function initWidget() {
         if (typeof window.initMultiCourtCaseWidget === 'function') {
             window.initMultiCourtCaseWidget(
@@ -59,7 +59,7 @@
             }
         }
     }
-    
+
     // Check if DOM is already loaded
     if (document.readyState === 'loading') {
         // DOM is still loading, wait for DOMContentLoaded

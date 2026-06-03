@@ -6,7 +6,7 @@ import sys
 from django.core.management.base import BaseCommand
 from django.db.models import Q
 
-from cases.models import Case, CaseType, CaseState
+from cases.models import Case, CaseState, CaseType
 from cases.services.priority_case_loader import filter_by_priority, load_priority_cases
 from cases.services.tag_enricher import TagEnricher
 
@@ -154,6 +154,7 @@ class Command(BaseCommand):
         try:
             if dry_run:
                 from auditlog.registry import auditlog
+
                 from cases.models import DocumentSource
 
                 auditlog.unregister(Case)

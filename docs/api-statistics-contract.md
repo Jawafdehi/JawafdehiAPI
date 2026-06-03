@@ -118,7 +118,7 @@ class StatisticsView(APIView):
         cached_data = cache.get(cache_key)
         if cached_data:
             return Response(cached_data)
-        
+
         stats = {
             'published_cases': Case.objects.filter(state=CaseState.PUBLISHED).count(),
             'cases_under_investigation': Case.objects.filter(
@@ -128,7 +128,7 @@ class StatisticsView(APIView):
             'entities_tracked': JawafEntity.objects.count(),
             'last_updated': timezone.now().isoformat(),
         }
-        
+
         cache.set(cache_key, stats, timeout=300)
         return Response(stats)
 ```
@@ -247,14 +247,14 @@ from cases.models import Case, CaseState, JawafEntity
 def test_statistics_endpoint(api_client):
     response = api_client.get('/api/statistics/')
     assert response.status_code == 200
-    
+
     data = response.json()
     assert 'published_cases' in data
     assert 'entities_tracked' in data
     assert 'cases_under_investigation' in data
     assert 'cases_closed' in data
     assert 'last_updated' in data
-    
+
     # Verify types
     assert isinstance(data['published_cases'], int)
     assert isinstance(data['entities_tracked'], int)
@@ -265,18 +265,18 @@ def test_statistics_endpoint(api_client):
 def test_statistics_counts_by_state(api_client, case_factory, entity_factory):
     # Create test data
     entity = entity_factory()
-    
+
     # Create cases in different states
     published_case = case_factory(state=CaseState.PUBLISHED)
     published_case.alleged_entities.add(entity)
-    
+
     draft_case = case_factory(state=CaseState.DRAFT)
     review_case = case_factory(state=CaseState.IN_REVIEW)
     closed_case = case_factory(state=CaseState.CLOSED)
-    
+
     response = api_client.get('/api/v1/statistics/')
     data = response.json()
-    
+
     assert data['published_cases'] == 1
     assert data['cases_under_investigation'] == 2  # DRAFT + IN_REVIEW
     assert data['cases_closed'] == 1
@@ -286,33 +286,33 @@ def test_statistics_counts_by_state(api_client, case_factory, entity_factory):
 def test_statistics_cache_behavior(api_client, case_factory):
     # Clear cache
     cache.clear()
-    
+
     # First request - should calculate
     response1 = api_client.get('/api/statistics/')
     data1 = response1.json()
-    
+
     # Create new case
     case_factory(state=CaseState.PUBLISHED)
-    
+
     # Second request within 5 minutes - should return cached data
     response2 = api_client.get('/api/statistics/')
     data2 = response2.json()
-    
+
     # Should be same as cached
     assert data1['published_cases'] == data2['published_cases']
-    
+
     # Clear cache and request again - should reflect new case
     cache.clear()
     response3 = api_client.get('/api/statistics/')
     data3 = response3.json()
-    
+
     assert data3['published_cases'] == data1['published_cases'] + 1
 
 @pytest.mark.django_db
 def test_statistics_empty_database(api_client):
     response = api_client.get('/api/statistics/')
     data = response.json()
-    
+
     assert data['published_cases'] == 0
     assert data['entities_tracked'] == 0
     assert data['cases_under_investigation'] == 0

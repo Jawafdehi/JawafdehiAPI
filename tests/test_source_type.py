@@ -7,6 +7,7 @@ Verifies field persistence, serialization, and valid enum values.
 import datetime
 
 import pytest
+
 from cases.models import DocumentSource, SourceType
 
 

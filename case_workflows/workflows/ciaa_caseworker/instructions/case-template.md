@@ -114,8 +114,8 @@ Each **source** has two distinct description fields:
 
 2–5 topic tags in English. Pick from existing tags where possible (e.g. `Procurement`, `CIAA`, `IT`, `Land`, `Banking`, `Revenue`) or add a new one if needed.
 
-- 
-- 
+-
+-
 
 ---
 
@@ -144,4 +144,3 @@ Internal working notes — not published. Include caseworker name and date draft
 Case-relevant images identified during news research (photos of accused, co-defendants, official press conference photos, property/crime-scene photos). Populated from `MEMORY.md ## Images` by the caseworker.
 
 - <!-- ![Caption](url) — context, source outlet -->
-

@@ -3,11 +3,12 @@ Tests for the public Feedback API endpoint.
 """
 
 import io
+
 import pytest
 from django.core.cache import cache
 from rest_framework.test import APIClient
 
-from cases.models import Feedback, FeedbackType, FeedbackStatus
+from cases.models import Feedback, FeedbackStatus, FeedbackType
 
 
 @pytest.fixture

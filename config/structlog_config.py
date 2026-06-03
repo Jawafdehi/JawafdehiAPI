@@ -1,4 +1,5 @@
 import os
+
 import structlog
 
 SHARED_CONTEXT_VARS = [

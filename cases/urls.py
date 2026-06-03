@@ -4,15 +4,16 @@ URL configuration for the cases app API.
 See: .kiro/specs/accountability-platform-core/design.md
 """
 
-from django.urls import path, include
+from django.urls import include, path
 from rest_framework.routers import DefaultRouter
+
 from .api_views import (
     CaseViewSet,
     DocumentSourceViewSet,
+    FeedbackView,
     JawafEntityViewSet,
     OEmbedView,
     StatisticsView,
-    FeedbackView,
 )
 
 # Create a router and register our viewsets

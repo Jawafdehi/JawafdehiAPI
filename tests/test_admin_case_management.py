@@ -6,9 +6,9 @@ Tests Properties 6, 9
 Validates: Requirements 2.1, 2.4, 7.2
 """
 
-import pytest
 from datetime import datetime
 
+import pytest
 from django.utils import timezone
 from hypothesis import given, settings
 from hypothesis import strategies as st

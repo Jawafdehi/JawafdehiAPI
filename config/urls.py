@@ -18,11 +18,12 @@ Including another URLconf
 from django.conf import settings
 from django.conf.urls.static import static
 from django.contrib import admin
-from django.urls import path, include
-from cases.views import index, docs
-from cases.api_views import OEmbedView
+from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+
+from cases.api_views import OEmbedView
+from cases.views import docs, index
 
 urlpatterns = [
     path("", index, name="index"),

@@ -252,7 +252,7 @@ Optional:
   --project PROJECT_ID      Google Cloud project ID (defaults to service account)
   --location LOCATION       Google Cloud location (default: us-central1)
   --model MODEL             Google AI model (default: gemini-2.5-pro)
-  
+
 Database Import:
   --create-db-entry         Create database entry after scraping
   --no-confirm              Skip confirmation prompt
@@ -380,11 +380,11 @@ with transaction.atomic():
     # Create case
     case = Case(...)
     case.save()
-    
+
     # Add relationships
     case.alleged_entities.add(entity1, entity2)
     case.locations.add(location1)
-    
+
     # Update evidence
     case.evidence = [...]
     case.save()

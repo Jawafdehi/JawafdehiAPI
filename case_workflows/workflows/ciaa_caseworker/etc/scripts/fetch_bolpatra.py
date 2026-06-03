@@ -5,14 +5,15 @@ This script searches for procurement documents using an IFB/RFP/EOI/PQ number
 and downloads all associated PDFs (bid documents, addendums, etc.)
 """
 
-import requests
-import re
 import os
+import re
 import sys
 import tempfile
-from bs4 import BeautifulSoup
 import time
+
+import requests
 import urllib3
+from bs4 import BeautifulSoup
 
 # Request timeout in seconds (connect, read)
 DEFAULT_TIMEOUT = (10, 60)

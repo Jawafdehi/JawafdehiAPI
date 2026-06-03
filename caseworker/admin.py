@@ -1,6 +1,8 @@
 from django.contrib import admin
-from .models import MCPServer, Skill, Summary, Draft, DraftVersion, LLMProvider
+
 from cases.admin import UserFullNameAdminMixin
+
+from .models import Draft, DraftVersion, LLMProvider, MCPServer, Skill, Summary
 
 
 @admin.register(MCPServer)

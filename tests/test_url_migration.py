@@ -8,10 +8,11 @@ These tests verify both the migration process and post-migration behavior:
 """
 
 import pytest
-from django.test import TransactionTestCase
-from django.db import connection
 from django.core.management import call_command
+from django.db import connection
 from django.db.migrations.exceptions import IrreversibleError
+from django.test import TransactionTestCase
+
 from cases.models import DocumentSource
 
 

@@ -8,16 +8,15 @@ Tests the admin interface configuration including:
 """
 
 import pytest
-
 from django.contrib import admin
 
 from cases.admin import DocumentSourceAdmin, DocumentSourceAdminForm
-from cases.models import DocumentSource, CaseType, SourceType
+from cases.models import CaseType, DocumentSource, SourceType
 from tests.conftest import (
-    create_document_source_with_entities,
     create_case_with_entities,
-    create_user_with_role,
+    create_document_source_with_entities,
     create_mock_request,
+    create_user_with_role,
 )
 
 

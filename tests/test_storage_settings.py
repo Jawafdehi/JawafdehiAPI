@@ -3,8 +3,8 @@ import pytest
 from config.settings import (
     build_media_url,
     build_s3_storage_options,
-    env_flag,
     ensure_trailing_slash,
+    env_flag,
 )
 
 

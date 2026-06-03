@@ -14,39 +14,39 @@ Here is the updated Agentic Workflow represented as a State Machine.
 stateDiagram-v2
     [*] --> Initialize
     Initialize: Input (CIAA Case Number & Metadata)
-    
+
     state "Evidence Gathering Phase" as GatheringPhase {
         [*] --> FetchJudicialData
         FetchJudicialData: Retrieve NGM Database Info (mcp tool)
-        
+
         state fork_state <<fork>>
         FetchJudicialData --> fork_state
-        
+
         fork_state --> FetchCIAA
         fork_state --> FetchChargeSheet
-        
+
         FetchCIAA: Find Press Release (ngm-query) -> 'sources/raw/'
         FetchChargeSheet: Query Attorney Gen -> 'sources/raw/'
-        
+
         state join_state <<join>>
         FetchCIAA --> ConvertToMarkdown
         FetchChargeSheet --> ConvertToMarkdown
-        
+
         ConvertToMarkdown: run convert_to_markdown -> 'sources/markdown/'
         ConvertToMarkdown --> join_state
-        
+
         join_state --> FetchNews
         FetchNews: Web Search for Media Coverage
         FetchNews --> [*]: Search Complete
     }
-    
+
     Initialize --> GatheringPhase
     GatheringPhase --> CompileContext: Documents extracted & converted
-    
+
     CompileContext: AI evaluates all synthesized .md documents
     CompileContext --> DraftCase: Ready for synthesis
     CompileContext --> GatheringPhase: Missing critical data (Retry)
-    
+
     DraftCase: Execute create_jawafdehi_case MCP
     DraftCase --> [*]: Case Created (Status: DRAFT)
 ```
@@ -54,7 +54,7 @@ stateDiagram-v2
 ## Agents vs. Skills vs. Workflows
 
 In this meta-repo's architecture, we leverage a **Workflow** that composes multiple **Skills/MCP Tools**:
-1. **Workflow**: The core orchestration logic lives in `.agents/workflows/create_jawafdehi_case.md`. 
+1. **Workflow**: The core orchestration logic lives in `.agents/workflows/create_jawafdehi_case.md`.
 2. **Skills / Extensible Extractors**: The workflow acts as the backbone. Over time, the list of parallel information extractors will expand modularly (e.g., adding extraction steps for **Bol Patras** and other government records).
 
 ## Proposed Changes

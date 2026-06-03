@@ -15,7 +15,7 @@ from .models import (
     JawafEntity,
     RelationshipType,
 )
-from .validators import validate_slug, validate_court_cases
+from .validators import validate_court_cases, validate_slug
 
 # Paths that callers are not permitted to target in a patch operation.
 # The view rejects any op whose `path` equals or is prefixed by one of these.

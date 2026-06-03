@@ -15,7 +15,7 @@
                     </option>
                     {% endfor %}
                 </select>
-                <a href="#" class="btn btn-sm btn-info view-source-btn" target="_blank" 
+                <a href="#" class="btn btn-sm btn-info view-source-btn" target="_blank"
                    {% if not item.source_id %}style="display: none;"{% endif %}>
                     <i class="fas fa-eye"></i> View
                 </a>
@@ -46,7 +46,7 @@
         {% if not forloop.last %},{% endif %}
         {% endfor %}
     ].join('');
-    
+
     var sourceUrlMap = {
         {% for source_id, source_title, source_url in sources %}
         {% if source_url %}
@@ -55,7 +55,7 @@
         {% endif %}
         {% endfor %}
     };
-    
+
     var rowTemplate = [
         '<span class="drag-handle">⋮⋮</span>',
         '<button type="button" class="btn btn-sm btn-danger remove-input">',
@@ -80,7 +80,7 @@
         '<textarea class="evidence-input"></textarea>',
         '</div>'
     ].join('');
-    
+
     window.initMultiWidget(
         '{{ widget_id }}_container',
         '{{ widget_id }}',

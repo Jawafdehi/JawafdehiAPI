@@ -7,12 +7,11 @@ Validates: Requirements 1.2
 """
 
 import pytest
-
 from django.core.exceptions import ValidationError
 from hypothesis import given, settings
 
-from cases.fields import TextListField, TimelineListField, EvidenceListField
-from tests.strategies import text_list, timeline_list, evidence_list
+from cases.fields import EvidenceListField, TextListField, TimelineListField
+from tests.strategies import evidence_list, text_list, timeline_list
 
 # ============================================================================
 # TextListField Tests

@@ -10,16 +10,17 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
-from pathlib import Path
 import os
 import sys
-from dotenv import load_dotenv
 from datetime import timedelta
+from pathlib import Path
+
 import dj_database_url
 import sentry_sdk
-from sentry_sdk.integrations.django import DjangoIntegration
 import structlog as _structlog
 from django.core.exceptions import ImproperlyConfigured
+from dotenv import load_dotenv
+from sentry_sdk.integrations.django import DjangoIntegration
 
 from config.structlog_config import configure_structlog
 
@@ -527,7 +528,7 @@ SPECTACULAR_SETTINGS = {
     "DESCRIPTION": """
 Public API for the Jawafdehi accountability platform.
 
-This API provides read-only access to published cases of alleged corruption 
+This API provides read-only access to published cases of alleged corruption
 and misconduct by public entities in Nepal.
 
 ## Features
@@ -539,7 +540,7 @@ and misconduct by public entities in Nepal.
 
 ## Access
 
-All endpoints are public and do not require authentication. Only published 
+All endpoints are public and do not require authentication. Only published
 cases (state=PUBLISHED) are accessible through this API.
 
 ## Filtering & Search

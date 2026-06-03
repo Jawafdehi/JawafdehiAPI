@@ -8,6 +8,7 @@ when the url field is a JSONField containing a list.
 import json
 
 import pytest
+
 from cases.models import CaseEntityRelationship, DocumentSource, RelationshipType
 from cases.services.case_importer import CaseImporter
 

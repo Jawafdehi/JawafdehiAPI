@@ -89,12 +89,16 @@ def retryable_network_error(exc: Exception) -> bool:
     """Return True for common transient network errors."""
     from requests.exceptions import (
         ChunkedEncodingError,
-        ConnectionError as RequestsConnectionError,
         ConnectTimeout,
         ReadTimeout,
     )
+    from requests.exceptions import (
+        ConnectionError as RequestsConnectionError,
+    )
     from urllib3.exceptions import (
         ProtocolError,
+    )
+    from urllib3.exceptions import (
         ReadTimeoutError as Urllib3ReadTimeout,
     )
 
