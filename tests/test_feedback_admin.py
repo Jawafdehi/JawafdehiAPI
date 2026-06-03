@@ -7,7 +7,7 @@ from django.contrib.admin.sites import AdminSite
 from django.test import RequestFactory
 
 from cases.admin import FeedbackAdmin
-from cases.models import Feedback, FeedbackType, FeedbackStatus
+from cases.models import Feedback, FeedbackStatus, FeedbackType
 from tests.conftest import create_user_with_role
 
 

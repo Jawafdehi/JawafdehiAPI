@@ -5,6 +5,7 @@ Ensures environment variables are set to their default values during testing.
 """
 
 import os
+
 import pytest
 
 # Set DATABASE_URL before Django settings are loaded so tests run without a
@@ -29,9 +30,9 @@ from hypothesis import settings as hypothesis_settings
 from cases.models import (
     Case,
     CaseEntityRelationship,
+    DocumentSource,
     JawafEntity,
     RelationshipType,
-    DocumentSource,
 )
 
 User = get_user_model()

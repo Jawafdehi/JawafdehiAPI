@@ -1,7 +1,8 @@
-from django.core.management.base import BaseCommand
-from django.utils import timezone
-from django.db import connection
 from datetime import datetime
+
+from django.core.management.base import BaseCommand
+from django.db import connection
+from django.utils import timezone
 
 
 class Command(BaseCommand):
@@ -11,8 +12,8 @@ class Command(BaseCommand):
         from cases.models import (
             Case,
             CaseEntityRelationship,
-            CaseType,
             CaseState,
+            CaseType,
             DocumentSource,
             JawafEntity,
             RelationshipType,

@@ -1,12 +1,13 @@
-from django.forms.widgets import Widget, Textarea
-from django.forms.fields import Field
-from django.utils.safestring import mark_safe
-from django.core.exceptions import ValidationError
-from django.core.validators import URLValidator
-from django.template.loader import render_to_string
-from nes.core.identifiers.validators import validate_entity_id
 import json
 from json import JSONDecodeError
+
+from django.core.exceptions import ValidationError
+from django.core.validators import URLValidator
+from django.forms.fields import Field
+from django.forms.widgets import Textarea, Widget
+from django.template.loader import render_to_string
+from django.utils.safestring import mark_safe
+from nes.core.identifiers.validators import validate_entity_id
 
 
 class EasyMDEWidget(Textarea):

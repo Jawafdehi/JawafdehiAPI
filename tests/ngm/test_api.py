@@ -1,6 +1,6 @@
 import pytest
-from django.contrib.auth.models import Group
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Group
 from django.core.cache import cache
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient

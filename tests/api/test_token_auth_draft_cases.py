@@ -5,10 +5,10 @@ Feature: Allow optional token-based authorization for GET /cases/<id> endpoint
 """
 
 import pytest
-from rest_framework.test import APIClient
-from rest_framework.authtoken.models import Token
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
+from rest_framework.authtoken.models import Token
+from rest_framework.test import APIClient
 
 from cases.models import CaseState, CaseType
 from tests.conftest import create_case_with_entities

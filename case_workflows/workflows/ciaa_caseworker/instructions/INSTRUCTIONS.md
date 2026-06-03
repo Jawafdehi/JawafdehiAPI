@@ -46,7 +46,7 @@ Usually, CIAA press release are on the date when the case is filed to special co
 Download and save it at sources/raw/ciaa-press-release-<press-release-id>.pdf
 
 Sample dates:
-- https://ciaa.gov.np/pressrelease/1000: मिति २०७६/०१/१२ गते । 
+- https://ciaa.gov.np/pressrelease/1000: मिति २०७६/०१/१२ गते ।
 - https://ciaa.gov.np/pressrelease/2000: मिति २०७८/०६/१९ गते ।
 - https://ciaa.gov.np/pressrelease/3000: मिति २०८१/१२/१४ गते।
 
@@ -492,4 +492,3 @@ field with the collected image list:
 ```
 
 Skip this step if no images were recorded in `MEMORY.md ## Images`.
-

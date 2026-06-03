@@ -176,17 +176,17 @@ class NGMJudicialQueryView(APIView):
     summary="Get court case details by court and case number",
     description="""
     Retrieves complete case details including hearings and entities.
-    
+
     URL format: /api/ngm/court_case/{case_id}
     where {case_id} = {court_identifier}:{case_number}
-    
+
     Example: /api/ngm/court_case/supreme:081-CR-0081
-    
+
     Returns:
     - Case details (registration, verdict, parties, etc.)
     - All hearings for the case (ordered by date, newest first)
     - All entities involved (plaintiffs, defendants, etc.)
-    
+
     Returns 404 if case does not exist.
     """,
     responses={

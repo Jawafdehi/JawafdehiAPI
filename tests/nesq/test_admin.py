@@ -16,7 +16,6 @@ See .kiro/specs/nes-queue-system/tasks.md §10.6 for requirements.
 """
 
 import pytest
-
 from django.contrib.admin.sites import AdminSite
 from django.utils import timezone
 

@@ -4,7 +4,7 @@ Unit tests for the Feedback model.
 
 import pytest
 
-from cases.models import Feedback, FeedbackType, FeedbackStatus
+from cases.models import Feedback, FeedbackStatus, FeedbackType
 
 
 @pytest.mark.django_db

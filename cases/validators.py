@@ -6,6 +6,7 @@ following Django's convention of separating validation concerns.
 """
 
 import re
+
 from django.core.exceptions import ValidationError
 
 COURT_CHOICES = [

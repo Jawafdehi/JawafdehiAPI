@@ -9,6 +9,7 @@ class CasesConfig(AppConfig):
 
         # Register models with auditlog
         from auditlog.registry import auditlog
+
         from cases.models import Case, DocumentSource, JawafEntity
 
         auditlog.register(Case)

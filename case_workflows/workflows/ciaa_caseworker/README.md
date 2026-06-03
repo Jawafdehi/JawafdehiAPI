@@ -14,7 +14,7 @@ The agent logic here is designed to be **provider agnostic**. While there are co
    - You can run the automation loop via `python .agents/caseworker/run_workflow.py <CIAA-case-number>`.
 
 2. **GitHub Copilot**
-   - You can invoke the caseworker instructions directly in your IDE chat interface. 
+   - You can invoke the caseworker instructions directly in your IDE chat interface.
    - Ensure the Jawafdehi Copilot MCP settings are configured.
    - You can prompt the IDE: "Please follow the workflow defined in `.agents/caseworker/instructions/INSTRUCTIONS.md`".
 

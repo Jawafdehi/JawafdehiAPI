@@ -7,6 +7,7 @@ django-storages S3 backend with additional functionality like file name hashing.
 
 import hashlib
 import os
+
 from storages.backends.s3boto3 import S3Boto3Storage
 
 

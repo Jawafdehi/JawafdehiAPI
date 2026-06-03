@@ -4,8 +4,8 @@ Custom field types for the Case model.
 These fields provide structured validation and storage for list-based data.
 """
 
-from django.db import models
 from django.core.exceptions import ValidationError
+from django.db import models
 
 
 class EntityListField(models.JSONField):

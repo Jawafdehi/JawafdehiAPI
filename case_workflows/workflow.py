@@ -62,7 +62,8 @@ def _patch_gemini_null_properties() -> None:
     later) is detected, this patch no-ops so we don't fight the library.
     """
     try:
-        from importlib.metadata import version as _pkg_version, PackageNotFoundError
+        from importlib.metadata import PackageNotFoundError
+        from importlib.metadata import version as _pkg_version
 
         try:
             _lgn_ver_str = _pkg_version("langchain-google-genai")

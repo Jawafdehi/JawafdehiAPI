@@ -7,7 +7,6 @@ Validates: Requirements 1.5, 3.1, 3.2, 3.3, 5.1, 5.2, 5.3
 """
 
 import pytest
-
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from hypothesis import given, settings
@@ -17,11 +16,13 @@ from cases.admin import CaseAdmin
 from cases.models import Case, CaseState, CaseType
 from tests.conftest import (
     create_case_with_entities,
-    create_user_with_role,
     create_mock_request,
+    create_user_with_role,
 )
 from tests.strategies import (
     simple_complete_case_data as complete_case_data,
+)
+from tests.strategies import (
     user_with_role,
 )
 

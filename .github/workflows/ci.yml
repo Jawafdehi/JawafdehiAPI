@@ -39,6 +39,9 @@ jobs:
           python-version: '3.12'
           extras: 'llm-all'
 
+      - name: Run pre-commit hooks
+        run: poetry run pre-commit run --all-files
+
       - name: Check formatting
         run: ./scripts/format.sh --check
 

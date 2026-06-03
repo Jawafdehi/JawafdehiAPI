@@ -1,15 +1,15 @@
-import tempfile
 import sys
+import tempfile
 import urllib.parse
-from pathlib import Path
 from io import StringIO
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.core.files.uploadedfile import SimpleUploadedFile
 
 from cases.management.commands.enrich_missing_bigo import Command
 from cases.models import Case, CaseState, CaseType, DocumentSource, SourceType
