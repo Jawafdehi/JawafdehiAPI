@@ -13,10 +13,14 @@ def _is_inside_git_worktree(path: Path) -> bool:
             ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
             check=True,
             capture_output=True,
-            timeout=30,
+            timeout=10,
         )
         return True
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+    except (
+        subprocess.CalledProcessError,
+        FileNotFoundError,
+        subprocess.TimeoutExpired,
+    ):
         return False
 
 
