@@ -338,14 +338,17 @@ class Command(BaseCommand):
                     self.stdout.write(
                         f"  Court order: {co_source.source_id} ({co_len} chars)"
                     )
-                if co_len < 15_000:
+                if co_len < 5_000:
                     content_parts.append("--- COURT ORDER (FULL) ---")
                     content_parts.append(co_md)
-                else:
+                elif co_len > 15_000:
                     content_parts.append("--- COURT ORDER HEADER ---")
                     content_parts.append(co_md[:4000])
                     content_parts.append("--- COURT ORDER VERDICT SECTION ---")
                     content_parts.append(co_md[-3000:])
+                else:
+                    content_parts.append("--- COURT ORDER (FULL) ---")
+                    content_parts.append(co_md)
             else:
                 if is_verbose:
                     self.stdout.write(
@@ -377,6 +380,7 @@ class Command(BaseCommand):
             entities_data = parse_extraction_response(response, {"entities"})
 
             if not entities_data:
+                self.stats["cases_skipped"] += 1
                 self.stdout.write(
                     self.style.WARNING("  SKIPPED: No entities extracted")
                 )
@@ -385,6 +389,11 @@ class Command(BaseCommand):
             self._apply_entities(case, entities_data, is_dry_run, session)
             self.stats["cases_enriched"] += 1
 
+        except CommandError as e:
+            self.stats["cases_skipped"] += 1
+            self.stdout.write(
+                self.style.WARNING(f"  SKIPPED: LLM call failed — {e}")
+            )
         except Exception as e:
             self.stats["cases_failed"] += 1
             logger.exception("Failed processing case %s", case.case_id)
