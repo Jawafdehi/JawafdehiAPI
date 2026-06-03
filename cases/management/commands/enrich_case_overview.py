@@ -1452,7 +1452,11 @@ class Command(BaseCommand):
                     break
                 joined += chunk
                 total += len(chunk)
-            fmt_context["court_order_texts"] = joined if joined else "(Truncated — no court order texts within aggregate cap)"
+            fmt_context["court_order_texts"] = (
+                joined
+                if joined
+                else "(Truncated — no court order texts within aggregate cap)"
+            )
         else:
             fmt_context["court_order_texts"] = "(No additional court order texts)"
 
