@@ -11,7 +11,6 @@ Usage::
     python manage.py enrich_ciaa_related_entities --llm-model claude-sonnet-4-5 --verbose
 """
 
-import json
 import logging
 import os
 import tempfile
@@ -21,6 +20,12 @@ import requests
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
+from cases.management.commands._enrich_utils import (
+    call_llm,
+    convert_to_markdown,
+    parse_extraction_response,
+    resolve_api_key,
+)
 from cases.models import (
     Case,
     CaseEntityRelationship,
@@ -31,12 +36,6 @@ from cases.models import (
     SourceType,
 )
 from cases.services.priority_case_loader import filter_by_priority, load_priority_cases
-from cases.management.commands._enrich_utils import (
-    call_llm,
-    convert_to_markdown,
-    parse_extraction_response,
-    resolve_api_key,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +103,9 @@ class Command(BaseCommand):
         parser.add_argument(
             "--llm-base-url",
             type=str,
-            default=os.environ.get("JAWAFDEHI_LLM_PROXY_URL", "http://localhost:11434/v1"),
+            default=os.environ.get(
+                "JAWAFDEHI_LLM_PROXY_URL", "http://localhost:11434/v1"
+            ),
         )
         parser.add_argument(
             "--llm-api-key",
@@ -128,10 +129,12 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        is_dry_run = options["dry_run"]
         limit = options["limit"]
         force = options["force"]
         is_verbose = options["verbose"]
+
+        if limit is not None and limit < 0:
+            raise CommandError("--limit must be >= 0")
 
         if is_verbose:
             logging.getLogger().setLevel(logging.DEBUG)
@@ -160,7 +163,7 @@ class Command(BaseCommand):
         qs = qs.order_by("case_id")
 
         cases = list(qs)
-        if limit:
+        if limit is not None:
             cases = cases[:limit]
 
         self.stdout.write(f"Found {len(cases)} cases to process")
@@ -190,7 +193,7 @@ class Command(BaseCommand):
         """Pre-fetch DocumentSource objects for all evidence references."""
         source_ids = set()
         for case in cases:
-            for item in (case.evidence or []):
+            for item in case.evidence or []:
                 if isinstance(item, dict) and isinstance(item.get("source_id"), str):
                     if item["source_id"].strip():
                         source_ids.add(item["source_id"])
@@ -205,7 +208,7 @@ class Command(BaseCommand):
     def _get_evidence_sources(self, case):
         """Return DocumentSource objects referenced in case.evidence."""
         sources = []
-        for item in (case.evidence or []):
+        for item in case.evidence or []:
             if isinstance(item, dict) and isinstance(item.get("source_id"), str):
                 source = self._source_lookup.get(item["source_id"])
                 if source is not None:
@@ -293,7 +296,11 @@ class Command(BaseCommand):
         try:
             converter = MarkItDown(enable_plugins=True)
             result = converter.convert(tmp_path)
-            if result and result.text_content and len(result.text_content.strip()) > 200:
+            if (
+                result
+                and result.text_content
+                and len(result.text_content.strip()) > 200
+            ):
                 return result.text_content.strip()
             return None
         finally:
@@ -391,9 +398,7 @@ class Command(BaseCommand):
 
         except CommandError as e:
             self.stats["cases_skipped"] += 1
-            self.stdout.write(
-                self.style.WARNING(f"  SKIPPED: LLM call failed — {e}")
-            )
+            self.stdout.write(self.style.WARNING(f"  SKIPPED: LLM call failed — {e}"))
         except Exception as e:
             self.stats["cases_failed"] += 1
             logger.exception("Failed processing case %s", case.case_id)
@@ -467,7 +472,7 @@ class Command(BaseCommand):
                     if rel_type == "location"
                     else RelationshipType.RELATED
                 )
-                rel, rel_created = CaseEntityRelationship.objects.get_or_create(
+                _rel, rel_created = CaseEntityRelationship.objects.get_or_create(
                     case=case,
                     entity=entity,
                     relationship_type=relationship_type_enum,
