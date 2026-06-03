@@ -1603,6 +1603,17 @@ class Command(BaseCommand):
                     type(payload.get("choices")).__name__,
                     str(payload)[:500],
                 )
+                response_model = payload.get("model") or "(unknown)"
+                logger.info(
+                    "LLM opencode: requested_model=%s response_model=%s",
+                    normalized_model,
+                    response_model,
+                )
+                if response_model != "(unknown)":
+                    assert response_model == normalized_model, (
+                        f"Model mismatch: sent {normalized_model!r} but "
+                        f"response from {response_model!r}"
+                    )
                 choices = payload.get("choices", [])
                 if not choices:
                     logger.warning(
