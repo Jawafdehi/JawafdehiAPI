@@ -15,6 +15,7 @@ import logging
 import os
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 from django.core.management.base import BaseCommand, CommandError
@@ -39,20 +40,56 @@ from cases.services.priority_case_loader import filter_by_priority, load_priorit
 
 logger = logging.getLogger(__name__)
 
+# ------------------------------------------------------------------
+# Slicing constants
+# ------------------------------------------------------------------
+COURT_ORDER_SMALL_THRESHOLD = 15_000
+COURT_ORDER_MEDIUM_THRESHOLD = 100_000
+COURT_ORDER_HEAD_TAIL_SMALL = 5_000
+COURT_ORDER_HEAD_TAIL_MEDIUM = 5_000
+COURT_ORDER_LARGE_HEAD = 6_000
+COURT_ORDER_LARGE_TAIL = 6_000
+COURT_ORDER_LARGE_WINDOW = 3_000
+COURT_ORDER_LARGE_WINDOW_COUNT = 3
+
+PRESS_RELEASE_MIN_CHARS = 4_000
+PRESS_RELEASE_MAX_CHARS = 6_000
+
+PROMPT_TARGET_MIN = 10_000
+PROMPT_TARGET_MAX = 25_000
+PROMPT_HARD_MAX = 30_000
+
+DOCUMENT_FORMAT_PRIORITY = {".docx": 4, ".doc": 3, ".pdf": 2}
+
 
 SYSTEM_PROMPT = """You are an expert Nepali legal data extractor.
 Analyze the provided corruption case documents (press releases and/or court order excerpts).
 Extract two types of entities connected to the case:
 
-1. Location Entities: The district and municipality where the corruption occurred.
-2. Related Entities: Any person or organization materially connected to the case beyond the primary accused.
-   Examples include:
-   - The government body, department, ministry, or local government whose funds were misused.
-   - Companies, cooperatives, contractors, or private firms involved as beneficiaries.
-   - Family members in whose name illegal assets were held (e.g., spouses).
-   - Co-defendants or associates playing a secondary role.
-   - Witnesses named directly in the court order.
-   - Any other person or institution directly involved.
+1. LOCATION ENTITIES (relationship_type="location"):
+   The district, municipality, rural municipality, or province where the corruption
+   occurred. For CIAA cases this is typically stated in the first line of the case
+   title or press release. One entity per distinct location.
+
+2. RELATED ENTITIES (relationship_type="related"):
+   Any person or organization materially connected to the case beyond the primary
+   accused. Prioritize these categories in order:
+   - Government bodies: ministries, departments, municipalities, local government
+     offices whose funds were misused or where the accused worked
+   - Companies and contractors: private firms, cooperatives, contractors,
+     suppliers, or consultants involved as beneficiaries of fraud or procurement
+     irregularities
+   - Family members: spouses, children, or relatives in whose name illegal assets
+     were held (critical for CIAA illegal wealth cases — the spouse's name almost
+     always appears as a co-holder of assets)
+   - Co-defendants and associates: secondary actors not listed as primary accused
+   - Beneficiaries: individuals or institutions that received misappropriated funds
+     or advantages
+   - Witnesses: key witnesses named directly in the court order or press release
+   - Legal actors: judges, lawyers, advocates, or procedural staff named in the
+     verdict or proceedings when they are materially connected to the case
+   - Any other person or institution the source documents identify as directly
+     involved
 
 Output exactly a JSON object with an "entities" key containing an array:
 {
@@ -60,7 +97,7 @@ Output exactly a JSON object with an "entities" key containing an array:
     {
       "entity_name": "Name of the entity (Nepali if Nepali text, else English)",
       "relationship_type": "location" or "related",
-      "notes": "One short phrase describing their connection (e.g., 'आरोपितको श्रीमती, सम्पत्ति हस्तान्तरण गरिएको', 'ठेक्का प्रदायक संस्था'). For locations, leave blank."
+      "notes": "One short phrase describing their connection. For locations, leave blank. Examples: '\\u0906\\u0930\\u094b\\u092a\\u093f\\u0924\\u0915\\u094b \\u0936\\u094d\\u0930\\u0940\\u092e\\u0924\\u0940, \\u0938\\u092e\\u094d\\u092a\\u0924\\u094d\\u0924\\u093f \\u0939\\u0938\\u094d\\u0924\\u093e\\u0928\\u094d\\u0924\\u0930\\u0923 \\u0917\\u0930\\u093f\\u090f\\u0915\\u094b', '\\u0920\\u0947\\u0915\\u094d\\u0915\\u093e \\u092a\\u094d\\u0930\\u0926\\u093e\\u092f\\u0915 \\u0938\\u0902\\u0938\\u094d\\u0925\\u093e', '\\u092a\\u0940\\u0921\\u093f\\u0924 \\u0938\\u0930\\u0915\\u093e\\u0930\\u0940 \\u0928\\u093f\\u0915\\u093e\\u092f', '\\u0938\\u0939-\\u0906\\u0930\\u094b\\u092a\\u093f\\u0924'"
     }
   ]
 }
@@ -153,7 +190,6 @@ class Command(BaseCommand):
             )
             qs = filter_by_priority(qs, priority_list)
 
-        # Skip cases that already have related entities
         if not force:
             already_enriched_ids = CaseEntityRelationship.objects.filter(
                 relationship_type=RelationshipType.RELATED
@@ -168,7 +204,6 @@ class Command(BaseCommand):
 
         self.stdout.write(f"Found {len(cases)} cases to process")
 
-        # Build source lookup from case evidence
         self._fetch_source_cache(cases)
 
         session = requests.Session()
@@ -215,12 +250,113 @@ class Command(BaseCommand):
                     sources.append(source)
         return sources
 
+    # ------------------------------------------------------------------
+    # Press release detection (Problem 1)
+    # ------------------------------------------------------------------
+
+    def _is_press_release_source(self, source):
+        """Check if a source should be treated as a CIAA press release.
+
+        Matches when:
+        - source_type is OFFICIAL_GOVERNMENT, OR
+        - description contains "CIAA Press Release", OR
+        - any URL contains "ciaa.gov.np/pressrelease"
+        """
+        if source.source_type == SourceType.OFFICIAL_GOVERNMENT:
+            return True
+
+        description = (source.description or "").lower()
+        if "ciaa press release" in description:
+            return True
+
+        urls = [
+            url.strip()
+            for url in (source.url or [])
+            if isinstance(url, str) and url.strip()
+        ]
+        for url in urls:
+            if "ciaa.gov.np/pressrelease" in url.lower():
+                return True
+
+        return False
+
+    def _score_source_for_press_release(self, source):
+        """Score a source for suitability as a CIAA press release.
+
+        Higher score = better match. Returns 0 for non-press-release sources.
+        """
+        if not self._is_press_release_source(source):
+            return 0
+
+        corpus_parts = [
+            source.title or "",
+            source.description or "",
+            source.uploaded_filename or "",
+        ]
+        urls = [
+            url.strip()
+            for url in (source.url or [])
+            if isinstance(url, str) and url.strip()
+        ]
+        corpus_parts.append(" ".join(urls))
+
+        for uploaded in source.uploaded_files.all():
+            corpus_parts.append(uploaded.filename or Path(uploaded.file.name).name)
+
+        corpus = " ".join(corpus_parts).lower()
+
+        score = 0
+
+        # Direct source_type match
+        if source.source_type == SourceType.OFFICIAL_GOVERNMENT:
+            score += 5
+
+        # Press release keywords
+        press_keywords = [
+            "press release",
+            "pressrelease",
+            "press-release",
+            "प्रेस विज्ञप्ति",
+            "विज्ञप्ति",
+        ]
+        if any(kw in corpus for kw in press_keywords):
+            score += 8
+
+        # CIAA-specific keywords
+        ciaa_keywords = ["ciaa", "अख्तियार"]
+        if any(kw in corpus for kw in ciaa_keywords):
+            score += 3
+
+        # Direct CIAA press release URL
+        if any("ciaa.gov.np/pressrelease" in u.lower() for u in urls):
+            score += 10
+
+        # Has DOC/DOCX URLs (editable formats)
+        if any(u.lower().endswith(".docx") for u in urls):
+            score += 4
+        elif any(u.lower().endswith(".doc") for u in urls):
+            score += 2
+        elif any(u.lower().endswith(".pdf") for u in urls):
+            score += 1
+
+        return score
+
     def _get_press_release_source(self, case):
-        """Return the best press release source for this case."""
-        for source in self._get_evidence_sources(case):
-            if source.source_type == SourceType.OFFICIAL_GOVERNMENT:
-                return source
-        return None
+        """Return the best press release source for this case.
+
+        Scores all evidence sources and returns the highest-scoring one.
+        """
+        sources = self._get_evidence_sources(case)
+        if not sources:
+            return None
+
+        ranked = sorted(
+            ((self._score_source_for_press_release(s), s) for s in sources),
+            key=lambda row: row[0],
+            reverse=True,
+        )
+        best_score, best_source = ranked[0]
+        return best_source if best_score > 0 else None
 
     def _get_court_order_source(self, case):
         """Return the best court order source for this case."""
@@ -230,33 +366,112 @@ class Command(BaseCommand):
         return None
 
     # ------------------------------------------------------------------
+    # URL deduplication and ranking (Problems 2 & 3)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _deduplicate_urls(urls):
+        """Group URLs by filename stem, keeping only the best format per group.
+
+        Priority: DOCX > DOC > PDF > other
+
+        Example: foo.pdf, foo.doc → keeps foo.doc only
+        """
+        from urllib.parse import urlparse
+
+        stems = {}  # stem -> [(priority, url)]
+        for url in urls:
+            parsed = urlparse(url)
+            path = Path(parsed.path)
+            stem = path.stem
+            suffix = path.suffix.lower()
+            priority = DOCUMENT_FORMAT_PRIORITY.get(suffix, 0)
+
+            if stem not in stems:
+                stems[stem] = []
+            stems[stem].append((priority, url))
+
+        result = []
+        for _stem, entries in stems.items():
+            entries.sort(key=lambda x: x[0], reverse=True)
+            result.append(entries[0][1])
+
+        return result
+
+    @staticmethod
+    def _ranked_press_release_urls(source):
+        """Return URLs ranked by conversion preference for press releases.
+
+        Priority: DOCX > DOC > PDF > other (e.g., CIAA webpage HTML)
+        """
+        urls = [
+            url.strip()
+            for url in (source.url or [])
+            if isinstance(url, str) and url.strip()
+        ]
+        if not urls:
+            return []
+
+        scored = []
+        for url in urls:
+            parsed = urlparse(url)
+            suffix = Path(parsed.path).suffix.lower()
+            priority = DOCUMENT_FORMAT_PRIORITY.get(suffix, 0)
+            # Non-document URLs (like webpage) get lowest priority
+            scored.append((priority, url))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        # Return unique in priority order
+        seen = set()
+        result = []
+        for _priority, url in scored:
+            if url not in seen:
+                seen.add(url)
+                result.append(url)
+        return result
+
+    # ------------------------------------------------------------------
     # Document conversion
     # ------------------------------------------------------------------
 
-    def _convert_source_to_markdown(self, source, session):
+    def _convert_source_to_markdown(self, source, session, is_press_release=False):
         """Convert a DocumentSource to markdown text.
 
-        Tries uploaded files first, then URLs via convert_to_markdown,
-        then falls back to source.description.
+        For press releases: tries DOCX → DOC → uploaded_file → PDF → webpage
+        For court orders: tries uploaded files first, then URLs.
         """
-        # Try uploaded files
-        uploaded_file = source.uploaded_file
-        if not uploaded_file:
-            uploaded = source.uploaded_files.first()
-            if uploaded and uploaded.file:
-                uploaded_file = uploaded.file
+        if is_press_release:
+            return self._convert_press_release_to_markdown(source, session)
+        return self._convert_court_order_to_markdown(source, session)
 
-        if uploaded_file:
-            try:
-                return self._convert_uploaded_file(uploaded_file)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to convert uploaded file for %s: %s",
-                    source.source_id,
-                    exc,
-                )
+    def _convert_press_release_to_markdown(self, source, session):
+        """Convert press release source. Priority: DOCX > DOC > uploaded > PDF > HTML."""
+        ranked_urls = self._ranked_press_release_urls(source)
 
-        # Try URLs
+        # Try each URL in priority order
+        for url in ranked_urls:
+            md = convert_to_markdown(url, session)
+            if md:
+                return md
+
+        # Try uploaded files as fallback
+        uploaded_md = self._convert_uploaded_file(source)
+        if uploaded_md:
+            return uploaded_md
+
+        # Fallback to description
+        if source.description and len(source.description.strip()) >= 500:
+            return source.description
+
+        return None
+
+    def _convert_court_order_to_markdown(self, source, session):
+        """Convert court order source. Uploaded files first, then URLs."""
+        uploaded_md = self._convert_uploaded_file(source)
+        if uploaded_md:
+            return uploaded_md
+
         urls = [
             url.strip()
             for url in (source.url or [])
@@ -267,14 +482,13 @@ class Command(BaseCommand):
             if md:
                 return md
 
-        # Fallback to description
         if source.description and len(source.description.strip()) >= 500:
             return source.description
 
         return None
 
-    def _convert_uploaded_file(self, file_field):
-        """Download an uploaded file to temp and convert via markitdown/likhit."""
+    def _convert_uploaded_file(self, source):
+        """Download and convert the best uploaded file for a source via markitdown/likhit."""
         try:
             import likhit  # noqa: F401
             from markitdown import MarkItDown
@@ -282,6 +496,15 @@ class Command(BaseCommand):
             raise CommandError(
                 "markitdown and likhit are required for document conversion."
             ) from exc
+
+        file_field = source.uploaded_file
+        if not file_field:
+            uploaded = source.uploaded_files.first()
+            if uploaded and uploaded.file:
+                file_field = uploaded.file
+
+        if not file_field:
+            return None
 
         suffix = Path(file_field.name).suffix or ""
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
@@ -307,6 +530,91 @@ class Command(BaseCommand):
             Path(tmp_path).unlink(missing_ok=True)
 
     # ------------------------------------------------------------------
+    # Intelligent truncation (Problems 4 & 5)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _truncate_press_release(text):
+        """Truncate press release to first 4000-6000 chars."""
+        if not text:
+            return text
+        text_len = len(text)
+        if text_len <= PRESS_RELEASE_MAX_CHARS:
+            return text[:PRESS_RELEASE_MAX_CHARS]
+        return text[:PRESS_RELEASE_MIN_CHARS]
+
+    @staticmethod
+    def _truncate_court_order(text):
+        """Intelligently truncate court order based on length.
+
+        < 15k chars  → entire document
+        15k-100k     → first 5000 + last 5000
+        > 100k       → first 6000 + 3×3000 evenly-spaced windows + last 6000
+        """
+        if not text:
+            return text
+
+        text_len = len(text)
+
+        if text_len < COURT_ORDER_SMALL_THRESHOLD:
+            return text
+
+        if text_len <= COURT_ORDER_MEDIUM_THRESHOLD:
+            return (
+                text[:COURT_ORDER_HEAD_TAIL_SMALL]
+                + "\n\n[...middle section omitted...]\n\n"
+                + text[-COURT_ORDER_HEAD_TAIL_SMALL:]
+            )
+
+        # > 100k: head + 3 evenly-spaced windows + tail
+        window_spacing = max(
+            1,
+            (text_len - COURT_ORDER_LARGE_HEAD - COURT_ORDER_LARGE_TAIL)
+            // (COURT_ORDER_LARGE_WINDOW_COUNT + 1),
+        )
+        parts = [text[:COURT_ORDER_LARGE_HEAD]]
+
+        for i in range(1, COURT_ORDER_LARGE_WINDOW_COUNT + 1):
+            center = COURT_ORDER_LARGE_HEAD + i * window_spacing
+            start = max(0, center - COURT_ORDER_LARGE_WINDOW // 2)
+            end = min(text_len, start + COURT_ORDER_LARGE_WINDOW)
+            parts.append(f"\n\n[...window {i}...]\n\n")
+            parts.append(text[start:end])
+
+        parts.append("\n\n[...final section...]\n\n")
+        parts.append(text[-COURT_ORDER_LARGE_TAIL:])
+
+        return "".join(parts)
+
+    @staticmethod
+    def _enforce_prompt_budget(parts, is_verbose=False):
+        """Ensure combined prompt stays within budget. Truncates largest part if over."""
+        combined = "\n\n".join(parts)
+        total = len(combined)
+
+        if total <= PROMPT_HARD_MAX:
+            return combined
+
+        # Find the largest part and truncate it further
+        largest_idx = max(range(len(parts)), key=lambda i: len(parts[i]))
+        current_overage = total - PROMPT_HARD_MAX
+
+        original = parts[largest_idx]
+        if len(original) > current_overage + 1000:
+            parts[largest_idx] = original[: len(original) - current_overage - 100]
+            if is_verbose:
+                logger.debug(
+                    "Prompt over budget (%d chars). Truncated part %d from %d to %d.",
+                    total,
+                    largest_idx,
+                    len(original),
+                    len(parts[largest_idx]),
+                )
+
+        combined = "\n\n".join(parts)
+        return combined[:PROMPT_HARD_MAX]
+
+    # ------------------------------------------------------------------
     # Case processing
     # ------------------------------------------------------------------
 
@@ -315,16 +623,20 @@ class Command(BaseCommand):
 
         content_parts = []
 
-        # Press release — short, always the first 1200 chars
+        # Press release — first 4000-6000 chars
         pr_source = self._get_press_release_source(case)
         if pr_source:
-            pr_md = self._convert_source_to_markdown(pr_source, session)
+            pr_md = self._convert_source_to_markdown(
+                pr_source, session, is_press_release=True
+            )
             if pr_md:
+                truncated = self._truncate_press_release(pr_md)
                 content_parts.append("--- PRESS RELEASE ---")
-                content_parts.append(pr_md[:1200])
+                content_parts.append(truncated)
                 if is_verbose:
                     self.stdout.write(
-                        f"  Press release: {pr_source.source_id} ({len(pr_md)} chars)"
+                        f"  Press release: {pr_source.source_id} "
+                        f"({len(pr_md)} chars → {len(truncated)} used)"
                     )
             else:
                 if is_verbose:
@@ -335,27 +647,22 @@ class Command(BaseCommand):
             if is_verbose:
                 self.stdout.write("  No press release source found")
 
-        # Court order — character-based slicing
+        # Court order — intelligent truncation
         co_source = self._get_court_order_source(case)
         if co_source:
-            co_md = self._convert_source_to_markdown(co_source, session)
+            co_md = self._convert_source_to_markdown(
+                co_source, session, is_press_release=False
+            )
             if co_md:
                 co_len = len(co_md)
+                truncated = self._truncate_court_order(co_md)
                 if is_verbose:
                     self.stdout.write(
-                        f"  Court order: {co_source.source_id} ({co_len} chars)"
+                        f"  Court order: {co_source.source_id} "
+                        f"({co_len} chars → {len(truncated)} used)"
                     )
-                if co_len < 5_000:
-                    content_parts.append("--- COURT ORDER (FULL) ---")
-                    content_parts.append(co_md)
-                elif co_len > 15_000:
-                    content_parts.append("--- COURT ORDER HEADER ---")
-                    content_parts.append(co_md[:4000])
-                    content_parts.append("--- COURT ORDER VERDICT SECTION ---")
-                    content_parts.append(co_md[-3000:])
-                else:
-                    content_parts.append("--- COURT ORDER (FULL) ---")
-                    content_parts.append(co_md)
+                content_parts.append("--- COURT ORDER ---")
+                content_parts.append(truncated)
             else:
                 if is_verbose:
                     self.stdout.write(
@@ -372,7 +679,17 @@ class Command(BaseCommand):
             )
             return
 
-        user_prompt = "\n\n".join(content_parts)
+        user_prompt = self._enforce_prompt_budget(content_parts, is_verbose)
+
+        if is_verbose:
+            self.stdout.write(f"  Prompt size: {len(user_prompt)} chars")
+
+        if user_prompt.strip() == "":
+            self.stats["cases_skipped"] += 1
+            self.stdout.write(
+                self.style.WARNING("  SKIPPED: Empty prompt after truncation")
+            )
+            return
 
         try:
             response = call_llm(
