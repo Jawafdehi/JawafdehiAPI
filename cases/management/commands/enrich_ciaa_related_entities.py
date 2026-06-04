@@ -46,7 +46,6 @@ logger = logging.getLogger(__name__)
 COURT_ORDER_SMALL_THRESHOLD = 8_000
 COURT_ORDER_MEDIUM_THRESHOLD = 80_000
 COURT_ORDER_HEAD_TAIL_SMALL = 3_000
-COURT_ORDER_HEAD_TAIL_MEDIUM = 3_000
 COURT_ORDER_LARGE_HEAD = 4_000
 COURT_ORDER_LARGE_TAIL = 4_000
 COURT_ORDER_LARGE_WINDOW = 2_000
@@ -205,17 +204,16 @@ class Command(BaseCommand):
 
         self._fetch_source_cache(cases)
 
-        session = requests.Session()
-
-        for idx, case in enumerate(cases, 1):
-            self.stats["cases_processed"] += 1
-            if is_verbose:
-                self.stdout.write(
-                    f"[{idx}/{len(cases)}] Processing case {case.case_id}..."
-                )
-            else:
-                self.stdout.write(f"Processing case {case.case_id}...")
-            self._process_case(case, options, api_key, session, is_verbose)
+        with requests.Session() as session:
+            for idx, case in enumerate(cases, 1):
+                self.stats["cases_processed"] += 1
+                if is_verbose:
+                    self.stdout.write(
+                        f"[{idx}/{len(cases)}] Processing case {case.case_id}..."
+                    )
+                else:
+                    self.stdout.write(f"Processing case {case.case_id}...")
+                self._process_case(case, options, api_key, session, is_verbose)
 
         self.stdout.write(self.style.SUCCESS(f"Finished. Stats: {self.stats}"))
 
@@ -498,24 +496,25 @@ class Command(BaseCommand):
 
         file_field = source.uploaded_file
         if not file_field:
-            uploaded = source.uploaded_files.first()
-            if uploaded and uploaded.file:
-                file_field = uploaded.file
+            uploaded_files = list(source.uploaded_files.all())
+            if uploaded_files and uploaded_files[0].file:
+                file_field = uploaded_files[0].file
 
         if not file_field:
             return None
 
         suffix = Path(file_field.name).suffix or ""
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp_path = tmp.name
+        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        tmp_path = tmp.name
+        try:
             with file_field.open("rb") as in_file:
                 while True:
                     chunk = in_file.read(8192)
                     if not chunk:
                         break
                     tmp.write(chunk)
+            tmp.close()
 
-        try:
             converter = MarkItDown(enable_plugins=True)
             result = converter.convert(tmp_path)
             if (
@@ -526,6 +525,7 @@ class Command(BaseCommand):
                 return result.text_content.strip()
             return None
         finally:
+            tmp.close()
             Path(tmp_path).unlink(missing_ok=True)
 
     # ------------------------------------------------------------------
@@ -543,9 +543,9 @@ class Command(BaseCommand):
     def _truncate_court_order(text):
         """Intelligently truncate court order based on length.
 
-        < 15k chars  → entire document
-        15k-100k     → first 5000 + last 5000
-        > 100k       → first 6000 + 3×3000 evenly-spaced windows + last 6000
+        < 8k chars   → entire document
+        8k-80k       → first 3000 + last 3000
+        > 80k        → first 4000 + 3×2000 evenly-spaced windows + last 4000
         """
         if not text:
             return text
@@ -777,9 +777,8 @@ class Command(BaseCommand):
                 )
                 continue
 
+            nes_id = self._link_nes(name, session)
             with transaction.atomic():
-                nes_id = self._link_nes(name, session)
-
                 entity, created = JawafEntity.objects.get_or_create(
                     display_name=name,
                     defaults={"nes_id": nes_id},
