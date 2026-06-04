@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import sys
 
@@ -25,9 +24,7 @@ class DjangoLLMClient:
     async def generate(self, *, system_prompt: str, user_prompt: str, max_tokens: int) -> str:
         def call():
             prompt = f"{system_prompt}\n\n{user_prompt}"
-            text = self.service.invoke(prompt)
-            json.loads(text)
-            return text
+            return self.service.invoke(prompt)
 
         return await asyncio.to_thread(call)
 
@@ -70,7 +67,9 @@ class Command(BaseCommand):
                 self.stdout.write(result.html)
             return
 
-        case.short_description = results["short_description"].html
+        short_desc = results.get("short_description")
+        if short_desc:
+            case.short_description = short_desc.html
         case.description = "\n\n".join(
             results[key].html for key in ("ka", "kha", "ga") if key in results
         )

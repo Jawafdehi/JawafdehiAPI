@@ -8,7 +8,6 @@ import re
 from dataclasses import dataclass
 from typing import Protocol
 
-from asgiref.sync import sync_to_async
 from django.core.cache import cache
 
 from cases.models import Case, DocumentSource, SourceType
@@ -218,7 +217,10 @@ def validate_section_html(html: str, *, heading: str | None = None) -> None:
         raise SectionQualityError("section output is empty")
 
     parser = HTMLValidationParser()
-    parser.feed(html)
+    try:
+        parser.feed(html)
+    except Exception as e:
+        raise SectionQualityError(f"HTML parsing failed: {e}")
     if parser.invalid_tags:
         raise SectionQualityError(f"disallowed HTML tags: {sorted(set(parser.invalid_tags))}")
     if parser.stack:
@@ -231,13 +233,31 @@ def validate_section_html(html: str, *, heading: str | None = None) -> None:
         if nepali_ratio < 0.20:
             raise SectionQualityError("section output does not contain enough Nepali text")
 
-    if heading and f"<h2>{heading}</h2>" not in html:
+    if heading and not re.search(r"<h2[^>]*>\s*" + re.escape(heading) + r"\s*</h2>", html):
         raise SectionQualityError(f"section heading missing: {heading}")
 
 
 def parse_llm_response(raw: str) -> tuple[str, str]:
-    data = json.loads(raw)
+    raw_cleaned = raw.strip()
+    if raw_cleaned.startswith("```"):
+        raw_cleaned = re.sub(r"^```(?:json)?\s*", "", raw_cleaned, flags=re.IGNORECASE)
+        raw_cleaned = re.sub(r"\s*```$", "", raw_cleaned)
+
+    try:
+        data = json.loads(raw_cleaned.strip())
+    except json.JSONDecodeError as e:
+        raise SectionQualityError(f"Invalid JSON response from LLM: {e}")
+
+    if not isinstance(data, dict):
+        raise SectionQualityError("LLM response is not a JSON object")
+
+    if "html" not in data:
+        raise SectionQualityError("LLM response is missing 'html' field")
+
     html = data["html"]
+    if not isinstance(html, str):
+        raise SectionQualityError("'html' field in LLM response is not a string")
+
     confidence = data.get("confidence", "low")
     if confidence not in {"high", "medium", "low"}:
         confidence = "low"
@@ -292,48 +312,63 @@ class SectionGenerationService:
         section_keys: tuple[str, ...] = ("short_description", "ka", "kha", "ga"),
     ) -> dict[str, SectionGenerationResult]:
         tasks = [self.generate_section(case, SECTION_SPECS[key], evidence) for key in section_keys]
-        results = await asyncio.gather(*tasks)
-        return {result.key: result for result in results}
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        final_results = {}
+        new_cache_entries = {}
+        eh = evidence_hash(evidence)
+
+        for key, result in zip(section_keys, results):
+            if isinstance(result, Exception):
+                continue
+            final_results[result.key] = result
+            if not result.from_cache:
+                new_cache_entries[result.key] = {
+                    "model": self.model,
+                    "evidence_hash": eh,
+                    "html": result.html,
+                    "confidence": result.confidence,
+                }
+
+        if new_cache_entries:
+            version_info = case.versionInfo
+            if not isinstance(version_info, dict):
+                version_info = {}
+            cache_data = version_info.get("section_generation_cache")
+            if not isinstance(cache_data, dict):
+                cache_data = {}
+            cache_data.update(new_cache_entries)
+            version_info["section_generation_cache"] = cache_data
+            case.versionInfo = version_info
+            await case.asave(update_fields=["versionInfo", "updated_at"])
+
+        return final_results
 
     async def generate_section(
         self, case: Case, spec: SectionSpec, evidence: list[SectionEvidence]
     ) -> SectionGenerationResult:
         eh = evidence_hash(evidence)
-        db_cache = (case.versionInfo or {}).get("section_generation_cache", {})
-        cached = db_cache.get(spec.key)
-        if cached and cached.get("evidence_hash") == eh and cached.get("model") == self.model:
+        version_info = case.versionInfo
+        db_cache = version_info.get("section_generation_cache") if isinstance(version_info, dict) else None
+        cached = db_cache.get(spec.key) if isinstance(db_cache, dict) else None
+        if isinstance(cached, dict) and cached.get("evidence_hash") == eh and cached.get("model") == self.model:
             validate_section_html(cached["html"], heading=spec.heading)
             return SectionGenerationResult(spec.key, cached["html"], cached["confidence"], True)
 
         user_prompt = build_section_prompt(case, spec, evidence)
         l4_key = f"llm:{prompt_hash(self.model, SYSTEM_PROMPT, user_prompt)}"
-        raw = cache.get(l4_key)
+        raw = await cache.aget(l4_key)
         if raw is None:
             raw = await self.llm_client.generate(
                 system_prompt=SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 max_tokens=spec.max_tokens,
             )
-            cache.set(l4_key, raw, timeout=24 * 60 * 60)
+            await cache.aset(l4_key, raw, timeout=24 * 60 * 60)
 
         html, confidence = parse_llm_response(raw)
         validate_section_html(html, heading=spec.heading)
-        await self._store_section_cache(case, spec.key, eh, html, confidence)
         return SectionGenerationResult(spec.key, html, confidence, False)
-
-    async def _store_section_cache(
-        self, case: Case, key: str, eh: str, html: str, confidence: str) -> None:
-        version_info = dict(case.versionInfo or {})
-        cache_data = dict(version_info.get("section_generation_cache", {}))
-        cache_data[key] = {
-            "model": self.model,
-            "evidence_hash": eh,
-            "html": html,
-            "confidence": confidence,
-        }
-        version_info["section_generation_cache"] = cache_data
-        case.versionInfo = version_info
-        await sync_to_async(case.save)(update_fields=["versionInfo", "updated_at"])
 
 
 def extract_case_evidence(case: Case) -> list[SectionEvidence]:
