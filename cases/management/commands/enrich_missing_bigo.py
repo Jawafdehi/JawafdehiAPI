@@ -1117,8 +1117,7 @@ Press release markdown:
 
         preview = re.sub(r"\s+", " ", content)[:200]
         raise ValueError(
-            "LLM response did not contain a JSON object. "
-            f"Response preview: {preview!r}"
+            f"LLM response did not contain a JSON object. Response preview: {preview!r}"
         )
 
     def _confidence_rank(self, confidence: str) -> int:

@@ -15,7 +15,6 @@ def reverse_convert(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("cases", "0019_add_publication_date_to_documentsource"),
     ]

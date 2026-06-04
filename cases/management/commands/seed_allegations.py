@@ -25,8 +25,8 @@ class Command(BaseCommand):
                 "WARNING: This will delete all existing cases and document sources!"
             )
         )
-        self.stdout.write(f'Database: {db_settings["NAME"]}')
-        self.stdout.write(f'Host: {db_settings.get("HOST", "localhost")}')
+        self.stdout.write(f"Database: {db_settings['NAME']}")
+        self.stdout.write(f"Host: {db_settings.get('HOST', 'localhost')}")
         confirm = input('Type "yes" to continue: ')
 
         if confirm.lower() != "yes":

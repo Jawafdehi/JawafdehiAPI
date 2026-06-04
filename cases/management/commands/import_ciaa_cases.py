@@ -116,9 +116,9 @@ class Command(BaseCommand):
             total_created = total_skipped = total_failed = 0
 
             for fy in fiscal_years:
-                logger.info(f"\n{'='*60}")
+                logger.info(f"\n{'=' * 60}")
                 logger.info(f"Processing fiscal year: {fy}")
-                logger.info(f"{'='*60}")
+                logger.info(f"{'=' * 60}")
 
                 created, skipped, failed = self._import_fiscal_year(
                     base_path_obj, fy, dry_run
@@ -242,17 +242,17 @@ class Command(BaseCommand):
         total = created + skipped + failed
         logger.info(f"Total processed: {total}")
         logger.info(
-            f"Created:       {created} ({created/total*100:.1f}%)"
+            f"Created:       {created} ({created / total * 100:.1f}%)"
             if total > 0
             else f"Created:       {created}"
         )
         logger.info(
-            f"Skipped:       {skipped} ({skipped/total*100:.1f}%)"
+            f"Skipped:       {skipped} ({skipped / total * 100:.1f}%)"
             if total > 0
             else f"Skipped:       {skipped}"
         )
         logger.info(
-            f"Failed:        {failed} ({failed/total*100:.1f}%)"
+            f"Failed:        {failed} ({failed / total * 100:.1f}%)"
             if total > 0
             else f"Failed:        {failed}"
         )

@@ -79,7 +79,6 @@ def migrate_entity_ids_to_jawafentity(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("cases", "0004_remove_case_add_contributors_to_documentsource"),
     ]

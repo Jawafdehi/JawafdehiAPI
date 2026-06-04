@@ -53,7 +53,6 @@ def noop(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("cases", "0011_add_source_type_field"),
     ]

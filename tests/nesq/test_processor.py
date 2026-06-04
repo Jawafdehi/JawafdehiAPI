@@ -91,8 +91,9 @@ def _make_mock_entity(entity_id="entity:person/sher-bahadur-deuba"):
 
 def _make_processor():
     """Create a QueueProcessor with mocked NES dependencies."""
-    with patch("nesq.processor.FileDatabase"), patch(
-        "nesq.processor.PublicationService"
+    with (
+        patch("nesq.processor.FileDatabase"),
+        patch("nesq.processor.PublicationService"),
     ):
         processor = QueueProcessor(nes_db_path="/tmp/fake-nes-db")
         processor.publication_service = AsyncMock()

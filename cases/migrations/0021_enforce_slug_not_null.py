@@ -58,7 +58,6 @@ def reverse_backfill(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("cases", "0020_remove_promises_case_type"),
     ]

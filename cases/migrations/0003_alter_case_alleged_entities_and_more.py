@@ -6,7 +6,6 @@ import cases.fields
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("cases", "0002_documentsource"),
     ]

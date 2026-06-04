@@ -1,0 +1,361 @@
+"""Prometheus metrics for the case overview enrichment pipeline.
+
+Exports 9 key metric families:
+  - pipeline_duration_seconds (Histogram: p50/p95/p99)
+  - llm_call_total (Counter: success/failure)
+  - cache_hit_total (Counter: per cache layer)
+  - quality_gate_total (Counter: pass/fail)
+  - section_confidence (Histogram: per section)
+  - likhit_conversion_failures_total (Counter)
+  - circuit_breaker_trips_total (Counter)
+  - null_source_type_ratio (Gauge)
+  - nepali_script_coverage (Gauge)
+"""
+
+from __future__ import annotations
+
+import os
+import tempfile
+import threading
+import time as _time
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+
+# ---------------------------------------------------------------------------
+# In-memory metrics backend (no external dependency required; a Prometheus
+# client_textfile exporter can be added later with `prometheus-client`).
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _Histogram:
+    name: str
+    help: str
+    labelnames: list[str] = field(default_factory=list)
+    _buckets: list[float] = field(
+        default_factory=lambda: [0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300]
+    )
+    _sum: float = field(default=0.0, repr=False)
+    _count: int = field(default=0, repr=False)
+    _bucket_counts: dict[tuple[str, str], int] = field(default_factory=dict, repr=False)
+    _label_sums: dict[str, float] = field(default_factory=dict, repr=False)
+    _label_counts: dict[str, int] = field(default_factory=dict, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def observe(self, value: float, labels: dict | None = None) -> None:
+        with self._lock:
+            self._sum += value
+            self._count += 1
+            label_prefix = _label_str(labels)
+            self._label_sums[label_prefix] = (
+                self._label_sums.get(label_prefix, 0.0) + value
+            )
+            self._label_counts[label_prefix] = (
+                self._label_counts.get(label_prefix, 0) + 1
+            )
+            for boundary in sorted(set(self._buckets)):
+                if value <= boundary:
+                    key = (label_prefix, str(boundary))
+                    self._bucket_counts[key] = self._bucket_counts.get(key, 0) + 1
+            key = (label_prefix, "+Inf")
+            self._bucket_counts[key] = self._bucket_counts.get(key, 0) + 1
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {
+                "sum": self._sum,
+                "count": self._count,
+                "buckets": dict(self._bucket_counts),
+                "label_sums": dict(self._label_sums),
+                "label_counts": dict(self._label_counts),
+            }
+
+    def reset(self) -> None:
+        with self._lock:
+            self._sum = 0.0
+            self._count = 0
+            self._bucket_counts.clear()
+            self._label_sums.clear()
+            self._label_counts.clear()
+
+
+@dataclass
+class _Counter:
+    name: str
+    help: str
+    labelnames: list[str] = field(default_factory=list)
+    _value: float = field(default=0.0, repr=False)
+    _labels: dict[str, float] = field(default_factory=dict, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def inc(self, amount: float = 1, labels: dict | None = None) -> None:
+        with self._lock:
+            self._value += amount
+            key = _label_str(labels)
+            self._labels[key] = self._labels.get(key, 0) + amount
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {"total": self._value, "by_label": dict(self._labels)}
+
+    def reset(self) -> None:
+        with self._lock:
+            self._value = 0.0
+            self._labels.clear()
+
+
+@dataclass
+class _Gauge:
+    name: str
+    help: str
+    labelnames: list[str] = field(default_factory=list)
+    _value: float = field(default=0.0, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def set(self, value: float) -> None:
+        with self._lock:
+            self._value = value
+
+    def inc(self, amount: float = 1) -> None:
+        with self._lock:
+            self._value += amount
+
+    def dec(self, amount: float = 1) -> None:
+        with self._lock:
+            self._value -= amount
+
+    def snapshot(self) -> float:
+        with self._lock:
+            return self._value
+
+    def reset(self) -> None:
+        with self._lock:
+            self._value = 0.0
+
+
+def _label_str(labels: dict | None) -> str:
+    if not labels:
+        return ""
+    parts = sorted(f'{k}="{v}"' for k, v in labels.items())
+    return "{" + ",".join(parts) + "}"
+
+
+def _append_label(label_prefix: str, name: str, value: str) -> str:
+    label = f'{name}="{value}"'
+    if not label_prefix:
+        return "{" + label + "}"
+    return label_prefix[:-1] + "," + label + "}"
+
+
+# ---------------------------------------------------------------------------
+# Metric definitions
+# ---------------------------------------------------------------------------
+
+pipeline_duration = _Histogram(
+    name="jawafdehi_enrichment_pipeline_duration_seconds",
+    help="End-to-end pipeline duration per case in seconds.",
+    labelnames=["tier", "command"],
+    _buckets=[0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600],
+)
+
+llm_call = _Counter(
+    name="jawafdehi_llm_call_total",
+    help="LLM call count by outcome.",
+    labelnames=["outcome", "model", "command"],
+)
+
+cache_hit = _Counter(
+    name="jawafdehi_cache_hit_total",
+    help="Cache hit count by layer.",
+    labelnames=["layer", "hit"],
+)
+
+quality_gate = _Counter(
+    name="jawafdehi_quality_gate_total",
+    help="Quality gate check count by result.",
+    labelnames=["gate", "result"],
+)
+
+section_confidence = _Histogram(
+    name="jawafdehi_section_confidence",
+    help="Per-section LLM extraction confidence (0-1).",
+    labelnames=["section"],
+    _buckets=[0.1, 0.3, 0.5, 0.7, 0.8, 0.9, 0.95, 0.99, 1.0],
+)
+
+likhit_failures = _Counter(
+    name="jawafdehi_likhit_conversion_failures_total",
+    help="Likhit document conversion failures.",
+    labelnames=["file_type"],
+)
+
+circuit_breaker_trips = _Counter(
+    name="jawafdehi_circuit_breaker_trips_total",
+    help="Circuit breaker trip count.",
+    labelnames=["circuit"],
+)
+
+null_source_type = _Gauge(
+    name="jawafdehi_null_source_type_ratio",
+    help="Ratio of source documents with null source_type (0-1).",
+)
+
+nepali_script_coverage = _Gauge(
+    name="jawafdehi_nepali_script_coverage",
+    help="Proportion of cases with Devanagari text in evidence (0-1).",
+)
+
+
+_ALL_METRICS = [
+    pipeline_duration,
+    llm_call,
+    cache_hit,
+    quality_gate,
+    section_confidence,
+    likhit_failures,
+    circuit_breaker_trips,
+    null_source_type,
+    nepali_script_coverage,
+]
+
+
+def reset_metrics() -> None:
+    for metric in _ALL_METRICS:
+        metric.reset()
+
+
+# ---------------------------------------------------------------------------
+# Textfile export (Prometheus node_exporter compatible)
+# ---------------------------------------------------------------------------
+
+_GAUGES: dict[str, _Gauge] = {
+    "jawafdehi_null_source_type_ratio": null_source_type,
+    "jawafdehi_nepali_script_coverage": nepali_script_coverage,
+}
+
+
+def export_textfile(path: str) -> None:
+    """Write all current metric snapshots to *path* in Prometheus exposition format."""
+    dirname = os.path.dirname(path) or "."
+    fd, tmp_path = tempfile.mkstemp(dir=dirname, suffix=".prom")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(export_textfile_to_string())
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def export_textfile_to_string() -> str:
+    """Return all current metric snapshots as a Prometheus exposition string."""
+    lines: list[str] = []
+
+    for metric in [
+        pipeline_duration,
+        section_confidence,
+    ]:
+        snap = metric.snapshot()
+        lines.append(f"# HELP {metric.name} {metric.help}")
+        lines.append(f"# TYPE {metric.name} histogram")
+        if snap["count"] > 0:
+            # Per-label-series sums and counts (skip empty label_prefix to
+            # avoid duplicate metric names with the global totals below).
+            for label_prefix, label_sum in sorted(snap.get("label_sums", {}).items()):
+                if not label_prefix:
+                    continue
+                label_count = snap.get("label_counts", {}).get(label_prefix, 0)
+                lines.append(f"{metric.name}_sum{label_prefix} {label_sum}")
+                lines.append(f"{metric.name}_count{label_prefix} {label_count}")
+            # Global totals (always emitted for Prometheus histogram exposition).
+            lines.append(f"{metric.name}_sum {snap['sum']}")
+            lines.append(f"{metric.name}_count {snap['count']}")
+            for (label_prefix, boundary), bucket_count in sorted(
+                snap["buckets"].items()
+            ):
+                labels = _append_label(label_prefix, "le", boundary)
+                lines.append(f"{metric.name}_bucket{labels} {bucket_count}")
+
+    counters = [
+        llm_call,
+        cache_hit,
+        quality_gate,
+        likhit_failures,
+        circuit_breaker_trips,
+    ]
+    for metric in counters:
+        snap = metric.snapshot()
+        lines.append(f"# HELP {metric.name} {metric.help}")
+        lines.append(f"# TYPE {metric.name} counter")
+        lines.append(f"{metric.name}_total {snap['total']}")
+        for label_key, label_val in sorted(snap.get("by_label", {}).items()):
+            clean_key = label_key.strip("{}") if label_key else ""
+            if not clean_key:
+                continue
+            lines.append(f"{metric.name}_total{{{clean_key}}} {label_val}")
+
+    for name, gauge in _GAUGES.items():
+        lines.append(f"# HELP {name} {gauge.help}")
+        lines.append(f"# TYPE {name} gauge")
+        lines.append(f"{name} {gauge.snapshot()}")
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Convenience helpers for pipeline instrumentation
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def track_pipeline_duration(tier: str, command: str = "unknown"):
+    """Context manager to record pipeline duration for a case."""
+    start = _time.monotonic()
+    try:
+        yield
+    finally:
+        elapsed = _time.monotonic() - start
+        pipeline_duration.observe(elapsed, labels={"tier": tier, "command": command})
+
+
+def record_llm_outcome(
+    success: bool, model: str = "unknown", command: str = "unknown"
+) -> None:
+    outcome = "success" if success else "failure"
+    llm_call.inc(labels={"outcome": outcome, "model": model, "command": command})
+
+
+def record_cache_lookup(layer: str, hit: bool) -> None:
+    cache_hit.inc(labels={"layer": layer, "hit": "true" if hit else "false"})
+
+
+def record_quality_gate(gate: str, passed: bool) -> None:
+    quality_gate.inc(labels={"gate": gate, "result": "pass" if passed else "fail"})
+
+
+def record_confidence(section: str, confidence: float) -> None:
+    section_confidence.observe(
+        max(0.0, min(1.0, confidence)), labels={"section": section}
+    )
+
+
+def record_likhit_failure(file_type: str = "unknown") -> None:
+    likhit_failures.inc(labels={"file_type": file_type})
+
+
+def record_circuit_breaker_trip(circuit: str) -> None:
+    circuit_breaker_trips.inc(labels={"circuit": circuit})
+
+
+def update_null_source_type_ratio(ratio: float) -> None:
+    null_source_type.set(max(0.0, min(1.0, ratio)))
+
+
+def update_nepali_script_coverage(coverage: float) -> None:
+    nepali_script_coverage.set(max(0.0, min(1.0, coverage)))

@@ -7,7 +7,6 @@ import cases.fields
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("cases", "0001_initial"),
     ]

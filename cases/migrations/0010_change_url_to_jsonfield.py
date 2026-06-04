@@ -98,7 +98,6 @@ def reverse_urls_to_string(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("cases", "0009_merge_20260112_0309"),
     ]

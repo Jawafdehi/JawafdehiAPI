@@ -55,7 +55,6 @@ def backfill_case_entity_relationships(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("cases", "0012_deprecate_case_versioning"),
     ]
