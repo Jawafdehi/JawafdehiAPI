@@ -8,7 +8,7 @@ from rest_framework.views import APIView
 from cases.models import Case
 
 from .models import CaseWorkflowRun
-from .permissions import IsAdminOrModerator
+from .permissions import IsAdminOrModerator, IsAdminOrModeratorOrContributorReadOnly
 from .registry import get_workflow, list_workflows
 from .serializers import (
     CaseWorkflowResumeSerializer,
@@ -25,7 +25,7 @@ class CaseWorkflowRunViewSet(viewsets.ReadOnlyModelViewSet):
     """
 
     authentication_classes = [TokenAuthentication]
-    permission_classes = [IsAdminOrModerator]
+    permission_classes = [IsAdminOrModeratorOrContributorReadOnly]
 
     queryset = CaseWorkflowRun.objects.all().order_by("-created_at")
     lookup_field = "run_id"
@@ -95,7 +95,7 @@ class EligibleCasesView(APIView):
     """
 
     authentication_classes = [TokenAuthentication]
-    permission_classes = [IsAdminOrModerator]
+    permission_classes = [IsAdminOrModeratorOrContributorReadOnly]
 
     def get(self, request):
         workflows = list_workflows()

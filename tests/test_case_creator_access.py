@@ -159,12 +159,11 @@ def test_non_creator_contributor_cannot_access(
     # Try to access with another contributor
     request = create_mock_request(another_contributor)
 
-    # Check view permission
+    # Check view permission — Contributors now have global read access
     has_view = case_admin.has_view_permission(request, case)
     has_change = case_admin.has_change_permission(request, case)
 
-    assert not has_view, "Non-creator contributor should NOT have view permission"
-
+    assert has_view, "Contributor should have view permission for all cases (global read access)"
     assert not has_change, "Non-creator contributor should NOT have change permission"
 
 

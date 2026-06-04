@@ -193,13 +193,11 @@ def can_manage_user(user: User, target_user: Optional[User]) -> bool:
 # ============================================================================
 
 # Case permissions
-can_view_case = is_admin_or_moderator | is_case_contributor
+can_view_case = is_admin_or_moderator | is_contributor
 can_change_case = is_admin_or_moderator | is_case_contributor
 
 # Source permissions
-can_view_source = (
-    is_admin_or_moderator | is_source_contributor | is_case_contributor_for_source
-)
+can_view_source = is_admin_or_moderator | is_contributor
 can_change_source = is_admin_or_moderator | is_source_contributor
 can_delete_source = is_admin_or_moderator
 
