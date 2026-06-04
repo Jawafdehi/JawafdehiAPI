@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import itertools
 import ipaddress
+import itertools
 import json
 import logging
 import os
