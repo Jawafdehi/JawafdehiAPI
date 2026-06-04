@@ -159,12 +159,13 @@ def test_non_creator_contributor_cannot_access(
     # Try to access with another contributor
     request = create_mock_request(another_contributor)
 
-    # Check view permission
+    # Check view permission — Contributors now have global read access
     has_view = case_admin.has_view_permission(request, case)
     has_change = case_admin.has_change_permission(request, case)
 
-    assert not has_view, "Non-creator contributor should NOT have view permission"
-
+    assert (
+        has_view
+    ), "Contributor should have view permission for all cases (global read access)"
     assert not has_change, "Non-creator contributor should NOT have change permission"
 
 
@@ -200,16 +201,16 @@ def test_creator_can_see_case_in_queryset(
 
     queryset = case_admin.get_queryset(request)
 
-    # Should only see their own case
+    # Should see all non-CLOSED cases (global read access)
     assert case1 in queryset, "Creator should see their own case in queryset"
 
     assert (
-        case2 not in queryset
-    ), "Creator should NOT see other contributors' cases in queryset"
+        case2 in queryset
+    ), "Creator should see other contributors' cases (global read access)"
 
     assert (
-        queryset.count() == 1
-    ), f"Creator should see exactly 1 case, but saw {queryset.count()}"
+        queryset.count() >= 2
+    ), f"Creator should see at least 2 cases, but saw {queryset.count()}"
 
 
 @pytest.mark.django_db

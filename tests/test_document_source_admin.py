@@ -187,17 +187,17 @@ class TestDocumentSourceAdmin:
 
         assert not admin_instance.has_change_permission(request, document_source)
 
-    def test_contributor_sees_only_assigned_sources(
+    def test_contributor_sees_all_active_sources(
         self, db, contributor_user, source_with_contributor, document_source
     ):
-        """Test that contributor only sees sources they're assigned to."""
+        """Test that contributor sees all active sources (global read access)."""
         admin_instance = admin.site._registry[DocumentSource]
         request = create_mock_request(contributor_user)
 
         queryset = admin_instance.get_queryset(request)
 
         assert source_with_contributor in queryset
-        assert document_source not in queryset
+        assert document_source in queryset
 
     def test_soft_deletion_preserves_record(self, db, document_source):
         """Test that soft deletion preserves the record in database."""

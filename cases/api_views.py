@@ -52,6 +52,7 @@ from .rules.predicates import (
     can_transition_case_state,
     can_view_case,
     is_admin_or_moderator,
+    is_contributor,
 )
 from .serializers import (
     CaseDetailSerializer,
@@ -239,7 +240,9 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
             # - Other authenticated (contributor): PUBLISHED + cases they are assigned to
             if not (self.request.user and self.request.user.is_authenticated):
                 queryset = Case.objects.filter(state=CaseState.PUBLISHED)
-            elif is_admin_or_moderator(self.request.user):
+            elif is_admin_or_moderator(self.request.user) or is_contributor(
+                self.request.user
+            ):
                 queryset = Case.objects.exclude(state=CaseState.CLOSED)
             else:
                 queryset = (
