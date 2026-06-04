@@ -43,21 +43,20 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------------
 # Slicing constants
 # ------------------------------------------------------------------
-COURT_ORDER_SMALL_THRESHOLD = 15_000
-COURT_ORDER_MEDIUM_THRESHOLD = 100_000
-COURT_ORDER_HEAD_TAIL_SMALL = 5_000
-COURT_ORDER_HEAD_TAIL_MEDIUM = 5_000
-COURT_ORDER_LARGE_HEAD = 6_000
-COURT_ORDER_LARGE_TAIL = 6_000
-COURT_ORDER_LARGE_WINDOW = 3_000
+COURT_ORDER_SMALL_THRESHOLD = 8_000
+COURT_ORDER_MEDIUM_THRESHOLD = 80_000
+COURT_ORDER_HEAD_TAIL_SMALL = 3_000
+COURT_ORDER_HEAD_TAIL_MEDIUM = 3_000
+COURT_ORDER_LARGE_HEAD = 4_000
+COURT_ORDER_LARGE_TAIL = 4_000
+COURT_ORDER_LARGE_WINDOW = 2_000
 COURT_ORDER_LARGE_WINDOW_COUNT = 3
 
-PRESS_RELEASE_MIN_CHARS = 4_000
-PRESS_RELEASE_MAX_CHARS = 6_000
+PRESS_RELEASE_CHARS = 1_200
 
-PROMPT_TARGET_MIN = 10_000
-PROMPT_TARGET_MAX = 25_000
-PROMPT_HARD_MAX = 30_000
+PROMPT_TARGET_MIN = 5_000
+PROMPT_TARGET_MAX = 12_000
+PROMPT_HARD_MAX = 20_000
 
 DOCUMENT_FORMAT_PRIORITY = {".docx": 4, ".doc": 3, ".pdf": 2}
 
@@ -535,13 +534,10 @@ class Command(BaseCommand):
 
     @staticmethod
     def _truncate_press_release(text):
-        """Truncate press release to first 4000-6000 chars."""
+        """Truncate press release to first 1200 chars."""
         if not text:
             return text
-        text_len = len(text)
-        if text_len <= PRESS_RELEASE_MAX_CHARS:
-            return text[:PRESS_RELEASE_MAX_CHARS]
-        return text[:PRESS_RELEASE_MIN_CHARS]
+        return text[:PRESS_RELEASE_CHARS]
 
     @staticmethod
     def _truncate_court_order(text):
@@ -618,12 +614,29 @@ class Command(BaseCommand):
     # Case processing
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _format_case_number(case):
+        """Extract case number from court_cases JSON field."""
+        court_cases = getattr(case, "court_cases", None)
+        if isinstance(court_cases, list) and court_cases:
+            first = court_cases[0]
+            if isinstance(first, str) and ":" in first:
+                return first.split(":", 1)[1]
+        return ""
+
     def _process_case(self, case, options, api_key, session, is_verbose):
         is_dry_run = options["dry_run"]
+        case_number = self._format_case_number(case)
+        title_trunc = (case.title or "")[:120]
+
+        self.stdout.write(
+            f"[CASE START] case_number={case_number} "
+            f"case_id={case.case_id} title={title_trunc}"
+        )
 
         content_parts = []
 
-        # Press release — first 4000-6000 chars
+        # Press release — first 1200 chars
         pr_source = self._get_press_release_source(case)
         if pr_source:
             pr_md = self._convert_source_to_markdown(
@@ -633,19 +646,16 @@ class Command(BaseCommand):
                 truncated = self._truncate_press_release(pr_md)
                 content_parts.append("--- PRESS RELEASE ---")
                 content_parts.append(truncated)
-                if is_verbose:
-                    self.stdout.write(
-                        f"  Press release: {pr_source.source_id} "
-                        f"({len(pr_md)} chars → {len(truncated)} used)"
-                    )
-            else:
-                if is_verbose:
-                    self.stdout.write(
-                        f"  Press release: {pr_source.source_id} — conversion failed"
-                    )
-        else:
-            if is_verbose:
-                self.stdout.write("  No press release source found")
+                self.stdout.write(
+                    f"press_release={pr_source.source_id} "
+                    f"chars={len(pr_md)} used={len(truncated)}"
+                )
+            elif is_verbose:
+                self.stdout.write(
+                    f"  Press release: {pr_source.source_id} — conversion failed"
+                )
+        elif is_verbose:
+            self.stdout.write("  No press release source found")
 
         # Court order — intelligent truncation
         co_source = self._get_court_order_source(case)
@@ -656,21 +666,18 @@ class Command(BaseCommand):
             if co_md:
                 co_len = len(co_md)
                 truncated = self._truncate_court_order(co_md)
-                if is_verbose:
-                    self.stdout.write(
-                        f"  Court order: {co_source.source_id} "
-                        f"({co_len} chars → {len(truncated)} used)"
-                    )
+                self.stdout.write(
+                    f"court_order={co_source.source_id} "
+                    f"chars={co_len} used={len(truncated)}"
+                )
                 content_parts.append("--- COURT ORDER ---")
                 content_parts.append(truncated)
-            else:
-                if is_verbose:
-                    self.stdout.write(
-                        f"  Court order: {co_source.source_id} — conversion failed"
-                    )
-        else:
-            if is_verbose:
-                self.stdout.write("  No court order source found")
+            elif is_verbose:
+                self.stdout.write(
+                    f"  Court order: {co_source.source_id} — conversion failed"
+                )
+        elif is_verbose:
+            self.stdout.write("  No court order source found")
 
         if not content_parts:
             self.stats["cases_skipped"] += 1
