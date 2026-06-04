@@ -8,10 +8,9 @@ to unassigned resources.
 import pytest
 from django.contrib.auth import get_user_model
 from django.test import RequestFactory
-from rest_framework import status
 
-from cases.models import Case, CaseState, CaseType
 from case_workflows.permissions import IsAdminOrModeratorOrContributorReadOnly
+from cases.models import Case, CaseState, CaseType
 from tests.conftest import (
     create_case_with_entities,
     create_mock_request,
@@ -152,7 +151,6 @@ class TestIsAdminOrModeratorOrContributorReadOnly:
         assert not perm.has_permission(req, _MockView())
 
     def test_unauthorized_user_denied(self):
-        user = create_user_with_role("norole", "norole@example.com", "NoRole")
         # NoRole is not a real group; create a plain user
         plain = User.objects.create_user(
             username="plain", email="plain@example.com", password="testpass123"

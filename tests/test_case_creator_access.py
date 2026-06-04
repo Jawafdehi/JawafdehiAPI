@@ -163,7 +163,9 @@ def test_non_creator_contributor_cannot_access(
     has_view = case_admin.has_view_permission(request, case)
     has_change = case_admin.has_change_permission(request, case)
 
-    assert has_view, "Contributor should have view permission for all cases (global read access)"
+    assert (
+        has_view
+    ), "Contributor should have view permission for all cases (global read access)"
     assert not has_change, "Non-creator contributor should NOT have change permission"
 
 

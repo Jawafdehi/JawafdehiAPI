@@ -8,7 +8,7 @@ from rest_framework.views import APIView
 from cases.models import Case
 
 from .models import CaseWorkflowRun
-from .permissions import IsAdminOrModerator, IsAdminOrModeratorOrContributorReadOnly
+from .permissions import IsAdminOrModeratorOrContributorReadOnly
 from .registry import get_workflow, list_workflows
 from .serializers import (
     CaseWorkflowResumeSerializer,
