@@ -945,10 +945,14 @@ def _convert_urls(src: DocumentSource) -> str:  # noqa
                 )
                 with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
                     content_length = resp.headers.get("Content-Length")
-                    if content_length and int(content_length) > _MAX_DOWNLOAD_BYTES:
+                    try:
+                        cl_val = int(content_length) if content_length else 0
+                    except (TypeError, ValueError):
+                        cl_val = 0
+                    if cl_val > _MAX_DOWNLOAD_BYTES:
                         logger.debug(
                             f"Skipping {url}: too large"
-                            f" ({content_length} > {_MAX_DOWNLOAD_BYTES})"
+                            f" ({cl_val} > {_MAX_DOWNLOAD_BYTES})"
                         )
                         continue
                     data = resp.read(_MAX_DOWNLOAD_BYTES + 1)
