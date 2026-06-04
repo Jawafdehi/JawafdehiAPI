@@ -201,16 +201,16 @@ def test_creator_can_see_case_in_queryset(
 
     queryset = case_admin.get_queryset(request)
 
-    # Should only see their own case
+    # Should see all non-CLOSED cases (global read access)
     assert case1 in queryset, "Creator should see their own case in queryset"
 
     assert (
-        case2 not in queryset
-    ), "Creator should NOT see other contributors' cases in queryset"
+        case2 in queryset
+    ), "Creator should see other contributors' cases (global read access)"
 
     assert (
-        queryset.count() == 1
-    ), f"Creator should see exactly 1 case, but saw {queryset.count()}"
+        queryset.count() >= 2
+    ), f"Creator should see at least 2 cases, but saw {queryset.count()}"
 
 
 @pytest.mark.django_db

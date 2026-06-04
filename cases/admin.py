@@ -612,7 +612,7 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         """
         Filter queryset based on user role.
 
-        - Contributors: Only see assigned cases
+        - Contributors: See all non-CLOSED cases (global read access)
         - Moderators/Admins: See all cases
         """
         qs = super().get_queryset(request)
@@ -621,9 +621,9 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         if is_admin_or_moderator(request.user):
             return qs
 
-        # Contributors only see assigned cases
+        # Contributors see all non-CLOSED cases (global read-only access)
         if is_contributor(request.user):
-            return qs.filter(contributors=request.user)
+            return qs.exclude(state=CaseState.CLOSED)
 
         # No role - see nothing
         return qs.none()
@@ -927,31 +927,9 @@ class DocumentSourceAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         if is_moderator(request.user):
             return qs.filter(is_deleted=False)
 
-        # Contributors see sources they're assigned to OR sources in their cases
+        # Contributors see all active sources (global read access)
         if is_contributor(request.user):
-            # Get cases where user is a contributor
-            user_cases = Case.objects.filter(contributors=request.user)
-
-            # Extract source_ids from evidence of user's cases
-            source_ids_from_cases = set()
-            for case in user_cases:
-                if case.evidence:
-                    for evidence_item in case.evidence:
-                        if (
-                            isinstance(evidence_item, dict)
-                            and "source_id" in evidence_item
-                        ):
-                            source_ids_from_cases.add(evidence_item["source_id"])
-
-            # Return sources where user is contributor OR source is in their cases
-            return (
-                qs.filter(is_deleted=False)
-                .filter(
-                    models.Q(contributors=request.user)
-                    | models.Q(source_id__in=source_ids_from_cases)
-                )
-                .distinct()
-            )
+            return qs.filter(is_deleted=False)
 
         # No role - see nothing
         return qs.none()

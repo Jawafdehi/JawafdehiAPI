@@ -21,7 +21,7 @@ class CaseWorkflowRunViewSet(viewsets.ReadOnlyModelViewSet):
     """
     List and retrieve CaseWorkflowRun records.
 
-    Accessible by Admin and Moderator users only.
+    Accessible by Admin and Moderator (full access), and Contributor (read-only).
     """
 
     authentication_classes = [TokenAuthentication]
@@ -91,7 +91,7 @@ class EligibleCasesView(APIView):
           }
         ]
 
-    Accessible by Admin and Moderator users only.
+    Accessible by Admin and Moderator (full access), and Contributor (read-only).
     """
 
     authentication_classes = [TokenAuthentication]
