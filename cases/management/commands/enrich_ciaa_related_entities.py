@@ -49,51 +49,12 @@ def _parse_accused_notes(response_text: str):
 
     Returns a list of {"name": ..., "notes": ...} dicts, or empty list if absent.
     """
-    import json
-
-    text = response_text.strip()
-
-    # Strip markdown fences (str.find = O(n), no ReDoS)
-    if "```" in text:
-        start = text.find("```")
-        if start != -1:
-            nl = text.find("\n", start)
-            if nl != -1:
-                end = text.find("```", nl)
-                if end != -1:
-                    text = text[nl + 1 : end].strip()
-
-    # Find the outer JSON object
-    obj_start = text.find("{")
-    if obj_start == -1:
+    entries = parse_extraction_response(response_text, {"accused_notes"})
+    if not entries:
         return []
-
-    depth = 0
-    obj_end = -1
-    for i, ch in enumerate(text[obj_start:], obj_start):
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                obj_end = i
-                break
-
-    if obj_end == -1:
-        return []
-
-    try:
-        obj = json.loads(text[obj_start : obj_end + 1])
-    except json.JSONDecodeError:
-        return []
-
-    accused_notes = obj.get("accused_notes", [])
-    if not isinstance(accused_notes, list):
-        return []
-
     return [
         item
-        for item in accused_notes
+        for item in entries
         if isinstance(item, dict) and item.get("name") and item.get("notes")
     ]
 
@@ -111,8 +72,6 @@ PRESS_RELEASE_CHARS_NO_COURT = (
     18_000  # no court order: use much more — it's the only source
 )
 
-PROMPT_TARGET_MIN = 5_000
-PROMPT_TARGET_MAX = 18_000  # press release 3k + ठहर खण्ड 12k + system overhead
 PROMPT_HARD_MAX = 25_000  # no court order case: 18k press release + system prompt
 
 DOCUMENT_FORMAT_PRIORITY = {".docx": 4, ".doc": 3, ".pdf": 2}
@@ -232,7 +191,6 @@ class Command(BaseCommand):
             "cases_processed": 0,
             "cases_skipped": 0,
             "cases_enriched": 0,
-            "cases_failed": 0,
             "entities_created": 0,
             "relationships_created": 0,
             "accused_notes_updated": 0,
@@ -297,7 +255,7 @@ class Command(BaseCommand):
             raise CommandError("--limit must be >= 0")
 
         if is_verbose:
-            logging.getLogger().setLevel(logging.DEBUG)
+            logger.setLevel(logging.DEBUG)
 
         # Always suppress urllib3 connection noise — it's not useful at any verbosity level
         logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
@@ -492,35 +450,6 @@ class Command(BaseCommand):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _deduplicate_urls(urls):
-        """Group URLs by filename stem, keeping only the best format per group.
-
-        Priority: DOCX > DOC > PDF > other
-
-        Example: foo.pdf, foo.doc → keeps foo.doc only
-        """
-        from urllib.parse import urlparse
-
-        stems = {}  # stem -> [(priority, url)]
-        for url in urls:
-            parsed = urlparse(url)
-            path = Path(parsed.path)
-            stem = path.stem
-            suffix = path.suffix.lower()
-            priority = DOCUMENT_FORMAT_PRIORITY.get(suffix, 0)
-
-            if stem not in stems:
-                stems[stem] = []
-            stems[stem].append((priority, url))
-
-        result = []
-        for _stem, entries in stems.items():
-            entries.sort(key=lambda x: x[0], reverse=True)
-            result.append(entries[0][1])
-
-        return result
-
-    @staticmethod
     def _ranked_press_release_urls(source):
         """Return URLs ranked by conversion preference for press releases.
 
@@ -629,9 +558,10 @@ class Command(BaseCommand):
             return None
 
         suffix = Path(file_field.name).suffix or ""
-        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
-        tmp_path = tmp.name
+        tmp_path = None
         try:
+            tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+            tmp_path = tmp.name
             with file_field.open("rb") as in_file:
                 while True:
                     chunk = in_file.read(8192)
@@ -650,8 +580,8 @@ class Command(BaseCommand):
                 return result.text_content.strip()
             return None
         finally:
-            tmp.close()
-            Path(tmp_path).unlink(missing_ok=True)
+            if tmp_path:
+                Path(tmp_path).unlink(missing_ok=True)
 
     # ------------------------------------------------------------------
     # Intelligent truncation (Problems 4 & 5)
@@ -689,11 +619,13 @@ class Command(BaseCommand):
         """Extract the most entity-rich section from a court order.
 
         Strategy:
-        1. If ठहर खण्ड (verdict section) is present, extract up to
+        1. If the document is shorter than COURT_ORDER_FULL_THRESHOLD,
+           return it as-is (no truncation needed).
+        2. If ठहर खण्ड (verdict section) is present, extract up to
            COURT_ORDER_THAHAR_CHARS from it. This section names all related
            parties, assets, banks, spouses, and contractors explicitly.
-        2. If no ठहर खण्ड, fall back to head + tail.
-        3. If doc is under COURT_ORDER_FULL_THRESHOLD, return as-is.
+        3. If no ठहर खण्ड, fall back to head (COURT_ORDER_HEAD_CHARS)
+           + tail (COURT_ORDER_TAIL_CHARS).
         """
         if not text:
             return text
@@ -817,7 +749,8 @@ class Command(BaseCommand):
             return True
 
         # 3. Substring containment (e.g. full title vs short name)
-        if na in nb or nb in na:
+        #    Minimum length guard avoids false positives like "राम" matching "सीताराम"
+        if len(na) >= 6 and len(nb) >= 6 and (na in nb or nb in na):
             return True
 
         # 4. Token overlap
@@ -1088,6 +1021,17 @@ class Command(BaseCommand):
             for line in updated:
                 self.stdout.write(line)
 
+    _PROCEDURAL_KEYWORDS = (
+        "उपन्यायाधिवक्ता",
+        "न्यायाधिवक्ता",
+        "सरकारी वकिल",
+        "अधिवक्ता",
+        "वरिष्ठ अधिवक्ता",
+        "न्यायाधीश",
+        "अध्यक्ष न्यायाधीश",
+        "सदस्य न्यायाधीश",
+    )
+
     # Boilerplate entities that appear in every case — skip them
     _SKIP_ENTITIES = frozenset(
         {
@@ -1133,18 +1077,8 @@ class Command(BaseCommand):
             ):
                 continue
             # Skip prosecutors, attorneys, judges — standard professional roles, not case participants
-            _PROCEDURAL_KEYWORDS = (
-                "उपन्यायाधिवक्ता",
-                "न्यायाधिवक्ता",
-                "सरकारी वकिल",
-                "अधिवक्ता",
-                "वरिष्ठ अधिवक्ता",
-                "न्यायाधीश",
-                "अध्यक्ष न्यायाधीश",
-                "सदस्य न्यायाधीश",
-            )
             if rel_type == "related" and any(
-                kw in (notes or "") for kw in _PROCEDURAL_KEYWORDS
+                kw in (notes or "") for kw in self._PROCEDURAL_KEYWORDS
             ):
                 continue
 
@@ -1178,11 +1112,13 @@ class Command(BaseCommand):
                     if rel_type == "location"
                     else RelationshipType.RELATED
                 )
+                notes_max = CaseEntityRelationship._meta.get_field("notes").max_length
+                safe_notes = (notes or "")[:notes_max]
                 _rel, rel_created = CaseEntityRelationship.objects.get_or_create(
                     case=case,
                     entity=entity,
                     relationship_type=relationship_type_enum,
-                    defaults={"notes": notes},
+                    defaults={"notes": safe_notes},
                 )
                 if rel_created:
                     self.stats["relationships_created"] += 1
