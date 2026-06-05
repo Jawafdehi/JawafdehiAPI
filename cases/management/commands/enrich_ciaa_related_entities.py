@@ -50,15 +50,18 @@ def _parse_accused_notes(response_text: str):
     Returns a list of {"name": ..., "notes": ...} dicts, or empty list if absent.
     """
     import json
-    import re
 
     text = response_text.strip()
 
-    # Strip markdown fences
+    # Strip markdown fences (str.find = O(n), no ReDoS)
     if "```" in text:
-        fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
-        if fence:
-            text = fence.group(1).strip()
+        start = text.find("```")
+        if start != -1:
+            nl = text.find("\n", start)
+            if nl != -1:
+                end = text.find("```", nl)
+                if end != -1:
+                    text = text[nl + 1 : end].strip()
 
     # Find the outer JSON object
     obj_start = text.find("{")

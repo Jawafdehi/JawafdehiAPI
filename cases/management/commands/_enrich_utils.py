@@ -410,13 +410,15 @@ def parse_extraction_response(
     """
     text = response_text.strip()
 
-    # Strip markdown code fences if present
+    # Strip markdown code fences if present (str.find = O(n), no ReDoS)
     if "```" in text:
-        import re
-
-        fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
-        if fence_match:
-            text = fence_match.group(1).strip()
+        start = text.find("```")
+        if start != -1:
+            nl = text.find("\n", start)
+            if nl != -1:
+                end = text.find("```", nl)
+                if end != -1:
+                    text = text[nl + 1 : end].strip()
 
     # Strategy 1: try to find a JSON object wrapper {"entities": [...]}
     # and extract the array directly — avoids "Extra data" from trailing braces
