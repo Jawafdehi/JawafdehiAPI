@@ -81,7 +81,7 @@ def call_llm(
     last_exc = None
     for attempt in range(1, max_retries + 1):
         try:
-            response = session.post(url, headers=headers, json=payload, timeout=120)
+            response = session.post(url, headers=headers, json=payload, timeout=300)
             response.raise_for_status()
         except requests.RequestException as exc:
             last_exc = exc

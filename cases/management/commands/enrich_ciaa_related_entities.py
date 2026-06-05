@@ -43,13 +43,9 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------------
 # Slicing constants
 # ------------------------------------------------------------------
-COURT_ORDER_SMALL_THRESHOLD = 8_000
-COURT_ORDER_MEDIUM_THRESHOLD = 80_000
-COURT_ORDER_HEAD_TAIL_SMALL = 3_000
-COURT_ORDER_LARGE_HEAD = 4_000
-COURT_ORDER_LARGE_TAIL = 4_000
-COURT_ORDER_LARGE_WINDOW = 2_000
-COURT_ORDER_LARGE_WINDOW_COUNT = 3
+COURT_ORDER_FULL_THRESHOLD = 8_000
+COURT_ORDER_HEAD_CHARS = 3_000
+COURT_ORDER_TAIL_CHARS = 3_000
 
 PRESS_RELEASE_CHARS = 1_200
 
@@ -541,46 +537,30 @@ class Command(BaseCommand):
 
     @staticmethod
     def _truncate_court_order(text):
-        """Intelligently truncate court order based on length.
+        """Extract only head + tail sections; includes full doc if under threshold.
 
-        < 8k chars   → entire document
-        8k-80k       → first 3000 + last 3000
-        > 80k        → first 4000 + 3×2000 evenly-spaced windows + last 4000
+        < FULL_THRESHOLD chars  → entire document
+        >= FULL_THRESHOLD      → first HEAD_CHARS + last TAIL_CHARS
+
+        Per issue spec: useful entity data is in the first ~100 lines and
+        last ~80 lines (verdict). The massive middle sections of illegal-wealth
+        cases (forensic tables, salary histories, property registers) contain
+        no entity information and are omitted entirely.
         """
         if not text:
             return text
 
-        text_len = len(text)
-
-        if text_len < COURT_ORDER_SMALL_THRESHOLD:
+        if len(text) < COURT_ORDER_FULL_THRESHOLD:
             return text
 
-        if text_len <= COURT_ORDER_MEDIUM_THRESHOLD:
-            return (
-                text[:COURT_ORDER_HEAD_TAIL_SMALL]
-                + "\n\n[...middle section omitted...]\n\n"
-                + text[-COURT_ORDER_HEAD_TAIL_SMALL:]
-            )
-
-        # > 100k: head + 3 evenly-spaced windows + tail
-        window_spacing = max(
-            1,
-            (text_len - COURT_ORDER_LARGE_HEAD - COURT_ORDER_LARGE_TAIL)
-            // (COURT_ORDER_LARGE_WINDOW_COUNT + 1),
+        label_head = "\n\n[...court order header section...]\n\n"
+        label_tail = "\n\n[...court order verdict section...]\n\n"
+        return (
+            label_head
+            + text[:COURT_ORDER_HEAD_CHARS]
+            + label_tail
+            + text[-COURT_ORDER_TAIL_CHARS:]
         )
-        parts = [text[:COURT_ORDER_LARGE_HEAD]]
-
-        for i in range(1, COURT_ORDER_LARGE_WINDOW_COUNT + 1):
-            center = COURT_ORDER_LARGE_HEAD + i * window_spacing
-            start = max(0, center - COURT_ORDER_LARGE_WINDOW // 2)
-            end = min(text_len, start + COURT_ORDER_LARGE_WINDOW)
-            parts.append(f"\n\n[...window {i}...]\n\n")
-            parts.append(text[start:end])
-
-        parts.append("\n\n[...final section...]\n\n")
-        parts.append(text[-COURT_ORDER_LARGE_TAIL:])
-
-        return "".join(parts)
 
     @staticmethod
     def _enforce_prompt_budget(parts, is_verbose=False):
