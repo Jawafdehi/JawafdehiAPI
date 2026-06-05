@@ -56,7 +56,11 @@ def call_llm(
 ) -> str:
     """Call LLM API via OpenAI-compatible chat completions endpoint.
 
-    Implements retry with exponential backoff for transient failures.
+    Retry strategy:
+    - ConnectionError/Timeout (connection phase): retry with backoff (proxy restart / transient blip).
+    - ReadTimeout (upstream model saturated): fail immediately — retrying won't help.
+    - 4xx: fail immediately.
+    - 5xx: retry with backoff.
     """
     if max_retries < 1:
         raise ValueError("max_retries must be >= 1")
@@ -75,27 +79,25 @@ def call_llm(
             {"role": "user", "content": user_prompt},
         ],
         "temperature": 0.1,
-        "max_tokens": 4000,
+        "max_tokens": 1500,
     }
 
     last_exc = None
     for attempt in range(1, max_retries + 1):
         try:
-            response = session.post(url, headers=headers, json=payload, timeout=300)
+            response = session.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=(30, 120),
+            )
             response.raise_for_status()
-        except requests.RequestException as exc:
+        except requests.ConnectionError as exc:
             last_exc = exc
-            if isinstance(exc, requests.HTTPError) and exc.response is not None:
-                status = exc.response.status_code
-                if 400 <= status < 500:
-                    raise CommandError(
-                        f"LLM API client error (HTTP {status}): "
-                        f"{exc.response.text[:500]}"
-                    ) from exc
             if attempt < max_retries:
                 wait = 2**attempt
                 logger.warning(
-                    "LLM API request failed (attempt %d/%d): %s. Retrying in %ds...",
+                    "LLM API connection failed (attempt %d/%d): %s. Retrying in %ds...",
                     attempt,
                     max_retries,
                     exc,
@@ -104,8 +106,36 @@ def call_llm(
                 time.sleep(wait)
                 continue
             raise CommandError(
-                f"LLM API request failed after {max_retries} attempts: {last_exc}"
+                f"LLM API connection failed after {max_retries} attempts: {last_exc}"
             ) from exc
+        except requests.Timeout as exc:
+            # ReadTimeout — upstream LLM model saturated; retrying wastes time.
+            raise CommandError(
+                f"LLM API timed out: {exc}"
+            ) from exc
+        except requests.HTTPError as exc:
+            if exc.response is not None and 400 <= exc.response.status_code < 500:
+                raise CommandError(
+                    f"LLM API client error (HTTP {exc.response.status_code}): "
+                    f"{exc.response.text[:500]}"
+                ) from exc
+            last_exc = exc
+            if attempt < max_retries:
+                wait = 2**attempt
+                logger.warning(
+                    "LLM API server error (attempt %d/%d): %s. Retrying in %ds...",
+                    attempt,
+                    max_retries,
+                    exc,
+                    wait,
+                )
+                time.sleep(wait)
+                continue
+            raise CommandError(
+                f"LLM API failed after {max_retries} attempts: {last_exc}"
+            ) from exc
+        except requests.RequestException as exc:
+            raise CommandError(f"LLM request failed: {exc}") from exc
 
         try:
             data = response.json()
