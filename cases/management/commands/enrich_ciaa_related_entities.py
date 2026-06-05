@@ -40,62 +40,183 @@ from cases.services.priority_case_loader import filter_by_priority, load_priorit
 
 logger = logging.getLogger(__name__)
 
+
+def _parse_accused_notes(response_text: str):
+    """Extract the accused_notes array from the LLM response JSON.
+
+    The LLM returns a combined object:
+      {"entities": [...], "accused_notes": [...]}
+
+    Returns a list of {"name": ..., "notes": ...} dicts, or empty list if absent.
+    """
+    import json
+    import re
+
+    text = response_text.strip()
+
+    # Strip markdown fences
+    if "```" in text:
+        fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+        if fence:
+            text = fence.group(1).strip()
+
+    # Find the outer JSON object
+    obj_start = text.find("{")
+    if obj_start == -1:
+        return []
+
+    depth = 0
+    obj_end = -1
+    for i, ch in enumerate(text[obj_start:], obj_start):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                obj_end = i
+                break
+
+    if obj_end == -1:
+        return []
+
+    try:
+        obj = json.loads(text[obj_start : obj_end + 1])
+    except json.JSONDecodeError:
+        return []
+
+    accused_notes = obj.get("accused_notes", [])
+    if not isinstance(accused_notes, list):
+        return []
+
+    return [
+        item
+        for item in accused_notes
+        if isinstance(item, dict) and item.get("name") and item.get("notes")
+    ]
+
+
 # ------------------------------------------------------------------
 # Slicing constants
 # ------------------------------------------------------------------
 COURT_ORDER_FULL_THRESHOLD = 8_000
-COURT_ORDER_HEAD_CHARS = 3_000
-COURT_ORDER_TAIL_CHARS = 3_000
+COURT_ORDER_HEAD_CHARS = 4_000  # fallback: entities front-loaded in header
+COURT_ORDER_TAIL_CHARS = 2_000  # fallback: tail when no ठहर खण्ड
+COURT_ORDER_THAHAR_CHARS = 12_000  # max chars from ठहर खण्ड when found
 
-PRESS_RELEASE_CHARS = 1_200
+PRESS_RELEASE_CHARS = 3_000  # with court order: 3k press release + ठहर खण्ड
+PRESS_RELEASE_CHARS_NO_COURT = (
+    18_000  # no court order: use much more — it's the only source
+)
 
 PROMPT_TARGET_MIN = 5_000
-PROMPT_TARGET_MAX = 12_000
-PROMPT_HARD_MAX = 20_000
+PROMPT_TARGET_MAX = 18_000  # press release 3k + ठहर खण्ड 12k + system overhead
+PROMPT_HARD_MAX = 25_000  # no court order case: 18k press release + system prompt
 
 DOCUMENT_FORMAT_PRIORITY = {".docx": 4, ".doc": 3, ".pdf": 2}
 
 
-SYSTEM_PROMPT = """You are an expert Nepali legal data extractor.
-Analyze the provided corruption case documents (press releases and/or court order excerpts).
-Extract two types of entities connected to the case:
+SYSTEM_PROMPT = """You are a Nepali legal research assistant helping to build a public transparency database of court cases.
+Analyze the provided Nepali legal documents (press release and/or court order excerpts) and extract structured data.
 
-1. LOCATION ENTITIES (relationship_type="location"):
-   The district, municipality, rural municipality, or province where the corruption
-   occurred. For CIAA cases this is typically stated in the first line of the case
-   title or press release. One entity per distinct location.
+You must extract THREE things in a single response:
 
-2. RELATED ENTITIES (relationship_type="related"):
-   Any person or organization materially connected to the case beyond the primary
-   accused. Prioritize these categories in order:
-   - Government bodies: ministries, departments, municipalities, local government
-     offices whose funds were misused or where the accused worked
-   - Companies and contractors: private firms, cooperatives, contractors,
-     suppliers, or consultants involved as beneficiaries of fraud or procurement
-     irregularities
-   - Family members: spouses, children, or relatives in whose name illegal assets
-     were held (critical for CIAA illegal wealth cases — the spouse's name almost
-     always appears as a co-holder of assets)
-   - Co-defendants and associates: secondary actors not listed as primary accused
-   - Beneficiaries: individuals or institutions that received misappropriated funds
-     or advantages
-   - Witnesses: key witnesses named directly in the court order or press release
-   - Legal actors: judges, lawyers, advocates, or procedural staff named in the
-     verdict or proceedings when they are materially connected to the case
-   - Any other person or institution the source documents identify as directly
-     involved
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 1 — LOCATION ENTITIES (relationship_type="location")
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Extract the district(s), municipality, or province WHERE THE CASE EVENTS occurred
+or where the key assets/funds at issue are located.
 
-Output exactly a JSON object with an "entities" key containing an array:
+STRICT RULES:
+- Extract ONLY where the case events happened or where the assets are.
+- DO NOT extract accused home addresses, birthplaces, or permanent addresses.
+- DO NOT extract the location of courts or government inquiry offices.
+- Extract 1 location for simple cases. Extract 2-3 only if the case genuinely spans
+  multiple districts.
+- Leave notes BLANK ("") for all location entities.
+- The entity_name should include context in the format: "Organisation/Activity - Location"
+
+Examples of CORRECT location entity names:
+- "साझा भण्डार सहकारी - सुर्खेत जिल्ला"
+- "स्वास्थ्य उपकरण खरिद - जनकपुरधाम"
+- "भरत ताल निर्माण परियोजना - सर्लाही जिल्ला"
+- "नापी कार्यालय - खैरहनी नगरपालिका"
+- (if no specific activity context, just the location name: "काठमाडौं")
+
+Examples of WRONG location names:
+- "तनहुँ जिल्ला" ← accused home address, SKIP
+- "काठमाडौं" ← if only reason is court/CIAA office, SKIP
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 2 — RELATED ENTITIES (relationship_type="related")
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Any person or organization connected to the case BEYOND the primary accused.
+Extract ALL of these categories that appear in the documents:
+
+  GOVERNMENT BODIES — ministry, department, municipality, office whose funds were
+  misused or where the accused worked.
+  Examples: "जलश्रोत तथा सिँचाइ विभाग"  notes: "आरोपी कार्यरत रहेको सरकारी निकाय"
+            "राष्ट्रिय सूचना प्रविधि केन्द्र"  notes: "खरिद प्रक्रियामा संलग्न सरकारी निकाय"
+
+  COMPANIES/CONTRACTORS — firms, JVs, cooperatives, suppliers, foreign companies.
+  Examples: "कल्पवृक्ष-कोहिनूर जे.भी."  notes: "ठेक्का प्राप्त गर्ने संयुक्त उद्यम"
+            "UOB Singapore बैंक"  notes: "Singapore स्थित बैंक, रकम हस्तान्तरणमा प्रयोग"
+
+  FAMILY MEMBERS — spouse, children, relatives holding assets.
+  Example: "श्रृजना गिरी"  notes: "आरोपितको श्रीमती, सम्पत्ति हस्तान्तरण गरिएको"
+
+  CO-DEFENDANTS/ASSOCIATES — secondary actors, facilitators, middlemen.
+  Example: "नानी काजी थापा"  notes: "घुस लेनदेनमा सहयोग"
+
+  INVESTIGATING/PROSECUTING BODIES — DO NOT extract the inquiry commission
+  (अख्तियार दुरुपयोग अनुसन्धान आयोग) or special attorney office as standalone
+  entities — they are present in every case. DO NOT extract individual prosecutors,
+  attorneys, judges, or court staff — they are performing standard professional
+  duties, not materially connected to the case events.
+  Only extract named CIAA investigation officers if they are specifically named
+  and their investigation is directly relevant.
+  Example: "रविन्द्र कुमार बुढाप्रिथी"  notes: "अनुसन्धान अधिकृत, CIAA"
+
+  WITNESSES/INVESTIGATORS — named inquiry officers, key witnesses.
+  Example: "रविन्द्र कुमार बुढाप्रिथी"  notes: "अनुसन्धान अधिकृत, CIAA"
+
+Notes must never be blank for related entities. Always describe the specific connection.
+Only extract entities with CONFIRMED connections — not people who were later acquitted.
+
+PRIORITY ORDER: People and organizations DIRECTLY involved in the case events come first.
+Generic legal infrastructure (courts, attorney offices) should be skipped unless a
+specific named person from those bodies is materially connected.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 3 — ACCUSED NOTES (accused_notes array)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+For each primary accused person named in the documents, extract a SHORT note
+describing their job title and role. Format: "job title, employer"
+Examples:
+  "तत्कालीन प्रबन्ध निर्देशक, नेपाल टेलिकम"
+  "तत्कालीन नगरप्रमुख, खैरहनी नगरपालिका"
+  "नापी अधिकृत, नापी कार्यालय चाबहिल"
+
+Only include primary accused persons. Keep notes under 80 chars.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT FORMAT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Output ONLY this JSON object, no other text:
 {
   "entities": [
     {
-      "entity_name": "Name of the entity (Nepali if Nepali text, else English)",
+      "entity_name": "Name exactly as in document",
       "relationship_type": "location" or "related",
-      "notes": "One short phrase describing their connection. For locations, leave blank. Examples: '\\u0906\\u0930\\u094b\\u092a\\u093f\\u0924\\u0915\\u094b \\u0936\\u094d\\u0930\\u0940\\u092e\\u0924\\u0940, \\u0938\\u092e\\u094d\\u092a\\u0924\\u094d\\u0924\\u093f \\u0939\\u0938\\u094d\\u0924\\u093e\\u0928\\u094d\\u0924\\u0930\\u0923 \\u0917\\u0930\\u093f\\u090f\\u0915\\u094b', '\\u0920\\u0947\\u0915\\u094d\\u0915\\u093e \\u092a\\u094d\\u0930\\u0926\\u093e\\u092f\\u0915 \\u0938\\u0902\\u0938\\u094d\\u0925\\u093e', '\\u092a\\u0940\\u0921\\u093f\\u0924 \\u0938\\u0930\\u0915\\u093e\\u0930\\u0940 \\u0928\\u093f\\u0915\\u093e\\u092f', '\\u0938\\u0939-\\u0906\\u0930\\u094b\\u092a\\u093f\\u0924'"
+      "notes": "specific description"
+    }
+  ],
+  "accused_notes": [
+    {
+      "name": "Accused person name exactly as in document",
+      "notes": "job title, employer"
     }
   ]
 }
-No other text.
 """
 
 
@@ -111,6 +232,7 @@ class Command(BaseCommand):
             "cases_failed": 0,
             "entities_created": 0,
             "relationships_created": 0,
+            "accused_notes_updated": 0,
         }
         self._source_lookup = {}
 
@@ -131,7 +253,7 @@ class Command(BaseCommand):
             type=str,
             default=os.environ.get(
                 "JAWAFDEHI_ALLEGATION_MODEL",
-                "claude-sonnet-4-5,claude-haiku-4-5",
+                "kr/claude-haiku-4.5,kr/claude-sonnet-4.5",
             ),
             help="Comma-separated list of models to try in order (fallback chain)",
         )
@@ -139,7 +261,7 @@ class Command(BaseCommand):
             "--llm-base-url",
             type=str,
             default=os.environ.get(
-                "JAWAFDEHI_LLM_PROXY_URL", "http://localhost:11434/v1"
+                "JAWAFDEHI_LLM_PROXY_URL", "https://llm-proxy.jawafdehi.org/v1"
             ),
         )
         parser.add_argument(
@@ -174,6 +296,9 @@ class Command(BaseCommand):
         if is_verbose:
             logging.getLogger().setLevel(logging.DEBUG)
 
+        # Always suppress urllib3 connection noise — it's not useful at any verbosity level
+        logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
+
         api_key = resolve_api_key(options["llm_api_key"])
         if not api_key:
             raise CommandError("LLM API key not found in env or args")
@@ -207,12 +332,9 @@ class Command(BaseCommand):
         with requests.Session() as session:
             for idx, case in enumerate(cases, 1):
                 self.stats["cases_processed"] += 1
-                if is_verbose:
-                    self.stdout.write(
-                        f"[{idx}/{len(cases)}] Processing case {case.case_id}..."
-                    )
-                else:
-                    self.stdout.write(f"Processing case {case.case_id}...")
+                self.stdout.write(
+                    f"[{idx}/{len(cases)}] Processing case {case.case_id}..."
+                )
                 self._process_case(case, options, api_key, session, is_verbose)
 
         self.stdout.write(self.style.SUCCESS(f"Finished. Stats: {self.stats}"))
@@ -533,23 +655,42 @@ class Command(BaseCommand):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _truncate_press_release(text):
-        """Truncate press release to first 1200 chars."""
+    def _truncate_press_release(text, limit=None):
+        """Truncate press release, cutting at the last sentence boundary before limit.
+
+        Cuts at the last Nepali danda (।), newline, or full stop before the limit
+        to avoid sending a truncated mid-sentence to the LLM.
+
+        limit defaults to PRESS_RELEASE_CHARS. Pass PRESS_RELEASE_CHARS_NO_COURT
+        when no court order is available.
+        """
         if not text:
             return text
-        return text[:PRESS_RELEASE_CHARS]
+        if limit is None:
+            limit = PRESS_RELEASE_CHARS
+        if len(text) <= limit:
+            return text
+
+        chunk = text[:limit]
+
+        # Cut at last sentence boundary — prefer Nepali danda, then newline, then period
+        for sep in ("।", "\n", ".", "!"):
+            idx = chunk.rfind(sep)
+            if idx >= limit // 2:  # must use at least half the budget
+                return chunk[: idx + 1]
+
+        return chunk
 
     @staticmethod
     def _truncate_court_order(text):
-        """Extract only head + tail sections; includes full doc if under threshold.
+        """Extract the most entity-rich section from a court order.
 
-        < FULL_THRESHOLD chars  → entire document
-        >= FULL_THRESHOLD      → first HEAD_CHARS + last TAIL_CHARS
-
-        Per issue spec: useful entity data is in the first ~100 lines and
-        last ~80 lines (verdict). The massive middle sections of illegal-wealth
-        cases (forensic tables, salary histories, property registers) contain
-        no entity information and are omitted entirely.
+        Strategy:
+        1. If ठहर खण्ड (verdict section) is present, extract up to
+           COURT_ORDER_THAHAR_CHARS from it. This section names all related
+           parties, assets, banks, spouses, and contractors explicitly.
+        2. If no ठहर खण्ड, fall back to head + tail.
+        3. If doc is under COURT_ORDER_FULL_THRESHOLD, return as-is.
         """
         if not text:
             return text
@@ -557,6 +698,24 @@ class Command(BaseCommand):
         if len(text) < COURT_ORDER_FULL_THRESHOLD:
             return text
 
+        # Try to find ठहर खण्ड
+        thahar_marker = "ठहर खण्ड"
+        idx = text.find(thahar_marker)
+        if idx != -1:
+            thahar_text = text[idx:]
+            # Cut at sentence boundary within budget
+            limit = COURT_ORDER_THAHAR_CHARS
+            if len(thahar_text) <= limit:
+                return f"\n\n[...ठहर खण्ड (verdict section)...]\n\n{thahar_text}"
+            chunk = thahar_text[:limit]
+            for sep in ("।", "\n", ".", "!"):
+                sep_idx = chunk.rfind(sep)
+                if sep_idx >= limit // 2:
+                    chunk = chunk[: sep_idx + 1]
+                    break
+            return f"\n\n[...ठहर खण्ड (verdict section)...]\n\n{chunk}"
+
+        # Fallback: head + tail
         label_head = "\n\n[...court order header section...]\n\n"
         label_tail = "\n\n[...court order verdict section...]\n\n"
         return (
@@ -594,6 +753,87 @@ class Command(BaseCommand):
         combined = "\n\n".join(parts)
         return combined[:PROMPT_HARD_MAX]
 
+    def _get_accused_relationships(self, case):
+        """Return existing ACCUSED CaseEntityRelationship objects for this case.
+
+        Returns a list of (relationship, display_name) tuples.
+        Used both for overlap detection and for updating notes.
+        """
+        rels = CaseEntityRelationship.objects.filter(
+            case=case,
+            relationship_type=RelationshipType.ACCUSED,
+        ).select_related("entity")
+        return [
+            (rel, rel.entity.display_name.strip())
+            for rel in rels
+            if rel.entity and rel.entity.display_name
+        ]
+
+    def _get_accused_names(self, case):
+        """Return a set of display_name values for existing ACCUSED relationships."""
+        return {name for _, name in self._get_accused_relationships(case)}
+
+    @staticmethod
+    def _normalize_name(name: str) -> str:
+        """Normalize a Nepali/English name for fuzzy comparison.
+
+        - Strip leading/trailing whitespace
+        - Collapse internal whitespace (handles "जीवन  बहादुर" → "जीवन बहादुर")
+        - Normalize Unicode to NFC (handles composed vs decomposed Devanagari)
+        - Lowercase (for English names)
+        """
+        import unicodedata
+
+        name = unicodedata.normalize("NFC", name.strip())
+        name = " ".join(name.split())  # collapse all internal whitespace
+        return name.lower()
+
+    @staticmethod
+    def _names_match(a: str, b: str) -> bool:
+        """Return True if two names likely refer to the same entity.
+
+        Strategy (in order):
+        1. Exact match after normalization
+        2. Space-stripped match — catches "जयकुमार" vs "जय कुमार" (compound word split)
+        3. One name is fully contained in the other (handles shortened forms)
+        4. Token overlap >= 2 tokens and overlap_ratio >= 0.75
+           — catches spelling variants, dropped particles, etc.
+        """
+        na = Command._normalize_name(a)
+        nb = Command._normalize_name(b)
+
+        # 1. Exact after normalization
+        if na == nb:
+            return True
+
+        # 2. Space-stripped — handles compound Nepali words written with/without space
+        # e.g. "जय कुमार खड्का" vs "जयकुमार खड्का"
+        # e.g. "गीता कुमारी शाही" vs "गीताकुमारी शाही"
+        # e.g. "योगेन्द्र नाथ" vs "योगेन्द्रनाथ"
+        if na.replace(" ", "") == nb.replace(" ", ""):
+            return True
+
+        # 3. Substring containment (e.g. full title vs short name)
+        if na in nb or nb in na:
+            return True
+
+        # 4. Token overlap
+        tokens_a = set(na.split())
+        tokens_b = set(nb.split())
+        # Require at least 2 tokens to avoid false positives on single common words
+        if len(tokens_a) < 2 or len(tokens_b) < 2:
+            return False
+        overlap = len(tokens_a & tokens_b)
+        smaller = min(len(tokens_a), len(tokens_b))
+        return overlap >= 2 and (overlap / smaller) >= 0.75
+
+    def _is_accused(self, name: str, accused_names: set) -> bool:
+        """Check if a name matches any known accused name using fuzzy matching."""
+        for accused in accused_names:
+            if self._names_match(name, accused):
+                return True
+        return False
+
     # ------------------------------------------------------------------
     # Case processing
     # ------------------------------------------------------------------
@@ -613,26 +853,46 @@ class Command(BaseCommand):
         case_number = self._format_case_number(case)
         title_trunc = (case.title or "")[:120]
 
+        self.stdout.write(f"\n{'─'*60}")
         self.stdout.write(
             f"[CASE START] case_number={case_number} "
-            f"case_id={case.case_id} title={title_trunc}"
+            f"case_id={case.case_id}\n  title={title_trunc}"
         )
+
+        # Load existing accused relationships (for overlap check + notes update)
+        accused_rels = self._get_accused_relationships(case)
+        accused_names = {name for _, name in accused_rels}
+        if accused_names and is_verbose:
+            self.stdout.write(
+                f"  Accused ({len(accused_names)}): {', '.join(sorted(accused_names))}"
+            )
 
         content_parts = []
 
-        # Press release — first 1200 chars
+        # Determine court order availability first — affects how much press release we use
+        co_source = self._get_court_order_source(case)
+
+        # Press release — use more context when no court order is available
         pr_source = self._get_press_release_source(case)
         if pr_source:
             pr_md = self._convert_source_to_markdown(
                 pr_source, session, is_press_release=True
             )
             if pr_md:
-                truncated = self._truncate_press_release(pr_md)
+                # No court order → use up to PRESS_RELEASE_CHARS_NO_COURT
+                # With court order → use PRESS_RELEASE_CHARS (still more than before)
+                if co_source is None:
+                    truncated = self._truncate_press_release(
+                        pr_md, limit=PRESS_RELEASE_CHARS_NO_COURT
+                    )
+                else:
+                    truncated = self._truncate_press_release(pr_md)
                 content_parts.append("--- PRESS RELEASE ---")
                 content_parts.append(truncated)
                 self.stdout.write(
                     f"press_release={pr_source.source_id} "
                     f"chars={len(pr_md)} used={len(truncated)}"
+                    + (" (extended — no court order)" if co_source is None else "")
                 )
             elif is_verbose:
                 self.stdout.write(
@@ -642,7 +902,6 @@ class Command(BaseCommand):
             self.stdout.write("  No press release source found")
 
         # Court order — intelligent truncation
-        co_source = self._get_court_order_source(case)
         if co_source:
             co_md = self._convert_source_to_markdown(
                 co_source, session, is_press_release=False
@@ -650,9 +909,11 @@ class Command(BaseCommand):
             if co_md:
                 co_len = len(co_md)
                 truncated = self._truncate_court_order(co_md)
+                thahar_found = "ठहर खण्ड" in co_md
                 self.stdout.write(
                     f"court_order={co_source.source_id} "
                     f"chars={co_len} used={len(truncated)}"
+                    + (" [ठहर खण्ड]" if thahar_found else " [head+tail]")
                 )
                 content_parts.append("--- COURT ORDER ---")
                 content_parts.append(truncated)
@@ -672,8 +933,7 @@ class Command(BaseCommand):
 
         user_prompt = self._enforce_prompt_budget(content_parts, is_verbose)
 
-        if is_verbose:
-            self.stdout.write(f"  Prompt size: {len(user_prompt)} chars")
+        self.stdout.write(f"Prompt size: {len(user_prompt)} chars")
 
         if user_prompt.strip() == "":
             self.stats["cases_skipped"] += 1
@@ -715,20 +975,31 @@ class Command(BaseCommand):
 
         if response is None:
             self.stats["cases_skipped"] += 1
-            msg = f"  SKIPPED: {last_error}" if last_error else "  SKIPPED: All models failed"
+            msg = (
+                f"  SKIPPED: {last_error}"
+                if last_error
+                else "  SKIPPED: All models failed"
+            )
             self.stdout.write(self.style.WARNING(msg))
             return
 
         entities_data = parse_extraction_response(response, {"entities"})
+        accused_notes_data = _parse_accused_notes(response)
 
-        if not entities_data:
+        if not entities_data and not accused_notes_data:
             self.stats["cases_skipped"] += 1
             self.stdout.write(
-                self.style.WARNING("  SKIPPED: No entities extracted")
+                self.style.WARNING("  SKIPPED: No entities or accused notes extracted")
             )
+            logger.debug("Raw LLM response (first 500 chars): %s", response[:500])
             return
 
-        self._apply_entities(case, entities_data, is_dry_run, session)
+        if entities_data:
+            self._apply_entities(
+                case, entities_data, is_dry_run, session, accused_names
+            )
+
+        self._apply_accused_notes(case, accused_notes_data, accused_rels, is_dry_run)
         self.stats["cases_enriched"] += 1
 
     # ------------------------------------------------------------------
@@ -764,19 +1035,125 @@ class Command(BaseCommand):
     # Entity persistence
     # ------------------------------------------------------------------
 
-    def _apply_entities(self, case, entities_data, is_dry_run, session):
+    def _apply_accused_notes(self, case, accused_notes_data, accused_rels, is_dry_run):
+        """Update notes on existing accused relationships using LLM-extracted notes.
+
+        Only updates relationships that currently have no notes (blank or null).
+        Uses fuzzy name matching to find the right relationship to update.
+        """
+        if not accused_notes_data:
+            return
+
+        # Build lookup: normalized_name -> relationship object (only those missing notes)
+        rels_needing_notes = [
+            (rel, name)
+            for rel, name in accused_rels
+            if not (rel.notes and rel.notes.strip())
+        ]
+
+        updated = []
+        for item in accused_notes_data:
+            extracted_name = (item.get("name") or "").strip()
+            new_notes = (item.get("notes") or "").strip()
+            if not extracted_name or not new_notes:
+                continue
+            # Filter garbage names: single/two-char entries like "म" (Nepali "I")
+            if len(extracted_name) <= 2:
+                continue
+            # Cap at 200 chars — reject verbose legal charge text
+            if len(new_notes) > 200:
+                continue
+
+            for rel, stored_name in rels_needing_notes:
+                # Skip garbage stored names in DB (data quality issue on mass-import cases)
+                if len(stored_name) <= 2:
+                    continue
+                if self._names_match(extracted_name, stored_name):
+                    if is_dry_run:
+                        self.stdout.write(
+                            f"  [DRY RUN] accused_note  {stored_name}  — {new_notes}"
+                        )
+                    else:
+                        rel.notes = new_notes
+                        rel.save(update_fields=["notes"])
+                        self.stats["accused_notes_updated"] += 1
+                        updated.append(f"  ~ accused    {stored_name}  — {new_notes}")
+                    break
+
+        if updated:
+            self.stdout.write(f"  Accused notes updated ({len(updated)}):")
+            for line in updated:
+                self.stdout.write(line)
+
+    # Boilerplate entities that appear in every case — skip them
+    _SKIP_ENTITIES = frozenset(
+        {
+            "विशेष अदालत, काठमाडौं",
+            "विशेष अदालत काठमाडौं",
+            "विशेष सरकारी वकिल कार्यालय",
+            "विशेष सरकारी वकील कार्यालय",
+            "विशेष सरकारी वकिल कार्यालय, काठमाडौं",
+            "विशेष सरकारी वकील कार्यालय, काठमाडौं",
+            "अख्तियार दुरुपयोग अनुसन्धान आयोग",
+            "अख्तियार दुरुपयोग अनुसन्धान आयोग, टंगाल",
+            "अख्तियार दुरुपयोग अनुसन्धान आयोग (CIAA)",
+            "Commission for the Investigation of Abuse of Authority (CIAA)",
+            "CIAA",
+        }
+    )
+
+    def _apply_entities(
+        self, case, entities_data, is_dry_run, session, accused_names=None
+    ):
+        accused_names = accused_names or set()
+        skipped_accused = []
+        created_summary = []
+
         for item in entities_data:
-            name = item.get("entity_name")
+            name = item.get("entity_name", "").strip()
             rel_type = item.get("relationship_type")
             notes = item.get("notes", "")
 
             if not name or rel_type not in ("location", "related"):
                 continue
 
+            # Skip boilerplate entities present in every case
+            if name in self._SKIP_ENTITIES:
+                continue
+            # Also catch variants by normalized name (handles spacing/punctuation differences)
+            norm = self._normalize_name(name)
+            if any(self._normalize_name(skip) == norm for skip in self._SKIP_ENTITIES):
+                continue
+            # Skip laws/acts — they are not entities
+            if rel_type == "related" and (
+                "ऐन," in name or "ऐन, " in name or "नियमावली," in name
+            ):
+                continue
+            # Skip prosecutors, attorneys, judges — standard professional roles, not case participants
+            _PROCEDURAL_KEYWORDS = (
+                "उपन्यायाधिवक्ता",
+                "न्यायाधिवक्ता",
+                "सरकारी वकिल",
+                "अधिवक्ता",
+                "वरिष्ठ अधिवक्ता",
+                "न्यायाधीश",
+                "अध्यक्ष न्यायाधीश",
+                "सदस्य न्यायाधीश",
+            )
+            if rel_type == "related" and any(
+                kw in (notes or "") for kw in _PROCEDURAL_KEYWORDS
+            ):
+                continue
+
+            # Skip entities already stored as accused — avoids duplicate relationships
+            if rel_type == "related" and self._is_accused(name, accused_names):
+                skipped_accused.append(name)
+                continue
+
             if is_dry_run:
                 self.stdout.write(
-                    f"  [DRY RUN] Would create {rel_type} entity: {name}"
-                    + (f" (notes: {notes})" if notes else "")
+                    f"  [DRY RUN] {rel_type:8s}  {name}"
+                    + (f"  — {notes}" if notes else "")
                 )
                 continue
 
@@ -806,3 +1183,17 @@ class Command(BaseCommand):
                 )
                 if rel_created:
                     self.stats["relationships_created"] += 1
+                    created_summary.append(
+                        f"  + {rel_type:8s}  {name}" + (f"  — {notes}" if notes else "")
+                    )
+
+        # Print clean per-case summary
+        if created_summary:
+            self.stdout.write(f"  Entities saved ({len(created_summary)}):")
+            for line in created_summary:
+                self.stdout.write(line)
+        if skipped_accused:
+            self.stdout.write(
+                f"  Skipped {len(skipped_accused)} accused overlaps: "
+                + ", ".join(skipped_accused)
+            )

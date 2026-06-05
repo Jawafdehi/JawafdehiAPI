@@ -45,6 +45,75 @@ def is_valid_iso_date(date_str: str) -> bool:
         return False
 
 
+def _parse_llm_response_body(raw: str) -> Optional[dict]:
+    """Parse the HTTP response body from an LLM proxy, handling both:
+
+    - Standard JSON: {"choices": [...], ...}
+    - SSE/streaming format: data: {...}\\ndata: {...}\\ndata: [DONE]\\n
+
+    For streaming responses, assembles content from delta chunks and returns
+    a synthetic choices object so the rest of call_llm works unchanged.
+    Returns None if the body cannot be parsed into a usable dict.
+    """
+    raw = raw.strip()
+    if not raw:
+        return None
+
+    # Try plain JSON first (most common case)
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, dict):
+            return obj
+    except json.JSONDecodeError:
+        pass
+
+    # Try SSE streaming format: lines starting with "data: "
+    if "data:" in raw:
+        assembled_content = []
+        final_chunk = None
+
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[len("data:") :].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                chunk = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+
+            if not isinstance(chunk, dict):
+                continue
+
+            # Last non-DONE chunk may have finish_reason; keep it as template
+            final_chunk = chunk
+
+            # Accumulate delta content
+            choices = chunk.get("choices", [])
+            if choices and isinstance(choices[0], dict):
+                delta = choices[0].get("delta", {})
+                piece = delta.get("content", "")
+                if piece:
+                    assembled_content.append(piece)
+
+        if assembled_content and final_chunk is not None:
+            # Build a non-streaming choices object from assembled content
+            full_content = "".join(assembled_content)
+            synthetic = dict(final_chunk)
+            synthetic["choices"] = [
+                {
+                    "message": {"role": "assistant", "content": full_content},
+                    "finish_reason": "stop",
+                    "index": 0,
+                }
+            ]
+            return synthetic
+
+    return None
+
+
 def call_llm(
     system_prompt: str,
     user_prompt: str,
@@ -57,10 +126,16 @@ def call_llm(
     """Call LLM API via OpenAI-compatible chat completions endpoint.
 
     Retry strategy:
-    - ConnectionError/Timeout (connection phase): retry with backoff (proxy restart / transient blip).
-    - ReadTimeout (upstream model saturated): fail immediately — retrying won't help.
-    - 4xx: fail immediately.
+    - ConnectionError: retry with backoff (proxy restart / transient blip).
+    - ReadTimeout: retry with backoff up to max_retries — the proxy may be
+      slow to respond on first hit (cold model) but succeed on retry.
+      Each retry uses an incrementally larger read timeout (60s, 90s, 120s)
+      so we fail fast on first attempt and give more headroom on retries.
+    - 4xx: fail immediately (client error, retrying won't help).
     - 5xx: retry with backoff.
+
+    Connect timeout is kept short (15s) since the proxy is always reachable;
+    a long connect timeout just means a dead proxy hangs the whole run.
     """
     if max_retries < 1:
         raise ValueError("max_retries must be >= 1")
@@ -79,17 +154,23 @@ def call_llm(
             {"role": "user", "content": user_prompt},
         ],
         "temperature": 0.1,
-        "max_tokens": 1500,
+        "max_tokens": 2000,  # enough for ~20-30 entities; bumped from 1500 for larger press-release-only cases
+        "stream": False,  # explicitly disable streaming; proxy may default to SSE
     }
+
+    # Read timeouts per attempt: fail fast on attempt 1, give more time on retries.
+    # This avoids burning 5 min × 3 attempts = 15 min on a slow proxy.
+    read_timeouts = [60, 90, 120]
 
     last_exc = None
     for attempt in range(1, max_retries + 1):
+        read_timeout = read_timeouts[min(attempt - 1, len(read_timeouts) - 1)]
         try:
             response = session.post(
                 url,
                 headers=headers,
                 json=payload,
-                timeout=(30, 120),
+                timeout=(15, read_timeout),
             )
             response.raise_for_status()
         except requests.ConnectionError as exc:
@@ -109,9 +190,20 @@ def call_llm(
                 f"LLM API connection failed after {max_retries} attempts: {last_exc}"
             ) from exc
         except requests.Timeout as exc:
-            # ReadTimeout — upstream LLM model saturated; retrying wastes time.
+            last_exc = exc
+            if attempt < max_retries:
+                wait = 2**attempt
+                logger.warning(
+                    "LLM API request failed (attempt %d/%d): %s. Retrying in %ds...",
+                    attempt,
+                    max_retries,
+                    exc,
+                    wait,
+                )
+                time.sleep(wait)
+                continue
             raise CommandError(
-                f"LLM API timed out: {exc}"
+                f"LLM API timed out after {max_retries} attempts: {last_exc}"
             ) from exc
         except requests.HTTPError as exc:
             if exc.response is not None and 400 <= exc.response.status_code < 500:
@@ -137,10 +229,17 @@ def call_llm(
         except requests.RequestException as exc:
             raise CommandError(f"LLM request failed: {exc}") from exc
 
+        raw_body = response.text
         try:
             data = response.json()
         except (ValueError, TypeError) as exc:
-            raise CommandError(f"LLM API returned invalid JSON: {exc}") from exc
+            # The proxy may return a streaming response (SSE) even for non-streaming
+            # requests, producing multiple JSON objects like:
+            #   data: {...}\ndata: {...}\ndata: [DONE]\n
+            # json() fails with "Extra data" in this case. Fall back to manual parsing.
+            data = _parse_llm_response_body(raw_body)
+            if data is None:
+                raise CommandError(f"LLM API returned invalid JSON: {exc}") from exc
 
         if not isinstance(data, dict):
             raise CommandError("LLM API returned non-dictionary JSON root")
@@ -156,7 +255,15 @@ def call_llm(
         if not isinstance(message, dict):
             raise CommandError("LLM API returned message missing or invalid")
 
+        finish_reason = choices[0].get("finish_reason", "")
+
         content = message.get("content")
+
+        # DeepSeek-R1 reasoning models sometimes put the answer in
+        # reasoning_content when content is empty (proxy-dependent behaviour)
+        if not content and message.get("reasoning_content"):
+            content = message.get("reasoning_content")
+
         if content is None:
             if "refusal" in message:
                 raise CommandError(
@@ -174,6 +281,24 @@ def call_llm(
             ) from None
 
         if not content.strip():
+            usage = data.get("usage", {})
+            reasoning_tokens = usage.get("completion_tokens_details", {}).get(
+                "reasoning_tokens", 0
+            )
+            if (
+                finish_reason == "length"
+                and reasoning_tokens >= payload["max_tokens"] - 50
+            ):
+                raise CommandError(
+                    f"LLM reasoning model exhausted all {payload['max_tokens']} tokens "
+                    f"on internal reasoning ({reasoning_tokens} reasoning tokens) with "
+                    f"no tokens left for output. Increase max_tokens or simplify prompt."
+                )
+            logger.warning(
+                "LLM API returned empty content. finish_reason=%s usage=%s",
+                finish_reason,
+                usage,
+            )
             raise CommandError("LLM API returned empty content")
 
         return content
@@ -274,40 +399,75 @@ def parse_extraction_response(
 ) -> Optional[Union[list, list[dict]]]:
     """Extract a JSON array from an LLM response, handling markdown wrappers.
 
-    Handles markdown code fences and nested wrapper keys.
+    Handles:
+    - Bare JSON array: [...]
+    - Wrapped object: {"entities": [...]}
+    - Markdown code fences: ```json ... ```
+    - Extra text before/after the JSON block
+
     Returns the raw parsed array; caller handles field mapping.
     Returns None when parsing fails or array is empty.
     """
     text = response_text.strip()
 
-    json_start = text.find("[")
-    json_end = text.rfind("]")
+    # Strip markdown code fences if present
+    if "```" in text:
+        import re
 
-    if json_start == -1 or json_end == -1 or json_end <= json_start:
-        logger.warning("Could not find JSON array in LLM response")
-        logger.debug("Response: %s", text[:500])
-        return None
+        fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+        if fence_match:
+            text = fence_match.group(1).strip()
 
-    json_str = text[json_start : json_end + 1]
+    # Strategy 1: try to find a JSON object wrapper {"entities": [...]}
+    # and extract the array directly — avoids "Extra data" from trailing braces
+    obj_start = text.find("{")
+    if obj_start != -1:
+        # Find matching closing brace
+        depth = 0
+        obj_end = -1
+        for i, ch in enumerate(text[obj_start:], obj_start):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    obj_end = i
+                    break
+        if obj_end != -1:
+            try:
+                obj = json.loads(text[obj_start : obj_end + 1])
+                if isinstance(obj, dict):
+                    for wrapper_key in wrapper_keys:
+                        if isinstance(obj.get(wrapper_key), list):
+                            entries = obj[wrapper_key]
+                            if entries:
+                                return entries
+            except json.JSONDecodeError:
+                pass  # fall through to array strategy
 
-    try:
-        entries = json.loads(json_str)
-    except json.JSONDecodeError as exc:
-        logger.warning("Failed to parse JSON from LLM response: %s", exc)
-        logger.debug("JSON string: %s", json_str[:500])
-        return None
+    # Strategy 2: find a bare JSON array [...]
+    arr_start = text.find("[")
+    if arr_start != -1:
+        # Find matching closing bracket
+        depth = 0
+        arr_end = -1
+        for i, ch in enumerate(text[arr_start:], arr_start):
+            if ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+                if depth == 0:
+                    arr_end = i
+                    break
+        if arr_end != -1:
+            try:
+                entries = json.loads(text[arr_start : arr_end + 1])
+                if isinstance(entries, list) and entries:
+                    return entries
+            except json.JSONDecodeError as exc:
+                logger.warning("Failed to parse JSON array from LLM response: %s", exc)
+                logger.debug("JSON string: %s", text[arr_start : arr_end + 1][:500])
 
-    if isinstance(entries, dict):
-        for wrapper_key in wrapper_keys:
-            if isinstance(entries.get(wrapper_key), list):
-                entries = entries[wrapper_key]
-                break
-
-    if not isinstance(entries, list):
-        logger.warning("LLM returned non-list: %s", type(entries).__name__)
-        return None
-
-    if not entries:
-        return None
-
-    return entries
+    logger.warning("Could not extract JSON from LLM response")
+    logger.debug("Response: %s", text[:500])
+    return None
