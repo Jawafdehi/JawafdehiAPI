@@ -129,7 +129,11 @@ class Command(BaseCommand):
         parser.add_argument(
             "--llm-model",
             type=str,
-            default=os.environ.get("JAWAFDEHI_ALLEGATION_MODEL", "claude-sonnet-4-5"),
+            default=os.environ.get(
+                "JAWAFDEHI_ALLEGATION_MODEL",
+                "claude-sonnet-4-5,claude-haiku-4-5",
+            ),
+            help="Comma-separated list of models to try in order (fallback chain)",
         )
         parser.add_argument(
             "--llm-base-url",
@@ -678,35 +682,54 @@ class Command(BaseCommand):
             )
             return
 
-        try:
-            response = call_llm(
-                system_prompt=SYSTEM_PROMPT,
-                user_prompt=user_prompt,
-                model=options["llm_model"],
-                base_url=options["llm_base_url"],
-                api_key=api_key,
-                session=session,
-            )
+        models = [m.strip() for m in options["llm_model"].split(",") if m.strip()]
+        last_error = None
+        response = None
 
-            entities_data = parse_extraction_response(response, {"entities"})
-
-            if not entities_data:
-                self.stats["cases_skipped"] += 1
-                self.stdout.write(
-                    self.style.WARNING("  SKIPPED: No entities extracted")
+        for model in models:
+            try:
+                response = call_llm(
+                    system_prompt=SYSTEM_PROMPT,
+                    user_prompt=user_prompt,
+                    model=model,
+                    base_url=options["llm_base_url"],
+                    api_key=api_key,
+                    session=session,
                 )
-                return
+                # Success — break out of fallback loop
+                break
+            except CommandError as e:
+                last_error = e
+                err_msg = str(e).lower()
+                is_timeout = "timed out" in err_msg or "read timed out" in err_msg
+                if len(models) > 1 and is_timeout and model != models[-1]:
+                    self.stdout.write(
+                        self.style.WARNING(
+                            f"  Model '{model}' timed out, trying fallback..."
+                        )
+                    )
+                    continue
+                # Non-retryable error or last model
+                response = None
+                break
 
-            self._apply_entities(case, entities_data, is_dry_run, session)
-            self.stats["cases_enriched"] += 1
-
-        except CommandError as e:
+        if response is None:
             self.stats["cases_skipped"] += 1
-            self.stdout.write(self.style.WARNING(f"  SKIPPED: LLM call failed — {e}"))
-        except Exception as e:
-            self.stats["cases_failed"] += 1
-            logger.exception("Failed processing case %s", case.case_id)
-            self.stdout.write(self.style.ERROR(f"  ERROR: {e}"))
+            msg = f"  SKIPPED: {last_error}" if last_error else "  SKIPPED: All models failed"
+            self.stdout.write(self.style.WARNING(msg))
+            return
+
+        entities_data = parse_extraction_response(response, {"entities"})
+
+        if not entities_data:
+            self.stats["cases_skipped"] += 1
+            self.stdout.write(
+                self.style.WARNING("  SKIPPED: No entities extracted")
+            )
+            return
+
+        self._apply_entities(case, entities_data, is_dry_run, session)
+        self.stats["cases_enriched"] += 1
 
     # ------------------------------------------------------------------
     # NES linking
