@@ -689,82 +689,82 @@ class Command(BaseCommand):
             if MEDIA_NEWS_TOTAL_CAP - total_used <= 200:
                 break
 
-            description = (source.description or "").strip()
-            if len(description) > 200:
-                portion = _truncate_at_sentence(
-                    description,
-                    min(MEDIA_NEWS_PER_ARTICLE_CAP, MEDIA_NEWS_TOTAL_CAP - total_used),
-                )
-                if len(portion) <= 200:
-                    logger.debug(
-                        "  media_news=source:%s — skipped (too short after truncation)",
-                        source.source_id,
-                    )
-                    continue
+            portion = self._get_media_news_description(source, total_used)
+            if portion is not None:
                 news_parts.append(portion)
                 logger.debug(
                     "  media_news=source:%s  chars=%d  used=%d (from description)",
                     source.source_id,
-                    len(description),
+                    len((source.description or "").strip()),
                     len(portion),
                 )
                 total_used += len(portion)
                 continue
 
-            had_url, skipped_reason = False, None
-            if isinstance(source.url, list):
-                if not source.url:
-                    logger.debug(
-                        "  media_news=source:%s — skipped (no URLs)",
-                        source.source_id,
-                    )
-                    continue
-                for url in source.url:
-                    had_url = True
-                    parsed = urlparse(url)
-                    if parsed.hostname and parsed.hostname in ALLOWED_HOSTS:
-                        content = convert_to_markdown(url, session)
-                        if content and len(content) > 200:
-                            portion = _truncate_at_sentence(
-                                content,
-                                min(
-                                    MEDIA_NEWS_PER_ARTICLE_CAP,
-                                    MEDIA_NEWS_TOTAL_CAP - total_used,
-                                ),
-                            )
-                            if len(portion) > 200:
-                                news_parts.append(portion)
-                                logger.debug(
-                                    "  media_news=source:%s  chars=%d  used=%d",
-                                    source.source_id,
-                                    len(content),
-                                    len(portion),
-                                )
-                                total_used += len(portion)
-                                break
-                            else:
-                                skipped_reason = "too short after truncation"
-                        else:
-                            skipped_reason = (
-                                "fetch failed" if not content else "too short"
-                            )
-                    else:
-                        skipped_reason = "disallowed host"
-                else:
-                    if had_url:
-                        logger.debug(
-                            "  media_news=source:%s — skipped (%s)",
-                            source.source_id,
-                            skipped_reason or "no URLs succeeded",
-                        )
-            else:
+            portion = self._get_media_news_from_url(source, session, total_used)
+            if portion is not None:
+                news_parts.append(portion)
                 logger.debug(
-                    "  media_news=source:%s — skipped (no usable content)",
+                    "  media_news=source:%s  chars=%d  used=%d",
                     source.source_id,
+                    len(portion),
+                    len(portion),
                 )
+                total_used += len(portion)
 
         if news_parts:
             content_parts.extend(news_parts)
+
+    def _get_media_news_description(
+        self, source: DocumentSource, total_used: int
+    ) -> Optional[str]:
+        """Try to use source description as MEDIA_NEWS content. Returns None if not viable."""
+        description = (source.description or "").strip()
+        if len(description) <= 200:
+            return None
+        portion = _truncate_at_sentence(
+            description,
+            min(MEDIA_NEWS_PER_ARTICLE_CAP, MEDIA_NEWS_TOTAL_CAP - total_used),
+        )
+        if len(portion) <= 200:
+            return None
+        return portion
+
+    def _get_media_news_from_url(
+        self, source: DocumentSource, session: requests.Session, total_used: int
+    ) -> Optional[str]:
+        """Fetch and truncate MEDIA_NEWS content from URLs. Returns None if all URLs fail."""
+        urls = source.url
+        if not isinstance(urls, list):
+            logger.debug(
+                "  media_news=source:%s — skipped (url field is not a list)",
+                source.source_id,
+            )
+            return None
+        if not urls:
+            logger.debug(
+                "  media_news=source:%s — skipped (no URLs)",
+                source.source_id,
+            )
+            return None
+        for url in urls:
+            parsed = urlparse(url)
+            if not parsed.hostname or parsed.hostname not in ALLOWED_HOSTS:
+                continue
+            content = convert_to_markdown(url, session)
+            if not content or len(content) <= 200:
+                continue
+            portion = _truncate_at_sentence(
+                content,
+                min(MEDIA_NEWS_PER_ARTICLE_CAP, MEDIA_NEWS_TOTAL_CAP - total_used),
+            )
+            if len(portion) > 200:
+                return portion
+        logger.debug(
+            "  media_news=source:%s — skipped (no usable content from URLs)",
+            source.source_id,
+        )
+        return None
 
     # ── NGM structured hearing data ──────────────────────────────────────
 

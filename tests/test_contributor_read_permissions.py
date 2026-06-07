@@ -8,6 +8,7 @@ to unassigned resources.
 import pytest
 from django.contrib.auth import get_user_model
 from django.test import RequestFactory
+from rest_framework.test import APIClient
 
 from case_workflows.permissions import IsAdminOrModeratorOrContributorReadOnly
 from cases.models import Case, CaseState, CaseType
@@ -202,11 +203,14 @@ def test_contributor_sees_all_non_closed_cases_in_list():
     from cases.rules.predicates import is_contributor
 
     assert is_contributor(contributor)
-    # The view-level check — contributor sees all non-CLOSED
-    all_non_closed = Case.objects.exclude(state=CaseState.CLOSED)
-    assert draft in all_non_closed
-    assert published in all_non_closed
-    assert closed not in all_non_closed
+    client = APIClient()
+    client.force_authenticate(user=contributor)
+    response = client.get("/api/cases/")
+    assert response.status_code == 200
+    ids = {c["case_id"] for c in response.data.get("results", [])}
+    assert draft.case_id in ids
+    assert published.case_id in ids
+    assert closed.case_id not in ids
 
 
 # ============================================================================

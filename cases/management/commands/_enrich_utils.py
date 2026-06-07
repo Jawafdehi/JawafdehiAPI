@@ -62,9 +62,7 @@ def extract_court_case_number(case) -> str:
         if isinstance(entry, str):
             parts = entry.split(":")
             case_number = parts[-1] if ":" in entry else entry
-            if "-CR-" in case_number:
-                return f"#{case_number}"
-            elif case_number:
+            if case_number:
                 return f"#{case_number}"
     return ""
 
