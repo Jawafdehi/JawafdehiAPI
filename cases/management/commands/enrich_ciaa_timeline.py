@@ -686,7 +686,7 @@ class Command(BaseCommand):
             if source.source_type != SourceType.MEDIA_NEWS:
                 continue
 
-            if total_used >= MEDIA_NEWS_TOTAL_CAP:
+            if MEDIA_NEWS_TOTAL_CAP - total_used <= 200:
                 break
 
             description = (source.description or "").strip()
@@ -858,6 +858,10 @@ class Command(BaseCommand):
     ) -> Optional[list[dict]]:
         """Call LLM to extract timeline entries from source text and NGM data."""
         chunks = self._chunk_source_text(source_text)
+        if not chunks:
+            if not ngm_data:
+                return None
+            chunks = [""]
         all_entries = []
 
         for idx, chunk in enumerate(chunks, 1):
