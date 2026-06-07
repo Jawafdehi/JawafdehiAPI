@@ -119,7 +119,7 @@ def test_unauthenticated_sees_only_published(
 def test_contributor_sees_published_and_assigned_draft(
     contributor, published_case, draft_assigned, draft_unassigned
 ):
-    """Contributor sees all non-CLOSED cases (PUBLISHED + DRAFT + IN_REVIEW)."""
+    """Contributor sees PUBLISHED and DRAFT (both assigned and unassigned)."""
     client = APIClient()
     client.force_authenticate(user=contributor)
     response = client.get("/api/cases/")
