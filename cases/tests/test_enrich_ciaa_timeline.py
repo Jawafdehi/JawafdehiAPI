@@ -863,7 +863,7 @@ class TestEnrichCiaaTimeline:
                 "",
                 "Test CIAA Case",
                 "test-model",
-                "http://testserver",
+                "https://testserver",
                 "test-key",
                 session,
                 ngm_data=mock_ngm,
