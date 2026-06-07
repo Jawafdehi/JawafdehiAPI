@@ -11,7 +11,7 @@ from django.test import RequestFactory
 from rest_framework.test import APIClient
 
 from case_workflows.permissions import IsAdminOrModeratorOrContributorReadOnly
-from cases.models import Case, CaseState, CaseType
+from cases.models import CaseState, CaseType
 from tests.conftest import (
     create_case_with_entities,
     create_mock_request,
