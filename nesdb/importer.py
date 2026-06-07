@@ -84,7 +84,7 @@ def import_incremental(repo_path: Path) -> ImportResult:
     if state is None:
         return import_full(repo_path)
 
-    changes = changed_json_paths(repo_path, state.last_commit_hash, "HEAD")
+    changes = changed_json_paths(repo_path, state.last_commit_hash, commit_hash)
     with transaction.atomic():
         result = ImportResult(commit_hash=commit_hash)
         for status, relative_path in changes:

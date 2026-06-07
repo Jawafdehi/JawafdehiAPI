@@ -7,6 +7,12 @@ from .models import NesEntity, NesEntityName, NesRelationship, NesSyncState
 class NesSyncStateAdmin(admin.ModelAdmin):
     list_display = ("last_commit_hash", "last_sync_at")
 
+    def has_add_permission(self, request):
+        return not NesSyncState.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
 
 class NesEntityNameInline(admin.TabularInline):
     model = NesEntityName
