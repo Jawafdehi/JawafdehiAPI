@@ -105,7 +105,7 @@ TIMELINE ENTRY FORMAT:
 Each entry must be a JSON object with:
 - "date": ISO date string (YYYY-MM-DD) in AD (Gregorian calendar)
 - "title": Brief label in Nepali (one line, 5-15 words) describing the event
-- "description": Optional 1-3 sentence explanation in Nepali
+- "description": Required Nepali explanation when source material provides detail
 
 All three fields must be written in Nepali (देवनागरी लिपि).
 
@@ -131,6 +131,24 @@ NGM DATE PRIORITY (CRITICAL):
   NGM-dated events, and to extract any additional events not in NGM
 - NGM dates are already in AD format — treat them as authoritative
 
+DESCRIPTION QUALITY RULES:
+- Description is REQUIRED when the source includes facts beyond the date/title
+- Target 2-4 concise Nepali sentences per description when detail exists
+- Preserve material facts: amounts (रु.), complaint/file/case numbers, names of
+  people/offices/companies, alleged acts, court decisions, verdicts, penalties,
+  and final outcomes
+- Do not output shallow descriptions like "अदालतमा सुनुवाइ भयो" when richer
+  source context exists
+- For routine NGM hearings with no remarks/context, description may be empty
+
+PUBLISHED STYLE EXAMPLES:
+- 2022-07-19 — उजुरी दर्ता — अक्सिजन प्लान्ट खरिद अनियमितता
+  Description: उ.द.नं. C-०००८०५ अन्तर्गत नगरपालिकाले सेटिङमा रु. १३,००,०००।– बढी हालेर अक्सिजन प्लान्ट खरिद गरेको भन्ने उजुरी CIAA मा दर्ता भएको। उजुरीमा खरिद प्रक्रियामा मिलेमतो गरी सार्वजनिक रकम हिनामिना गरिएको आरोप उल्लेख छ।
+- 2014-01-26 — उजुरी दर्ता — अख्तियारमा पहिलो उजुरी
+  Description: मिति २०७०/१०/१२ मा काठमाडौं महानगरपालिकामा कार्यरत इन्जिनियर रामबाबु महतो तथा निजको परिवारको नाममा रहेको सम्पत्ति वैधानिक आयस्रोतसँग मेल नखाने भनी अख्तियारमा उजुरी परेको। उजुरीमा अस्वाभाविक जीवनशैली र स्रोत नखुलेको सम्पत्ति आर्जनबारे छानबिन माग गरिएको थियो।
+- 2025-06-09 — विशेष अदालतमा मुद्दा दर्ता
+  Description: अख्तियारले अनुसन्धानबाट भ्रष्टाचारजन्य कसुर देखिएको निष्कर्षसहित विशेष अदालत, काठमाडौंमा आरोपपत्र दायर गरेको। आरोपपत्रमा प्रतिवादी, बिगो रकम, सम्बद्ध कार्यालय र मागदाबी स्रोतमा उल्लेख भए अनुसार समेटिएको थियो।
+
 QUALITY RULES:
 - Minimum 3 timeline entries when sufficient source material exists
 - Entries must be in chronological order (earliest first)
@@ -146,14 +164,24 @@ documents and NGM structured hearing data.
 Case title: {case_title}
 
 Instructions:
-- Each entry must have "date" (YYYY-MM-DD in AD) and "title" in Nepali
-- "description" is optional but encouraged when source provides details
+- Each entry must have "date" (YYYY-MM-DD in AD), "title", and "description"
+- Write all title/description text in Nepali देवनागरी
+- Description is required whenever source text or NGM remarks provide detail
+- Target 2-4 concise sentences for descriptions with substantive source detail
+- Include exact material facts when present: रु. amounts, उजुरी/file/case numbers,
+  names of parties/offices/companies, alleged acts, decisions, verdicts, penalties,
+  and outcomes
 - For NGM dates: use them exactly as-is — they are authoritative ground-truth
 - For document-text dates: convert from BS to AD before outputting
-- Use document text for narrative context (titles, descriptions)
+- Use document text to enrich NGM-dated hearing entries with narrative context
 - Order entries chronologically from earliest to latest
 - Only include events explicitly mentioned or clearly inferred from the sources
 - If sources are insufficient, return fewer entries
+
+Style examples:
+- {{"date": "2022-07-19", "title": "उजुरी दर्ता — अक्सिजन प्लान्ट खरिद अनियमितता", "description": "उ.द.नं. C-०००८०५ अन्तर्गत नगरपालिकाले सेटिङमा रु. १३,००,०००।– बढी हालेर अक्सिजन प्लान्ट खरिद गरेको भन्ने उजुरी CIAA मा दर्ता भएको। उजुरीमा खरिद प्रक्रियामा मिलेमतो गरी सार्वजनिक रकम हिनामिना गरिएको आरोप उल्लेख छ।"}}
+- {{"date": "2014-01-26", "title": "उजुरी दर्ता — अख्तियारमा पहिलो उजुरी", "description": "मिति २०७०/१०/१२ मा काठमाडौं महानगरपालिकामा कार्यरत इन्जिनियर रामबाबु महतो तथा निजको परिवारको नाममा रहेको सम्पत्ति वैधानिक आयस्रोतसँग मेल नखाने भनी अख्तियारमा उजुरी परेको। उजुरीमा अस्वाभाविक जीवनशैली र स्रोत नखुलेको सम्पत्ति आर्जनबारे छानबिन माग गरिएको थियो।"}}
+- {{"date": "2025-06-09", "title": "विशेष अदालतमा मुद्दा दर्ता", "description": "अख्तियारले अनुसन्धानबाट भ्रष्टाचारजन्य कसुर देखिएको निष्कर्षसहित विशेष अदालत, काठमाडौंमा आरोपपत्र दायर गरेको। आरोपपत्रमा प्रतिवादी, बिगो रकम, सम्बद्ध कार्यालय र मागदाबी स्रोतमा उल्लेख भए अनुसार समेटिएको थियो।"}}
 
 IMPORTANT: Return ONLY a valid JSON array of timeline entry objects.
 Format: [{{"date": "YYYY-MM-DD", "title": "नेपाली शीर्षक", "description": "विवरण"}}]
@@ -845,11 +873,19 @@ class Command(BaseCommand):
             entries = self._parse_timeline_response(response_text) or []
             all_entries.extend(entries)
             logger.debug(
-                "  source_text chunk %d/%d: %d entries extracted",
+                "  chunk %d/%d: %d entries extracted",
                 idx,
                 len(chunks),
                 len(entries),
             )
+            for entry in entries:
+                description = entry.get("description", "")
+                logger.debug(
+                    "    → %s — %s | desc: %d chars",
+                    entry.get("date", "?"),
+                    entry.get("title", "?"),
+                    len(description),
+                )
 
         unique_entries = self._deduplicate_timeline_entries(all_entries)
         logger.info(
