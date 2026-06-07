@@ -459,6 +459,25 @@ class TestEnrichCiaaTimeline:
         assert "Court order" in content
         assert "---" in content
 
+    def test_media_news_skips_when_remaining_budget_too_small(self):
+        source = self._create_source(source_type=SourceType.MEDIA_NEWS)
+        cmd = Command()
+        session = self._session()
+        content_parts = []
+
+        with patch(
+            "cases.management.commands.enrich_ciaa_timeline.MEDIA_NEWS_TOTAL_CAP",
+            200,
+        ):
+            cmd._append_media_news_content(
+                [source.source_id],
+                {source.source_id: source},
+                content_parts,
+                session,
+            )
+
+        assert content_parts == []
+
     # ── 7. Dry-run safety ───────────────────────────────────────────────
 
     def test_dry_run_no_db_writes(self):
@@ -831,6 +850,28 @@ class TestEnrichCiaaTimeline:
 
         output = out.getvalue()
         assert "NGM data: 2 hearing(s)" in output
+
+    def test_extract_timeline_runs_with_ngm_only_input(self):
+        cmd = Command()
+        session = self._session()
+        mock_ngm = self._mock_ngm_data()
+
+        with self._mock_call_llm(
+            [{"date": "2023-09-20", "title": "Case registered", "description": ""}]
+        ):
+            result = cmd._extract_timeline(
+                "",
+                "Test CIAA Case",
+                "test-model",
+                "http://testserver",
+                "test-key",
+                session,
+                ngm_data=mock_ngm,
+            )
+
+        assert result == [
+            {"date": "2023-09-20", "title": "Case registered", "description": ""}
+        ]
 
     def test_ngm_counter_incremented(self):
         """cases_ngm_used stat is incremented when NGM data is available."""
