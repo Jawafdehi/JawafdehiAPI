@@ -35,8 +35,10 @@ from cases.management.commands._enrich_utils import (
     ALLOWED_HOSTS,
     call_llm,
     convert_to_markdown,
+    extract_court_case_number,
     is_valid_iso_date,
     parse_extraction_response,
+    rank_source_urls,
     resolve_api_key,
 )
 from cases.models import Case, DocumentSource, SourceType
@@ -44,6 +46,36 @@ from cases.services.priority_case_loader import filter_by_priority, load_priorit
 from ngm.services import get_court_case_details
 
 logger = logging.getLogger(__name__)
+
+_SOURCE_TYPE_LABELS = {
+    SourceType.LEGAL_PROCEDURAL: "press_release",
+    SourceType.LEGAL_COURT_ORDER: "court_order",
+    SourceType.OFFICIAL_GOVERNMENT: "official_govt",
+    SourceType.MEDIA_NEWS: "media_news",
+}
+
+MEDIA_NEWS_TOTAL_CAP = 3000
+MEDIA_NEWS_PER_ARTICLE_CAP = 800
+TIMELINE_CHUNK_SIZE = 12000
+TIMELINE_CHUNK_OVERLAP = 1000
+
+
+def _truncate_at_sentence(text: str, max_chars: int) -> str:
+    """Truncate text at the last sentence boundary within max_chars."""
+    if len(text) <= max_chars:
+        return text
+    truncated = text[:max_chars]
+    # Try Nepali full stop first, then double newline, then English period-space
+    boundary = max(
+        truncated.rfind("। "),
+        truncated.rfind("।"),
+        truncated.rfind("\n\n"),
+        truncated.rfind(". "),
+    )
+    if boundary > 0:
+        return text[: boundary + 1].strip()
+    return text[:max_chars]
+
 
 EXTRACTION_SYSTEM_PROMPT = """\
 You are a Nepali legal analyst extracting structured timeline entries from \
@@ -373,7 +405,11 @@ class Command(BaseCommand):
         force: bool = False,
     ):
         self.stats["cases_processed"] += 1
-        self.stdout.write(f"\n[{idx}/{total}] {case.case_id} — {case.title[:80]}")
+        case_number = extract_court_case_number(case)
+        self.stdout.write(
+            f"\n[{idx}/{total}] Processing {case.case_id}"
+            f" ({case_number}) — {case.title[:80]}"
+        )
 
         source_text = self._get_source_content(case, session)
         ngm_data = self._get_ngm_data(case)
@@ -462,6 +498,7 @@ class Command(BaseCommand):
         2. LEGAL_PROCEDURAL URLs — download + likhit/markitdown convert
         3. LEGAL_COURT_ORDER URLs — supplement with court order data
         4. OFFICIAL_GOVERNMENT description/URLs — use if available
+        5. MEDIA_NEWS articles — supplement with news coverage (capped at ~3k total)
         """
         if not case.evidence:
             logger.debug("  No evidence entries on case")
@@ -510,6 +547,12 @@ class Command(BaseCommand):
             content_parts,
             session,
         )
+        self._append_media_news_content(
+            source_ids,
+            source_by_id,
+            content_parts,
+            session,
+        )
 
         if not content_parts:
             logger.debug("  No usable content from any source type")
@@ -526,6 +569,7 @@ class Command(BaseCommand):
         session: requests.Session,
     ):
         """Try to get content from sources of a specific type and append to parts."""
+        label = _SOURCE_TYPE_LABELS.get(source_type, source_type)
         for sid in source_ids:
             source = source_by_id.get(sid)
             if source is None:
@@ -536,16 +580,147 @@ class Command(BaseCommand):
             description = (source.description or "").strip()
             if len(description) > 200:
                 content_parts.append(description)
+                logger.debug(
+                    "  %s=source:%s  chars=%d  used=%d (from description)",
+                    label,
+                    source.source_id,
+                    len(description),
+                    len(description),
+                )
                 continue
 
+            ranked_urls = rank_source_urls(source)
+            if not ranked_urls:
+                logger.debug(
+                    "  %s=source:%s — skipped (no URLs)",
+                    label,
+                    source.source_id,
+                )
+                continue
+
+            skipped_reason = None
+            for url in ranked_urls:
+                parsed = urlparse(url)
+                if parsed.hostname and parsed.hostname in ALLOWED_HOSTS:
+                    content = convert_to_markdown(url, session)
+                    if content and len(content) > 200:
+                        content_parts.append(content)
+                        logger.debug(
+                            "  %s=source:%s  chars=%d  used=%d",
+                            label,
+                            source.source_id,
+                            len(content),
+                            len(content),
+                        )
+                        break
+                    else:
+                        skipped_reason = "fetch failed" if not content else "too short"
+                else:
+                    skipped_reason = "disallowed host"
+            else:
+                logger.debug(
+                    "  %s=source:%s — skipped (%s)",
+                    label,
+                    source.source_id,
+                    skipped_reason or "no URLs succeeded",
+                )
+
+    def _append_media_news_content(
+        self,
+        source_ids: list[str],
+        source_by_id: dict,
+        content_parts: list[str],
+        session: requests.Session,
+    ):
+        """Fetch news article URLs, cap per-article at ~500-800 chars and total at 3000."""
+        total_used = 0
+        news_parts = []
+        for sid in source_ids:
+            source = source_by_id.get(sid)
+            if source is None:
+                continue
+            if source.source_type != SourceType.MEDIA_NEWS:
+                continue
+
+            if total_used >= MEDIA_NEWS_TOTAL_CAP:
+                break
+
+            description = (source.description or "").strip()
+            if len(description) > 200:
+                portion = _truncate_at_sentence(
+                    description,
+                    min(MEDIA_NEWS_PER_ARTICLE_CAP, MEDIA_NEWS_TOTAL_CAP - total_used),
+                )
+                if len(portion) <= 200:
+                    logger.debug(
+                        "  media_news=source:%s — skipped (too short after truncation)",
+                        source.source_id,
+                    )
+                    continue
+                news_parts.append(portion)
+                logger.debug(
+                    "  media_news=source:%s  chars=%d  used=%d (from description)",
+                    source.source_id,
+                    len(description),
+                    len(portion),
+                )
+                total_used += len(portion)
+                continue
+
+            had_url, skipped_reason = False, None
             if isinstance(source.url, list):
+                if not source.url:
+                    logger.debug(
+                        "  media_news=source:%s — skipped (no URLs)",
+                        source.source_id,
+                    )
+                    continue
                 for url in source.url:
+                    had_url = True
                     parsed = urlparse(url)
                     if parsed.hostname and parsed.hostname in ALLOWED_HOSTS:
                         content = convert_to_markdown(url, session)
                         if content and len(content) > 200:
-                            content_parts.append(content)
-                            break
+                            portion = _truncate_at_sentence(
+                                content,
+                                min(
+                                    MEDIA_NEWS_PER_ARTICLE_CAP,
+                                    MEDIA_NEWS_TOTAL_CAP - total_used,
+                                ),
+                            )
+                            if len(portion) > 200:
+                                news_parts.append(portion)
+                                logger.debug(
+                                    "  media_news=source:%s  chars=%d  used=%d",
+                                    source.source_id,
+                                    len(content),
+                                    len(portion),
+                                )
+                                total_used += len(portion)
+                                break
+                            else:
+                                skipped_reason = "too short after truncation"
+                        else:
+                            skipped_reason = (
+                                "fetch failed" if not content else "too short"
+                            )
+                    else:
+                        skipped_reason = "disallowed host"
+                else:
+                    if had_url:
+                        logger.debug(
+                            "  media_news=source:%s — skipped (%s)",
+                            source.source_id,
+                            skipped_reason or "no URLs succeeded",
+                        )
+            else:
+                logger.debug(
+                    "  media_news=source:%s — skipped (no usable content)",
+                    source.source_id,
+                )
+
+        if news_parts:
+            content_parts.extend(news_parts)
 
     # ── NGM structured hearing data ──────────────────────────────────────
 
@@ -638,14 +813,55 @@ class Command(BaseCommand):
         ngm_data: Optional[dict] = None,
     ) -> Optional[list[dict]]:
         """Call LLM to extract timeline entries from source text and NGM data."""
+        chunks = self._chunk_source_text(source_text)
+        all_entries = []
+
+        for idx, chunk in enumerate(chunks, 1):
+            response_text = self._extract_timeline_chunk(
+                source_text=chunk,
+                case_title=case_title,
+                llm_model=llm_model,
+                llm_base_url=llm_base_url,
+                llm_api_key=llm_api_key,
+                session=session,
+                ngm_data=ngm_data,
+            )
+            entries = self._parse_timeline_response(response_text) or []
+            all_entries.extend(entries)
+            logger.debug(
+                "  source_text chunk %d/%d: %d entries extracted",
+                idx,
+                len(chunks),
+                len(entries),
+            )
+
+        unique_entries = self._deduplicate_timeline_entries(all_entries)
+        logger.info(
+            "  source_text: %d chunks processed, %d entries extracted, %d unique after dedup",
+            len(chunks),
+            len(all_entries),
+            len(unique_entries),
+        )
+        return unique_entries or None
+
+    def _extract_timeline_chunk(
+        self,
+        source_text: str,
+        case_title: str,
+        llm_model: str,
+        llm_base_url: str,
+        llm_api_key: Optional[str],
+        session: requests.Session,
+        ngm_data: Optional[dict] = None,
+    ) -> str:
         ngm_section = self._format_ngm_section(ngm_data)
         prompt = EXTRACTION_USER_PROMPT.format(
             case_title=case_title,
             ngm_section=ngm_section,
-            source_text=source_text[:40000],
+            source_text=source_text,
         )
 
-        response_text = call_llm(
+        return call_llm(
             system_prompt=EXTRACTION_SYSTEM_PROMPT,
             user_prompt=prompt,
             model=llm_model,
@@ -654,7 +870,36 @@ class Command(BaseCommand):
             session=session,
         )
 
-        return self._parse_timeline_response(response_text)
+    def _chunk_source_text(self, source_text: str) -> list[str]:
+        text = (source_text or "").strip()
+        if not text:
+            return []
+        if len(text) <= TIMELINE_CHUNK_SIZE:
+            return [text]
+
+        chunks = []
+        start = 0
+        while start < len(text):
+            end = min(start + TIMELINE_CHUNK_SIZE, len(text))
+            chunks.append(text[start:end])
+            if end >= len(text):
+                break
+            start = end - TIMELINE_CHUNK_OVERLAP
+        return chunks
+
+    def _deduplicate_timeline_entries(self, entries: list[dict]) -> list[dict]:
+        best_by_key = {}
+        for entry in entries:
+            key = (entry.get("date"), entry.get("title"))
+            current = best_by_key.get(key)
+            if current is None or len(entry.get("description", "")) > len(
+                current.get("description", "")
+            ):
+                best_by_key[key] = entry
+
+        unique_entries = list(best_by_key.values())
+        unique_entries.sort(key=lambda entry: entry["date"])
+        return unique_entries
 
     def _parse_timeline_response(self, response_text: str) -> Optional[list[dict]]:
         """Parse the LLM response to extract timeline entries with field mapping."""
