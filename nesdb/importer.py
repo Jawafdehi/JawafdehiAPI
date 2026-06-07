@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from django.db import transaction
-
 from nes.core.identifiers import break_entity_id
 from nes.core.models.relationship import Relationship
 from nes.core.utils.entity_utils import entity_from_dict
