@@ -23,6 +23,7 @@ Usage::
 import logging
 import os
 import re
+import unicodedata
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -58,6 +59,21 @@ MEDIA_NEWS_TOTAL_CAP = 3000
 MEDIA_NEWS_PER_ARTICLE_CAP = 800
 TIMELINE_CHUNK_SIZE = 12000
 TIMELINE_CHUNK_OVERLAP = 1000
+TIMELINE_MAX_ENTRIES = 30
+TIMELINE_DISTINCT_EVENT_TERMS = (
+    "आरोप",
+    "दायर",
+    "उजुरी",
+    "दर्ता",
+    "थुनछेक",
+    "आदेश",
+    "फैसला",
+    "निर्णय",
+    "बोलपत्र",
+    "सम्झौता",
+    "लागत",
+)
+TIMELINE_ROUTINE_HEARING_TERMS = ("सुनुवाइ", "सुनुवाई", "पेशी")
 
 
 def _truncate_at_sentence(text: str, max_chars: int) -> str:
@@ -890,16 +906,103 @@ class Command(BaseCommand):
     def _deduplicate_timeline_entries(self, entries: list[dict]) -> list[dict]:
         best_by_key = {}
         for entry in entries:
-            key = (entry.get("date"), entry.get("title"))
+            key = (
+                entry.get("date"),
+                self._normalized_title_key(entry.get("title", "")),
+            )
             current = best_by_key.get(key)
-            if current is None or len(entry.get("description", "")) > len(
-                current.get("description", "")
-            ):
+            if current is None or self._entry_score(entry) > self._entry_score(current):
                 best_by_key[key] = entry
 
-        unique_entries = list(best_by_key.values())
-        unique_entries.sort(key=lambda entry: entry["date"])
-        return unique_entries
+        deduped = list(best_by_key.values())
+        collapsed = self._collapse_same_date_entries(deduped)
+        capped = self._cap_timeline_entries(collapsed)
+        capped.sort(key=lambda entry: entry["date"])
+        return capped
+
+    def _normalized_title_key(self, title: str) -> str:
+        normalized = unicodedata.normalize("NFC", title or "")
+        normalized = re.sub(r"\s+", "", normalized)
+        return normalized.replace("सुनुवाई", "सुनुवाइ").replace("ब्यवसायी", "व्यवसायी")
+
+    def _entry_score(self, entry: dict) -> tuple[int, int, int]:
+        text = f"{entry.get('title', '')} {entry.get('description', '')}"
+        milestone_score = sum(
+            1 for term in TIMELINE_DISTINCT_EVENT_TERMS if term in text
+        )
+        return (
+            milestone_score,
+            len(entry.get("description", "")),
+            len(entry.get("title", "")),
+        )
+
+    def _collapse_same_date_entries(self, entries: list[dict]) -> list[dict]:
+        by_date = {}
+        for entry in entries:
+            by_date.setdefault(entry["date"], []).append(entry)
+
+        collapsed = []
+        for date, date_entries in by_date.items():
+            if len(date_entries) == 1:
+                collapsed.extend(date_entries)
+                continue
+
+            date_entries.sort(key=self._entry_score, reverse=True)
+            kept = [date_entries[0]]
+            for candidate in date_entries[1:]:
+                if len(kept) >= 2:
+                    break
+                if self._is_clearly_distinct_event(candidate, kept[0]):
+                    kept.append(candidate)
+
+            collapsed.extend(kept)
+            logger.debug(
+                "  timeline date %s: collapsed %d entries to %d",
+                date,
+                len(date_entries),
+                len(kept),
+            )
+        return collapsed
+
+    def _is_clearly_distinct_event(self, candidate: dict, kept: dict) -> bool:
+        candidate_terms = self._distinct_event_terms(candidate)
+        kept_terms = self._distinct_event_terms(kept)
+        return bool(
+            candidate_terms and kept_terms and candidate_terms.isdisjoint(kept_terms)
+        )
+
+    def _distinct_event_terms(self, entry: dict) -> set[str]:
+        text = f"{entry.get('title', '')} {entry.get('description', '')}"
+        return {term for term in TIMELINE_DISTINCT_EVENT_TERMS if term in text}
+
+    def _cap_timeline_entries(self, entries: list[dict]) -> list[dict]:
+        if len(entries) <= TIMELINE_MAX_ENTRIES:
+            return entries
+
+        substantive = [
+            entry for entry in entries if not self._is_redundant_hearing(entry)
+        ]
+        if len(substantive) >= 3:
+            entries = substantive
+        if len(entries) <= TIMELINE_MAX_ENTRIES:
+            return entries
+
+        entries = sorted(entries, key=self._entry_score, reverse=True)[
+            :TIMELINE_MAX_ENTRIES
+        ]
+        logger.debug("  timeline capped to %d entries", len(entries))
+        return entries
+
+    def _is_redundant_hearing(self, entry: dict) -> bool:
+        title = entry.get("title", "")
+        description = entry.get("description", "")
+        if not any(term in title for term in TIMELINE_ROUTINE_HEARING_TERMS):
+            return False
+        if any(
+            term in f"{title} {description}" for term in TIMELINE_DISTINCT_EVENT_TERMS
+        ):
+            return False
+        return len(description) < 80
 
     def _parse_timeline_response(self, response_text: str) -> Optional[list[dict]]:
         """Parse the LLM response to extract timeline entries with field mapping."""
