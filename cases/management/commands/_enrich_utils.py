@@ -17,9 +17,56 @@ from urllib.parse import urljoin, urlparse
 import requests
 from django.core.management.base import CommandError
 
+from cases.models import DocumentSource
+
 logger = logging.getLogger(__name__)
 
 ALLOWED_HOSTS = frozenset({"ciaa.gov.np", "ngm-store.jawafdehi.org"})
+
+DOCUMENT_FORMAT_PRIORITY = {".docx": 4, ".doc": 3, ".pdf": 2}
+
+
+def rank_source_urls(source: DocumentSource) -> list[str]:
+    """Return URLs sorted by format priority (DOCX > DOC > PDF > web)."""
+    urls = [
+        url.strip()
+        for url in (source.url or [])
+        if isinstance(url, str) and url.strip()
+    ]
+    if not urls:
+        return []
+
+    scored = []
+    for url in urls:
+        parsed = urlparse(url)
+        suffix = Path(parsed.path).suffix.lower()
+        priority = DOCUMENT_FORMAT_PRIORITY.get(suffix, 0)
+        scored.append((priority, url))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    seen = set()
+    result = []
+    for _priority, url in scored:
+        if url not in seen:
+            seen.add(url)
+            result.append(url)
+    return result
+
+
+def extract_court_case_number(case) -> str:
+    """Extract a human-readable court case number (e.g. #080-CR-0007) from case.court_cases."""
+    if not case.court_cases or not isinstance(case.court_cases, list):
+        return ""
+    for entry in case.court_cases:
+        if isinstance(entry, str):
+            parts = entry.split(":")
+            case_number = parts[-1] if ":" in entry else entry
+            if "-CR-" in case_number:
+                return f"#{case_number}"
+            elif case_number:
+                return f"#{case_number}"
+    return ""
 
 
 def resolve_api_key(cli_key: Optional[str]) -> Optional[str]:
@@ -294,12 +341,21 @@ def call_llm(
                     f"on internal reasoning ({reasoning_tokens} reasoning tokens) with "
                     f"no tokens left for output. Increase max_tokens or simplify prompt."
                 )
-            logger.warning(
-                "LLM API returned empty content. finish_reason=%s usage=%s",
-                finish_reason,
-                usage,
-            )
-            raise CommandError("LLM API returned empty content")
+            if attempt < max_retries:
+                wait = 2**attempt
+                logger.warning(
+                    "LLM returned empty content (attempt %d/%d, finish_reason=%s). "
+                    "Retrying in %ds...",
+                    attempt,
+                    max_retries,
+                    finish_reason,
+                    wait,
+                )
+                time.sleep(wait)
+                continue
+            raise CommandError(
+                f"LLM API returned empty content after {max_retries} attempts"
+            ) from None
 
         return content
 
