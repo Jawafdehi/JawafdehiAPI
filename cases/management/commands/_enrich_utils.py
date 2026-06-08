@@ -365,12 +365,11 @@ def convert_to_markdown(
     Pipeline: URL download -> temp file -> likhit/markitdown -> markdown.
     Returns None when conversion fails or produces insufficient content.
 
-    ``allowed_hosts`` defaults to ``ALLOWED_HOSTS``. Pass None (or an empty
-    frozenset) to skip the host check entirely, for MEDIA_NEWS article URLs.
+    ``allowed_hosts`` defaults to ``ALLOWED_HOSTS``. Pass ``None`` to skip
+    the host check entirely (for MEDIA_NEWS article URLs).
     """
-    hosts = ALLOWED_HOSTS if allowed_hosts is None else allowed_hosts
     initial_hostname = urlparse(url).hostname
-    if initial_hostname not in hosts:
+    if allowed_hosts is not None and initial_hostname not in allowed_hosts:
         logger.warning("Refusing to fetch untrusted host: %s", url)
         return None
 
@@ -391,7 +390,7 @@ def convert_to_markdown(
                 return None
             next_url = urljoin(current_url, location)
             next_hostname = urlparse(next_url).hostname
-            if next_hostname not in hosts:
+            if allowed_hosts is not None and next_hostname not in allowed_hosts:
                 logger.warning(
                     "Redirect target host not allowed: %s -> %s",
                     current_url,
