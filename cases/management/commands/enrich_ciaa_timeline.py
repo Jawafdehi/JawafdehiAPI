@@ -78,19 +78,47 @@ TIMELINE_DISTINCT_EVENT_TERMS = (
 )
 TIMELINE_ROUTINE_HEARING_TERMS = ("सुनुवाइ", "सुनुवाई", "पेशी")
 
-PUBLISHED_STYLE_EXAMPLES = """\
-- 2022-07-19 — उजुरी दर्ता — अक्सिजन प्लान्ट खरिद अनियमितता
-  Description: उ.द.नं. C-०००८०५ अन्तर्गत नगरपालिकाले सेटिङमा रु. १३,००,०००।– बढी हालेर अक्सिजन प्लान्ट खरिद गरेको भन्ने उजुरी CIAA मा दर्ता भएको। उजुरीमा खरिद प्रक्रियामा मिलेमतो गरी सार्वजनिक रकम हिनामिना गरिएको आरोप उल्लेख छ।
-- 2014-01-26 — उजुरी दर्ता — अख्तियारमा पहिलो उजुरी
-  Description: मिति २०७०/१०/१२ मा काठमाडौं महानगरपालिकामा कार्यरत इन्जिनियर रामबाबु महतो तथा निजको परिवारको नाममा रहेको सम्पत्ति वैधानिक आयस्रोतसँग मेल नखाने भनी अख्तियारमा उजुरी परेको। उजुरीमा अस्वाभाविक जीवनशैली र स्रोत नखुलेको सम्पत्ति आर्जनबारे छानबिन माग गरिएको थियो।
-- 2025-06-09 — विशेष अदालतमा मुद्दा दर्ता
-  Description: अख्तियारले अनुसन्धानबाट भ्रष्टाचारजन्य कसुर देखिएको निष्कर्षसहित विशेष अदालत, काठमाडौंमा आरोपपत्र दायर गरेको। आरोपपत्रमा प्रतिवादी, बिगो रकम, सम्बद्ध कार्यालय र मागदाबी स्रोतमा उल्लेख भए अनुसार समेटिएको थियो।"""
+_TIMELINE_EXAMPLES = (
+    {
+        "date": "2022-07-19",
+        "title": "उजुरी दर्ता — अक्सिजन प्लान्ट खरिद अनियमितता",
+        "description": (
+            "उ.द.नं. C-०००८०५ अन्तर्गत नगरपालिकाले सेटिङमा रु. १३,००,०००।– बढी हालेर "
+            "अक्सिजन प्लान्ट खरिद गरेको भन्ने उजुरी CIAA मा दर्ता भएको। उजुरीमा खरिद "
+            "प्रक्रियामा मिलेमतो गरी सार्वजनिक रकम हिनामिना गरिएको आरोप उल्लेख छ।"
+        ),
+    },
+    {
+        "date": "2014-01-26",
+        "title": "उजुरी दर्ता — अख्तियारमा पहिलो उजुरी",
+        "description": (
+            "मिति २०७०/१०/१२ मा काठमाडौं महानगरपालिकामा कार्यरत इन्जिनियर रामबाबु महतो "
+            "तथा निजको परिवारको नाममा रहेको सम्पत्ति वैधानिक आयस्रोतसँग मेल नखाने भनी "
+            "अख्तियारमा उजुरी परेको। उजुरीमा अस्वाभाविक जीवनशैली र स्रोत नखुलेको सम्पत्ति "
+            "आर्जनबारे छानबिन माग गरिएको थियो।"
+        ),
+    },
+    {
+        "date": "2025-06-09",
+        "title": "विशेष अदालतमा मुद्दा दर्ता",
+        "description": (
+            "अख्तियारले अनुसन्धानबाट भ्रष्टाचारजन्य कसुर देखिएको निष्कर्षसहित विशेष अदालत, "
+            "काठमाडौंमा आरोपपत्र दायर गरेको। आरोपपत्रमा प्रतिवादी, बिगो रकम, सम्बद्ध "
+            "कार्यालय र मागदाबी स्रोतमा उल्लेख भए अनुसार समेटिएको थियो।"
+        ),
+    },
+)
 
-PUBLISHED_STYLE_PROMPT_EXAMPLES = """\
-Style examples:
-- {"date": "2022-07-19", "title": "उजुरी दर्ता — अक्सिजन प्लान्ट खरिद अनियमितता", "description": "उ.द.नं. C-०००८०५ अन्तर्गत नगरपालिकाले सेटिङमा रु. १३,००,०००।– बढी हालेर अक्सिजन प्लान्ट खरिद गरेको भन्ने उजुरी CIAA मा दर्ता भएको। उजुरीमा खरिद प्रक्रियामा मिलेमतो गरी सार्वजनिक रकम हिनामिना गरिएको आरोप उल्लेख छ।"}}
-- {"date": "2014-01-26", "title": "उजुरी दर्ता — अख्तियारमा पहिलो उजुरी", "description": "मिति २०७०/१०/१२ मा काठमाडौं महानगरपालिकामा कार्यरत इन्जिनियर रामबाबु महतो तथा निजको परिवारको नाममा रहेको सम्पत्ति वैधानिक आयस्रोतसँग मेल नखाने भनी अख्तियारमा उजुरी परेको। उजुरीमा अस्वाभाविक जीवनशैली र स्रोत नखुलेको सम्पत्ति आर्जनबारे छानबिन माग गरिएको थियो।"}}
-- {"date": "2025-06-09", "title": "विशेष अदालतमा मुद्दा दर्ता", "description": "अख्तियारले अनुसन्धानबाट भ्रष्टाचारजन्य कसुर देखिएको निष्कर्षसहित विशेष अदालत, काठमाडौंमा आरोपपत्र दायर गरेको। आरोपपत्रमा प्रतिवादी, बिगो रकम, सम्बद्ध कार्यालय र मागदाबी स्रोतमा उल्लेख भए अनुसार समेटिएको थियो।"}}"""
+PUBLISHED_STYLE_EXAMPLES = "\n".join(
+    f"- {ex['date']} — {ex['title']}\n  Description: {ex['description']}"
+    for ex in _TIMELINE_EXAMPLES
+)
+
+PUBLISHED_STYLE_PROMPT_EXAMPLES = "Style examples:\n" + "\n".join(
+    f'- {{"date": "{ex["date"]}", "title": "{ex["title"]}", '
+    f'"description": "{ex["description"]}"}}'
+    for ex in _TIMELINE_EXAMPLES
+)
 
 
 def _truncate_at_sentence(text: str, max_chars: int) -> str:
@@ -540,8 +568,7 @@ class Command(BaseCommand):
                 else (desc if desc else "⚠ no desc")
             )
             self.stdout.write(
-                f"    {i}. {entry.get('date', '?')} — "
-                f"{entry.get('title', '?')[:60]}"
+                f"    {i}. {entry.get('date', '?')} — {entry.get('title', '?')[:60]}"
             )
             self.stdout.write(f"       {desc_preview}")
 
@@ -778,7 +805,7 @@ class Command(BaseCommand):
             parsed = urlparse(url)
             if not parsed.hostname:
                 continue
-            content = convert_to_markdown(url, session)
+            content = convert_to_markdown(url, session, allowed_hosts=None)
             if not content or len(content) <= 200:
                 continue
             portion = _truncate_at_sentence(
@@ -993,23 +1020,17 @@ class Command(BaseCommand):
 
         deduped = list(best_by_key.values())
         collapsed = self._collapse_same_date_entries(deduped)
-        verdict_drop = self._warn_verdict_date_cluster(collapsed)
-        if verdict_drop:
-            kept_dates = set()
-            dropped_dates = set()
-            kept_entries = []
-            for i, e in enumerate(collapsed):
-                if i in verdict_drop:
-                    dropped_dates.add(e.get("date", "?"))
-                else:
-                    kept_entries.append(e)
-                    kept_dates.add(e.get("date", "?"))
-            collapsed = kept_entries
+        verdict_res = self._warn_verdict_date_cluster(collapsed)
+        if verdict_res:
+            keeper_idx, verdict_drop = verdict_res
+            dropped_dates = {collapsed[i].get("date", "?") for i in verdict_drop}
+            kept_date = collapsed[keeper_idx].get("date", "?")
+            collapsed = [e for i, e in enumerate(collapsed) if i not in verdict_drop]
             self.stdout.write(
                 self.style.WARNING(
                     f"  Collapsed {len(verdict_drop) + 1} verdict-cluster entries "
-                    f"into 1 (dates: {', '.join(sorted(dropped_dates | kept_dates))}) "
-                    f"— kept {', '.join(sorted(kept_dates))}"
+                    f"into 1 (dates: {', '.join(sorted(dropped_dates | {kept_date}))}) "
+                    f"— kept {kept_date}"
                 )
             )
         capped = self._cap_timeline_entries(collapsed)
@@ -1067,23 +1088,29 @@ class Command(BaseCommand):
             candidate_terms and kept_terms and candidate_terms.isdisjoint(kept_terms)
         )
 
-    def _warn_verdict_date_cluster(self, entries: list[dict]) -> set[int]:
+    def _warn_verdict_date_cluster(
+        self, entries: list[dict]
+    ) -> Optional[tuple[int, set[int]]]:
         """Find clusters of 3+ verdict-like entries within 180 days.
 
-        Returns a set of indices (into the *entries* list) to drop —
-        keeping only the cluster entry with the longest description.
-        Returns empty set when no cluster is found.
+        Returns a tuple of (keeper_index, set_of_indices_to_drop) or None
+        when no cluster is found.  The keeper (the entry with the longest
+        description) is included in the count — callers can log
+        len(to_drop) + 1 total cluster entries.
         """
         if len(entries) < 3:
-            return set()
+            return None
         verdict_terms = {"फैसला", "निर्णय", "ठहर"}
         verdict_indices: list[tuple[int, dict]] = [
             (i, e)
             for i, e in enumerate(entries)
-            if verdict_terms & set(e.get("title", "") + e.get("description", ""))
+            if any(
+                term in f"{e.get('title', '')} {e.get('description', '')}"
+                for term in verdict_terms
+            )
         ]
         if len(verdict_indices) < 3:
-            return set()
+            return None
         from datetime import datetime, timedelta
 
         try:
@@ -1096,7 +1123,7 @@ class Command(BaseCommand):
                 for idx, e in verdict_indices
             ]
         except (ValueError, KeyError):
-            return set()
+            return None
         dated.sort(key=lambda p: p[0])
         window = timedelta(days=180)
         for i in range(len(dated) - 2):
@@ -1123,8 +1150,8 @@ class Command(BaseCommand):
                     cluster[-1][0].strftime("%Y-%m-%d"),
                     keeper[0].strftime("%Y-%m-%d"),
                 )
-                return to_drop
-        return set()
+                return keeper[1], to_drop
+        return None
 
     def _distinct_event_terms(self, entry: dict) -> set[str]:
         text = f"{entry.get('title', '')} {entry.get('description', '')}"

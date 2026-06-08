@@ -190,6 +190,16 @@ def test_contributor_sees_all_non_closed_cases_in_list():
     published.state = CaseState.PUBLISHED
     published.save()
 
+    in_review = create_case_with_entities(
+        title="In Review Case",
+        alleged_entities=["entity:person/review-person"],
+        key_allegations=["Test"],
+        case_type=CaseType.CORRUPTION,
+        description="In review case",
+    )
+    in_review.state = CaseState.IN_REVIEW
+    in_review.save()
+
     closed = create_case_with_entities(
         title="Closed Case",
         alleged_entities=["entity:person/closed-person"],
@@ -210,6 +220,7 @@ def test_contributor_sees_all_non_closed_cases_in_list():
     ids = {c["case_id"] for c in response.data.get("results", [])}
     assert draft.case_id in ids
     assert published.case_id in ids
+    assert in_review.case_id in ids
     assert closed.case_id not in ids
 
 
