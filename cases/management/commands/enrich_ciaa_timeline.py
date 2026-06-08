@@ -131,6 +131,14 @@ NGM DATE PRIORITY (CRITICAL):
   NGM-dated events, and to extract any additional events not in NGM
 - NGM dates are already in AD format — treat them as authoritative
 
+VERDICT DATE PRECISION (CRITICAL):
+- Be very precise with BS→AD conversion for verdict dates
+- If you see the same verdict mentioned multiple times in different document
+  sections, emit it only ONCE — do not create separate entries with slightly
+  different dates for the same verdict
+- The same BS date must always produce the same AD date; do not vary the
+  conversion per chunk
+
 DESCRIPTION QUALITY RULES:
 - Description is REQUIRED when the source includes facts beyond the date/title
 - Target 2-4 concise Nepali sentences per description when detail exists
@@ -139,7 +147,10 @@ DESCRIPTION QUALITY RULES:
   and final outcomes
 - Do not output shallow descriptions like "अदालतमा सुनुवाइ भयो" when richer
   source context exists
-- For routine NGM hearings with no remarks/context, description may be empty
+- Do NOT emit a timeline entry for a hearing date unless you can write a non-empty
+  description based on the document text. A bare "hearing took place" entry with no
+  context is worse than no entry. If NGM remarks only say 'बृद्ध' or equivalent
+  (adjourned), skip that hearing entirely
 
 PUBLISHED STYLE EXAMPLES:
 - 2022-07-19 — उजुरी दर्ता — अक्सिजन प्लान्ट खरिद अनियमितता
@@ -956,6 +967,7 @@ class Command(BaseCommand):
 
         deduped = list(best_by_key.values())
         collapsed = self._collapse_same_date_entries(deduped)
+        self._warn_verdict_date_cluster(collapsed)
         capped = self._cap_timeline_entries(collapsed)
         capped.sort(key=lambda entry: entry["date"])
         return capped
@@ -1010,6 +1022,45 @@ class Command(BaseCommand):
         return bool(
             candidate_terms and kept_terms and candidate_terms.isdisjoint(kept_terms)
         )
+
+    def _warn_verdict_date_cluster(self, entries: list[dict]) -> None:
+        """Log warning when 3+ entries within 180 days share verdict-like terms.
+
+        Does not auto-collapse — some may genuinely be different events
+        (verdict, appeal, Supreme Court). Flags for manual review.
+        """
+        if len(entries) < 3:
+            return
+        verdict_terms = {"फैसला", "निर्णय", "ठहर"}
+        verdict_entries = [
+            e
+            for e in entries
+            if verdict_terms & set(e.get("title", "") + e.get("description", ""))
+        ]
+        if len(verdict_entries) < 3:
+            return
+        from datetime import datetime, timedelta
+
+        try:
+            dated = [
+                (datetime.strptime(e["date"], "%Y-%m-%d"), e) for e in verdict_entries
+            ]
+        except (ValueError, KeyError):
+            return
+        dated.sort(key=lambda p: p[0])
+        window = timedelta(days=180)
+        for i in range(len(dated) - 2):
+            if dated[i + 2][0] - dated[i][0] <= window:
+                logger.warning(
+                    "  ⚠ %d verdict-like entries within %d-day window (%s → %s) — "
+                    "may indicate BS→AD conversion inconsistency or genuine multi-stage "
+                    "verdict process; manual review recommended",
+                    len(verdict_entries),
+                    window.days,
+                    dated[i][0].strftime("%Y-%m-%d"),
+                    dated[-1][0].strftime("%Y-%m-%d"),
+                )
+                return
 
     def _distinct_event_terms(self, entry: dict) -> set[str]:
         text = f"{entry.get('title', '')} {entry.get('description', '')}"
