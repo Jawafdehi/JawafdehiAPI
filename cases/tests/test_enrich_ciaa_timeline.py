@@ -869,9 +869,12 @@ class TestEnrichCiaaTimeline:
                 ngm_data=mock_ngm,
             )
 
-        assert result == [
-            {"date": "2023-09-20", "title": "Case registered", "description": ""}
-        ]
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]["date"] == "2023-09-20"
+        assert result[0]["title"] == "Case registered"
+        assert result[0]["date_bs"] is not None
+        assert "description" not in result[0]
 
     def test_ngm_counter_incremented(self):
         """cases_ngm_used stat is incremented when NGM data is available."""

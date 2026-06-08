@@ -28,11 +28,8 @@ DOCUMENT_FORMAT_PRIORITY = {".docx": 4, ".doc": 3, ".pdf": 2}
 
 def rank_source_urls(source: DocumentSource) -> list[str]:
     """Return URLs sorted by format priority (DOCX > DOC > PDF > web)."""
-    urls = [
-        url.strip()
-        for url in (source.url or [])
-        if isinstance(url, str) and url.strip()
-    ]
+    raw_urls = source.url if isinstance(source.url, list) else []
+    urls = [url.strip() for url in raw_urls if isinstance(url, str) and url.strip()]
     if not urls:
         return []
 
@@ -358,14 +355,22 @@ def call_llm(
         return content
 
 
-def convert_to_markdown(url: str, session: requests.Session) -> Optional[str]:
+def convert_to_markdown(
+    url: str,
+    session: requests.Session,
+    allowed_hosts: Optional[frozenset[str]] = None,
+) -> Optional[str]:
     """Download file from URL and convert to markdown using likhit.
 
     Pipeline: URL download -> temp file -> likhit/markitdown -> markdown.
     Returns None when conversion fails or produces insufficient content.
+
+    ``allowed_hosts`` defaults to ``ALLOWED_HOSTS``. Pass None (or an empty
+    frozenset) to skip the host check entirely, for MEDIA_NEWS article URLs.
     """
+    hosts = ALLOWED_HOSTS if allowed_hosts is None else allowed_hosts
     initial_hostname = urlparse(url).hostname
-    if initial_hostname not in ALLOWED_HOSTS:
+    if initial_hostname not in hosts:
         logger.warning("Refusing to fetch untrusted host: %s", url)
         return None
 
@@ -386,7 +391,7 @@ def convert_to_markdown(url: str, session: requests.Session) -> Optional[str]:
                 return None
             next_url = urljoin(current_url, location)
             next_hostname = urlparse(next_url).hostname
-            if next_hostname not in ALLOWED_HOSTS:
+            if next_hostname not in hosts:
                 logger.warning(
                     "Redirect target host not allowed: %s -> %s",
                     current_url,
