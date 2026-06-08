@@ -20,13 +20,16 @@ Usage::
     python manage.py enrich_ciaa_timeline --force
 """
 
+import datetime
 import logging
 import os
 import re
+import time
 import unicodedata
 from typing import Optional
 from urllib.parse import urlparse
 
+import nepali_datetime
 import requests
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
@@ -57,7 +60,7 @@ _SOURCE_TYPE_LABELS = {
 
 MEDIA_NEWS_TOTAL_CAP = 3000
 MEDIA_NEWS_PER_ARTICLE_CAP = 800
-TIMELINE_CHUNK_SIZE = 12000
+TIMELINE_CHUNK_SIZE = 10000
 TIMELINE_CHUNK_OVERLAP = 1000
 TIMELINE_MAX_ENTRIES = 30
 TIMELINE_DISTINCT_EVENT_TERMS = (
@@ -524,9 +527,11 @@ class Command(BaseCommand):
         entry_count = len(timeline_entries)
         self.stdout.write(self.style.SUCCESS(f"  Extracted {entry_count} entry(s)"))
         for i, entry in enumerate(timeline_entries, 1):
+            desc = entry.get("description", "")
+            desc_info = f"  [{len(desc)} chars]" if desc else "  [⚠ no desc]"
             self.stdout.write(
                 f"    {i}. {entry.get('date', '?')} — "
-                f"{entry.get('title', '?')[:80]}"
+                f"{entry.get('title', '?')[:60]}{desc_info}"
             )
 
         if dry_run:
@@ -876,6 +881,8 @@ class Command(BaseCommand):
         all_entries = []
 
         for idx, chunk in enumerate(chunks, 1):
+            if idx > 1:
+                time.sleep(0.5)
             response_text = self._extract_timeline_chunk(
                 source_text=chunk,
                 case_title=case_title,
@@ -1089,6 +1096,9 @@ class Command(BaseCommand):
         description = entry.get("description", "")
         if not any(term in title for term in TIMELINE_ROUTINE_HEARING_TERMS):
             return False
+        # Drop bare hearings with no description — useless entries
+        if not description or not description.strip():
+            return True
         if any(
             term in f"{title} {description}" for term in TIMELINE_DISTINCT_EVENT_TERMS
         ):
@@ -1131,6 +1141,44 @@ class Command(BaseCommand):
                     entry["date"],
                 )
                 continue
+
+            # Catch BS dates slipping through as syntactically valid ISO
+            year = int(entry["date"].split("-")[0])
+            if year > 2100:
+                try:
+                    bs_parts = entry["date"].split("-")
+                    bs_date = nepali_datetime.date(
+                        int(bs_parts[0]), int(bs_parts[1]), int(bs_parts[2])
+                    )
+                    ad_date = bs_date.to_datetime_date()
+                    entry["date_bs"] = entry["date"]
+                    entry["date"] = ad_date.isoformat()
+                    logger.info(
+                        "  Converted BS date %s → AD %s",
+                        entry["date_bs"],
+                        entry["date"],
+                    )
+                except (ValueError, IndexError, OverflowError) as exc:
+                    logger.warning(
+                        "  Dropping BS date %s — conversion failed: %s",
+                        entry["date"],
+                        exc,
+                    )
+                    continue
+
+            # Compute date_bs from AD date
+            if "date_bs" not in entry:
+                try:
+                    ad_date = datetime.date.fromisoformat(entry["date"])
+                    bs_obj = nepali_datetime.date.from_datetime_date(ad_date)
+                    entry["date_bs"] = bs_obj.strftime("%Y-%m-%d")
+                except (ValueError, OverflowError) as exc:
+                    logger.warning(
+                        "  Dropping entry — date_bs conversion failed for %s: %s",
+                        entry["date"],
+                        exc,
+                    )
+                    continue
 
             clean.append(entry)
 
