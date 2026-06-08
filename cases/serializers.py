@@ -409,7 +409,7 @@ class DocumentSourceSerializer(serializers.ModelSerializer):
                 return
             # Handle dict entries (link+role format)
             if isinstance(value, dict):
-                value = value.get("link", "")
+                value = value.get("link") or ""
                 if not value:
                     return
             candidate = value

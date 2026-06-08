@@ -200,6 +200,12 @@ window.MultiWidgetConfigs = {
                 const role = roleSelect ? roleSelect.value.trim() : '';
                 return role ? { link, role } : { link, role: null };
             }).filter(v => v);
+        },
+        setupRowCallback: (row, manager) => {
+            const roleSelect = row.querySelector('.url-role-select');
+            if (roleSelect) {
+                roleSelect.addEventListener('change', () => manager.updateHidden());
+            }
         }
     },
 
