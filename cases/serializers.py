@@ -407,6 +407,11 @@ class DocumentSourceSerializer(serializers.ModelSerializer):
         def add_url(value, role="RAW"):
             if not value:
                 return
+            # Handle dict entries (link+role format)
+            if isinstance(value, dict):
+                value = value.get("link", "")
+                if not value:
+                    return
             candidate = value
             if request is not None:
                 candidate = request.build_absolute_uri(candidate)
