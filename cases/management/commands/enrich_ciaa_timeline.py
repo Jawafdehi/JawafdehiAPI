@@ -716,6 +716,18 @@ class Command(BaseCommand):
             if MEDIA_NEWS_TOTAL_CAP - total_used <= 200:
                 break
 
+            portion = self._get_media_news_from_url(source, session, total_used)
+            if portion is not None:
+                news_parts.append(portion)
+                logger.debug(
+                    "  media_news=source:%s  chars=%d  used=%d (from URL)",
+                    source.source_id,
+                    len(portion),
+                    len(portion),
+                )
+                total_used += len(portion)
+                continue
+
             portion = self._get_media_news_description(source, total_used)
             if portion is not None:
                 news_parts.append(portion)
@@ -723,18 +735,6 @@ class Command(BaseCommand):
                     "  media_news=source:%s  chars=%d  used=%d (from description)",
                     source.source_id,
                     len((source.description or "").strip()),
-                    len(portion),
-                )
-                total_used += len(portion)
-                continue
-
-            portion = self._get_media_news_from_url(source, session, total_used)
-            if portion is not None:
-                news_parts.append(portion)
-                logger.debug(
-                    "  media_news=source:%s  chars=%d  used=%d",
-                    source.source_id,
-                    len(portion),
                     len(portion),
                 )
                 total_used += len(portion)
@@ -776,7 +776,7 @@ class Command(BaseCommand):
             return None
         for url in urls:
             parsed = urlparse(url)
-            if not parsed.hostname or parsed.hostname not in ALLOWED_HOSTS:
+            if not parsed.hostname:
                 continue
             content = convert_to_markdown(url, session)
             if not content or len(content) <= 200:
@@ -892,6 +892,7 @@ class Command(BaseCommand):
         all_entries = []
 
         for idx, chunk in enumerate(chunks, 1):
+            self.stdout.write(f"  Chunk {idx}/{len(chunks)} ({len(chunk)} chars)...")
             if idx > 1:
                 time.sleep(0.5)
             response_text = self._extract_timeline_chunk(
@@ -992,7 +993,25 @@ class Command(BaseCommand):
 
         deduped = list(best_by_key.values())
         collapsed = self._collapse_same_date_entries(deduped)
-        self._warn_verdict_date_cluster(collapsed)
+        verdict_drop = self._warn_verdict_date_cluster(collapsed)
+        if verdict_drop:
+            kept_dates = set()
+            dropped_dates = set()
+            kept_entries = []
+            for i, e in enumerate(collapsed):
+                if i in verdict_drop:
+                    dropped_dates.add(e.get("date", "?"))
+                else:
+                    kept_entries.append(e)
+                    kept_dates.add(e.get("date", "?"))
+            collapsed = kept_entries
+            self.stdout.write(
+                self.style.WARNING(
+                    f"  Collapsed {len(verdict_drop) + 1} verdict-cluster entries "
+                    f"into 1 (dates: {', '.join(sorted(dropped_dates | kept_dates))}) "
+                    f"— kept {', '.join(sorted(kept_dates))}"
+                )
+            )
         capped = self._cap_timeline_entries(collapsed)
         capped.sort(key=lambda entry: entry["date"])
         return capped
@@ -1048,44 +1067,64 @@ class Command(BaseCommand):
             candidate_terms and kept_terms and candidate_terms.isdisjoint(kept_terms)
         )
 
-    def _warn_verdict_date_cluster(self, entries: list[dict]) -> None:
-        """Log warning when 3+ entries within 180 days share verdict-like terms.
+    def _warn_verdict_date_cluster(self, entries: list[dict]) -> set[int]:
+        """Find clusters of 3+ verdict-like entries within 180 days.
 
-        Does not auto-collapse — some may genuinely be different events
-        (verdict, appeal, Supreme Court). Flags for manual review.
+        Returns a set of indices (into the *entries* list) to drop —
+        keeping only the cluster entry with the longest description.
+        Returns empty set when no cluster is found.
         """
         if len(entries) < 3:
-            return
+            return set()
         verdict_terms = {"फैसला", "निर्णय", "ठहर"}
-        verdict_entries = [
-            e
-            for e in entries
+        verdict_indices: list[tuple[int, dict]] = [
+            (i, e)
+            for i, e in enumerate(entries)
             if verdict_terms & set(e.get("title", "") + e.get("description", ""))
         ]
-        if len(verdict_entries) < 3:
-            return
+        if len(verdict_indices) < 3:
+            return set()
         from datetime import datetime, timedelta
 
         try:
             dated = [
-                (datetime.strptime(e["date"], "%Y-%m-%d"), e) for e in verdict_entries
+                (
+                    datetime.strptime(e["date"], "%Y-%m-%d"),
+                    idx,
+                    e,
+                )
+                for idx, e in verdict_indices
             ]
         except (ValueError, KeyError):
-            return
+            return set()
         dated.sort(key=lambda p: p[0])
         window = timedelta(days=180)
         for i in range(len(dated) - 2):
             if dated[i + 2][0] - dated[i][0] <= window:
+                # Find the cluster span: first to last that falls within window
+                cluster = [dated[i]]
+                for j in range(i + 1, len(dated)):
+                    if dated[j][0] - dated[i][0] <= window:
+                        cluster.append(dated[j])
+                    else:
+                        break
+                cluster.sort(
+                    key=lambda p: len(p[2].get("description", "")), reverse=True
+                )
+                keeper = cluster[0]
+                to_drop = {item[1] for item in cluster[1:]}
                 logger.warning(
                     "  ⚠ %d verdict-like entries within %d-day window (%s → %s) — "
                     "may indicate BS→AD conversion inconsistency or genuine multi-stage "
-                    "verdict process; manual review recommended",
-                    len(verdict_entries),
+                    "verdict process; kept entry from %s (longest desc)",
+                    len(cluster),
                     window.days,
-                    dated[i][0].strftime("%Y-%m-%d"),
-                    dated[-1][0].strftime("%Y-%m-%d"),
+                    cluster[0][0].strftime("%Y-%m-%d"),
+                    cluster[-1][0].strftime("%Y-%m-%d"),
+                    keeper[0].strftime("%Y-%m-%d"),
                 )
-                return
+                return to_drop
+        return set()
 
     def _distinct_event_terms(self, entry: dict) -> set[str]:
         text = f"{entry.get('title', '')} {entry.get('description', '')}"
