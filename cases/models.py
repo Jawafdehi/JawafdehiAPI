@@ -13,6 +13,7 @@ from django.core.validators import URLValidator
 from django.db import models
 from django.utils import timezone
 
+from .enums import SourceURLRole
 from .fields import (
     EvidenceListField,
     TextListField,
@@ -27,11 +28,12 @@ def validate_url_list(value):
     """
     Validate that the url field contains a list of valid URLs.
 
-    Args:
-        value: The value to validate (should be a list of URL strings)
+    Each entry may be a plain URL string, or a dict with keys:
+      - url (str, required): the URL itself
+      - role (str, optional): one of SourceURLRole values (RAW, MARKDOWN, PERMALINK)
 
     Raises:
-        ValidationError: If value is not a list or contains invalid URLs
+        ValidationError: If value is not a list or contains invalid entries
     """
     if value in (None, []):
         return
@@ -41,15 +43,29 @@ def validate_url_list(value):
 
     validator = URLValidator()
     for item in value:
-        if not isinstance(item, str):
-            raise ValidationError("Each URL must be a string.")
+        if isinstance(item, str):
+            stripped = item.strip()
+            if not stripped:
+                raise ValidationError("URLs cannot be blank or whitespace-only.")
+            validator(stripped)
+        elif isinstance(item, dict):
+            url_val = item.get("url", "")
+            if not isinstance(url_val, str) or not url_val.strip():
+                raise ValidationError(
+                    "Each dict entry must have a non-blank 'url' key."
+                )
+            stripped = url_val.strip()
+            validator(stripped)
 
-        # Strip whitespace and validate
-        stripped = item.strip()
-        if not stripped:
-            raise ValidationError("URLs cannot be blank or whitespace-only.")
-
-        validator(stripped)
+            role = item.get("role")
+            if role is not None and role not in SourceURLRole.values:
+                raise ValidationError(
+                    f"Invalid role '{role}'. Must be one of {list(SourceURLRole.values)}."
+                )
+        else:
+            raise ValidationError(
+                "Each entry must be a URL string or a dict with 'url' key."
+            )
 
 
 # File upload configuration
@@ -846,17 +862,23 @@ class DocumentSource(models.Model):
 
         - Strips whitespace from title
         - Ensures title is not empty after stripping
-        - Normalizes URL list entries (strips whitespace)
+        - Normalizes bare str URL entries to dicts with role=RAW
         """
         # Normalize title
         self.title = (self.title or "").strip()
         if not self.title:
             raise ValidationError({"title": "Title is required and cannot be empty"})
 
-        # Normalize URL list entries (strip whitespace from each URL)
+        # Normalize bare str entries to dicts with role=RAW
         if isinstance(self.url, list):
             self.url = [
-                url.strip() if isinstance(url, str) else url for url in self.url
+                {
+                    "url": url.strip(),
+                    "role": SourceURLRole.RAW,
+                }
+                if isinstance(url, str)
+                else url
+                for url in self.url
             ]
 
         # Enforce publication_date for media/news sources
