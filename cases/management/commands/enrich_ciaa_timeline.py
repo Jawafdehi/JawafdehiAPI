@@ -29,11 +29,11 @@ import unicodedata
 from typing import Optional
 from urllib.parse import urlparse
 
-import nepali_datetime
 import requests
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils import timezone
+from nepali.datetime import nepalidate as _nepali_date
 
 from cases.management.commands._enrich_utils import (
     ALLOWED_HOSTS,
@@ -534,11 +534,16 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(f"  Extracted {entry_count} entry(s)"))
         for i, entry in enumerate(timeline_entries, 1):
             desc = entry.get("description", "")
-            desc_info = f"  [{len(desc)} chars]" if desc else "  [⚠ no desc]"
+            desc_preview = (
+                (desc[:100] + "…")
+                if len(desc) > 100
+                else (desc if desc else "⚠ no desc")
+            )
             self.stdout.write(
                 f"    {i}. {entry.get('date', '?')} — "
-                f"{entry.get('title', '?')[:60]}{desc_info}"
+                f"{entry.get('title', '?')[:60]}"
             )
+            self.stdout.write(f"       {desc_preview}")
 
         if dry_run:
             self.stdout.write(
@@ -909,10 +914,14 @@ class Command(BaseCommand):
             for entry in entries:
                 description = entry.get("description", "")
                 logger.debug(
-                    "    → %s — %s | desc: %d chars",
+                    "    → %s — %s | %s",
                     entry.get("date", "?"),
                     entry.get("title", "?"),
-                    len(description),
+                    (
+                        (description[:120] + "…")
+                        if len(description) > 120
+                        else (description if description else "⚠ no desc")
+                    ),
                 )
 
         unique_entries = self._deduplicate_timeline_entries(all_entries)
@@ -1156,7 +1165,7 @@ class Command(BaseCommand):
             if year > 2100:
                 try:
                     bs_parts = entry["date"].split("-")
-                    bs_date = nepali_datetime.date(
+                    bs_date = _nepali_date(
                         int(bs_parts[0]), int(bs_parts[1]), int(bs_parts[2])
                     )
                     ad_date = bs_date.to_datetime_date()
@@ -1179,7 +1188,7 @@ class Command(BaseCommand):
             if "date_bs" not in entry:
                 try:
                     ad_date = datetime.date.fromisoformat(entry["date"])
-                    bs_obj = nepali_datetime.date.from_datetime_date(ad_date)
+                    bs_obj = _nepali_date.from_date(ad_date)
                     entry["date_bs"] = bs_obj.strftime("%Y-%m-%d")
                 except (ValueError, OverflowError) as exc:
                     logger.warning(
