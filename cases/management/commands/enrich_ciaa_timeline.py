@@ -513,7 +513,9 @@ class Command(BaseCommand):
             f" ({case_number}) — {case.title[:80]}"
         )
 
+        self.stdout.write("  Fetching sources...")
         source_text = self._get_source_content(case, session)
+        self.stdout.write("  Querying NGM...")
         ngm_data = self._get_ngm_data(case)
 
         if not source_text and not ngm_data:
@@ -970,7 +972,10 @@ class Command(BaseCommand):
         all_entries = []
 
         for idx, chunk in enumerate(chunks, 1):
-            self.stdout.write(f"  Chunk {idx}/{len(chunks)} ({len(chunk)} chars)...")
+            t0 = time.monotonic()
+            self.stdout.write(
+                f"  Chunk {idx}/{len(chunks)} ({len(chunk)} chars) — calling LLM..."
+            )
             if idx > 1:
                 time.sleep(0.5)
             response_text = self._extract_timeline_chunk(
@@ -983,6 +988,10 @@ class Command(BaseCommand):
                 ngm_data=ngm_data,
             )
             entries = self._parse_timeline_response(response_text) or []
+            elapsed = time.monotonic() - t0
+            self.stdout.write(
+                f"  → done in {elapsed:.1f}s, {len(entries)} entries"
+            )
             all_entries.extend(entries)
             logger.debug(
                 "  chunk %d/%d: %d entries extracted",
