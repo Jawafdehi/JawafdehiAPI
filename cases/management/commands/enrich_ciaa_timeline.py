@@ -59,8 +59,8 @@ _SOURCE_TYPE_LABELS = {
     SourceType.MEDIA_NEWS: "media_news",
 }
 
-MEDIA_NEWS_TOTAL_CAP = 3000
-MEDIA_NEWS_PER_ARTICLE_CAP = 800
+MEDIA_NEWS_TOTAL_CAP = 50_000   # effectively uncapped — full articles sent to LLM
+MEDIA_NEWS_PER_ARTICLE_CAP = 15_000  # full article per source
 TIMELINE_CHUNK_SIZE = 10000
 TIMELINE_CHUNK_OVERLAP = 1000
 TIMELINE_MAX_ENTRIES = 30
@@ -734,7 +734,11 @@ class Command(BaseCommand):
         content_parts: list[str],
         session: requests.Session,
     ):
-        """Fetch news article URLs, cap per-article at ~500-800 chars and total at 3000."""
+        """Fetch news article URLs and append full article text to content_parts.
+
+        Per-article cap: MEDIA_NEWS_PER_ARTICLE_CAP chars.
+        Total cap: MEDIA_NEWS_TOTAL_CAP chars across all news sources.
+        """
         total_used = 0
         news_parts = []
         for sid in source_ids:
@@ -745,16 +749,22 @@ class Command(BaseCommand):
                 continue
 
             if MEDIA_NEWS_TOTAL_CAP - total_used <= 200:
+                logger.debug(
+                    "  media_news — total cap reached (%d/%d), skipping remaining sources",
+                    total_used,
+                    MEDIA_NEWS_TOTAL_CAP,
+                )
                 break
 
             portion = self._get_media_news_from_url(source, session, total_used)
             if portion is not None:
                 news_parts.append(portion)
                 logger.debug(
-                    "  media_news=source:%s  chars=%d  used=%d (from URL)",
+                    "  media_news=source:%s  chars=%d  used=%d (from URL) [running_total=%d]",
                     source.source_id,
                     len(portion),
                     len(portion),
+                    total_used + len(portion),
                 )
                 total_used += len(portion)
                 continue
@@ -763,10 +773,11 @@ class Command(BaseCommand):
             if portion is not None:
                 news_parts.append(portion)
                 logger.debug(
-                    "  media_news=source:%s  chars=%d  used=%d (from description)",
+                    "  media_news=source:%s  chars=%d  used=%d (from description) [running_total=%d]",
                     source.source_id,
                     len((source.description or "").strip()),
                     len(portion),
+                    total_used + len(portion),
                 )
                 total_used += len(portion)
 
@@ -808,6 +819,11 @@ class Command(BaseCommand):
         for url in urls:
             parsed = urlparse(url)
             if not parsed.hostname:
+                logger.debug(
+                    "  media_news=source:%s — skipped URL (no hostname): %s",
+                    source.source_id,
+                    url,
+                )
                 continue
             try:
                 validate_host_safety(parsed.hostname)
@@ -818,12 +834,28 @@ class Command(BaseCommand):
                     exc,
                 )
                 continue
+            logger.debug(
+                "  media_news=source:%s — fetching URL: %s",
+                source.source_id,
+                url,
+            )
             content = convert_to_markdown(url, session, skip_host_check=True)
-            if not content or len(content) <= 200:
+            raw_len = len(content) if content else 0
+            if not content or raw_len <= 200:
+                logger.debug(
+                    "  media_news=source:%s — fetch returned %d chars (too short/empty), skipping",
+                    source.source_id,
+                    raw_len,
+                )
                 continue
-            portion = _truncate_at_sentence(
-                content,
-                min(MEDIA_NEWS_PER_ARTICLE_CAP, MEDIA_NEWS_TOTAL_CAP - total_used),
+            cap = min(MEDIA_NEWS_PER_ARTICLE_CAP, MEDIA_NEWS_TOTAL_CAP - total_used)
+            portion = _truncate_at_sentence(content, cap)
+            logger.debug(
+                "  media_news=source:%s — raw=%d chars, cap=%d, after_truncate=%d chars",
+                source.source_id,
+                raw_len,
+                cap,
+                len(portion),
             )
             if len(portion) > 200:
                 return portion
