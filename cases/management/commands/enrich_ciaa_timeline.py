@@ -77,6 +77,9 @@ TIMELINE_DISTINCT_EVENT_TERMS = (
     "सम्झौता",
     "लागत",
 )
+# Verdict title terms for cluster/consolidation — excludes निर्णय which
+# broadly covers board/cabinet decisions, not just court verdicts.
+TIMELINE_VERDICT_TITLE_TERMS = ("फैसला", "दोषी")
 TIMELINE_ROUTINE_HEARING_TERMS = ("सुनुवाइ", "सुनुवाई", "पेशी")
 
 _TIMELINE_EXAMPLES = (
@@ -184,6 +187,9 @@ VERDICT DATE PRECISION (CRITICAL):
   different dates for the same verdict
 - The same BS date must always produce the same AD date; do not vary the
   conversion per chunk
+- A case has AT MOST ONE verdict entry — never emit more than one entry
+  with "फैसला" in the title, regardless of how many times the verdict is
+  described in different source sections or chunks
 
 DESCRIPTION QUALITY RULES:
 - Description is REQUIRED when the source includes facts beyond the date/title
@@ -1065,19 +1071,7 @@ class Command(BaseCommand):
 
         deduped = list(best_by_key.values())
         collapsed = self._collapse_same_date_entries(deduped)
-        verdict_res = self._warn_verdict_date_cluster(collapsed)
-        if verdict_res:
-            keeper_idx, verdict_drop = verdict_res
-            dropped_dates = {collapsed[i].get("date", "?") for i in verdict_drop}
-            kept_date = collapsed[keeper_idx].get("date", "?")
-            collapsed = [e for i, e in enumerate(collapsed) if i not in verdict_drop]
-            self.stdout.write(
-                self.style.WARNING(
-                    f"  Collapsed {len(verdict_drop) + 1} verdict-cluster entries "
-                    f"into 1 (dates: {', '.join(sorted(dropped_dates | {kept_date}))}) "
-                    f"— kept {kept_date}"
-                )
-            )
+        collapsed = self._consolidate_verdict_entries(collapsed)
         capped = self._cap_timeline_entries(collapsed)
         capped.sort(key=lambda entry: entry["date"])
         return capped
@@ -1098,12 +1092,7 @@ class Command(BaseCommand):
             len(entry.get("title", "")),
         )
 
-    def _is_verdict_title(self, title: str) -> bool:
-        """Return True if the title indicates a verdict-type event."""
-        return any(term in title for term in ("फैसला", "निर्णय", "दोषी"))
-
     def _collapse_same_date_entries(self, entries: list[dict]) -> list[dict]:
-        verdict_terms = {"फैसला", "निर्णय", "दोषी"}
         by_date = {}
         for entry in entries:
             by_date.setdefault(entry["date"], []).append(entry)
@@ -1118,7 +1107,7 @@ class Command(BaseCommand):
             # Verdict-type entries on same date: always keep only 1
             verdict_on_date = [
                 e for e in date_entries
-                if any(t in e.get("title", "") for t in verdict_terms)
+                if any(t in e.get("title", "") for t in TIMELINE_VERDICT_TITLE_TERMS)
             ]
             if len(verdict_on_date) > 1:
                 verdict_on_date.sort(
@@ -1159,76 +1148,41 @@ class Command(BaseCommand):
             candidate_terms and kept_terms and candidate_terms.isdisjoint(kept_terms)
         )
 
-    def _warn_verdict_date_cluster(
-        self, entries: list[dict]
-    ) -> Optional[tuple[int, set[int]]]:
-        """Find clusters of 3+ verdict-like entries within 180 days.
+    def _consolidate_verdict_entries(self, entries: list[dict]) -> list[dict]:
+        """Globally collapse all verdict entries into the single best entry.
 
-        Only considers entries whose *title* contains verdict terms
-        (फैसला/निर्णय) — description-only matches are ignored.
-        Entries containing अपील are excluded (appeals are distinct
-        procedural events, not verdicts).
+        Unlike the old _warn_verdict_date_cluster (which fired once on the
+        first 3+ cluster within 180 days), this scans ALL entries for verdict
+        titles (फैसला/दोषी) and keeps only the one with the longest
+        description plus the most representative date.  Entries whose titles
+        contain अपील are excluded (appeals are distinct procedural events).
 
-        Returns a tuple of (keeper_index, set_of_indices_to_drop) or None
-        when no cluster is found.  The keeper (the entry with the longest
-        description) is included in the count — callers can log
-        len(to_drop) + 1 total cluster entries.
+        The keeper is chosen by: longest description first, then earliest date
+        (to anchor the timeline to the actual verdict date).
         """
-        if len(entries) < 3:
-            return None
-        verdict_terms = {"फैसला", "निर्णय"}
-        verdict_indices: list[tuple[int, dict]] = [
-            (i, e)
-            for i, e in enumerate(entries)
+        verdict_entries = [
+            e for e in entries
             if "अपील" not in e.get("title", "")
-            and any(
-                term in e.get("title", "")
-                for term in verdict_terms
-            )
+            and any(t in e.get("title", "") for t in TIMELINE_VERDICT_TITLE_TERMS)
         ]
-        if len(verdict_indices) < 3:
-            return None
-        from datetime import datetime, timedelta
+        if len(verdict_entries) <= 1:
+            return entries
 
-        try:
-            dated = [
-                (
-                    datetime.strptime(e["date"], "%Y-%m-%d"),
-                    idx,
-                    e,
-                )
-                for idx, e in verdict_indices
-            ]
-        except (ValueError, KeyError):
-            return None
-        dated.sort(key=lambda p: p[0])
-        window = timedelta(days=180)
-        for i in range(len(dated) - 2):
-            if dated[i + 2][0] - dated[i][0] <= window:
-                # Find the cluster span: first to last that falls within window
-                cluster = [dated[i]]
-                for j in range(i + 1, len(dated)):
-                    if dated[j][0] - dated[i][0] <= window:
-                        cluster.append(dated[j])
-                    else:
-                        break
-                cluster.sort(
-                    key=lambda p: len(p[2].get("description", "")), reverse=True
-                )
-                keeper = cluster[0]
-                to_drop = {item[1] for item in cluster[1:]}
-                logger.warning(
-                    "  ⚠ %d verdict-like entries within %d-day window (%s → %s) — "
-                    "may indicate BS→AD conversion inconsistency or genuine multi-stage "
-                    "verdict process; kept entry from %s (longest desc)",
-                    len(cluster),
-                    window.days,
-                    cluster[0][0].strftime("%Y-%m-%d"),
-                    cluster[-1][0].strftime("%Y-%m-%d"),
-                    keeper[0].strftime("%Y-%m-%d"),
-                )
-                return keeper[1], to_drop
-        return None
+        # Sort by desc length desc, then date asc
+        verdict_entries.sort(
+            key=lambda e: (len(e.get("description", "")), e.get("date", "9999-99-99")),
+            reverse=True,
+        )
+        keeper = verdict_entries[0]
+        remaining = [e for e in entries if e not in verdict_entries]
+        self.stdout.write(
+            self.style.WARNING(
+                f"  Collapsed {len(verdict_entries)} verdict entries into 1 "
+                f"({keeper.get('date', '?')} — {keeper.get('title', '?')[:60]})"
+            )
+        )
+        remaining.append(keeper)
+        return remaining
 
     def _distinct_event_terms(self, entry: dict) -> set[str]:
         text = f"{entry.get('title', '')} {entry.get('description', '')}"
@@ -1317,9 +1271,11 @@ class Command(BaseCommand):
                 )
                 continue
 
-            # Catch BS dates slipping through as syntactically valid ISO
+            # Catch BS dates slipping through as syntactically valid ISO.
+            # AD years for CIAA cases are 2010–2026; BS years are 2070–2100.
+            # Any year > 2070 is unambiguously BS (AD has not reached 2071 yet).
             year = int(entry["date"].split("-")[0])
-            if year > 2100:
+            if year > 2070:
                 try:
                     bs_parts = entry["date"].split("-")
                     bs_date = _nepali_date(
