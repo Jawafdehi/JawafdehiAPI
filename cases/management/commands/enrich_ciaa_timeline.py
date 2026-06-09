@@ -317,6 +317,9 @@ class Command(BaseCommand):
             "cases_llm_error": 0,
             "cases_already_populated": 0,
             "cases_ngm_used": 0,
+            "dates_dropped_invalid": 0,
+            "dates_dropped_future": 0,
+            "verdict_dedup_same_date": 0,
         }
         self._http_session: Optional[requests.Session] = None
 
@@ -1063,16 +1066,42 @@ class Command(BaseCommand):
             len(entry.get("title", "")),
         )
 
+    def _is_verdict_title(self, title: str) -> bool:
+        """Return True if the title indicates a verdict-type event."""
+        return any(term in title for term in ("फैसला", "निर्णय", "दोषी"))
+
     def _collapse_same_date_entries(self, entries: list[dict]) -> list[dict]:
+        verdict_terms = {"फैसला", "निर्णय", "दोषी"}
         by_date = {}
         for entry in entries:
             by_date.setdefault(entry["date"], []).append(entry)
 
         collapsed = []
         for date, date_entries in by_date.items():
-            if len(date_entries) == 1:
+            original_count = len(date_entries)
+            if original_count == 1:
                 collapsed.extend(date_entries)
                 continue
+
+            # Verdict-type entries on same date: always keep only 1
+            verdict_on_date = [
+                e for e in date_entries
+                if any(t in e.get("title", "") for t in verdict_terms)
+            ]
+            if len(verdict_on_date) > 1:
+                verdict_on_date.sort(
+                    key=lambda e: len(e.get("description", "")), reverse=True
+                )
+                keeper = verdict_on_date[0]
+                self.stats["verdict_dedup_same_date"] += len(verdict_on_date) - 1
+                logger.debug(
+                    "  timeline date %s: collapsed %d verdict entries to 1",
+                    date,
+                    len(verdict_on_date),
+                )
+                # Rebuild date_entries with single verdict keeper replacing all
+                non_verdict = [e for e in date_entries if e is not keeper and e not in verdict_on_date]
+                date_entries = [keeper] + non_verdict
 
             date_entries.sort(key=self._entry_score, reverse=True)
             kept = [date_entries[0]]
@@ -1086,7 +1115,7 @@ class Command(BaseCommand):
             logger.debug(
                 "  timeline date %s: collapsed %d entries to %d",
                 date,
-                len(date_entries),
+                original_count,
                 len(kept),
             )
         return collapsed
@@ -1103,6 +1132,11 @@ class Command(BaseCommand):
     ) -> Optional[tuple[int, set[int]]]:
         """Find clusters of 3+ verdict-like entries within 180 days.
 
+        Only considers entries whose *title* contains verdict terms
+        (फैसला/निर्णय) — description-only matches are ignored.
+        Entries containing अपील are excluded (appeals are distinct
+        procedural events, not verdicts).
+
         Returns a tuple of (keeper_index, set_of_indices_to_drop) or None
         when no cluster is found.  The keeper (the entry with the longest
         description) is included in the count — callers can log
@@ -1110,12 +1144,13 @@ class Command(BaseCommand):
         """
         if len(entries) < 3:
             return None
-        verdict_terms = {"फैसला", "निर्णय", "ठहर"}
+        verdict_terms = {"फैसला", "निर्णय"}
         verdict_indices: list[tuple[int, dict]] = [
             (i, e)
             for i, e in enumerate(entries)
-            if any(
-                term in f"{e.get('title', '')} {e.get('description', '')}"
+            if "अपील" not in e.get("title", "")
+            and any(
+                term in e.get("title", "")
                 for term in verdict_terms
             )
         ]
@@ -1193,6 +1228,18 @@ class Command(BaseCommand):
         # Drop bare hearings with no description — useless entries
         if not description or not description.strip():
             return True
+        # Drop hearings where BOTH title and description are only boilerplate
+        # hearing terms with no distinct fact terms
+        combined = f"{title} {description}"
+        if (
+            any(term in title for term in TIMELINE_ROUTINE_HEARING_TERMS)
+            and not any(term in description for term in TIMELINE_DISTINCT_EVENT_TERMS)
+            and all(
+                term not in combined
+                for term in TIMELINE_DISTINCT_EVENT_TERMS
+            )
+        ):
+            return True
         if any(
             term in f"{title} {description}" for term in TIMELINE_DISTINCT_EVENT_TERMS
         ):
@@ -1230,9 +1277,11 @@ class Command(BaseCommand):
                 entry["description"] = str(desc_val).strip()
 
             if not is_valid_iso_date(entry["date"]):
+                self.stats["dates_dropped_invalid"] += 1
                 logger.warning(
-                    "  Dropping non-ISO date format: %s",
+                    "  Dropping non-ISO date %s for entry '%s'",
                     entry["date"],
+                    title_val[:80],
                 )
                 continue
 
@@ -1259,6 +1308,17 @@ class Command(BaseCommand):
                         exc,
                     )
                     continue
+
+            # Drop future dates (BS→AD conversion errors can produce dates > today)
+            today = datetime.date.today()
+            if entry["date"] > today.isoformat():
+                self.stats["dates_dropped_future"] += 1
+                logger.debug(
+                    "  Dropping future date %s (BS→AD error?) for entry '%s'",
+                    entry["date"],
+                    title_val[:80],
+                )
+                continue
 
             # Compute date_bs from AD date
             if "date_bs" not in entry:
@@ -1325,3 +1385,19 @@ class Command(BaseCommand):
         self.stdout.write(
             f"  Already populated:      {self.stats['cases_already_populated']}"
         )
+        dropped_invalid = self.stats["dates_dropped_invalid"]
+        dropped_future = self.stats["dates_dropped_future"]
+        if dropped_invalid or dropped_future or self.stats["verdict_dedup_same_date"]:
+            self.stdout.write("  Cleanup:")
+            if dropped_invalid:
+                self.stdout.write(
+                    f"    Invalid dates dropped: {dropped_invalid}"
+                )
+            if dropped_future:
+                self.stdout.write(
+                    f"    Future dates dropped:  {dropped_future}"
+                )
+            if self.stats["verdict_dedup_same_date"]:
+                self.stdout.write(
+                    f"    Verdict dedup (same d): {self.stats['verdict_dedup_same_date']}"
+                )
