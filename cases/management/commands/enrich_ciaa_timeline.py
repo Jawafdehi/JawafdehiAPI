@@ -44,6 +44,7 @@ from cases.management.commands._enrich_utils import (
     parse_extraction_response,
     rank_source_urls,
     resolve_api_key,
+    validate_host_safety,
 )
 from cases.models import Case, DocumentSource, SourceType
 from cases.services.priority_case_loader import filter_by_priority, load_priority_cases
@@ -805,7 +806,16 @@ class Command(BaseCommand):
             parsed = urlparse(url)
             if not parsed.hostname:
                 continue
-            content = convert_to_markdown(url, session, allowed_hosts=None)
+            try:
+                validate_host_safety(parsed.hostname)
+            except ValueError as exc:
+                logger.warning(
+                    "  media_news=source:%s — SSRF blocked: %s",
+                    source.source_id,
+                    exc,
+                )
+                continue
+            content = convert_to_markdown(url, session, skip_host_check=True)
             if not content or len(content) <= 200:
                 continue
             portion = _truncate_at_sentence(

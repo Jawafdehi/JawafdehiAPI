@@ -4,9 +4,11 @@ Reduces code duplication between enrich_ciaa_allegations.py,
 enrich_ciaa_timeline.py, and future enrichment commands.
 """
 
+import ipaddress
 import json
 import logging
 import os
+import socket
 import tempfile
 import time
 from datetime import date
@@ -24,6 +26,54 @@ logger = logging.getLogger(__name__)
 ALLOWED_HOSTS = frozenset({"ciaa.gov.np", "ngm-store.jawafdehi.org"})
 
 DOCUMENT_FORMAT_PRIORITY = {".docx": 4, ".doc": 3, ".pdf": 2}
+
+# SSRF protection: block well-known internal/metadata endpoints.
+# These are not configurable infrastructure — they are RFC-defined
+# special-purpose addresses used by all major cloud providers.
+_CLOUD_METADATA_IP = "169.254.169.254"  # NOSONAR — link-local, not configurable
+
+_SSRF_BLOCKED_HOSTNAMES = frozenset(
+    {
+        "localhost",
+        "metadata.google.internal",
+        _CLOUD_METADATA_IP,
+        "metadata",
+        "0.0.0.0",
+    }
+)
+
+
+def validate_host_safety(hostname: str) -> None:
+    """Check that hostname resolves to a public, non-internal address.
+
+    Raises ValueError if the host is blocked (loopback, private, link-local,
+    well-known metadata endpoint) or unresolvable.
+    """
+    host = hostname.lower().rstrip(".")
+    if host in _SSRF_BLOCKED_HOSTNAMES:
+        raise ValueError(
+            f"Blocked internal host: {hostname!r}. "
+            "Download sources must target public hosts only."
+        )
+    try:
+        addrinfo = socket.getaddrinfo(host, None)
+    except socket.gaierror as exc:
+        raise ValueError(
+            f"Cannot resolve host: {hostname!r}. "
+            "Only resolvable public hosts are allowed for source downloads."
+        ) from exc
+    for info in addrinfo:
+        addr = ipaddress.ip_address(info[4][0])
+        if (
+            addr.is_loopback
+            or addr.is_private
+            or addr.is_link_local
+            or addr.is_reserved
+        ):
+            raise ValueError(
+                f"Blocked internal address: {hostname!r} → {addr}. "
+                "Download sources must target public IPs only."
+            )
 
 
 def rank_source_urls(source: DocumentSource) -> list[str]:
@@ -359,7 +409,7 @@ def call_llm(
 def convert_to_markdown(
     url: str,
     session: requests.Session,
-    allowed_hosts: Optional[frozenset[str]] = None,
+    skip_host_check: bool = False,
 ) -> Optional[str]:
     """Download file from URL and convert to markdown using likhit.
 
@@ -371,6 +421,14 @@ def convert_to_markdown(
     """
     initial_hostname = urlparse(url).hostname
     if allowed_hosts is not None and initial_hostname not in allowed_hosts:
+    When ``skip_host_check=True``, the ``ALLOWED_HOSTS`` allowlist is
+    bypassed (for MEDIA_NEWS article URLs). SSRF protections against
+    private and loopback addresses are still applied by
+    ``validate_host_safety`` where needed; this only lifts the domain
+    allowlist.
+    """
+    initial_hostname = urlparse(url).hostname
+    if not skip_host_check and initial_hostname not in ALLOWED_HOSTS:
         logger.warning("Refusing to fetch untrusted host: %s", url)
         return None
 
@@ -392,6 +450,7 @@ def convert_to_markdown(
             next_url = urljoin(current_url, location)
             next_hostname = urlparse(next_url).hostname
             if allowed_hosts is not None and next_hostname not in allowed_hosts:
+            if not skip_host_check and next_hostname not in ALLOWED_HOSTS:
                 logger.warning(
                     "Redirect target host not allowed: %s -> %s",
                     current_url,
