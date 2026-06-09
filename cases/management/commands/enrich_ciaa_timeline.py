@@ -1281,7 +1281,7 @@ class Command(BaseCommand):
                     bs_date = _nepali_date(
                         int(bs_parts[0]), int(bs_parts[1]), int(bs_parts[2])
                     )
-                    ad_date = bs_date.to_datetime_date()
+                    ad_date = bs_date.to_datetime()
                     entry["date_bs"] = entry["date"]
                     entry["date"] = ad_date.isoformat()
                     logger.info(
