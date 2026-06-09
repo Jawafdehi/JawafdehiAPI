@@ -23,7 +23,7 @@ from drf_spectacular.utils import (
     extend_schema,
     extend_schema_view,
 )
-from rest_framework import filters, mixins, status, viewsets
+from rest_framework import filters, mixins, serializers, status, viewsets
 from rest_framework.authentication import SessionAuthentication, TokenAuthentication
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
@@ -43,6 +43,7 @@ from .models import (
     Case,
     CaseEntityRelationship,
     CaseState,
+    CaseType,
     DocumentSource,
     JawafEntity,
     RelationshipType,
@@ -54,6 +55,7 @@ from .rules.predicates import (
     is_admin_or_moderator,
     is_contributor,
 )
+from .search_serializers import SearchResponseSerializer
 from .serializers import (
     CaseDetailSerializer,
     CaseSerializer,
@@ -61,8 +63,125 @@ from .serializers import (
     FeedbackSerializer,
     JawafEntitySerializer,
 )
+from .services.search import UnifiedSearchService
 
 logger = logging.getLogger(__name__)
+
+
+class UnifiedSearchQuerySerializer(serializers.Serializer):
+    q = serializers.CharField(required=False, allow_blank=True, default="")
+    type = serializers.ListField(
+        child=serializers.ChoiceField(choices=["case", "entity", "document"]),
+        required=False,
+        default=list,
+    )
+    entity_type = serializers.ListField(
+        child=serializers.ChoiceField(
+            choices=["person", "organization", "location", "unknown"]
+        ),
+        required=False,
+        default=list,
+    )
+    role = serializers.ListField(
+        child=serializers.ChoiceField(choices=RelationshipType.values),
+        required=False,
+        default=list,
+    )
+    case_type = serializers.ListField(
+        child=serializers.ChoiceField(choices=CaseType.values),
+        required=False,
+        default=list,
+    )
+    tags = serializers.ListField(
+        child=serializers.CharField(allow_blank=False),
+        required=False,
+        default=list,
+    )
+    sort = serializers.ChoiceField(
+        choices=["relevance", "newest", "oldest", "title"],
+        required=False,
+        default="relevance",
+    )
+    page = serializers.IntegerField(required=False, min_value=1, default=1)
+    page_size = serializers.IntegerField(required=False, min_value=1, default=10)
+
+
+@extend_schema(
+    summary="Search the accountability archive",
+    description="""
+    Search published accountability cases, entities, and evidence documents in
+    one deterministic relevance-ranked result list. Sidebar filters accept
+    repeated query parameters, including record type. Entity types are derived
+    locally from NES IDs; this endpoint does not call external services.
+    """,
+    parameters=[
+        OpenApiParameter("q", OpenApiTypes.STR, OpenApiParameter.QUERY, required=False),
+        OpenApiParameter(
+            "type",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            enum=["case", "entity", "document"],
+            many=True,
+        ),
+        OpenApiParameter(
+            "entity_type",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            enum=["person", "organization", "location", "unknown"],
+            many=True,
+        ),
+        OpenApiParameter(
+            "role",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            enum=RelationshipType.values,
+            many=True,
+        ),
+        OpenApiParameter(
+            "case_type",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            enum=CaseType.values,
+            many=True,
+        ),
+        OpenApiParameter(
+            "tags",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            many=True,
+        ),
+        OpenApiParameter(
+            "sort",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            enum=["relevance", "newest", "oldest", "title"],
+        ),
+        OpenApiParameter(
+            "page", OpenApiTypes.INT, OpenApiParameter.QUERY, required=False
+        ),
+        OpenApiParameter(
+            "page_size", OpenApiTypes.INT, OpenApiParameter.QUERY, required=False
+        ),
+    ],
+    responses={200: SearchResponseSerializer},
+    tags=["search"],
+)
+class UnifiedSearchView(APIView):
+    """Expose backend-owned mixed archive discovery."""
+
+    def get(self, request):
+        serializer = UnifiedSearchQuerySerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        response = UnifiedSearchService().search(
+            request=request, **serializer.validated_data
+        )
+        return Response(response)
 
 
 @extend_schema_view(
