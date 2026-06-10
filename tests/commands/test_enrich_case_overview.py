@@ -351,7 +351,8 @@ class TestSanitizeDownloadFilename:
 
     def test_handles_path_traversal(self):
         result = _sanitize_download_filename("../../../etc/passwd", "src-001")
-        assert "etc" not in result.lower()
+        lower = result.lower()
+        assert "etc" not in lower and "passwd" not in lower
 
     def test_handles_null_bytes(self):
         result = _sanitize_download_filename("file\x00name.pdf", "src-001")
