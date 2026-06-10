@@ -249,16 +249,31 @@ def call_llm(
                 f"LLM API timed out after {max_retries} attempts: {last_exc}"
             ) from exc
         except requests.HTTPError as exc:
-            if exc.response is not None and 400 <= exc.response.status_code < 500:
+            status = exc.response.status_code if exc.response is not None else None
+            # 429 = rate limit, 403 from this proxy = temporary throttle ("reset after Xm")
+            # Both are transient — retry with backoff. All other 4xx are permanent client
+            # errors (bad request, auth failure) where retrying won't help.
+            is_transient_4xx = status in (429, 403)
+            if exc.response is not None and 400 <= status < 500 and not is_transient_4xx:
                 raise CommandError(
-                    f"LLM API client error (HTTP {exc.response.status_code}): "
+                    f"LLM API client error (HTTP {status}): "
                     f"{exc.response.text[:500]}"
                 ) from exc
             last_exc = exc
             if attempt < max_retries:
+                # For rate-limit responses, honour the server's reset hint if present,
+                # otherwise fall back to exponential backoff.
                 wait = 2**attempt
+                if is_transient_4xx and exc.response is not None:
+                    retry_after = exc.response.headers.get("Retry-After")
+                    if retry_after:
+                        try:
+                            wait = max(wait, int(retry_after))
+                        except ValueError:
+                            pass
                 logger.warning(
-                    "LLM API server error (attempt %d/%d): %s. Retrying in %ds...",
+                    "LLM API %s error (attempt %d/%d): %s. Retrying in %ds...",
+                    "rate-limit" if is_transient_4xx else "server",
                     attempt,
                     max_retries,
                     exc,
