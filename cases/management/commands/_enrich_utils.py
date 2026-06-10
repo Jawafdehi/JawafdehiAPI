@@ -203,7 +203,7 @@ def call_llm(
     # Read timeouts per attempt.
     # Large CIAA court orders (600k+ chars) chunked at 10k can take 2-4 min
     # per chunk with Claude Sonnet.
-    read_timeouts = [300, 300, 300]
+    read_timeouts = [90, 120, 180]
 
     last_exc = None
     for attempt in range(1, max_retries + 1):
