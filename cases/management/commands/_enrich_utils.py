@@ -200,9 +200,10 @@ def call_llm(
         "stream": False,  # explicitly disable streaming; proxy may default to SSE
     }
 
-    # Read timeouts per attempt: fail fast on attempt 1, give more time on retries.
-    # This avoids burning 5 min × 3 attempts = 15 min on a slow proxy.
-    read_timeouts = [60, 90, 120]
+    # Read timeouts per attempt.
+    # Large CIAA court orders (600k+ chars) chunked at 10k can take 2-4 min
+    # per chunk with Claude Sonnet.
+    read_timeouts = [300, 300, 300]
 
     last_exc = None
     for attempt in range(1, max_retries + 1):
