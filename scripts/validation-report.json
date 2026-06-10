@@ -1,0 +1,8096 @@
+{
+  "pipeline": "Phase 6: Validation & Quality Control",
+  "generated_at": "2026-06-10",
+  "data_sources": {
+    "enriched_cases": 2900,
+    "unified_cases": 1418,
+    "cross_ref": 370,
+    "annual_report": 34,
+    "ngm_cases": 0,
+    "entities_raw": 18917
+  },
+  "total_issues": 1093,
+  "issues": [
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2081/82",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "warning",
+      "check": "case_number_format",
+      "fy": "2080/81",
+      "value": "(080-CR-0173)",
+      "detail": "Does not match XX-CR-NNNN pattern"
+    },
+    {
+      "severity": "warning",
+      "check": "case_number_format",
+      "fy": "2080/81",
+      "value": "9080-CR-0204",
+      "detail": "Does not match XX-CR-NNNN pattern"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2079/80",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2078/79",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2076/77",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2075/76",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2074/75",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2073/74",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "error",
+      "check": "case_number_empty",
+      "fy": "2071/72",
+      "value": "",
+      "detail": "Empty case_number"
+    },
+    {
+      "severity": "warning",
+      "check": "xref_case_number_format",
+      "fy": "2080/81",
+      "value": "(080-CR-0173)",
+      "detail": "Cross-ref case number doesn't match XX-CR-NNNN"
+    },
+    {
+      "severity": "warning",
+      "check": "xref_case_number_format",
+      "fy": "2080/81",
+      "value": "9080-CR-0204",
+      "detail": "Cross-ref case number doesn't match XX-CR-NNNN"
+    },
+    {
+      "severity": "error",
+      "check": "bad_bs_date_filing_date_bs",
+      "fy": "2081/82",
+      "case_number": "081-CR-0036",
+      "value": "2081-08-24T00:00:00",
+      "detail": "filing_date_bs doesn't match YYYY-MM-DD"
+    },
+    {
+      "severity": "error",
+      "check": "bad_bs_date_filing_date_bs",
+      "fy": "2081/82",
+      "case_number": "081-CR-0113",
+      "value": "2082-02-25T00:00:00",
+      "detail": "filing_date_bs doesn't match YYYY-MM-DD"
+    },
+    {
+      "severity": "error",
+      "check": "bad_bs_date_filing_date_bs",
+      "fy": "2080/81",
+      "case_number": "080-CR-0064",
+      "value": "2080/07/23",
+      "detail": "filing_date_bs doesn't match YYYY-MM-DD"
+    },
+    {
+      "severity": "error",
+      "check": "bad_bs_date_filing_date_bs",
+      "fy": "2080/81",
+      "case_number": "080-CR-0084",
+      "value": "2080/09/23",
+      "detail": "filing_date_bs doesn't match YYYY-MM-DD"
+    },
+    {
+      "severity": "error",
+      "check": "bad_bs_date_filing_date_bs",
+      "fy": "2080/81",
+      "case_number": "080-CR-0098",
+      "value": "2080/10/25",
+      "detail": "filing_date_bs doesn't match YYYY-MM-DD"
+    },
+    {
+      "severity": "error",
+      "check": "bad_bs_date_filing_date_bs",
+      "fy": "2080/81",
+      "case_number": "(080-CR-0173)",
+      "value": "2081/01/25",
+      "detail": "filing_date_bs doesn't match YYYY-MM-DD"
+    },
+    {
+      "severity": "error",
+      "check": "bad_bs_date_filing_date_bs",
+      "fy": "2080/81",
+      "case_number": "9080-CR-0204",
+      "value": "2081/03/20",
+      "detail": "filing_date_bs doesn't match YYYY-MM-DD"
+    },
+    {
+      "severity": "error",
+      "check": "bad_bs_date_filing_date_bs",
+      "fy": "2080/81",
+      "case_number": "080-CR-0017",
+      "value": "2080-04-25T00:00:00",
+      "detail": "filing_date_bs doesn't match YYYY-MM-DD"
+    },
+    {
+      "severity": "error",
+      "check": "bad_bs_date_filing_date_bs",
+      "fy": "2080/81",
+      "case_number": "080-CR-01830",
+      "value": "2081-02-21T00:00:00",
+      "detail": "filing_date_bs doesn't match YYYY-MM-DD"
+    },
+    {
+      "severity": "info",
+      "check": "verdict_date_ad_nonstandard",
+      "fy": "multiple",
+      "case_number": "multiple",
+      "value": "{'चलिरहेको': 122, 'फैसला (मिती: २०८०/०९/२२)': 27, 'फैसला (मिती: २०७९/०२/१९)': 17, 'फैसला (मिती: २०८०/११/१०)': 14, 'फैसला (मिती: २०७९/०३/०९)': 13}",
+      "detail": "verdict_date_ad has non-AD values (likely raw BS text)"
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "विष्णुप्रसाद शर्मा (2x) vs 1 other form(s)",
+      "detail": "Normalized key 'विष्णुप्रसादशर्मा' has 2 display variants: [('विष्णुप्रसाद शर्मा', 2), ('विष्णु प्रसाद शर्मा', 1)]",
+      "sample_cases": [
+        "2069/70",
+        "2081/82"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "सुरेन्द्र प्रसाद यादव (4x) vs 1 other form(s)",
+      "detail": "Normalized key 'सुरेन्द्रप्रसादयादव' has 2 display variants: [('सुरेन्द्र प्रसाद यादव', 4), ('सुरेन्द्रप्रसाद यादव', 1)]",
+      "sample_cases": [
+        "2069/70",
+        "2081/82"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "दिपेन्द्र कुमार ठाकुर (4x) vs 1 other form(s)",
+      "detail": "Normalized key 'दिपेन्द्रकुमारठाकुर' has 2 display variants: [('दिपेन्द्र कुमार ठाकुर', 4), ('दिपेन्द्रकुमार ठाकुर', 1)]",
+      "sample_cases": [
+        "2069/70",
+        "2081/82"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "अशोक कुमार साह (4x) vs 1 other form(s)",
+      "detail": "Normalized key 'अशोककुमारसाह' has 2 display variants: [('अशोक कुमार साह', 4), ('अशोककुमार साह', 1)]",
+      "sample_cases": [
+        "2080/81",
+        "2069/70"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "सुनिल कुमार झा (4x) vs 1 other form(s)",
+      "detail": "Normalized key 'सुनिलकुमारझा' has 2 display variants: [('सुनिल कुमार झा', 4), ('सुनिलकुमार झा', 1)]",
+      "sample_cases": [
+        "2078/79",
+        "2069/70",
+        "2081/82"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "सुरेन्द्र कुमार यादव (3x) vs 1 other form(s)",
+      "detail": "Normalized key 'सुरेन्द्रकुमारयादव' has 2 display variants: [('सुरेन्द्र कुमार यादव', 3), ('सुरेन्द्रकुमार यादव', 1)]",
+      "sample_cases": [
+        "2069/70",
+        "2081/82"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "रामपुकार यादव (2x) vs 1 other form(s)",
+      "detail": "Normalized key 'रामपुकारयादव' has 2 display variants: [('रामपुकार यादव', 2), ('राम पुकार यादव', 1)]",
+      "sample_cases": [
+        "2069/70",
+        "2071/72"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "राम प्रसाद भट्टराई (14x) vs 1 other form(s)",
+      "detail": "Normalized key 'रामप्रसादभट्टराई' has 2 display variants: [('राम प्रसाद भट्टराई', 14), ('रामप्रसाद भट्टराई', 2)]",
+      "sample_cases": [
+        "2073/74",
+        "2069/70",
+        "2076/77",
+        "2075/76"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "श्रीनारायण यादव (2x) vs 2 other form(s)",
+      "detail": "Normalized key 'नारायणयादव' has 3 display variants: [('श्रीनारायण यादव', 2), ('नारायण यादव', 2), ('श्री नारायण यादव', 2)]",
+      "sample_cases": [
+        "2070/71",
+        "2077/78",
+        "2071/72"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "रामनरेश राय (4x) vs 1 other form(s)",
+      "detail": "Normalized key 'रामनरेशराय' has 2 display variants: [('रामनरेश राय', 4), ('राम नरेश राय', 3)]",
+      "sample_cases": [
+        "2070/71",
+        "2073/74",
+        "2071/72"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "अशोक कुमार यादव (10x) vs 1 other form(s)",
+      "detail": "Normalized key 'अशोककुमारयादव' has 2 display variants: [('अशोक कुमार यादव', 10), ('अशोककुमार यादव', 1)]",
+      "sample_cases": [
+        "2070/71",
+        "2081/82",
+        "2072/73",
+        "2071/72",
+        "2080/81"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "राम प्रसाद न्यौपाने (2x) vs 1 other form(s)",
+      "detail": "Normalized key 'रामप्रसादन्यौपाने' has 2 display variants: [('राम प्रसाद न्यौपाने', 2), ('रामप्रसाद न्यौपाने', 1)]",
+      "sample_cases": [
+        "2070/71",
+        "2076/77"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "राम दयाल महतो (2x) vs 1 other form(s)",
+      "detail": "Normalized key 'रामदयालमहतो' has 2 display variants: [('राम दयाल महतो', 2), ('रामदयाल महतो', 1)]",
+      "sample_cases": [
+        "2070/71",
+        "2071/72"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "विजय कान्त झा (3x) vs 1 other form(s)",
+      "detail": "Normalized key 'विजयकान्तझा' has 2 display variants: [('विजय कान्त झा', 3), ('विजयकान्त झा', 3)]",
+      "sample_cases": [
+        "2077/78",
+        "2075/76"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "राम लखन चौधरी (2x) vs 1 other form(s)",
+      "detail": "Normalized key 'रामलखनचौधरी' has 2 display variants: [('राम लखन चौधरी', 2), ('रामलखन चौधरी', 2)]",
+      "sample_cases": [
+        "2078/79",
+        "2076/77"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "उमेश कुमार चौधरी (3x) vs 1 other form(s)",
+      "detail": "Normalized key 'उमेशकुमारचौधरी' has 2 display variants: [('उमेश कुमार चौधरी', 3), ('उमेशकुमार चौधरी', 1)]",
+      "sample_cases": [
+        "2078/79"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "राम बहादुर महतो (2x) vs 1 other form(s)",
+      "detail": "Normalized key 'रामबहादुरमहतो' has 2 display variants: [('राम बहादुर महतो', 2), ('रामबहादुर महतो', 1)]",
+      "sample_cases": [
+        "2078/79"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "दुर्गा प्रसाद पोखरेल (4x) vs 1 other form(s)",
+      "detail": "Normalized key 'दुर्गाप्रसादपोखरेल' has 2 display variants: [('दुर्गा प्रसाद पोखरेल', 4), ('दुर्गाप्रसाद पोखरेल', 1)]",
+      "sample_cases": [
+        "2078/79",
+        "2074/75"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "राम दुलार साह (2x) vs 1 other form(s)",
+      "detail": "Normalized key 'रामदुलारसाह' has 2 display variants: [('राम दुलार साह', 2), ('रामदुलार साह', 1)]",
+      "sample_cases": [
+        "2078/79"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "भीम बहादुर गुरुङ (2x) vs 1 other form(s)",
+      "detail": "Normalized key 'भीमबहादुरगुरुङ' has 2 display variants: [('भीम बहादुर गुरुङ', 2), ('भीमबहादुर गुरुङ', 1)]",
+      "sample_cases": [
+        "2078/79"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "अजय कुमार साह (2x) vs 1 other form(s)",
+      "detail": "Normalized key 'अजयकुमारसाह' has 2 display variants: [('अजय कुमार साह', 2), ('अजयकुमार साह', 1)]",
+      "sample_cases": [
+        "2078/79"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "सुरेन्द्र बहादुर थापा (5x) vs 1 other form(s)",
+      "detail": "Normalized key 'सुरेन्द्रबहादुरथापा' has 2 display variants: [('सुरेन्द्र बहादुर थापा', 5), ('सुरेन्द्रबहादुर थापा', 1)]",
+      "sample_cases": [
+        "2078/79",
+        "2075/76"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "जनक राज जोशी (2x) vs 1 other form(s)",
+      "detail": "Normalized key 'जनकराजजोशी' has 2 display variants: [('जनक राज जोशी', 2), ('जनकराज जोशी', 2)]",
+      "sample_cases": [
+        "2078/79",
+        "2080/81"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "राम कुमार श्रेष्ठ (2x) vs 1 other form(s)",
+      "detail": "Normalized key 'रामकुमारश्रेष्ठ' has 2 display variants: [('राम कुमार श्रेष्ठ', 2), ('रामकुमार श्रेष्ठ', 2)]",
+      "sample_cases": [
+        "2078/79",
+        "2082/83"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "सोम प्रसाद पहाडी (3x) vs 1 other form(s)",
+      "detail": "Normalized key 'सोमप्रसादपहाडी' has 2 display variants: [('सोम प्रसाद पहाडी', 3), ('सोमप्रसाद पहाडी', 1)]",
+      "sample_cases": [
+        "2078/79"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "धन बहादुर वि.क. (2x) vs 1 other form(s)",
+      "detail": "Normalized key 'धनबहादुरविक' has 2 display variants: [('धन बहादुर वि.क.', 2), ('धनबहादुर वि.क.', 1)]",
+      "sample_cases": [
+        "2078/79",
+        "2073/74"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "धर्मेन्द्र प्रसाद पटेल (2x) vs 1 other form(s)",
+      "detail": "Normalized key 'धर्मेन्द्रप्रसादपटेल' has 2 display variants: [('धर्मेन्द्र प्रसाद पटेल', 2), ('धर्मेन्द्रप्रसाद पटेल', 1)]",
+      "sample_cases": [
+        "2078/79"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "कमल बहादुर शाही (7x) vs 1 other form(s)",
+      "detail": "Normalized key 'कमलबहादुरशाही' has 2 display variants: [('कमल बहादुर शाही', 7), ('कमलबहादुर शाही', 1)]",
+      "sample_cases": [
+        "2078/79",
+        "2076/77",
+        "2079/80"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "राम चन्द्र भण्डारी (2x) vs 1 other form(s)",
+      "detail": "Normalized key 'रामचन्द्रभण्डारी' has 2 display variants: [('राम चन्द्र भण्डारी', 2), ('रामचन्द्र भण्डारी', 1)]",
+      "sample_cases": [
+        "2078/79",
+        "2071/72"
+      ]
+    },
+    {
+      "severity": "warning",
+      "check": "entity_spelling_variant",
+      "fy": "multiple",
+      "value": "पुष्पराज जोशी (4x) vs 1 other form(s)",
+      "detail": "Normalized key 'पुष्पराजजोशी' has 2 display variants: [('पुष्पराज जोशी', 4), ('पुष्प राज जोशी', 1)]",
+      "sample_cases": [
+        "2078/79",
+        "2079/80",
+        "2071/72"
+      ]
+    },
+    {
+      "severity": "info",
+      "check": "fy_case_count_low_vs_ciaa",
+      "fy": "2075/76",
+      "value": "unified=147 ciaa_published=916",
+      "detail": "Unified case count (147) < 30% of CIAA published (916)"
+    }
+  ],
+  "coverage_matrix": [
+    {
+      "fy": "2063/64",
+      "total_cases": 2,
+      "ciaa_published": 115,
+      "coverage_pct": 1.7,
+      "ngm_only": 2,
+      "ngm_annual_report": 0,
+      "annual_report_only": 0,
+      "sheets": 0,
+      "has_ngm": "Y",
+      "has_ar": "N",
+      "has_ss": "N",
+      "sources_summary": "NGM:2 AR:0 SS:0"
+    },
+    {
+      "fy": "2064/65",
+      "total_cases": 2,
+      "ciaa_published": 65,
+      "coverage_pct": 3.1,
+      "ngm_only": 2,
+      "ngm_annual_report": 0,
+      "annual_report_only": 0,
+      "sheets": 0,
+      "has_ngm": "Y",
+      "has_ar": "N",
+      "has_ss": "N",
+      "sources_summary": "NGM:2 AR:0 SS:0"
+    },
+    {
+      "fy": "2065/66",
+      "total_cases": 4,
+      "ciaa_published": 50,
+      "coverage_pct": 8.0,
+      "ngm_only": 4,
+      "ngm_annual_report": 0,
+      "annual_report_only": 0,
+      "sheets": 0,
+      "has_ngm": "Y",
+      "has_ar": "N",
+      "has_ss": "N",
+      "sources_summary": "NGM:4 AR:0 SS:0"
+    },
+    {
+      "fy": "2066/67",
+      "total_cases": 2,
+      "ciaa_published": 27,
+      "coverage_pct": 7.4,
+      "ngm_only": 2,
+      "ngm_annual_report": 0,
+      "annual_report_only": 0,
+      "sheets": 0,
+      "has_ngm": "Y",
+      "has_ar": "N",
+      "has_ss": "N",
+      "sources_summary": "NGM:2 AR:0 SS:0"
+    },
+    {
+      "fy": "2067/68",
+      "total_cases": 17,
+      "ciaa_published": 67,
+      "coverage_pct": 25.4,
+      "ngm_only": 17,
+      "ngm_annual_report": 0,
+      "annual_report_only": 0,
+      "sheets": 0,
+      "has_ngm": "Y",
+      "has_ar": "N",
+      "has_ss": "N",
+      "sources_summary": "NGM:17 AR:0 SS:0"
+    },
+    {
+      "fy": "2068/69",
+      "total_cases": 107,
+      "ciaa_published": 111,
+      "coverage_pct": 96.4,
+      "ngm_only": 107,
+      "ngm_annual_report": 0,
+      "annual_report_only": 0,
+      "sheets": 0,
+      "has_ngm": "Y",
+      "has_ar": "N",
+      "has_ss": "N",
+      "sources_summary": "NGM:107 AR:0 SS:0"
+    },
+    {
+      "fy": "2069/70",
+      "total_cases": 113,
+      "ciaa_published": 93,
+      "coverage_pct": 121.5,
+      "ngm_only": 113,
+      "ngm_annual_report": 0,
+      "annual_report_only": 0,
+      "sheets": 0,
+      "has_ngm": "Y",
+      "has_ar": "N",
+      "has_ss": "N",
+      "sources_summary": "NGM:113 AR:0 SS:0"
+    },
+    {
+      "fy": "2070/71",
+      "total_cases": 167,
+      "ciaa_published": 168,
+      "coverage_pct": 99.4,
+      "ngm_only": 167,
+      "ngm_annual_report": 0,
+      "annual_report_only": 0,
+      "sheets": 0,
+      "has_ngm": "Y",
+      "has_ar": "N",
+      "has_ss": "N",
+      "sources_summary": "NGM:167 AR:0 SS:0"
+    },
+    {
+      "fy": "2071/72",
+      "total_cases": 300,
+      "ciaa_published": 141,
+      "coverage_pct": 212.8,
+      "ngm_only": 295,
+      "ngm_annual_report": 5,
+      "annual_report_only": 0,
+      "sheets": 0,
+      "has_ngm": "Y",
+      "has_ar": "Y",
+      "has_ss": "N",
+      "sources_summary": "NGM:295 AR:5 SS:0"
+    },
+    {
+      "fy": "2072/73",
+      "total_cases": 139,
+      "ciaa_published": "-",
+      "coverage_pct": "-",
+      "ngm_only": 125,
+      "ngm_annual_report": 14,
+      "annual_report_only": 0,
+      "sheets": 0,
+      "has_ngm": "Y",
+      "has_ar": "Y",
+      "has_ss": "N",
+      "sources_summary": "NGM:125 AR:14 SS:0"
+    },
+    {
+      "fy": "2073/74",
+      "total_cases": 168,
+      "ciaa_published": 154,
+      "coverage_pct": 109.1,
+      "ngm_only": 128,
+      "ngm_annual_report": 37,
+      "annual_report_only": 3,
+      "sheets": 0,
+      "has_ngm": "Y",
+      "has_ar": "Y",
+      "has_ss": "N",
+      "sources_summary": "NGM:128 AR:40 SS:0"
+    },
+    {
+      "fy": "2074/75",
+      "total_cases": 199,
+      "ciaa_published": 192,
+      "coverage_pct": 103.6,
+      "ngm_only": 145,
+      "ngm_annual_report": 53,
+      "annual_report_only": 1,
+      "sheets": 0,
+      "has_ngm": "Y",
+      "has_ar": "Y",
+      "has_ss": "N",
+      "sources_summary": "NGM:145 AR:54 SS:0"
+    },
+    {
+      "fy": "2075/76",
+      "total_cases": 364,
+      "ciaa_published": 916,
+      "coverage_pct": 39.7,
+      "ngm_only": 299,
+      "ngm_annual_report": 64,
+      "annual_report_only": 1,
+      "sheets": 0,
+      "has_ngm": "Y",
+      "has_ar": "Y",
+      "has_ss": "N",
+      "sources_summary": "NGM:299 AR:65 SS:0"
+    },
+    {
+      "fy": "2076/77",
+      "total_cases": 444,
+      "ciaa_published": 990,
+      "coverage_pct": 44.8,
+      "ngm_only": 409,
+      "ngm_annual_report": 35,
+      "annual_report_only": 0,
+      "sheets": 0,
+      "has_ngm": "Y",
+      "has_ar": "Y",
+      "has_ss": "N",
+      "sources_summary": "NGM:409 AR:35 SS:0"
+    },
+    {
+      "fy": "2077/78",
+      "total_cases": 126,
+      "ciaa_published": 114,
+      "coverage_pct": 110.5,
+      "ngm_only": 126,
+      "ngm_annual_report": 0,
+      "annual_report_only": 0,
+      "sheets": 0,
+      "has_ngm": "Y",
+      "has_ar": "N",
+      "has_ss": "N",
+      "sources_summary": "NGM:126 AR:0 SS:0"
+    },
+    {
+      "fy": "2078/79",
+      "total_cases": 135,
+      "ciaa_published": 131,
+      "coverage_pct": 103.1,
+      "ngm_only": 134,
+      "ngm_annual_report": 0,
+      "annual_report_only": 1,
+      "sheets": 0,
+      "has_ngm": "Y",
+      "has_ar": "Y",
+      "has_ss": "N",
+      "sources_summary": "NGM:134 AR:1 SS:0"
+    },
+    {
+      "fy": "2079/80",
+      "total_cases": 171,
+      "ciaa_published": 162,
+      "coverage_pct": 105.6,
+      "ngm_only": 169,
+      "ngm_annual_report": 1,
+      "annual_report_only": 1,
+      "sheets": 0,
+      "has_ngm": "Y",
+      "has_ar": "Y",
+      "has_ss": "N",
+      "sources_summary": "NGM:169 AR:2 SS:0"
+    },
+    {
+      "fy": "2080/81",
+      "total_cases": 215,
+      "ciaa_published": 137,
+      "coverage_pct": 156.9,
+      "ngm_only": 14,
+      "ngm_annual_report": 138,
+      "annual_report_only": 0,
+      "sheets": 63,
+      "has_ngm": "Y",
+      "has_ar": "Y",
+      "has_ss": "Y",
+      "sources_summary": "NGM:14 AR:138 SS:63"
+    },
+    {
+      "fy": "2081/82",
+      "total_cases": 142,
+      "ciaa_published": 137,
+      "coverage_pct": 103.6,
+      "ngm_only": 7,
+      "ngm_annual_report": 132,
+      "annual_report_only": 0,
+      "sheets": 3,
+      "has_ngm": "Y",
+      "has_ar": "Y",
+      "has_ss": "Y",
+      "sources_summary": "NGM:7 AR:132 SS:3"
+    },
+    {
+      "fy": "2082/83",
+      "total_cases": 83,
+      "ciaa_published": "-",
+      "coverage_pct": "-",
+      "ngm_only": 83,
+      "ngm_annual_report": 0,
+      "annual_report_only": 0,
+      "sheets": 0,
+      "has_ngm": "Y",
+      "has_ar": "N",
+      "has_ss": "N",
+      "sources_summary": "NGM:83 AR:0 SS:0"
+    }
+  ],
+  "quality_tiers": {
+    "gold_count": 1738,
+    "silver_count": 1152,
+    "bronze_count": 10,
+    "gold_pct": 59.9,
+    "silver_pct": 39.7,
+    "bronze_pct": 0.3
+  },
+  "summary": {
+    "total_enriched_cases": 2900,
+    "total_unified_cases": 1418,
+    "total_cross_ref_records": 370,
+    "fiscal_years_in_stats": 34,
+    "quality_issues_found": 1093
+  }
+}
