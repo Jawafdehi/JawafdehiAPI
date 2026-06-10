@@ -392,8 +392,9 @@ def convert_to_markdown(
     Pipeline: URL download -> temp file -> likhit/markitdown -> markdown.
     Returns None when conversion fails or produces insufficient content.
 
-    ``allowed_hosts`` defaults to ``ALLOWED_HOSTS``. Pass ``None`` to skip
-    the host check entirely (for MEDIA_NEWS article URLs).
+    Pass a frozenset of allowed hostnames to enforce host validation.
+    Pass ``None`` (the default) to skip the host check entirely — useful
+    when the caller has already validated the hostname or for MEDIA_NEWS URLs.
     """
     initial_hostname = urlparse(url).hostname
     if allowed_hosts is not None and initial_hostname not in allowed_hosts:
