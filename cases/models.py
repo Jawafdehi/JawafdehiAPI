@@ -258,6 +258,8 @@ class RelationshipType(models.TextChoices):
     OPPOSITION = "opposition", "Opposition"
     VICTIM = "victim", "Victim"
     LOCATION = "location", "Location"
+    RESPONDENT = "respondent", "प्रत्यर्थी (respondent)"
+    PETITIONER = "petitioner", "रिट निवेदक (petitioner)"
 
 
 class CaseEntityRelationship(models.Model):
