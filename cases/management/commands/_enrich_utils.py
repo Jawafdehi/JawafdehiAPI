@@ -163,7 +163,7 @@ def call_llm(
     base_url: str,
     api_key: Optional[str],
     session: requests.Session,
-    max_retries: int = 3,
+    max_retries: int = 4,
 ) -> str:
     """Call LLM API via OpenAI-compatible chat completions endpoint.
 

@@ -1121,8 +1121,9 @@ class Command(BaseCommand):
         )
 
     def _call_llm_anthropic(self, client, model, prompt, timeout=DEFAULT_LLM_TIMEOUT):
-        max_retries = 3
+        max_retries = 4
         for attempt in range(max_retries):
+
             try:
                 response = client.messages.create(
                     model=model,
