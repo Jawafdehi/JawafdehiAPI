@@ -10,6 +10,7 @@ Output: cases_FY_XXYY.json per fiscal year in the output directory (default: ./d
 
 import argparse
 import json
+import logging
 import os
 import re
 from datetime import datetime
@@ -22,6 +23,8 @@ from googleapiclient.discovery import build
 
 # Nepali date conversion
 from nepali_datetime import date as nepali_date
+
+logger = logging.getLogger(__name__)
 
 SPREADSHEET_ID = "1O8U9VA1FSCSocGwJHYgbm8sVoMkjYnQbOADvOlBhSJ0"
 
@@ -129,7 +132,10 @@ def bs_to_ad(year_bs, month_bs, day_bs):
         d = nepali_date(year_bs, month_bs, day_bs)
         ad = d.to_datetime_date()
         return ad.strftime("%Y-%m-%d")
-    except Exception:
+    except (ValueError, OverflowError, TypeError) as e:
+        logger.warning(
+            "BS date conversion failed: %d/%d/%d — %s", year_bs, month_bs, day_bs, e
+        )
         return None
 
 
@@ -152,7 +158,7 @@ def clean_text(text):
         # Unescape common escape sequences from Sheets API
         text = text.replace("\\n", "\n").replace("\\t", " ")
         # Normalize whitespace
-        text = re.sub(r"\s*\n\s*", "\n", text)
+        text = re.sub(r"[ \t]*\n[ \t]*", "\n", text)
         return text.strip()
     return str(text)
 
@@ -172,20 +178,8 @@ def parse_bigo(value):
         return None
 
 
-def extract_defendants_v1(row, headers):
-    """Extract defendants from the 'detailed_v1' format (2080/2081).
-    In this format, multi-defendant rows have empty key fields but repeat defendant info.
-    """
-    return {
-        "name": clean_text(row.get("प्रतिवादीको_नाम", "")),
-        "position_office": clean_text(row.get("पद_र_कार्यालय", "")),
-        "offence_law": clean_text(row.get("कसुर_सजाय_मागदाबी", "")),
-        "bigo": parse_bigo(row.get("बिगो_रकम")),
-    }
-
-
-def extract_defendants_v2(row, headers):
-    """Extract defendants from the 'detailed_v2' format (2081/2082)."""
+def extract_defendants_detailed(row, headers):
+    """Extract defendants from detailed formats (v1/v2)."""
     return {
         "name": clean_text(row.get("प्रतिवादीको_नाम", "")),
         "position_office": clean_text(row.get("पद_र_कार्यालय", "")),
@@ -237,7 +231,7 @@ def normalize_row(headers, values, sheet_name, format_type):
                 ),
                 "case_number": clean_text(row.get("आयोगको_निर्णय.मुद्दा_नं", "")),
                 "defendant_count": row.get("आयोगको_निर्णय.प्रतिवादी_सङ्ख्या", ""),
-                "defendant": extract_defendants_v2(row, headers),
+                "defendant": extract_defendants_detailed(row, headers),
                 "case_type": clean_text(row.get("case type", "")),
             }
         )
@@ -259,7 +253,7 @@ def normalize_row(headers, values, sheet_name, format_type):
                 ),
                 "case_number": clean_text(row.get("मुद्दा_नं", "")),
                 "defendant_count": row.get("प्रतिवादी_सङ्ख्या", ""),
-                "defendant": extract_defendants_v1(row, headers),
+                "defendant": extract_defendants_detailed(row, headers),
                 "case_type": clean_text(row.get("illegal benefit", "")),
             }
         )
@@ -435,11 +429,7 @@ def group_into_cases(rows, headers, sheet_name, format_type):
             row_count += 1
         elif current_case is not None:
             # Add as additional defendant
-            extract_fn = (
-                extract_defendants_v2
-                if format_type == "detailed_v2"
-                else extract_defendants_v1
-            )
+            extract_fn = extract_defendants_detailed
             d = extract_fn(row, headers)
             if d["name"] or d["position_office"]:
                 if "additional_defendants" not in current_case:
