@@ -157,8 +157,9 @@ def clean_text(text):
     if isinstance(text, str):
         # Unescape common escape sequences from Sheets API
         text = text.replace("\\n", "\n").replace("\\t", " ")
-        # Normalize whitespace
-        text = re.sub(r"[ \t]*\n[ \t]*", "\n", text)
+        # Normalize whitespace around newlines (non-regex to avoid ReDoS)
+        lines = text.split("\n")
+        text = "\n".join(line.strip() for line in lines)
         return text.strip()
     return str(text)
 
