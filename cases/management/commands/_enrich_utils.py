@@ -254,7 +254,11 @@ def call_llm(
             # Both are transient — retry with backoff. All other 4xx are permanent client
             # errors (bad request, auth failure) where retrying won't help.
             is_transient_4xx = status in (429, 403)
-            if exc.response is not None and 400 <= status < 500 and not is_transient_4xx:
+            if (
+                exc.response is not None
+                and 400 <= status < 500
+                and not is_transient_4xx
+            ):
                 raise CommandError(
                     f"LLM API client error (HTTP {status}): "
                     f"{exc.response.text[:500]}"
