@@ -1328,7 +1328,7 @@ class Command(BaseCommand):
                     model=model,
                     base_url=base_url,
                     api_key=api_key,
-                    timeout=timeout,
+                    request_timeout=timeout,
                 )
 
         async def _run():
@@ -2659,17 +2659,18 @@ def _is_direct_document_url(url):
 
 def _source_url_priority(url):
     path = urllib.parse.unquote(urllib.parse.urlparse(url).path).lower()
-    if path.endswith(".docx"):
+    ext = Path(path).suffix
+    if ext == ".docx":
         return 4
-    if path.endswith(".doc"):
+    if ext == ".doc":
         return 3
-    return 2 if path.endswith(".pdf") else 0
+    return 2 if ext == ".pdf" else 0
 
 
 def _url_stem(url):
     path = urllib.parse.unquote(urllib.parse.urlparse(url).path).lower()
     stem = path.rstrip("/").split("/")[-1] if "/" in path else path
-    for ext in (".docx", ".doc", ".pdf"):
+    for ext in _DOC_EXTENSIONS:
         if stem.endswith(ext):
             stem = stem[: -len(ext)]
             break
