@@ -367,6 +367,20 @@ def call_llm(
                 )
             if attempt < max_retries:
                 wait = 2**attempt
+                # Assistant prefix trick sometimes causes model to output just
+                # "[" and stop (completion_tokens <= 1, finish_reason=stop).
+                # Drop the prefix on retry so the model responds normally.
+                if (
+                    finish_reason == "stop"
+                    and usage.get("completion_tokens", 0) <= 1
+                    and len(payload["messages"]) >= 3
+                    and payload["messages"][-1].get("role") == "assistant"
+                ):
+                    payload = dict(payload)
+                    payload["messages"] = payload["messages"][:-1]
+                    logger.warning(
+                        "  Dropping assistant prefix (model returned just '[')"
+                    )
                 logger.warning(
                     "LLM returned empty content (attempt %d/%d). Retrying in %ds... "
                     "finish_reason=%s usage=%s",
