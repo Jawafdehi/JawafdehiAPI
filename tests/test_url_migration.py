@@ -262,6 +262,8 @@ class TestSourceLinkDictFormat:
                 {"link": "https://example.com/doc1", "role": "RAW"},
                 {"link": "https://example.com/doc2.md", "role": "MARKDOWN"},
                 {"link": "https://example.com/permalink", "role": "PERMALINK"},
+                {"link": "https://example.com/page", "role": "SOURCE_PAGE"},
+                {"link": "https://example.com/doc1.doc", "role": "ALTERNATE"},
             ]
         )
 
@@ -386,7 +388,9 @@ class TestSourceLinkDictFormat:
         assert SourceLinkRole.RAW.value == "RAW"
         assert SourceLinkRole.MARKDOWN.value == "MARKDOWN"
         assert SourceLinkRole.PERMALINK.value == "PERMALINK"
-        assert len(list(SourceLinkRole)) == 3
+        assert SourceLinkRole.SOURCE_PAGE.value == "SOURCE_PAGE"
+        assert SourceLinkRole.ALTERNATE.value == "ALTERNATE"
+        assert len(list(SourceLinkRole)) == 5
 
     def test_create_serializer_rejects_invalid_url(self):
         """SourceLinkField should reject invalid URLs."""

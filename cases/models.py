@@ -28,6 +28,12 @@ class SourceLinkRole(enum.StrEnum):
     RAW = "RAW"
     MARKDOWN = "MARKDOWN"
     PERMALINK = "PERMALINK"
+    # The web page a document was published on / linked from (e.g. a CIAA
+    # press-release landing page), as opposed to the document file itself.
+    SOURCE_PAGE = "SOURCE_PAGE"
+    # An alternate-format rendering of the RAW document (e.g. the .doc export
+    # of a release whose .pdf is the RAW link).
+    ALTERNATE = "ALTERNATE"
 
 
 def validate_url_list(value):
