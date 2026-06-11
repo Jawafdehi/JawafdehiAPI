@@ -573,16 +573,13 @@ class Command(BaseCommand):
         entry_count = len(timeline_entries)
         self.stdout.write(self.style.SUCCESS(f"  Extracted {entry_count} entry(s)"))
         for i, entry in enumerate(timeline_entries, 1):
-            desc = entry.get("description", "")
-            desc_preview = (
-                (desc[:100] + "…")
-                if len(desc) > 100
-                else (desc if desc else "⚠ no desc")
-            )
-            self.stdout.write(
-                f"    {i}. {entry.get('date', '?')} — {entry.get('title', '?')[:60]}"
-            )
-            self.stdout.write(f"       {desc_preview}")
+            ad_date = entry.get("date", "?")
+            bs_date = entry.get("date_bs", "")
+            date_str = f"{ad_date} (BS: {bs_date})" if bs_date else ad_date
+            title = entry.get("title", "?") or "?"
+            desc = entry.get("description", "") or "⚠ no desc"
+            self.stdout.write(f"    {i}. {date_str} — {title}")
+            self.stdout.write(f"       {desc}")
 
         if dry_run:
             self.stdout.write(
@@ -690,7 +687,7 @@ class Command(BaseCommand):
             description = (source.description or "").strip()
             if len(description) > 200:
                 content_parts.append(description)
-                logger.debug(
+                logger.info(
                     "  %s=source:%s  chars=%d  used=%d (from description)",
                     label,
                     source.source_id,
@@ -715,7 +712,7 @@ class Command(BaseCommand):
                     content = convert_to_markdown(url, session)
                     if content and len(content) > 200:
                         content_parts.append(content)
-                        logger.debug(
+                        logger.info(
                             "  %s=source:%s  chars=%d  used=%d",
                             label,
                             source.source_id,
@@ -758,7 +755,7 @@ class Command(BaseCommand):
             portion = self._get_media_news_from_url(source, session, total_used)
             if portion is not None:
                 news_parts.append(portion)
-                logger.debug(
+                logger.info(
                     "  media_news=source:%s  chars=%d  used=%d (from URL)",
                     source.source_id,
                     len(portion),
@@ -770,7 +767,7 @@ class Command(BaseCommand):
             portion = self._get_media_news_description(source, total_used)
             if portion is not None:
                 news_parts.append(portion)
-                logger.debug(
+                logger.info(
                     "  media_news=source:%s  chars=%d  used=%d (from description)",
                     source.source_id,
                     len((source.description or "").strip()),
