@@ -72,6 +72,15 @@ class Command(BaseCommand):
             default=0.0,
             help="Seconds to pause between cases (be gentle on prod).",
         )
+        parser.add_argument(
+            "--read-sleep",
+            type=float,
+            default=0.2,
+            help=(
+                "Seconds to pause between case-read API calls (listing + each "
+                "case fetch) to avoid rate-limiting (HTTP 429). Default 0.2."
+            ),
+        )
 
     def handle(self, *args, **opts):
         slugs = opts.get("slugs")
@@ -79,6 +88,7 @@ class Command(BaseCommand):
         overwrite = opts["overwrite"]
         dry_run = opts["dry_run"]
         sleep = float(opts["sleep"])
+        self.read_sleep = float(opts["read_sleep"])
 
         # Upstream client is only needed for writes; --dry-run skips it (and
         # therefore does not require CASEWORK_POLLER_TOKEN).
@@ -139,6 +149,11 @@ class Command(BaseCommand):
         return out
 
     def _process_case(self, slug, client, overwrite, dry_run, totals):
+        # Throttle the per-case read to avoid rate-limiting (HTTP 429) when
+        # sweeping the whole published corpus. jds_client also retries 429/5xx
+        # with backoff, but a steady pace avoids tripping the limiter at all.
+        if self.read_sleep:
+            time.sleep(self.read_sleep)
         case = jds_client.get_case(slug)
         converted, candidates = converter.convert_case_to_attach_candidates(
             case, overwrite=overwrite

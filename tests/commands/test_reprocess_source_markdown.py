@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from django.core.management import call_command, load_command_class
 
-from review import converter
+from review import converter, jds_client
 from review.upstream_client import UpstreamClient, UpstreamError
 
 
@@ -20,7 +20,8 @@ def _stub_markitdown_if_missing(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "flag", ["--slug", "--limit", "--overwrite", "--dry-run", "--sleep"]
+    "flag",
+    ["--slug", "--limit", "--overwrite", "--dry-run", "--sleep", "--read-sleep"],
 )
 def test_cli_flags_registered(flag):
     cmd = load_command_class("review", "reprocess_source_markdown")
@@ -29,6 +30,72 @@ def test_cli_flags_registered(flag):
         if flag in action.option_strings:
             return
     pytest.fail(f"Flag {flag} not found in command arguments")
+
+
+# ── jds_client retry / backoff on rate-limit (429) ───────────
+
+
+def _resp(status, body=None, headers=None):
+    m = MagicMock()
+    m.status_code = status
+    m.headers = headers or {}
+    m.json.return_value = body or {}
+    return m
+
+
+def test_get_case_retries_on_429_then_succeeds():
+    with patch.object(
+        jds_client.requests,
+        "get",
+        side_effect=[
+            _resp(429, headers={"Retry-After": "0"}),
+            _resp(200, {"slug": "x"}),
+        ],
+    ) as get, patch.object(jds_client.time, "sleep") as slept:
+        out = jds_client.get_case("x")
+    assert out == {"slug": "x"}
+    assert get.call_count == 2
+    assert slept.called
+
+
+def test_get_case_raises_after_exhausting_retries(settings):
+    settings.JDS_MAX_RETRIES = 2
+    with patch.object(
+        jds_client.requests,
+        "get",
+        return_value=_resp(429, headers={"Retry-After": "0"}),
+    ) as get, patch.object(jds_client.time, "sleep"):
+        with pytest.raises(jds_client.JdsError) as exc:
+            jds_client.get_case("y")
+    assert "429" in str(exc.value)
+    assert get.call_count == 3  # initial + 2 retries
+
+
+def test_retry_after_header_is_honored():
+    assert (
+        jds_client._retry_after_seconds(
+            _resp(429, headers={"Retry-After": "3"}), 0, 1.0
+        )
+        == 3.0
+    )
+
+
+def test_backoff_is_exponential_without_header():
+    # base 1.0 * 2**attempt
+    assert jds_client._retry_after_seconds(_resp(429, headers={}), 0, 1.0) == 1.0
+    assert jds_client._retry_after_seconds(_resp(429, headers={}), 2, 1.0) == 4.0
+    # capped at 60s
+    assert jds_client._retry_after_seconds(_resp(429, headers={}), 10, 1.0) == 60.0
+
+
+def test_non_retryable_status_returns_immediately():
+    with patch.object(
+        jds_client.requests, "get", return_value=_resp(404)
+    ) as get, patch.object(jds_client.time, "sleep") as slept:
+        with pytest.raises(jds_client.JdsError):
+            jds_client.get_case("missing")
+    assert get.call_count == 1  # 404 is not retried
+    assert not slept.called
 
 
 # ── Shared converter: convert_case_to_attach_candidates ──────
