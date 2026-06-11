@@ -262,12 +262,15 @@ def _classify_source_type(source: DocumentSource) -> SourceType | None:
 
 
 def _domain_in_url(domain: str, url: str) -> bool:
-    """Check if *domain* appears in the netloc of *url*."""
+    """Check if *domain* appears in the hostname of *url*."""
     try:
         parsed = urllib.parse.urlparse(url)
-        host = parsed.netloc.lower()
+        host = parsed.hostname
         if not host:
-            host = parsed.path.lower().split("/")[0]
+            # Fallback for URLs without scheme, e.g. "example.com/foo"
+            host = parsed.path.split("/")[0].split(":")[0].lower()
+        else:
+            host = host.lower()
         return host == domain or host.endswith(f".{domain}")
     except Exception:  # noqa: BLE001
         return False
@@ -343,6 +346,7 @@ class Command(BaseCommand):
         classified = 0
         skipped = 0
         results: dict[str, int] = {}
+        updates: dict[str, list[str]] = {}
 
         for source in qs:
             st = _classify_source_type(source)
@@ -359,11 +363,15 @@ class Command(BaseCommand):
             if dry_run:
                 self._log_verbose(f"[DRY-RUN] {source.source_id}: → {label}")
             else:
-                DocumentSource.objects.filter(source_id=source.source_id).update(
-                    source_type=st.value,
+                updates.setdefault(label, []).append(source.source_id)
+                self._log_verbose(f"[SET] {source.source_id}: → {label}")
+
+        if not dry_run and updates:
+            for label, source_ids in updates.items():
+                DocumentSource.objects.filter(source_id__in=source_ids).update(
+                    source_type=label,
                     updated_at=timezone.now(),
                 )
-                self._log_verbose(f"[SET] {source.source_id}: → {label}")
 
         # Summary
         self.stdout.write("-" * 50)
