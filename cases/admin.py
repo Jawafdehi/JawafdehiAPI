@@ -14,6 +14,8 @@ from rest_framework.authtoken.models import Token
 from cases.widgets import ToastUIEditorWidget
 
 from .models import (
+    ALLOWED_UPLOAD_EXTENSIONS,
+    MAX_UPLOAD_FILE_SIZE,
     Case,
     CaseEntityRelationship,
     CaseState,
@@ -797,7 +799,13 @@ class DocumentSourceAdminForm(forms.ModelForm):
 
 
 class DocumentSourceUploadInline(admin.TabularInline):
-    """Inline form for managing multiple uploaded files on a source."""
+    """Inline form for managing multiple uploaded files on a source.
+
+    Uploaded files are always stored as RAW source links (the link-type
+    selector on the External URLs tab does not apply to uploads). Allowed
+    types and the size cap are surfaced as help text and an ``accept`` filter
+    so the constraint is clear before submit, not only on a validation error.
+    """
 
     model = DocumentSourceUpload
     extra = 1
@@ -805,6 +813,20 @@ class DocumentSourceUploadInline(admin.TabularInline):
     readonly_fields = ("filename", "content_type", "file_size", "created_at")
     verbose_name = "Uploaded file"
     verbose_name_plural = "Uploaded files"
+
+    def formfield_for_dbfield(self, db_field, request, **kwargs):
+        formfield = super().formfield_for_dbfield(db_field, request, **kwargs)
+        if db_field.name == "file" and formfield is not None:
+            max_mb = int(MAX_UPLOAD_FILE_SIZE / (1024 * 1024))
+            allowed = ", ".join(ALLOWED_UPLOAD_EXTENSIONS)
+            formfield.help_text = (
+                f"Stored as a RAW source document. Allowed types: {allowed}. "
+                f"Max size: {max_mb} MB."
+            )
+            formfield.widget.attrs["accept"] = ",".join(
+                f".{ext}" for ext in ALLOWED_UPLOAD_EXTENSIONS
+            )
+        return formfield
 
 
 @admin.register(DocumentSource)

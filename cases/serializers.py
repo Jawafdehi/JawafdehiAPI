@@ -310,50 +310,48 @@ class CaseDetailSerializer(CaseSerializer):
 
 
 class SourceLinkField(serializers.Field):
-    """Field that accepts a plain URL string or a ``{'link': str, 'role': str}`` dict."""
+    """Field that accepts a ``{'link': str, 'role': str}`` source-link dict.
+
+    Plain URL strings are no longer accepted — every link must be a dict with a
+    ``link`` key and an explicit ``role`` (``RAW``/``MARKDOWN``/``PERMALINK``).
+    File uploads are recorded as ``RAW`` automatically by the view; this field
+    is only used for caller-supplied external URLs, which must name their role.
+    """
 
     def to_internal_value(self, data):
         from django.core.exceptions import ValidationError as DjangoValidationError
         from django.core.validators import URLValidator
 
         validator = URLValidator()
+        valid_roles = [r.value for r in SourceLinkRole]
 
-        if isinstance(data, str):
-            stripped = data.strip()
-            try:
-                validator(stripped)
-            except DjangoValidationError:
-                raise serializers.ValidationError("Enter a valid URL.")
-            return stripped
+        if not isinstance(data, dict):
+            raise serializers.ValidationError(
+                "Must be a dict with 'link' and 'role' keys; "
+                "plain URL strings are no longer accepted."
+            )
 
-        if isinstance(data, dict):
-            link = data.get("link")
-            role = data.get("role")
-            if not link or not isinstance(link, str) or not link.strip():
-                raise serializers.ValidationError(
-                    "Dict must contain a 'link' key with a non-empty string value."
-                )
-            stripped_link = link.strip()
-            try:
-                validator(stripped_link)
-            except DjangoValidationError:
-                raise serializers.ValidationError("Enter a valid URL.")
+        link = data.get("link")
+        role = data.get("role")
+        if not link or not isinstance(link, str) or not link.strip():
+            raise serializers.ValidationError(
+                "Dict must contain a 'link' key with a non-empty string value."
+            )
+        stripped_link = link.strip()
+        try:
+            validator(stripped_link)
+        except DjangoValidationError:
+            raise serializers.ValidationError("Enter a valid URL.")
 
-            cleaned = {"link": stripped_link}
-            if role is not None:
-                try:
-                    SourceLinkRole(role)
-                    cleaned["role"] = role
-                except ValueError:
-                    raise serializers.ValidationError(
-                        f"Invalid role '{role}'. Must be one of "
-                        f"{[r.value for r in SourceLinkRole]}."
-                    )
-            return cleaned
-
-        raise serializers.ValidationError(
-            "Must be a URL string or a dict with 'link' key."
-        )
+        if role is None:
+            raise serializers.ValidationError(
+                f"A 'role' is required. Must be one of {valid_roles}."
+            )
+        if role not in valid_roles:
+            raise serializers.ValidationError(
+                f"Invalid role '{role}'. Must be one of {valid_roles}."
+            )
+        return {"link": stripped_link, "role": role}
 
     def to_representation(self, value):
         if isinstance(value, str):
@@ -384,8 +382,19 @@ class DocumentSourceSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.ListField(child=serializers.URLField()))
     def get_url(self, obj):
-        """Backward-compat: return only link strings (deprecated)."""
-        return [u["link"] for u in self.get_urls(obj)]
+        """Backward-compat: return only link strings (deprecated).
+
+        Deduplicated by link — the same link under two roles (e.g. RAW + the
+        MARKDOWN-converted view) collapses to a single string here.
+        """
+        seen = set()
+        links = []
+        for u in self.get_urls(obj):
+            link = u["link"]
+            if link not in seen:
+                seen.add(link)
+                links.append(link)
+        return links
 
     @extend_schema_field(
         inline_serializer(
@@ -425,9 +434,13 @@ class DocumentSourceSerializer(serializers.ModelSerializer):
 
         if obj.uploaded_file:
             try:
-                add_url(obj.uploaded_file.url, "PERMALINK")
-            except Exception:
-                pass
+                add_url(obj.uploaded_file.url, "RAW")
+            except (ValueError, AttributeError) as exc:
+                logger.warning(
+                    "Skipping uploaded_file URL for source %s: %s",
+                    obj.source_id,
+                    exc,
+                )
 
         uploaded_files = getattr(obj, "uploaded_files", None)
         if uploaded_files is not None:
@@ -438,9 +451,14 @@ class DocumentSourceSerializer(serializers.ModelSerializer):
             )
             for uploaded_file in uploads_iterable:
                 try:
-                    add_url(uploaded_file.file.url, "PERMALINK")
-                except Exception:
-                    pass
+                    add_url(uploaded_file.file.url, "RAW")
+                except (ValueError, AttributeError) as exc:
+                    logger.warning(
+                        "Skipping uploaded file %s URL for source %s: %s",
+                        getattr(uploaded_file, "pk", "?"),
+                        obj.source_id,
+                        exc,
+                    )
 
         return merged_urls
 

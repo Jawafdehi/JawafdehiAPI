@@ -535,7 +535,7 @@ class Command(BaseCommand):
                 # Build complete URL list from existing link strings
                 # (existing.url has dicts, url_links gives plain strings for dedup)
                 existing_links = existing.url_links
-                url_list = [{"link": link, "role": None} for link in existing_links]
+                url_list = [{"link": link, "role": "RAW"} for link in existing_links]
 
                 # Encode and add press release web URL first (ensure it's at the beginning)
                 if press_release_url and str(press_release_url).strip():
@@ -561,7 +561,7 @@ class Command(BaseCommand):
                             break
                     if existing_idx is not None:
                         url_list.pop(existing_idx)
-                    url_list.insert(0, {"link": encoded_url, "role": None})
+                    url_list.insert(0, {"link": encoded_url, "role": "RAW"})
 
                 # Add all file URLs (skip duplicates)
                 for file_url in file_urls:
@@ -585,7 +585,7 @@ class Command(BaseCommand):
                             isinstance(u, dict) and u.get("link") == encoded_url
                             for u in url_list
                         ):
-                            url_list.append({"link": encoded_url, "role": None})
+                            url_list.append({"link": encoded_url, "role": "RAW"})
 
                 # Update existing source with complete URL list
                 existing.url = url_list
@@ -641,7 +641,7 @@ class Command(BaseCommand):
                     encoded_fragment,
                 )
             )
-            url_list.append(encoded_url)
+            url_list.append({"link": encoded_url, "role": "RAW"})
 
         # Add all file URLs
         for file_url in file_urls:
@@ -660,7 +660,7 @@ class Command(BaseCommand):
                         encoded_fragment,
                     )
                 )
-                url_list.append(encoded_url)
+                url_list.append({"link": encoded_url, "role": "RAW"})
 
         if not url_list:
             logger.error(f"No valid URLs for press release {press_release_url}")
