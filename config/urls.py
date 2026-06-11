@@ -43,6 +43,9 @@ urlpatterns = [
     path("api/case-workflows/", include("case_workflows.urls")),
     # Caseworker Agent routes
     path("api/caseworker/", include("caseworker.urls")),
+    # Casework Review System (VOL-3) — rule-centered case-quality review.
+    # Auth: shared JWT (token from /api/caseworker/auth/token/) + Contributor role.
+    path("api/casework/", include("review.urls")),
     path(
         "api/caseworker/auth/token/",
         TokenObtainPairView.as_view(),

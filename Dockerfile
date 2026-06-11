@@ -26,6 +26,7 @@ COPY case_workflows ./case_workflows
 COPY nesq ./nesq
 COPY ngm ./ngm
 COPY caseworker ./caseworker
+COPY review ./review
 COPY static ./static
 
 # Collect static files
