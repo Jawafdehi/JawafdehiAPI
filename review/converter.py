@@ -11,7 +11,9 @@ to markdown the upstream should store" logic lives in exactly one place.
 
 import functools
 import hashlib
+import json
 import os
+import re
 import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
@@ -19,6 +21,10 @@ from urllib.parse import urlparse
 from django.conf import settings
 
 from . import jds_client
+
+# A YAML frontmatter block at the very top of a document (to strip before
+# re-emitting, so re-runs don't stack frontmatter).
+_FRONTMATTER_RE = re.compile(r"\A---\n.*?\n---\n+", re.DOTALL)
 
 # Lazy singleton MarkItDown instance (loading plugins is expensive).
 _md = None
@@ -98,6 +104,39 @@ def _ext_from_url(url, content_type=""):
     return ".bin"
 
 
+def _with_frontmatter(body, source):
+    """Prepend a YAML frontmatter block to a converted-markdown `body`.
+
+    Frontmatter carries the processing timestamp plus source metadata so each
+    stored markdown file is self-describing. The timestamp is stamped fresh on
+    every emit, so it is NOT part of the on-disk cache (the cache holds only the
+    deterministic body); any pre-existing frontmatter on `body` is stripped first
+    so re-runs don't stack blocks.
+    """
+    from django.utils import timezone
+
+    body = _FRONTMATTER_RE.sub("", body or "").lstrip("\n")
+    if not body.strip():
+        # No real content: stay empty so callers' `markdown.strip()` checks still
+        # treat this source as "nothing to attach" (a frontmatter-only file is
+        # not a usable conversion).
+        return ""
+    fields = {
+        "processed_at": timezone.now().isoformat(),
+        "source_id": source.get("source_id") or "",
+        "title": source.get("title") or "",
+        "source_type": source.get("source_type") or "",
+        "source_url": _pick_url(source.get("url", [])) or "",
+    }
+    lines = ["---"]
+    for key, value in fields.items():
+        # json.dumps gives safe YAML-compatible scalar quoting for arbitrary
+        # strings (colons, quotes, unicode) without a YAML dependency.
+        lines.append(f"{key}: {json.dumps(value, ensure_ascii=False)}")
+    lines.append("---")
+    return "\n".join(lines) + "\n\n" + body
+
+
 def convert_source(source, *, overwrite=False):
     """Return markdown text for a single source dict.
 
@@ -133,11 +172,14 @@ def convert_source(source, *, overwrite=False):
     #    the "already attached" short-circuit — otherwise refreshing markdown
     #    after a converter change (e.g. a new likhit OCR DPI) would just re-serve
     #    the stale cached output. We still WRITE the fresh result below.
+    # The cache holds the deterministic converted BODY — never the frontmatter,
+    # whose timestamp is stamped fresh on every emit below.
     cache_key = hashlib.sha256(url.encode()).hexdigest()[:24]
     cache_path = Path(settings.SOURCE_MARKDOWN_DIR) / f"{cache_key}.md"
     if cache_path.exists() and not overwrite:
+        body = cache_path.read_text(encoding="utf-8")
         return {
-            "markdown": cache_path.read_text(encoding="utf-8"),
+            "markdown": _with_frontmatter(body, source),
             "status": "converted",
             "url": url,
             "note": "From cache.",
@@ -156,7 +198,7 @@ def convert_source(source, *, overwrite=False):
             os.unlink(tmp)
         cache_path.write_text(md_text, encoding="utf-8")
         return {
-            "markdown": md_text,
+            "markdown": _with_frontmatter(md_text, source),
             "status": "converted",
             "url": url,
             "note": f"Converted via likhit ({ext}).",

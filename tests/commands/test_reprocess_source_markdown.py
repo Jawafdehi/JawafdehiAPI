@@ -123,7 +123,11 @@ def test_convert_source_overwrite_bypasses_short_circuit(settings, tmp_path):
     ):
         md.return_value.convert.return_value = MagicMock(text_content="new md")
         res = converter.convert_source(src, overwrite=True)
-    assert res["status"] == "converted" and res["markdown"] == "new md"
+    # Output is frontmatter-wrapped; the converted body must be present and the
+    # short-circuit bypassed (we re-converted "new md", not re-served "old").
+    assert res["status"] == "converted"
+    assert res["markdown"].startswith("---\n") and "processed_at:" in res["markdown"]
+    assert res["markdown"].rstrip().endswith("new md")
 
 
 def test_convert_source_overwrite_bypasses_disk_cache(settings, tmp_path):
@@ -149,14 +153,78 @@ def test_convert_source_overwrite_bypasses_disk_cache(settings, tmp_path):
     ):
         md.return_value.convert.return_value = MagicMock(text_content="fresh")
         res = converter.convert_source(src, overwrite=True)
-    assert res["markdown"] == "fresh"
-    # And the fresh result is written back to the cache.
+    assert res["markdown"].rstrip().endswith("fresh")
+    # The cache holds the bare, frontmatter-free body (timestamp is stamped fresh
+    # on each emit, not cached).
     assert cache_path.read_text(encoding="utf-8") == "fresh"
 
-    # Without overwrite, the cache is served as-is.
+    # Without overwrite, the cached body is re-served (no re-download) and
+    # re-wrapped with fresh frontmatter.
     with patch.object(converter.jds_client, "download_source_file") as dl:
         res2 = converter.convert_source(src)
-    assert res2["markdown"] == "fresh" and dl.call_count == 0
+    assert res2["markdown"].rstrip().endswith("fresh") and dl.call_count == 0
+    assert "processed_at:" in res2["markdown"]
+
+
+# ── Frontmatter ──────────────────────────────────────────────
+
+
+def _convert_with_body(src, body, *, content_type="application/pdf", ext=".pdf"):
+    """Run convert_source for `src`, mocking the download + MarkItDown output."""
+    with patch.object(
+        converter.jds_client,
+        "download_source_file",
+        return_value=(b"raw", content_type),
+    ), patch.object(converter, "_ext_from_url", return_value=ext), patch.object(
+        converter, "_markitdown"
+    ) as md, patch.object(
+        converter, "_patch_likhit_ocr_dpi"
+    ):
+        md.return_value.convert.return_value = MagicMock(text_content=body)
+        return converter.convert_source(src, overwrite=True)
+
+
+def test_converted_markdown_is_passed_through_unmodified(settings, tmp_path):
+    """MarkItDown already emits clean markdown; convert_source must add only the
+    frontmatter and leave the body verbatim (no re-escaping of * or _)."""
+    settings.SOURCE_MARKDOWN_DIR = tmp_path
+    src = {"source_id": "s1", "title": "Verdict", "url": ["http://x/a.pdf"]}
+    body = "# शीर्षक\n\n- **बुँदा** and *italic*\n\n[link](http://x)"
+    md = _convert_with_body(src, body)["markdown"]
+    assert "\\*" not in md
+    # The body appears verbatim after the frontmatter block.
+    assert md.split("---\n", 2)[-1].strip().endswith(body)
+
+
+def test_frontmatter_has_processed_at_and_source_metadata(settings, tmp_path):
+    settings.SOURCE_MARKDOWN_DIR = tmp_path
+    src = {
+        "source_id": "src:123",
+        "title": "My: Title",  # colon — must be safely quoted
+        "source_type": "MEDIA_NEWS",
+        "url": ["http://x/a.pdf"],
+    }
+    md = _convert_with_body(src, "body", content_type="application/pdf", ext=".pdf")[
+        "markdown"
+    ]
+    assert md.startswith("---\n")
+    assert "processed_at:" in md
+    assert 'source_id: "src:123"' in md
+    assert 'title: "My: Title"' in md
+    assert 'source_type: "MEDIA_NEWS"' in md
+    assert 'source_url: "http://x/a.pdf"' in md
+
+
+def test_with_frontmatter_does_not_stack_or_emit_for_empty():
+    # Empty body stays empty (so it is not treated as an attachable candidate).
+    assert converter._with_frontmatter("", {"source_id": "s"}) == ""
+    assert converter._with_frontmatter("  \n\n", {"source_id": "s"}) == ""
+    # Pre-existing frontmatter is stripped before re-adding (no stacking).
+    pre = '---\nprocessed_at: "old"\nsource_id: "s"\n---\n\nReal body'
+    out = converter._with_frontmatter(pre, {"source_id": "s9"})
+    assert out.count("processed_at:") == 1
+    assert '"old"' not in out
+    assert "Real body" in out
 
 
 # ── Command: dry-run does not write upstream ─────────────────
