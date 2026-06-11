@@ -2,7 +2,13 @@
     {% for value in values %}
     <div class="input-row" draggable="true">
         <span class="drag-handle">⋮⋮</span>
-        <input type="url" class="url-input" value="{{ value }}" placeholder="https://example.com">
+        <input type="url" class="url-input" value="{{ value.link }}" placeholder="https://example.com">
+        <select class="url-role" aria-label="Link type">
+            <option value="">— type —</option>
+            {% for r in role_choices %}
+            <option value="{{ r }}" {% if value.role == r %}selected{% endif %}>{{ r }}</option>
+            {% endfor %}
+        </select>
         <button type="button" class="btn btn-sm btn-danger remove-input" aria-label="Remove URL">
             <i class="fas fa-times" aria-hidden="true"></i>
         </button>
@@ -16,19 +22,37 @@
 </div>
 <input type="hidden" name="{{ name }}" id="{{ widget_id }}" value="{{ values_json }}">
 
+{# Role choices as JSON (json_script safely escapes for embedding) so the new-row
+   template builds the <select> in JS without interpolating values into JS source. #}
+{{ role_choices|json_script:role_choices_id }}
+
 <script>
-window.initMultiWidget(
-    '{{ widget_id }}_container',
-    '{{ widget_id }}',
-    'url',
-    {
-        rowTemplate: [
-            '<span class="drag-handle">⋮⋮</span>',
-            '<input type="url" class="url-input" placeholder="https://example.com">',
-            '<button type="button" class="btn btn-sm btn-danger remove-input" aria-label="Remove URL">',
-            '<i class="fas fa-times" aria-hidden="true"></i>',
-            '</button>'
-        ].join(' ')
-    }
-);
+(function () {
+    var roleChoices = JSON.parse(
+        document.getElementById('{{ role_choices_id }}').textContent
+    );
+    var roleOptions = '<option value="">— type —</option>' +
+        roleChoices.map(function (r) {
+            var opt = document.createElement('option');
+            opt.value = r;
+            opt.textContent = r;
+            return opt.outerHTML;
+        }).join('');
+
+    window.initMultiWidget(
+        '{{ widget_id }}_container',
+        '{{ widget_id }}',
+        'url',
+        {
+            rowTemplate: [
+                '<span class="drag-handle">⋮⋮</span>',
+                '<input type="url" class="url-input" placeholder="https://example.com">',
+                '<select class="url-role" aria-label="Link type">' + roleOptions + '</select>',
+                '<button type="button" class="btn btn-sm btn-danger remove-input" aria-label="Remove URL">',
+                '<i class="fas fa-times" aria-hidden="true"></i>',
+                '</button>'
+            ].join(' ')
+        }
+    );
+})();
 </script>
