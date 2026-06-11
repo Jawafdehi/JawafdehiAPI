@@ -11,10 +11,14 @@ from datetime import date as date_type
 from pathlib import Path
 from typing import List
 
-from google import genai
-from google.genai.types import GenerateContentConfig, GoogleSearch, HttpOptions, Tool
-from google.oauth2 import service_account
 from pydantic import BaseModel, Field
+
+# NOTE: ``google-genai`` / ``google-auth`` are only present when the optional
+# ``llm-all`` extra is installed (via ``langchain-google-genai``). CaseScraper is
+# the sole consumer, yet this module is imported eagerly at startup
+# (cases.admin -> cases.services.__init__). To keep the app bootable on installs
+# without that extra (e.g. a likhit-only poller box), the Google imports are done
+# lazily inside the methods that use them rather than at module load.
 
 
 class DocumentSource(BaseModel):
@@ -163,6 +167,12 @@ class CaseScraper:
         self.language = language
         self.logger = logger
 
+        # Lazy import: only required when a CaseScraper is actually constructed
+        # (see module docstring above).
+        from google import genai
+        from google.genai.types import HttpOptions
+        from google.oauth2 import service_account
+
         # Validate service account file
         if not self.service_account_path.exists():
             raise FileNotFoundError(
@@ -273,6 +283,8 @@ class CaseScraper:
         Returns:
             Raw extracted data as markdown text
         """
+        from google.genai.types import GenerateContentConfig, GoogleSearch, Tool
+
         self.log("  Extracting raw information from sources...")
 
         # Concatenate all source contents
@@ -304,6 +316,8 @@ class CaseScraper:
         Returns:
             Validated Case object
         """
+        from google.genai.types import GenerateContentConfig
+
         self.log("\nPhase 2: Structuring data...")
         self.log("  Converting raw data to structured format...")
 
