@@ -246,4 +246,26 @@ class Command(BaseCommand):
             ]
         )
 
+        # ReviewAssistant: a review-system role that can manage document sources
+        # (e.g. populate the MARKDOWN url during a review) and access reviews.
+        # Review access itself is granted in review/permissions.py by group name;
+        # here we grant the document-source permissions it needs.
+        review_assistant_group, created = Group.objects.get_or_create(
+            name="ReviewAssistant"
+        )
+        if created:
+            self.stdout.write(self.style.SUCCESS("Created ReviewAssistant group"))
+        else:
+            self.stdout.write("ReviewAssistant group already exists")
+
+        review_assistant_group.permissions.set(
+            [
+                source_permissions["view"],
+                source_permissions["change"],
+                # Attaching markdown creates a DocumentSourceUpload.
+                upload_permissions["view"],
+                upload_permissions["add"],
+            ]
+        )
+
         self.stdout.write(self.style.SUCCESS("Successfully configured all groups"))

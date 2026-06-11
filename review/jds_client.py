@@ -85,14 +85,35 @@ def extract_sources(case):
         key = sid or src.get("title")
         if key in sources:
             continue
+        # Prefer the new role-tagged `urls` (list of {link, role}); fall back to
+        # the deprecated plain `url` string list. We keep BOTH: `url` (strings)
+        # for conversion/download, and `urls` (with roles) so callers can tell
+        # whether a MARKDOWN link already exists.
+        urls = src.get("urls") or []
+        url_strings = src.get("url", []) or []
+        if not url_strings and urls:
+            url_strings = [
+                u.get("link") for u in urls if isinstance(u, dict) and u.get("link")
+            ]
+        # If a MARKDOWN link is already attached, surface its text as markdown.
+        existing_md_link = next(
+            (
+                u.get("link")
+                for u in urls
+                if isinstance(u, dict) and u.get("role") == "MARKDOWN"
+            ),
+            None,
+        )
         sources[key] = {
             "source_id": sid,
             "title": src.get("title", ""),
             "source_type": src.get("source_type", ""),
-            "url": src.get("url", []) or [],
+            "url": url_strings,
+            "urls": urls,
             "evidence_description": ev.get("description", ""),
             # markdown attached on the source already? (future-proof)
             "markdown": src.get("markdown") or ev.get("markdown"),
+            "markdown_url": existing_md_link,
         }
     return list(sources.values())
 
