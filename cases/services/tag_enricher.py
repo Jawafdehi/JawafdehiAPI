@@ -752,8 +752,9 @@ def _collect_evidence_text(case: Case) -> str:  # noqa
     contain the richest information for CIAA cases.
     """
     HIGH_VALUE_SOURCE_TYPES = (
-        SourceType.LEGAL_PROCEDURAL,
-        SourceType.LEGAL_COURT_ORDER,
+        SourceType.CIAA_PRESS_RELEASE,
+        SourceType.AG_ABHIYOG_PATRA,
+        SourceType.COURT_ORDER,
     )
 
     parts = []

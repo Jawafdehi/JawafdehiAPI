@@ -245,13 +245,13 @@ def test_document_source_has_contributors_field():
 
 @pytest.mark.django_db
 def test_media_news_source_requires_publication_date():
-    """MEDIA_NEWS DocumentSource must be rejected when publication_date is absent."""
+    """NEWS DocumentSource must be rejected when publication_date is absent."""
     source = create_document_source_with_entities(
         title="Gorkhapatra report",
         description="News article",
         related_entity_ids=[],
     )
-    source.source_type = SourceType.MEDIA_NEWS
+    source.source_type = SourceType.NEWS
     source.publication_date = None
 
     with pytest.raises(ValidationError) as exc_info:
@@ -262,7 +262,7 @@ def test_media_news_source_requires_publication_date():
 
 @pytest.mark.django_db
 def test_media_news_source_accepts_valid_publication_date():
-    """MEDIA_NEWS DocumentSource with a publication_date must save successfully."""
+    """NEWS DocumentSource with a publication_date must save successfully."""
     import datetime
 
     source = create_document_source_with_entities(
@@ -270,7 +270,7 @@ def test_media_news_source_accepts_valid_publication_date():
         description="News article",
         related_entity_ids=[],
     )
-    source.source_type = SourceType.MEDIA_NEWS
+    source.source_type = SourceType.NEWS
     source.publication_date = datetime.date(2024, 3, 15)
 
     # Must not raise

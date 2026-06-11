@@ -210,7 +210,7 @@ All responses are in JSON format with the following structure:
   "source_id": "source:20240115:abc123",
   "title": "Source Title",
   "description": "Source description",
-  "source_type": "MEDIA_NEWS",
+  "source_type": "NEWS",
   "url": [
     "https://example.com/document.pdf",
     "https://example.com/backup-link.pdf"
@@ -235,17 +235,15 @@ All responses are in JSON format with the following structure:
 
 The `source_type` field is optional and may be `null` if the source has not been classified. When present, it must be one of the following values:
 
-- `LEGAL_COURT_ORDER` - Legal: Court Order/Verdict
-- `LEGAL_PROCEDURAL` - Legal: Procedural/Law Enforcement
-- `OFFICIAL_GOVERNMENT` - Official (Government)
-- `FINANCIAL_FORENSIC` - Financial/Forensic Record
-- `INTERNAL_CORPORATE` - Internal Corporate Doc
-- `MEDIA_NEWS` - Media/News
-- `INVESTIGATIVE_REPORT` - Investigative Report
-- `PUBLIC_COMPLAINT` - Public Complaint/Whistleblower
-- `LEGISLATIVE_DOC` - Legislative/Policy Doc
+- `CIAA_PRESS_RELEASE` - CIAA Press Release
+- `AG_ABHIYOG_PATRA` - AG Charge Sheet (Abhiyog Patra)
+- `OAG_AUDIT_REPORT` - OAG Audit Report
+- `COURT_ORDER` - Court Order/Verdict
+- `COURT_FILING_OTHER` - Other Court Filing
+- `LAW_OR_BILL` - Law/Act/Bill
+- `NEWS` - News/Media
 - `SOCIAL_MEDIA` - Social Media
-- `OTHER_VISUAL` - Other / Visual Assets
+- `MISC` - Miscellaneous
 
 > **Note:** The authoritative list of source type values is defined in the backend `SourceType` enum (see `cases/models.py`). For the most current list, consult the OpenAPI schema at `/api/schema/` or `/api/schema/?format=json`.
 

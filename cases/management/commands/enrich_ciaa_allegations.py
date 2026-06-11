@@ -965,7 +965,7 @@ class Command(BaseCommand):
             score += 5
         if any(keyword in corpus for keyword in ciaa_keywords):
             score += 3
-        if source.source_type == SourceType.OFFICIAL_GOVERNMENT:
+        if source.source_type == SourceType.CIAA_PRESS_RELEASE:
             score += 1
         return score
 

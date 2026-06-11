@@ -612,10 +612,10 @@ call upload_document_source with:
     - description (REQUIRED for legal/official docs): concise source description in Nepali, e.g.
             "अख्तियारद्वारा दायर गरिएको अभियोग पत्र — मुद्दा {case_dir.name}, प्रतिवादी र मुख्य आरोपसम्बन्धी आधिकारिक कागजात।"
   - source_type from this mapping:
-      ciaa-press-release-*  →  OFFICIAL_GOVERNMENT
-      charge-sheet-*        →  LEGAL_PROCEDURAL
-      court-order-*         →  LEGAL_COURT_ORDER
-      bolpatra-*            →  OFFICIAL_GOVERNMENT
+      ciaa-press-release-*  →  CIAA_PRESS_RELEASE
+      charge-sheet-*        →  AG_ABHIYOG_PATRA
+      court-order-*         →  COURT_ORDER
+      bolpatra-*            →  MISC
 
 Also upload news markdown files from {case_dir}/sources/markdown/. For every file matching
 news-*.md, call upload_document_source with:
@@ -624,7 +624,7 @@ news-*.md, call upload_document_source with:
     - url: ["<original_article_url>"] using the original article URL recorded in {case_dir}/MEMORY.md. Do not use the uploaded markdown path as the external URL.
     - publication_date: YYYY-MM-DD from {case_dir}/MEMORY.md when available
     - description: one-sentence source description in Nepali summarising the article's specific contribution to this case
-  - source_type: MEDIA_NEWS
+  - source_type: NEWS
 
 For every news source, preserve both pieces of information: the uploaded markdown transcript stays attached as the file upload, and the original external article URL must be present in the `url` field.
 

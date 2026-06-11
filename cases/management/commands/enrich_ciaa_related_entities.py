@@ -338,11 +338,11 @@ class Command(BaseCommand):
         """Check if a source should be treated as a CIAA press release.
 
         Matches when:
-        - source_type is OFFICIAL_GOVERNMENT, OR
+        - source_type is CIAA_PRESS_RELEASE, OR
         - description contains "CIAA Press Release", OR
         - any URL contains "ciaa.gov.np/pressrelease"
         """
-        if source.source_type == SourceType.OFFICIAL_GOVERNMENT:
+        if source.source_type == SourceType.CIAA_PRESS_RELEASE:
             return True
 
         description = (source.description or "").lower()
@@ -380,7 +380,7 @@ class Command(BaseCommand):
         score = 0
 
         # Direct source_type match
-        if source.source_type == SourceType.OFFICIAL_GOVERNMENT:
+        if source.source_type == SourceType.CIAA_PRESS_RELEASE:
             score += 5
 
         # Press release keywords
@@ -433,7 +433,7 @@ class Command(BaseCommand):
     def _get_court_order_source(self, case):
         """Return the best court order source for this case."""
         for source in self._get_evidence_sources(case):
-            if source.source_type == SourceType.LEGAL_COURT_ORDER:
+            if source.source_type == SourceType.COURT_ORDER:
                 return source
         return None
 

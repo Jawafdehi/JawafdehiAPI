@@ -289,7 +289,7 @@ class CIAADraftCaseService:
             source_data = {
                 "title": pr.get("title", "CIAA Press Release")[:300],
                 "url": pr.get("url", ""),
-                "source_type": SourceType.LEGAL_PROCEDURAL,
+                "source_type": SourceType.CIAA_PRESS_RELEASE,
                 "publication_date": self.convert_bs_to_ad(pr.get("date", "")),
             }
             if source := self.get_or_create_source(source_data):
@@ -319,7 +319,7 @@ class CIAADraftCaseService:
             source_data = {
                 "title": ap.get("title", "AG Charge Sheet")[:300],
                 "url": [encoded_url] if encoded_url else [],
-                "source_type": SourceType.OFFICIAL_GOVERNMENT,
+                "source_type": SourceType.AG_ABHIYOG_PATRA,
                 "publication_date": self.convert_bs_to_ad(ap.get("filing_date", "")),
             }
             if source := self.get_or_create_source(source_data):
@@ -340,7 +340,7 @@ class CIAADraftCaseService:
                 source_data = {
                     "title": f"Court Order - {ciaa_json.get('case_no', 'Unknown')}",
                     "url": faisala_url,
-                    "source_type": SourceType.LEGAL_COURT_ORDER,
+                    "source_type": SourceType.COURT_ORDER,
                 }
                 if source := self.get_or_create_source(source_data):
                     sources.append(source)

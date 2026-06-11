@@ -607,7 +607,7 @@ class Command(BaseCommand):
                 )
                 return existing, False, False  # created=False, updated=False
 
-        source_type = SourceType.LEGAL_PROCEDURAL
+        source_type = SourceType.CIAA_PRESS_RELEASE
 
         # Parse publication date (BS format: YYYY-MM-DD)
         pub_date = None
