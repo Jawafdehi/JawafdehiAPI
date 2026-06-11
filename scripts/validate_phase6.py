@@ -11,22 +11,26 @@ Outputs: validation-report.json, coverage-matrix.csv
 
 import csv
 import json
+import os
 import re
 import sys
 from collections import Counter, defaultdict
+from datetime import date
 from pathlib import Path
 
-DATA_DIR = Path("/paperspace/tmp/corruption-case-db")
+DATA_DIR = Path(
+    os.environ.get("CORRUPTION_DB_DIR", "/paperspace/tmp/corruption-case-db")
+)
 EXTRACTED_DIR = DATA_DIR / "extracted-data"
 CONSOLIDATED_DIR = EXTRACTED_DIR / "consolidated"
-OUTPUT_DIR = Path("/paperspace/tmp/code/JawafdehiAPI-JAWA-2396/scripts")
+OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", Path(__file__).resolve().parent))
 
 # ── Load all data sources ──────────────────────────────────────────────────
 
 
 def load_json(path, label):
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
         print(f"  WARN: {label} — {e}")
@@ -401,12 +405,10 @@ def analyze_fy_distribution(sources):
     print(f"  {'-'*50}")
 
     all_fys = sorted(
-        set(
-            list(enriched_fy.keys())
-            + list(unified_fy.keys())
-            + list(cross_ref_fy.keys())
-            + list(annual_stats.keys())
-        )
+        set(enriched_fy.keys())
+        | set(unified_fy.keys())
+        | set(cross_ref_fy.keys())
+        | set(annual_stats.keys())
     )
 
     for fy in all_fys:
@@ -548,7 +550,7 @@ def coverage_matrix(sources):
         "has_ss",
         "sources_summary",
     ]
-    with open(csv_path, "w", newline="") as f:
+    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
@@ -603,9 +605,11 @@ def classify_quality_tiers(sources):
         total_score = sum(scores)
         max_score = len(scores)
 
-        if total_score >= 7:
+        GOLD_TIER_THRESHOLD = 7
+        SILVER_TIER_THRESHOLD = 4
+        if total_score >= GOLD_TIER_THRESHOLD:
             tier = "Gold"
-        elif total_score >= 4:
+        elif total_score >= SILVER_TIER_THRESHOLD:
             tier = "Silver"
         else:
             tier = "Bronze"
@@ -631,15 +635,10 @@ def classify_quality_tiers(sources):
             }
         )
 
-    print(
-        f"  Gold:   {len(tiers['Gold'])} ({len(tiers['Gold'])/len(sources['enriched_cases'])*100:.1f}%)"
-    )
-    print(
-        f"  Silver: {len(tiers['Silver'])} ({len(tiers['Silver'])/len(sources['enriched_cases'])*100:.1f}%)"
-    )
-    print(
-        f"  Bronze: {len(tiers['Bronze'])} ({len(tiers['Bronze'])/len(sources['enriched_cases'])*100:.1f}%)"
-    )
+    denom = max(len(sources["enriched_cases"]), 1)
+    print(f"  Gold:   {len(tiers['Gold'])} ({len(tiers['Gold'])/denom*100:.1f}%)")
+    print(f"  Silver: {len(tiers['Silver'])} ({len(tiers['Silver'])/denom*100:.1f}%)")
+    print(f"  Bronze: {len(tiers['Bronze'])} ({len(tiers['Bronze'])/denom*100:.1f}%)")
     print(f"  Total:  {sum(len(v) for v in tiers.values())}")
     return tiers
 
@@ -704,7 +703,7 @@ def main():
     # ── Build Report ──────────────────────────────────────────────────────
     report = {
         "pipeline": "Phase 6: Validation & Quality Control",
-        "generated_at": "2026-06-10",
+        "generated_at": date.today().isoformat(),
         "data_sources": {
             k: (
                 len(v)
@@ -761,4 +760,6 @@ def main():
 
 if __name__ == "__main__":
     report = main()
+    if report.get("total_issues", 0) > 0:
+        sys.exit(1)
     sys.exit(0)
