@@ -16,7 +16,7 @@ class Migration(migrations.Migration):
             field=models.JSONField(
                 blank=True,
                 default=list,
-                help_text="Parallel array to url — link type per URL. Values: RAW, PERMALINK, MARKDOWN",
+                help_text="Parallel array to url — link type per URL. Values: UNKNOWN, RAW, PERMALINK, MARKDOWN",
             ),
         ),
     ]

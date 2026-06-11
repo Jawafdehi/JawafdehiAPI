@@ -25,6 +25,7 @@ User = get_user_model()
 
 
 class SourceLinkRole(enum.StrEnum):
+    UNKNOWN = "UNKNOWN"
     RAW = "RAW"
     MARKDOWN = "MARKDOWN"
     PERMALINK = "PERMALINK"
@@ -804,7 +805,7 @@ class DocumentSource(models.Model):
     link_types = models.JSONField(
         default=list,
         blank=True,
-        help_text="Parallel array to url — link type per URL. Values: RAW, PERMALINK, MARKDOWN",
+        help_text="Parallel array to url — link type per URL. Values: UNKNOWN, RAW, PERMALINK, MARKDOWN",
     )
 
     # Uploaded file fields (for native file uploads)

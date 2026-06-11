@@ -357,11 +357,11 @@ class SourceLinkField(serializers.Field):
 
     def to_representation(self, value):
         if isinstance(value, str):
-            return {"link": value, "role": SourceLinkRole.RAW.value}
+            return {"link": value, "role": SourceLinkRole.UNKNOWN.value}
         if isinstance(value, dict):
             return {
                 "link": value.get("link"),
-                "role": value.get("role") or SourceLinkRole.RAW.value,
+                "role": value.get("role") or SourceLinkRole.UNKNOWN.value,
             }
         return value
 

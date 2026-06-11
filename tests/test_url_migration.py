@@ -355,10 +355,11 @@ class TestSourceLinkDictFormat:
         """SourceLinkRole enum should have expected members."""
         from cases.models import SourceLinkRole
 
+        assert SourceLinkRole.UNKNOWN.value == "UNKNOWN"
         assert SourceLinkRole.RAW.value == "RAW"
         assert SourceLinkRole.MARKDOWN.value == "MARKDOWN"
         assert SourceLinkRole.PERMALINK.value == "PERMALINK"
-        assert len(list(SourceLinkRole)) == 3
+        assert len(list(SourceLinkRole)) == 4
 
     def test_create_serializer_rejects_invalid_url(self):
         """SourceLinkField should reject invalid URLs."""
