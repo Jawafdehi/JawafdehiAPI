@@ -166,6 +166,134 @@ def test_convert_source_overwrite_bypasses_disk_cache(settings, tmp_path):
     assert "processed_at:" in res2["markdown"]
 
 
+# ── Role-aware link selection ────────────────────────────────
+
+
+def _pick(urls=None, url=None):
+    src = {}
+    if urls is not None:
+        src["urls"] = urls
+    if url is not None:
+        src["url"] = url
+    return converter._pick_source_link(src)
+
+
+def test_pick_raw_when_only_raw():
+    assert _pick([{"link": "http://x/a.pdf", "role": "RAW"}]) == (
+        "http://x/a.pdf",
+        "RAW",
+    )
+
+
+def test_pick_prefers_alternate_when_better_format():
+    # ALTERNATE .docx beats RAW .pdf (docx ranks higher).
+    assert _pick(
+        [
+            {"link": "http://x/a.pdf", "role": "RAW"},
+            {"link": "http://x/a.docx", "role": "ALTERNATE"},
+        ]
+    ) == ("http://x/a.docx", "ALTERNATE")
+
+
+def test_pick_keeps_raw_when_alternate_not_better():
+    # RAW .docx stays even though an ALTERNATE .pdf exists (pdf ranks lower).
+    assert _pick(
+        [
+            {"link": "http://x/a.docx", "role": "RAW"},
+            {"link": "http://x/a.pdf", "role": "ALTERNATE"},
+        ]
+    ) == ("http://x/a.docx", "RAW")
+    # Equal rank -> keep RAW.
+    assert _pick(
+        [
+            {"link": "http://x/raw.pdf", "role": "RAW"},
+            {"link": "http://x/alt.pdf", "role": "ALTERNATE"},
+        ]
+    ) == ("http://x/raw.pdf", "RAW")
+
+
+def test_pick_source_page_only_as_fallback():
+    # RAW present -> SOURCE_PAGE ignored.
+    assert _pick(
+        [
+            {"link": "http://x/page", "role": "SOURCE_PAGE"},
+            {"link": "http://x/a.pdf", "role": "RAW"},
+        ]
+    ) == ("http://x/a.pdf", "RAW")
+    # Only SOURCE_PAGE -> use it.
+    assert _pick([{"link": "http://x/page", "role": "SOURCE_PAGE"}]) == (
+        "http://x/page",
+        "SOURCE_PAGE",
+    )
+
+
+def test_pick_skips_markdown_and_permalink():
+    assert _pick(
+        [
+            {"link": "http://x/a.md", "role": "MARKDOWN"},
+            {"link": "http://x/p", "role": "PERMALINK"},
+        ]
+    ) == (None, None)
+
+
+def test_pick_falls_back_to_legacy_url_strings():
+    assert _pick(url=["http://x/legacy.pdf"]) == ("http://x/legacy.pdf", "RAW")
+
+
+# ── HTML main-content extraction (chrome removal) ────────────
+
+
+def test_source_page_uses_html_extraction(settings, tmp_path):
+    """A SOURCE_PAGE (HTML) link is run through main-content extraction, not the
+    plain MarkItDown PDF/doc path."""
+    settings.SOURCE_MARKDOWN_DIR = tmp_path
+    src = {
+        "source_id": "p1",
+        "title": "Press release",
+        "urls": [{"link": "http://x/page", "role": "SOURCE_PAGE"}],
+    }
+    with patch.object(
+        converter.jds_client,
+        "download_source_file",
+        return_value=(
+            b"<html><body><nav>MENU</nav><article>Real body</article></body></html>",
+            "text/html",
+        ),
+    ), patch.object(
+        converter, "_html_to_markdown", return_value="Real body"
+    ) as h2m, patch.object(
+        converter, "_markitdown"
+    ) as md:
+        res = converter.convert_source(src, overwrite=True)
+    h2m.assert_called_once()
+    md.assert_not_called()  # HTML path used; MarkItDown not invoked
+    assert "trafilatura" in res["note"]
+    assert res["markdown"].rstrip().endswith("Real body")
+
+
+def test_source_page_falls_back_to_markitdown_when_extraction_empty(settings, tmp_path):
+    """If main-content extraction finds nothing, fall back to MarkItDown."""
+    settings.SOURCE_MARKDOWN_DIR = tmp_path
+    src = {
+        "source_id": "p2",
+        "title": "Empty page",
+        "urls": [{"link": "http://x/page.html", "role": "SOURCE_PAGE"}],
+    }
+    with patch.object(
+        converter.jds_client,
+        "download_source_file",
+        return_value=(b"<html></html>", "text/html"),
+    ), patch.object(converter, "_html_to_markdown", return_value=""), patch.object(
+        converter, "_markitdown"
+    ) as md, patch.object(
+        converter, "_patch_likhit_ocr_dpi"
+    ):
+        md.return_value.convert.return_value = MagicMock(text_content="fallback body")
+        res = converter.convert_source(src, overwrite=True)
+    md.assert_called_once()
+    assert res["markdown"].rstrip().endswith("fallback body")
+
+
 # ── Frontmatter ──────────────────────────────────────────────
 
 

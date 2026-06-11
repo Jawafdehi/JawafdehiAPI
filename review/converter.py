@@ -83,7 +83,11 @@ def _markitdown():
 
 
 def _pick_url(urls):
-    """Prefer a direct (non web-archive) artifact url; fall back to first."""
+    """Prefer a direct (non web-archive) artifact url; fall back to first.
+
+    Operates on a plain list of url STRINGS (the legacy ``source['url']``
+    shape). Role-aware selection lives in ``_pick_source_link``.
+    """
     if not urls:
         return None
     direct = [u for u in urls if "web.archive.org" not in u]
@@ -104,14 +108,98 @@ def _ext_from_url(url, content_type=""):
     return ".bin"
 
 
-def _with_frontmatter(body, source):
+# How cleanly a format converts to markdown — higher is better. Word docs are
+# structured text (best), HTML is extractable main-content, PDF may need OCR,
+# everything else is a guess. Used to decide whether an ALTERNATE link is a
+# better conversion target than the RAW one.
+_FORMAT_RANK = {
+    ".docx": 4,
+    ".doc": 4,
+    ".html": 3,
+    ".htm": 3,
+    ".pdf": 2,
+    ".txt": 2,
+}
+
+
+def _format_rank(url):
+    return _FORMAT_RANK.get(_ext_from_url(url), 1)
+
+
+def _pick_source_link(source):
+    """Choose which link to convert, honoring the source's link ROLES.
+
+    Returns ``(url, role)`` or ``(None, None)``. Selection priority:
+
+      1. RAW — the canonical document file — is the default target.
+      2. ALTERNATE — an alternate-format rendering of the same document — is
+         preferred over RAW only when it converts more cleanly (e.g. a ``.docx``
+         export when RAW is a scanned ``.pdf``); see ``_FORMAT_RANK``.
+      3. SOURCE_PAGE — the HTML page a document was published on — is a last
+         resort (no document file present); it is fetched and run through
+         main-content extraction to drop site chrome.
+
+    MARKDOWN (our own output) and PERMALINK (a stable pointer, not necessarily
+    fetchable) are never conversion targets. Falls back to the legacy plain
+    ``url`` string list when no role-tagged ``urls`` exist.
+    """
+    by_role = {}
+    for item in source.get("urls") or []:
+        if not isinstance(item, dict):
+            continue
+        link, role = item.get("link"), item.get("role")
+        if link and role and role not in by_role:
+            by_role[role] = link  # first link of each role wins
+
+    raw = by_role.get("RAW")
+    alt = by_role.get("ALTERNATE")
+    if raw or alt:
+        if raw and alt:
+            chosen = alt if _format_rank(alt) > _format_rank(raw) else raw
+        else:
+            chosen = raw or alt
+        return chosen, ("ALTERNATE" if chosen == alt and chosen != raw else "RAW")
+
+    page = by_role.get("SOURCE_PAGE")
+    if page:
+        return page, "SOURCE_PAGE"
+
+    # Legacy sources with only plain url strings (no roles): treat as RAW.
+    legacy = _pick_url(source.get("url", []))
+    return (legacy, "RAW") if legacy else (None, None)
+
+
+def _html_to_markdown(raw_bytes):
+    """Extract the MAIN content of an HTML page as Markdown (drops site chrome).
+
+    HTML sources (SOURCE_PAGE, or a RAW/ALTERNATE link that is itself a web
+    page) otherwise convert to markdown that includes nav/header/footer/sidebar
+    boilerplate. trafilatura isolates the article body using text-density
+    heuristics. Returns the extracted markdown, or "" when trafilatura finds no
+    main content (caller then falls back to the plain MarkItDown conversion).
+    """
+    import trafilatura
+
+    html = raw_bytes.decode("utf-8", errors="replace")
+    extracted = trafilatura.extract(
+        html,
+        output_format="markdown",
+        include_comments=False,
+        include_tables=True,
+        favor_precision=True,
+    )
+    return (extracted or "").strip()
+
+
+def _with_frontmatter(body, source, *, source_url=None):
     """Prepend a YAML frontmatter block to a converted-markdown `body`.
 
     Frontmatter carries the processing timestamp plus source metadata so each
     stored markdown file is self-describing. The timestamp is stamped fresh on
     every emit, so it is NOT part of the on-disk cache (the cache holds only the
     deterministic body); any pre-existing frontmatter on `body` is stripped first
-    so re-runs don't stack blocks.
+    so re-runs don't stack blocks. ``source_url`` is the link actually converted
+    (defaults to the role-aware pick).
     """
     from django.utils import timezone
 
@@ -121,12 +209,14 @@ def _with_frontmatter(body, source):
         # treat this source as "nothing to attach" (a frontmatter-only file is
         # not a usable conversion).
         return ""
+    if source_url is None:
+        source_url, _ = _pick_source_link(source)
     fields = {
         "processed_at": timezone.now().isoformat(),
         "source_id": source.get("source_id") or "",
         "title": source.get("title") or "",
         "source_type": source.get("source_type") or "",
-        "source_url": _pick_url(source.get("url", [])) or "",
+        "source_url": source_url or "",
     }
     lines = ["---"]
     for key, value in fields.items():
@@ -158,13 +248,15 @@ def convert_source(source, *, overwrite=False):
             "note": "Markdown already present on source.",
         }
 
-    url = _pick_url(source.get("url", []))
+    # Choose which link to convert, honoring link roles (RAW/ALTERNATE > the
+    # HTML SOURCE_PAGE; never MARKDOWN/PERMALINK).
+    url, role = _pick_source_link(source)
     if not url:
         return {
             "markdown": "",
             "status": "skipped",
             "url": None,
-            "note": "Source has no url to convert.",
+            "note": "Source has no convertible url (RAW/ALTERNATE/SOURCE_PAGE).",
         }
 
     # 2. Cache by content hash of url. The cache key is the url, NOT the
@@ -179,7 +271,7 @@ def convert_source(source, *, overwrite=False):
     if cache_path.exists() and not overwrite:
         body = cache_path.read_text(encoding="utf-8")
         return {
-            "markdown": _with_frontmatter(body, source),
+            "markdown": _with_frontmatter(body, source, source_url=url),
             "status": "converted",
             "url": url,
             "note": "From cache.",
@@ -188,20 +280,32 @@ def convert_source(source, *, overwrite=False):
     try:
         content, ctype = jds_client.download_source_file(url)
         ext = _ext_from_url(url, ctype)
-        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tf:
-            tf.write(content)
-            tmp = tf.name
-        try:
-            result = _markitdown().convert(tmp)
-            md_text = result.text_content or ""
-        finally:
-            os.unlink(tmp)
+        # HTML sources (the SOURCE_PAGE landing page, or a RAW/ALTERNATE link
+        # that is itself a web page): extract just the main content so the
+        # markdown isn't polluted with nav/header/footer chrome. Fall back to the
+        # plain MarkItDown conversion when extraction finds no article body.
+        md_text = ""
+        note = ""
+        if role == "SOURCE_PAGE" or ext in (".html", ".htm"):
+            md_text = _html_to_markdown(content)
+            if md_text:
+                note = "Converted via trafilatura (HTML main-content)."
+        if not md_text:
+            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tf:
+                tf.write(content)
+                tmp = tf.name
+            try:
+                result = _markitdown().convert(tmp)
+                md_text = result.text_content or ""
+            finally:
+                os.unlink(tmp)
+            note = note or f"Converted via likhit ({ext})."
         cache_path.write_text(md_text, encoding="utf-8")
         return {
-            "markdown": _with_frontmatter(md_text, source),
+            "markdown": _with_frontmatter(md_text, source, source_url=url),
             "status": "converted",
             "url": url,
-            "note": f"Converted via likhit ({ext}).",
+            "note": note,
         }
     except Exception as e:  # noqa: BLE001 - surface conversion failure per source
         return {
@@ -237,7 +341,7 @@ def convert_all(sources, *, overwrite=False):
         try:
             res = fut.result(timeout=timeout)
         except FutureTimeout:
-            url = _pick_url(s.get("url", []))
+            url, _ = _pick_source_link(s)
             res = {
                 "markdown": "",
                 "status": "error",
@@ -246,10 +350,11 @@ def convert_all(sources, *, overwrite=False):
             }
             fut.cancel()
         except Exception as e:  # noqa: BLE001 - never let one source kill the batch
+            url, _ = _pick_source_link(s)
             res = {
                 "markdown": "",
                 "status": "error",
-                "url": _pick_url(s.get("url", [])),
+                "url": url,
                 "note": f"Conversion failed: {e}",
             }
         finally:
