@@ -62,7 +62,29 @@ MEDIA_NEWS_TOTAL_CAP = 3000
 MEDIA_NEWS_PER_ARTICLE_CAP = 800
 TIMELINE_CHUNK_SIZE = 10000
 TIMELINE_CHUNK_OVERLAP = 1000
-TIMELINE_MAX_ENTRIES = 30
+REASONING_BLEED_PREFIXES = (
+    "the ",
+    "i ",
+    "we ",
+    "here",
+    "based",
+    "as ",
+    "in ",
+    "thi",
+    "it ",
+    "to ",
+    "a ",
+    "an ",
+    "for",
+    "let",
+    "ok",
+    "sure",
+    "cer",
+    "acc",
+    "according",
+)
+
+TIMELINE_MAX_ENTRIES = 40
 TIMELINE_DISTINCT_EVENT_TERMS = (
     "आरोप",
     "दायर",
@@ -139,6 +161,10 @@ def _truncate_at_sentence(text: str, max_chars: int) -> str:
 
 
 EXTRACTION_SYSTEM_PROMPT = """\
+OUTPUT RULE: Respond with ONLY a valid JSON array. No reasoning, no explanation, \
+no markdown, no text of any kind outside the JSON array. \
+Your entire response must start with [ and end with ].
+
 You are a Nepali legal analyst extracting structured timeline entries from \
 CIAA (Commission for the Investigation of Abuse of Authority) press releases, \
 court orders, charge sheets, and NGM court hearing records.
@@ -209,38 +235,24 @@ QUALITY RULES:
 """
 
 EXTRACTION_USER_PROMPT = """\
-Extract chronological timeline entries from the provided CIAA case source \
-documents and NGM structured hearing data.
+Output ONLY a JSON array. Start with [. No reasoning or explanation.
 
 Case title: {case_title}
 
-Instructions:
-- Each entry must have "date" (YYYY-MM-DD in AD), "title", and "description"
-- Write all title/description text in Nepali देवनागरी
-- Description is required whenever source text or NGM remarks provide detail
-- Target 2-4 concise sentences for descriptions with substantive source detail
-- Include exact material facts when present: रु. amounts, उजुरी/file/case numbers,
-  names of parties/offices/companies, alleged acts, decisions, verdicts, penalties,
-  and outcomes
-- For NGM dates: use them exactly as-is — they are authoritative ground-truth
-- For document-text dates: convert from BS to AD before outputting
-- Use document text to enrich NGM-dated hearing entries with narrative context
-- Order entries chronologically from earliest to latest
-- Only include events explicitly mentioned or clearly inferred from the sources
-- If sources are insufficient, return fewer entries
-
-{PUBLISHED_STYLE_PROMPT_EXAMPLES}
-
-IMPORTANT: Return ONLY a valid JSON array of timeline entry objects.
-Format: [{{"date": "YYYY-MM-DD", "title": "नेपाली शीर्षक", "description": "विवरण"}}]
-No explanations, no markdown, no text outside the JSON array.
+Timeline entries must have "date" (YYYY-MM-DD AD), "title" (Nepali), \
+and "description" (Nepali, 2-4 sentences when source provides detail).
+Include exact facts when present: रु. amounts, case numbers, names, verdicts, penalties.
+- NGM dates: use exactly as-is (authoritative AD)
+- Document dates: convert BS→AD before output
+- Chronological order
 
 {ngm_section}
 
 DOCUMENT TEXT (use for context, narrative, and any dates not in NGM):
 
 {source_text}
-"""
+
+Output the JSON array now. Start with ["""
 
 
 class Command(BaseCommand):
@@ -802,6 +814,10 @@ class Command(BaseCommand):
             )
             return None
         for url in urls:
+            if isinstance(url, dict):
+                url = url.get("link") or url.get("url") or url.get("href") or ""
+            if not isinstance(url, str) or not url.strip():
+                continue
             parsed = urlparse(url)
             if not parsed.hostname:
                 continue
@@ -976,10 +992,9 @@ class Command(BaseCommand):
             case_title=case_title,
             ngm_section=ngm_section,
             source_text=source_text,
-            PUBLISHED_STYLE_PROMPT_EXAMPLES=PUBLISHED_STYLE_PROMPT_EXAMPLES,
         )
 
-        return call_llm(
+        response = call_llm(
             system_prompt=EXTRACTION_SYSTEM_PROMPT.replace(
                 "{PUBLISHED_STYLE_EXAMPLES}", PUBLISHED_STYLE_EXAMPLES
             ),
@@ -988,7 +1003,31 @@ class Command(BaseCommand):
             base_url=llm_base_url,
             api_key=llm_api_key,
             session=session,
+            max_tokens=16000,
         )
+
+        # Detect reasoning bleed: the model responded with reasoning text instead
+        # of JSON (common with kimi-k2.5 / deepseek when it runs out of thinking
+        # tokens). Retry once with lower max_tokens and no prefix trick.
+        stripped = response.strip().lstrip("[").lstrip()
+        if any(stripped.lower().startswith(p) for p in REASONING_BLEED_PREFIXES):
+            logger.warning(
+                "  Chunk returned reasoning-only text (%.80s…) — retrying",
+                stripped[:80],
+            )
+            response = call_llm(
+                system_prompt=EXTRACTION_SYSTEM_PROMPT.replace(
+                    "{PUBLISHED_STYLE_EXAMPLES}", PUBLISHED_STYLE_EXAMPLES
+                ),
+                user_prompt=prompt,
+                model=llm_model,
+                base_url=llm_base_url,
+                api_key=llm_api_key,
+                session=session,
+                max_tokens=4000,
+            )
+
+        return response
 
     def _chunk_source_text(self, source_text: str) -> list[str]:
         text = (source_text or "").strip()
@@ -1019,7 +1058,8 @@ class Command(BaseCommand):
                 best_by_key[key] = entry
 
         deduped = list(best_by_key.values())
-        collapsed = self._collapse_same_date_entries(deduped)
+        filtered = self._filter_buddha_entries(deduped)
+        collapsed = self._collapse_same_date_entries(filtered)
         verdict_res = self._warn_verdict_date_cluster(collapsed)
         if verdict_res:
             keeper_idx, verdict_drop = verdict_res
@@ -1053,6 +1093,41 @@ class Command(BaseCommand):
             len(entry.get("title", "")),
         )
 
+    @staticmethod
+    def _filter_buddha_entries(entries: list[dict]) -> list[dict]:
+        """Drop pure adjournment (बृद्ध) entries with no substantive content."""
+        substantive_terms = {
+            "फैसला",
+            "निर्णय",
+            "ठहर",
+            "आदेश",
+            "दोषी",
+            "बरी",
+            "सजाय",
+            "कैद",
+            "जरिबाना",
+            "रु.",
+            "बयान",
+            "साक्षी",
+            "आरोप",
+            "दर्ता",
+            "धरौटी",
+            "पक्राउ",
+            "थुनछेक",
+            "बहस",
+            "सफाई",
+            "बकपत्र",
+        }
+        kept = []
+        for entry in entries:
+            title = entry.get("title", "")
+            combined = f"{title} {entry.get('description', '')}"
+            if "बृद्ध" in title:
+                if not any(term in combined for term in substantive_terms):
+                    continue  # pure adjournment — drop it
+            kept.append(entry)
+        return kept
+
     def _collapse_same_date_entries(self, entries: list[dict]) -> list[dict]:
         by_date = {}
         for entry in entries:
@@ -1067,9 +1142,7 @@ class Command(BaseCommand):
             date_entries.sort(key=self._entry_score, reverse=True)
             kept = [date_entries[0]]
             for candidate in date_entries[1:]:
-                if len(kept) >= 2:
-                    break
-                if self._is_clearly_distinct_event(candidate, kept[0]):
+                if all(self._is_clearly_distinct_event(candidate, k) for k in kept):
                     kept.append(candidate)
 
             collapsed.extend(kept)

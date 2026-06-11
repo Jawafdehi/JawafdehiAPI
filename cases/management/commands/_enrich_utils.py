@@ -29,7 +29,14 @@ DOCUMENT_FORMAT_PRIORITY = {".docx": 4, ".doc": 3, ".pdf": 2}
 def rank_source_urls(source: DocumentSource) -> list[str]:
     """Return URLs sorted by format priority (DOCX > DOC > PDF > web)."""
     raw_urls = source.url if isinstance(source.url, list) else []
-    urls = [url.strip() for url in raw_urls if isinstance(url, str) and url.strip()]
+    urls = []
+    for entry in raw_urls:
+        if isinstance(entry, str) and entry.strip():
+            urls.append(entry.strip())
+        elif isinstance(entry, dict):
+            link = entry.get("link") or entry.get("url") or entry.get("href") or ""
+            if isinstance(link, str) and link.strip():
+                urls.append(link.strip())
     if not urls:
         return []
 
@@ -164,6 +171,7 @@ def call_llm(
     api_key: Optional[str],
     session: requests.Session,
     max_retries: int = 4,
+    max_tokens: int = 2000,
 ) -> str:
     """Call LLM API via OpenAI-compatible chat completions endpoint.
 
@@ -194,9 +202,10 @@ def call_llm(
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
+            {"role": "assistant", "content": "["},
         ],
         "temperature": 0.1,
-        "max_tokens": 2000,  # enough for ~20-30 entities; bumped from 1500 for larger press-release-only cases
+        "max_tokens": max_tokens,
         "stream": False,  # explicitly disable streaming; proxy may default to SSE
     }
 
@@ -483,20 +492,28 @@ def convert_to_markdown(
 def parse_extraction_response(
     response_text: str, wrapper_keys: set[str]
 ) -> Optional[Union[list, list[dict]]]:
-    """Extract a JSON array from an LLM response, handling markdown wrappers.
+    """Extract a JSON array from an LLM response, handling multiple failure modes.
 
     Handles:
     - Bare JSON array: [...]
     - Wrapped object: {"entities": [...]}
     - Markdown code fences: ```json ... ```
     - Extra text before/after the JSON block
+    - Reasoning models that put thinking before JSON
+    - Prefix bleed after assistant "[" prefix (e.g. "[The user wants...")
+    - Unbracketed object sequences: {"date": ...}, {"date": ...}
+    - Returns None when parsing fails or array is empty.
 
-    Returns the raw parsed array; caller handles field mapping.
-    Returns None when parsing fails or array is empty.
+    Strategy: scan for the LAST valid JSON array in the response. Reasoning
+    models often emit thinking text that contains brackets before the real
+    answer, so the first "[" found is unreliable.
     """
     text = response_text.strip()
+    if not text:
+        logger.warning("parse_extraction_response: empty response")
+        return None
 
-    # Strip markdown code fences if present (str.find = O(n), no ReDoS)
+    # Strip markdown code fences if present
     if "```" in text:
         start = text.find("```")
         if start != -1:
@@ -506,11 +523,43 @@ def parse_extraction_response(
                 if end != -1:
                     text = text[nl + 1 : end].strip()
 
+    # Heuristic: assist prefix "[" followed by reasoning text rather than JSON
+    # e.g. "[The user wants..."  — strip the bad "[" so scanning below works
+    if text.startswith("["):
+        rest = text[1:].lstrip()
+        if rest and rest[0] not in (
+            "{",
+            '"',
+            "[",
+            "]",
+            "0",
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+            "-",
+            " ",
+            "\t",
+            "\n",
+            "\r",
+        ):
+            text = text[1:]
+
+    # Heuristic: model output bare JSON objects without outer brackets
+    # e.g. {"date": ...}, {"date": ...} (no leading "[", no trailing "]")
+    if not text.startswith("["):
+        text = "[" + text
+    if not text.rstrip().endswith("]"):
+        text = text.rstrip().rstrip(",") + "]"
+
     # Strategy 1: try to find a JSON object wrapper {"entities": [...]}
-    # and extract the array directly — avoids "Extra data" from trailing braces
     obj_start = text.find("{")
     if obj_start != -1:
-        # Find matching closing brace
         depth = 0
         obj_end = -1
         for i, ch in enumerate(text[obj_start:], obj_start):
@@ -527,16 +576,18 @@ def parse_extraction_response(
                 if isinstance(obj, dict):
                     for wrapper_key in wrapper_keys:
                         if isinstance(obj.get(wrapper_key), list):
-                            entries = obj[wrapper_key]
-                            if entries:
-                                return entries
+                            return obj[wrapper_key]
             except json.JSONDecodeError:
-                pass  # fall through to array strategy
+                pass
 
-    # Strategy 2: find a bare JSON array [...]
-    arr_start = text.find("[")
-    if arr_start != -1:
-        # Find matching closing bracket
+    # Strategy 2: scan for the LAST valid JSON array (reasoning models put
+    # answer last, thinking first)
+    last_valid: Optional[list] = None
+    search_from = 0
+    while True:
+        arr_start = text.find("[", search_from)
+        if arr_start == -1:
+            break
         depth = 0
         arr_end = -1
         for i, ch in enumerate(text[arr_start:], arr_start):
@@ -547,15 +598,18 @@ def parse_extraction_response(
                 if depth == 0:
                     arr_end = i
                     break
-        if arr_end != -1:
-            try:
-                entries = json.loads(text[arr_start : arr_end + 1])
-                if isinstance(entries, list) and entries:
-                    return entries
-            except json.JSONDecodeError as exc:
-                logger.warning("Failed to parse JSON array from LLM response: %s", exc)
-                logger.debug("JSON string: %s", text[arr_start : arr_end + 1][:500])
+        if arr_end == -1:
+            break
+        try:
+            entries = json.loads(text[arr_start : arr_end + 1])
+            if isinstance(entries, list):
+                last_valid = entries
+        except json.JSONDecodeError:
+            pass
+        search_from = arr_end + 1
 
-    logger.warning("Could not extract JSON from LLM response")
-    logger.debug("Response: %s", text[:500])
+    if last_valid is not None:
+        return last_valid
+
+    logger.warning("Raw LLM response (parse failed): %s", text[:2000])
     return None
