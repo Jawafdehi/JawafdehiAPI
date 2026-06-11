@@ -60,6 +60,7 @@ from .rules.predicates import (
     can_view_case,
     is_admin_or_moderator,
     is_contributor,
+    is_readonly,
 )
 from .search_serializers import SearchResponseSerializer
 from .serializers import (
@@ -210,8 +211,9 @@ class UnifiedSearchView(APIView):
 
         **Visibility rules:**
         - Unauthenticated requests: only PUBLISHED cases.
-        - Admin / Moderator: all non-CLOSED cases (PUBLISHED + IN_REVIEW + DRAFT).
-        - Authenticated contributor/other: PUBLISHED cases + any DRAFT or IN_REVIEW cases
+        - Admin / Moderator / Contributor / ReadOnly: all non-CLOSED cases
+          (PUBLISHED + IN_REVIEW + DRAFT).
+        - Other authenticated users: PUBLISHED cases + any DRAFT or IN_REVIEW cases
           they are explicitly assigned to as contributors.
 
         Results are ordered by creation date (newest first).
@@ -294,10 +296,10 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
     Public read-only API for Cases (with PATCH support for authenticated users).
 
     Provides:
-    - Create endpoint: POST /api/cases/ (authenticated users only)
+    - Create endpoint: POST /api/cases/ (authenticated; write authorization in create)
     - List endpoint: GET /api/cases/
     - Retrieve endpoint: GET /api/cases/{id}/
-    - Patch endpoint: PATCH /api/cases/{id}/ (authenticated users only)
+    - Patch endpoint: PATCH /api/cases/{id}/ (authenticated; gated by can_change_case)
 
     Filtering:
     - case_type: Filter by case type
@@ -306,8 +308,10 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
     Search:
     - Full-text search across title, description, key_allegations
 
-    Only published cases (state=PUBLISHED) are accessible.
-    The detail endpoint also includes IN_REVIEW cases.
+    Read visibility is role-based: unauthenticated callers see PUBLISHED cases
+    (retrieve also exposes IN_REVIEW); Admin / Moderator / Contributor / ReadOnly
+    see all non-CLOSED cases (incl. DRAFT). CLOSED cases are never exposed via
+    this API.
     """
 
     serializer_class = CaseSerializer
@@ -322,7 +326,14 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
     ]
 
     def get_permissions(self):
-        if self.action in ("create", "partial_update"):
+        # create requires the cases.add_case model permission (DjangoModelPermissions
+        # maps POST->add_case) on top of authentication, so the org-wide ReadOnly
+        # role (view-only perms) and plain authenticated users without add_case
+        # cannot create cases. partial_update stays IsAuthenticated here; its
+        # authorization is the can_change_case check inside partial_update().
+        if self.action == "create":
+            return [IsAuthenticated(), DjangoModelPermissions()]
+        if self.action == "partial_update":
             return [IsAuthenticated()]
         return super().get_permissions()
 
@@ -344,6 +355,12 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
           - CLOSED cases are never exposed via public API
         Partial update endpoint: all cases except CLOSED (authorization check happens in partial_update).
         """
+        if self.action == "create":
+            # DjangoModelPermissions calls get_queryset() only to derive the model
+            # for the add_case check; return an empty queryset (still carries
+            # .model) so the list/tag-filtering path below does not run on POST.
+            return Case.objects.none()
+
         if self.action == "partial_update":
             # PATCH endpoint: return all cases except CLOSED, authorization check happens in partial_update method
             return Case.objects.exclude(state=CaseState.CLOSED)
@@ -361,12 +378,14 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
         else:
             # List endpoint: visibility depends on authentication/role.
             # - Unauthenticated: PUBLISHED only
-            # - Admin/Moderator: all non-CLOSED cases
-            # - Other authenticated (contributor): PUBLISHED + cases they are assigned to
+            # - Admin/Moderator/Contributor/ReadOnly: all non-CLOSED cases
+            # - Other authenticated: PUBLISHED + cases they are assigned to
             if not (self.request.user and self.request.user.is_authenticated):
                 queryset = Case.objects.filter(state=CaseState.PUBLISHED)
-            elif is_admin_or_moderator(self.request.user) or is_contributor(
-                self.request.user
+            elif (
+                is_admin_or_moderator(self.request.user)
+                or is_contributor(self.request.user)
+                or is_readonly(self.request.user)
             ):
                 queryset = Case.objects.exclude(state=CaseState.CLOSED)
             else:
@@ -693,8 +712,11 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
         description="""
         Retrieve a paginated list of document sources.
 
-        Only sources associated with published or in-review cases are accessible.
-        Soft-deleted sources (is_deleted=True) are excluded.
+        Sources associated with published or in-review cases are accessible to
+        all callers. Users in the org-wide ReadOnly role get a system-wide read:
+        every non-deleted source, including those referenced only by DRAFT cases
+        or not referenced by any case. Soft-deleted sources (is_deleted=True) are
+        always excluded.
 
         **Pagination:**
         - Results are paginated with 20 items per page
@@ -728,7 +750,8 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
         description="""
         Create a new document source with an optional file upload.
 
-        Requires authentication. Accepts multipart form data.
+        Requires authentication and the `cases.add_documentsource` permission.
+        Accepts multipart form data.
         """,
         tags=["sources"],
     ),
@@ -750,18 +773,22 @@ class DocumentSourceViewSet(
     - Update endpoint: PATCH/PUT /api/sources/{id_or_source_id}/
 
     The retrieve/update endpoints accept either the database id or the source_id.
-    Only sources associated with published or in-review cases are accessible.
-    Update requires the cases.change_documentsource permission.
+    Sources tied to published or in-review cases are accessible to all callers;
+    the org-wide ReadOnly role additionally reads every non-deleted source.
+    Create requires cases.add_documentsource; update requires
+    cases.change_documentsource (enforced via DjangoModelPermissions).
     """
 
     parser_classes = [MultiPartParser, FormParser, JSONParser]
     lookup_field = "pk"
 
     def get_permissions(self):
-        if self.action in ("partial_update", "update"):
+        # Writes require the matching Django model permission (DjangoModelPermissions
+        # maps POST->add_documentsource, PUT/PATCH->change_documentsource) on top of
+        # authentication. This keeps the org-wide ReadOnly role (view-only perms) and
+        # plain authenticated users without source perms out of the write paths.
+        if self.action in ("create", "partial_update", "update"):
             return [IsAuthenticated(), DjangoModelPermissions()]
-        if self.action == "create":
-            return [IsAuthenticated()]
         return super().get_permissions()
 
     def get_serializer_class(self):
@@ -805,6 +832,26 @@ class DocumentSourceViewSet(
         A source is accessible if it's referenced in the evidence field
         of at least one published or in-review case.
         """
+        # On create, DjangoModelPermissions calls get_queryset() solely to derive
+        # the model for the permission check. Short-circuit so the expensive
+        # visibility scan (every published/in-review case + JSON evidence parse)
+        # does not run on the POST hot path. .none() still carries .model.
+        # (update/partial_update legitimately need the real queryset via
+        # get_object(), so they fall through.)
+        if self.action == "create":
+            return DocumentSource.objects.none()
+
+        # The org-wide ReadOnly role gets a system-wide read: all non-deleted
+        # sources, including those referenced only by DRAFT cases (or by no case
+        # at all). Other callers keep the public contract below.
+        user = self.request.user
+        if user and user.is_authenticated and is_readonly(user):
+            return (
+                DocumentSource.objects.filter(is_deleted=False)
+                .prefetch_related("uploaded_files")
+                .distinct()
+            )
+
         allowed_states = [CaseState.PUBLISHED, CaseState.IN_REVIEW]
         visible_cases = Case.objects.filter(state__in=allowed_states)
 
@@ -854,9 +901,13 @@ class DocumentSourceViewSet(
 
 @extend_schema_view(
     list=extend_schema(
-        summary="List all entities",
+        summary="List entities",
         description="""
-        Retrieve a paginated list of all entities in the system.
+        Retrieve a paginated list of entities.
+
+        For most callers the list is limited to entities appearing in published
+        cases. Users in the org-wide ReadOnly role get a system-wide read: every
+        entity in the system.
 
         Entities can have either:
         - `nes_id`: Reference to Nepal Entity Service
@@ -902,7 +953,7 @@ class DocumentSourceViewSet(
         description="""
         Create a new JawafEntity.
 
-        Requires authentication.
+        Requires authentication and the `cases.add_jawafentity` permission.
         """,
         tags=["entities"],
     ),
@@ -921,21 +972,28 @@ class JawafEntityViewSet(
     - List endpoint: GET /api/entities/ (filtered by case association)
     - Retrieve endpoint: GET /api/entities/{id}/
     - Create endpoint: POST /api/entities/
-    - Update endpoint: PATCH /api/entities/{id}/ (authenticated users only)
+    - Update endpoint: PATCH /api/entities/{id}/
 
     Search:
     - Full-text search across nes_id and display_name
 
-    Only entities associated with published cases are returned in list view.
-    Entities must appear in alleged_entities or related_entities (not locations).
+    For most callers the list view returns only entities associated with
+    published cases (in alleged_entities or related_entities, not locations);
+    the org-wide ReadOnly role reads every entity. Create requires
+    cases.add_jawafentity; update requires cases.change_jawafentity (enforced
+    via DjangoModelPermissions).
     """
 
     filter_backends = [filters.SearchFilter]
     search_fields = ["nes_id", "display_name"]
 
     def get_permissions(self):
+        # Writes require the matching Django model permission (DjangoModelPermissions
+        # maps POST->add_jawafentity, PUT/PATCH->change_jawafentity) on top of
+        # authentication, so the org-wide ReadOnly role (view-only perms) and plain
+        # authenticated users without entity perms cannot create or edit entities.
         if self.action in ("create", "partial_update", "update"):
-            return [IsAuthenticated()]
+            return [IsAuthenticated(), DjangoModelPermissions()]
         return super().get_permissions()
 
     def get_serializer_class(self):
@@ -970,9 +1028,23 @@ class JawafEntityViewSet(
 
         Uses caching to avoid expensive queryset evaluation.
         """
+        # On create, DjangoModelPermissions calls get_queryset() solely to derive
+        # the model for the permission check. Short-circuit so the published-case
+        # scan / cache lookup does not run on the POST hot path. .none() still
+        # carries .model. (update/partial_update fall through to the real lookup.)
+        if self.action == "create":
+            return JawafEntity.objects.none()
+
         # For retrieve action, return all entities
         if self.action == "retrieve":
             return JawafEntity.objects.all()
+
+        # The org-wide ReadOnly role gets a system-wide read: every entity in the
+        # list, not just those appearing in published cases (mirrors the source
+        # widening above). Other callers keep the public, published-only contract.
+        user = self.request.user
+        if user and user.is_authenticated and is_readonly(user):
+            return JawafEntity.objects.all().order_by("-created_at")
 
         # For list action, filter by case association
         from django.core.cache import cache

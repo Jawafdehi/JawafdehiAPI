@@ -52,6 +52,18 @@ def has_role(user: User) -> bool:
     return user.groups.filter(name__in=["Admin", "Moderator", "Contributor"]).exists()
 
 
+@rules.predicate
+def is_readonly(user: User) -> bool:
+    """Check if user is in the org-wide ReadOnly group.
+
+    ReadOnly is an assign-to-anyone role that grants system-wide read access
+    (view_* model perms) but no write perms. It deliberately does NOT imply
+    has_role, so write rules that build on is_admin_or_moderator /
+    is_*_contributor continue to exclude ReadOnly users.
+    """
+    return user.groups.filter(name="ReadOnly").exists()
+
+
 # ============================================================================
 # Case-specific Predicates
 # ============================================================================
@@ -193,11 +205,14 @@ def can_manage_user(user: User, target_user: Optional[User]) -> bool:
 # ============================================================================
 
 # Case permissions
-can_view_case = is_admin_or_moderator | is_contributor
+# ReadOnly joins the view predicate so the org-wide read role can list AND
+# retrieve all non-CLOSED cases (the retrieve() DRAFT gate uses can_view_case).
+# Write predicates intentionally omit is_readonly.
+can_view_case = is_admin_or_moderator | is_contributor | is_readonly
 can_change_case = is_admin_or_moderator | is_case_contributor
 
 # Source permissions
-can_view_source = is_admin_or_moderator | is_contributor
+can_view_source = is_admin_or_moderator | is_contributor | is_readonly
 can_change_source = is_admin_or_moderator | is_source_contributor
 can_delete_source = is_admin_or_moderator
 

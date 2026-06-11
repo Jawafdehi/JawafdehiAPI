@@ -268,4 +268,27 @@ class Command(BaseCommand):
             ]
         )
 
+        # ReadOnly: an org-wide read role that can be assigned to anyone. Grants
+        # view_* on every content model so the holder can GET/list all cases
+        # (including non-PUBLISHED, non-CLOSED), sources, uploads, entities, and
+        # relationships, but holds no add/change/delete permission. Casework
+        # review read access is granted by group name in review/permissions.py
+        # (CanReadReview); writes there stay gated by HasContributorRole, which
+        # does not include ReadOnly.
+        readonly_group, created = Group.objects.get_or_create(name="ReadOnly")
+        if created:
+            self.stdout.write(self.style.SUCCESS("Created ReadOnly group"))
+        else:
+            self.stdout.write("ReadOnly group already exists")
+
+        readonly_group.permissions.set(
+            [
+                case_permissions["view"],
+                source_permissions["view"],
+                upload_permissions["view"],
+                entity_permissions["view"],
+                relationship_permissions["view"],
+            ]
+        )
+
         self.stdout.write(self.style.SUCCESS("Successfully configured all groups"))

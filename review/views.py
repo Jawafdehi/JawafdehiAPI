@@ -5,7 +5,10 @@ Auth model change vs. the standalone casework system:
   - Here we reuse jawafdehi-api's JWT. Clients obtain a token pair from the
     existing /api/caseworker/auth/token/ endpoint (SimpleJWT TokenObtainPair)
     and send it as `Authorization: Bearer <access>`.
-  - Every endpoint additionally requires the Contributor role (HasContributorRole).
+  - Read endpoints (review list/detail, rules, config GET, ``me``) require a
+    role with read access (CanReadReview: Contributor+ / ReviewAssistant /
+    the org-wide ReadOnly role). Mutation endpoints require at least the
+    Contributor role (HasContributorRole), which excludes ReadOnly.
 
 So there is no login_view here anymore; the SPA logs in against the shared JWT
 endpoint. We expose a small `me` view so the SPA can show who is signed in and
@@ -22,6 +25,7 @@ from . import case_provider, code_rules
 from .models import CaseReview, ReviewConfig
 from .permissions import (
     CanManageDocumentSources,
+    CanReadReview,
     HasContributorRole,
     IsAdminOrModerator,
 )
@@ -36,7 +40,7 @@ from .serializers import (
 
 
 @api_view(["GET"])
-@permission_classes([HasContributorRole])
+@permission_classes([CanReadReview])
 def me_view(request):
     """Return the signed-in user + their roles (for the SPA header / gating)."""
     user = request.user
@@ -241,7 +245,7 @@ def attach_source_markdown(request, source_id):
 
 class ReviewListView(generics.ListAPIView):
     serializer_class = CaseReviewListSerializer
-    permission_classes = [HasContributorRole]
+    permission_classes = [CanReadReview]
 
     def get_queryset(self):
         return CaseReview.objects.all()
@@ -249,7 +253,7 @@ class ReviewListView(generics.ListAPIView):
 
 class ReviewDetailView(generics.RetrieveAPIView):
     serializer_class = CaseReviewDetailSerializer
-    permission_classes = [HasContributorRole]
+    permission_classes = [CanReadReview]
     queryset = CaseReview.objects.all()
 
 
@@ -259,14 +263,14 @@ class ReviewDetailView(generics.RetrieveAPIView):
 
 
 @api_view(["GET"])
-@permission_classes([HasContributorRole])
+@permission_classes([CanReadReview])
 def rules_list(request):
     """List all (code-defined) rules, in display order."""
     return Response([code_rules.as_dict(r) for r in code_rules.get_rules()])
 
 
 @api_view(["GET"])
-@permission_classes([HasContributorRole])
+@permission_classes([CanReadReview])
 def rule_detail(request, pk):
     """Retrieve a single (code-defined) rule by its stable id."""
     rule = code_rules.get_rule(pk)
@@ -276,7 +280,7 @@ def rule_detail(request, pk):
 
 
 @api_view(["GET", "PUT"])
-@permission_classes([HasContributorRole])
+@permission_classes([CanReadReview])
 def config_view(request):
     """Get or edit global review config (thresholds + LLM sampling).
 
