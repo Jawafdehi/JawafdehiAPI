@@ -787,12 +787,8 @@ class DocumentSource(models.Model):
     source_type = models.CharField(
         max_length=50,
         choices=SourceType.choices,
-        null=True,
-        blank=True,
+        default=SourceType.MISC,
         help_text="Type of source",
-        # TODO: Consider making this non-nullable in a future migration:
-        # 1. Create data migration to backfill NULL values to SourceType.MISC
-        # 2. Create schema migration to set null=False, blank=False
     )
     url = models.JSONField(
         default=list,

@@ -10,17 +10,18 @@ This is a *projection*, not a DB write. Nothing here was applied to production.
 ## How to reproduce the dry run
 
 ```bash
-# Backfill command (classifies NULL-source_type rows only), DB-free preview:
-python manage.py backfill_source_types --dry-run --verbose
-
-# Full migration projection (all rows) is what the table below reflects; the
-# migration itself runs on deploy:
-python manage.py migrate cases 0028_alter_source_type_choices
+# Apply the full chain on a scratch DB and watch the migration output:
+python manage.py migrate cases
 ```
 
 The migration (`0027`) re-classifies **every non-deleted source** (per the
 approved "replace + data-migrate" plan), then `0028` updates the field choices.
 It also re-roles every `.md` link to `MARKDOWN` (idempotent).
+
+Once the data is classified, `source_type` is made **mandatory**: `0030`
+backfills any residual NULL to `MISC` (defensive — there should be none after
+`0027`), and `0031` sets the column `NOT NULL` with a `MISC` default. New
+sources that omit `source_type` therefore default to `MISC` rather than NULL.
 
 ## OLD source_type distribution (n=261)
 - `MEDIA_NEWS`: 101
