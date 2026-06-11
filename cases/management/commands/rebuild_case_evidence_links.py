@@ -14,6 +14,7 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("--check", action="store_true")
         parser.add_argument("--case-id", action="append", dest="case_ids")
+        parser.add_argument("--max-errors", type=int, default=10)
 
     def handle(self, *args, **options):
         queryset = Case.objects.all().order_by("pk")
@@ -23,9 +24,13 @@ class Command(BaseCommand):
         if options["check"]:
             drift = self._find_drift(queryset)
             if drift:
+                sample = [
+                    f"{case_id} expected={expected} actual={actual}"
+                    for case_id, expected, actual in drift[: options["max_errors"]]
+                ]
                 raise CommandError(
                     f"Case evidence link drift detected for {len(drift)} case(s): "
-                    f"{', '.join(drift[:10])}"
+                    f"{'; '.join(sample)}"
                 )
             self.stdout.write(self.style.SUCCESS("Case evidence links are in sync."))
             return
@@ -55,13 +60,19 @@ class Command(BaseCommand):
                         for item in case.evidence or []
                         if isinstance(item, dict) and item.get("source_id")
                     ]
-                ).values_list("pk", flat=True)
+                ).values_list("source_id", flat=True)
             )
             actual = set(
                 CaseEvidenceSource.objects.filter(case=case).values_list(
-                    "document_source_id", flat=True
+                    "document_source__source_id", flat=True
                 )
             )
             if expected != actual:
-                drift.append(case.case_id)
+                drift.append(
+                    (
+                        case.case_id,
+                        sorted(expected),
+                        sorted(actual),
+                    )
+                )
         return drift

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import Counter
 from typing import Any
 
 from django.contrib.postgres.search import (
@@ -11,6 +10,7 @@ from django.contrib.postgres.search import (
     SearchVector,
     TrigramWordSimilarity,
 )
+from django.db import connection
 from django.db.models import (
     Case as DatabaseCase,
     CharField,
@@ -79,6 +79,7 @@ class PostgresUnifiedSearchService(LegacyUnifiedSearchService):
             cases,
             entities,
             documents,
+            counts=counts,
             entity_types=entity_type,
             roles=role,
             case_types=case_type,
@@ -446,6 +447,7 @@ class PostgresUnifiedSearchService(LegacyUnifiedSearchService):
         entities,
         documents,
         *,
+        counts,
         entity_types,
         roles,
         case_types,
@@ -464,9 +466,7 @@ class PostgresUnifiedSearchService(LegacyUnifiedSearchService):
                 count=Count("id", distinct=True)
             )
         }
-        tag_counts = Counter()
-        for case_tags in related_cases.values_list("tags", flat=True).iterator():
-            tag_counts.update(case_tags or [])
+        tag_counts = self._tag_counts(related_cases)
         role_counts = {
             name: count
             for name, count in (
@@ -505,9 +505,9 @@ class PostgresUnifiedSearchService(LegacyUnifiedSearchService):
             )
         }
         type_counts = {
-            "case": cases.count(),
-            "entity": entities.count(),
-            "document": documents.count(),
+            "case": counts["cases"],
+            "entity": counts["entities"],
+            "document": counts["documents"],
         }
         return {
             "type": [
@@ -535,6 +535,23 @@ class PostgresUnifiedSearchService(LegacyUnifiedSearchService):
                 for name, count in sorted(tag_counts.items())
             ],
         }
+
+    def _tag_counts(self, related_cases):
+        case_ids_sql, params = related_cases.values("id").query.sql_with_params()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT tag_value, COUNT(*) AS tag_count
+                FROM ({case_ids_sql}) related_case
+                JOIN cases_case archive_case ON archive_case.id = related_case.id
+                CROSS JOIN LATERAL jsonb_array_elements_text(archive_case.tags)
+                    AS tag_value
+                GROUP BY tag_value
+                ORDER BY tag_value
+                """,
+                params,
+            )
+            return dict(cursor.fetchall())
 
     def _case_ids_for_sources(self, source_ids):
         if not source_ids:

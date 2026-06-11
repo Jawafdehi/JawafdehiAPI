@@ -1,6 +1,10 @@
 """PostgreSQL-specific archive search infrastructure tests."""
 
+from io import StringIO
+
 import pytest
+from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.db import connection
 
 from cases.models import Case, CaseEvidenceSource, CaseState, CaseType, DocumentSource
@@ -57,3 +61,31 @@ def test_case_save_syncs_evidence_source_links():
     case.save(update_fields=["evidence"])
 
     assert not CaseEvidenceSource.objects.filter(case=case).exists()
+
+
+@pytest.mark.django_db
+def test_rebuild_case_evidence_links_command_checks_and_repairs_drift():
+    source = DocumentSource.objects.create(
+        source_id="source:sync:command",
+        title="Command source",
+        description="Evidence source.",
+    )
+    case = Case.objects.create(
+        case_id="case-evidence-command",
+        case_type=CaseType.CORRUPTION,
+        state=CaseState.PUBLISHED,
+        title="Evidence command",
+        evidence=[{"source_id": source.source_id, "description": "Initial"}],
+    )
+    CaseEvidenceSource.objects.filter(case=case).delete()
+
+    with pytest.raises(CommandError, match="source:sync:command"):
+        call_command("rebuild_case_evidence_links", "--check")
+
+    output = StringIO()
+    call_command("rebuild_case_evidence_links", stdout=output)
+
+    assert "Rebuilt" in output.getvalue()
+    assert list(case.evidence_links.values_list("document_source_id", flat=True)) == [
+        source.id
+    ]

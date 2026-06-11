@@ -94,9 +94,30 @@ def backfill_case_evidence_links(apps, schema_editor):
     DocumentSource = apps.get_model("cases", "DocumentSource")
     CaseEvidenceSource = apps.get_model("cases", "CaseEvidenceSource")
 
-    source_id_to_pk = dict(DocumentSource.objects.values_list("source_id", "pk"))
-    links = []
+    batch = []
     for case in Case.objects.order_by("pk").iterator(chunk_size=500):
+        batch.append(case)
+        if len(batch) >= 500:
+            _backfill_case_evidence_batch(batch, DocumentSource, CaseEvidenceSource)
+            batch = []
+    if batch:
+        _backfill_case_evidence_batch(batch, DocumentSource, CaseEvidenceSource)
+
+
+def _backfill_case_evidence_batch(cases, DocumentSource, CaseEvidenceSource):
+    source_ids = {
+        (item.get("source_id") or "").strip()
+        for case in cases
+        for item in (case.evidence or [])
+        if isinstance(item, dict) and item.get("source_id")
+    }
+    source_id_to_pk = dict(
+        DocumentSource.objects.filter(source_id__in=source_ids).values_list(
+            "source_id", "pk"
+        )
+    )
+    links = []
+    for case in cases:
         seen = set()
         for index, item in enumerate(case.evidence or []):
             if not isinstance(item, dict):
