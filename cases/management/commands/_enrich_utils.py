@@ -215,7 +215,9 @@ def call_llm(
     read_timeouts = [90, 120, 180]
 
     last_exc = None
-    for attempt in range(1, max_retries + 1):
+    attempt = 0
+    while attempt < max_retries:
+        attempt += 1
         read_timeout = read_timeouts[min(attempt - 1, len(read_timeouts) - 1)]
         try:
             response = session.post(
@@ -365,22 +367,24 @@ def call_llm(
                     f"on internal reasoning ({reasoning_tokens} reasoning tokens) with "
                     f"no tokens left for output. Increase max_tokens or simplify prompt."
                 )
+            # Assistant prefix echo: model outputs just "[" and stops.
+            # Drop the prefix and retry immediately without burning an attempt.
+            if (
+                finish_reason == "stop"
+                and usage.get("completion_tokens", 0) <= 1
+                and len(payload["messages"]) >= 3
+                and payload["messages"][-1].get("role") == "assistant"
+            ):
+                payload = dict(payload)
+                payload["messages"] = payload["messages"][:-1]
+                attempt -= 1
+                logger.warning(
+                    "  Prefix echo (model returned just '[') — dropped prefix, retrying at no cost"
+                )
+                continue
+
             if attempt < max_retries:
                 wait = 2**attempt
-                # Assistant prefix trick sometimes causes model to output just
-                # "[" and stop (completion_tokens <= 1, finish_reason=stop).
-                # Drop the prefix on retry so the model responds normally.
-                if (
-                    finish_reason == "stop"
-                    and usage.get("completion_tokens", 0) <= 1
-                    and len(payload["messages"]) >= 3
-                    and payload["messages"][-1].get("role") == "assistant"
-                ):
-                    payload = dict(payload)
-                    payload["messages"] = payload["messages"][:-1]
-                    logger.warning(
-                        "  Dropping assistant prefix (model returned just '[')"
-                    )
                 logger.warning(
                     "LLM returned empty content (attempt %d/%d). Retrying in %ds... "
                     "finish_reason=%s usage=%s",
