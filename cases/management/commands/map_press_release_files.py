@@ -224,23 +224,20 @@ class Command(BaseCommand):
                         continue
 
                     # Skip if source is already file-backed (has NGM file URL)
-                    is_file_backed = False
-                    if isinstance(source.url, list):
-                        for url in source.url:
-                            if "ngm-store.jawafdehi.org" in url:
-                                is_file_backed = True
-                                break
+                    is_file_backed = any(
+                        "ngm-store.jawafdehi.org" in url for url in source.url_links
+                    )
 
                     if is_file_backed:
                         skipped_already_mapped += 1
                         continue
 
                     # Check if source URL contains press release URL
-                    if isinstance(source.url, list):
-                        for url in source.url:
-                            if "ciaa.gov.np/pressrelease/" in url:
-                                has_pr_evidence = True
-                                break
+                    if any(
+                        "ciaa.gov.np/pressrelease/" in url for url in source.url_links
+                    ):
+                        has_pr_evidence = True
+                        break
 
             if has_pr_evidence:
                 cases_with_pr_evidence.append(case)
@@ -296,12 +293,10 @@ class Command(BaseCommand):
                 continue
 
             # Check if this is a press release source
-            press_release_url = None
-            if isinstance(source.url, list):
-                for url in source.url:
-                    if "ciaa.gov.np/pressrelease/" in url:
-                        press_release_url = url
-                        break
+            press_release_url = next(
+                (url for url in source.url_links if "ciaa.gov.np/pressrelease/" in url),
+                None,
+            )
 
             if not press_release_url:
                 # Not a press release source, keep as is
@@ -407,7 +402,7 @@ class Command(BaseCommand):
                 # Check if source already exists (same logic as get_or_create_press_release_source)
                 if connection.vendor == "postgresql":
                     existing = DocumentSource.objects.filter(
-                        url__contains=[press_release_url], is_deleted=False
+                        url__contains=[{"link": press_release_url}], is_deleted=False
                     ).first()
                 else:
                     existing = None
@@ -415,20 +410,13 @@ class Command(BaseCommand):
                         url__icontains=press_release_url, is_deleted=False
                     )
                     for source in candidates:
-                        if (
-                            isinstance(source.url, list)
-                            and press_release_url in source.url
-                        ):
+                        if press_release_url in source.url_links:
                             existing = source
                             break
 
                 if existing:
                     # Check if it would need updating
-                    existing_urls = (
-                        existing.url
-                        if isinstance(existing.url, list)
-                        else [existing.url]
-                    )
+                    existing_urls = existing.url_links
                     needs_update = any(
                         file_url not in existing_urls for file_url in file_urls
                     )
@@ -525,7 +513,7 @@ class Command(BaseCommand):
         # Check if source already exists by press release URL (database-agnostic)
         if connection.vendor == "postgresql":
             existing = DocumentSource.objects.filter(
-                url__contains=[press_release_url], is_deleted=False
+                url__contains=[{"link": press_release_url}], is_deleted=False
             ).first()
         else:
             # Fallback for SQLite and other databases
@@ -534,27 +522,20 @@ class Command(BaseCommand):
                 url__icontains=press_release_url, is_deleted=False
             )
             for source in candidates:
-                if isinstance(source.url, list) and press_release_url in source.url:
+                if press_release_url in source.url_links:
                     existing = source
                     break
 
         if existing:
             # Check if existing source needs to be updated with file URLs
-            existing_urls = (
-                existing.url if isinstance(existing.url, list) else [existing.url]
-            )
-            needs_update = False
-
-            # Check if any file URLs are missing
-            for file_url in file_urls:
-                if file_url not in existing_urls:
-                    needs_update = True
-                    break
+            existing_links = existing.url_links
+            needs_update = any(file_url not in existing_links for file_url in file_urls)
 
             if needs_update:
-                # Build complete URL list: merge new URLs with existing ones
-                # Start with existing URLs to preserve any prior URLs
-                url_list = list(existing_urls) if existing_urls else []
+                # Build complete URL list from existing link strings
+                # (existing.url has dicts, url_links gives plain strings for dedup)
+                existing_links = existing.url_links
+                url_list = [{"link": link, "role": None} for link in existing_links]
 
                 # Encode and add press release web URL first (ensure it's at the beginning)
                 if press_release_url and str(press_release_url).strip():
@@ -573,9 +554,14 @@ class Command(BaseCommand):
                         )
                     )
                     # Remove if already exists and prepend to ensure it's first
-                    if encoded_url in url_list:
-                        url_list.remove(encoded_url)
-                    url_list.insert(0, encoded_url)
+                    existing_idx = None
+                    for i, u in enumerate(url_list):
+                        if isinstance(u, dict) and u.get("link") == encoded_url:
+                            existing_idx = i
+                            break
+                    if existing_idx is not None:
+                        url_list.pop(existing_idx)
+                    url_list.insert(0, {"link": encoded_url, "role": None})
 
                 # Add all file URLs (skip duplicates)
                 for file_url in file_urls:
@@ -595,8 +581,11 @@ class Command(BaseCommand):
                             )
                         )
                         # Only add if not already present
-                        if encoded_url not in url_list:
-                            url_list.append(encoded_url)
+                        if not any(
+                            isinstance(u, dict) and u.get("link") == encoded_url
+                            for u in url_list
+                        ):
+                            url_list.append({"link": encoded_url, "role": None})
 
                 # Update existing source with complete URL list
                 existing.url = url_list

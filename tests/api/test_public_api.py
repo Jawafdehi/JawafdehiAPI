@@ -740,8 +740,20 @@ def test_document_source_api_merges_url_with_legacy_and_multiple_uploads():
     response = client.get(f"/api/sources/{source.id}/")
     assert response.status_code == 200
 
-    merged_urls = response.data["url"]
-    assert merged_urls.count("https://example.com/reference.pdf") == 1
-    assert any(url.endswith(source.uploaded_file.url) for url in merged_urls)
-    assert any(url.endswith(upload_one.file.url) for url in merged_urls)
-    assert any(url.endswith(upload_two.file.url) for url in merged_urls)
+    # Check backward-compat url field (list of strings)
+    raw_links = response.data["url"]
+    assert raw_links.count("https://example.com/reference.pdf") == 1
+    assert any(link.endswith(source.uploaded_file.url) for link in raw_links)
+    assert any(link.endswith(upload_one.file.url) for link in raw_links)
+    assert any(link.endswith(upload_two.file.url) for link in raw_links)
+
+    # Check new urls field (list of dicts)
+    merged_urls = response.data["urls"]
+    links = [u["link"] for u in merged_urls]
+    assert links.count("https://example.com/reference.pdf") == 1
+    # Uploaded files should have PERMALINK role
+    for u in merged_urls:
+        if u["link"] == "https://example.com/reference.pdf":
+            assert u["role"] == "RAW"
+        else:
+            assert u["role"] == "PERMALINK"

@@ -204,22 +204,28 @@ class TestURLMigrationProcess(TransactionTestCase):
 class TestURLFieldPostMigration:
     """Test suite for URL field behavior after migration to JSONField."""
 
-    def test_url_field_stores_list(self):
-        """Verify url field accepts and persists a list of URLs."""
+    def test_url_field_stores_dicts(self):
+        """Verify url field stores dict format after save normalization."""
         source = DocumentSource.objects.create(
             title="Test Source", url=["https://example.com"]
         )
 
         assert isinstance(source.url, list)
-        assert source.url == ["https://example.com"]
+        assert source.url == [{"link": "https://example.com", "role": None}]
 
     def test_multiple_urls_storage(self):
-        """Verify multiple URLs can be stored and retrieved."""
-        urls = ["https://example.com", "https://backup.example.com"]
+        """Verify multiple URLs can be stored and retrieved (normalized to dicts)."""
+        urls = [
+            "https://example.com",
+            {"link": "https://backup.example.com", "role": "RAW"},
+        ]
         source = DocumentSource.objects.create(title="Test Source", url=urls)
 
         source.refresh_from_db()
-        assert source.url == urls
+        assert source.url == [
+            {"link": "https://example.com", "role": None},
+            {"link": "https://backup.example.com", "role": "RAW"},
+        ]
 
     def test_url_serialization(self):
         """Verify URLs serialize correctly in API responses."""
@@ -230,4 +236,354 @@ class TestURLFieldPostMigration:
         )
 
         serializer = DocumentSourceSerializer(source)
-        assert serializer.data["url"] == ["https://example.com", "https://backup.com"]
+        # Backward-compat url field returns strings
+        assert serializer.data["url"] == [
+            "https://example.com",
+            "https://backup.com",
+        ]
+        # New urls field returns dicts
+        assert serializer.data["urls"] == [
+            {"link": "https://example.com", "role": "RAW"},
+            {"link": "https://backup.com", "role": "RAW"},
+        ]
+
+
+@pytest.mark.django_db
+class TestSourceLinkDictFormat:
+    """Tests for the source link dict format support."""
+
+    def test_validate_url_list_accepts_dict_items(self):
+        """validate_url_list should accept dict items with link+role."""
+        from cases.models import validate_url_list
+
+        # Should not raise
+        validate_url_list(
+            [
+                {"link": "https://example.com/doc1", "role": "RAW"},
+                {"link": "https://example.com/doc2.md", "role": "MARKDOWN"},
+                {"link": "https://example.com/permalink", "role": "PERMALINK"},
+            ]
+        )
+
+    def test_validate_url_list_accepts_mixed_list(self):
+        """validate_url_list should accept a mix of str and dict."""
+        from cases.models import validate_url_list
+
+        validate_url_list(
+            [
+                "https://example.com/plain",
+                {"link": "https://example.com/dict", "role": "RAW"},
+            ]
+        )
+
+    def test_validate_url_list_accepts_dict_without_role(self):
+        """role is optional in dict — defaults to None which is valid."""
+        from cases.models import validate_url_list
+
+        validate_url_list([{"link": "https://example.com/doc"}])
+
+    def test_validate_url_list_rejects_invalid_role(self):
+        """validate_url_list should reject dict with invalid role."""
+        from django.core.exceptions import ValidationError
+
+        from cases.models import validate_url_list
+
+        with pytest.raises(ValidationError):
+            validate_url_list([{"link": "https://example.com/doc", "role": "INVALID"}])
+
+    def test_validate_url_list_rejects_dict_missing_link(self):
+        """validate_url_list should reject dict missing link key."""
+        from django.core.exceptions import ValidationError
+
+        from cases.models import validate_url_list
+
+        with pytest.raises(ValidationError):
+            validate_url_list([{"role": "RAW"}])
+
+    def test_create_serializer_accepts_dict_urls(self):
+        """DocumentSourceCreateSerializer should accept dict format URLs."""
+        from cases.serializers import DocumentSourceCreateSerializer
+
+        data = {
+            "title": "Dict URL Test",
+            "url": [
+                "https://example.com/plain",
+                {"link": "https://example.com/with-role", "role": "MARKDOWN"},
+            ],
+        }
+        serializer = DocumentSourceCreateSerializer(data=data)
+        assert serializer.is_valid(), f"Errors: {serializer.errors}"
+        assert serializer.validated_data["url"] == [
+            "https://example.com/plain",
+            {"link": "https://example.com/with-role", "role": "MARKDOWN"},
+        ]
+
+    def test_create_serializer_accepts_plain_strings(self):
+        """DocumentSourceCreateSerializer should still accept plain strings."""
+        from cases.serializers import DocumentSourceCreateSerializer
+
+        data = {
+            "title": "Plain URL Test",
+            "url": ["https://example.com/doc"],
+        }
+        serializer = DocumentSourceCreateSerializer(data=data)
+        assert serializer.is_valid(), f"Errors: {serializer.errors}"
+        assert serializer.validated_data["url"] == ["https://example.com/doc"]
+
+    def test_serializer_outputs_dict_format(self):
+        """DocumentSourceSerializer should output {link, role} dicts."""
+        from cases.serializers import DocumentSourceSerializer
+
+        source = DocumentSource.objects.create(
+            title="Dict Output Test",
+            url=[
+                "https://example.com/plain",
+                {"link": "https://example.com/markdown", "role": "MARKDOWN"},
+            ],
+        )
+        serializer = DocumentSourceSerializer(source)
+        assert serializer.data["url"] == [
+            "https://example.com/plain",
+            "https://example.com/markdown",
+        ]
+        assert serializer.data["urls"] == [
+            {"link": "https://example.com/plain", "role": "RAW"},
+            {"link": "https://example.com/markdown", "role": "MARKDOWN"},
+        ]
+
+    def test_source_link_role_enum_values(self):
+        """SourceLinkRole enum should have expected members."""
+        from cases.models import SourceLinkRole
+
+        assert SourceLinkRole.RAW.value == "RAW"
+        assert SourceLinkRole.MARKDOWN.value == "MARKDOWN"
+        assert SourceLinkRole.PERMALINK.value == "PERMALINK"
+        assert len(list(SourceLinkRole)) == 3
+
+    def test_create_serializer_rejects_invalid_url(self):
+        """SourceLinkField should reject invalid URLs."""
+        from cases.serializers import DocumentSourceCreateSerializer
+
+        data = {
+            "title": "Invalid URL Test",
+            "url": ["not-a-url"],
+        }
+        serializer = DocumentSourceCreateSerializer(data=data)
+        assert not serializer.is_valid()
+
+    def test_create_serializer_rejects_dict_invalid_url(self):
+        """SourceLinkField should reject dict with invalid URL."""
+        from cases.serializers import DocumentSourceCreateSerializer
+
+        data = {
+            "title": "Invalid Dict URL Test",
+            "url": [{"link": "not-a-url", "role": "RAW"}],
+        }
+        serializer = DocumentSourceCreateSerializer(data=data)
+        assert not serializer.is_valid()
+
+    def test_create_serializer_strips_whitespace(self):
+        """SourceLinkField should strip whitespace from URLs."""
+        from cases.serializers import DocumentSourceCreateSerializer
+
+        data = {
+            "title": "Whitespace Test",
+            "url": ["  https://example.com/doc  "],
+        }
+        serializer = DocumentSourceCreateSerializer(data=data)
+        assert serializer.is_valid(), f"Errors: {serializer.errors}"
+        assert serializer.validated_data["url"] == ["https://example.com/doc"]
+
+    def test_create_serializer_sanitizes_extra_dict_keys(self):
+        """SourceLinkField should strip extra keys from dict input."""
+        from cases.serializers import DocumentSourceCreateSerializer
+
+        data = {
+            "title": "Extra Keys Test",
+            "url": [
+                {
+                    "link": "https://example.com/doc",
+                    "role": "RAW",
+                    "malicious": "payload",
+                }
+            ],
+        }
+        serializer = DocumentSourceCreateSerializer(data=data)
+        assert serializer.is_valid(), f"Errors: {serializer.errors}"
+        assert serializer.validated_data["url"] == [
+            {"link": "https://example.com/doc", "role": "RAW"}
+        ]
+
+    def test_representation_defaults_none_role_to_raw(self):
+        """to_representation should default None role to RAW."""
+        from cases.serializers import DocumentSourceSerializer
+
+        source = DocumentSource.objects.create(
+            title="None Role Test",
+            url=[{"link": "https://example.com/doc", "role": None}],
+        )
+        serializer = DocumentSourceSerializer(source)
+        assert serializer.data["url"] == ["https://example.com/doc"]
+        assert serializer.data["urls"] == [
+            {"link": "https://example.com/doc", "role": "RAW"}
+        ]
+
+
+class TestDictFormatMigration(TransactionTestCase):
+    """Test the data migration that converts str entries to dict format."""
+
+    @staticmethod
+    def get_historical_model(connection, migration_tuple, app_label, model_name):
+        from django.db.migrations.executor import MigrationExecutor
+
+        executor = MigrationExecutor(connection)
+        project_state = executor.loader.project_state(migration_tuple)
+        return project_state.apps.get_model(app_label, model_name)
+
+    def setUp(self):
+        """Create test data with mixed str/dict URL entries before the migration."""
+        from django.utils import timezone
+
+        call_command("migrate", "cases", "0024_alter_chat_user_identity", verbosity=0)
+
+        DocumentSource = self.get_historical_model(
+            connection,
+            ("cases", "0024_alter_chat_user_identity"),
+            "cases",
+            "DocumentSource",
+        )
+
+        now = timezone.now()
+        DocumentSource.objects.bulk_create(
+            [
+                DocumentSource(
+                    source_id="source:dict:migrate:001",
+                    title="Plain strings",
+                    description="All str entries",
+                    url=["https://example.com/1", "https://example.com/2"],
+                    is_deleted=False,
+                    created_at=now,
+                    updated_at=now,
+                ),
+                DocumentSource(
+                    source_id="source:dict:migrate:002",
+                    title="Already dicts",
+                    description="Already in dict format",
+                    url=[
+                        {"link": "https://example.com/3", "role": "RAW"},
+                    ],
+                    is_deleted=False,
+                    created_at=now,
+                    updated_at=now,
+                ),
+                DocumentSource(
+                    source_id="source:dict:migrate:003",
+                    title="Mixed entries",
+                    description="Mix of str and dict",
+                    url=[
+                        "https://example.com/4",
+                        {"link": "https://example.com/5", "role": "MARKDOWN"},
+                    ],
+                    is_deleted=False,
+                    created_at=now,
+                    updated_at=now,
+                ),
+                DocumentSource(
+                    source_id="source:dict:migrate:004",
+                    title="Empty list",
+                    description="Empty URL list",
+                    url=[],
+                    is_deleted=False,
+                    created_at=now,
+                    updated_at=now,
+                ),
+            ]
+        )
+
+    def test_forward_converts_strs_to_dicts(self):
+        """Migration should convert str entries to {link, role: None} dicts."""
+        call_command("migrate", "cases", "0025_convert_url_list_to_dict", verbosity=0)
+
+        DocumentSource = self.get_historical_model(
+            connection,
+            ("cases", "0025_convert_url_list_to_dict"),
+            "cases",
+            "DocumentSource",
+        )
+
+        s1 = DocumentSource.objects.get(source_id="source:dict:migrate:001")
+        for entry in s1.url:
+            assert isinstance(entry, dict), f"Expected dict, got {entry!r}"
+            assert "link" in entry
+            assert "role" in entry
+        assert s1.url[0] == {"link": "https://example.com/1", "role": None}
+        assert s1.url[1] == {"link": "https://example.com/2", "role": None}
+
+    def test_forward_leaves_existing_dicts(self):
+        """Migration should not modify existing dict entries."""
+        call_command("migrate", "cases", "0025_convert_url_list_to_dict", verbosity=0)
+
+        DocumentSource = self.get_historical_model(
+            connection,
+            ("cases", "0025_convert_url_list_to_dict"),
+            "cases",
+            "DocumentSource",
+        )
+
+        s2 = DocumentSource.objects.get(source_id="source:dict:migrate:002")
+        assert s2.url == [{"link": "https://example.com/3", "role": "RAW"}]
+
+    def test_forward_converts_mixed_list(self):
+        """Migration should handle mixed str/dict lists."""
+        call_command("migrate", "cases", "0025_convert_url_list_to_dict", verbosity=0)
+
+        DocumentSource = self.get_historical_model(
+            connection,
+            ("cases", "0025_convert_url_list_to_dict"),
+            "cases",
+            "DocumentSource",
+        )
+
+        s3 = DocumentSource.objects.get(source_id="source:dict:migrate:003")
+        assert s3.url[0] == {"link": "https://example.com/4", "role": None}
+        assert s3.url[1] == {"link": "https://example.com/5", "role": "MARKDOWN"}
+
+    def test_forward_handles_empty_list(self):
+        """Migration should not break empty lists."""
+        call_command("migrate", "cases", "0025_convert_url_list_to_dict", verbosity=0)
+
+        DocumentSource = self.get_historical_model(
+            connection,
+            ("cases", "0025_convert_url_list_to_dict"),
+            "cases",
+            "DocumentSource",
+        )
+
+        s4 = DocumentSource.objects.get(source_id="source:dict:migrate:004")
+        assert s4.url == []
+
+    def test_reverse_converts_dicts_to_strings(self):
+        """Reverse migration should convert dict entries back to strings."""
+        call_command("migrate", "cases", "0025_convert_url_list_to_dict", verbosity=0)
+        call_command("migrate", "cases", "0024_alter_chat_user_identity", verbosity=0)
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT url FROM cases_documentsource WHERE source_id = %s",
+                ["source:dict:migrate:001"],
+            )
+            url_value = cursor.fetchone()[0]
+
+        import json as _json
+
+        parsed = _json.loads(url_value) if isinstance(url_value, str) else url_value
+        assert parsed == ["https://example.com/1", "https://example.com/2"]
+
+    def tearDown(self):
+        call_command("migrate", verbosity=0)
+        super().tearDown()
+
+    @classmethod
+    def tearDownClass(cls):
+        call_command("migrate", verbosity=0)
+        super().tearDownClass()
