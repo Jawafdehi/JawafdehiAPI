@@ -313,7 +313,8 @@ class SourceLinkField(serializers.Field):
     """Field that accepts a ``{'link': str, 'role': str}`` source-link dict.
 
     Plain URL strings are no longer accepted — every link must be a dict with a
-    ``link`` key and an explicit ``role`` (``RAW``/``MARKDOWN``/``PERMALINK``).
+    ``link`` key and an explicit ``role`` (one of the ``SourceLinkRole`` values:
+    ``RAW``/``MARKDOWN``/``PERMALINK``/``SOURCE_PAGE``/``ALTERNATE``).
     File uploads are recorded as ``RAW`` automatically by the view; this field
     is only used for caller-supplied external URLs, which must name their role.
     """
@@ -693,7 +694,7 @@ class DocumentSourceUpdateSerializer(serializers.ModelSerializer):
         required=False,
         help_text="List of URLs for this source. Each item may be a plain URL "
         "string or a dict with 'link' and 'role' keys (role can be RAW, "
-        "MARKDOWN or PERMALINK).",
+        "MARKDOWN, PERMALINK, SOURCE_PAGE or ALTERNATE).",
     )
 
     class Meta:
