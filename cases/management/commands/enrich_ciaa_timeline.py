@@ -98,7 +98,7 @@ TIMELINE_DISTINCT_EVENT_TERMS = (
     "सम्झौता",
     "लागत",
 )
-TIMELINE_ROUTINE_HEARING_TERMS = ("सुनुवाइ", "सुनुवाई", "पेशी")
+TIMELINE_ROUTINE_HEARING_TERMS = ("सुनुवाइ", "सुनुवाई", "पेशी", "बहस")
 
 _TIMELINE_EXAMPLES = (
     {
@@ -169,8 +169,9 @@ You are a Nepali legal analyst extracting structured timeline entries from \
 CIAA (Commission for the Investigation of Abuse of Authority) press releases, \
 court orders, charge sheets, and NGM court hearing records.
 
-Your task is to reconstruct the chronological progression of a corruption case \
-from available source documents.
+Your task is to reconstruct the factual chronology of a corruption case — the \
+story of what happened and when, plus key legal milestones. This is NOT a \
+duplicate of the court's Pragati Bibaran (case progress tracker).
 
 TIMELINE ENTRY FORMAT:
 Each entry must be a JSON object with:
@@ -180,13 +181,31 @@ Each entry must be a JSON object with:
 
 All three fields must be written in Nepali (देवनागरी लिपि).
 
-KEY EVENTS TO EXTRACT (when available in sources):
-1. CIAA investigation initiation / filing decision date
-2. Case filed to Special Court date
-3. Court hearing dates
-4. Verdict / judgment date
-5. Case registration at CIAA (if different from investigation start)
-6. Any other significant dates mentioned in the source
+EXTRACT ONLY THESE EVENT TYPES (in order of priority):
+
+FACTUAL TIMELINE (highest priority — always extract when present in sources):
+1. Factual incident period — when did the underlying act happen \
+(कहिलेदेखि कहिलेसम्म भ्रष्टाचार/घटना घट्यो). May span multiple years for illicit wealth cases.
+2. उजुरी/complaint filed date
+3. CIAA investigation initiated date (अनुसन्धान थालिएको)
+4. CIAA press release date (प्रेस विज्ञप्ति जारी)
+5. Chargesheet filed to Special Court (आरोपपत्र दायर मिति)
+
+LEGAL OUTCOME TIMELINE (extract when available):
+6. Interim order by Special Court (अन्तरिम आदेश), if any
+7. Special Court verdict date + sentence summary \
+(फैसला — सजाय, जरिबाना, बिगो)
+8. Appeal to Supreme Court date (पुनरावेदन दायर), if any
+9. Supreme Court interim order, if any
+10. Supreme Court verdict, if any
+
+DO NOT EXTRACT:
+- Individual hearing/सुनुवाइ dates (these exist in Pragati Bibaran already)
+- बहस/argument hearing dates
+- साक्षी bowing scheduling dates
+- Adjournment/बृद्ध dates
+- बयान/statement dates (unless it IS the chargesheet or verdict)
+- Procedural steps like "मुद्दा पुर्पक्षमा राखियो"
 
 DATE CONVERSION RULES (CRITICAL):
 - Document text sources use Bikram Sambat (BS) dates — convert to AD
@@ -201,6 +220,11 @@ NGM DATE PRIORITY (CRITICAL):
 - Use document text to add narrative context (title, description) to
   NGM-dated events, and to extract any additional events not in NGM
 - NGM dates are already in AD format — treat them as authoritative
+- For आरोपपत्र दायर events: the correct date is the NGM case registration \
+  date (case_registration field). Do NOT use dates found inside the फैसला \
+  document that cite back to the original filing — those are references, \
+  not the event date.
+- If NGM provides case_registration, that IS the आरोप दायर date.
 
 VERDICT DATE PRECISION (CRITICAL):
 - Be very precise with BS→AD conversion for verdict dates
@@ -213,15 +237,51 @@ VERDICT DATE PRECISION (CRITICAL):
 DESCRIPTION QUALITY RULES:
 - Description is REQUIRED when the source includes facts beyond the date/title
 - Target 2-4 concise Nepali sentences per description when detail exists
-- Preserve material facts: amounts (रु.), complaint/file/case numbers, names of
-  people/offices/companies, alleged acts, court decisions, verdicts, penalties,
-  and final outcomes
-- Do not output shallow descriptions like "अदालतमा सुनुवाइ भयो" when richer
+- Always extract and include: advocate names (अधिवक्ता/उपन्यायाधिवक्ता), \
+  act+section citations (दफा X बमोजिम), exact रु. amounts with denomination \
+  (रु.१,५५,७९,६९५।५८), court bench/decision numbers (इजलास नं., निर्णय नं.), \
+  document references (पाना-X को बहसनोट, च.नं., बकपत्र dates), \
+  BS dates alongside AD dates when both appear in source
+- For बहस/argument entries: state WHAT argument was made, not just that \
+  argument occurred
+- For फैसला entries: state the exact sentence (कैद months/years + जरिबाना \
+  amount + बिगो amount + recovery order), which defendant got which punishment
+- For साक्षी entries: name the witness and summarise what they testified
+- Do not output shallow descriptions like "अदालतमा सुनुवाइ भयो" when richer \
   source context exists
-- Do NOT emit a timeline entry for a hearing date unless you can write a non-empty
-  description based on the document text. A bare "hearing took place" entry with no
-  context is worse than no entry. If NGM remarks only say 'बृद्ध' or equivalent
-  (adjourned), skip that hearing entirely
+- Do NOT emit a timeline entry unless you can write a non-empty description \
+  based on the document text.
+
+HEARING SKIP RULES (CRITICAL):
+- Skip ANY hearing where the only information is that it was adjourned \
+  (बृद्ध/स्थगित)
+- This includes: "बृद्ध भएको", "सुनुवाइ बृद्ध", "कानुन व्यवसायीबाट बृद्ध", \
+  "अन्य आदेशसहित बृद्ध", "सफाई बृद्ध" — all mean nothing happened
+- Only include a hearing date if something SUBSTANTIVE occurred: साक्षी बुझियो, \
+  बयान लिइयो, बहस भयो, धरौटी माग/जम्मा, फैसला/ठहर, आदेश
+- When in doubt whether it's substantive — skip it
+
+BANNED PHRASES — never use these in title or description:
+- "हेर्दा हेर्दै" — court holding pattern, not a timeline event
+- "अदालत सुनुवाइ" as a standalone title — too generic, zero information
+- "अदालतमा सुनुवाइ" as a standalone title — same
+- "दुवै पक्षबाट सुनुवाइ" — not informative
+- "पक्षबाट सुनुवाइ" — not informative
+- "सुनुवाइ स्थगित" — adjournment, same as बृद्ध, skip it
+- "बृद्ध" in any form — adjournment, skip entirely
+- "कसुर ठहर सजाय निर्धारणको लागि पेश" — scheduling step, not an event
+If the only thing you can say about a hearing is one of the above, \
+DO NOT emit that entry.
+
+UNIQUE CONTENT RULE:
+- Each timeline entry MUST contain unique information from the source text for \
+  that specific date — do NOT repeat the same description template across \
+  different dates
+- If two different dates have identical content available, include only the one \
+  with more detail. Do not emit an entry saying "hearing happened" with no \
+  unique facts from the source
+- If you cannot write a unique, factual description for a given date, skip that \
+  entry
 
 PUBLISHED STYLE EXAMPLES:
 {PUBLISHED_STYLE_EXAMPLES}
@@ -239,9 +299,13 @@ Output ONLY a JSON array. Start with [. No reasoning or explanation.
 
 Case title: {case_title}
 
-Timeline entries must have "date" (YYYY-MM-DD AD), "title" (Nepali), \
-and "description" (Nepali, 2-4 sentences when source provides detail).
-Include exact facts when present: रु. amounts, case numbers, names, verdicts, penalties.
+Extract ONLY factual milestones (incident, complaint, CIAA investigation, \
+chargesheet, verdict, appeal) and legal outcomes — NOT hearing/sunuvai dates.
+
+Each entry: "date" (YYYY-MM-DD AD), "title" (Nepali), \
+"description" (Nepali, 2-4 sentences with specific facts).
+Include exact facts: advocate names, act+section citations, \
+रु. amounts, bench numbers, document references, BS+AD dual dates.
 - NGM dates: use exactly as-is (authoritative AD)
 - Document dates: convert BS→AD before output
 - Chronological order
@@ -1056,6 +1120,7 @@ class Command(BaseCommand):
 
         deduped = list(best_by_key.values())
         filtered = self._filter_buddha_entries(deduped)
+        filtered = self._filter_banned_phrases(filtered)
         collapsed = self._collapse_same_date_entries(filtered)
         verdict_res = self._warn_verdict_date_cluster(collapsed)
         if verdict_res:
@@ -1092,7 +1157,11 @@ class Command(BaseCommand):
 
     @staticmethod
     def _filter_buddha_entries(entries: list[dict]) -> list[dict]:
-        """Drop pure adjournment (बृद्ध) entries with no substantive content."""
+        """Drop pure adjournment (बृद्ध/स्थगित) entries with no substantive content."""
+        _BUDDHA_VARIANTS = (
+            "बृद्ध",  # matches बृद्ध भएको, सुनुवाइ बृद्ध, etc.
+            "स्थगित",
+        )
         substantive_terms = {
             "फैसला",
             "निर्णय",
@@ -1118,10 +1187,33 @@ class Command(BaseCommand):
         kept = []
         for entry in entries:
             title = entry.get("title", "")
-            combined = f"{title} {entry.get('description', '')}"
-            if "बृद्ध" in title:
+            description = entry.get("description", "")
+            combined = f"{title} {description}"
+            has_adjournment = any(v in combined for v in _BUDDHA_VARIANTS)
+            if has_adjournment:
                 if not any(term in combined for term in substantive_terms):
                     continue  # pure adjournment — drop it
+            kept.append(entry)
+        return kept
+
+    @staticmethod
+    def _filter_banned_phrases(entries: list[dict]) -> list[dict]:
+        """Drop entries whose title or description matches banned phrases (Gap 5)."""
+        _BANNED_TITLE_PATTERNS = (
+            "हेर्दा हेर्दै",
+            "अदालत सुनुवाइ",
+            "अदालतमा सुनुवाइ",
+            "दुवै पक्षबाट सुनुवाइ",
+            "पक्षबाट सुनुवाइ",
+            "सुनुवाइ स्थगित",
+            "कसुर ठहर सजाय निर्धारणको लागि पेश",
+        )
+        kept = []
+        for entry in entries:
+            title = entry.get("title", "")
+            combined = f"{title} {entry.get('description', '')}"
+            if any(bp in title or bp in combined for bp in _BANNED_TITLE_PATTERNS):
+                continue
             kept.append(entry)
         return kept
 
