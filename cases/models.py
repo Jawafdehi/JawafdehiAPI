@@ -801,6 +801,11 @@ class DocumentSource(models.Model):
         validators=[validate_url_list],
         help_text="List of URLs for this source",
     )
+    link_types = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Parallel array to url — link type per URL. Values: RAW, PERMALINK, MARKDOWN",
+    )
 
     # Uploaded file fields (for native file uploads)
     # If uploaded_file is set, this source is considered an uploaded-file source
