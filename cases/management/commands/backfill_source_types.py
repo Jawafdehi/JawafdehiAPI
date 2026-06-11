@@ -187,6 +187,20 @@ LEGISLATIVE_NEPALI_KEYWORDS = (
 )
 
 
+def _any_keyword(corpus: str, *keyword_tuples: tuple[str, ...]) -> bool:
+    """True if any keyword from any tuple is found in *corpus*."""
+    for tup in keyword_tuples:
+        for kw in tup:
+            if kw in corpus:
+                return True
+    return False
+
+
+def _any_url_domain(domains: frozenset[str], urls: list[str]) -> bool:
+    """True if any URL matches any of the given *domains*."""
+    return any(_domain_in_url(d, u) for d in domains for u in urls)
+
+
 def _classify_source_type(source: DocumentSource) -> SourceType | None:
     """Classify a single source using 11 priority-ordered deterministic rules.
 
@@ -199,65 +213,55 @@ def _classify_source_type(source: DocumentSource) -> SourceType | None:
 
     corpus = f"{title} {desc}".lower()
 
-    # ── Rule 1: CIAA Press Release ──────────────────────────────────────
+    # Rule 1: CIAA Press Release → OFFICIAL_GOVERNMENT
     if any(CIAA_PRESS_RELEASE_RE.search(u) for u in urls):
         return SourceType.OFFICIAL_GOVERNMENT
 
-    # ── Rule 2: NGM Court Orders ────────────────────────────────────────
+    # Rule 2: NGM Court Orders → LEGAL_COURT_ORDER
     if any(NGM_COURT_ORDER_DOMAIN in u for u in urls):
-        # If the URL path contains /court/ it's likely a court order.
-        # Broader: anything on ngm-store that isn't a press release
-        # is a court document.
         return SourceType.LEGAL_COURT_ORDER
 
-    # ── Rule 3: CIAA Procedural ─────────────────────────────────────────
-    if any(
-        kw in corpus
-        for kw in CIAA_PROCEDURAL_KEYWORDS + CIAA_PROCEDURAL_NEPALI_KEYWORDS
-    ):
+    # Rule 3: CIAA Procedural → LEGAL_PROCEDURAL
+    if _any_keyword(corpus, CIAA_PROCEDURAL_KEYWORDS, CIAA_PROCEDURAL_NEPALI_KEYWORDS):
         return SourceType.LEGAL_PROCEDURAL
 
-    # ── Rule 4: Financial/Forensic ──────────────────────────────────────
-    if any(kw in corpus for kw in FINANCIAL_KEYWORDS + FINANCIAL_NEPALI_KEYWORDS):
+    # Rule 4: Financial/Forensic → FINANCIAL_FORENSIC
+    if _any_keyword(corpus, FINANCIAL_KEYWORDS, FINANCIAL_NEPALI_KEYWORDS):
         return SourceType.FINANCIAL_FORENSIC
 
-    # ── Rule 5: Media/News ──────────────────────────────────────────────
-    if any(_domain_in_url(d, u) for d in MEDIA_DOMAINS for u in urls):
+    # Rule 5: Media/News → MEDIA_NEWS
+    if _any_url_domain(MEDIA_DOMAINS, urls):
         return SourceType.MEDIA_NEWS
 
-    # ── Rule 6: Investigative Reports ───────────────────────────────────
-    if any(_domain_in_url(d, u) for d in INVESTIGATIVE_DOMAINS for u in urls):
+    # Rule 6: Investigative Reports → INVESTIGATIVE_REPORT
+    if _any_url_domain(INVESTIGATIVE_DOMAINS, urls):
         return SourceType.INVESTIGATIVE_REPORT
-    if any(
-        kw in corpus for kw in INVESTIGATIVE_KEYWORDS + INVESTIGATIVE_NEPALI_KEYWORDS
-    ):
+    if _any_keyword(corpus, INVESTIGATIVE_KEYWORDS, INVESTIGATIVE_NEPALI_KEYWORDS):
         return SourceType.INVESTIGATIVE_REPORT
 
-    # ── Rule 7: Public Complaint ────────────────────────────────────────
-    if any(
-        kw in corpus
-        for kw in PUBLIC_COMPLAINT_KEYWORDS + PUBLIC_COMPLAINT_NEPALI_KEYWORDS
+    # Rule 7: Public Complaint → PUBLIC_COMPLAINT
+    if _any_keyword(
+        corpus, PUBLIC_COMPLAINT_KEYWORDS, PUBLIC_COMPLAINT_NEPALI_KEYWORDS
     ):
         return SourceType.PUBLIC_COMPLAINT
 
-    # ── Rule 8: Legislative/Policy ──────────────────────────────────────
-    if any(_domain_in_url(d, u) for d in LEGISLATIVE_DOMAINS for u in urls):
+    # Rule 8: Legislative/Policy → LEGISLATIVE_DOC
+    if _any_url_domain(LEGISLATIVE_DOMAINS, urls):
         return SourceType.LEGISLATIVE_DOC
-    if any(kw in corpus for kw in LEGISLATIVE_KEYWORDS + LEGISLATIVE_NEPALI_KEYWORDS):
+    if _any_keyword(corpus, LEGISLATIVE_KEYWORDS, LEGISLATIVE_NEPALI_KEYWORDS):
         return SourceType.LEGISLATIVE_DOC
 
-    # ── Rule 9: Social Media ────────────────────────────────────────────
-    if any(_domain_in_url(d, u) for d in SOCIAL_DOMAINS for u in urls):
+    # Rule 9: Social Media → SOCIAL_MEDIA
+    if _any_url_domain(SOCIAL_DOMAINS, urls):
         return SourceType.SOCIAL_MEDIA
 
-    # ── Rule 10: Internal Corporate ─────────────────────────────────────
-    if any(
-        kw in corpus
-        for kw in INTERNAL_CORPORATE_KEYWORDS + INTERNAL_CORPORATE_NEPALI_KEYWORDS
+    # Rule 10: Internal Corporate → INTERNAL_CORPORATE
+    if _any_keyword(
+        corpus, INTERNAL_CORPORATE_KEYWORDS, INTERNAL_CORPORATE_NEPALI_KEYWORDS
     ):
         return SourceType.INTERNAL_CORPORATE
 
-    # ── Rule 11: Fallback ───────────────────────────────────────────────
+    # Rule 11: Fallback → OTHER_VISUAL
     return SourceType.OTHER_VISUAL
 
 
@@ -319,20 +323,25 @@ class Command(BaseCommand):
                 "Refusing to run in production. Use --allow-production to override."
             )
 
-        qs = DocumentSource.objects.filter(
-            source_type__isnull=True,
-            is_deleted=False,
-        )
-
-        if options["source_id"]:
-            qs = qs.filter(source_id=options["source_id"])
-
+        qs = self._get_queryset(options)
         total = qs.count()
         if total == 0:
             self.stdout.write("No sources found with NULL source_type.")
             return
 
-        limit = options["limit"]
+        sources, actual = self._apply_limit(qs, options["limit"], total)
+        dry_run = options["dry_run"]
+
+        classified, skipped, results = self._classify_batch(sources, dry_run=dry_run)
+        self._print_summary(actual, classified, skipped, dry_run, results)
+
+    def _get_queryset(self, options):
+        qs = DocumentSource.objects.filter(source_type__isnull=True, is_deleted=False)
+        if options["source_id"]:
+            qs = qs.filter(source_id=options["source_id"])
+        return qs
+
+    def _apply_limit(self, qs, limit, total):
         if limit > 0:
             qs = qs[:limit]
             actual = len(qs)
@@ -341,14 +350,15 @@ class Command(BaseCommand):
             qs = list(qs)
             actual = len(qs)
             self.stdout.write(f"Processing all {actual} eligible sources.")
+        return qs, actual
 
-        dry_run = options["dry_run"]
+    def _classify_batch(self, sources, *, dry_run):
         classified = 0
         skipped = 0
         results: dict[str, int] = {}
         updates: dict[str, list[str]] = {}
 
-        for source in qs:
+        for source in sources:
             st = _classify_source_type(source)
             if st is None:
                 skipped += 1
@@ -373,7 +383,9 @@ class Command(BaseCommand):
                     updated_at=timezone.now(),
                 )
 
-        # Summary
+        return classified, skipped, results
+
+    def _print_summary(self, actual, classified, skipped, dry_run, results):
         self.stdout.write("-" * 50)
         self.stdout.write(
             f"Total={actual}  Classified={classified}  "
