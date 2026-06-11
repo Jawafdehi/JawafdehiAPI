@@ -1,10 +1,9 @@
 """Attach converted Markdown to a DocumentSource.
 
 When a source is converted to Markdown (e.g. via likhit during a casework
-review), we persist that Markdown as an uploaded file on the source and record
-a ``MARKDOWN``-role link in the source's ``url`` list, so the rendered markdown
-is a first-class, durable URL on the source rather than something recomputed
-every review.
+review), we persist that Markdown to storage (S3) and record a ``MARKDOWN``-role
+link in the source's ``url`` list, so the rendered markdown is a first-class,
+durable URL on the source rather than something recomputed every review.
 
 This is idempotent: a source that already has a MARKDOWN url is left untouched
 unless ``overwrite=True``.
@@ -14,11 +13,11 @@ from urllib.parse import urljoin
 
 from django.conf import settings
 from django.core.files.base import ContentFile
+from django.core.files.storage import default_storage
 from django.utils import timezone
 
 from cases.models import (
     DocumentSource,
-    DocumentSourceUpload,
     SourceLinkRole,
     validate_url_list,
 )
@@ -66,15 +65,11 @@ def attach_markdown(source: DocumentSource, markdown: str, *, overwrite: bool = 
         )
         return {"created": False, "link": existing, "skipped": True}
 
-    # Save the markdown as an uploaded file on the source.
+    # Save the markdown to storage (S3) and record its link. A source's links
+    # live solely in `url`, so we do not persist a separate uploaded-file record.
     filename = f"{source.source_id}.md"
-    upload = DocumentSourceUpload(source=source)
-    upload.file.save(filename, ContentFile(markdown.encode("utf-8")), save=False)
-    upload.filename = filename
-    upload.content_type = "text/markdown"
-    upload.save()
-
-    link = _absolute(upload.file.url)
+    stored_name = default_storage.save(filename, ContentFile(markdown.encode("utf-8")))
+    link = _absolute(default_storage.url(stored_name))
 
     # Append (or replace) the MARKDOWN-role url on the source.
     urls = [
