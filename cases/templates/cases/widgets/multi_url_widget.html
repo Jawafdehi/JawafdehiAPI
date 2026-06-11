@@ -4,9 +4,8 @@
         <span class="drag-handle">⋮⋮</span>
         <input type="url" class="url-input" value="{{ value.link }}" placeholder="https://example.com">
         <select class="url-role" aria-label="Link type">
-            <option value="">— type —</option>
             {% for r in role_choices %}
-            <option value="{{ r }}" {% if value.role == r %}selected{% endif %}>{{ r }}</option>
+            <option value="{{ r }}" {% if value.role == r or value.role == None and r == "RAW" %}selected{% endif %}>{{ r }}</option>
             {% endfor %}
         </select>
         <button type="button" class="btn btn-sm btn-danger remove-input" aria-label="Remove URL">
@@ -31,13 +30,14 @@
     var roleChoices = JSON.parse(
         document.getElementById('{{ role_choices_id }}').textContent
     );
-    var roleOptions = '<option value="">— type —</option>' +
-        roleChoices.map(function (r) {
-            var opt = document.createElement('option');
-            opt.value = r;
-            opt.textContent = r;
-            return opt.outerHTML;
-        }).join('');
+    // No blank option — role is mandatory; new rows default to the first
+    // choice (RAW), matching the rendered existing-row selects above.
+    var roleOptions = roleChoices.map(function (r) {
+        var opt = document.createElement('option');
+        opt.value = r;
+        opt.textContent = r;
+        return opt.outerHTML;
+    }).join('');
 
     window.initMultiWidget(
         '{{ widget_id }}_container',

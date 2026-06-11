@@ -191,14 +191,16 @@ window.MultiWidgetConfigs = {
         inputClass: 'url-input',
         rowClass: 'input-row',
         getValues: (container) => {
-            // Emit source-link dicts {link, role}. role omitted when blank.
+            // Emit source-link dicts {link, role}. role is mandatory; the
+            // dropdown has no blank option, so it always carries a valid role.
+            // Fall back to RAW defensively if the value is somehow empty.
             return Array.from(container.querySelectorAll('.input-row')).map(row => {
                 const linkInput = row.querySelector('.url-input');
                 const roleSelect = row.querySelector('.url-role');
                 const link = linkInput ? linkInput.value.trim() : '';
                 if (!link) return null;
-                const role = roleSelect ? roleSelect.value.trim() : '';
-                return role ? { link, role } : { link, role: null };
+                const role = (roleSelect && roleSelect.value.trim()) || 'RAW';
+                return { link, role };
             }).filter(v => v);
         }
     },

@@ -32,13 +32,16 @@ class SourceLinkRole(enum.StrEnum):
 
 def validate_url_list(value):
     """
-    Validate that the url field contains a list of valid URLs.
+    Validate that the url field contains a list of source-link dicts.
 
-    Each item may be a plain URL string or a dict with ``link`` and ``role``
-    keys where ``role`` is a valid ``SourceLinkRole`` value.
+    Each item must be a dict with a non-blank ``link`` string and an explicit
+    ``role`` that is a valid ``SourceLinkRole`` value. Plain URL strings and a
+    missing/``None`` role are no longer accepted — ``DocumentSource.clean()``
+    normalizes legacy string entries and absent roles to ``RAW`` before this
+    validator runs, so a value reaching here without a role is a real error.
 
     Args:
-        value: The value to validate (should be a list of URL strings or dicts)
+        value: The value to validate (should be a list of source-link dicts)
 
     Raises:
         ValidationError: If value is not a list or contains invalid items
@@ -47,37 +50,31 @@ def validate_url_list(value):
         return
 
     if not isinstance(value, list):
-        raise ValidationError("url must be a list of URLs.")
+        raise ValidationError("url must be a list of source-link dicts.")
 
+    valid_roles = [r.value for r in SourceLinkRole]
     validator = URLValidator()
     for item in value:
-        if isinstance(item, str):
-            stripped = item.strip()
-            if not stripped:
-                raise ValidationError("URLs cannot be blank or whitespace-only.")
-            validator(stripped)
-        elif isinstance(item, dict):
-            link = item.get("link")
-            if not link or not isinstance(link, str) or not link.strip():
-                raise ValidationError(
-                    "Each URL dict must contain a non-blank 'link' string."
-                )
-            stripped_link = link.strip()
-            validator(stripped_link)
-            item["link"] = stripped_link
-
-            role = item.get("role")
-            if role is not None:
-                try:
-                    SourceLinkRole(role)
-                except ValueError:
-                    raise ValidationError(
-                        f"Invalid role '{role}'. Must be one of "
-                        f"{[r.value for r in SourceLinkRole]}."
-                    )
-        else:
+        if not isinstance(item, dict):
             raise ValidationError(
-                "Each URL must be a string or a dict with 'link' and 'role' keys."
+                "Each URL must be a dict with a 'link' and 'role' key; "
+                "plain URL strings are no longer accepted."
+            )
+        link = item.get("link")
+        if not link or not isinstance(link, str) or not link.strip():
+            raise ValidationError(
+                "Each URL dict must contain a non-blank 'link' string."
+            )
+        validator(link.strip())
+
+        role = item.get("role")
+        if role is None:
+            raise ValidationError(
+                f"Each URL dict must contain a 'role'. Must be one of {valid_roles}."
+            )
+        if role not in valid_roles:
+            raise ValidationError(
+                f"Invalid role '{role}'. Must be one of {valid_roles}."
             )
 
 
@@ -881,38 +878,68 @@ class DocumentSource(models.Model):
                     result.append(link)
         return result
 
+    @staticmethod
+    def normalize_url_list(url):
+        """Coerce a url value to the canonical list of {link, role} dicts.
+
+        role is mandatory; a missing/None role (legacy data, programmatic
+        callers) or a plain string URL (legacy/importer input) is coerced to
+        RAW so internal saves stay valid. Anything still invalid after this
+        (e.g. a blank link, or an unknown role) is left for validate_url_list
+        to reject. A bare string / None becomes a (possibly empty) list.
+        """
+        if isinstance(url, str):
+            stripped = url.strip()
+            url = [stripped] if stripped else []
+        elif url is None:
+            return []
+
+        if not isinstance(url, list):
+            return url
+
+        normalized = []
+        for item in url:
+            if isinstance(item, str):
+                stripped = item.strip()
+                if stripped:
+                    normalized.append(
+                        {"link": stripped, "role": SourceLinkRole.RAW.value}
+                    )
+            elif isinstance(item, dict):
+                link = item.get("link", "")
+                stripped = link.strip() if isinstance(link, str) else ""
+                if stripped:
+                    role = item.get("role")
+                    normalized.append(
+                        {
+                            "link": stripped,
+                            "role": (
+                                role if role is not None else SourceLinkRole.RAW.value
+                            ),
+                        }
+                    )
+            else:
+                normalized.append(item)
+        return normalized
+
     def clean(self):
         """
         Normalize and validate DocumentSource data.
 
         - Strips whitespace from title
         - Ensures title is not empty after stripping
-        - Normalizes URL list entries (strips whitespace)
+        - Normalizes URL list entries (strips whitespace, defaults role to RAW)
         """
         # Normalize title
         self.title = (self.title or "").strip()
         if not self.title:
             raise ValidationError({"title": "Title is required and cannot be empty"})
 
-        # Normalize URL list entries (strip whitespace, normalize str→dict)
-        if isinstance(self.url, list):
-            normalized = []
-            for item in self.url:
-                if isinstance(item, str):
-                    stripped = item.strip()
-                    if stripped:
-                        normalized.append({"link": stripped, "role": None})
-                elif isinstance(item, dict):
-                    link = item.get("link", "")
-                    stripped = link.strip() if isinstance(link, str) else ""
-                    if stripped:
-                        entry = {"link": stripped}
-                        role = item.get("role")
-                        entry["role"] = role if role is not None else None
-                        normalized.append(entry)
-                else:
-                    normalized.append(item)
-            self.url = normalized
+        # Normalize URL entries to the canonical {link, role} dict form. Note
+        # save() also normalizes BEFORE full_clean() so the field validator
+        # (validate_url_list, run in clean_fields()) sees normalized data; this
+        # call covers direct clean()/full_clean() callers and is idempotent.
+        self.url = self.normalize_url_list(self.url)
 
         # Enforce publication_date for media/news sources
         if self.source_type == SourceType.NEWS and not self.publication_date:
@@ -931,16 +958,13 @@ class DocumentSource(models.Model):
             timestamp = datetime.now().strftime("%Y%m%d")
             self.source_id = f"source:{timestamp}:{uuid.uuid4().hex[:8]}"
 
-        # Normalize url to a list before validation for backward compatibility
-        # Older call sites may still pass a single string or None
-        if isinstance(self.url, str):
-            url_str = self.url.strip()
-            self.url = [url_str] if url_str else []
-        elif self.url is None:
-            self.url = []
+        # Normalize url to canonical {link, role} dicts BEFORE full_clean().
+        # Django runs field validators (validate_url_list) in clean_fields(),
+        # which executes before clean() — so legacy strings / None roles must
+        # be coerced here, or the field validator would reject them first.
+        self.url = self.normalize_url_list(self.url)
 
-        # Run full model and field validation (includes validate_url_list)
-        # This calls clean() which normalizes data, then validates
+        # Run full model and field validation (includes validate_url_list).
         self.full_clean()
 
         super().save(*args, **kwargs)

@@ -751,9 +751,6 @@ def test_document_source_api_merges_url_with_legacy_and_multiple_uploads():
     merged_urls = response.data["urls"]
     links = [u["link"] for u in merged_urls]
     assert links.count("https://example.com/reference.pdf") == 1
-    # Uploaded files should have PERMALINK role
+    # Uploaded files are RAW source documents, as are the external URLs here.
     for u in merged_urls:
-        if u["link"] == "https://example.com/reference.pdf":
-            assert u["role"] == "RAW"
-        else:
-            assert u["role"] == "PERMALINK"
+        assert u["role"] == "RAW"

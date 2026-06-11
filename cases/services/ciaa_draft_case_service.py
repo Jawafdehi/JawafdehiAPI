@@ -407,11 +407,12 @@ class CIAADraftCaseService:
                 logger.debug(f"Reusing source: {title}")
                 return source
 
-        # Create new source
+        # Create new source. url_list holds bare link strings (used for the
+        # dedup lookups above); store them as canonical RAW source-link dicts.
         publication_date = source_data.get("publication_date")
         source = DocumentSource.objects.create(
             title=title,
-            url=url_list,
+            url=[{"link": link, "role": "RAW"} for link in url_list],
             source_type=source_type,
             publication_date=publication_date,
         )
