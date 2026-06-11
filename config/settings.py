@@ -211,6 +211,8 @@ INSTALLED_APPS = [
     "ngm",
     "caseworker",
     "case_workflows",
+    # Casework Review System (VOL-3): rule-centered case-quality review.
+    "review",
 ]
 
 MIDDLEWARE = [
@@ -245,6 +247,12 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = "config.wsgi.application"
+
+# Where a successful session login redirects when no ?next= is supplied.
+# The only session-login surface here is the Django admin (the casework portal
+# uses JWT and never touches this), so send admin logins to the admin index
+# instead of Django's nonexistent default of /accounts/profile/.
+LOGIN_REDIRECT_URL = "/admin/"
 
 
 # Database
@@ -573,7 +581,14 @@ CORS_ALLOWED_ORIGINS = get_env_list(
     "CORS_ALLOWED_ORIGINS",
     "http://localhost:8080,http://127.0.0.1:8080,https://jawafdehi.org,https://beta.jawafdehi.org",
 )
-CORS_ALLOWED_ORIGIN_REGEXES = get_env_list("CORS_ALLOWED_ORIGIN_REGEXES")
+# Allow the casework portal SPA served from the project's Cloudflare workers.dev
+# domain — newnepal.workers.dev and its per-version preview subdomains
+# (e.g. abc123.newnepal.workers.dev) — to call the API (e.g. the JWT token
+# endpoint) cross-origin.
+CORS_ALLOWED_ORIGIN_REGEXES = get_env_list(
+    "CORS_ALLOWED_ORIGIN_REGEXES",
+    r"^https://([a-z0-9-]+\.)?newnepal\.workers\.dev$",
+)
 CORS_ALLOW_METHODS = ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"]
 CORS_ALLOW_HEADERS = [
     "accept",
@@ -683,3 +698,40 @@ JAZZMIN_SETTINGS = {
 # MARKDOWNX_MEDIA_PATH = "markdownx/"
 # MARKDOWNX_UPLOAD_CONTENT_TYPES = ["image/jpeg", "image/png", "image/webp"]
 # MARKDOWNX_UPLOAD_MAX_SIZE = 5 * 1024 * 1024
+
+
+# ============================================================================
+# Casework Review System (VOL-3) — rule-centered case-quality review
+# ============================================================================
+# The review app pulls a case (local DB by default, or live JDS API), converts
+# its sources to markdown via likhit, and scores it against editable Rules using
+# an AWS Bedrock LLM judge. See review/ for the engine.
+
+# Where the review pipeline gets case data:
+#   "local"  -> serialize a cases.Case from THIS database (offline; default).
+#   "remote" -> fetch from the live Jawafdehi public API (needs JAWAFDEHI_API_TOKEN).
+REVIEW_CASE_SOURCE = os.getenv("REVIEW_CASE_SOURCE", "local")
+
+# Live JDS API (used by the seed_jawafdehi CLI and by REVIEW_CASE_SOURCE="remote").
+JAWAFDEHI_API_BASE = os.getenv("JAWAFDEHI_API_BASE", "https://portal.jawafdehi.org/api")
+JAWAFDEHI_API_TOKEN = os.getenv("JAWAFDEHI_API_TOKEN", "")
+JAWAFDEHI_S3_BASE = os.getenv("JAWAFDEHI_S3_BASE", "https://s3.jawafdehi.org")
+
+# AWS Bedrock (LLM judge). Distinct from the S3 storage creds above: the judge
+# uses a named profile / cross-region inference profile model id.
+AWS_PROFILE = os.getenv("REVIEW_AWS_PROFILE", os.getenv("AWS_PROFILE", ""))
+AWS_REGION = os.getenv("AWS_REGION", "us-west-2")
+BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "global.anthropic.claude-opus-4-8")
+BEDROCK_MAX_WORKERS = int(os.getenv("BEDROCK_MAX_WORKERS", "8"))
+
+# Converted source markdown cache + per-source conversion timeout.
+SOURCE_MARKDOWN_DIR = Path(
+    os.getenv("SOURCE_MARKDOWN_DIR", str(BASE_DIR / "review_source_markdown"))
+)
+SOURCE_MARKDOWN_DIR.mkdir(parents=True, exist_ok=True)
+CONVERT_SOURCE_TIMEOUT = int(os.getenv("CONVERT_SOURCE_TIMEOUT", "180"))
+
+# Max number of case reviews allowed to run CONCURRENTLY. Additional submitted
+# reviews queue (status=pending) and start as running slots free up. Configurable
+# via env so the operator can tune the parallel review throughput.
+REVIEW_MAX_PARALLEL = int(os.getenv("REVIEW_MAX_PARALLEL", "3"))
