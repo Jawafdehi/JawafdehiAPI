@@ -1235,24 +1235,19 @@ class TagEnricher:
     def __init__(self, use_llm: bool = True, llm_client=None):
         self.use_llm = use_llm
         self._llm_client = llm_client
-        self._llm_service = None
 
     def _invoke_llm(self, prompt: str) -> str:
-        if self._llm_client is not None:
-            logger.debug("  Using CLI-provided LLM client (bypassing DB LLMProvider)")
-            response = self._llm_client.invoke(prompt)
-            if hasattr(response, "content"):
-                return response.content
-            return str(response)
+        if self._llm_client is None:
+            raise RuntimeError(
+                "TagEnricher requires an llm_client. The DB LLMProvider fallback "
+                "was removed with the caseworker app; pass --llm-base-url / "
+                "--llm-api-key to the enrich command to configure one."
+            )
 
-        if self._llm_service is None:
-            from caseworker.services import LLMService
-
-            self._llm_service = LLMService()
-
-        logger.debug("  Using DB LLMProvider")
-        llm = self._llm_service.get_llm()
-        return self._llm_service._call_llm(llm, prompt)
+        response = self._llm_client.invoke(prompt)
+        if hasattr(response, "content"):
+            return response.content
+        return str(response)
 
     def enrich_case(
         self, case: Case, force: bool = False, case_num: int = 0, total_cases: int = 0

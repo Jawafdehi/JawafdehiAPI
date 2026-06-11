@@ -112,7 +112,14 @@ class Command(BaseCommand):
             llm_client = self._build_llm_client(llm_base_url, llm_api_key, llm_model)
             logger.info(f"LLM client configured: {llm_model} @ {llm_base_url}")
         elif use_llm:
-            logger.info("Using DB LLMProvider (no --llm-base-url)")
+            self.stderr.write(
+                self.style.ERROR(
+                    "--llm-base-url (with --llm-api-key) is required for LLM "
+                    "classification. The DB LLMProvider fallback was removed with "
+                    "the caseworker app; pass --no-llm to run rules-only."
+                )
+            )
+            return
 
         if case_id:
             cases = Case.objects.filter(case_id=case_id, case_type=CaseType.CORRUPTION)
