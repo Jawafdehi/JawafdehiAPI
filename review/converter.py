@@ -2,8 +2,14 @@
 
 `likhit` is Jawafdehi's MarkItDown plugin for Nepali PDFs / legacy docs.
 We only convert sources that do not already have markdown attached.
+
+This module is the shared conversion core: both the review pipeline
+(``review.runner``) and the ``reprocess_source_markdown`` management command go
+through ``convert_case_to_attach_candidates`` so the "convert a case's sources
+to markdown the upstream should store" logic lives in exactly one place.
 """
 
+import functools
 import hashlib
 import os
 import tempfile
@@ -92,14 +98,20 @@ def _ext_from_url(url, content_type=""):
     return ".bin"
 
 
-def convert_source(source):
+def convert_source(source, *, overwrite=False):
     """Return markdown text for a single source dict.
 
     Returns dict: {markdown, status, url, note}
     status in {attached, converted, skipped, error}
+
+    When ``overwrite`` is True the "markdown already present on source"
+    short-circuit is bypassed so the artifact is re-downloaded and re-converted
+    via likhit (the url-hash cache is still honored — same bytes in, same
+    markdown out). This is used by the reprocess command to refresh markdown
+    after a converter change (e.g. a new likhit OCR DPI).
     """
-    # 1. If markdown already attached to the source, use it.
-    if source.get("markdown"):
+    # 1. If markdown already attached to the source, use it (unless overwriting).
+    if source.get("markdown") and not overwrite:
         return {
             "markdown": source["markdown"],
             "status": "attached",
@@ -116,10 +128,14 @@ def convert_source(source):
             "note": "Source has no url to convert.",
         }
 
-    # 2. Cache by content hash of url.
+    # 2. Cache by content hash of url. The cache key is the url, NOT the
+    #    converter version, so `overwrite` must bypass the cache READ as well as
+    #    the "already attached" short-circuit — otherwise refreshing markdown
+    #    after a converter change (e.g. a new likhit OCR DPI) would just re-serve
+    #    the stale cached output. We still WRITE the fresh result below.
     cache_key = hashlib.sha256(url.encode()).hexdigest()[:24]
     cache_path = Path(settings.SOURCE_MARKDOWN_DIR) / f"{cache_key}.md"
-    if cache_path.exists():
+    if cache_path.exists() and not overwrite:
         return {
             "markdown": cache_path.read_text(encoding="utf-8"),
             "status": "converted",
@@ -154,25 +170,28 @@ def convert_source(source):
         }
 
 
-def convert_all(sources):
+def convert_all(sources, *, overwrite=False):
     """Convert a list of source dicts; attach `markdown` + `conversion`.
 
     Each source conversion is wrapped in a hard wall-clock timeout
     (settings.CONVERT_SOURCE_TIMEOUT). A single stalled artifact (e.g. a scanned
     PDF whose Bedrock OCR never returns) is marked conversion_status=error
     instead of blocking the entire review in stage `converting_sources`.
+
+    ``overwrite`` is forwarded to ``convert_source`` (see its docstring).
     """
     from concurrent.futures import ThreadPoolExecutor
     from concurrent.futures import TimeoutError as FutureTimeout
 
     timeout = getattr(settings, "CONVERT_SOURCE_TIMEOUT", 180)
+    _convert = functools.partial(convert_source, overwrite=overwrite)
     out = []
     for s in sources:
         # Run each conversion in its own short-lived executor so we can abandon
         # it on timeout. The worker thread may keep running (it's a daemon-ish
         # pool we drop the reference to), but the pipeline is no longer blocked.
         ex = ThreadPoolExecutor(max_workers=1)
-        fut = ex.submit(convert_source, s)
+        fut = ex.submit(_convert, s)
         try:
             res = fut.result(timeout=timeout)
         except FutureTimeout:
@@ -200,3 +219,62 @@ def convert_all(sources):
         s["conversion_note"] = res["note"]
         out.append(s)
     return out
+
+
+def _source_has_markdown_link(source):
+    """True if a (converted) source dict already carries a MARKDOWN-role url."""
+    if source.get("markdown_url"):
+        return True
+    for item in source.get("urls") or []:
+        if isinstance(item, dict) and item.get("role") == "MARKDOWN":
+            return True
+    return False
+
+
+def convert_case_to_attach_candidates(case, *, overwrite=False):
+    """Convert a case's document sources and return attach candidates.
+
+    Shared by ``review.runner`` (the graded review pipeline) and the
+    ``reprocess_source_markdown`` command, so the rule for "which converted
+    sources should have their markdown stored upstream" lives in one place.
+
+    Returns ``(converted, candidates)`` where:
+      - ``converted`` is the list of source dicts with ``markdown`` /
+        ``conversion_status`` / ``conversion_note`` attached (the runner feeds
+        this to its Bedrock analysis + scoring).
+      - ``candidates`` is ``[{"source_id", "markdown"}]`` — the sources whose
+        markdown should be POSTed to the upstream ``/sources/{id}/markdown/``
+        endpoint.
+
+    Default (``overwrite=False``): only sources we actually converted (status
+    ``converted``) that carry a real source_id, non-empty markdown, and do NOT
+    already have a MARKDOWN link. This is the long-standing poller behavior.
+
+    With ``overwrite=True``: also include sources whose markdown was already
+    attached (status ``attached``) and ignore any existing MARKDOWN link, so the
+    upstream replaces it (server-side ``attach_markdown(overwrite=True)`` does
+    the replace). Used to refresh markdown after a converter change.
+    """
+    sources = jds_client.extract_sources(case)
+    converted = convert_all(sources, overwrite=overwrite)
+
+    candidates = []
+    for s in converted:
+        sid = s.get("source_id")
+        md = s.get("markdown") or ""
+        if not (sid and md.strip()):
+            continue
+        if overwrite:
+            # Refresh: accept freshly converted markdown (and re-emit markdown we
+            # short-circuited as "attached"); the upstream replaces existing.
+            if s.get("conversion_status") in ("converted", "attached"):
+                candidates.append({"source_id": sid, "markdown": md})
+        else:
+            # Only attach when WE produced the markdown for a source that has no
+            # MARKDOWN link yet.
+            if s.get(
+                "conversion_status"
+            ) == "converted" and not _source_has_markdown_link(s):
+                candidates.append({"source_id": sid, "markdown": md})
+
+    return converted, candidates

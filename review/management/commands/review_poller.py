@@ -33,11 +33,11 @@ poller writes anything back to the (possibly production) API.
 
 import time
 
-import requests
 from django.conf import settings
 from django.core.management.base import BaseCommand
 
 from review import runner
+from review.upstream_client import UpstreamClient, UpstreamError
 
 
 class PollerError(Exception):
@@ -69,24 +69,6 @@ class Command(BaseCommand):
             help="Seconds between polls when the queue is empty.",
         )
 
-    # ---- API helpers -------------------------------------------------
-
-    def _headers(self):
-        return {
-            "Authorization": f"Token {self.token}",
-            "Content-Type": "application/json",
-        }
-
-    def _post(self, path, payload, timeout=60):
-        url = f"{settings.CASEWORK_API_BASE.rstrip('/')}{path}"
-        return requests.post(
-            url, json=payload, headers=self._headers(), timeout=timeout
-        )
-
-    def _get(self, path, timeout=30):
-        url = f"{settings.CASEWORK_API_BASE.rstrip('/')}{path}"
-        return requests.get(url, headers=self._headers(), timeout=timeout)
-
     # ---- read-only listing ------------------------------------------
 
     def _list_pending(self):
@@ -95,7 +77,7 @@ class Command(BaseCommand):
         Does NOT claim anything (no pending->running transition), so it is safe
         to run against production just to see what is waiting.
         """
-        r = self._get("/reviews/?page_size=1000")
+        r = self.client.get("/reviews/?page_size=1000")
         if r.status_code != 200:
             raise PollerError(f"list failed: HTTP {r.status_code} {r.text[:200]}")
         data = r.json()
@@ -116,7 +98,7 @@ class Command(BaseCommand):
 
     def _claim(self):
         """Return a job payload dict, or None if the queue is empty."""
-        r = self._post("/jobs/claim/", {}, timeout=30)
+        r = self.client.post("/jobs/claim/", {}, timeout=30)
         if r.status_code == 204:
             return None
         if r.status_code != 200:
@@ -125,37 +107,16 @@ class Command(BaseCommand):
 
     def _report_stage(self, review_id, stage):
         try:
-            self._post(f"/jobs/{review_id}/stage/", {"stage": stage}, timeout=15)
+            self.client.post(f"/jobs/{review_id}/stage/", {"stage": stage}, timeout=15)
         except Exception:  # noqa: BLE001 - progress is best-effort
             pass
 
     def _submit(self, review_id, payload):
-        r = self._post(f"/jobs/{review_id}/result/", payload, timeout=60)
+        r = self.client.post(f"/jobs/{review_id}/result/", payload, timeout=60)
         if r.status_code not in (200, 201):
             raise PollerError(
                 f"result submit failed for {review_id}: HTTP {r.status_code} {r.text[:200]}"
             )
-
-    def _attach_markdown(self, items):
-        """Maintenance fix: attach locally-converted markdown back to sources."""
-        for item in items or []:
-            sid = item.get("source_id")
-            try:
-                r = self._post(
-                    f"/sources/{sid}/markdown/",
-                    {"markdown": item.get("markdown", "")},
-                    timeout=60,
-                )
-                if r.status_code == 200:
-                    body = r.json()
-                    if body.get("created"):
-                        self.stdout.write(f"    attached MARKDOWN url to source {sid}")
-                else:
-                    self.stderr.write(
-                        f"    markdown attach failed for {sid}: HTTP {r.status_code} {r.text[:150]}"
-                    )
-            except Exception as e:  # noqa: BLE001 - maintenance is best-effort
-                self.stderr.write(f"    markdown attach error for {sid}: {e}")
 
     def _process_job(self, job):
         review_id = job["review_id"]
@@ -167,7 +128,7 @@ class Command(BaseCommand):
                 on_stage=lambda s: self._report_stage(review_id, s),
             )
             # Maintenance fix: populate MARKDOWN urls on sources we converted.
-            self._attach_markdown(out.pop("markdown_to_attach", []))
+            self.client.attach_markdown(out.pop("markdown_to_attach", []))
             out["status"] = "done"
             self._submit(review_id, out)
             self.stdout.write(self.style.SUCCESS(f"  finished review {review_id}"))
@@ -187,13 +148,12 @@ class Command(BaseCommand):
         apply = opts["apply"]
         once = opts["once"]
         poll = float(opts["poll"])
-        self.token = settings.CASEWORK_POLLER_TOKEN
-        if not self.token:
-            raise PollerError(
-                "CASEWORK_POLLER_TOKEN is not set. Create a DRF token for the "
-                "poller's service account (manage.py drf_create_token <user>) "
-                "and set it in the environment."
+        try:
+            self.client = UpstreamClient(
+                on_log=self.stdout.write, on_err=self.stderr.write
             )
+        except UpstreamError as e:
+            raise PollerError(str(e))
 
         # Read-only by default: just report the pending queue and exit. Claiming
         # and submitting results (the mutating path) require an explicit --apply.
