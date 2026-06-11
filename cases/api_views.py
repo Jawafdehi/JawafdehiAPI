@@ -26,7 +26,7 @@ from drf_spectacular.utils import (
 from rest_framework import filters, mixins, serializers, status, viewsets
 from rest_framework.authentication import SessionAuthentication, TokenAuthentication
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import DjangoModelPermissions, IsAuthenticated
 from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
@@ -731,6 +731,7 @@ class DocumentSourceViewSet(
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
     mixins.CreateModelMixin,
+    mixins.UpdateModelMixin,
     viewsets.GenericViewSet,
 ):
     """
@@ -740,16 +741,20 @@ class DocumentSourceViewSet(
     - List endpoint: GET /api/sources/
     - Retrieve endpoint: GET /api/sources/{id_or_source_id}/
     - Create endpoint: POST /api/sources/
+    - Update endpoint: PATCH/PUT /api/sources/{id_or_source_id}/
 
-    The retrieve endpoint accepts either the database id or the source_id.
+    The retrieve/update endpoints accept either the database id or the source_id.
     Only sources associated with published or in-review cases are accessible.
+    Update requires the cases.change_documentsource permission.
     """
 
     parser_classes = [MultiPartParser, FormParser, JSONParser]
     lookup_field = "pk"
 
     def get_permissions(self):
-        if self.action in ("create", "partial_update", "update"):
+        if self.action in ("partial_update", "update"):
+            return [IsAuthenticated(), DjangoModelPermissions()]
+        if self.action == "create":
             return [IsAuthenticated()]
         return super().get_permissions()
 
@@ -758,7 +763,23 @@ class DocumentSourceViewSet(
             from .serializers import DocumentSourceCreateSerializer
 
             return DocumentSourceCreateSerializer
+        if self.action in ("partial_update", "update"):
+            from .serializers import DocumentSourceUpdateSerializer
+
+            return DocumentSourceUpdateSerializer
         return DocumentSourceSerializer
+
+    def update(self, request, *args, **kwargs):
+        kwargs["partial"] = True  # treat PUT as PATCH (partial updates only)
+        partial = kwargs.pop("partial", True)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        read_serializer = DocumentSourceSerializer(
+            instance, context=self.get_serializer_context()
+        )
+        return Response(read_serializer.data)
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)

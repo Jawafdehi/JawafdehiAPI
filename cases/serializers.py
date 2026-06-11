@@ -660,3 +660,44 @@ class DocumentSourceCreateSerializer(serializers.ModelSerializer):
         if not value or not value.strip():
             raise serializers.ValidationError("Title is required and cannot be empty")
         return value.strip()
+
+
+class DocumentSourceUpdateSerializer(serializers.ModelSerializer):
+    """Serializer for updating an existing DocumentSource (PATCH).
+
+    Supports updating the ``url`` list — including adding a ``MARKDOWN``-role
+    link (e.g. once a source has been converted to markdown) — plus the basic
+    descriptive fields. ``source_id`` is immutable.
+    """
+
+    url = serializers.ListField(
+        child=SourceLinkField(),
+        required=False,
+        help_text="List of URLs for this source. Each item may be a plain URL "
+        "string or a dict with 'link' and 'role' keys (role can be RAW, "
+        "MARKDOWN or PERMALINK).",
+    )
+
+    class Meta:
+        model = DocumentSource
+        fields = [
+            "id",
+            "source_id",
+            "title",
+            "description",
+            "source_type",
+            "url",
+            "publication_date",
+        ]
+        read_only_fields = ["id", "source_id"]
+
+    def to_internal_value(self, data):
+        import json as _json
+
+        if isinstance(data, dict) and "url" in data and isinstance(data["url"], str):
+            try:
+                data = data.copy()
+                data["url"] = _json.loads(data["url"])
+            except (_json.JSONDecodeError, ValueError):
+                pass
+        return super().to_internal_value(data)

@@ -735,3 +735,20 @@ CONVERT_SOURCE_TIMEOUT = int(os.getenv("CONVERT_SOURCE_TIMEOUT", "180"))
 # reviews queue (status=pending) and start as running slots free up. Configurable
 # via env so the operator can tune the parallel review throughput.
 REVIEW_MAX_PARALLEL = int(os.getenv("REVIEW_MAX_PARALLEL", "3"))
+
+# Casework job poller: the poller talks ONLY to the casework HTTP API (claim ->
+# process locally -> submit result) and never touches the DB. It authenticates
+# with a long-lived DRF auth token (Authorization: Token <key>) belonging to a
+# dedicated service account — NOT a username/password login. Create the token
+# with `manage.py drf_create_token <service-account-username>` and supply it via
+# CASEWORK_POLLER_TOKEN. Locally the API is this same server on :40173.
+CASEWORK_API_BASE = os.getenv(
+    "CASEWORK_API_BASE", "http://127.0.0.1:40173/api/casework"
+)
+CASEWORK_POLLER_TOKEN = os.getenv("CASEWORK_POLLER_TOKEN", "")
+
+# Base used to absolutize relative media URLs (e.g. a locally-stored MARKDOWN
+# file served under /media/) when there is no request context. In production
+# MEDIA_URL is already an absolute S3 URL so this is unused; locally it makes the
+# stored markdown link a valid absolute URL.
+MEDIA_PUBLIC_BASE = os.getenv("MEDIA_PUBLIC_BASE", "http://127.0.0.1:40173")

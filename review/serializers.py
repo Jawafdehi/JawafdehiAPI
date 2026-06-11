@@ -68,3 +68,42 @@ class SubmitSerializer(serializers.Serializer):
 
     def validate_slug(self, value):
         return value.strip().strip("/")
+
+
+class SourceMarkdownSerializer(serializers.Serializer):
+    """Markdown the poller attaches to a DocumentSource (MARKDOWN-role url)."""
+
+    markdown = serializers.CharField(trim_whitespace=False)
+    overwrite = serializers.BooleanField(required=False, default=False)
+
+
+class JobResultSerializer(serializers.Serializer):
+    """Payload the poller posts back after processing a claimed job.
+
+    On success, `result` (the full scored result dict) plus the case/source
+    metadata is supplied. On failure, `error` is supplied instead.
+    """
+
+    status = serializers.ChoiceField(choices=["done", "failed"])
+    error = serializers.CharField(required=False, allow_blank=True, default="")
+
+    case_title = serializers.CharField(required=False, allow_blank=True, default="")
+    case_state = serializers.CharField(required=False, allow_blank=True, default="")
+    case_type = serializers.CharField(required=False, allow_blank=True, default="")
+    source_count = serializers.IntegerField(required=False, default=0)
+    sources_converted = serializers.IntegerField(required=False, default=0)
+    result = serializers.JSONField(required=False, allow_null=True, default=None)
+    duration_seconds = serializers.FloatField(
+        required=False, allow_null=True, default=None
+    )
+
+    def validate(self, attrs):
+        if attrs["status"] == "done" and not attrs.get("result"):
+            raise serializers.ValidationError(
+                {"result": "result is required when status is 'done'."}
+            )
+        if attrs["status"] == "failed" and not attrs.get("error"):
+            raise serializers.ValidationError(
+                {"error": "error is required when status is 'failed'."}
+            )
+        return attrs

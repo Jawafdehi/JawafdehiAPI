@@ -37,6 +37,11 @@ class HasContributorRole(permissions.BasePermission):
             return False
         if user.is_superuser:
             return True
+        # has_role covers Admin / Moderator / Contributor. ReviewAssistant is a
+        # review-system role (manages reviews + document sources) that also gets
+        # in here without being a general content contributor.
+        if user.groups.filter(name="ReviewAssistant").exists():
+            return True
         # has_role is a django-rules predicate; call it directly.
         return bool(has_role(user))
 
@@ -57,3 +62,22 @@ class IsAdminOrModerator(permissions.BasePermission):
         if user.is_superuser:
             return True
         return bool(is_admin_or_moderator(user))
+
+
+class CanManageDocumentSources(permissions.BasePermission):
+    """Allow users who may update document sources.
+
+    Used by the poller's source-markdown maintenance endpoint. Satisfied by a
+    superuser or anyone holding the ``cases.change_documentsource`` permission
+    (Admin / Moderator / Contributor / ReviewAssistant via group perms).
+    """
+
+    message = "Updating document sources requires the change_documentsource permission."
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+        if user.is_superuser:
+            return True
+        return user.has_perm("cases.change_documentsource")
