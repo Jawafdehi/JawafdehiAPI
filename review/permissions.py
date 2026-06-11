@@ -46,6 +46,32 @@ class HasContributorRole(permissions.BasePermission):
         return bool(has_role(user))
 
 
+class CanReadReview(permissions.BasePermission):
+    """Allow read access to the Casework Review System.
+
+    Admits superuser, Admin, Moderator, Contributor, ReviewAssistant, and the
+    org-wide ReadOnly role. Used only on GET endpoints (review list/detail,
+    rules, config read, ``me``); mutation endpoints keep HasContributorRole,
+    which deliberately excludes ReadOnly. This is what lets a read-only role
+    observe the queue without being able to claim jobs, submit results, or
+    re-queue reviews.
+    """
+
+    message = "Reading the Casework Review System requires a role with read access."
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+        if user.is_superuser:
+            return True
+        # ReviewAssistant + ReadOnly get read access by group name; the rest
+        # (Admin / Moderator / Contributor) come through has_role.
+        if user.groups.filter(name__in=["ReviewAssistant", "ReadOnly"]).exists():
+            return True
+        return bool(has_role(user))
+
+
 class IsAdminOrModerator(permissions.BasePermission):
     """Allow only Admin / Moderator (or superuser).
 
