@@ -15,7 +15,7 @@ import pytest
 from django.core.management import call_command, load_command_class
 from django.core.management.base import CommandError
 
-from cases.models import Case, CaseState, CaseType, DocumentSource
+from cases.models import Case, CaseState, CaseType, DocumentSource, SourceType
 
 
 @pytest.fixture(autouse=True)
@@ -64,7 +64,7 @@ def _make_source(
             if url is not None
             else ["https://ngm-store.jawafdehi.org/case/test-file.md"]
         ),
-        source_type=None,
+        source_type=SourceType.CIAA_PRESS_RELEASE,
     )
 
 

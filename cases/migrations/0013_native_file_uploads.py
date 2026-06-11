@@ -1,5 +1,6 @@
-import cases.models
 from django.db import migrations, models
+
+import cases.models
 
 
 def backfill_legacy_uploaded_file(apps, schema_editor):

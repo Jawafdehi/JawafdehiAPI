@@ -4,15 +4,16 @@ Management command to create user groups for role-based permissions.
 Usage: python manage.py create_groups
 """
 
-from django.core.management.base import BaseCommand
 from django.contrib.auth.models import Group, Permission
 from django.contrib.contenttypes.models import ContentType
+from django.core.management.base import BaseCommand
+
 from cases.models import (
     Case,
+    CaseEntityRelationship,
     DocumentSource,
     DocumentSourceUpload,
     JawafEntity,
-    CaseEntityRelationship,
 )
 
 
@@ -242,6 +243,51 @@ class Command(BaseCommand):
                 relationship_permissions["add"],
                 relationship_permissions["change"],
                 relationship_permissions["delete"],
+            ]
+        )
+
+        # ReviewAssistant: a review-system role that can manage document sources
+        # (e.g. populate the MARKDOWN url during a review) and access reviews.
+        # Review access itself is granted in review/permissions.py by group name;
+        # here we grant the document-source permissions it needs.
+        review_assistant_group, created = Group.objects.get_or_create(
+            name="ReviewAssistant"
+        )
+        if created:
+            self.stdout.write(self.style.SUCCESS("Created ReviewAssistant group"))
+        else:
+            self.stdout.write("ReviewAssistant group already exists")
+
+        review_assistant_group.permissions.set(
+            [
+                source_permissions["view"],
+                source_permissions["change"],
+                # Attaching markdown creates a DocumentSourceUpload.
+                upload_permissions["view"],
+                upload_permissions["add"],
+            ]
+        )
+
+        # ReadOnly: an org-wide read role that can be assigned to anyone. Grants
+        # view_* on every content model so the holder can GET/list all cases
+        # (including non-PUBLISHED, non-CLOSED), sources, uploads, entities, and
+        # relationships, but holds no add/change/delete permission. Casework
+        # review read access is granted by group name in review/permissions.py
+        # (CanReadReview); writes there stay gated by HasContributorRole, which
+        # does not include ReadOnly.
+        readonly_group, created = Group.objects.get_or_create(name="ReadOnly")
+        if created:
+            self.stdout.write(self.style.SUCCESS("Created ReadOnly group"))
+        else:
+            self.stdout.write("ReadOnly group already exists")
+
+        readonly_group.permissions.set(
+            [
+                case_permissions["view"],
+                source_permissions["view"],
+                upload_permissions["view"],
+                entity_permissions["view"],
+                relationship_permissions["view"],
             ]
         )
 

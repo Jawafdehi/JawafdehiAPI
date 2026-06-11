@@ -5,7 +5,6 @@ Validates that the API documentation is properly configured and accessible.
 """
 
 import pytest
-
 from django.test import Client
 from django.urls import reverse
 

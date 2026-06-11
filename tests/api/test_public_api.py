@@ -8,7 +8,6 @@ Validates: Requirements 4.1, 6.1, 6.2, 6.3, 8.1, 8.3
 
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
-
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from rest_framework.test import APIClient
@@ -20,6 +19,8 @@ from tests.conftest import (
 )
 from tests.strategies import (
     complete_case_data_with_timeline as complete_case_data,
+)
+from tests.strategies import (
     valid_source_data,
 )
 
@@ -739,8 +740,17 @@ def test_document_source_api_merges_url_with_legacy_and_multiple_uploads():
     response = client.get(f"/api/sources/{source.id}/")
     assert response.status_code == 200
 
-    merged_urls = response.data["url"]
-    assert merged_urls.count("https://example.com/reference.pdf") == 1
-    assert any(url.endswith(source.uploaded_file.url) for url in merged_urls)
-    assert any(url.endswith(upload_one.file.url) for url in merged_urls)
-    assert any(url.endswith(upload_two.file.url) for url in merged_urls)
+    # Check backward-compat url field (list of strings)
+    raw_links = response.data["url"]
+    assert raw_links.count("https://example.com/reference.pdf") == 1
+    assert any(link.endswith(source.uploaded_file.url) for link in raw_links)
+    assert any(link.endswith(upload_one.file.url) for link in raw_links)
+    assert any(link.endswith(upload_two.file.url) for link in raw_links)
+
+    # Check new urls field (list of dicts)
+    merged_urls = response.data["urls"]
+    links = [u["link"] for u in merged_urls]
+    assert links.count("https://example.com/reference.pdf") == 1
+    # Uploaded files are RAW source documents, as are the external URLs here.
+    for u in merged_urls:
+        assert u["role"] == "RAW"

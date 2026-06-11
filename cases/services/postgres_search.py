@@ -13,6 +13,8 @@ from django.contrib.postgres.search import (
 from django.db import connection
 from django.db.models import (
     Case as DatabaseCase,
+)
+from django.db.models import (
     CharField,
     Count,
     Exists,

@@ -6,9 +6,9 @@ Tests entity listing, retrieval, search, and pagination
 """
 
 import pytest
-
 from django.core.cache import cache
-from hypothesis import given, strategies as st, settings
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from rest_framework.test import APIClient
 
 from cases.models import (

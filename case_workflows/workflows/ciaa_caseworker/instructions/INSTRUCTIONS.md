@@ -46,7 +46,7 @@ Usually, CIAA press release are on the date when the case is filed to special co
 Download and save it at sources/raw/ciaa-press-release-<press-release-id>.pdf
 
 Sample dates:
-- https://ciaa.gov.np/pressrelease/1000: मिति २०७६/०१/१२ गते । 
+- https://ciaa.gov.np/pressrelease/1000: मिति २०७६/०१/१२ गते ।
 - https://ciaa.gov.np/pressrelease/2000: मिति २०७८/०६/१९ गते ।
 - https://ciaa.gov.np/pressrelease/3000: मिति २०८१/१२/१४ गते।
 
@@ -383,13 +383,13 @@ For each file in `sources/raw/` with one of those extensions, call `upload_docum
 
 | filename prefix         | `source_type`        | `description` required? | `publication_date` required? |
 |-------------------------|----------------------|-------------------------|------------------------------|
-| `ciaa-press-release-*`  | `OFFICIAL_GOVERNMENT`| Yes                     | No                           |
-| `charge-sheet-*`        | `LEGAL_PROCEDURAL`   | Yes                     | No                           |
-| `court-order-*`         | `LEGAL_COURT_ORDER`  | Yes                     | No                           |
-| `bolpatra-*`            | `OFFICIAL_GOVERNMENT`| Yes                     | No                           |
+| `ciaa-press-release-*`  | `CIAA_PRESS_RELEASE` | Yes                     | No                           |
+| `charge-sheet-*`        | `AG_ABHIYOG_PATRA`   | Yes                     | No                           |
+| `court-order-*`         | `COURT_ORDER`        | Yes                     | No                           |
+| `bolpatra-*`            | `MISC`               | Yes                     | No                           |
 
 For news articles (`sources/markdown/news-*.md`), call `upload_document_source` with:
-- `source_type`: `MEDIA_NEWS`
+- `source_type`: `NEWS`
 - `file_path`: absolute path to the cleaned `.md` file
 - keep the uploaded `.md` transcript as the uploaded file attachment
 - `url`: `["<original_article_url>"]` — use the URL recorded in `MEMORY.md ## News Articles`
@@ -492,4 +492,3 @@ field with the collected image list:
 ```
 
 Skip this step if no images were recorded in `MEMORY.md ## Images`.
-

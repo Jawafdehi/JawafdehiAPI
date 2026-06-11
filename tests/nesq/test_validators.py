@@ -13,6 +13,7 @@ Tests cover:
 """
 
 import pytest
+from nes.core.models.base import NameKind
 from pydantic import ValidationError
 
 from nesq.validators import (
@@ -21,7 +22,6 @@ from nesq.validators import (
     UpdateEntityPayload,
     validate_action_payload,
 )
-from nes.core.models.base import NameKind
 
 # ============================================================================
 # Valid entity IDs for testing — must pass NES validate_entity_id()

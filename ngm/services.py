@@ -197,10 +197,10 @@ def get_court_case_details(court_identifier: str, case_number: str) -> dict | No
             # Fetch case details
             cursor.execute(
                 """
-                SELECT case_number, court_identifier, registration_date_bs, 
+                SELECT case_number, court_identifier, registration_date_bs,
                        registration_date_ad, case_type, division, category, section,
                        plaintiff, defendant, original_case_number, case_id, priority,
-                       registration_number, case_status, verdict_date_bs, 
+                       registration_number, case_status, verdict_date_bs,
                        verdict_date_ad, verdict_judge, status
                 FROM court_cases
                 WHERE court_identifier = %s AND case_number = %s
@@ -218,7 +218,7 @@ def get_court_case_details(court_identifier: str, case_number: str) -> dict | No
             # Fetch hearings
             cursor.execute(
                 """
-                SELECT id, case_number, court_identifier, hearing_date_bs, 
+                SELECT id, case_number, court_identifier, hearing_date_bs,
                        hearing_date_ad, bench, bench_type, judge_names, lawyer_names,
                        serial_no, case_status, decision_type, remarks
                 FROM court_case_hearings

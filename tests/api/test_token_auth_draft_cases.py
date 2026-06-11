@@ -5,10 +5,10 @@ Feature: Allow optional token-based authorization for GET /cases/<id> endpoint
 """
 
 import pytest
-from rest_framework.test import APIClient
-from rest_framework.authtoken.models import Token
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
+from rest_framework.authtoken.models import Token
+from rest_framework.test import APIClient
 
 from cases.models import CaseState, CaseType
 from tests.conftest import create_case_with_entities
@@ -107,8 +107,8 @@ class TestTokenAuthDraftCases:
         assert response.data["case_id"] == case.case_id
         assert response.data["state"] == CaseState.DRAFT
 
-    def test_draft_case_not_accessible_to_unauthorized_contributor(self):
-        """DRAFT case should NOT be accessible to unauthorized contributor (not assigned to case)."""
+    def test_draft_case_accessible_to_any_contributor(self):
+        """DRAFT case should be accessible to any contributor (global read access)."""
         # Create a DRAFT case assigned to contributor_user
         case = create_case_with_entities(
             title="Draft Case",
@@ -120,14 +120,14 @@ class TestTokenAuthDraftCases:
         )
         case.contributors.add(self.contributor_user)
 
-        # Try to access with other_contributor token (not assigned)
+        # Access with other_contributor token (not assigned to case)
         self.client.credentials(
             HTTP_AUTHORIZATION=f"Token {self.other_contributor_token.key}"
         )
         response = self.client.get(f"/api/cases/{case.slug}/")
 
-        assert response.status_code == 404
-        assert response.data["detail"] == "Not found."
+        assert response.status_code == 200
+        assert response.data["case_id"] == case.case_id
 
     def test_published_case_accessible_without_authorization(self):
         """PUBLISHED case should be accessible without authorization."""

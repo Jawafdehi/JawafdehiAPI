@@ -7,13 +7,12 @@ Validates: Requirements 1.1, 1.2, 1.3, 7.3
 """
 
 import pytest
-
 from django.core.exceptions import ValidationError
 from hypothesis import given, settings
 
 from cases.models import Case, CaseState, CaseType, RelationshipType
 from tests.conftest import create_case_with_entities
-from tests.strategies import minimal_case_data, complete_case_data
+from tests.strategies import complete_case_data, minimal_case_data
 
 # ============================================================================
 # Property 1: New cases start in Draft state

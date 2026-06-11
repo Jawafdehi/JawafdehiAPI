@@ -1,7 +1,7 @@
+import django.db.models.deletion
 from django.contrib.postgres.indexes import GinIndex
 from django.contrib.postgres.search import SearchVector
 from django.db import migrations, models
-import django.db.models.deletion
 
 INDEX_NAMES = (
     "case_archive_fts_idx",
@@ -146,7 +146,7 @@ class Migration(migrations.Migration):
     atomic = False
 
     dependencies = [
-        ("cases", "0024_alter_chat_user_identity"),
+        ("cases", "0032_backfill_source_link_role_raw"),
     ]
 
     operations = [

@@ -1,15 +1,15 @@
-import tempfile
 import sys
+import tempfile
 import urllib.parse
-from pathlib import Path
 from io import StringIO
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.core.files.uploadedfile import SimpleUploadedFile
 
 from cases.management.commands.enrich_missing_bigo import Command
 from cases.models import Case, CaseState, CaseType, DocumentSource, SourceType
@@ -37,7 +37,7 @@ def _create_source(source_id: str, title: str, url: str) -> DocumentSource:
     return DocumentSource.objects.create(
         source_id=source_id,
         title=title,
-        source_type=SourceType.OFFICIAL_GOVERNMENT,
+        source_type=SourceType.CIAA_PRESS_RELEASE,
         url=[url],
     )
 
@@ -480,7 +480,7 @@ def test_download_source_to_path_sanitizes_dot_filename_and_confines_output():
     source = DocumentSource(
         source_id="source-test-001",
         title="CIAA Press Release",
-        source_type=SourceType.OFFICIAL_GOVERNMENT,
+        source_type=SourceType.CIAA_PRESS_RELEASE,
         uploaded_filename="..",
         url=[],
     )
@@ -526,7 +526,7 @@ def test_extract_bigo_from_source_metadata_reads_ngm_filename():
     source = DocumentSource(
         source_id="source:test:ngm-metadata-bigo",
         title="CIAA Press Release",
-        source_type=SourceType.OFFICIAL_GOVERNMENT,
+        source_type=SourceType.CIAA_PRESS_RELEASE,
         url=[
             f"https://ngm-store.jawafdehi.org/uploads/ciaa/press-releases/files/{encoded_filename}"
         ],
@@ -541,7 +541,7 @@ def test_extract_bigo_from_source_metadata_reads_direct_ngm_url_for_case_a4a309d
     source = DocumentSource(
         source_id="source:test:case-a4a309dd9ebc",
         title="CIAA Press Release",
-        source_type=SourceType.OFFICIAL_GOVERNMENT,
+        source_type=SourceType.CIAA_PRESS_RELEASE,
         url=[url],
     )
 
@@ -570,7 +570,7 @@ def test_build_bigo_prompt_includes_source_metadata():
     source = DocumentSource(
         source_id="source:test:prompt-source",
         title="CIAA Press Release बिगो रु. ३८६,७१७,६४० कायम",
-        source_type=SourceType.OFFICIAL_GOVERNMENT,
+        source_type=SourceType.CIAA_PRESS_RELEASE,
         url=["https://ngm-store.jawafdehi.org/test.pdf"],
     )
 

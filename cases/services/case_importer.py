@@ -97,18 +97,31 @@ class CaseImporter:
         # Guard against None values and handle both string and list URLs
         url_raw = source_data.get("url", "")
 
-        # Handle URL as string or list
+        # Handle URL as string, list, or dict. Normalize every entry to a
+        # canonical {link, role} dict — role defaults to RAW when the input is
+        # a bare string or omits it (only external URLs reach here).
+        from cases.models import SourceLinkRole
+
+        def _make_link(raw):
+            if isinstance(raw, str):
+                stripped = raw.strip()
+                return (
+                    {"link": stripped, "role": SourceLinkRole.RAW.value}
+                    if stripped
+                    else None
+                )
+            if isinstance(raw, dict):
+                link = raw.get("link") or raw.get("url")
+                if isinstance(link, str) and link.strip():
+                    role = raw.get("role") or SourceLinkRole.RAW.value
+                    return {"link": link.strip(), "role": role}
+            return None
+
         if isinstance(url_raw, list):
-            # Filter and normalize list entries
-            url_list = []
-            for item in url_raw:
-                if isinstance(item, str):
-                    stripped = item.strip()
-                    if stripped:
-                        url_list.append(stripped)
-        elif isinstance(url_raw, str):
-            stripped = url_raw.strip()
-            url_list = [stripped] if stripped else []
+            url_list = [entry for entry in (_make_link(i) for i in url_raw) if entry]
+        elif isinstance(url_raw, (str, dict)):
+            entry = _make_link(url_raw)
+            url_list = [entry] if entry else []
         else:
             url_list = []
 
@@ -127,16 +140,25 @@ class CaseImporter:
         # TODO: Consider adding GIN index on url field for better performance:
         #   CREATE INDEX idx_documentsource_url_gin ON cases_documentsource USING gin (url);
         if url_list:
-            # Check if any URL in our list matches existing sources
+            # Check if any URL in our list matches existing sources.
+            # Stored URL entries are dicts with 'link' key (post-migration).
+            # Accept both str and dict lookups for backward compat during transition.
             from django.db import connection
+
+            # Match on the link only (role-agnostic) so a reused source isn't
+            # duplicated just because its stored role differs.
+            candidate_links = [entry["link"] for entry in url_list]
 
             # Use PostgreSQL JSON containment if available, otherwise fall back to Python filtering
             if connection.vendor == "postgresql":
-                for url in url_list:
+                for link in candidate_links:
                     source = (
                         DocumentSource.objects.filter(
                             is_deleted=False,
-                            url__contains=[url],  # PostgreSQL JSON containment operator
+                        )
+                        .filter(
+                            # Match dict entry with matching link
+                            url__contains=[{"link": link}]
                         )
                         .only("source_id", "title")
                         .first()
@@ -148,14 +170,25 @@ class CaseImporter:
                         return source
             else:
                 # SQLite fallback: fetch all non-deleted sources and check URLs in Python
-                for url in url_list:
+                for link in candidate_links:
                     for source in DocumentSource.objects.filter(is_deleted=False).only(
                         "source_id", "title", "url"
                     ):
-                        if isinstance(source.url, list) and url in source.url:
-                            self.stats["sources_reused"] += 1
-                            self.log(f"  Reusing source: {title}")
-                            return source
+                        if isinstance(source.url, list):
+                            for stored in source.url:
+                                stored_link = (
+                                    stored
+                                    if isinstance(stored, str)
+                                    else (
+                                        stored.get("link")
+                                        if isinstance(stored, dict)
+                                        else None
+                                    )
+                                )
+                                if stored_link == link:
+                                    self.stats["sources_reused"] += 1
+                                    self.log(f"  Reusing source: {title}")
+                                    return source
 
         # Try to find by title (excluding soft-deleted sources)
         source = DocumentSource.objects.filter(title=title, is_deleted=False).first()

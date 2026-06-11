@@ -5,6 +5,7 @@ Ensures environment variables are set to their default values during testing.
 """
 
 import os
+
 import pytest
 
 # Set DATABASE_URL before Django settings are loaded so tests run without a
@@ -29,9 +30,10 @@ from hypothesis import settings as hypothesis_settings
 from cases.models import (
     Case,
     CaseEntityRelationship,
+    DocumentSource,
+    DocumentSourceUpload,
     JawafEntity,
     RelationshipType,
-    DocumentSource,
 )
 
 User = get_user_model()
@@ -252,7 +254,7 @@ def create_user_with_role(username, email, role, password="testpass123"):
     Args:
         username: Username for the user
         email: Email for the user
-        role: Role name ('Admin', 'Moderator', 'Contributor')
+        role: Role name ('Admin', 'Moderator', 'Contributor', 'ReadOnly')
         password: Password for the user (default: 'testpass123')
 
     Returns:
@@ -312,5 +314,28 @@ def create_user_with_role(username, email, role, password="testpass123"):
     # Moderators and Admins can manage users
     if role in ["Admin", "Moderator"]:
         user.user_permissions.add(*user_perms)
+
+    # ReadOnly: org-wide read role. No is_staff/is_superuser and no write perms.
+    # Mirror the view_* set granted to the ReadOnly group in create_groups.py so
+    # model-perm-gated checks (e.g. DjangoModelPermissions) behave faithfully:
+    # GET on every content model is allowed, but no add/change/delete.
+    if role == "ReadOnly":
+        readonly_view_perms = Permission.objects.filter(
+            codename__in=[
+                "view_case",
+                "view_documentsource",
+                "view_documentsourceupload",
+                "view_jawafentity",
+                "view_caseentityrelationship",
+            ],
+            content_type__in=[
+                ContentType.objects.get_for_model(Case),
+                ContentType.objects.get_for_model(DocumentSource),
+                ContentType.objects.get_for_model(DocumentSourceUpload),
+                ContentType.objects.get_for_model(JawafEntity),
+                ContentType.objects.get_for_model(CaseEntityRelationship),
+            ],
+        )
+        user.user_permissions.add(*readonly_view_perms)
 
     return user

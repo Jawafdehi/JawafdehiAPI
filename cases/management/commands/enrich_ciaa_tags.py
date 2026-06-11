@@ -6,7 +6,7 @@ import sys
 from django.core.management.base import BaseCommand
 from django.db.models import Q
 
-from cases.models import Case, CaseType, CaseState
+from cases.models import Case, CaseState, CaseType
 from cases.services.priority_case_loader import filter_by_priority, load_priority_cases
 from cases.services.tag_enricher import TagEnricher
 
@@ -112,7 +112,14 @@ class Command(BaseCommand):
             llm_client = self._build_llm_client(llm_base_url, llm_api_key, llm_model)
             logger.info(f"LLM client configured: {llm_model} @ {llm_base_url}")
         elif use_llm:
-            logger.info("Using DB LLMProvider (no --llm-base-url)")
+            self.stderr.write(
+                self.style.ERROR(
+                    "--llm-base-url (with --llm-api-key) is required for LLM "
+                    "classification. The DB LLMProvider fallback was removed with "
+                    "the caseworker app; pass --no-llm to run rules-only."
+                )
+            )
+            return
 
         if case_id:
             cases = Case.objects.filter(case_id=case_id, case_type=CaseType.CORRUPTION)
@@ -154,6 +161,7 @@ class Command(BaseCommand):
         try:
             if dry_run:
                 from auditlog.registry import auditlog
+
                 from cases.models import DocumentSource
 
                 auditlog.unregister(Case)

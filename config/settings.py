@@ -10,16 +10,17 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
-from pathlib import Path
 import os
 import sys
-from dotenv import load_dotenv
 from datetime import timedelta
+from pathlib import Path
+
 import dj_database_url
 import sentry_sdk
-from sentry_sdk.integrations.django import DjangoIntegration
 import structlog as _structlog
 from django.core.exceptions import ImproperlyConfigured
+from dotenv import load_dotenv
+from sentry_sdk.integrations.django import DjangoIntegration
 
 from config.structlog_config import configure_structlog
 
@@ -210,8 +211,9 @@ INSTALLED_APPS = [
     "cases",
     "nesq",
     "ngm",
-    "caseworker",
     "case_workflows",
+    # Casework Review System (VOL-3): rule-centered case-quality review.
+    "review",
 ]
 
 MIDDLEWARE = [
@@ -246,6 +248,12 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = "config.wsgi.application"
+
+# Where a successful session login redirects when no ?next= is supplied.
+# The only session-login surface here is the Django admin (the casework portal
+# uses JWT and never touches this), so send admin logins to the admin index
+# instead of Django's nonexistent default of /accounts/profile/.
+LOGIN_REDIRECT_URL = "/admin/"
 
 
 # Database
@@ -529,7 +537,7 @@ SPECTACULAR_SETTINGS = {
     "DESCRIPTION": """
 Public API for the Jawafdehi accountability platform.
 
-This API provides read-only access to published cases of alleged corruption 
+This API provides read-only access to published cases of alleged corruption
 and misconduct by public entities in Nepal.
 
 ## Features
@@ -541,7 +549,7 @@ and misconduct by public entities in Nepal.
 
 ## Access
 
-All endpoints are public and do not require authentication. Only published 
+All endpoints are public and do not require authentication. Only published
 cases (state=PUBLISHED) are accessible through this API.
 
 ## Filtering & Search
@@ -574,7 +582,14 @@ CORS_ALLOWED_ORIGINS = get_env_list(
     "CORS_ALLOWED_ORIGINS",
     "http://localhost:8080,http://127.0.0.1:8080,https://jawafdehi.org,https://beta.jawafdehi.org",
 )
-CORS_ALLOWED_ORIGIN_REGEXES = get_env_list("CORS_ALLOWED_ORIGIN_REGEXES")
+# Allow the casework portal SPA served from the project's Cloudflare workers.dev
+# domain — newnepal.workers.dev and its per-version preview subdomains
+# (e.g. abc123.newnepal.workers.dev) — to call the API (e.g. the JWT token
+# endpoint) cross-origin.
+CORS_ALLOWED_ORIGIN_REGEXES = get_env_list(
+    "CORS_ALLOWED_ORIGIN_REGEXES",
+    r"^https://([a-z0-9-]+\.)?newnepal\.workers\.dev$",
+)
 CORS_ALLOW_METHODS = ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"]
 CORS_ALLOW_HEADERS = [
     "accept",
@@ -684,3 +699,57 @@ JAZZMIN_SETTINGS = {
 # MARKDOWNX_MEDIA_PATH = "markdownx/"
 # MARKDOWNX_UPLOAD_CONTENT_TYPES = ["image/jpeg", "image/png", "image/webp"]
 # MARKDOWNX_UPLOAD_MAX_SIZE = 5 * 1024 * 1024
+
+
+# ============================================================================
+# Casework Review System (VOL-3) — rule-centered case-quality review
+# ============================================================================
+# The review app pulls a case (local DB by default, or live JDS API), converts
+# its sources to markdown via likhit, and scores it against editable Rules using
+# an AWS Bedrock LLM judge. See review/ for the engine.
+
+# Where the review pipeline gets case data:
+#   "local"  -> serialize a cases.Case from THIS database (offline; default).
+#   "remote" -> fetch from the live Jawafdehi public API (needs JAWAFDEHI_API_TOKEN).
+REVIEW_CASE_SOURCE = os.getenv("REVIEW_CASE_SOURCE", "local")
+
+# Live JDS API (used by the seed_jawafdehi CLI and by REVIEW_CASE_SOURCE="remote").
+JAWAFDEHI_API_BASE = os.getenv("JAWAFDEHI_API_BASE", "https://portal.jawafdehi.org/api")
+JAWAFDEHI_API_TOKEN = os.getenv("JAWAFDEHI_API_TOKEN", "")
+JAWAFDEHI_S3_BASE = os.getenv("JAWAFDEHI_S3_BASE", "https://s3.jawafdehi.org")
+
+# AWS Bedrock (LLM judge). Distinct from the S3 storage creds above: the judge
+# uses a named profile / cross-region inference profile model id.
+AWS_PROFILE = os.getenv("REVIEW_AWS_PROFILE", os.getenv("AWS_PROFILE", ""))
+AWS_REGION = os.getenv("AWS_REGION", "us-west-2")
+BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "global.anthropic.claude-opus-4-8")
+BEDROCK_MAX_WORKERS = int(os.getenv("BEDROCK_MAX_WORKERS", "8"))
+
+# Converted source markdown cache + per-source conversion timeout.
+SOURCE_MARKDOWN_DIR = Path(
+    os.getenv("SOURCE_MARKDOWN_DIR", str(BASE_DIR / "review_source_markdown"))
+)
+SOURCE_MARKDOWN_DIR.mkdir(parents=True, exist_ok=True)
+CONVERT_SOURCE_TIMEOUT = int(os.getenv("CONVERT_SOURCE_TIMEOUT", "180"))
+
+# Max number of case reviews allowed to run CONCURRENTLY. Additional submitted
+# reviews queue (status=pending) and start as running slots free up. Configurable
+# via env so the operator can tune the parallel review throughput.
+REVIEW_MAX_PARALLEL = int(os.getenv("REVIEW_MAX_PARALLEL", "3"))
+
+# Casework job poller: the poller talks ONLY to the casework HTTP API (claim ->
+# process locally -> submit result) and never touches the DB. It authenticates
+# with a long-lived DRF auth token (Authorization: Token <key>) belonging to a
+# dedicated service account — NOT a username/password login. Create the token
+# with `manage.py drf_create_token <service-account-username>` and supply it via
+# CASEWORK_POLLER_TOKEN. Locally the API is this same server on :40173.
+CASEWORK_API_BASE = os.getenv(
+    "CASEWORK_API_BASE", "http://127.0.0.1:40173/api/casework"
+)
+CASEWORK_POLLER_TOKEN = os.getenv("CASEWORK_POLLER_TOKEN", "")
+
+# Base used to absolutize relative media URLs (e.g. a locally-stored MARKDOWN
+# file served under /media/) when there is no request context. In production
+# MEDIA_URL is already an absolute S3 URL so this is unused; locally it makes the
+# stored markdown link a valid absolute URL.
+MEDIA_PUBLIC_BASE = os.getenv("MEDIA_PUBLIC_BASE", "http://127.0.0.1:40173")

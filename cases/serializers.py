@@ -17,6 +17,7 @@ from .models import (
     DocumentSource,
     Feedback,
     JawafEntity,
+    SourceLinkRole,
 )
 
 logger = logging.getLogger(__name__)
@@ -274,7 +275,14 @@ class CaseDetailSerializer(CaseSerializer):
         if not raw_evidence:
             return []
 
-        source_ids = [e["source_id"] for e in raw_evidence if "source_id" in e]
+        def resolve_source_id(entry):
+            """Extract a string source_id from an entry, handling embedded dicts."""
+            sid = entry.get("source_id")
+            if isinstance(sid, dict):
+                return sid.get("source_id") or sid.get("link")
+            return sid
+
+        source_ids = [sid for e in raw_evidence if (sid := resolve_source_id(e))]
         sources = {
             s.source_id: DocumentSourceSerializer(s, context=self.context).data
             for s in DocumentSource.objects.filter(
@@ -287,10 +295,10 @@ class CaseDetailSerializer(CaseSerializer):
             | {
                 "source": (
                     {
-                        k: sources[entry["source_id"]][k]
-                        for k in ["title", "source_type", "url"]
+                        k: sources[sid][k]
+                        for k in ["title", "source_type", "url", "urls"]
                     }
-                    if entry.get("source_id") in sources
+                    if (sid := resolve_source_id(entry)) in sources
                     else None
                 )
             }
@@ -301,6 +309,61 @@ class CaseDetailSerializer(CaseSerializer):
         pass
 
 
+class SourceLinkField(serializers.Field):
+    """Field that accepts a ``{'link': str, 'role': str}`` source-link dict.
+
+    Plain URL strings are no longer accepted — every link must be a dict with a
+    ``link`` key and an explicit ``role`` (one of the ``SourceLinkRole`` values).
+    File uploads are recorded as ``RAW`` automatically by the view; this field
+    is only used for caller-supplied external URLs, which must name their role.
+    """
+
+    def to_internal_value(self, data):
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from django.core.validators import URLValidator
+
+        validator = URLValidator()
+        valid_roles = [r.value for r in SourceLinkRole]
+
+        if not isinstance(data, dict):
+            raise serializers.ValidationError(
+                "Must be a dict with 'link' and 'role' keys; "
+                "plain URL strings are no longer accepted."
+            )
+
+        link = data.get("link")
+        role = data.get("role")
+        if not link or not isinstance(link, str) or not link.strip():
+            raise serializers.ValidationError(
+                "Dict must contain a 'link' key with a non-empty string value."
+            )
+        stripped_link = link.strip()
+        try:
+            validator(stripped_link)
+        except DjangoValidationError:
+            raise serializers.ValidationError("Enter a valid URL.")
+
+        if role is None:
+            raise serializers.ValidationError(
+                f"A 'role' is required. Must be one of {valid_roles}."
+            )
+        if role not in valid_roles:
+            raise serializers.ValidationError(
+                f"Invalid role '{role}'. Must be one of {valid_roles}."
+            )
+        return {"link": stripped_link, "role": role}
+
+    def to_representation(self, value):
+        if isinstance(value, str):
+            return {"link": value, "role": SourceLinkRole.RAW.value}
+        if isinstance(value, dict):
+            return {
+                "link": value.get("link"),
+                "role": value.get("role") or SourceLinkRole.RAW.value,
+            }
+        return value
+
+
 class DocumentSourceSerializer(serializers.ModelSerializer):
     """
     Serializer for DocumentSource model.
@@ -309,32 +372,75 @@ class DocumentSourceSerializer(serializers.ModelSerializer):
     """
 
     url = serializers.SerializerMethodField(
-        help_text="List of URLs for this source, including uploaded file URL when available"
+        help_text="Deprecated — use 'urls'. List of URL strings for this source, "
+        "including uploaded file URL when available"
+    )
+    urls = serializers.SerializerMethodField(
+        help_text="List of URL dicts with 'link' and 'role' keys for this source, "
+        "including uploaded file URL when available"
     )
 
+    @extend_schema_field(serializers.ListField(child=serializers.URLField()))
     def get_url(self, obj):
+        """Backward-compat: return only link strings (deprecated).
+
+        Deduplicated by link — the same link under two roles (e.g. RAW + the
+        MARKDOWN-converted view) collapses to a single string here.
+        """
+        seen = set()
+        links = []
+        for u in self.get_urls(obj):
+            link = u["link"]
+            if link not in seen:
+                seen.add(link)
+                links.append(link)
+        return links
+
+    @extend_schema_field(
+        inline_serializer(
+            many=True,
+            name="SourceLink",
+            fields={
+                "link": serializers.URLField(),
+                "role": serializers.ChoiceField(
+                    choices=[r.value for r in SourceLinkRole]
+                ),
+            },
+        )
+    )
+    def get_urls(self, obj):
         request = self.context.get("request")
         merged_urls = []
         seen = set()
 
-        def add_url(value):
+        def add_url(value, role="RAW"):
             if not value:
                 return
             candidate = value
             if request is not None:
                 candidate = request.build_absolute_uri(candidate)
-            if candidate not in seen:
-                seen.add(candidate)
-                merged_urls.append(candidate)
+            dedupe_key = (candidate, role)
+            if dedupe_key not in seen:
+                seen.add(dedupe_key)
+                merged_urls.append({"link": candidate, "role": role})
 
-        for url in list(obj.url or []):
-            add_url(url)
+        for item in list(obj.url or []):
+            if isinstance(item, dict):
+                link = item.get("link")
+                role = item.get("role") or "RAW"
+                add_url(link, role)
+            else:
+                add_url(item)
 
         if obj.uploaded_file:
             try:
-                add_url(obj.uploaded_file.url)
-            except Exception:
-                pass
+                add_url(obj.uploaded_file.url, "RAW")
+            except (ValueError, AttributeError) as exc:
+                logger.warning(
+                    "Skipping uploaded_file URL for source %s: %s",
+                    obj.source_id,
+                    exc,
+                )
 
         uploaded_files = getattr(obj, "uploaded_files", None)
         if uploaded_files is not None:
@@ -345,9 +451,14 @@ class DocumentSourceSerializer(serializers.ModelSerializer):
             )
             for uploaded_file in uploads_iterable:
                 try:
-                    add_url(uploaded_file.file.url)
-                except Exception:
-                    pass
+                    add_url(uploaded_file.file.url, "RAW")
+                except (ValueError, AttributeError) as exc:
+                    logger.warning(
+                        "Skipping uploaded file %s URL for source %s: %s",
+                        getattr(uploaded_file, "pk", "?"),
+                        obj.source_id,
+                        exc,
+                    )
 
         return merged_urls
 
@@ -360,6 +471,7 @@ class DocumentSourceSerializer(serializers.ModelSerializer):
             "description",
             "source_type",
             "url",
+            "urls",
             "publication_date",
             "created_at",
             "updated_at",
@@ -523,10 +635,11 @@ class DocumentSourceCreateSerializer(serializers.ModelSerializer):
     """Serializer for creating DocumentSource records with file uploads via API."""
 
     url = serializers.ListField(
-        child=serializers.URLField(),
+        child=SourceLinkField(),
         required=False,
         default=list,
-        help_text="List of external URLs for this source (e.g. original article link)",
+        help_text="List of external URLs for this source (e.g. original article link). "
+        "Each item may be a plain URL string or a dict with 'link' and 'role' keys.",
     )
 
     class Meta:
@@ -565,3 +678,46 @@ class DocumentSourceCreateSerializer(serializers.ModelSerializer):
         if not value or not value.strip():
             raise serializers.ValidationError("Title is required and cannot be empty")
         return value.strip()
+
+
+class DocumentSourceUpdateSerializer(serializers.ModelSerializer):
+    """Serializer for updating an existing DocumentSource (PATCH).
+
+    Supports updating the ``url`` list — including adding a ``MARKDOWN``-role
+    link (e.g. once a source has been converted to markdown) — plus the basic
+    descriptive fields. ``source_id`` is immutable.
+    """
+
+    url = serializers.ListField(
+        child=SourceLinkField(),
+        required=False,
+        help_text=(
+            "List of URLs for this source. Each item must be a dict with "
+            "'link' and 'role' keys (role can be "
+            f"{', '.join(r.value for r in SourceLinkRole)})."
+        ),
+    )
+
+    class Meta:
+        model = DocumentSource
+        fields = [
+            "id",
+            "source_id",
+            "title",
+            "description",
+            "source_type",
+            "url",
+            "publication_date",
+        ]
+        read_only_fields = ["id", "source_id"]
+
+    def to_internal_value(self, data):
+        import json as _json
+
+        if isinstance(data, dict) and "url" in data and isinstance(data["url"], str):
+            try:
+                data = data.copy()
+                data["url"] = _json.loads(data["url"])
+            except (_json.JSONDecodeError, ValueError):
+                pass
+        return super().to_internal_value(data)

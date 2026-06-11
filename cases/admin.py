@@ -1,48 +1,51 @@
-from django.contrib import admin
-from django.contrib import messages
-from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
-from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
-from django.contrib.auth import get_user_model
 from django import forms
-from django.db import models
-from django.utils.html import format_html
+from django.contrib import admin, messages
+from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
+from django.contrib.auth import get_user_model
+from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.core.exceptions import PermissionDenied, ValidationError
+from django.db import models
 from django.forms.models import BaseInlineFormSet
 from django.template.response import TemplateResponse
-from cases.widgets import ToastUIEditorWidget
-from rest_framework.authtoken.models import Token
+from django.utils.html import format_html
 from rest_framework.authtoken.admin import TokenAdmin as BaseTokenAdmin
+from rest_framework.authtoken.models import Token
+
+from cases.widgets import ToastUIEditorWidget
+
 from .models import (
+    ALLOWED_UPLOAD_EXTENSIONS,
+    MAX_UPLOAD_FILE_SIZE,
     Case,
+    CaseEntityRelationship,
+    CaseState,
     ChatUserIdentity,
     DocumentSource,
     DocumentSourceUpload,
-    JawafEntity,
-    CaseState,
     Feedback,
-    CaseEntityRelationship,
+    JawafEntity,
     RelationshipType,
 )
+from .rules.predicates import (
+    can_change_case,
+    can_change_source,
+    can_manage_user,
+    can_transition_case_state,
+    can_view_case,
+    can_view_source,
+    is_admin,
+    is_admin_or_moderator,
+    is_contributor,
+    is_moderator,
+)
 from .services import EntityMergeError, analyze_merge_impact, merge_entities_by_ids
+from .validators import COURT_CHOICES
 from .widgets import (
+    MultiCourtCaseField,
+    MultiEvidenceField,
     MultiTextField,
     MultiTimelineField,
-    MultiEvidenceField,
     MultiURLField,
-    MultiCourtCaseField,
-)
-from .validators import COURT_CHOICES
-from .rules.predicates import (
-    is_admin,
-    is_moderator,
-    is_contributor,
-    is_admin_or_moderator,
-    can_transition_case_state,
-    can_manage_user,
-    can_view_case,
-    can_change_case,
-    can_view_source,
-    can_change_source,
 )
 
 User = get_user_model()
@@ -611,7 +614,7 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         """
         Filter queryset based on user role.
 
-        - Contributors: Only see assigned cases
+        - Contributors: See all non-CLOSED cases (global read access)
         - Moderators/Admins: See all cases
         """
         qs = super().get_queryset(request)
@@ -620,9 +623,9 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         if is_admin_or_moderator(request.user):
             return qs
 
-        # Contributors only see assigned cases
+        # Contributors see all non-CLOSED cases (global read-only access)
         if is_contributor(request.user):
-            return qs.filter(contributors=request.user)
+            return qs.exclude(state=CaseState.CLOSED)
 
         # No role - see nothing
         return qs.none()
@@ -796,7 +799,13 @@ class DocumentSourceAdminForm(forms.ModelForm):
 
 
 class DocumentSourceUploadInline(admin.TabularInline):
-    """Inline form for managing multiple uploaded files on a source."""
+    """Inline form for managing multiple uploaded files on a source.
+
+    Uploaded files are always stored as RAW source links (the link-type
+    selector on the External URLs tab does not apply to uploads). Allowed
+    types and the size cap are surfaced as help text and an ``accept`` filter
+    so the constraint is clear before submit, not only on a validation error.
+    """
 
     model = DocumentSourceUpload
     extra = 1
@@ -804,6 +813,20 @@ class DocumentSourceUploadInline(admin.TabularInline):
     readonly_fields = ("filename", "content_type", "file_size", "created_at")
     verbose_name = "Uploaded file"
     verbose_name_plural = "Uploaded files"
+
+    def formfield_for_dbfield(self, db_field, request, **kwargs):
+        formfield = super().formfield_for_dbfield(db_field, request, **kwargs)
+        if db_field.name == "file" and formfield is not None:
+            max_mb = int(MAX_UPLOAD_FILE_SIZE / (1024 * 1024))
+            allowed = ", ".join(ALLOWED_UPLOAD_EXTENSIONS)
+            formfield.help_text = (
+                f"Stored as a RAW source document. Allowed types: {allowed}. "
+                f"Max size: {max_mb} MB."
+            )
+            formfield.widget.attrs["accept"] = ",".join(
+                f".{ext}" for ext in ALLOWED_UPLOAD_EXTENSIONS
+            )
+        return formfield
 
 
 @admin.register(DocumentSource)
@@ -926,31 +949,9 @@ class DocumentSourceAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         if is_moderator(request.user):
             return qs.filter(is_deleted=False)
 
-        # Contributors see sources they're assigned to OR sources in their cases
+        # Contributors see all active sources (global read access)
         if is_contributor(request.user):
-            # Get cases where user is a contributor
-            user_cases = Case.objects.filter(contributors=request.user)
-
-            # Extract source_ids from evidence of user's cases
-            source_ids_from_cases = set()
-            for case in user_cases:
-                if case.evidence:
-                    for evidence_item in case.evidence:
-                        if (
-                            isinstance(evidence_item, dict)
-                            and "source_id" in evidence_item
-                        ):
-                            source_ids_from_cases.add(evidence_item["source_id"])
-
-            # Return sources where user is contributor OR source is in their cases
-            return (
-                qs.filter(is_deleted=False)
-                .filter(
-                    models.Q(contributors=request.user)
-                    | models.Q(source_id__in=source_ids_from_cases)
-                )
-                .distinct()
-            )
+            return qs.filter(is_deleted=False)
 
         # No role - see nothing
         return qs.none()

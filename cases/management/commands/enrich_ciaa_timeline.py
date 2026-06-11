@@ -458,10 +458,10 @@ class Command(BaseCommand):
         """Acquire source document text for timeline extraction.
 
         Priority order:
-        1. LEGAL_PROCEDURAL description (already extracted) — use if len > 200
-        2. LEGAL_PROCEDURAL URLs — download + likhit/markitdown convert
-        3. LEGAL_COURT_ORDER URLs — supplement with court order data
-        4. OFFICIAL_GOVERNMENT description/URLs — use if available
+        1. AG_ABHIYOG_PATRA description (already extracted) — use if len > 200
+        2. AG_ABHIYOG_PATRA URLs — download + likhit/markitdown convert
+        3. COURT_ORDER URLs — supplement with court order data
+        4. CIAA_PRESS_RELEASE description/URLs — use if available
         """
         if not case.evidence:
             logger.debug("  No evidence entries on case")
@@ -492,21 +492,21 @@ class Command(BaseCommand):
         self._append_source_content(
             source_ids,
             source_by_id,
-            SourceType.LEGAL_PROCEDURAL,
+            SourceType.AG_ABHIYOG_PATRA,
             content_parts,
             session,
         )
         self._append_source_content(
             source_ids,
             source_by_id,
-            SourceType.LEGAL_COURT_ORDER,
+            SourceType.COURT_ORDER,
             content_parts,
             session,
         )
         self._append_source_content(
             source_ids,
             source_by_id,
-            SourceType.OFFICIAL_GOVERNMENT,
+            SourceType.CIAA_PRESS_RELEASE,
             content_parts,
             session,
         )
@@ -538,14 +538,13 @@ class Command(BaseCommand):
                 content_parts.append(description)
                 continue
 
-            if isinstance(source.url, list):
-                for url in source.url:
-                    parsed = urlparse(url)
-                    if parsed.hostname and parsed.hostname in ALLOWED_HOSTS:
-                        content = convert_to_markdown(url, session)
-                        if content and len(content) > 200:
-                            content_parts.append(content)
-                            break
+            for url in source.url_links:
+                parsed = urlparse(url)
+                if parsed.hostname and parsed.hostname in ALLOWED_HOSTS:
+                    content = convert_to_markdown(url, session)
+                    if content and len(content) > 200:
+                        content_parts.append(content)
+                        break
 
     # ── NGM structured hearing data ──────────────────────────────────────
 

@@ -209,11 +209,11 @@ class FeedbackStatus(models.TextChoices):
 class Feedback(models.Model):
     """
     Platform feedback submissions from users.
-    
+
     Stores feedback, bug reports, feature requests, and general comments
     about the Jawafdehi platform.
     """
-    
+
     # Core fields
     feedback_type = models.CharField(
         max_length=20,
@@ -233,14 +233,14 @@ class Feedback(models.Model):
         blank=True,
         help_text="Page or feature related to feedback"
     )
-    
+
     # Contact information (stored as JSON for flexibility)
     contact_info = models.JSONField(
         default=dict,
         blank=True,
         help_text="Optional contact information"
     )
-    
+
     # Status tracking
     status = models.CharField(
         max_length=20,
@@ -249,7 +249,7 @@ class Feedback(models.Model):
         db_index=True,
         help_text="Current status of feedback"
     )
-    
+
     # Metadata
     ip_address = models.GenericIPAddressField(
         null=True,
@@ -260,24 +260,24 @@ class Feedback(models.Model):
         blank=True,
         help_text="User agent string"
     )
-    
+
     # Admin notes
     admin_notes = models.TextField(
         blank=True,
         help_text="Internal notes for administrators"
     )
-    
+
     # Timestamps
     submitted_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)
-    
+
     class Meta:
         ordering = ['-submitted_at']
         indexes = [
             models.Index(fields=['feedback_type', 'status']),
             models.Index(fields=['status', 'submitted_at']),
         ]
-    
+
     def __str__(self):
         return f"{self.feedback_type.upper()}: {self.subject}"
 ```
@@ -319,15 +319,15 @@ class ContactInfoSerializer(serializers.Serializer):
 
 class FeedbackSerializer(serializers.ModelSerializer):
     contactInfo = ContactInfoSerializer(required=False, source='contact_info')
-    
+
     class Meta:
         model = Feedback
         fields = [
-            'id', 'feedbackType', 'subject', 'description', 
+            'id', 'feedbackType', 'subject', 'description',
             'relatedPage', 'contactInfo', 'status', 'submittedAt'
         ]
         read_only_fields = ['id', 'status', 'submittedAt']
-    
+
     def to_representation(self, instance):
         """Convert snake_case to camelCase for API response."""
         data = super().to_representation(instance)
@@ -358,22 +358,22 @@ class FeedbackRateThrottle(AnonRateThrottle):
 
 class FeedbackView(APIView):
     throttle_classes = [FeedbackRateThrottle]
-    
+
     def post(self, request):
         serializer = FeedbackSerializer(data=request.data)
-        
+
         if serializer.is_valid():
             # Capture metadata
             feedback = serializer.save(
                 ip_address=self.get_client_ip(request),
                 user_agent=request.META.get('HTTP_USER_AGENT', '')
             )
-            
+
             return Response(
                 serializer.to_representation(feedback),
                 status=status.HTTP_201_CREATED
             )
-        
+
         return Response(
             {
                 'error': 'Validation error',
@@ -381,7 +381,7 @@ class FeedbackView(APIView):
             },
             status=status.HTTP_400_BAD_REQUEST
         )
-    
+
     def get_client_ip(self, request):
         """Extract client IP address from request."""
         x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
@@ -446,13 +446,13 @@ from .models import Feedback
 @admin.register(Feedback)
 class FeedbackAdmin(admin.ModelAdmin):
     list_display = [
-        'id', 'feedback_type', 'subject', 'status', 
+        'id', 'feedback_type', 'subject', 'status',
         'has_contact_info', 'submitted_at'
     ]
     list_filter = ['feedback_type', 'status', 'submitted_at']
     search_fields = ['subject', 'description', 'related_page']
     readonly_fields = ['submitted_at', 'updated_at', 'ip_address', 'user_agent']
-    
+
     fieldsets = (
         ('Feedback Details', {
             'fields': ('feedback_type', 'subject', 'description', 'related_page')
@@ -469,7 +469,7 @@ class FeedbackAdmin(admin.ModelAdmin):
             'classes': ('collapse',)
         }),
     )
-    
+
     def has_contact_info(self, obj):
         return bool(obj.contact_info and obj.contact_info.get('contactMethods'))
     has_contact_info.boolean = True
@@ -521,12 +521,12 @@ const submitFeedback = async (feedback: FeedbackSubmission): Promise<FeedbackRes
     },
     body: JSON.stringify(feedback),
   });
-  
+
   if (!response.ok) {
     const error = await response.json();
     throw new Error(error.detail || 'Failed to submit feedback');
   }
-  
+
   return response.json();
 };
 ```
@@ -598,16 +598,16 @@ def test_submit_feedback_success(api_client):
             ]
         }
     }
-    
+
     response = api_client.post('/api/feedback/', data, format='json')
-    
+
     assert response.status_code == 201
     assert response.data['feedbackType'] == 'bug'
     assert response.data['subject'] == 'Search not working'
     assert response.data['status'] == 'submitted'
     assert 'submittedAt' in response.data
     assert 'message' in response.data
-    
+
     # Verify database record
     feedback = Feedback.objects.get(id=response.data['id'])
     assert feedback.feedback_type == FeedbackType.BUG
@@ -623,9 +623,9 @@ def test_submit_feedback_anonymous(api_client):
         "subject": "Great platform",
         "description": "This is very helpful"
     }
-    
+
     response = api_client.post('/api/feedback/', data, format='json')
-    
+
     assert response.status_code == 201
     feedback = Feedback.objects.get(id=response.data['id'])
     assert feedback.contact_info == {}
@@ -634,9 +634,9 @@ def test_submit_feedback_anonymous(api_client):
 @pytest.mark.django_db
 def test_submit_feedback_missing_required_fields(api_client):
     data = {"feedbackType": "bug"}
-    
+
     response = api_client.post('/api/feedback/', data, format='json')
-    
+
     assert response.status_code == 400
     assert 'error' in response.data
     assert 'details' in response.data
@@ -651,9 +651,9 @@ def test_submit_feedback_invalid_type(api_client):
         "subject": "Test",
         "description": "Test description"
     }
-    
+
     response = api_client.post('/api/feedback/', data, format='json')
-    
+
     assert response.status_code == 400
     assert 'feedbackType' in response.data['details']
 
@@ -665,12 +665,12 @@ def test_feedback_rate_limiting(api_client):
         "subject": "Test",
         "description": "Test description"
     }
-    
+
     # Submit 5 times (should succeed)
     for _ in range(5):
         response = api_client.post('/api/feedback/', data, format='json')
         assert response.status_code == 201
-    
+
     # 6th submission should be rate limited
     response = api_client.post('/api/feedback/', data, format='json')
     assert response.status_code == 429

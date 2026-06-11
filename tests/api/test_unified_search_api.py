@@ -38,7 +38,7 @@ def archive_records():
         source_id="source:ciaa:procurement",
         title="CIAA procurement filing",
         description="Official procurement investigation filing.",
-        source_type=SourceType.OFFICIAL_GOVERNMENT,
+        source_type=SourceType.CIAA_PRESS_RELEASE,
     )
     published_case = Case.objects.create(
         case_id="case-procurement",

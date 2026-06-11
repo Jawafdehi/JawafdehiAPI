@@ -1,8 +1,8 @@
 import pytest
 from rest_framework.test import APIClient
 
-from cases.models import Case
 from case_workflows.models import CaseWorkflowRun
+from cases.models import Case
 from tests.conftest import create_user_with_role
 
 

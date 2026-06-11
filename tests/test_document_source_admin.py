@@ -8,16 +8,15 @@ Tests the admin interface configuration including:
 """
 
 import pytest
-
 from django.contrib import admin
 
 from cases.admin import DocumentSourceAdmin, DocumentSourceAdminForm
-from cases.models import DocumentSource, CaseType, SourceType
+from cases.models import CaseType, DocumentSource, SourceType
 from tests.conftest import (
-    create_document_source_with_entities,
     create_case_with_entities,
-    create_user_with_role,
+    create_document_source_with_entities,
     create_mock_request,
+    create_user_with_role,
 )
 
 
@@ -188,17 +187,17 @@ class TestDocumentSourceAdmin:
 
         assert not admin_instance.has_change_permission(request, document_source)
 
-    def test_contributor_sees_only_assigned_sources(
+    def test_contributor_sees_all_active_sources(
         self, db, contributor_user, source_with_contributor, document_source
     ):
-        """Test that contributor only sees sources they're assigned to."""
+        """Test that contributor sees all active sources (global read access)."""
         admin_instance = admin.site._registry[DocumentSource]
         request = create_mock_request(contributor_user)
 
         queryset = admin_instance.get_queryset(request)
 
         assert source_with_contributor in queryset
-        assert document_source not in queryset
+        assert document_source in queryset
 
     def test_soft_deletion_preserves_record(self, db, document_source):
         """Test that soft deletion preserves the record in database."""
@@ -280,7 +279,7 @@ class TestDocumentSourceAdminForm:
             data={
                 "title": "News Coverage",
                 "description": "Coverage without a publication date",
-                "source_type": SourceType.MEDIA_NEWS,
+                "source_type": SourceType.NEWS,
                 "is_deleted": False,
                 "url": [],
             }
@@ -314,6 +313,7 @@ class TestDocumentSourceAdminForm:
                 "source_id": document_source.source_id,
                 "title": "Valid Title",
                 "description": "",
+                "source_type": SourceType.MISC,
                 "related_entity_ids": "[]",
                 "is_deleted": False,
             },
@@ -331,6 +331,7 @@ class TestDocumentSourceAdminForm:
                 "source_id": document_source.source_id,
                 "title": "Valid Title",
                 "description": "Valid description",
+                "source_type": SourceType.MISC,
                 "related_entity_ids": "[]",
                 "is_deleted": False,
             },

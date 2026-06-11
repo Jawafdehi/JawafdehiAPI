@@ -7,7 +7,6 @@ Validates: Requirements 1.1, 1.2, 1.3, 1.4, 2.1, 2.2, 2.3, 2.4, 3.1, 3.2, 3.3, 5
 """
 
 import pytest
-
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.test import Client
@@ -201,14 +200,14 @@ class TestDjangoAdminWorkflows:
         case.refresh_from_db()
         assert case.title == "Updated by Contributor1"
 
-        # Step 3: Verify contributor2 cannot access the case
+        # Step 3: Verify contributor2 has read but not write access to the case
         request2 = factory.get("/")
         request2.user = self.contributor2
 
         queryset2 = admin_instance.get_queryset(request2)
         assert (
-            case not in queryset2
-        ), "Contributor2 should NOT see unassigned case in queryset (Requirement 3.2)"
+            case in queryset2
+        ), "Contributor2 should see unassigned case in queryset (global read access)"
 
         has_permission2 = admin_instance.has_change_permission(request2, case)
         assert (
@@ -299,21 +298,21 @@ class TestDjangoAdminWorkflows:
             has_change_permission
         ), "Contributor should have change permission for their own case"
 
-        # Step 5: Verify another contributor cannot see the case
+        # Step 5: Verify another contributor can view but not change the case
         request_contrib2 = factory.get("/")
         request_contrib2.user = self.contributor2
 
         queryset2 = admin_instance.get_queryset(request_contrib2)
         assert (
-            case not in queryset2
-        ), "Other contributors should NOT see unassigned cases in list view (Requirement 3.2)"
+            case in queryset2
+        ), "Other contributors should see unassigned cases in list view (global read access)"
 
         has_view_permission2 = admin_instance.has_view_permission(
             request_contrib2, case
         )
         assert (
-            not has_view_permission2
-        ), "Other contributors should NOT have view permission for unassigned cases"
+            has_view_permission2
+        ), "Other contributors should have view permission for unassigned cases"
 
     def test_state_transitions_with_validation(self):
         """
@@ -369,6 +368,7 @@ class TestDjangoAdminWorkflows:
 
         # Step 5: Contributor attempts to publish (should fail)
         from django.test import RequestFactory
+
         from cases.admin import CaseAdminForm
 
         factory = RequestFactory()
@@ -625,8 +625,9 @@ class TestDjangoAdminWorkflows:
         )
 
         # Step 2: Verify moderator1 cannot see moderator2 in user queryset
-        from cases.admin import CustomUserAdmin
         from django.test import RequestFactory
+
+        from cases.admin import CustomUserAdmin
 
         user_admin = CustomUserAdmin(User, None)
         factory = RequestFactory()
@@ -761,6 +762,7 @@ class TestDjangoAdminWorkflows:
         case.save()
 
         from django.test import RequestFactory
+
         from cases.admin import CaseAdminForm
 
         factory = RequestFactory()
@@ -986,21 +988,21 @@ class TestDjangoAdminWorkflows:
             response.status_code == 200
         ), "Contributor should be able to access case detail page"
 
-        # Verify other contributor cannot see this case
+        # Verify other contributor can view but not change this case
         request_other = factory.get("/admin/cases/case/")
         request_other.user = self.contributor2
 
         queryset_other = admin_instance.get_queryset(request_other)
         assert (
-            minimal_case not in queryset_other
-        ), "Other contributors should NOT see unassigned cases (Requirement 3.2)"
+            minimal_case in queryset_other
+        ), "Other contributors should see unassigned cases (global read access)"
 
         has_view_permission_other = admin_instance.has_view_permission(
             request_other, minimal_case
         )
         assert (
-            not has_view_permission_other
-        ), "Other contributors should NOT have view permission for unassigned cases"
+            has_view_permission_other
+        ), "Other contributors should have view permission for unassigned cases"
 
     def test_new_case_must_be_draft_state(self):
         """
@@ -1016,6 +1018,7 @@ class TestDjangoAdminWorkflows:
         Validates: Requirements 1.1
         """
         from django.test import RequestFactory
+
         from cases.admin import CaseAdminForm
 
         factory = RequestFactory()

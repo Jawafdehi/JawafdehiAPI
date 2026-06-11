@@ -1,4 +1,5 @@
 import pytest
+
 from cases.models import CaseState, CaseType
 from tests.conftest import create_case_with_entities
 

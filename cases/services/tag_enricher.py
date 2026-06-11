@@ -1,6 +1,9 @@
 """Service for rule-based and LLM-based tag classification of CIAA cases."""
 
+from __future__ import annotations
+
 import ipaddress
+import itertools
 import json
 import logging
 import os
@@ -737,7 +740,7 @@ def _collect_case_text(case: Case) -> str:
 
 
 def _collect_evidence_text(case: Case) -> str:  # noqa
-    """Build a text blob from evidence entries, using actual file content when available.
+    """Build a search corpus from evidence entries and source document files.
 
     Priority:
     1. DocumentSource uploaded_file content (converted via MarkItDown)
@@ -749,8 +752,9 @@ def _collect_evidence_text(case: Case) -> str:  # noqa
     contain the richest information for CIAA cases.
     """
     HIGH_VALUE_SOURCE_TYPES = (
-        SourceType.LEGAL_PROCEDURAL,
-        SourceType.LEGAL_COURT_ORDER,
+        SourceType.CIAA_PRESS_RELEASE,
+        SourceType.AG_ABHIYOG_PATRA,
+        SourceType.COURT_ORDER,
     )
 
     parts = []
@@ -782,11 +786,9 @@ def _collect_evidence_text(case: Case) -> str:  # noqa
 
     all_count = len(source_ids)
     hv_count = high_value.count()
-    logger.info(
-        f"  Found {hv_count}/{all_count} high-value sources (press releases, court orders)"
-    )
+    logger.info(f"  Found {hv_count}/{all_count} high-value sources")
 
-    sources = list(high_value) + list(other)
+    sources = list(itertools.chain(high_value, other))
 
     source_ids_for_uploads = [s.id for s in sources]
     pre_fetched_uploads = {}
@@ -944,16 +946,19 @@ def _convert_urls(src: DocumentSource) -> str:  # noqa
                 )
                 with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
                     content_length = resp.headers.get("Content-Length")
-                    if content_length and int(content_length) > _MAX_DOWNLOAD_BYTES:
+                    try:
+                        cl_val = int(content_length) if content_length else 0
+                    except (TypeError, ValueError):
+                        cl_val = 0
+                    if cl_val > _MAX_DOWNLOAD_BYTES:
                         logger.debug(
-                            f"Skipping {url}: Content-Length {content_length} > {_MAX_DOWNLOAD_BYTES}"
+                            f"Skipping {url}: too large"
+                            f" ({cl_val} > {_MAX_DOWNLOAD_BYTES})"
                         )
                         continue
                     data = resp.read(_MAX_DOWNLOAD_BYTES + 1)
                     if len(data) > _MAX_DOWNLOAD_BYTES:
-                        logger.debug(
-                            f"Skipping {url}: download exceeds {_MAX_DOWNLOAD_BYTES} bytes"
-                        )
+                        logger.debug(f"Skipping {url}: >{_MAX_DOWNLOAD_BYTES} bytes")
                         continue
                     with open(tmp_path, "wb") as f:
                         f.write(data)
@@ -977,16 +982,44 @@ def _convert_urls(src: DocumentSource) -> str:  # noqa
     return ""
 
 
-def _match_keywords(text: str, keyword_map: dict[str, list[str]]) -> list[str]:  # noqa
-    """Match text against keyword maps. Returns matched tag names."""
-    matched = []
+def _precompile_keyword_map(
+    keyword_map: dict[str, list[str]],
+) -> dict[str, tuple[list[re.Pattern], list[str]]]:
+    """Precompile regex patterns for ascii keywords, non-ascii kept as literals."""
+    compiled = {}
     for tag, keywords in keyword_map.items():
+        regexes = []
+        literals = []
         for kw in keywords:
             if kw.isascii() and all(c.isascii() for c in kw):
-                if re.search(r"\b" + re.escape(kw) + r"\w*\b", text):
-                    matched.append(tag)
-                    break
+                regexes.append(re.compile(r"\b" + re.escape(kw) + r"\w*\b"))
             else:
+                literals.append(kw)
+        compiled[tag] = (regexes, literals)
+    return compiled
+
+
+# Precompile keyword maps once at module load
+_COMPILED_SECTORS = _precompile_keyword_map(SECTOR_KEYWORDS)
+_COMPILED_CORRUPTION = _precompile_keyword_map(CORRUPTION_TYPE_KEYWORDS)
+_COMPILED_REGIONS = _precompile_keyword_map(REGION_KEYWORDS)
+
+# Precompute valid tag set for validate_tags
+_VALID_TAGS = frozenset(SECTOR_TAGS + CORRUPTION_TYPE_TAGS + REGION_TAGS + CONTEXT_TAGS)
+
+
+def _match_keywords(
+    text: str, compiled_map: dict[str, tuple[list[re.Pattern], list[str]]]
+) -> list[str]:
+    """Match text against precompiled keyword maps. Returns matched tag names."""
+    matched = []
+    for tag, (regexes, literals) in compiled_map.items():
+        for pat in regexes:
+            if pat.search(text):
+                matched.append(tag)
+                break
+        else:
+            for kw in literals:
                 if kw in text:
                     matched.append(tag)
                     break
@@ -1064,7 +1097,8 @@ def _build_tag_selection_instructions() -> list[str]:
     lines.append("")
     lines.append("Return ONLY a JSON array of tag strings, nothing else.")
     lines.append(
-        'Example: ["CIAA", "Corruption", "Local Government", "Bribery", "Kathmandu Valley"]'
+        'Example: ["CIAA", "Corruption", "Local Government", '
+        '"Bribery", "Kathmandu Valley"]'
     )
     return lines
 
@@ -1074,13 +1108,13 @@ def classify_case_rules(case: Case) -> list[str]:  # noqa
     text = _collect_case_text(case)
     tags = []
 
-    sectors = _match_keywords(text, SECTOR_KEYWORDS)
+    sectors = _match_keywords(text, _COMPILED_SECTORS)
     tags.extend(sectors[:3])
 
-    corruption_types = _match_keywords(text, CORRUPTION_TYPE_KEYWORDS)
+    corruption_types = _match_keywords(text, _COMPILED_CORRUPTION)
     tags.extend(corruption_types[:3])
 
-    regions = _match_keywords(text, REGION_KEYWORDS)
+    regions = _match_keywords(text, _COMPILED_REGIONS)
     tags.extend(regions[:2])
 
     amount_tier = _detect_amount_tier(case.bigo)
@@ -1104,7 +1138,8 @@ def build_llm_classification_prompt(case: Case) -> str:
     """Build a prompt for LLM-based tag classification from case metadata."""
     lines = []
     lines.append(
-        "Classify the following Nepal corruption case with tags from the controlled vocabulary below."
+        "Classify the following Nepal corruption case with tags "
+        "from the controlled vocabulary below."
     )
     lines.append("")
     lines.append(f"Case Title: {case.title}")
@@ -1128,10 +1163,12 @@ def build_llm_classification_prompt_from_sources(case: Case, evidence_text: str)
     """Build a prompt for LLM-based tag classification using source documents."""
     lines = []
     lines.append(
-        "Classify the following Nepal corruption case with tags from the controlled vocabulary below."
+        "Classify the following Nepal corruption case with tags "
+        "from the controlled vocabulary below."
     )
     lines.append(
-        "Use the source documents (press releases, court orders) as the primary evidence."
+        "Use the source documents (press releases, court orders) "
+        "as the primary evidence."
     )
     lines.append("")
     lines.append(f"Case Title: {case.title}")
@@ -1177,21 +1214,11 @@ def validate_tags(tags: list[str]) -> list[str]:
 
     Amount tier tags (~X Crore Y Lakh etc.) are dynamic and always pass through.
     """
-    all_valid = set()
-    for tag_list in [
-        SECTOR_TAGS,
-        CORRUPTION_TYPE_TAGS,
-        REGION_TAGS,
-        CONTEXT_TAGS,
-    ]:
-        all_valid.update(tag_list)
-
     valid = []
     seen = set()
     for t in tags:
-        # Amount tags are dynamic (e.g. "~4 Crore 90 Lakh") — always valid
         is_amount = t.startswith("~") or t == "Under 1 Hazar"
-        if (t in all_valid or is_amount) and t not in seen:
+        if (t in _VALID_TAGS or is_amount) and t not in seen:
             seen.add(t)
             valid.append(t)
     return valid
@@ -1209,24 +1236,19 @@ class TagEnricher:
     def __init__(self, use_llm: bool = True, llm_client=None):
         self.use_llm = use_llm
         self._llm_client = llm_client
-        self._llm_service = None
 
     def _invoke_llm(self, prompt: str) -> str:
-        if self._llm_client is not None:
-            logger.debug("  Using CLI-provided LLM client (bypassing DB LLMProvider)")
-            response = self._llm_client.invoke(prompt)
-            if hasattr(response, "content"):
-                return response.content
-            return str(response)
+        if self._llm_client is None:
+            raise RuntimeError(
+                "TagEnricher requires an llm_client. The DB LLMProvider fallback "
+                "was removed with the caseworker app; pass --llm-base-url / "
+                "--llm-api-key to the enrich command to configure one."
+            )
 
-        if self._llm_service is None:
-            from caseworker.services import LLMService
-
-            self._llm_service = LLMService()
-
-        logger.debug("  Using DB LLMProvider")
-        llm = self._llm_service.get_llm()
-        return self._llm_service._call_llm(llm, prompt)
+        response = self._llm_client.invoke(prompt)
+        if hasattr(response, "content"):
+            return response.content
+        return str(response)
 
     def enrich_case(
         self, case: Case, force: bool = False, case_num: int = 0, total_cases: int = 0

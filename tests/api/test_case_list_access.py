@@ -119,7 +119,7 @@ def test_unauthenticated_sees_only_published(
 def test_contributor_sees_published_and_assigned_draft(
     contributor, published_case, draft_assigned, draft_unassigned
 ):
-    """Contributor sees PUBLISHED cases + their assigned DRAFT."""
+    """Contributor sees all non-CLOSED cases (PUBLISHED + DRAFT + IN_REVIEW)."""
     client = APIClient()
     client.force_authenticate(user=contributor)
     response = client.get("/api/cases/")
@@ -127,7 +127,7 @@ def test_contributor_sees_published_and_assigned_draft(
     ids = case_ids_in(response)
     assert published_case.case_id in ids
     assert draft_assigned.case_id in ids
-    assert draft_unassigned.case_id not in ids  # not assigned — must not appear
+    assert draft_unassigned.case_id in ids  # global read access
 
 
 @pytest.mark.django_db
@@ -145,16 +145,16 @@ def test_contributor_sees_assigned_in_review(
 
 
 @pytest.mark.django_db
-def test_contributor_does_not_see_unassigned_draft(
+def test_contributor_does_see_unassigned_draft(
     contributor, draft_unassigned, draft_assigned
 ):
-    """Contributor must NOT see another contributor's draft they are not assigned to."""
+    """Contributor sees all drafts (global read access), including unassigned."""
     client = APIClient()
     client.force_authenticate(user=contributor)
     response = client.get("/api/cases/")
     assert response.status_code == 200
     ids = case_ids_in(response)
-    assert draft_unassigned.case_id not in ids
+    assert draft_unassigned.case_id in ids
 
 
 @pytest.mark.django_db
@@ -168,15 +168,15 @@ def test_contributor_never_sees_closed(contributor, closed_case):
 
 
 @pytest.mark.django_db
-def test_other_contributor_cannot_see_another_users_draft(
+def test_other_contributor_can_see_another_users_draft(
     other_contributor, draft_assigned
 ):
-    """A contributor unrelated to a draft must not see it in the list."""
+    """A contributor unrelated to a draft can now see it (global read access)."""
     client = APIClient()
     client.force_authenticate(user=other_contributor)
     response = client.get("/api/cases/")
     assert response.status_code == 200
-    assert draft_assigned.case_id not in case_ids_in(response)
+    assert draft_assigned.case_id in case_ids_in(response)
 
 
 # ---------------------------------------------------------------------------

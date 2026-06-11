@@ -95,14 +95,14 @@ Each **source** has two distinct description fields:
 
 ### 1. [Document Title]
 
-- **Type:** OFFICIAL_GOVERNMENT
+- **Type:** AG_ABHIYOG_PATRA
 - **Source Description:** <!-- Nepali. What this document is: e.g. "अख्तियारद्वारा विशेष अदालतमा दायर गरिएको अभियोग पत्र — मुद्दा {{CASE_NUMBER}}, मिति २०८१-०५-१५, प्रतिवादी Ram Prasad Sharma" -->
 - **Evidence Description:** <!-- Nepali. How it supports this case: e.g. "यो अभियोग पत्रले घुसखोरीको आरोप र रु. ९.२२ करोडको बिगो रकम पुष्टि गर्दछ।" -->
 - **URL:** <!-- https://s3.jawafdehi.org/case_uploads/... or web URL -->
 
 ### 2. [Document Title]
 
-- **Type:** MEDIA_NEWS
+- **Type:** NEWS
 - **Publication Date:** <!-- YYYY-MM-DD — required for all news sources -->
 - **Source Description:** <!-- Nepali. What the article reports -->
 - **Evidence Description:** <!-- Nepali. How this article relates to the case -->
@@ -114,8 +114,8 @@ Each **source** has two distinct description fields:
 
 2–5 topic tags in English. Pick from existing tags where possible (e.g. `Procurement`, `CIAA`, `IT`, `Land`, `Banking`, `Revenue`) or add a new one if needed.
 
-- 
-- 
+-
+-
 
 ---
 
@@ -144,4 +144,3 @@ Internal working notes — not published. Include caseworker name and date draft
 Case-relevant images identified during news research (photos of accused, co-defendants, official press conference photos, property/crime-scene photos). Populated from `MEMORY.md ## Images` by the caseworker.
 
 - <!-- ![Caption](url) — context, source outlet -->
-

@@ -1,11 +1,12 @@
 """Tests for map_press_release_files management command."""
 
-import pytest
-from unittest.mock import patch, MagicMock
-from django.core.management import call_command
 from io import StringIO
+from unittest.mock import MagicMock, patch
 
-from cases.models import Case, DocumentSource, CaseState, CaseType, SourceType
+import pytest
+from django.core.management import call_command
+
+from cases.models import Case, CaseState, CaseType, DocumentSource, SourceType
 
 
 @pytest.mark.django_db
@@ -71,7 +72,7 @@ class TestMapPressReleaseFiles:
         pr_source = DocumentSource.objects.create(
             title="CIAA Press Release",
             url=["https://ciaa.gov.np/pressrelease/3173"],
-            source_type=SourceType.LEGAL_PROCEDURAL,
+            source_type=SourceType.CIAA_PRESS_RELEASE,
         )
 
         # Create case with evidence pointing to press release
@@ -150,8 +151,9 @@ class TestMapPressReleaseFiles:
 
             # Source should have both the web URL and file URLs
             assert len(source.url) == 3  # web URL + 2 file URLs
-            assert any("ciaa.gov.np/pressrelease/3173" in url for url in source.url)
-            assert sum("ngm-store.jawafdehi.org" in url for url in source.url) == 2
+            links = [u["link"] if isinstance(u, dict) else u for u in source.url]
+            assert any("ciaa.gov.np/pressrelease/3173" in link for link in links)
+            assert sum("ngm-store.jawafdehi.org" in link for link in links) == 2
 
             # Evidence description should show file count
             assert "2 documents" in evidence_entry["description"]
@@ -166,7 +168,7 @@ class TestMapPressReleaseFiles:
         regular_source = DocumentSource.objects.create(
             title="Regular Document",
             url=["https://example.com/document.pdf"],
-            source_type=SourceType.LEGAL_COURT_ORDER,
+            source_type=SourceType.COURT_ORDER,
         )
 
         case = Case.objects.create(
@@ -212,7 +214,7 @@ class TestMapPressReleaseFiles:
         other_source = DocumentSource.objects.create(
             title="Other Press Release",
             url=["https://ciaa.gov.np/pressrelease/9999"],
-            source_type=SourceType.LEGAL_PROCEDURAL,
+            source_type=SourceType.CIAA_PRESS_RELEASE,
         )
         other_case = Case.objects.create(
             case_type=CaseType.CORRUPTION,
@@ -259,7 +261,7 @@ class TestMapPressReleaseFiles:
             pr_source = DocumentSource.objects.create(
                 title=f"Press Release {i}",
                 url=["https://ciaa.gov.np/pressrelease/3173"],
-                source_type=SourceType.LEGAL_PROCEDURAL,
+                source_type=SourceType.CIAA_PRESS_RELEASE,
             )
             case = Case.objects.create(
                 case_type=CaseType.CORRUPTION,

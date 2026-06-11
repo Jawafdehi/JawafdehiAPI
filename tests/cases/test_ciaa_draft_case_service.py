@@ -36,8 +36,8 @@ class TestCreateDocumentSources:
 
         assert len(sources) == 1
         source = sources[0]
-        assert source.source_type == SourceType.OFFICIAL_GOVERNMENT
-        assert "https://ag.gov.np/storage/test.pdf" in source.url
+        assert source.source_type == SourceType.AG_ABHIYOG_PATRA
+        assert "https://ag.gov.np/storage/test.pdf" in source.url_links
         assert "AG Charge Sheet Test" in source.title
         assert source.publication_date is not None
 
@@ -71,7 +71,7 @@ class TestCreateDocumentSources:
         assert len(sources) == 1
         source = sources[0]
         assert source.publication_date is not None
-        assert source.source_type == SourceType.LEGAL_PROCEDURAL
+        assert source.source_type == SourceType.CIAA_PRESS_RELEASE
 
     def test_empty_json_no_sources(self, db):
         service = CIAADraftCaseService()

@@ -289,7 +289,7 @@ class CIAADraftCaseService:
             source_data = {
                 "title": pr.get("title", "CIAA Press Release")[:300],
                 "url": pr.get("url", ""),
-                "source_type": SourceType.LEGAL_PROCEDURAL,
+                "source_type": SourceType.CIAA_PRESS_RELEASE,
                 "publication_date": self.convert_bs_to_ad(pr.get("date", "")),
             }
             if source := self.get_or_create_source(source_data):
@@ -319,7 +319,7 @@ class CIAADraftCaseService:
             source_data = {
                 "title": ap.get("title", "AG Charge Sheet")[:300],
                 "url": [encoded_url] if encoded_url else [],
-                "source_type": SourceType.OFFICIAL_GOVERNMENT,
+                "source_type": SourceType.AG_ABHIYOG_PATRA,
                 "publication_date": self.convert_bs_to_ad(ap.get("filing_date", "")),
             }
             if source := self.get_or_create_source(source_data):
@@ -340,7 +340,7 @@ class CIAADraftCaseService:
                 source_data = {
                     "title": f"Court Order - {ciaa_json.get('case_no', 'Unknown')}",
                     "url": faisala_url,
-                    "source_type": SourceType.LEGAL_COURT_ORDER,
+                    "source_type": SourceType.COURT_ORDER,
                 }
                 if source := self.get_or_create_source(source_data):
                     sources.append(source)
@@ -380,7 +380,7 @@ class CIAADraftCaseService:
                 for url in url_list:
                     if (
                         source := DocumentSource.objects.filter(
-                            is_deleted=False, url__contains=[url]
+                            is_deleted=False, url__contains=[{"link": url}]
                         )
                         .only("source_id", "title")
                         .first()
@@ -393,7 +393,7 @@ class CIAADraftCaseService:
                     for source in DocumentSource.objects.filter(is_deleted=False).only(
                         "source_id", "title", "url"
                     ):
-                        if isinstance(source.url, list) and url in source.url:
+                        if url in source.url_links:
                             self.stats["sources_reused"] += 1
                             logger.debug(f"Reusing source: {title}")
                             return source
@@ -407,11 +407,12 @@ class CIAADraftCaseService:
                 logger.debug(f"Reusing source: {title}")
                 return source
 
-        # Create new source
+        # Create new source. url_list holds bare link strings (used for the
+        # dedup lookups above); store them as canonical RAW source-link dicts.
         publication_date = source_data.get("publication_date")
         source = DocumentSource.objects.create(
             title=title,
-            url=url_list,
+            url=[{"link": link, "role": "RAW"} for link in url_list],
             source_type=source_type,
             publication_date=publication_date,
         )
