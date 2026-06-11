@@ -385,34 +385,33 @@ class CaseState(models.TextChoices):
 
 
 class SourceType(models.TextChoices):
-    """Enum for document source types."""
+    """Type of a DocumentSource, derived from the document it represents.
 
-    # Legal Documents (Court & Procedural)
-    LEGAL_COURT_ORDER = "LEGAL_COURT_ORDER", "Legal: Court Order/Verdict"
-    LEGAL_PROCEDURAL = "LEGAL_PROCEDURAL", "Legal: Procedural/Law Enforcement"
+    Issuer-prefixed types name documents from a specific authority (CIAA, the
+    Attorney General's office, the Office of the Auditor General); the rest name
+    a document kind. Values are stable identifiers — changing them requires a
+    data migration. See ``cases.services.source_classifier`` for how a source's
+    (title, description, urls) is mapped to one of these.
+    """
 
-    # Official Government
-    OFFICIAL_GOVERNMENT = "OFFICIAL_GOVERNMENT", "Official (Government)"
+    # Issuer-specific documents
+    CIAA_PRESS_RELEASE = "CIAA_PRESS_RELEASE", "CIAA Press Release"
+    AG_ABHIYOG_PATRA = "AG_ABHIYOG_PATRA", "AG Charge Sheet (Abhiyog Patra)"
+    OAG_AUDIT_REPORT = "OAG_AUDIT_REPORT", "OAG Audit Report"
 
-    # Financial & Corporate
-    FINANCIAL_FORENSIC = "FINANCIAL_FORENSIC", "Financial/Forensic Record"
-    INTERNAL_CORPORATE = "INTERNAL_CORPORATE", "Internal Corporate Doc"
+    # Court documents
+    COURT_ORDER = "COURT_ORDER", "Court Order/Verdict"
+    COURT_FILING_OTHER = "COURT_FILING_OTHER", "Other Court Filing"
 
-    # Media & Investigations
-    MEDIA_NEWS = "MEDIA_NEWS", "Media/News"
-    INVESTIGATIVE_REPORT = "INVESTIGATIVE_REPORT", "Investigative Report"
+    # Legislation
+    LAW_OR_BILL = "LAW_OR_BILL", "Law/Act/Bill"
 
-    # Public Input
-    PUBLIC_COMPLAINT = "PUBLIC_COMPLAINT", "Public Complaint/Whistleblower"
-
-    # Legislative
-    LEGISLATIVE_DOC = "LEGISLATIVE_DOC", "Legislative/Policy Doc"
-
-    # Social Media
+    # Media & social
+    NEWS = "NEWS", "News/Media"
     SOCIAL_MEDIA = "SOCIAL_MEDIA", "Social Media"
 
-    # Other
-    OTHER_VISUAL = "OTHER_VISUAL", "Other / Visual Assets"
+    # Catch-all
+    MISC = "MISC", "Miscellaneous"
 
 
 class Case(models.Model):
@@ -792,7 +791,7 @@ class DocumentSource(models.Model):
         blank=True,
         help_text="Type of source",
         # TODO: Consider making this non-nullable in a future migration:
-        # 1. Create data migration to backfill NULL values to SourceType.OTHER_VISUAL
+        # 1. Create data migration to backfill NULL values to SourceType.MISC
         # 2. Create schema migration to set null=False, blank=False
     )
     url = models.JSONField(
@@ -920,7 +919,7 @@ class DocumentSource(models.Model):
             self.url = normalized
 
         # Enforce publication_date for media/news sources
-        if self.source_type == SourceType.MEDIA_NEWS and not self.publication_date:
+        if self.source_type == SourceType.NEWS and not self.publication_date:
             raise ValidationError(
                 {
                     "publication_date": "Publication date is required for media/news sources"

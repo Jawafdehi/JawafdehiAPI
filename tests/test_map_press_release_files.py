@@ -72,7 +72,7 @@ class TestMapPressReleaseFiles:
         pr_source = DocumentSource.objects.create(
             title="CIAA Press Release",
             url=["https://ciaa.gov.np/pressrelease/3173"],
-            source_type=SourceType.LEGAL_PROCEDURAL,
+            source_type=SourceType.CIAA_PRESS_RELEASE,
         )
 
         # Create case with evidence pointing to press release
@@ -168,7 +168,7 @@ class TestMapPressReleaseFiles:
         regular_source = DocumentSource.objects.create(
             title="Regular Document",
             url=["https://example.com/document.pdf"],
-            source_type=SourceType.LEGAL_COURT_ORDER,
+            source_type=SourceType.COURT_ORDER,
         )
 
         case = Case.objects.create(
@@ -214,7 +214,7 @@ class TestMapPressReleaseFiles:
         other_source = DocumentSource.objects.create(
             title="Other Press Release",
             url=["https://ciaa.gov.np/pressrelease/9999"],
-            source_type=SourceType.LEGAL_PROCEDURAL,
+            source_type=SourceType.CIAA_PRESS_RELEASE,
         )
         other_case = Case.objects.create(
             case_type=CaseType.CORRUPTION,
@@ -261,7 +261,7 @@ class TestMapPressReleaseFiles:
             pr_source = DocumentSource.objects.create(
                 title=f"Press Release {i}",
                 url=["https://ciaa.gov.np/pressrelease/3173"],
-                source_type=SourceType.LEGAL_PROCEDURAL,
+                source_type=SourceType.CIAA_PRESS_RELEASE,
             )
             case = Case.objects.create(
                 case_type=CaseType.CORRUPTION,

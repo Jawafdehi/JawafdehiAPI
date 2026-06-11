@@ -279,7 +279,7 @@ class TestDocumentSourceAdminForm:
             data={
                 "title": "News Coverage",
                 "description": "Coverage without a publication date",
-                "source_type": SourceType.MEDIA_NEWS,
+                "source_type": SourceType.NEWS,
                 "is_deleted": False,
                 "url": [],
             }
