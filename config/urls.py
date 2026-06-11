@@ -22,7 +22,7 @@ from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
-from cases.api_views import OEmbedView
+from cases.api_views import MeView, OEmbedView
 from cases.views import docs, index
 
 urlpatterns = [
@@ -41,8 +41,10 @@ urlpatterns = [
     path("api/", include("ngm.urls")),
     # Case Workflows routes
     path("api/case-workflows/", include("case_workflows.urls")),
-    # Caseworker Agent routes
-    path("api/caseworker/", include("caseworker.urls")),
+    # Chat identity resolution for the jawafdehi-mcp server. This is the lone
+    # surviving endpoint from the removed caseworker agent app; the path is kept
+    # for backward compatibility with the MCP server.
+    path("api/caseworker/me", MeView.as_view(), name="cw-me"),
     # Casework Review System (VOL-3) — rule-centered case-quality review.
     # Auth: shared JWT (token from /api/caseworker/auth/token/) + Contributor role.
     path("api/casework/", include("review.urls")),
