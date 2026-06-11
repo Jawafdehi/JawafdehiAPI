@@ -95,12 +95,12 @@ def test_fixes_markdown_link_roles():
 @pytest.mark.django_db
 def test_is_idempotent():
     """Running the migration twice yields the same result."""
-    source = DocumentSource.objects.create(
+    source = _create_with_legacy_type(
+        "LEGAL_COURT_ORDER",
         source_id="m:idem",
         title="विशेष अदालतको फैसला",
         description="",
         url=[{"link": "https://s3.jawafdehi.org/case_uploads/o.md", "role": "RAW"}],
-        source_type=None,
     )
 
     _run_migration()
@@ -117,16 +117,18 @@ def test_is_idempotent():
 @pytest.mark.django_db
 def test_skips_deleted_sources():
     """Soft-deleted sources are not reclassified."""
-    deleted = DocumentSource.objects.create(
+    deleted = _create_with_legacy_type(
+        "OFFICIAL_GOVERNMENT",
         source_id="m:deleted",
         title="विशेष अदालतको फैसला",
         description="",
         url=[],
-        source_type=None,
         is_deleted=True,
     )
 
     _run_migration()
 
+    # Skipped by the migration (filter is is_deleted=False), so its legacy
+    # value is left untouched rather than re-classified to COURT_ORDER.
     deleted.refresh_from_db()
-    assert deleted.source_type is None
+    assert deleted.source_type == "OFFICIAL_GOVERNMENT"

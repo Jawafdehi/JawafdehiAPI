@@ -26,12 +26,24 @@ class TestSourceTypeField:
         source.refresh_from_db()
         assert source.source_type == SourceType.NEWS
 
-    def test_source_type_nullable(self):
-        """Verify source_type can be null."""
-        source = DocumentSource.objects.create(title="Test Source", source_type=None)
+    def test_source_type_defaults_to_misc_when_omitted(self):
+        """source_type is mandatory; when not supplied it defaults to MISC."""
+        source = DocumentSource.objects.create(title="Test Source")
 
         source.refresh_from_db()
-        assert source.source_type is None
+        assert source.source_type == SourceType.MISC
+
+    def test_source_type_not_nullable(self):
+        """Explicitly setting source_type to None is rejected.
+
+        DocumentSource.save() runs full_clean(), so a null source_type is
+        caught at the validation layer (the field is no longer null/blank).
+        """
+        from django.core.exceptions import ValidationError
+
+        with pytest.raises(ValidationError) as exc_info:
+            DocumentSource.objects.create(title="Test Source", source_type=None)
+        assert "source_type" in exc_info.value.message_dict
 
     def test_source_type_serialization(self):
         """Verify source_type serializes correctly in API responses."""

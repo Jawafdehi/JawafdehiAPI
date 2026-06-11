@@ -3,7 +3,6 @@
 Single source of truth for mapping a source's (title, description, urls) to a
 ``SourceType``. Used by:
 
-- the ``backfill_source_types`` management command (classify NULL rows),
 - the ``revamp_source_types`` data migration (re-derive every row), and
 - producers that create sources (so labels are right from the start).
 
