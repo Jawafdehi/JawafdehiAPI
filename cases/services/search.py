@@ -97,7 +97,7 @@ def _excerpt(value: str | None, fallback: str) -> str:
     return normalized[:237] + ("..." if len(normalized) > 237 else "")
 
 
-class UnifiedSearchService:
+class LegacyUnifiedSearchService:
     """Build one normalized archive search response for API consumers."""
 
     def search(
@@ -399,6 +399,7 @@ class UnifiedSearchService:
                 "url": f"/case/{case.slug}",
                 "api_url": f"/api/cases/{case.slug}/",
                 "slug": case.slug,
+                "image_url": case.thumbnail_url or case.banner_url or None,
                 "state": case.state,
                 "case_type": case.case_type,
                 "date": (
@@ -688,3 +689,18 @@ class UnifiedSearchService:
 
     def _public_result(self, record):
         return record["result"]
+
+
+class UnifiedSearchService:
+    """Select the PostgreSQL search path while retaining a rollback fallback."""
+
+    def search(self, **kwargs):
+        from django.conf import settings
+        from django.db import connection
+
+        use_postgres_search = getattr(settings, "ARCHIVE_SEARCH_USE_POSTGRES", False)
+        if use_postgres_search and connection.vendor == "postgresql":
+            from cases.services.postgres_search import PostgresUnifiedSearchService
+
+            return PostgresUnifiedSearchService().search(**kwargs)
+        return LegacyUnifiedSearchService().search(**kwargs)

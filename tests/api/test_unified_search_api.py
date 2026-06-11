@@ -3,6 +3,8 @@
 from datetime import timedelta
 
 import pytest
+from django.db import connection
+from django.test import override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -43,6 +45,7 @@ def archive_records():
         case_type=CaseType.CORRUPTION,
         state=CaseState.PUBLISHED,
         title="KP Sharma Oli procurement case",
+        thumbnail_url="https://example.com/procurement-thumbnail.jpg",
         short_description="Procurement accountability record.",
         description="A public procurement investigation.",
         key_allegations=["Irregular procurement decision"],
@@ -105,6 +108,9 @@ def test_search_returns_one_mixed_normalized_result_list(archive_records):
     assert results_by_type["case"]["url"] == (
         f"/case/{archive_records['published_case'].slug}"
     )
+    assert results_by_type["case"]["image_url"] == (
+        "https://example.com/procurement-thumbnail.jpg"
+    )
     assert results_by_type["entity"]["url"] == (
         f"/entity/{archive_records['person'].id}"
     )
@@ -165,6 +171,7 @@ def test_search_supports_repeatable_refinement_filters(archive_records):
 
 
 @pytest.mark.django_db
+@override_settings(ARCHIVE_SEARCH_USE_POSTGRES=True)
 def test_role_and_entity_type_filters_match_same_relationship(archive_records):
     archive_records["source"].related_entities.add(archive_records["organization"])
 
@@ -224,6 +231,37 @@ def test_search_matches_document_fields_without_case_text_match(archive_records)
         "document"
     ]
     assert response.data["results"][0]["id"] == archive_records["source"].id
+
+
+@pytest.mark.django_db
+def test_search_matches_nepali_text(archive_records):
+    response = APIClient().get("/api/search/", {"q": "नेपाल सरकार"})
+
+    assert response.status_code == 200
+    assert {result["result_type"] for result in response.data["results"]} == {
+        "case",
+        "entity",
+    }
+    assert archive_records["organization"].id in {
+        result["id"]
+        for result in response.data["results"]
+        if result["result_type"] == "entity"
+    }
+
+
+@pytest.mark.django_db
+@override_settings(ARCHIVE_SEARCH_USE_POSTGRES=True)
+def test_search_tolerates_minor_title_typos(archive_records):
+    if connection.vendor != "postgresql":
+        pytest.skip("Typo tolerance is provided by PostgreSQL pg_trgm")
+
+    response = APIClient().get("/api/search/", {"q": "procuremnt"})
+
+    assert response.status_code == 200
+    assert {result["result_type"] for result in response.data["results"]} >= {
+        "case",
+        "document",
+    }
 
 
 @pytest.mark.django_db

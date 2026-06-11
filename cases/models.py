@@ -5,6 +5,8 @@ See: .kiro/specs/accountability-platform-core/design.md
 """
 
 from django.db import models
+from django.contrib.postgres.indexes import GinIndex
+from django.contrib.postgres.search import SearchVector
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.core.validators import URLValidator
@@ -173,6 +175,18 @@ class JawafEntity(models.Model):
                 condition=~models.Q(nes_id__isnull=True, display_name__isnull=True),
                 name="jawafentity_must_have_nes_id_or_display_name",
             )
+        ]
+        indexes = [
+            GinIndex(
+                fields=["display_name"],
+                name="entity_name_trgm_idx",
+                opclasses=["gin_trgm_ops"],
+            ),
+            GinIndex(
+                fields=["nes_id"],
+                name="entity_nes_id_trgm_idx",
+                opclasses=["gin_trgm_ops"],
+            ),
         ]
 
     def __str__(self):
@@ -509,6 +523,32 @@ class Case(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        indexes = [
+            GinIndex(
+                SearchVector(
+                    "title",
+                    "short_description",
+                    "description",
+                    "case_id",
+                    config="simple",
+                ),
+                name="case_archive_fts_idx",
+            ),
+            GinIndex(
+                fields=["title"],
+                name="case_title_trgm_idx",
+                opclasses=["gin_trgm_ops"],
+            ),
+            GinIndex(
+                fields=["case_id"],
+                name="case_id_trgm_idx",
+                opclasses=["gin_trgm_ops"],
+            ),
+            models.Index(
+                fields=["state", "case_type", "-created_at"],
+                name="case_archive_filter_idx",
+            ),
+        ]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -587,6 +627,11 @@ class Case(models.Model):
 
     def save(self, *args, **kwargs):
         """Override save to generate case_id for new cases."""
+        update_fields = kwargs.get("update_fields")
+        should_sync_evidence = update_fields is None or "evidence" in set(
+            update_fields or []
+        )
+
         # Normalize empty/whitespace slug to None to avoid unique constraint violations
         if self.slug is not None and not self.slug.strip():
             self.slug = None
@@ -617,6 +662,11 @@ class Case(models.Model):
 
         # Update cached original slug after successful save
         self._original_slug = self.slug
+
+        if should_sync_evidence:
+            from cases.services.case_evidence_links import sync_case_evidence_sources
+
+            sync_case_evidence_sources(self)
 
     def validate(self):
         """
@@ -835,6 +885,31 @@ class DocumentSource(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        indexes = [
+            GinIndex(
+                SearchVector(
+                    "title",
+                    "description",
+                    "source_id",
+                    config="simple",
+                ),
+                name="source_archive_fts_idx",
+            ),
+            GinIndex(
+                fields=["title"],
+                name="source_title_trgm_idx",
+                opclasses=["gin_trgm_ops"],
+            ),
+            GinIndex(
+                fields=["source_id"],
+                name="source_id_trgm_idx",
+                opclasses=["gin_trgm_ops"],
+            ),
+            models.Index(
+                fields=["is_deleted", "-created_at"],
+                name="source_archive_filter_idx",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.source_id} - {self.title}"
@@ -888,6 +963,47 @@ class DocumentSource(models.Model):
         self.full_clean()
 
         super().save(*args, **kwargs)
+
+
+class CaseEvidenceSource(models.Model):
+    """Indexed derived link from a case evidence entry to a document source."""
+
+    case = models.ForeignKey(
+        Case,
+        on_delete=models.CASCADE,
+        related_name="evidence_links",
+    )
+    document_source = models.ForeignKey(
+        DocumentSource,
+        on_delete=models.CASCADE,
+        related_name="case_links",
+    )
+    evidence_index = models.PositiveIntegerField(default=0)
+    description = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["case_id", "evidence_index", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["case", "document_source"],
+                name="unique_case_evidence_source",
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=["case", "document_source"],
+                name="case_evidence_case_source_idx",
+            ),
+            models.Index(
+                fields=["document_source", "case"],
+                name="case_evidence_source_case_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.case_id} -> {self.document_source_id}"
 
 
 class DocumentSourceUpload(models.Model):

@@ -128,6 +128,7 @@ if not SECRET_KEY or SECRET_KEY.startswith("django-insecure-"):
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv("DEBUG", "False") == "True"
+ARCHIVE_SEARCH_USE_POSTGRES = env_flag("ARCHIVE_SEARCH_USE_POSTGRES", False)
 
 ALLOWED_HOSTS = get_env_list("ALLOWED_HOSTS", "")
 if not DEBUG and not ALLOWED_HOSTS:
@@ -196,6 +197,7 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    "django.contrib.postgres",
     "rest_framework",
     "rest_framework.authtoken",
     "rest_framework_simplejwt",

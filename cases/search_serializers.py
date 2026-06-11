@@ -38,6 +38,7 @@ class SearchResultSerializer(serializers.Serializer):
 class SearchCaseResultSerializer(SearchResultSerializer):
     result_type = serializers.ChoiceField(choices=["case"])
     slug = serializers.CharField()
+    image_url = serializers.URLField(allow_null=True)
     state = serializers.CharField()
     case_type = serializers.CharField()
     date = serializers.DateField(allow_null=True)
