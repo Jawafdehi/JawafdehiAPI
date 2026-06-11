@@ -64,6 +64,12 @@ class MultiWidgetManager {
             });
         }
 
+        // Also update the hidden value when any <select> in the row changes
+        // (e.g. the URL link-role dropdown, which isn't an `.inputClass` input).
+        row.querySelectorAll('select').forEach(sel => {
+            sel.addEventListener('change', () => this.updateHidden());
+        });
+
         // Setup widget-specific handlers
         if (this.config.setupRowCallback) {
             this.config.setupRowCallback(row, this);
@@ -185,8 +191,15 @@ window.MultiWidgetConfigs = {
         inputClass: 'url-input',
         rowClass: 'input-row',
         getValues: (container) => {
-            const inputs = container.querySelectorAll('.url-input');
-            return Array.from(inputs).map(i => i.value.trim()).filter(v => v);
+            // Emit source-link dicts {link, role}. role omitted when blank.
+            return Array.from(container.querySelectorAll('.input-row')).map(row => {
+                const linkInput = row.querySelector('.url-input');
+                const roleSelect = row.querySelector('.url-role');
+                const link = linkInput ? linkInput.value.trim() : '';
+                if (!link) return null;
+                const role = roleSelect ? roleSelect.value.trim() : '';
+                return role ? { link, role } : { link, role: null };
+            }).filter(v => v);
         }
     },
 

@@ -2,7 +2,6 @@ import json
 from json import JSONDecodeError
 
 from django.core.exceptions import ValidationError
-from django.core.validators import URLValidator
 from django.forms.fields import Field
 from django.forms.widgets import Textarea, Widget
 from django.template.loader import render_to_string
@@ -319,12 +318,31 @@ class MultiURLWidget(BaseMultiWidget):
         final_attrs = self.build_attrs(self.attrs, attrs)
         widget_id = final_attrs.get("id", name)
 
+        from cases.models import SourceLinkRole
+
+        # Normalize every value to a {link, role} dict so the template can render
+        # value.link / value.role unconditionally. Without this, a legacy plain
+        # string vs a dict need different handling, and a dict with an empty link
+        # would render its repr into the input via the `default` filter.
+        normalized = []
+        for item in value or []:
+            if isinstance(item, dict):
+                normalized.append(
+                    {"link": item.get("link") or "", "role": item.get("role") or ""}
+                )
+            else:
+                normalized.append({"link": item or "", "role": ""})
+
         context = {
             "widget_id": widget_id,
             "name": name,
-            "values": value,
+            "values": normalized,
             "values_json": json.dumps(value),
             "button_label": self.button_label,
+            "role_choices": [r.value for r in SourceLinkRole],
+            # Unique id for the json_script block (avoids collisions when several
+            # MultiURL widgets render on one page, e.g. an inline formset).
+            "role_choices_id": f"{widget_id}_role_choices",
         }
         return context
 
@@ -359,28 +377,15 @@ class MultiURLField(Field):
 
     def validate(self, value):
         super().validate(value)
-        # Validate each URL
+        # Each item may be a plain URL string OR a {"link": str, "role": ...}
+        # dict (source-link format). Delegate to the model validator so the
+        # admin form stays in sync with DocumentSource.url's own rules — a
+        # string-only check here wrongly rejected dict items, which broke
+        # selecting a link type/role in the admin.
         if value:
-            validator = URLValidator()
-            for url in value:
-                # Check type before calling .strip()
-                if not isinstance(url, str):
-                    raise ValidationError(
-                        f"Invalid URL type: expected string, got {type(url).__name__} ({url!r})"
-                    )
+            from cases.models import validate_url_list
 
-                # Normalize and check if empty
-                normalized = url.strip()
-                if not normalized:
-                    # Reject whitespace-only or empty URLs at form validation time
-                    raise ValidationError(
-                        f"URL cannot be blank or whitespace-only: {url!r}"
-                    )
-
-                try:
-                    validator(normalized)
-                except ValidationError as err:
-                    raise ValidationError(f"Invalid URL: {url}") from err
+            validate_url_list(value)
 
 
 class MultiCourtCaseWidget(BaseMultiWidget):
