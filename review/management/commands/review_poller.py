@@ -20,8 +20,15 @@ configured via CASEWORK_POLLER_TOKEN and belongs to a dedicated service account
 with the Contributor (or ReviewAssistant) role. Create one with:
   manage.py drf_create_token <service-account-username>
 
-  manage.py review_poller            # poll forever
-  manage.py review_poller --once     # drain pending, then exit
+By default the poller is READ-ONLY: it lists the currently-pending reviews and
+exits without touching them. Claiming a review (pending->running) and submitting
+its result are the only mutating operations, so they are gated behind --apply.
+This makes the safe action the default and forces an explicit opt-in before the
+poller writes anything back to the (possibly production) API.
+
+  manage.py review_poller                    # READ-ONLY: list pending, exit
+  manage.py review_poller --apply            # claim/score/submit, poll forever
+  manage.py review_poller --apply --once     # claim/score/submit, drain then exit
 """
 
 import time
@@ -42,9 +49,18 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument(
+            "--apply",
+            action="store_true",
+            help=(
+                "Actually claim, score and submit reviews (mutates the API: "
+                "pending->running->done/failed). Without this flag the poller is "
+                "read-only and only lists the pending queue."
+            ),
+        )
+        parser.add_argument(
             "--once",
             action="store_true",
-            help="Drain currently-pending reviews then exit (no infinite poll).",
+            help="With --apply: drain currently-pending reviews then exit (no infinite poll).",
         )
         parser.add_argument(
             "--poll",
@@ -66,6 +82,35 @@ class Command(BaseCommand):
         return requests.post(
             url, json=payload, headers=self._headers(), timeout=timeout
         )
+
+    def _get(self, path, timeout=30):
+        url = f"{settings.CASEWORK_API_BASE.rstrip('/')}{path}"
+        return requests.get(url, headers=self._headers(), timeout=timeout)
+
+    # ---- read-only listing ------------------------------------------
+
+    def _list_pending(self):
+        """Read-only: GET the review queue and report the pending reviews.
+
+        Does NOT claim anything (no pending->running transition), so it is safe
+        to run against production just to see what is waiting.
+        """
+        r = self._get("/reviews/?page_size=1000")
+        if r.status_code != 200:
+            raise PollerError(f"list failed: HTTP {r.status_code} {r.text[:200]}")
+        data = r.json()
+        rows = data.get("results", data) if isinstance(data, dict) else data
+        pending = [row for row in rows if row.get("status") == "pending"]
+        self.stdout.write(
+            f"queue: {len(rows)} total, {len(pending)} pending "
+            "(read-only; use --apply to process them)"
+        )
+        for row in pending:
+            self.stdout.write(
+                f"  pending review {row.get('id')} ({row.get('slug')}) "
+                f"created={row.get('created_at')}"
+            )
+        return pending
 
     # ---- job lifecycle ----------------------------------------------
 
@@ -139,6 +184,7 @@ class Command(BaseCommand):
     # ---- main loop ---------------------------------------------------
 
     def handle(self, *args, **opts):
+        apply = opts["apply"]
         once = opts["once"]
         poll = float(opts["poll"])
         self.token = settings.CASEWORK_POLLER_TOKEN
@@ -148,6 +194,18 @@ class Command(BaseCommand):
                 "poller's service account (manage.py drf_create_token <user>) "
                 "and set it in the environment."
             )
+
+        # Read-only by default: just report the pending queue and exit. Claiming
+        # and submitting results (the mutating path) require an explicit --apply.
+        if not apply:
+            self.stdout.write(
+                self.style.MIGRATE_HEADING(
+                    f"review_poller (read-only): api={settings.CASEWORK_API_BASE}"
+                )
+            )
+            self._list_pending()
+            return
+
         self.stdout.write(
             self.style.MIGRATE_HEADING(
                 f"review_poller up: api={settings.CASEWORK_API_BASE} once={once}"
