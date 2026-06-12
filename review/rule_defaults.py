@@ -204,15 +204,41 @@ DEFAULT_RULES = [
         "condition_text": "Always active.",
         "applies_to": ALL,
         "description": (
-            "Enough evidence sources, each with a resolvable URL, and a spread of "
-            "official/legal source types. The case should be verifiable from its "
-            "attached evidence."
+            "Enough evidence sources, each resolving to its primary (RAW) "
+            "document, and a spread of official/legal source types. The case "
+            "should be verifiable from its attached evidence."
         ),
         "weight": 1.5,
         "is_gate": True,
         "gate_min": 35,
         "enabled": True,
         "order": 60,
+    },
+    {
+        "key": "source_link_roles_valid",
+        "title": "Source links are well-formed (one RAW each)",
+        "category": "Sourcing",
+        "kind": "deterministic",
+        "detector": "source_link_roles_valid",
+        "condition_text": "Always active (hard gate).",
+        "applies_to": ALL,
+        "description": (
+            "Every document source **must** have exactly **one** canonical "
+            "`RAW` link, and every link must carry a recognised role "
+            "(`RAW`, `MARKDOWN`, `PERMALINK`, `SOURCE_PAGE`, `ALTERNATE`). "
+            "A source with no links, no RAW link, more than one RAW link, or an "
+            "unrecognised role **fails the review** — additional copies of the "
+            "same document (mirrors, alternate-format exports, archives, markdown "
+            "renderings) belong under `ALTERNATE` / `PERMALINK` / `MARKDOWN`, not "
+            "as a second RAW. This is the review-side enforcement of the stored "
+            "source-link convention — stricter than the model's link validator, "
+            "which only requires each link to carry a recognised role."
+        ),
+        "weight": 1.3,
+        "is_gate": True,
+        "gate_min": 50,
+        "enabled": True,
+        "order": 60.5,
     },
     {
         "key": "ciaa_press_release_attached",
@@ -306,6 +332,88 @@ DEFAULT_RULES = [
         "weight": 1.0,
         "enabled": True,
         "order": 68,
+    },
+    {
+        "key": "source_raw_link_quality",
+        "title": "RAW link is the right kind of document",
+        "category": "Sourcing",
+        "kind": "llm",
+        "detector": "",
+        "condition_text": "Always active.",
+        "applies_to": ALL,
+        "description": (
+            "Each source's single canonical **RAW** link should point at the "
+            "actual primary **document** — an uploaded / stored file or a direct "
+            "document link (e.g. a PDF or scan of the press release, charge sheet, "
+            "court order, or verdict) — rather than a generic web page.\n\n"
+            "**Exception — NEWS sources:** for a news source there is no document "
+            "to upload, so the news article's own URL is the legitimate RAW and "
+            "must NOT be penalised.\n\n"
+            "Also check that each source has **exactly one** RAW link and that any "
+            "*additional* links are filed under the correct supporting role rather "
+            "than as a second RAW: a markdown rendering as **MARKDOWN**, an "
+            "archive / web-capture as **PERMALINK**, and any other supplementary "
+            "copy (an alternate-format export, a mirror, another hosting of the "
+            "same file) as **ALTERNATE**.\n\n"
+            "Score 100 when every non-news source's RAW is a document file (news "
+            "RAW being a URL is fine), each source has a single RAW, and extra "
+            "links use the right roles. Lower the score the more sources put a "
+            "bare web page as a non-news RAW, carry multiple RAW links, or "
+            "mis-file supporting links as RAW."
+        ),
+        "good_examples": (
+            "A CIAA press-release source whose RAW is the uploaded PDF/scan, with "
+            "the ciaa.gov.np page kept as ALTERNATE and a web.archive.org capture "
+            "as PERMALINK. A NEWS source whose RAW is the article URL itself."
+        ),
+        "bad_examples": (
+            "A press-release source whose only RAW is a bare ciaa.gov.np web page "
+            "with the uploaded PDF mis-tagged (or absent); a source carrying the "
+            "ciaa.gov.np page, a .doc export and a .pdf export all three tagged "
+            "RAW (only one should be RAW, the others ALTERNATE)."
+        ),
+        "weight": 0.8,
+        "enabled": True,
+        "order": 68.5,
+    },
+    {
+        "key": "ephemeral_sources_archived",
+        "title": "Ephemeral web sources are archived",
+        "category": "Sourcing",
+        "kind": "llm",
+        "detector": "",
+        "condition_text": "Always active.",
+        "applies_to": ALL,
+        "description": (
+            "When a source's **RAW** link is an **ephemeral** external web page — "
+            "a news outlet or general website that can change or disappear — the "
+            "source should also carry a **PERMALINK** archive copy (e.g. a "
+            "`web.archive.org` capture) to guard against link rot.\n\n"
+            "This expectation applies **only** to ephemeral news/web pages. It "
+            "does **not** apply to:\n"
+            "1. Files in our own storage (`*.jawafdehi.org`), which are durable.\n"
+            "2. Official government / court / institutional records (e.g. "
+            "`*.gov.np`, UN, World Bank), which are treated as durable primary "
+            "records.\n"
+            "3. A link that is itself already a stable permalink.\n\n"
+            "Score 100 when every ephemeral news/web source has a PERMALINK "
+            "archive companion; lower the score the more such sources lack one. "
+            "Do not penalise official-record or own-storage sources for missing "
+            "an archive."
+        ),
+        "good_examples": (
+            "A NEWS source whose article URL (RAW) is paired with a "
+            "web.archive.org capture (PERMALINK). An official ciaa.gov.np / "
+            "*.gov.np source with no archive — fine, it is a durable record."
+        ),
+        "bad_examples": (
+            "A NEWS source citing only a news-outlet article URL as RAW with no "
+            "web.archive.org (or other) PERMALINK companion, leaving the citation "
+            "exposed to link rot."
+        ),
+        "weight": 0.6,
+        "enabled": True,
+        "order": 68.7,
     },
     # ---------------- Timeline ----------------
     {

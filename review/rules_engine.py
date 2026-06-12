@@ -44,6 +44,50 @@ def _source_titles(case):
     return out
 
 
+def _valid_link_roles():
+    """The set of valid link-role values, sourced from the model enum.
+
+    Lazily imported (like ``accused_present`` does for ``requires_accused``) so
+    the model, admin, and review engine stay in sync — adding a value to
+    ``SourceLinkRole`` automatically widens what the review gate accepts.
+    """
+    from cases.models import SourceLinkRole
+
+    return {r.value for r in SourceLinkRole}
+
+
+def _sources(case):
+    """The source dicts behind a case's evidence, in order.
+
+    One entry per evidence item (NOT de-duped): a source attached to several
+    evidence rows is judged once per attachment, matching the other detectors
+    (``_source_titles`` et al.) and the original ``sourcing`` source count.
+
+    Each source dict carries the role-tagged ``urls`` ([{link, role}]) and the
+    legacy flat ``url`` string list (see review.jds_client.extract_sources).
+    """
+    return [ev.get("source") or {} for ev in (case.get("evidence") or [])]
+
+
+def _source_roles(src):
+    """Role list for a source's links. Returns ([roles], has_legacy_flat).
+
+    A missing/``None`` role is coerced to ``RAW`` to match
+    cases.models.normalize_url_list, so a legacy link without an explicit role
+    is treated as the canonical document rather than an invalid one. A source
+    still on the deprecated flat ``url`` shape (no role-tagged ``urls``) is
+    reported as has_legacy_flat=True; detectors must not penalise that shape.
+    """
+    urls = src.get("urls") or []
+    roles = [
+        (u.get("role") if u.get("role") is not None else "RAW")
+        for u in urls
+        if isinstance(u, dict)
+    ]
+    has_legacy_flat = not urls and bool(src.get("url"))
+    return roles, has_legacy_flat
+
+
 def _any(text, keywords):
     return any(k.lower() in text for k in keywords)
 
@@ -168,30 +212,72 @@ def structural_completeness(case):
 
 
 def sourcing(case):
-    evidence = case.get("evidence") or []
-    n = len(evidence)
-    with_url = 0
+    sources = _sources(case)
+    n = len(sources)
+    with_raw = 0
     types = set()
-    for ev in evidence:
-        src = ev.get("source") or {}
-        if src.get("url"):
-            with_url += 1
+    for src in sources:
+        roles, has_legacy_flat = _source_roles(src)
+        # A source is properly evidenced when it resolves to a canonical (RAW)
+        # document. Legacy flat-`url` sources count as RAW (normalize_url_list).
+        if "RAW" in roles or has_legacy_flat:
+            with_raw += 1
         if src.get("source_type"):
             types.add(src["source_type"])
     pts = 0
     pts += min(n / GOLD_SOURCES, 1.0) * 40
-    pts += (with_url / n if n else 0) * 30
+    pts += (with_raw / n if n else 0) * 30
     strong = {t for t in types if t.startswith("OFFICIAL") or t.startswith("LEGAL")}
     pts += min(len(types) / 3.0, 1.0) * 15
     pts += 15 if strong else 0
     issues = []
     if n < 2:
         issues.append(f"Only {n} sources (org min: 2).")
-    if n and with_url < n:
-        issues.append(f"{n - with_url} of {n} sources lack a resolvable URL.")
+    if n and with_raw < n:
+        issues.append(
+            f"{n - with_raw} of {n} sources have no canonical (RAW) document link."
+        )
     if not strong:
         issues.append("No OFFICIAL_GOVERNMENT or LEGAL_* source type present.")
     return _clamp(pts), issues
+
+
+def source_link_roles_valid(case):
+    """Structural validity of every source's links (gate).
+
+    Stricter than cases.models.validate_url_list: that validator only requires
+    each link to carry a recognised role, whereas this gate additionally
+    requires exactly one canonical RAW link per source and rejects link-less
+    sources. A case fails when any source has: no links, a link with an
+    unrecognised role, no RAW link, or more than one RAW link. Sources still on
+    the legacy flat-`url` shape are exempt (normalize_url_list treats those
+    links as a single RAW). Binary: 100 when every source is well-formed, else 0
+    (so the gate rejects).
+    """
+    valid_roles = _valid_link_roles()
+    issues = []
+    for src in _sources(case):
+        roles, has_legacy_flat = _source_roles(src)
+        if has_legacy_flat:
+            continue
+        title = (src.get("title") or "?")[:40]
+        if not roles:
+            issues.append(f"'{title}': source has no links.")
+            continue
+        invalid = sorted({r for r in roles if r not in valid_roles})
+        if invalid:
+            issues.append(f"'{title}': invalid link role(s) {invalid}.")
+        raw_count = roles.count("RAW")
+        if raw_count == 0:
+            issues.append(f"'{title}': no canonical (RAW) link.")
+        elif raw_count > 1:
+            issues.append(
+                f"'{title}': {raw_count} RAW links; exactly one is allowed "
+                "(extra copies should be ALTERNATE/MARKDOWN/PERMALINK)."
+            )
+    if issues:
+        return 0, issues
+    return 100, []
 
 
 def ciaa_press_release(case):
@@ -349,6 +435,7 @@ DETECTORS = {
     "additional_description": additional_description,
     "structural_completeness": structural_completeness,
     "sourcing": sourcing,
+    "source_link_roles_valid": source_link_roles_valid,
     "ciaa_press_release": ciaa_press_release,
     "charge_sheet": charge_sheet,
     "court_record": court_record,
