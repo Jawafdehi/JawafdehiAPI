@@ -59,7 +59,12 @@ class Command(BaseCommand):
         parser.add_argument(
             "--overwrite",
             action="store_true",
-            help="Re-convert and replace markdown even if the source already has a MARKDOWN url.",
+            help=(
+                "Re-convert and replace markdown even if the source already has a "
+                "MARKDOWN url. Also bypasses the on-disk conversion cache, so use "
+                "this after a converter change (new likhit OCR DPI, or toggling "
+                "LIBREOFFICE_DOC_CONVERSION) to force fresh output."
+            ),
         )
         parser.add_argument(
             "--dry-run",

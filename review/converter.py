@@ -190,10 +190,14 @@ def _libreoffice_to_docx(content, ext, soffice):
             )
         except Exception:  # noqa: BLE001 - any failure -> caller falls back
             return None
-        out_path = os.path.join(work, "input.docx")
-        if not os.path.exists(out_path):
+        # LibreOffice names the output from the input stem (input.doc -> input.docx),
+        # but glob rather than hardcode the name so an unexpected stem still works.
+        import glob
+
+        produced = glob.glob(os.path.join(work, "*.docx"))
+        if not produced:
             return None
-        with open(out_path, "rb") as f:
+        with open(produced[0], "rb") as f:
             return f.read()
 
 
@@ -377,10 +381,13 @@ def convert_source(source, *, overwrite=False):
         }
 
     # 2. Cache by content hash of url. The cache key is the url, NOT the
-    #    converter version, so `overwrite` must bypass the cache READ as well as
-    #    the "already attached" short-circuit — otherwise refreshing markdown
-    #    after a converter change (e.g. a new likhit OCR DPI) would just re-serve
-    #    the stale cached output. We still WRITE the fresh result below.
+    #    converter or its configuration, so `overwrite` must bypass the cache
+    #    READ (as well as the "already attached" short-circuit). Otherwise any
+    #    CONVERTER CHANGE re-serves stale cached output — this includes a new
+    #    likhit OCR DPI AND toggling LIBREOFFICE_DOC_CONVERSION (a .doc cached via
+    #    antiword would keep returning the antiword body even after LibreOffice is
+    #    enabled). Re-run with --overwrite after any such change. We still WRITE
+    #    the fresh result below.
     # The cache holds the deterministic converted BODY — never the frontmatter,
     # whose timestamp is stamped fresh on every emit below.
     cache_key = hashlib.sha256(url.encode()).hexdigest()[:24]
@@ -414,11 +421,12 @@ def convert_source(source, *, overwrite=False):
             md_text = _html_to_markdown(content)
             if md_text:
                 note = "Converted via trafilatura (HTML main-content)."
-        # Legacy Word: optionally use LibreOffice to produce a clean .docx (it
-        # handles files the bundled antiword crashes on or rejects). Off by
-        # default; falls back to the likhit path when LibreOffice is disabled,
-        # absent, or the conversion fails.
-        if not md_text and ext in (".doc", ".docx"):
+        # Legacy Word (.doc only): optionally use LibreOffice to produce a clean
+        # .docx (it handles files the bundled antiword crashes on or rejects).
+        # Modern .docx is left to markitdown directly — LibreOffice would be a
+        # redundant round-trip. Off by default; falls back to the likhit path when
+        # LibreOffice is disabled, absent, or the conversion fails.
+        if not md_text and ext == ".doc":
             if getattr(settings, "LIBREOFFICE_DOC_CONVERSION", False):
                 soffice = _find_libreoffice()
                 if soffice:
