@@ -473,19 +473,15 @@ class Command(BaseCommand):
     # Document conversion
     # ------------------------------------------------------------------
 
-    def _convert_source_to_markdown(self, source, session, is_press_release=False):
+    def _convert_source_to_markdown(self, source, session):
         """Convert a DocumentSource to markdown text.
 
         Conversion is URL-based: a source's links (including uploaded file links)
         all live in its ``url`` list, tried in document-priority order
         (DOCX > DOC > PDF > HTML) so the richest format wins regardless of the
-        order links sit in ``url``. ``is_press_release`` is retained for API
-        compatibility; both paths now share the same ranked conversion.
+        order links sit in ``url``. Falls back to the description when no URL
+        converts.
         """
-        return self._convert_ranked_urls_to_markdown(source, session)
-
-    def _convert_ranked_urls_to_markdown(self, source, session):
-        """Try the source's document URLs in priority order, then description."""
         for url in self._ranked_document_urls(source):
             md = convert_to_markdown(url, session)
             if md:
@@ -725,9 +721,7 @@ class Command(BaseCommand):
         # Press release — use more context when no court order is available
         pr_source = self._get_press_release_source(case)
         if pr_source:
-            pr_md = self._convert_source_to_markdown(
-                pr_source, session, is_press_release=True
-            )
+            pr_md = self._convert_source_to_markdown(pr_source, session)
             if pr_md:
                 # No court order → use up to PRESS_RELEASE_CHARS_NO_COURT
                 # With court order → use PRESS_RELEASE_CHARS (still more than before)
@@ -753,9 +747,7 @@ class Command(BaseCommand):
 
         # Court order — intelligent truncation
         if co_source:
-            co_md = self._convert_source_to_markdown(
-                co_source, session, is_press_release=False
-            )
+            co_md = self._convert_source_to_markdown(co_source, session)
             if co_md:
                 co_len = len(co_md)
                 truncated = self._truncate_court_order(co_md)
