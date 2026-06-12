@@ -730,6 +730,20 @@ SOURCE_MARKDOWN_DIR = Path(
 SOURCE_MARKDOWN_DIR.mkdir(parents=True, exist_ok=True)
 CONVERT_SOURCE_TIMEOUT = int(os.getenv("CONVERT_SOURCE_TIMEOUT", "180"))
 
+# Use LibreOffice (headless) to convert legacy Word .doc / .docx sources to a
+# clean .docx before markdown extraction. Default ON: prod is expected to have
+# LibreOffice installed (it handles files the bundled antiword crashes on or
+# rejects). An operator on a resource-constrained box may set
+# LIBREOFFICE_DOC_CONVERSION=false to fall back to the lighter likhit/antiword
+# path. When enabled but the binary is absent, the converter degrades to the
+# fallback automatically (no hard dependency).
+LIBREOFFICE_DOC_CONVERSION = (
+    os.getenv("LIBREOFFICE_DOC_CONVERSION", "true").lower() == "true"
+)
+# Optional explicit path to the soffice/libreoffice binary; otherwise PATH is
+# searched (including the versioned `libreoffice26.2` name).
+LIBREOFFICE_BINARY = os.getenv("LIBREOFFICE_BINARY", "")
+
 # Max number of case reviews allowed to run CONCURRENTLY. Additional submitted
 # reviews queue (status=pending) and start as running slots free up. Configurable
 # via env so the operator can tune the parallel review throughput.

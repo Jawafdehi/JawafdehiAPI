@@ -434,12 +434,131 @@ def test_docx_mislabeled_as_doc_is_routed_by_magic(settings, tmp_path):
         return_value=(b"PK\x03\x04 zipbytes...", "application/msword"),
     ), patch.object(converter, "_markitdown") as md, patch.object(
         converter, "_patch_likhit_ocr_dpi"
+    ), patch.object(
+        # Already-OOXML: LibreOffice step is unnecessary; force the direct path.
+        converter,
+        "_find_libreoffice",
+        return_value=None,
     ):
         md.return_value.convert.side_effect = _fake_convert
         res = converter.convert_source(src, overwrite=True)
     assert res["status"] == "converted"
     assert "(.docx)" in res["note"]  # routed as docx, not .doc
     assert captured["suffix"] == ".docx"  # temp file given the right suffix
+
+
+# ── LibreOffice legacy-Word conversion ───────────────────────
+
+
+def test_doc_uses_libreoffice_when_enabled(settings, tmp_path):
+    """A real .doc (OLE2 magic) is routed through LibreOffice -> .docx -> markitdown
+    when conversion is enabled and the binary is present."""
+    settings.SOURCE_MARKDOWN_DIR = tmp_path
+    settings.LIBREOFFICE_DOC_CONVERSION = True
+    src = {
+        "source_id": "doc1",
+        "title": "Legacy doc",
+        "urls": [{"link": "http://x/order.doc", "role": "RAW"}],
+    }
+    captured = {}
+
+    def _fake_convert(path):
+        captured["suffix"] = path[-5:]
+        return MagicMock(text_content="lo body")
+
+    with patch.object(
+        converter.jds_client,
+        "download_source_file",
+        return_value=(b"\xd0\xcf\x11\xe0 ole2bytes", "application/msword"),
+    ), patch.object(
+        converter, "_find_libreoffice", return_value="/usr/bin/soffice"
+    ), patch.object(
+        converter, "_libreoffice_to_docx", return_value=b"PK\x03\x04 docxbytes"
+    ) as lo, patch.object(
+        converter, "_markitdown"
+    ) as md, patch.object(
+        converter, "_patch_likhit_ocr_dpi"
+    ):
+        md.return_value.convert.side_effect = _fake_convert
+        res = converter.convert_source(src, overwrite=True)
+    lo.assert_called_once()
+    assert "LibreOffice" in res["note"]
+    assert captured["suffix"] == ".docx"  # markitdown saw the LO-produced docx
+
+
+def test_doc_falls_back_when_libreoffice_disabled(settings, tmp_path):
+    """With LIBREOFFICE_DOC_CONVERSION off, the .doc goes straight to the likhit
+    path (LibreOffice is never invoked)."""
+    settings.SOURCE_MARKDOWN_DIR = tmp_path
+    settings.LIBREOFFICE_DOC_CONVERSION = False
+    src = {
+        "source_id": "doc2",
+        "title": "Legacy doc",
+        "urls": [{"link": "http://x/order.doc", "role": "RAW"}],
+    }
+    with patch.object(
+        converter.jds_client,
+        "download_source_file",
+        return_value=(b"\xd0\xcf\x11\xe0 ole2bytes", "application/msword"),
+    ), patch.object(converter, "_libreoffice_to_docx") as lo, patch.object(
+        converter, "_markitdown"
+    ) as md, patch.object(
+        converter, "_patch_likhit_ocr_dpi"
+    ):
+        md.return_value.convert.return_value = MagicMock(text_content="antiword body")
+        res = converter.convert_source(src, overwrite=True)
+    lo.assert_not_called()
+    assert "likhit (.doc)" in res["note"]
+
+
+def test_doc_falls_back_when_libreoffice_absent(settings, tmp_path):
+    """Enabled but binary not installed -> graceful fallback to the likhit path."""
+    settings.SOURCE_MARKDOWN_DIR = tmp_path
+    settings.LIBREOFFICE_DOC_CONVERSION = True
+    src = {
+        "source_id": "doc3",
+        "title": "Legacy doc",
+        "urls": [{"link": "http://x/order.doc", "role": "RAW"}],
+    }
+    with patch.object(
+        converter.jds_client,
+        "download_source_file",
+        return_value=(b"\xd0\xcf\x11\xe0 ole2bytes", "application/msword"),
+    ), patch.object(converter, "_find_libreoffice", return_value=None), patch.object(
+        converter, "_markitdown"
+    ) as md, patch.object(
+        converter, "_patch_likhit_ocr_dpi"
+    ):
+        md.return_value.convert.return_value = MagicMock(text_content="antiword body")
+        res = converter.convert_source(src, overwrite=True)
+    assert "likhit (.doc)" in res["note"]
+
+
+def test_doc_falls_back_when_libreoffice_conversion_fails(settings, tmp_path):
+    """If LibreOffice runs but returns no docx, fall back to the likhit path."""
+    settings.SOURCE_MARKDOWN_DIR = tmp_path
+    settings.LIBREOFFICE_DOC_CONVERSION = True
+    src = {
+        "source_id": "doc4",
+        "title": "Legacy doc",
+        "urls": [{"link": "http://x/order.doc", "role": "RAW"}],
+    }
+    with patch.object(
+        converter.jds_client,
+        "download_source_file",
+        return_value=(b"\xd0\xcf\x11\xe0 ole2bytes", "application/msword"),
+    ), patch.object(
+        converter, "_find_libreoffice", return_value="/usr/bin/soffice"
+    ), patch.object(
+        converter, "_libreoffice_to_docx", return_value=None  # conversion failed
+    ), patch.object(
+        converter, "_markitdown"
+    ) as md, patch.object(
+        converter, "_patch_likhit_ocr_dpi"
+    ):
+        md.return_value.convert.return_value = MagicMock(text_content="antiword body")
+        res = converter.convert_source(src, overwrite=True)
+    assert "likhit (.doc)" in res["note"]
 
 
 # ── Frontmatter ──────────────────────────────────────────────

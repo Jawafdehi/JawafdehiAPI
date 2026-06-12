@@ -132,6 +132,71 @@ def _ext_from_magic(content):
     return None
 
 
+def _find_libreoffice():
+    """Return the LibreOffice/soffice executable path, or None if not installed.
+
+    Honors settings.LIBREOFFICE_BINARY, then searches PATH for the common names
+    (the Document Foundation RPMs install a versioned `libreoffice26.2`).
+    """
+    import shutil
+
+    explicit = getattr(settings, "LIBREOFFICE_BINARY", "") or ""
+    if explicit:
+        return explicit if os.path.exists(explicit) else None
+    for name in ("soffice", "libreoffice"):
+        found = shutil.which(name)
+        if found:
+            return found
+    # Versioned binaries (e.g. libreoffice26.2) installed under /usr/bin.
+    import glob
+
+    for path in sorted(glob.glob("/usr/bin/libreoffice*")):
+        if os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def _libreoffice_to_docx(content, ext, soffice):
+    """Convert a legacy Word document (bytes) to .docx with LibreOffice headless.
+
+    Returns the .docx bytes, or None on failure. Each call uses a private,
+    short-lived LibreOffice user profile so concurrent conversions don't collide
+    on the shared default profile.
+    """
+    import subprocess
+
+    with tempfile.TemporaryDirectory() as work:
+        src_path = os.path.join(work, f"input{ext}")
+        with open(src_path, "wb") as f:
+            f.write(content)
+        profile = os.path.join(work, "profile")
+        timeout = getattr(settings, "CONVERT_SOURCE_TIMEOUT", 180)
+        try:
+            subprocess.run(
+                [
+                    soffice,
+                    "--headless",
+                    f"-env:UserInstallation=file://{profile}",
+                    "--convert-to",
+                    "docx",
+                    "--outdir",
+                    work,
+                    src_path,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+                check=True,
+            )
+        except Exception:  # noqa: BLE001 - any failure -> caller falls back
+            return None
+        out_path = os.path.join(work, "input.docx")
+        if not os.path.exists(out_path):
+            return None
+        with open(out_path, "rb") as f:
+            return f.read()
+
+
 # How cleanly a format converts to markdown — higher is better. Word docs are
 # structured text (best), HTML is extractable main-content, PDF may need OCR,
 # everything else is a guess. Used to decide whether an ALTERNATE link is a
@@ -344,12 +409,25 @@ def convert_source(source, *, overwrite=False):
         # plain MarkItDown conversion when extraction finds no article body.
         md_text = ""
         note = ""
+        convert_ext = ext  # extension markitdown sees (LibreOffice may change it)
         if role == "SOURCE_PAGE" or ext in (".html", ".htm"):
             md_text = _html_to_markdown(content)
             if md_text:
                 note = "Converted via trafilatura (HTML main-content)."
+        # Legacy Word: prefer LibreOffice to produce a clean .docx (handles files
+        # the bundled antiword crashes on or rejects). Falls back to the likhit
+        # path when LibreOffice is disabled, absent, or the conversion fails.
+        if not md_text and ext in (".doc", ".docx"):
+            if getattr(settings, "LIBREOFFICE_DOC_CONVERSION", True):
+                soffice = _find_libreoffice()
+                if soffice:
+                    docx = _libreoffice_to_docx(content, ext, soffice)
+                    if docx:
+                        content = docx
+                        convert_ext = ".docx"
+                        note = f"Converted via LibreOffice + markitdown ({ext})."
         if not md_text:
-            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tf:
+            with tempfile.NamedTemporaryFile(suffix=convert_ext, delete=False) as tf:
                 tf.write(content)
                 tmp = tf.name
             try:
