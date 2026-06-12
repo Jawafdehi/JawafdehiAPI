@@ -110,11 +110,14 @@ class TestDocumentSourceAdmin:
 
         assert "publication_date" in basic_fieldset_fields
 
-    def test_upload_inline_is_configured(self, db):
-        """DocumentSource admin should expose inline uploads for multi-file support."""
+    def test_upload_control_is_on_form(self, db):
+        """File upload is a form control (stored to S3 + appended to `url`),
+        not a persisted-row inline."""
         admin_instance = admin.site._registry[DocumentSource]
-        inline_models = [inline.model.__name__ for inline in admin_instance.inlines]
-        assert "DocumentSourceUpload" in inline_models
+        assert admin_instance.inlines == []
+        form_fields = admin_instance.form.base_fields
+        assert "upload_file" in form_fields
+        assert "upload_role" in form_fields
 
     def test_view_on_site_is_disabled(self, db):
         """Test that 'View on site' button is disabled for DocumentSource.

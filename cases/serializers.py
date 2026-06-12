@@ -632,7 +632,13 @@ class JawafEntityCreateSerializer(serializers.ModelSerializer):
 
 
 class DocumentSourceCreateSerializer(serializers.ModelSerializer):
-    """Serializer for creating DocumentSource records with file uploads via API."""
+    """Serializer for creating DocumentSource records with file uploads via API.
+
+    A source's links live solely in its ``url`` list. An uploaded file is an
+    ingestion convenience: we store it to S3 and append the resulting permanent
+    URL to ``url`` (role ``upload_role``, default RAW) rather than persisting a
+    separate uploaded-file record.
+    """
 
     url = serializers.ListField(
         child=SourceLinkField(),
@@ -640,6 +646,13 @@ class DocumentSourceCreateSerializer(serializers.ModelSerializer):
         default=list,
         help_text="List of external URLs for this source (e.g. original article link). "
         "Each item may be a plain URL string or a dict with 'link' and 'role' keys.",
+    )
+    upload_role = serializers.ChoiceField(
+        choices=[r.value for r in SourceLinkRole],
+        required=False,
+        default=SourceLinkRole.RAW.value,
+        write_only=True,
+        help_text="Role to assign to an uploaded_file's link in `url` (default RAW).",
     )
 
     class Meta:
@@ -653,8 +666,33 @@ class DocumentSourceCreateSerializer(serializers.ModelSerializer):
             "url",
             "publication_date",
             "uploaded_file",
+            "upload_role",
         ]
         read_only_fields = ["id", "source_id"]
+
+    def create(self, validated_data):
+        """Store any uploaded file to S3 and record its link in ``url``.
+
+        The file is NOT persisted to the ``uploaded_file`` FileField; ``url`` is
+        the single source of truth for a source's links.
+
+        The source row is created first (which runs model validation, e.g. the
+        publication_date requirement for NEWS), and the file is stored only
+        afterwards — so a validation failure never leaves an orphaned S3 object.
+        """
+        from cases.services.source_files import store_file_as_link
+
+        uploaded_file = validated_data.pop("uploaded_file", None)
+        upload_role = validated_data.pop("upload_role", SourceLinkRole.RAW.value)
+
+        instance = super().create(validated_data)
+
+        if uploaded_file is not None:
+            link = store_file_as_link(uploaded_file, role=upload_role)
+            instance.url = list(instance.url or []) + [link]
+            instance.save(update_fields=["url", "updated_at"])
+
+        return instance
 
     def to_internal_value(self, data):
         """

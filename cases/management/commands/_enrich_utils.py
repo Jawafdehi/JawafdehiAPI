@@ -19,7 +19,9 @@ from django.core.management.base import CommandError
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_HOSTS = frozenset({"ciaa.gov.np", "ngm-store.jawafdehi.org"})
+ALLOWED_HOSTS = frozenset(
+    {"ciaa.gov.np", "ngm-store.jawafdehi.org", "s3.jawafdehi.org"}
+)
 
 
 def resolve_api_key(cli_key: Optional[str]) -> Optional[str]:

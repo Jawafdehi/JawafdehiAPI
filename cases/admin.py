@@ -763,13 +763,39 @@ class DocumentSourceAdminForm(forms.ModelForm):
         help_text="External URLs to the source (you can add multiple)",
     )
 
+    # Ingestion-only file upload: stored to S3 and appended to `url` as a link
+    # on save (see DocumentSourceAdmin.save_model). Not a model field — a
+    # source's links live solely in `url`.
+    upload_file = forms.FileField(
+        required=False,
+        label="Upload a file",
+        help_text=(
+            "Optional. Stored to S3 and added to External URLs as a source link. "
+            f"Allowed types: {', '.join(ALLOWED_UPLOAD_EXTENSIONS)}. "
+            f"Max size: {int(MAX_UPLOAD_FILE_SIZE / (1024 * 1024))} MB."
+        ),
+    )
+    upload_role = forms.ChoiceField(
+        required=False,
+        label="Uploaded file role",
+        help_text="Role for the uploaded file's link (default RAW).",
+    )
+
     class Meta:
         model = DocumentSource
         fields = "__all__"
 
     def __init__(self, *args, **kwargs):
+        from .models import SourceLinkRole
+
         self.request = kwargs.pop("request", None)
         super().__init__(*args, **kwargs)
+
+        # Role choices derived from the enum so new roles appear automatically.
+        self.fields["upload_role"].choices = [
+            (r.value, r.value) for r in SourceLinkRole
+        ]
+        self.fields["upload_role"].initial = SourceLinkRole.RAW.value
 
         # Restrict contributors field visibility based on user role
         if self.request:
@@ -794,6 +820,27 @@ class DocumentSourceAdminForm(forms.ModelForm):
         title = cleaned_data.get("title")
         if not title or not title.strip():
             raise ValidationError({"title": "Title is required and cannot be empty"})
+
+        # Validate an uploaded file against the same rules as model uploads.
+        upload_file = cleaned_data.get("upload_file")
+        if upload_file:
+            from .models import (
+                validate_upload_file_extension,
+                validate_upload_file_mimetype,
+                validate_upload_file_size,
+            )
+
+            for validator in (
+                validate_upload_file_extension,
+                validate_upload_file_size,
+                validate_upload_file_mimetype,
+            ):
+                try:
+                    validator(upload_file)
+                except ValidationError as exc:
+                    # Attach to the upload_file field so the error renders next to
+                    # the input rather than as a form-wide non-field error.
+                    self.add_error("upload_file", exc)
 
         return cleaned_data
 
@@ -841,7 +888,9 @@ class DocumentSourceAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
     """
 
     form = DocumentSourceAdminForm
-    inlines = [DocumentSourceUploadInline]
+    # File upload is handled by the form's `upload_file` control (stored to S3 and
+    # appended to `url`); no separate uploaded-file inline.
+    inlines = []
 
     # Disable "View on site" button since DocumentSource doesn't have a public detail page
     view_on_site = False
@@ -899,7 +948,7 @@ class DocumentSourceAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         ),
         (
             "External URLs",
-            {"fields": ("url",)},
+            {"fields": ("url", "upload_file", "upload_role")},
         ),
     )
 
@@ -1019,9 +1068,26 @@ class DocumentSourceAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         """
         Save the model with validation.
 
+        If a file was uploaded, store it to S3 and append its URL to `obj.url`
+        as a source link (a source's links live solely in `url`). The file is
+        not persisted as a separate uploaded-file record.
+
         Note: Model's save() method calls full_clean() which handles all validation.
-        No need for explicit validation here.
         """
+        upload_file = (
+            form.cleaned_data.get("upload_file")
+            if form is not None and hasattr(form, "cleaned_data")
+            else None
+        )
+        if upload_file:
+            from cases.services.source_files import store_file_as_link
+
+            from .models import SourceLinkRole
+
+            role = form.cleaned_data.get("upload_role") or SourceLinkRole.RAW.value
+            link = store_file_as_link(upload_file, role=role)
+            obj.url = list(obj.url or []) + [link]
+
         super().save_model(request, obj, form, change)
 
     def save_related(self, request, form, formsets, change):
