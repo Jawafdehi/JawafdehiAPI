@@ -159,7 +159,8 @@ def test_evidence_requires_valid_source_references(case_data, source_data):
         ), "Source should not be None when it exists"
         assert evidence_item["source"]["title"] == source.title
         assert "source_type" in evidence_item["source"]
-        assert "url" in evidence_item["source"]
+        assert "urls" in evidence_item["source"]
+        assert "url" not in evidence_item["source"]
 
 
 @pytest.mark.django_db
@@ -696,8 +697,8 @@ def test_document_source_api_shows_sources_from_published_and_in_review_cases():
 
 @pytest.mark.django_db
 def test_document_source_api_returns_url_links_deduped():
-    """The API exposes the source's `url` links; the backward-compat `url`
-    string list dedupes a link that appears under more than one role."""
+    """The API exposes the source's links via `urls` (role-tagged dicts); the
+    deprecated `url` string list is no longer part of the public response."""
     source = create_document_source_with_entities(
         title="Merged Source",
         description="Source with role-tagged links",
@@ -727,12 +728,11 @@ def test_document_source_api_returns_url_links_deduped():
     response = client.get(f"/api/sources/{source.id}/")
     assert response.status_code == 200
 
-    # Backward-compat url field (list of strings), deduped by link.
-    raw_links = response.data["url"]
-    assert raw_links.count("https://example.com/reference.pdf") == 1
-    assert "https://example.com/article" in raw_links
+    # The deprecated string-list `url` field is no longer exposed.
+    assert "url" not in response.data
 
     # urls field carries the role-tagged dicts.
     role_by_link = {(u["link"], u["role"]) for u in response.data["urls"]}
     assert ("https://example.com/reference.pdf", "MARKDOWN") in role_by_link
     assert ("https://example.com/reference.pdf", "RAW") in role_by_link
+    assert ("https://example.com/article", "RAW") in role_by_link

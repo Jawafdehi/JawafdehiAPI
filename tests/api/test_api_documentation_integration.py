@@ -124,7 +124,7 @@ class TestAPIDocumentationIntegration:
             "source_id",
             "title",
             "description",
-            "url",
+            "urls",
         ]
 
         for field in expected_fields:

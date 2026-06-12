@@ -297,10 +297,7 @@ class CaseDetailSerializer(CaseSerializer):
             entry
             | {
                 "source": (
-                    {
-                        k: sources[sid][k]
-                        for k in ["title", "source_type", "url", "urls"]
-                    }
+                    {k: sources[sid][k] for k in ["title", "source_type", "urls"]}
                     if (sid := resolve_source_id(entry)) in sources
                     else None
                 )
@@ -374,30 +371,10 @@ class DocumentSourceSerializer(serializers.ModelSerializer):
     Used for public API access to sources associated with published cases.
     """
 
-    url = serializers.SerializerMethodField(
-        help_text="Deprecated — use 'urls'. List of URL strings for this source, "
-        "including uploaded file URL when available"
-    )
     urls = serializers.SerializerMethodField(
         help_text="List of URL dicts with 'link' and 'role' keys for this source, "
         "including uploaded file URL when available"
     )
-
-    @extend_schema_field(serializers.ListField(child=serializers.URLField()))
-    def get_url(self, obj):
-        """Backward-compat: return only link strings (deprecated).
-
-        Deduplicated by link — the same link under two roles (e.g. RAW + the
-        MARKDOWN-converted view) collapses to a single string here.
-        """
-        seen = set()
-        links = []
-        for u in self.get_urls(obj):
-            link = u["link"]
-            if link not in seen:
-                seen.add(link)
-                links.append(link)
-        return links
 
     @extend_schema_field(
         inline_serializer(
@@ -445,7 +422,6 @@ class DocumentSourceSerializer(serializers.ModelSerializer):
             "title",
             "description",
             "source_type",
-            "url",
             "urls",
             "publication_date",
             "created_at",
