@@ -18,6 +18,9 @@ from .models import (
     Feedback,
     JawafEntity,
     SourceLinkRole,
+    validate_upload_file_extension,
+    validate_upload_file_mimetype,
+    validate_upload_file_size,
 )
 
 logger = logging.getLogger(__name__)
@@ -617,11 +620,16 @@ class DocumentSourceCreateSerializer(serializers.ModelSerializer):
         required=False,
         default=list,
         help_text="List of external URLs for this source (e.g. original article link). "
-        "Each item may be a plain URL string or a dict with 'link' and 'role' keys.",
+        "Each item is a dict with 'link' and 'role' keys.",
     )
     uploaded_file = serializers.FileField(
         required=False,
         write_only=True,
+        validators=[
+            validate_upload_file_extension,
+            validate_upload_file_size,
+            validate_upload_file_mimetype,
+        ],
         help_text="Optional file to ingest: stored to S3 and appended to `url` "
         "as a link (role `upload_role`, default RAW).",
     )

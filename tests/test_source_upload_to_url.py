@@ -42,6 +42,20 @@ def test_create_serializer_stores_upload_as_url_link():
 
 
 @pytest.mark.django_db
+def test_create_serializer_rejects_disallowed_upload_extension():
+    """The API upload path enforces the same extension/size/mimetype rules as
+    the admin (the field carries the model upload validators)."""
+    bad = SimpleUploadedFile(
+        "malware.exe", b"MZ\x90\x00", content_type="application/octet-stream"
+    )
+    serializer = DocumentSourceCreateSerializer(
+        data={"title": "Bad upload", "source_type": "MISC", "uploaded_file": bad}
+    )
+    assert not serializer.is_valid()
+    assert "uploaded_file" in serializer.errors
+
+
+@pytest.mark.django_db
 def test_create_serializer_honors_upload_role():
     """A caller-supplied upload_role is applied to the stored link."""
     md = SimpleUploadedFile("notes.md", b"# hi", content_type="text/markdown")

@@ -862,8 +862,6 @@ def _convert_urls(src: DocumentSource) -> str:  # noqa
     """
     doc_urls = []
     for u in src.url_links:
-        if not isinstance(u, str):
-            continue
         parsed = urlparse(u)
         if parsed.scheme not in ("http", "https"):
             continue

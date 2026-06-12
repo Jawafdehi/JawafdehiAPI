@@ -438,10 +438,13 @@ class Command(BaseCommand):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _ranked_press_release_urls(source):
-        """Return URLs ranked by conversion preference for press releases.
+    def _ranked_document_urls(source):
+        """Return the source's URLs ranked by conversion preference.
 
-        Priority: DOCX > DOC > PDF > other (e.g., CIAA webpage HTML)
+        Priority: DOCX > DOC > PDF > other (e.g., a CIAA webpage / HTML landing
+        page). Used for both press releases and court orders so the richest
+        document format is always tried before a landing page, regardless of the
+        order links happen to sit in ``url``.
         """
         urls = [url.strip() for url in source.url_links if url.strip()]
         if not urls:
@@ -474,41 +477,21 @@ class Command(BaseCommand):
         """Convert a DocumentSource to markdown text.
 
         Conversion is URL-based: a source's links (including uploaded file links)
-        all live in its ``url`` list. For press releases the URLs are tried in
-        priority order (DOCX > DOC > PDF > HTML); for court orders, in list order.
+        all live in its ``url`` list, tried in document-priority order
+        (DOCX > DOC > PDF > HTML) so the richest format wins regardless of the
+        order links sit in ``url``. ``is_press_release`` is retained for API
+        compatibility; both paths now share the same ranked conversion.
         """
-        if is_press_release:
-            return self._convert_press_release_to_markdown(source, session)
-        return self._convert_court_order_to_markdown(source, session)
+        return self._convert_ranked_urls_to_markdown(source, session)
 
-    def _convert_press_release_to_markdown(self, source, session):
-        """Convert press release source. Priority: DOCX > DOC > PDF > HTML.
-
-        File links (uploaded docs) live in the source's ``url`` list alongside
-        web URLs, so URL-based conversion covers them.
-        """
-        ranked_urls = self._ranked_press_release_urls(source)
-
-        # Try each URL in priority order
-        for url in ranked_urls:
+    def _convert_ranked_urls_to_markdown(self, source, session):
+        """Try the source's document URLs in priority order, then description."""
+        for url in self._ranked_document_urls(source):
             md = convert_to_markdown(url, session)
             if md:
                 return md
 
         # Fallback to description
-        if source.description and len(source.description.strip()) >= 500:
-            return source.description
-
-        return None
-
-    def _convert_court_order_to_markdown(self, source, session):
-        """Convert court order source from its URLs (incl. uploaded file links)."""
-        urls = [url.strip() for url in source.url_links if url.strip()]
-        for url in urls:
-            md = convert_to_markdown(url, session)
-            if md:
-                return md
-
         if source.description and len(source.description.strip()) >= 500:
             return source.description
 

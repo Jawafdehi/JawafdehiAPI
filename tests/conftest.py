@@ -323,7 +323,6 @@ def create_user_with_role(username, email, role, password="testpass123"):
             codename__in=[
                 "view_case",
                 "view_documentsource",
-                "view_documentsourceupload",
                 "view_jawafentity",
                 "view_caseentityrelationship",
             ],
