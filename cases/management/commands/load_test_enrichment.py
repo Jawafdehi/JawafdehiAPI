@@ -15,8 +15,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from django.core.management.base import BaseCommand, CommandError
 
 from cases.models import Case, CaseState
-from cases.services.tag_enricher import TagEnricher
 from cases.observability import export_textfile, pipeline_duration
+from cases.services.tag_enricher import TagEnricher
 
 
 def _percentile(sorted_values: list[float], pct: int) -> float:
