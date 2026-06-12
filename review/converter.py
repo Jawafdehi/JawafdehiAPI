@@ -126,6 +126,31 @@ def _format_rank(url):
     return _FORMAT_RANK.get(_ext_from_url(url), 1)
 
 
+# Some source links were persisted with the INTERNAL Cloudflare R2 S3-API
+# endpoint (``<account>.r2.cloudflarestorage.com/jawafdehi/case_uploads/...``)
+# instead of the PUBLIC custom-domain form (``s3.jawafdehi.org/case_uploads/...``).
+# The internal endpoint returns HTTP 400 to anonymous GETs, so the file can't be
+# downloaded for conversion. Rewrite it to the public host (dropping the
+# ``jawafdehi`` bucket path segment, which the custom domain maps implicitly).
+_R2_INTERNAL_RE = re.compile(
+    r"^https?://[0-9a-f]+\.r2\.cloudflarestorage\.com/jawafdehi/(?P<path>.+)$"
+)
+_PUBLIC_MEDIA_HOST = "https://s3.jawafdehi.org/"
+
+
+def _normalize_media_url(url):
+    """Rewrite an internal R2 S3-endpoint url to the public custom-domain url.
+
+    Leaves every other url untouched. See ``_R2_INTERNAL_RE`` above.
+    """
+    if not url:
+        return url
+    m = _R2_INTERNAL_RE.match(url)
+    if m:
+        return _PUBLIC_MEDIA_HOST + m.group("path")
+    return url
+
+
 def _pick_source_link(source):
     """Choose which link to convert, honoring the source's link ROLES.
 
@@ -148,6 +173,9 @@ def _pick_source_link(source):
         if not isinstance(item, dict):
             continue
         link, role = item.get("link"), item.get("role")
+        # Normalize internal R2 endpoint urls to the public host so the picked
+        # link is actually fetchable (see _normalize_media_url).
+        link = _normalize_media_url(link)
         if link and role and role not in by_role:
             by_role[role] = link  # first link of each role wins
 
@@ -165,7 +193,7 @@ def _pick_source_link(source):
         return page, "SOURCE_PAGE"
 
     # Legacy sources with only plain url strings (no roles): treat as RAW.
-    legacy = _pick_url(source.get("url", []))
+    legacy = _normalize_media_url(_pick_url(source.get("url", [])))
     return (legacy, "RAW") if legacy else (None, None)
 
 

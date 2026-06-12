@@ -307,6 +307,46 @@ def test_pick_falls_back_to_legacy_url_strings():
     assert _pick(url=["http://x/legacy.pdf"]) == ("http://x/legacy.pdf", "RAW")
 
 
+# ── Internal R2 endpoint → public host normalization ─────────
+
+_R2_BAD = (
+    "https://4c96557d73194d4f245ba23bd6063ad5.r2.cloudflarestorage.com/"
+    "jawafdehi/case_uploads/9121ea874182ef01e7eba0409168b8f60ae60c2881946c1b131d4054bb920c1c.pdf"
+)
+_R2_PUBLIC = (
+    "https://s3.jawafdehi.org/case_uploads/"
+    "9121ea874182ef01e7eba0409168b8f60ae60c2881946c1b131d4054bb920c1c.pdf"
+)
+
+
+def test_normalize_media_url_rewrites_internal_r2_endpoint():
+    assert converter._normalize_media_url(_R2_BAD) == _R2_PUBLIC
+
+
+def test_normalize_media_url_leaves_other_urls_untouched():
+    assert converter._normalize_media_url(_R2_PUBLIC) == _R2_PUBLIC
+    assert (
+        converter._normalize_media_url("https://lawcommission.gov.np/content/13421/")
+        == "https://lawcommission.gov.np/content/13421/"
+    )
+    assert converter._normalize_media_url(None) is None
+    assert converter._normalize_media_url("") == ""
+
+
+def test_pick_normalizes_internal_r2_raw_link():
+    # The real prod data shape: a broken internal-R2 RAW link listed first,
+    # with the public sibling second. The picker must return a fetchable url.
+    url, role = _pick(
+        [
+            {"link": _R2_BAD, "role": "RAW"},
+            {"link": _R2_PUBLIC, "role": "RAW"},
+        ]
+    )
+    assert url == _R2_PUBLIC and role == "RAW"
+    # Even if the internal-R2 link is the ONLY RAW link, it is normalized.
+    assert _pick([{"link": _R2_BAD, "role": "RAW"}]) == (_R2_PUBLIC, "RAW")
+
+
 # ── HTML main-content extraction (chrome removal) ────────────
 
 
