@@ -13,7 +13,7 @@ from django.contrib.postgres.indexes import GinIndex
 from django.contrib.postgres.search import SearchVector
 from django.core.exceptions import ValidationError
 from django.core.validators import URLValidator
-from django.db import models
+from django.db import models, transaction
 from django.utils import timezone
 
 from .fields import (
@@ -692,15 +692,18 @@ class Case(models.Model):
             ):
                 raise ValidationError("Slug cannot be modified once set")
 
-        super().save(*args, **kwargs)
+        with transaction.atomic():
+            super().save(*args, **kwargs)
 
-        # Update cached original slug after successful save
-        self._original_slug = self.slug
+            # Update cached original slug after successful save
+            self._original_slug = self.slug
 
-        if should_sync_evidence:
-            from cases.services.case_evidence_links import sync_case_evidence_sources
+            if should_sync_evidence:
+                from cases.services.case_evidence_links import (
+                    sync_case_evidence_sources,
+                )
 
-            sync_case_evidence_sources(self)
+                sync_case_evidence_sources(self)
 
     def validate(self):
         """

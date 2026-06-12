@@ -36,6 +36,11 @@ class Command(BaseCommand):
         parser.add_argument("--query", action="append", dest="queries")
 
     def handle(self, *args, **options):
+        if options["iterations"] < 1:
+            raise CommandError("--iterations must be >= 1.")
+        if options["warmup"] < 0:
+            raise CommandError("--warmup must be >= 0.")
+
         if connection.vendor != "postgresql":
             raise CommandError("Archive search benchmarking requires PostgreSQL.")
 
@@ -73,6 +78,8 @@ class Command(BaseCommand):
                 started = time.perf_counter()
                 self._search(service, request, query)
                 samples.append((time.perf_counter() - started) * 1000)
+        if not samples:
+            raise CommandError("Archive search benchmark did not collect samples.")
 
         sorted_samples = sorted(samples)
         p95_index = max(0, math.ceil(0.95 * len(sorted_samples)) - 1)

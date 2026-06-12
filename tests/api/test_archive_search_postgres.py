@@ -65,6 +65,39 @@ def test_case_save_syncs_evidence_source_links():
 
 
 @pytest.mark.django_db
+def test_case_save_rolls_back_when_evidence_sync_fails(monkeypatch):
+    case = Case.objects.create(
+        case_id="case-evidence-rollback",
+        case_type=CaseType.CORRUPTION,
+        state=CaseState.PUBLISHED,
+        title="Evidence rollback",
+        evidence=[],
+    )
+
+    def fail_sync(case):
+        raise RuntimeError("sync failed")
+
+    monkeypatch.setattr(
+        "cases.services.case_evidence_links.sync_case_evidence_sources",
+        fail_sync,
+    )
+    case.title = "Changed title"
+    case.evidence = [{"source_id": "source:rollback", "description": "Changed"}]
+
+    with pytest.raises(RuntimeError, match="sync failed"):
+        case.save(update_fields=["title", "evidence"])
+
+    case.refresh_from_db()
+    assert case.title == "Evidence rollback"
+    assert case.evidence == []
+
+
+def test_benchmark_archive_search_rejects_invalid_iterations():
+    with pytest.raises(CommandError, match="--iterations must be >= 1"):
+        call_command("benchmark_archive_search", iterations=0)
+
+
+@pytest.mark.django_db
 def test_rebuild_case_evidence_links_command_checks_and_repairs_drift():
     source = DocumentSource.objects.create(
         source_id="source:sync:command",
