@@ -443,6 +443,38 @@ def test_dry_run_does_not_attach():
     attach.assert_not_called()
 
 
+def test_per_source_errors_and_skips_are_surfaced():
+    """Errored/skipped sources are logged with their reason, not just counted."""
+    import io
+
+    case = _case_with_source()
+    converted = [
+        {
+            "source_id": "s-err",
+            "conversion_status": "error",
+            "conversion_note": "dead url",
+        },
+        {
+            "source_id": "s-skip",
+            "conversion_status": "skipped",
+            "conversion_note": "Source has no convertible url",
+        },
+        {"source_id": "s-ok", "conversion_status": "converted"},
+    ]
+    out, err = io.StringIO(), io.StringIO()
+    with patch.object(
+        jds_client_in_cmd(), "iter_paginated", return_value=[{"slug": "c1"}]
+    ), patch.object(jds_client_in_cmd(), "get_case", return_value=case), patch.object(
+        converter,
+        "convert_case_to_attach_candidates",
+        return_value=(converted, []),
+    ):
+        call_command("reprocess_source_markdown", "--dry-run", stdout=out, stderr=err)
+    err_text, out_text = err.getvalue(), out.getvalue()
+    assert "s-err" in err_text and "dead url" in err_text
+    assert "s-skip" in out_text and "no convertible url" in out_text
+
+
 def test_live_run_attaches_via_client(settings):
     settings.CASEWORK_POLLER_TOKEN = "tok"
     case = _case_with_source()

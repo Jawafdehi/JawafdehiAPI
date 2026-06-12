@@ -165,8 +165,18 @@ class Command(BaseCommand):
                 totals["converted"] += 1
             elif status == "error":
                 totals["errored"] += 1
+                # Surface WHY a source failed (web-archive-only link, dead url,
+                # OCR timeout, ...) so errors are explainable, not just counted.
+                self.stderr.write(
+                    f"    error source {s.get('source_id')}: "
+                    f"{s.get('conversion_note') or 'unknown'}"
+                )
             else:
                 totals["skipped"] += 1
+                self.stdout.write(
+                    f"    skipped source {s.get('source_id')}: "
+                    f"{s.get('conversion_note') or 'unknown'}"
+                )
 
         self.stdout.write(
             f"  {slug}: {len(converted)} sources, {len(candidates)} to attach"
