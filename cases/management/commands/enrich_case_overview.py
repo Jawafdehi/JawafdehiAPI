@@ -27,12 +27,11 @@ Pipeline (per case)
 
 Classification rules
 --------------------
-``OFFICIAL_GOVERNMENT`` sources are sub-classified:
-  1. ``_has_charge_sheet_keywords()`` → charge_sheet (single)
-  2. ``_has_press_release_keywords()`` OR ``_has_ngm_store_url()`` → press_releases
-  3. Everything else → other_docs
-
-Other ``source_type`` values map directly (LEGAL_COURT_ORDER → court_orders, etc.).
+``AG_ABHIYOG_PATRA`` → charge_sheet (single, first found).
+``CIAA_PRESS_RELEASE`` → press_releases.
+``COURT_ORDER`` / ``COURT_FILING_OTHER`` → court_orders.
+``NEWS`` → media_sources.
+Everything else → other_docs.
 
 LLM backends
 ------------
@@ -859,7 +858,7 @@ class Command(BaseCommand):
             source.source_id: source
             for source in DocumentSource.objects.filter(
                 source_id__in=source_ids, is_deleted=False
-            ).prefetch_related("uploaded_files")
+            )
         }
 
     # ── Multi-source evidence gathering ───────────────────────────
@@ -886,30 +885,18 @@ class Command(BaseCommand):
             if not source:
                 continue
             stype = source.source_type
-            if stype == SourceType.OFFICIAL_GOVERNMENT:
-                if _has_charge_sheet_keywords(source):
-                    if not gathered["charge_sheet"]:
-                        gathered["charge_sheet"] = source
-                elif _has_court_order_keywords(source):
-                    gathered["court_orders"].append(source)
-                elif _has_press_release_keywords(source) or _has_ngm_store_url(source):
-                    gathered["press_releases"].append(source)
-                else:
-                    gathered["other_docs"].append(source)
-            elif stype == SourceType.LEGAL_PROCEDURAL:
-                if _has_court_order_keywords(source):
-                    gathered["court_orders"].append(source)
-                elif _has_press_release_keywords(source) or _has_ngm_store_url(source):
-                    gathered["press_releases"].append(source)
+            if stype == SourceType.AG_ABHIYOG_PATRA:
+                if not gathered["charge_sheet"]:
+                    gathered["charge_sheet"] = source
                 else:
                     gathered["procedural_docs"].append(source)
-            elif stype == SourceType.LEGAL_COURT_ORDER:
+            elif stype == SourceType.CIAA_PRESS_RELEASE:
+                gathered["press_releases"].append(source)
+            elif stype == SourceType.COURT_ORDER:
                 gathered["court_orders"].append(source)
-            elif stype == SourceType.FINANCIAL_FORENSIC:
-                gathered["financial_docs"].append(source)
-            elif stype == SourceType.INVESTIGATIVE_REPORT:
-                gathered["investigative_reports"].append(source)
-            elif stype == SourceType.MEDIA_NEWS:
+            elif stype == SourceType.COURT_FILING_OTHER:
+                gathered["court_orders"].append(source)
+            elif stype == SourceType.NEWS:
                 gathered["media_sources"].append(source)
             else:
                 gathered["other_docs"].append(source)
@@ -1206,9 +1193,9 @@ class Command(BaseCommand):
             q = Q(title__icontains=case_num)
             sources = DocumentSource.objects.filter(
                 q,
-                source_type=SourceType.LEGAL_COURT_ORDER,
+                source_type=SourceType.COURT_ORDER,
                 is_deleted=False,
-            ).prefetch_related("uploaded_files")
+            )
             for source in sources:
                 text = self._convert_one_source(source)
                 if text:
@@ -2252,16 +2239,20 @@ Return ONLY space-separated keywords, no punctuation, no explanation."""
             )
 
     def _download_source_to_path(self, source, output_dir):
-        if source.uploaded_file:
+        if hasattr(source, "uploaded_file") and source.uploaded_file:
+            uploaded_name = (
+                getattr(source, "uploaded_filename", None) or source.uploaded_file.name
+            )
             filename = _sanitize_download_filename(
-                source.uploaded_filename or source.uploaded_file.name,
+                uploaded_name,
                 source.source_id,
             )
             out_path = _confined_output_path(output_dir, filename)
             with source.uploaded_file.open("rb") as in_file:
                 _copy_stream_to_path_with_limit(in_file, out_path)
             return out_path
-        uploaded = source.uploaded_files.first()
+        uploaded_qs = getattr(source, "uploaded_files", None)
+        uploaded = uploaded_qs.first() if uploaded_qs is not None else None
         if uploaded and uploaded.file:
             filename = _sanitize_download_filename(
                 uploaded.filename or uploaded.file.name, source.source_id
@@ -2534,13 +2525,13 @@ Return ONLY space-separated keywords, no punctuation, no explanation."""
         return text.encode("ascii", errors="replace").decode("ascii")
 
     def _describe_source(self, source):
-        if source.uploaded_file:
-            return (
-                f"uploaded file: "
-                f"{source.uploaded_filename or source.uploaded_file.name} "
-                f"({source.source_id})"
+        if hasattr(source, "uploaded_file") and source.uploaded_file:
+            uploaded_name = (
+                getattr(source, "uploaded_filename", None) or source.uploaded_file.name
             )
-        uploaded = source.uploaded_files.first()
+            return f"uploaded file: " f"{uploaded_name} " f"({source.source_id})"
+        uploaded_qs = getattr(source, "uploaded_files", None)
+        uploaded = uploaded_qs.first() if uploaded_qs is not None else None
         if uploaded and uploaded.file:
             return (
                 f"uploaded file: {uploaded.filename or uploaded.file.name} "
