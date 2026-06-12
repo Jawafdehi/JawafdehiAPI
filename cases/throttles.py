@@ -62,8 +62,10 @@ class RoleBasedRateThrottle(SimpleRateThrottle):
         role_names = self.get_role_names(user)
         for role in self.GROUP_PRIORITY:
             if role in role_names:
-                # Fall back to the default rate if a tier's rate is unset.
-                return self.resolve_rate(self.TIER_LIMITS[role]) or default_rate
+                # .get() (not []) so a role listed in GROUP_PRIORITY but missing
+                # from TIER_LIMITS degrades to the default rate instead of
+                # raising KeyError. Also covers an unset tier rate.
+                return self.resolve_rate(self.TIER_LIMITS.get(role)) or default_rate
 
         return default_rate
 
@@ -123,10 +125,10 @@ class RoleBasedUserRateThrottle(RoleBasedRateThrottle):
         return api_settings.DEFAULT_THROTTLE_RATES.get(key)
 
     def get_role_names(self, user):
-        roles = super().get_role_names(user)
         # is_staff is unused in this codebase today, but honoring it (and
         # superuser) keeps the built-in flags meaningful and future-proof.
-        # Both map onto the top "Admin" tier.
+        # Both map onto the top "Admin" tier, so short-circuit and skip the
+        # groups query on this per-request hot path.
         if user.is_superuser or user.is_staff:
-            roles = roles | {"Admin"}
-        return roles
+            return {"Admin"}
+        return super().get_role_names(user)

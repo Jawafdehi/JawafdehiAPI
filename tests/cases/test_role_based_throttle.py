@@ -22,6 +22,11 @@ RATES = {
     "staff": "5000/hour",
 }
 
+# Arbitrary client addresses for cache-key assertions (documentation-range IPs
+# per RFC 5737, so they can never collide with a real host).
+SHARED_IP = "192.0.2.1"
+ANON_IP = "192.0.2.9"
+
 
 def add_user_to_groups(user, *group_names):
     for group_name in group_names:
@@ -49,7 +54,6 @@ def add_user_to_groups(user, *group_names):
 def test_get_user_rate_by_role(groups, is_staff, is_superuser, expected_rate):
     user = User.objects.create_user(
         username="rate_user",
-        password="testpass123",
         is_staff=is_staff,
         is_superuser=is_superuser,
     )
@@ -81,14 +85,14 @@ def test_authenticated_users_bucket_by_identity_not_ip():
     throttle = RoleBasedUserRateThrottle()
     throttle.scope = "user"
 
-    user_a = User.objects.create_user(username="user_a", password="testpass123")
-    user_b = User.objects.create_user(username="user_b", password="testpass123")
+    user_a = User.objects.create_user(username="user_a")
+    user_b = User.objects.create_user(username="user_b")
 
     # Same client IP, different authenticated users.
-    req_a = factory.get("/api/anything/", REMOTE_ADDR="10.0.0.1")
+    req_a = factory.get("/api/anything/", REMOTE_ADDR=SHARED_IP)
     req_a.user = user_a
     req_a.auth = None  # JWT/Session: no DRF token key on request.auth
-    req_b = factory.get("/api/anything/", REMOTE_ADDR="10.0.0.1")
+    req_b = factory.get("/api/anything/", REMOTE_ADDR=SHARED_IP)
     req_b.user = user_b
     req_b.auth = None
 
@@ -106,11 +110,11 @@ def test_anonymous_requests_bucket_by_ip():
     throttle = RoleBasedUserRateThrottle()
     throttle.scope = "user"
 
-    request = factory.get("/api/anything/", REMOTE_ADDR="10.0.0.9")
+    request = factory.get("/api/anything/", REMOTE_ADDR=ANON_IP)
     request.user = AnonymousUser()
     request.auth = None
 
     assert throttle.get_cache_key(request, view=None) == throttle.cache_format % {
         "scope": "user",
-        "ident": "10.0.0.9",
+        "ident": ANON_IP,
     }
