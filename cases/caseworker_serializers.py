@@ -5,6 +5,7 @@ CasePatchSerializer validates the post-patch result dict (not the patch document
 itself) before the changes are persisted.
 """
 
+import re
 from datetime import datetime
 
 from rest_framework import serializers
@@ -35,9 +36,16 @@ BLOCKED_PATH_PREFIXES = frozenset(
 
 
 class TimelineItemSerializer(serializers.Serializer):
+    # Bikram Sambat dates are not Gregorian-parseable, so they are validated by
+    # shape only (mirrors cases.fields.TimelineListField._BS_DATE_RE).
+    _BS_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
     date = serializers.CharField()
     title = serializers.CharField()
     description = serializers.CharField(required=False, allow_blank=True)
+    date_bs = serializers.CharField(required=False)
+    end_date = serializers.CharField(required=False)
+    end_date_bs = serializers.CharField(required=False)
 
     def validate_date(self, value):
         try:
@@ -52,6 +60,39 @@ class TimelineItemSerializer(serializers.Serializer):
         if not value or not value.strip():
             raise serializers.ValidationError("Title must be a non-empty string")
         return value
+
+    def validate_end_date(self, value):
+        try:
+            datetime.fromisoformat(value)
+        except (ValueError, TypeError):
+            raise serializers.ValidationError(
+                "Invalid end_date format (expected ISO format YYYY-MM-DD)"
+            )
+        return value
+
+    def validate_date_bs(self, value):
+        return self._validate_bs("date_bs", value)
+
+    def validate_end_date_bs(self, value):
+        return self._validate_bs("end_date_bs", value)
+
+    def _validate_bs(self, field_name, value):
+        if not self._BS_DATE_RE.match(value):
+            raise serializers.ValidationError(
+                f"{field_name} must be a Bikram Sambat date string in YYYY-MM-DD "
+                "format"
+            )
+        return value
+
+    def validate(self, attrs):
+        end_date = attrs.get("end_date")
+        if end_date is not None:
+            # date already validated to ISO format by validate_date
+            if datetime.fromisoformat(end_date) < datetime.fromisoformat(attrs["date"]):
+                raise serializers.ValidationError(
+                    {"end_date": "end_date must be on or after date"}
+                )
+        return attrs
 
 
 class EvidenceItemSerializer(serializers.Serializer):
