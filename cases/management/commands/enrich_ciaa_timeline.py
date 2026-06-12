@@ -1,15 +1,24 @@
 """
-Django management command to extract case timeline entries from CIAA source
-documents using LLM extraction.
+Django management command to extract a case's FACTUAL TIMELINE from CIAA source
+documents using LLM extraction, fully over the Jawafdehi HTTP API.
 
-Phase 1 (A.3) of CIAA FY 080/081 Case Enrichment pipeline.
-Populates ``Case.timeline`` with chronological entries covering case
-progression from investigation through verdict.
+Phase A.3 of the CIAA Case Enrichment pipeline. Populates ``Case.timeline``
+with the factual milestones of a corruption case (incident period, complaint,
+CIAA investigation, press release, chargesheet filing, interim orders, Special
+Court verdict, Supreme Court appeal/verdict) — NOT the routine hearing-by-hearing
+court progression (that is already tracked as the case's Pragati Bibaran by case
+number). See https://github.com/Jawafdehi/JawafdehiAPI/issues/186.
 
-Processes all DRAFT cases with empty ``timeline``, regardless of
-court case naming conventions.
+This command is API-driven: it reads cases, source content and NGM hearing
+records over HTTP and writes the timeline via ``PATCH /api/cases/{slug}/``. It
+never touches the ORM, so a ``--dry-run`` needs no database credentials — only
+an API token (to read DRAFT cases) and an LLM key (timeline generation requires
+the model). The LLM is given a ``convert_date`` tool so it converts dates
+between Bikram Sambat and Gregorian reliably instead of doing the arithmetic in
+its head.
 
-Idempotent: skips cases with non-empty ``timeline``.
+Idempotent: skips cases whose ``timeline`` is already populated (unless
+``--force``).
 
 Usage::
 
@@ -23,97 +32,121 @@ Usage::
 import logging
 import os
 import re
+import urllib.parse
 from typing import Optional
-from urllib.parse import urlparse
 
 import requests
 from django.core.management.base import BaseCommand, CommandError
-from django.db import transaction
-from django.utils import timezone
 
 from cases.management.commands._enrich_utils import (
-    ALLOWED_HOSTS,
-    call_llm,
-    convert_to_markdown,
+    CONVERT_DATE_TOOL,
+    CONVERT_DATE_TOOL_ANTHROPIC,
+    call_bedrock_with_tools,
+    call_llm_with_tools,
+    convert_date,
     is_valid_iso_date,
     parse_extraction_response,
     resolve_api_key,
 )
-from cases.models import Case, DocumentSource, SourceType
-from cases.services.priority_case_loader import filter_by_priority, load_priority_cases
-from ngm.services import get_court_case_details
+from cases.services.priority_case_loader import load_priority_cases
 
 logger = logging.getLogger(__name__)
 
+# Source types (matched as plain strings from the API payload — no model import
+# so the command stays ORM-free). Ordered by usefulness for factual milestones.
+MILESTONE_SOURCE_TYPES = (
+    "AG_ABHIYOG_PATRA",  # charge sheet — richest factual detail
+    "CIAA_PRESS_RELEASE",  # complaint / investigation / chargesheet dates
+    "COURT_ORDER",  # verdict
+    "COURT_FILING_OTHER",
+)
+
 EXTRACTION_SYSTEM_PROMPT = """\
-You are a Nepali legal analyst extracting structured timeline entries from \
-CIAA (Commission for the Investigation of Abuse of Authority) press releases, \
-court orders, charge sheets, and NGM court hearing records.
+You are a Nepali legal analyst reconstructing the FACTUAL TIMELINE of a \
+corruption case investigated by Nepal's CIAA (अख्तियार दुरुपयोग अनुसन्धान आयोग) \
+and tried at the Special Court (विशेष अदालत).
 
-Your task is to reconstruct the chronological progression of a corruption case \
-from available source documents.
+Your goal is to capture the factual milestones of the case — what happened and \
+when — NOT the routine court-procedure log. The court's hearing-by-hearing \
+progression (पेशी/sunwai) is already tracked separately as the case's Pragati \
+Bibaran by case number, so DO NOT emit one entry per hearing. Use the hearing \
+records only to anchor the dates of the milestones below.
 
-TIMELINE ENTRY FORMAT:
-Each entry must be a JSON object with:
-- "date": ISO date string (YYYY-MM-DD) in AD (Gregorian calendar)
-- "title": Brief label in Nepali (one line, 5-15 words) describing the event
-- "description": Optional 1-3 sentence explanation in Nepali
+MILESTONES TO EXTRACT (include each only when grounded in the sources):
+1. Factual incident period — the span the alleged offence covers, BEFORE the
+   complaint (the CIAA "jaanch awadhi" / जाँच अवधि, or the period the accused
+   held office or the conduct occurred). Emit as a SINGLE entry with both
+   "date" (start) and "end_date" (end).
+2. Complaint (उजुरी निवेदन) — when the complaint was registered at the CIAA.
+3. CIAA investigation (अनुसन्धान) — when the CIAA began/decided to investigate,
+   if distinct from the complaint.
+4. Press release (प्रेस विज्ञप्ति) — when the CIAA publicly announced the case.
+5. Chargesheet filed / case registered (अभियोगपत्र/आरोपपत्र दायर, मुद्दा दर्ता)
+   — when the CIAA filed the chargesheet at the Special Court.
+6. Interim court order (अन्तरिम आदेश) — any interim order dates, if issued.
+7. Special Court verdict (विशेष अदालतको फैसला) — judgment date and outcome
+   (conviction / acquittal "सफाई" / partial).
+8. Supreme Court appeal (सर्वोच्च अदालतमा पुनरावेदन) — when an appeal was filed.
+9. Supreme Court verdict (सर्वोच्च अदालतको फैसला) — final judgment.
 
-All three fields must be written in Nepali (देवनागरी लिपि).
+ENTRY FORMAT — each entry is a JSON object:
+- "date": AD date "YYYY-MM-DD" (Gregorian). REQUIRED.
+- "date_bs": the Bikram Sambat date "YYYY-MM-DD" as it appears in the source.
+  REQUIRED — every Nepali legal document states dates in BS; record it.
+- "end_date": AD "YYYY-MM-DD" — ONLY for the incident-period entry (milestone 1).
+- "end_date_bs": the BS date for end_date — only when end_date is present.
+- "title": short Nepali label (देवनागरी, 4-12 words) naming the milestone.
+- "description": 1-3 Nepali sentences with specifics (amounts, section numbers,
+  press-release number, bench, outcome). Optional but strongly encouraged.
 
-KEY EVENTS TO EXTRACT (when available in sources):
-1. CIAA investigation initiation / filing decision date
-2. Case filed to Special Court date
-3. Court hearing dates
-4. Verdict / judgment date
-5. Case registration at CIAA (if different from investigation start)
-6. Any other significant dates mentioned in the source
-
-DATE CONVERSION RULES (CRITICAL):
-- Document text sources use Bikram Sambat (BS) dates — convert to AD
-- NGM structured data contains reliable AD dates — use EXACTLY as-is
-- BS to AD offset: subtract 56 years and 8 months 17 days as baseline
-- ALWAYS output in YYYY-MM-DD format
-
-NGM DATE PRIORITY (CRITICAL):
-- NGM structured hearing data (if provided) contains ground-truth AD dates
-- For any event that exists in BOTH NGM data and document text,
-  use the NGM date exactly — do not convert or adjust it
-- Use document text to add narrative context (title, description) to
-  NGM-dated events, and to extract any additional events not in NGM
-- NGM dates are already in AD format — treat them as authoritative
+DATE CONVERSION TOOL (MANDATORY):
+You have a `convert_date` tool that converts between AD (Gregorian) and BS
+(Bikram Sambat) using Nepal's official calendar. LLMs routinely get BS<->AD
+conversion wrong by days or months — so you MUST NOT convert dates in your head.
+- For every date taken from a source document (stated in BS), call convert_date
+  with mode="bs_to_ad" to get the AD "date"; keep the original BS as "date_bs".
+- For every date taken from the NGM hearing records (in AD), call convert_date
+  with mode="ad_to_bs" to get "date_bs"; keep the AD as "date".
+- Batch dates into one tool call where possible (the tool accepts a list).
+- Use ONLY the tool's output for "date"/"date_bs"; never adjust or round it.
+- Verify every entry's "date" and "date_bs" are a matching pair the tool
+  returned before emitting it.
 
 QUALITY RULES:
-- Minimum 3 timeline entries when sufficient source material exists
-- Entries must be in chronological order (earliest first)
-- Each entry must be factually grounded in the provided sources
-- Do NOT fabricate dates or events not mentioned in the sources
-- If the source text is insufficient, return fewer entries or an empty array
+- Order entries chronologically, earliest first.
+- Every entry must be grounded in the provided sources. Do NOT fabricate dates,
+  events, amounts, or outcomes.
+- Omit a milestone entirely if the sources do not support it. Fewer, accurate
+  entries are better than padded ones.
+- Do NOT emit routine hearing/पेशी entries — synthesize them into milestone 7.
 """
 
 EXTRACTION_USER_PROMPT = """\
-Extract chronological timeline entries from the provided CIAA case source \
-documents and NGM structured hearing data.
+Reconstruct the factual timeline for the following CIAA Special Court case.
 
 Case title: {case_title}
 
 Instructions:
-- Each entry must have "date" (YYYY-MM-DD in AD) and "title" in Nepali
-- "description" is optional but encouraged when source provides details
-- For NGM dates: use them exactly as-is — they are authoritative ground-truth
-- For document-text dates: convert from BS to AD before outputting
-- Use document text for narrative context (titles, descriptions)
-- Order entries chronologically from earliest to latest
-- Only include events explicitly mentioned or clearly inferred from the sources
-- If sources are insufficient, return fewer entries
+- Extract the factual milestones defined in the system prompt that the sources
+  support.
+- Every entry needs "date" (AD YYYY-MM-DD), "date_bs" (BS YYYY-MM-DD), and a
+  Nepali "title".
+- Express the factual incident period (milestone 1) as ONE entry with "date" +
+  "end_date" (and "date_bs" + "end_date_bs").
+- Convert every date with the convert_date tool — do not convert dates yourself.
+  Source dates are BS (use bs_to_ad); NGM dates are AD (use ad_to_bs).
+- Use the NGM hearing data only to anchor milestone dates (chargesheet
+  registration, verdict). Do NOT create one entry per hearing.
+- Order entries chronologically; only include milestones the sources support.
 
-IMPORTANT: Return ONLY a valid JSON array of timeline entry objects.
-Format: [{{"date": "YYYY-MM-DD", "title": "नेपाली शीर्षक", "description": "विवरण"}}]
-No explanations, no markdown, no text outside the JSON array.
+Return ONLY a valid JSON array of entry objects. No markdown, no prose.
+Format:
+[{{"date": "YYYY-MM-DD", "date_bs": "YYYY-MM-DD", "title": "नेपाली शीर्षक", "description": "विवरण"}}]
 
 {ngm_section}
 
-DOCUMENT TEXT (use for context, narrative, and any dates not in NGM):
+DOCUMENT TEXT (chargesheet, press release, court order — use for milestones,
+narrative, amounts, and any dates not in the NGM data):
 
 {source_text}
 """
@@ -121,15 +154,15 @@ DOCUMENT TEXT (use for context, narrative, and any dates not in NGM):
 
 class Command(BaseCommand):
     help = (
-        "Extract case timeline entries from CIAA source documents via LLM. "
-        "Populates timeline for CIAA Special Court draft cases."
+        "Extract the factual timeline of CIAA Special Court cases via LLM, "
+        "reading and writing entirely over the Jawafdehi HTTP API."
     )
 
     def add_arguments(self, parser):
         parser.add_argument(
             "--dry-run",
             action="store_true",
-            help="Preview without saving to database",
+            help="Preview without PATCHing the API",
         )
         parser.add_argument(
             "--case-id",
@@ -157,10 +190,35 @@ class Command(BaseCommand):
             help="Enrich only cases in the priority case list",
         )
         parser.add_argument(
+            "--api-base-url",
+            type=str,
+            default=os.environ.get("JAWAFDEHI_API_BASE_URL", "http://127.0.0.1:8000"),
+            help="Jawafdehi API base URL (root or /api).",
+        )
+        parser.add_argument(
+            "--api-token",
+            type=str,
+            default=None,
+            help="Jawafdehi API token. Defaults to JAWAFDEHI_API_TOKEN.",
+        )
+        parser.add_argument(
+            "--llm-backend",
+            type=str,
+            choices=("auto", "bedrock", "openai"),
+            default="auto",
+            help=(
+                "LLM backend. 'bedrock' uses AWS Bedrock invoke_model (Claude, "
+                "e.g. Opus 4.8); 'openai' uses an OpenAI-compatible gateway. "
+                "'auto' (default) infers bedrock for claude/anthropic model ids."
+            ),
+        )
+        parser.add_argument(
             "--llm-model",
             type=str,
-            default="claude-sonnet-4-20250514",
-            help="LLM model identifier (default: claude-sonnet-4-20250514)",
+            default=os.environ.get(
+                "BEDROCK_MODEL_ID", "global.anthropic.claude-opus-4-8"
+            ),
+            help="LLM model identifier (default: BEDROCK_MODEL_ID env / Opus 4.8).",
         )
         parser.add_argument(
             "--llm-base-url",
@@ -168,13 +226,33 @@ class Command(BaseCommand):
             default=os.environ.get(
                 "JAWAFDEHI_LLM_PROXY_URL", "https://llm-proxy.jawafdehi.org/v1"
             ),
-            help="LLM API base URL (OpenAI-compatible endpoint)",
+            help="OpenAI-backend base URL (OpenAI-compatible endpoint).",
         )
         parser.add_argument(
             "--llm-api-key",
             type=str,
             default=None,
-            help="LLM API key (defaults to JAWAFDEHI_LLM_API_KEY or ANTHROPIC_API_KEY env var)",
+            help="OpenAI-backend API key (defaults to JAWAFDEHI_LLM_API_KEY or ANTHROPIC_API_KEY env var)",
+        )
+        parser.add_argument(
+            "--aws-profile",
+            type=str,
+            default=os.environ.get(
+                "REVIEW_AWS_PROFILE", os.environ.get("AWS_PROFILE", "")
+            ),
+            help="AWS profile for the bedrock backend (defaults to REVIEW_AWS_PROFILE/AWS_PROFILE).",
+        )
+        parser.add_argument(
+            "--aws-region",
+            type=str,
+            default=os.environ.get("AWS_REGION", "us-west-2"),
+            help="AWS region for the bedrock backend (default: us-west-2).",
+        )
+        parser.add_argument(
+            "--llm-max-tokens",
+            type=int,
+            default=4000,
+            help="LLM response token budget (default: 4000).",
         )
         parser.add_argument(
             "--verbose",
@@ -200,37 +278,25 @@ class Command(BaseCommand):
             self._http_session = requests.Session()
         return self._http_session
 
+    # ── argument resolution / validation ─────────────────────────────────
+
     def handle(self, *args, **options):
         dry_run = options["dry_run"]
         case_id = options.get("case_id")
-        limit = options.get("limit")
-
-        if limit is not None:
-            try:
-                limit_int = int(limit)
-            except (ValueError, TypeError):
-                raise CommandError(
-                    f"Invalid --limit value: {limit}. Must be a positive integer."
-                )
-            if limit_int <= 0:
-                raise CommandError(
-                    f"Invalid --limit: {limit_int}. Must be a positive integer."
-                )
-            limit = limit_int
-        llm_model = options["llm_model"]
-        llm_base_url = options["llm_base_url"]
-        llm_api_key = options.get("llm_api_key")
+        limit = self._validate_limit(options.get("limit"))
         force = options.get("force")
         fiscal_year = options.get("fiscal_year")
         priority = options.get("priority")
         verbose = options.get("verbose")
+
+        api_base_url = options["api_base_url"]
+        api_token = options.get("api_token") or os.environ.get("JAWAFDEHI_API_TOKEN")
 
         if priority and case_id:
             raise CommandError("--priority and --case-id are mutually exclusive")
 
         if verbose:
             logger.setLevel(logging.DEBUG)
-
         if not logger.handlers:
             handler = logging.StreamHandler(self.stdout)
             handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
@@ -240,12 +306,16 @@ class Command(BaseCommand):
         if dry_run:
             self.stdout.write(self.style.WARNING("[DRY RUN] No changes will be saved."))
 
-        api_key = resolve_api_key(llm_api_key)
-        if not dry_run and not api_key:
+        # Reading DRAFT cases requires authentication even for a dry run.
+        if not api_token:
             raise CommandError(
-                "No LLM API key provided. Set JAWAFDEHI_LLM_API_KEY or "
-                "ANTHROPIC_API_KEY environment variable, or use --llm-api-key."
+                "Jawafdehi API token is required to read DRAFT cases. "
+                "Set --api-token or JAWAFDEHI_API_TOKEN."
             )
+
+        # Resolve + validate the LLM backend. Timeline generation always needs
+        # the LLM (even on a dry run we still call the model; we just skip PATCH).
+        llm_cfg = self._resolve_llm_config(options)
 
         if fiscal_year and not re.match(r"^\d{2,3}$", fiscal_year):
             raise CommandError(
@@ -253,7 +323,11 @@ class Command(BaseCommand):
                 "Use 2- or 3-digit format, e.g., '80' or '080'."
             )
 
+        session = self._get_session()
         cases = self._get_ciaa_cases(
+            api_base_url=api_base_url,
+            api_token=api_token,
+            session=session,
             case_id=case_id,
             limit=limit,
             force=force,
@@ -261,9 +335,9 @@ class Command(BaseCommand):
             priority=priority,
         )
         total = len(cases)
-
         self.stdout.write(
-            f"Found {total} CIAA draft cases to process. Model: {llm_model}"
+            f"Found {total} CIAA draft cases to process. "
+            f"Backend: {llm_cfg['backend']} | Model: {llm_cfg['model']}"
         )
         if force:
             self.stdout.write(
@@ -272,111 +346,246 @@ class Command(BaseCommand):
         if fiscal_year:
             self.stdout.write(f"  Fiscal year filter: {fiscal_year}")
         if priority:
-            priority_list = load_priority_cases()
-            self.stdout.write(f"  Priority mode: {len(priority_list)} cases")
+            self.stdout.write(f"  Priority mode: {len(load_priority_cases())} cases")
 
-        session = self._get_session()
         for idx, case in enumerate(cases, 1):
             self._process_case(
                 case=case,
                 idx=idx,
                 total=total,
                 dry_run=dry_run,
-                llm_model=llm_model,
-                llm_base_url=llm_base_url,
-                llm_api_key=api_key,
+                llm_cfg=llm_cfg,
+                api_base_url=api_base_url,
+                api_token=api_token,
                 session=session,
-                force=force,
             )
 
         self._print_summary(dry_run)
 
-    # ── helpers ──────────────────────────────────────────────────────────
+    def _resolve_llm_config(self, options: dict) -> dict:
+        """Resolve and validate the LLM backend + its credentials.
+
+        Backend selection: 'bedrock' or 'openai', or 'auto' which infers bedrock
+        for claude/anthropic model ids and openai otherwise. Raises CommandError
+        if the chosen backend's required credential is missing.
+        """
+        model = options["llm_model"]
+        backend = options["llm_backend"]
+        if backend == "auto":
+            lowered = model.lower()
+            backend = (
+                "bedrock"
+                if ("anthropic" in lowered or "claude" in lowered)
+                else "openai"
+            )
+
+        cfg = {
+            "backend": backend,
+            "model": model,
+            "max_tokens": options["llm_max_tokens"],
+        }
+        if backend == "bedrock":
+            # boto3 resolves credentials from the profile/instance role; we only
+            # need the profile/region here. A missing role surfaces at call time.
+            cfg["aws_profile"] = options.get("aws_profile") or ""
+            cfg["aws_region"] = options.get("aws_region") or "us-west-2"
+        else:
+            api_key = resolve_api_key(options.get("llm_api_key"))
+            if not api_key:
+                raise CommandError(
+                    "No LLM API key provided for the openai backend. Set "
+                    "JAWAFDEHI_LLM_API_KEY or ANTHROPIC_API_KEY, or use --llm-api-key."
+                )
+            cfg["base_url"] = options["llm_base_url"]
+            cfg["api_key"] = api_key
+        return cfg
+
+    @staticmethod
+    def _validate_limit(limit) -> Optional[int]:
+        if limit is None:
+            return None
+        try:
+            limit_int = int(limit)
+        except (ValueError, TypeError):
+            raise CommandError(
+                f"Invalid --limit value: {limit}. Must be a positive integer."
+            )
+        if limit_int <= 0:
+            raise CommandError(
+                f"Invalid --limit: {limit_int}. Must be a positive integer."
+            )
+        return limit_int
+
+    # ── API reads ─────────────────────────────────────────────────────────
+
+    def _api_root(self, api_base_url: str) -> str:
+        """Return the API root (".../api") for the given base URL, validated.
+
+        Memoised: the base URL is constant for a run, so we parse/validate once.
+        """
+        cached = getattr(self, "_api_root_cache", None)
+        if cached is not None and cached[0] == api_base_url:
+            return cached[1]
+        parsed = urllib.parse.urlparse((api_base_url or "").strip())
+        if not (
+            parsed.scheme == "https"
+            or (parsed.scheme == "http" and self._is_loopback_host(parsed.hostname))
+        ):
+            raise CommandError(
+                f"Invalid api_base_url '{api_base_url}': use https for non-local hosts."
+            )
+        if not parsed.netloc:
+            raise CommandError(
+                f"Invalid api_base_url '{api_base_url}': URL must include a host."
+            )
+        path = parsed.path.rstrip("/")
+        base = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, path, "", "", ""))
+        api_root = base if base.endswith("/api") else f"{base}/api"
+        self._api_root_cache = (api_base_url, api_root)
+        return api_root
+
+    @staticmethod
+    def _is_loopback_host(hostname: Optional[str]) -> bool:
+        if not hostname:
+            return False
+        host = hostname.lower().rstrip(".")
+        if host == "localhost":
+            return True
+        import ipaddress
+
+        try:
+            return ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            return False
+
+    def _api_get(
+        self,
+        url: str,
+        api_token: str,
+        session: requests.Session,
+        params: Optional[dict] = None,
+    ) -> dict:
+        """GET a JSON document from the API with token auth."""
+        headers = {
+            "Authorization": f"Token {api_token}",
+            "Accept": "application/json",
+        }
+        try:
+            response = session.get(url, headers=headers, params=params, timeout=60)
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else "?"
+            body = exc.response.text[:300] if exc.response is not None else ""
+            raise CommandError(f"API GET {url} failed (HTTP {status}): {body}") from exc
+        except requests.RequestException as exc:
+            raise CommandError(f"API GET {url} failed: {exc}") from exc
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise CommandError(f"API GET {url} returned invalid JSON: {exc}") from exc
 
     def _get_ciaa_cases(
         self,
+        api_base_url: str,
+        api_token: str,
+        session: requests.Session,
         case_id: Optional[str] = None,
         limit: Optional[int] = None,
         force: bool = False,
         fiscal_year: Optional[str] = None,
         priority: bool = False,
-    ) -> list[Case]:
-        """Return DRAFT cases with empty timeline that are candidates for enrichment."""
-        queryset = Case.objects.filter(state="DRAFT")
-        if case_id:
-            queryset = queryset.filter(case_id=case_id)
+    ) -> list[dict]:
+        """Fetch DRAFT CIAA Special Court cases (as API dicts) to enrich."""
+        api_root = self._api_root(api_base_url)
+        priority_numbers = set(load_priority_cases()) if priority else None
 
-        if priority:
-            priority_list = load_priority_cases()
-            queryset = filter_by_priority(queryset, priority_list)
+        selected: list[dict] = []
+        next_url = f"{api_root}/cases/"
+        params = {"case_type": "CORRUPTION"}
 
-        all_cases = []
-        candidate_count = 0
-        for case in queryset.order_by("case_id"):
-            if not self._is_ciaa_special_court_case(case):
-                continue
-            if fiscal_year and not self._matches_fiscal_year(case, fiscal_year):
-                continue
-            candidate_count += 1
-            if not force and case.timeline:
-                continue
-            all_cases.append(case)
-            if limit and len(all_cases) >= limit:
-                break
+        while next_url:
+            page = self._api_get(next_url, api_token, session, params=params)
+            params = None  # the `next` link already carries query params
+            results = page.get("results", []) if isinstance(page, dict) else []
+            for summary in results:
+                if summary.get("state") != "DRAFT":
+                    continue
+                if case_id and summary.get("case_id") != case_id:
+                    continue
+                if not self._is_ciaa_special_court_case(summary):
+                    continue
+                if fiscal_year and not self._matches_fiscal_year(summary, fiscal_year):
+                    continue
+                if priority_numbers is not None and not self._matches_priority(
+                    summary, priority_numbers
+                ):
+                    continue
 
-        if not force:
-            self.stats["cases_already_populated"] = sum(
-                1
-                for c in queryset
-                if self._is_ciaa_special_court_case(c)
-                and (not fiscal_year or self._matches_fiscal_year(c, fiscal_year))
-                and c.timeline
-            )
-        return all_cases
+                if not force and summary.get("timeline"):
+                    self.stats["cases_already_populated"] += 1
+                    continue
+
+                selected.append(summary)
+                if limit and len(selected) >= limit:
+                    return selected
+
+            next_url = page.get("next") if isinstance(page, dict) else None
+
+        return selected
 
     @staticmethod
-    def _is_ciaa_special_court_case(case: Case) -> bool:
-        """Return True if the case references Special Court in court_cases."""
-        if case.court_cases and isinstance(case.court_cases, list):
-            return any(
-                isinstance(ref, str) and ref.startswith("special:")
-                for ref in case.court_cases
-            )
-        return False
+    def _is_ciaa_special_court_case(case: dict) -> bool:
+        court_cases = case.get("court_cases") or []
+        return isinstance(court_cases, list) and any(
+            isinstance(ref, str) and ref.startswith("special:") for ref in court_cases
+        )
 
-    def _matches_fiscal_year(self, case: Case, fiscal_year: str) -> bool:
-        """Check if a case's court_cases reference matches the given fiscal year."""
+    @staticmethod
+    def _matches_fiscal_year(case: dict, fiscal_year: str) -> bool:
         fy_normalized = fiscal_year.lstrip("0") or "0"
-        if case.court_cases and isinstance(case.court_cases, list):
-            for entry in case.court_cases:
-                if isinstance(entry, str):
-                    parts = entry.split(":")
-                    case_number = parts[-1] if ":" in entry else entry
-                    if "-CR-" in case_number:
-                        prefix = case_number.split("-CR-")[0].lstrip("0") or "0"
-                        if prefix == fy_normalized:
-                            return True
+        for entry in case.get("court_cases") or []:
+            if not isinstance(entry, str):
+                continue
+            case_number = entry.split(":")[-1] if ":" in entry else entry
+            if "-CR-" in case_number:
+                prefix = case_number.split("-CR-")[0].lstrip("0") or "0"
+                if prefix == fy_normalized:
+                    return True
         return False
 
-    # ── core pipeline ────────────────────────────────────────────────────
+    @staticmethod
+    def _matches_priority(case: dict, priority_numbers: set) -> bool:
+        for entry in case.get("court_cases") or []:
+            if not isinstance(entry, str):
+                continue
+            case_number = entry.split(":")[-1] if ":" in entry else entry
+            if case_number in priority_numbers:
+                return True
+        return False
+
+    # ── core pipeline ─────────────────────────────────────────────────────
 
     def _process_case(
         self,
-        case: Case,
+        case: dict,
         idx: int,
         total: int,
         dry_run: bool,
-        llm_model: str,
-        llm_base_url: str,
-        llm_api_key: Optional[str],
+        llm_cfg: dict,
+        api_base_url: str,
+        api_token: str,
         session: requests.Session,
-        force: bool = False,
     ):
         self.stats["cases_processed"] += 1
-        self.stdout.write(f"\n[{idx}/{total}] {case.case_id} — {case.title[:80]}")
+        case_id = case.get("case_id", "?")
+        title = case.get("title", "")
+        self.stdout.write(f"\n[{idx}/{total}] {case_id} — {title[:80]}")
 
-        source_text = self._get_source_content(case, session)
-        ngm_data = self._get_ngm_data(case)
+        # The case-list summary already carries court_cases/timeline, but we need
+        # the detail endpoint to get evidence enriched with source URLs.
+        detail = self._fetch_case_detail(case, api_base_url, api_token, session)
+        source_text = self._get_source_content(detail)
+        ngm_data = self._get_ngm_data(detail, api_base_url, api_token, session)
 
         if not source_text and not ngm_data:
             self.stats["cases_no_content"] += 1
@@ -387,7 +596,6 @@ class Command(BaseCommand):
 
         if source_text:
             self.stdout.write(f"  Source content: {len(source_text)} chars")
-
         if ngm_data:
             self.stats["cases_ngm_used"] += 1
             self.stdout.write(
@@ -398,170 +606,194 @@ class Command(BaseCommand):
         else:
             self.stdout.write("  NGM data: none")
 
-        if dry_run and not llm_api_key:
-            self.stdout.write(
-                self.style.WARNING("  [DRY RUN] No API key — skipping LLM extraction")
-            )
-            return
-
         try:
-            timeline_entries = self._extract_timeline(
-                source_text=source_text,
-                case_title=case.title,
-                llm_model=llm_model,
-                llm_base_url=llm_base_url,
-                llm_api_key=llm_api_key,
+            entries = self._extract_timeline(
+                source_text=source_text or "",
+                case_title=title,
+                llm_cfg=llm_cfg,
                 session=session,
                 ngm_data=ngm_data,
             )
-        except (
-            requests.RequestException,
-            CommandError,
-            ValueError,
-        ) as exc:
+        except (requests.RequestException, CommandError, ValueError) as exc:
             self.stats["cases_llm_error"] += 1
             self.stdout.write(self.style.ERROR(f"  LLM extraction failed: {exc}"))
             return
 
-        if not timeline_entries:
+        if not entries:
             self.stats["cases_skipped"] += 1
             self.stdout.write(
                 self.style.WARNING("  LLM returned no timeline entries — skipping")
             )
             return
 
-        entry_count = len(timeline_entries)
-        self.stdout.write(self.style.SUCCESS(f"  Extracted {entry_count} entry(s)"))
-        for i, entry in enumerate(timeline_entries, 1):
+        self.stdout.write(self.style.SUCCESS(f"  Extracted {len(entries)} entry(s)"))
+        for i, entry in enumerate(entries, 1):
+            span = f" → {entry['end_date']}" if entry.get("end_date") else ""
             self.stdout.write(
-                f"    {i}. {entry.get('date', '?')} — "
+                f"    {i}. {entry.get('date', '?')}{span} — "
                 f"{entry.get('title', '?')[:80]}"
             )
 
         if dry_run:
             self.stdout.write(
-                self.style.WARNING("  [DRY RUN] Would save but --dry-run is set")
+                self.style.WARNING("  [DRY RUN] Would PATCH but --dry-run is set")
             )
-        else:
-            try:
-                self._save_timeline(case, timeline_entries, force=force)
-                self.stats["cases_enriched"] += 1
-            except CommandError as exc:
-                self.stats["cases_llm_error"] += 1
-                self.stdout.write(self.style.ERROR(f"  Failed to save timeline: {exc}"))
+            return
 
-    # ── source acquisition with tiered fallback ──────────────────────────
+        try:
+            self._patch_timeline(
+                case_slug=detail.get("slug") or case.get("slug"),
+                case_id=case_id,
+                entries=entries,
+                api_base_url=api_base_url,
+                api_token=api_token,
+                session=session,
+            )
+            self.stats["cases_enriched"] += 1
+            self.stdout.write(self.style.SUCCESS(f"  [UPDATED] {case_id}"))
+        except CommandError as exc:
+            self.stats["cases_llm_error"] += 1
+            self.stdout.write(self.style.ERROR(f"  Failed to PATCH timeline: {exc}"))
 
-    def _get_source_content(
-        self, case: Case, session: requests.Session
-    ) -> Optional[str]:
-        """Acquire source document text for timeline extraction.
+    def _fetch_case_detail(
+        self,
+        case: dict,
+        api_base_url: str,
+        api_token: str,
+        session: requests.Session,
+    ) -> dict:
+        """Fetch the case-detail document (evidence enriched with source URLs)."""
+        slug = case.get("slug")
+        if not slug:
+            return case
+        api_root = self._api_root(api_base_url)
+        quoted = urllib.parse.quote(str(slug).strip(), safe="")
+        url = f"{api_root}/cases/{quoted}/"
+        try:
+            return self._api_get(url, api_token, session)
+        except CommandError as exc:
+            logger.warning("  Falling back to summary for %s: %s", slug, exc)
+            return case
 
-        Priority order:
-        1. AG_ABHIYOG_PATRA description (already extracted) — use if len > 200
-        2. AG_ABHIYOG_PATRA URLs — download + likhit/markitdown convert
-        3. COURT_ORDER URLs — supplement with court order data
-        4. CIAA_PRESS_RELEASE description/URLs — use if available
+    # ── source acquisition ─────────────────────────────────────────────────
+
+    def _get_source_content(self, case: dict) -> Optional[str]:
+        """Assemble source document text for the milestone-relevant source types.
+
+        Reads the detail endpoint's enriched evidence (each entry may carry a
+        nested ``source`` with ``source_type`` and ``urls``). Prefers the
+        already-extracted ``description`` when long enough, else downloads and
+        converts a MARKDOWN/RAW link from an allowed host.
         """
-        if not case.evidence:
-            logger.debug("  No evidence entries on case")
+        evidence = case.get("evidence") or []
+        if not evidence:
             return None
 
-        source_ids = [
-            entry["source_id"]
-            for entry in case.evidence
-            if isinstance(entry, dict) and entry.get("source_id")
-        ]
-        if not source_ids:
-            logger.debug("  No source_ids in evidence")
-            return None
+        # Group evidence by source_type so we can honour milestone priority.
+        by_type: dict[str, list[dict]] = {}
+        for entry in evidence:
+            if not isinstance(entry, dict):
+                continue
+            source = entry.get("source")
+            if not isinstance(source, dict):
+                continue
+            stype = source.get("source_type")
+            by_type.setdefault(stype, []).append(entry)
 
-        sources = list(
-            DocumentSource.objects.filter(
-                source_id__in=source_ids, is_deleted=False
-            ).only("source_id", "description", "title", "url", "source_type")
-        )
-        if not sources:
-            logger.debug("  No DocumentSource records found")
-            return None
-
-        source_by_id = {s.source_id: s for s in sources}
-
-        content_parts = []
-
-        self._append_source_content(
-            source_ids,
-            source_by_id,
-            SourceType.AG_ABHIYOG_PATRA,
-            content_parts,
-            session,
-        )
-        self._append_source_content(
-            source_ids,
-            source_by_id,
-            SourceType.COURT_ORDER,
-            content_parts,
-            session,
-        )
-        self._append_source_content(
-            source_ids,
-            source_by_id,
-            SourceType.CIAA_PRESS_RELEASE,
-            content_parts,
-            session,
-        )
+        content_parts: list[str] = []
+        for stype in MILESTONE_SOURCE_TYPES:
+            for entry in by_type.get(stype, []):
+                text = self._content_from_evidence_entry(entry)
+                if text:
+                    content_parts.append(text)
 
         if not content_parts:
-            logger.debug("  No usable content from any source type")
             return None
-
         return "\n\n---\n\n".join(content_parts)
 
-    def _append_source_content(
-        self,
-        source_ids: list[str],
-        source_by_id: dict,
-        source_type: str,
-        content_parts: list[str],
-        session: requests.Session,
-    ):
-        """Try to get content from sources of a specific type and append to parts."""
-        for sid in source_ids:
-            source = source_by_id.get(sid)
-            if source is None:
-                continue
-            if source.source_type != source_type:
-                continue
+    def _content_from_evidence_entry(self, entry: dict) -> Optional[str]:
+        """Return usable text for one evidence entry.
 
-            description = (source.description or "").strip()
-            if len(description) > 200:
-                content_parts.append(description)
-                continue
-
-            for url in source.url_links:
-                parsed = urlparse(url)
-                if parsed.hostname and parsed.hostname in ALLOWED_HOSTS:
-                    content = convert_to_markdown(url, session)
-                    if content and len(content) > 200:
-                        content_parts.append(content)
-                        break
-
-    # ── NGM structured hearing data ──────────────────────────────────────
-
-    def _get_ngm_data(self, case: Case) -> Optional[dict]:
-        """Query NGM database for structured hearing records.
-
-        Extracts the special court case number from case.court_cases
-        and fetches ground-truth dates, hearing records, and verdict info.
-        Returns None if no special court reference or NGM query fails.
+        Order of preference:
+        1. The already-extracted evidence ``description`` when long enough.
+        2. An existing MARKDOWN-role link on the source (already converted).
+        3. Otherwise, create the markdown with the shared source converter
+           (``review.converter.convert_source``) — the canonical likhit/markitdown
+           pipeline (PR #178), which disk-caches by URL so we don't re-convert.
         """
-        if not case.court_cases:
+        description = (entry.get("description") or "").strip()
+        if len(description) > 200:
+            return description
+
+        source = entry.get("source") or {}
+        urls = source.get("urls") or []
+
+        # 2. Use an existing MARKDOWN link verbatim — it is already converted.
+        md_link = next(
+            (
+                u["link"]
+                for u in urls
+                if isinstance(u, dict) and u.get("role") == "MARKDOWN" and u.get("link")
+            ),
+            None,
+        )
+        if md_link:
+            text = self._download_text(md_link)
+            if text and len(text) > 200:
+                return text
+
+        # 3. No markdown yet — create it from the convertible links.
+        convertible = [
+            u["link"]
+            for u in urls
+            if isinstance(u, dict)
+            and u.get("link")
+            and u.get("role") in ("RAW", "ALTERNATE", "SOURCE_PAGE")
+        ]
+        if not convertible:
             return None
 
+        from review import converter as source_converter
+
+        result = source_converter.convert_source({"url": convertible})
+        if result.get("status") in ("converted", "attached"):
+            text = (result.get("markdown") or "").strip()
+            if len(text) > 200:
+                return text
+        else:
+            logger.warning(
+                "  Source conversion %s: %s",
+                result.get("status"),
+                result.get("note"),
+            )
+        return None
+
+    @staticmethod
+    def _download_text(url: str) -> Optional[str]:
+        """Download an already-converted markdown link and return its text."""
+        from review import jds_client
+
+        try:
+            content, _ = jds_client.download_source_file(url)
+        except Exception as exc:  # noqa: BLE001 - one bad link must not abort
+            logger.warning("  Failed to download markdown link %s: %s", url, exc)
+            return None
+        return content.decode("utf-8", errors="replace")
+
+    # ── NGM structured hearing data (via API) ──────────────────────────────
+
+    def _get_ngm_data(
+        self,
+        case: dict,
+        api_base_url: str,
+        api_token: str,
+        session: requests.Session,
+    ) -> Optional[dict]:
+        """Fetch NGM hearing records for the case's special-court reference."""
         special_ref = next(
             (
                 ref.split(":", 1)[1]
-                for ref in case.court_cases
+                for ref in (case.get("court_cases") or [])
                 if isinstance(ref, str) and ref.startswith("special:")
             ),
             None,
@@ -569,33 +801,35 @@ class Command(BaseCommand):
         if not special_ref:
             return None
 
+        api_root = self._api_root(api_base_url)
+        quoted = urllib.parse.quote(f"special:{special_ref}", safe=":")
+        url = f"{api_root}/ngm/court_case/{quoted}"
         try:
-            ngm_data = get_court_case_details("special", special_ref)
-            if ngm_data is None:
-                logger.debug("  NGM: no case found for %s", special_ref)
-                return None
-            return ngm_data
-        except ValueError as exc:
+            data = self._api_get(url, api_token, session)
+        except CommandError as exc:
             logger.warning("  NGM query failed for %s: %s", special_ref, exc)
             return None
+        if not isinstance(data, dict) or data.get("error"):
+            return None
+        return data
 
     def _format_ngm_section(self, ngm_data: Optional[dict]) -> str:
-        """Format NGM hearing data as a structured section for the LLM prompt.
+        """Format the flat NGM API payload as a prompt section.
 
-        Returns an empty string if no NGM data available.
+        The NGM detail API returns a flat object (registration/verdict fields at
+        the top level, plus a ``hearings`` list), unlike the nested ORM shape.
         """
         if not ngm_data:
             return ""
 
         lines = [
-            "NGM STRUCTURED HEARING DATA (ground-truth dates — use these dates EXACTLY as-is):",
+            "NGM STRUCTURED HEARING DATA (ground-truth AD dates — convert to BS "
+            "with the convert_date tool; use only to anchor milestone dates):",
             "",
         ]
-
-        case_data = ngm_data.get("case") or {}
-        reg_date = case_data.get("registration_date_ad")
-        verdict_date = case_data.get("verdict_date_ad")
-        case_status = case_data.get("case_status", "")
+        reg_date = ngm_data.get("registration_date_ad")
+        verdict_date = ngm_data.get("verdict_date_ad")
+        case_status = ngm_data.get("case_status")
 
         if reg_date:
             lines.append(f"- Case registration: {reg_date}")
@@ -618,114 +852,161 @@ class Command(BaseCommand):
 
         if verdict_date:
             lines.append(f"- Verdict date: {verdict_date}")
-            verdict_judge = case_data.get("verdict_judge")
+            verdict_judge = ngm_data.get("verdict_judge")
             if verdict_judge:
                 lines.append(f"  Judge: {verdict_judge}")
 
         return "\n".join(lines) + "\n"
 
-    # ── LLM extraction ───────────────────────────────────────────────────
+    # ── LLM extraction (tool-use) ───────────────────────────────────────────
 
     def _extract_timeline(
         self,
         source_text: str,
         case_title: str,
-        llm_model: str,
-        llm_base_url: str,
-        llm_api_key: Optional[str],
+        llm_cfg: dict,
         session: requests.Session,
         ngm_data: Optional[dict] = None,
     ) -> Optional[list[dict]]:
-        """Call LLM to extract timeline entries from source text and NGM data."""
-        ngm_section = self._format_ngm_section(ngm_data)
+        """Call the LLM (with the convert_date tool) to extract timeline entries.
+
+        Dispatches to the configured backend: the OpenAI-compatible gateway
+        (``call_llm_with_tools``) or AWS Bedrock (``call_bedrock_with_tools``).
+        """
         prompt = EXTRACTION_USER_PROMPT.format(
             case_title=case_title,
-            ngm_section=ngm_section,
+            ngm_section=self._format_ngm_section(ngm_data),
             source_text=source_text[:40000],
         )
+        executors = {"convert_date": convert_date}
 
-        response_text = call_llm(
-            system_prompt=EXTRACTION_SYSTEM_PROMPT,
-            user_prompt=prompt,
-            model=llm_model,
-            base_url=llm_base_url,
-            api_key=llm_api_key,
-            session=session,
-        )
-
+        if llm_cfg["backend"] == "bedrock":
+            response_text = call_bedrock_with_tools(
+                system_prompt=EXTRACTION_SYSTEM_PROMPT,
+                user_prompt=prompt,
+                model_id=llm_cfg["model"],
+                tools=[CONVERT_DATE_TOOL_ANTHROPIC],
+                tool_executors=executors,
+                aws_profile=llm_cfg.get("aws_profile", ""),
+                aws_region=llm_cfg.get("aws_region", "us-west-2"),
+                max_tokens=llm_cfg["max_tokens"],
+            )
+        else:
+            response_text = call_llm_with_tools(
+                system_prompt=EXTRACTION_SYSTEM_PROMPT,
+                user_prompt=prompt,
+                model=llm_cfg["model"],
+                base_url=llm_cfg["base_url"],
+                api_key=llm_cfg["api_key"],
+                session=session,
+                tools=[CONVERT_DATE_TOOL],
+                tool_executors=executors,
+                max_tokens=llm_cfg["max_tokens"],
+            )
         return self._parse_timeline_response(response_text)
 
     def _parse_timeline_response(self, response_text: str) -> Optional[list[dict]]:
-        """Parse the LLM response to extract timeline entries with field mapping."""
-        entries = parse_extraction_response(
+        """Parse the LLM response into clean, validated timeline entries."""
+        raw = parse_extraction_response(
             response_text, wrapper_keys={"timeline", "entries"}
         )
-        if entries is None:
+        if raw is None:
             return None
 
         clean = []
-        for item in entries:
+        for item in raw:
             if not isinstance(item, dict):
                 continue
-            date_val = (
-                item.get("date") or item.get("date_bs") or item.get("date_ad") or ""
-            )
-            title_val = item.get("title") or item.get("event") or item.get("name") or ""
-            desc_val = (
-                item.get("description") or item.get("desc") or item.get("detail") or ""
-            )
-
-            if not date_val or not title_val:
-                continue
-
-            entry = {
-                "date": str(date_val).strip(),
-                "title": str(title_val).strip(),
-            }
-            if desc_val and str(desc_val).strip():
-                entry["description"] = str(desc_val).strip()
-
-            if not is_valid_iso_date(entry["date"]):
-                logger.warning(
-                    "  Dropping non-ISO date format: %s",
-                    entry["date"],
-                )
-                continue
-
-            clean.append(entry)
+            entry = self._clean_entry(item)
+            if entry is not None:
+                clean.append(entry)
 
         if not clean:
             return None
-
-        clean.sort(key=lambda entry: entry["date"])
+        clean.sort(key=lambda e: e["date"])
         return clean
 
-    # ── persistence ─────────────────────────────────────────────────────
+    def _clean_entry(self, item: dict) -> Optional[dict]:
+        """Validate and normalise a single LLM-produced entry, or drop it."""
+        date_val = str(item.get("date") or "").strip()
+        title_val = str(
+            item.get("title") or item.get("event") or item.get("name") or ""
+        ).strip()
+        if not date_val or not title_val:
+            return None
+        if not is_valid_iso_date(date_val):
+            logger.warning("  Dropping entry with non-ISO date: %s", date_val)
+            return None
 
-    def _save_timeline(self, case: Case, entries: list[dict], force: bool = False):
-        """Persist timeline entries to the database.
+        entry: dict = {"date": date_val, "title": title_val}
 
-        Uses select_for_update to guard against concurrent writes.
-        When force=False, skips cases whose timeline was populated
-        by another process since the initial read.
-        """
-        with transaction.atomic():
-            locked = (
-                Case.objects.select_for_update().filter(pk=case.pk).only("timeline")
-            )
-            if not force:
-                locked = locked.filter(timeline=[])
-            updated = locked.update(
-                timeline=entries,
-                updated_at=timezone.now(),
-            )
-            if not updated:
-                raise CommandError(
-                    f"Case {case.case_id} was populated concurrently; skipping save."
+        desc_val = str(
+            item.get("description") or item.get("desc") or item.get("detail") or ""
+        ).strip()
+        if desc_val:
+            entry["description"] = desc_val
+
+        date_bs = str(item.get("date_bs") or "").strip()
+        if date_bs:
+            entry["date_bs"] = date_bs
+
+        end_date = str(item.get("end_date") or "").strip()
+        if end_date:
+            if not is_valid_iso_date(end_date):
+                logger.warning(
+                    "  Dropping invalid end_date %s; keeping entry", end_date
                 )
-        logger.info("  Saved %d timeline entries to %s", len(entries), case.case_id)
+            elif end_date < date_val:
+                logger.warning(
+                    "  Dropping end_date %s before date %s; keeping entry",
+                    end_date,
+                    date_val,
+                )
+            else:
+                entry["end_date"] = end_date
+                end_date_bs = str(item.get("end_date_bs") or "").strip()
+                if end_date_bs:
+                    entry["end_date_bs"] = end_date_bs
 
-    # ── summary ──────────────────────────────────────────────────────────
+        return entry
+
+    # ── API write ───────────────────────────────────────────────────────────
+
+    def _patch_timeline(
+        self,
+        case_slug: Optional[str],
+        case_id: str,
+        entries: list[dict],
+        api_base_url: str,
+        api_token: str,
+        session: requests.Session,
+    ) -> None:
+        """PATCH the case timeline via an RFC 6902 JSON Patch replace op."""
+        if not case_slug:
+            raise CommandError(f"Case {case_id} has no slug; cannot PATCH.")
+
+        api_root = self._api_root(api_base_url)
+        quoted = urllib.parse.quote(str(case_slug).strip(), safe="")
+        url = f"{api_root}/cases/{quoted}/"
+        patch = [{"op": "replace", "path": "/timeline", "value": entries}]
+        headers = {
+            "Authorization": f"Token {api_token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        try:
+            response = session.patch(url, json=patch, headers=headers, timeout=30)
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else "?"
+            body = exc.response.text[:300] if exc.response is not None else ""
+            raise CommandError(
+                f"PATCH failed for case {case_id} (status {status}): {body}"
+            ) from exc
+        except requests.RequestException as exc:
+            raise CommandError(f"PATCH failed for case {case_id}: {exc}") from exc
+
+    # ── summary ─────────────────────────────────────────────────────────────
 
     def _print_summary(self, dry_run: bool):
         self.stdout.write("\n" + "=" * 60)

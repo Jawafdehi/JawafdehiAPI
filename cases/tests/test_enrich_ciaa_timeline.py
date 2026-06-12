@@ -1,10 +1,11 @@
 """
-Tests for enrich_ciaa_timeline management command.
+Tests for the API-driven enrich_ciaa_timeline management command.
 
-Phase 1 (A.3) of CIAA FY 080/081 Case Enrichment pipeline.
-Covers: idempotency, CIAA case filtering, JSON response parsing,
-source content acquisition, dry-run safety, --force flag,
---fiscal-year filtering, and CLI flag registration.
+The command reads cases, source content and NGM hearing records over the
+Jawafdehi HTTP API and writes the timeline via PATCH — it never touches the
+ORM. These tests therefore mock the HTTP layer (the command's _api_get /
+_get_source_content / _get_ngm_data and the urllib PATCH) rather than creating
+database rows. See https://github.com/Jawafdehi/JawafdehiAPI/issues/186.
 """
 
 import json
@@ -12,897 +13,532 @@ from io import StringIO
 from unittest.mock import MagicMock, patch
 
 import pytest
-import requests
 from django.core.management import call_command
 from django.core.management.base import CommandError
 
 from cases.management.commands.enrich_ciaa_timeline import Command
-from cases.models import Case, CaseState, CaseType, DocumentSource, SourceType
+
+API_BASE = "https://portal.jawafdehi.org/api"
+COMMON = dict(
+    api_base_url=API_BASE,
+    api_token="tok",
+    llm_api_key="llmkey",
+)
 
 
-@pytest.mark.django_db
-class TestEnrichCiaaTimeline:
-    """Test suite for enrich_ciaa_timeline management command."""
+def _case(**overrides):
+    base = {
+        "case_id": "case-0001",
+        "slug": "case-0001-slug",
+        "state": "DRAFT",
+        "title": "Test CIAA case",
+        "court_cases": ["special:081-CR-0060"],
+        "timeline": [],
+        "evidence": [],
+    }
+    base.update(overrides)
+    return base
 
-    # ── helpers ──────────────────────────────────────────────────────────
 
-    def _create_case(self, **overrides):
-        defaults = {
-            "case_type": CaseType.CORRUPTION,
-            "state": CaseState.DRAFT,
-            "title": "Test CIAA Case",
-            "case_id": "case-test-001",
-            "court_cases": ["special:test-001"],
-            "timeline": [],
-            "evidence": [],
+# ── case selection / filtering ───────────────────────────────────────────────
+
+
+class TestCaseSelection:
+    def _run_select(self, pages, **kwargs):
+        cmd = Command()
+        with patch.object(cmd, "_api_get", side_effect=pages):
+            return cmd._get_ciaa_cases(
+                api_base_url=API_BASE,
+                api_token="tok",
+                session=MagicMock(),
+                **kwargs,
+            )
+
+    def test_selects_draft_special_court_cases(self):
+        page = {"results": [_case()], "next": None}
+        selected = self._run_select([page])
+        assert [c["case_id"] for c in selected] == ["case-0001"]
+
+    def test_skips_non_draft(self):
+        page = {"results": [_case(state="PUBLISHED")], "next": None}
+        assert self._run_select([page]) == []
+
+    def test_skips_non_special_court(self):
+        page = {"results": [_case(court_cases=["supreme:081-CR-0060"])], "next": None}
+        assert self._run_select([page]) == []
+
+    def test_skips_already_populated_unless_force(self):
+        page = {
+            "results": [_case(timeline=[{"date": "2025-01-01", "title": "x"}])],
+            "next": None,
         }
-        defaults.update(overrides)
-        return Case.objects.create(**defaults)
+        assert self._run_select([page]) == []
 
-    def _create_source(self, source_type=SourceType.LEGAL_PROCEDURAL, **overrides):
-        defaults = {
-            "title": "CIAA Press Release",
-            "description": "Source document content with timeline information. " * 30,
-            "url": ["https://ciaa.gov.np/pressrelease/3173"],
-            "source_type": source_type,
+    def test_force_includes_populated(self):
+        page = {
+            "results": [_case(timeline=[{"date": "2025-01-01", "title": "x"}])],
+            "next": None,
         }
-        defaults.update(overrides)
-        return DocumentSource.objects.create(**defaults)
+        selected = self._run_select([page], force=True)
+        assert len(selected) == 1
 
-    def _session(self):
-        """Create a mock requests.Session for direct method tests."""
-        session = MagicMock(spec=requests.Session)
-        return session
+    def test_fiscal_year_filter(self):
+        page = {
+            "results": [
+                _case(case_id="a", court_cases=["special:081-CR-0060"]),
+                _case(case_id="b", court_cases=["special:080-CR-0010"]),
+            ],
+            "next": None,
+        }
+        selected = self._run_select([page], fiscal_year="081")
+        assert [c["case_id"] for c in selected] == ["a"]
 
-    def _mock_llm_response(self, entries=None):
-        if entries is None:
-            entries = [
+    def test_case_id_filter(self):
+        page = {
+            "results": [_case(case_id="a"), _case(case_id="b")],
+            "next": None,
+        }
+        selected = self._run_select([page], case_id="b")
+        assert [c["case_id"] for c in selected] == ["b"]
+
+    def test_limit(self):
+        page = {
+            "results": [_case(case_id=f"c{i}") for i in range(5)],
+            "next": None,
+        }
+        selected = self._run_select([page], limit=2)
+        assert len(selected) == 2
+
+    def test_follows_pagination(self):
+        page1 = {"results": [_case(case_id="a")], "next": f"{API_BASE}/cases/?page=2"}
+        page2 = {"results": [_case(case_id="b")], "next": None}
+        selected = self._run_select([page1, page2])
+        assert [c["case_id"] for c in selected] == ["a", "b"]
+
+
+# ── response parsing ───────────────────────────────────────────────────────
+
+
+class TestParseTimelineResponse:
+    def setup_method(self):
+        self.cmd = Command()
+
+    def test_parses_clean_array_with_bs_and_span(self):
+        text = json.dumps(
+            [
                 {
-                    "date": "2023-08-15",
-                    "title": "अख्तियारले अनुसन्धान शुरु",
-                    "description": "विशेष अदालतमा मुद्दा दायर गर्ने निर्णय",
+                    "date": "1989-07-14",
+                    "date_bs": "2046-03-30",
+                    "end_date": "2020-07-15",
+                    "end_date_bs": "2077-03-31",
+                    "title": "जाँच अवधि",
+                    "description": "Investigation span.",
                 },
                 {
-                    "date": "2023-09-20",
-                    "title": "विशेष अदालतमा मुद्दा दायर",
-                    "description": "विशेष अदालतमा मुद्दा दर्ता भएको",
+                    "date": "2025-02-09",
+                    "date_bs": "2081-10-27",
+                    "title": "मुद्दा दर्ता",
                 },
-                {"date": "2024-03-10", "title": "फैसला सुनाइएको", "description": ""},
             ]
-        return json.dumps(entries)
-
-    def _mock_call_llm(self, entries=None):
-        """Patch call_llm in the enrich_ciaa_timeline namespace."""
-        return patch(
-            "cases.management.commands.enrich_ciaa_timeline.call_llm",
-            return_value=self._mock_llm_response(entries),
         )
+        entries = self.cmd._parse_timeline_response(text)
+        assert len(entries) == 2
+        # sorted chronologically
+        assert entries[0]["date"] == "1989-07-14"
+        assert entries[0]["date_bs"] == "2046-03-30"
+        assert entries[0]["end_date"] == "2020-07-15"
+        assert entries[0]["end_date_bs"] == "2077-03-31"
+        assert entries[1]["date_bs"] == "2081-10-27"
 
-    def _mock_call_llm_error(self, exc=None):
-        """Patch call_llm to raise an error."""
-        if exc is None:
-            exc = requests.ConnectionError("Connection refused")
-        return patch(
-            "cases.management.commands.enrich_ciaa_timeline.call_llm",
-            side_effect=exc,
+    def test_strips_markdown_fences(self):
+        text = '```json\n[{"date": "2025-02-09", "title": "x"}]\n```'
+        entries = self.cmd._parse_timeline_response(text)
+        assert entries and entries[0]["date"] == "2025-02-09"
+
+    def test_invalid_json_returns_none(self):
+        assert self.cmd._parse_timeline_response("not json") is None
+
+    def test_empty_array_returns_none(self):
+        assert self.cmd._parse_timeline_response("[]") is None
+
+    def test_drops_entries_missing_required_fields(self):
+        text = json.dumps(
+            [
+                {"date": "2025-02-09"},  # no title
+                {"title": "no date"},  # no date
+                {"date": "2025-02-09", "title": "ok"},
+            ]
         )
+        entries = self.cmd._parse_timeline_response(text)
+        assert len(entries) == 1
+        assert entries[0]["title"] == "ok"
 
-    def _mock_call_llm_missing_content(
-        self,
-        message: str = "LLM refused: I cannot help",
-    ):
-        """Patch call_llm to raise CommandError simulating a missing-content LLM response.
+    def test_drops_non_iso_date(self):
+        text = json.dumps([{"date": "2081-10-27 BS", "title": "x"}])
+        assert self.cmd._parse_timeline_response(text) is None
 
-        When the LLM returns a response where choices[0].message lacks a 'content'
-        key (e.g. 'refusal' or 'tool_calls' instead), call_llm raises CommandError
-        with a descriptive message. This helper simulates that production failure
-        mode so the test exercises the caller's error-handling path.
-        """
-        return patch(
-            "cases.management.commands.enrich_ciaa_timeline.call_llm",
-            side_effect=CommandError(message),
+    def test_drops_end_date_before_start_but_keeps_entry(self):
+        text = json.dumps(
+            [{"date": "2020-07-15", "end_date": "1989-07-14", "title": "x"}]
         )
+        entries = self.cmd._parse_timeline_response(text)
+        assert len(entries) == 1
+        assert "end_date" not in entries[0]
 
-    def _mock_ngm_data(self, hearings=None, case_overrides=None):
-        """Create mock NGM data dict."""
-        data = {
-            "case": {
-                "registration_date_ad": "2023-09-20",
-                "verdict_date_ad": "2024-03-10",
+    def test_nested_timeline_key(self):
+        text = json.dumps({"timeline": [{"date": "2025-02-09", "title": "x"}]})
+        entries = self.cmd._parse_timeline_response(text)
+        assert entries and entries[0]["title"] == "x"
+
+
+# ── NGM section formatting ─────────────────────────────────────────────────
+
+
+class TestFormatNgmSection:
+    def test_flat_api_payload(self):
+        cmd = Command()
+        section = cmd._format_ngm_section(
+            {
+                "registration_date_ad": "2025-02-09",
                 "case_status": "फैसला भएको",
-                "verdict_judge": "Hon. Judge Name",
-                **(case_overrides or {}),
-            },
-            "hearings": hearings
-            or [
+                "verdict_date_ad": "2025-06-20",
+                "verdict_judge": "Judge X",
+                "hearings": [
+                    {"hearing_date_ad": "2025-03-01", "decision_type": "पेशी"},
+                ],
+            }
+        )
+        assert "Case registration: 2025-02-09" in section
+        assert "Hearings (1 records)" in section
+        assert "Verdict date: 2025-06-20" in section
+        assert "Judge X" in section
+
+    def test_empty(self):
+        assert Command()._format_ngm_section(None) == ""
+
+
+# ── source content acquisition ─────────────────────────────────────────────
+
+
+class TestSourceContent:
+    def test_uses_long_description(self):
+        cmd = Command()
+        case = {
+            "evidence": [
                 {
-                    "hearing_date_ad": "2023-11-15",
-                    "decision_type": "पेशी",
-                    "remarks": "सुनुवाइ भएको",
-                },
-                {
-                    "hearing_date_ad": "2024-01-20",
-                    "decision_type": "पेशी",
-                    "remarks": "अन्तिम सुनुवाइ",
-                },
-            ],
-        }
-        return data
-
-    # ── 1. Idempotency ──────────────────────────────────────────────────
-
-    def test_skips_cases_with_populated_timeline(self):
-        """Idempotency: cases with non-empty timeline are skipped."""
-        self._create_case(
-            case_id="populated-test",
-            timeline=[{"date": "2023-08-15", "title": "Test event"}],
-        )
-
-        out = StringIO()
-        call_command("enrich_ciaa_timeline", "--dry-run", stdout=out)
-
-        output = out.getvalue()
-        assert "Already populated:      1" in output
-        assert "Cases processed:        0" in output
-
-    def test_processes_cases_with_empty_timeline(self):
-        """Cases with empty timeline are processed."""
-        pr_source = self._create_source()
-        case = self._create_case(
-            timeline=[],
-            evidence=[{"source_id": pr_source.source_id, "description": "test"}],
-        )
-
-        with self._mock_call_llm():
-            out = StringIO()
-            call_command(
-                "enrich_ciaa_timeline",
-                f"--case-id={case.case_id}",
-                "--dry-run",
-                stdout=out,
-            )
-
-        output = out.getvalue()
-        assert "Cases processed:        1" in output
-        assert "Cases enriched:         0" in output
-        assert "Already populated:      0" in output
-        assert "DRY RUN" in output
-
-    # ── 2. --force flag ─────────────────────────────────────────────────
-
-    def test_force_reprocesses_populated_cases(self):
-        """--force flag re-generates timeline even when already populated."""
-        pr_source = self._create_source()
-        case = self._create_case(
-            timeline=[{"date": "2022-01-01", "title": "Old event"}],
-            evidence=[{"source_id": pr_source.source_id, "description": "test"}],
-        )
-
-        with self._mock_call_llm():
-            out = StringIO()
-            call_command(
-                "enrich_ciaa_timeline",
-                f"--case-id={case.case_id}",
-                "--force",
-                "--dry-run",
-                stdout=out,
-            )
-
-        output = out.getvalue()
-        assert "force" in output.lower()
-        assert "Cases processed:        1" in output
-        assert "Already populated:      0" in output
-
-    # ── 3. --fiscal-year filtering ───────────────────────────────────────
-
-    def test_fiscal_year_filter_matches_court_cases(self):
-        """--fiscal-year 080 filters cases with 080-CR court cases."""
-        self._create_case(
-            case_id="fy-080-case",
-            court_cases=["special:080-CR-0007"],
-            timeline=[],
-        )
-        self._create_case(
-            case_id="fy-081-case",
-            court_cases=["special:081-CR-0123"],
-            timeline=[],
-        )
-
-        cmd = Command()
-        cmd.stats = {
-            "cases_processed": 0,
-            "cases_enriched": 0,
-            "cases_skipped": 0,
-            "cases_no_content": 0,
-            "cases_llm_error": 0,
-            "cases_already_populated": 0,
-            "cases_ngm_used": 0,
-        }
-
-        cases = cmd._get_ciaa_cases(fiscal_year="080")
-        case_ids = [c.case_id for c in cases]
-        assert "fy-080-case" in case_ids
-        assert "fy-081-case" not in case_ids
-
-    def test_fiscal_year_filter_normalized(self):
-        """--fiscal-year handles leading zeros (e.g., '080' and '80' both work)."""
-        self._create_case(
-            case_id="fy-080-case",
-            court_cases=["special:080-CR-0007"],
-            timeline=[],
-        )
-
-        cmd = Command()
-        cmd.stats = dict.fromkeys(
-            [
-                "cases_processed",
-                "cases_enriched",
-                "cases_skipped",
-                "cases_no_content",
-                "cases_llm_error",
-                "cases_already_populated",
-                "cases_ngm_used",
-            ],
-            0,
-        )
-
-        cases = cmd._get_ciaa_cases(fiscal_year="80")
-        case_ids = [c.case_id for c in cases]
-        assert "fy-080-case" in case_ids
-
-    def test_fiscal_year_rejects_invalid_format(self):
-        """Invalid fiscal year format raises CommandError."""
-        with pytest.raises(CommandError) as exc_info:
-            call_command(
-                "enrich_ciaa_timeline",
-                "--fiscal-year=not-a-year",
-                "--dry-run",
-            )
-        assert "Invalid fiscal year" in str(exc_info.value)
-
-    # ── 4. CIAA case filtering ───────────────────────────────────────────
-
-    def test_skips_non_draft_cases(self):
-        """Only DRAFT cases are considered for enrichment."""
-        self._create_case(
-            case_id="draft-case",
-            state=CaseState.DRAFT,
-            timeline=[],
-        )
-        self._create_case(
-            case_id="published-case",
-            state=CaseState.PUBLISHED,
-            timeline=[],
-        )
-
-        cmd = Command()
-        cmd.stats = dict.fromkeys(
-            [
-                "cases_processed",
-                "cases_enriched",
-                "cases_skipped",
-                "cases_no_content",
-                "cases_llm_error",
-                "cases_already_populated",
-                "cases_ngm_used",
-            ],
-            0,
-        )
-
-        cases = cmd._get_ciaa_cases()
-        case_ids = [c.case_id for c in cases]
-        assert "draft-case" in case_ids
-        assert "published-case" not in case_ids
-
-    # ── 5. JSON response parsing ────────────────────────────────────────
-
-    def test_parse_clean_json_array(self):
-        """Clean JSON array of timeline entries parses correctly."""
-        cmd = Command()
-        entries = [
-            {"date": "2023-08-15", "title": "घटना १"},
-            {"date": "2023-09-20", "title": "घटना २", "description": "विवरण"},
-        ]
-        result = cmd._parse_timeline_response(json.dumps(entries))
-        assert len(result) == 2
-        assert result[0]["date"] == "2023-08-15"
-        assert result[0]["title"] == "घटना १"
-
-    def test_parse_json_with_markdown_wrappers(self):
-        """Timeline wrapped in markdown code fences is extracted."""
-        cmd = Command()
-        response = (
-            "Here is the timeline:\n```json\n"
-            + json.dumps([{"date": "2023-08-15", "title": "Test"}])
-            + "\n```\nDone."
-        )
-        result = cmd._parse_timeline_response(response)
-        assert len(result) == 1
-        assert result[0]["date"] == "2023-08-15"
-
-    def test_parse_invalid_json_returns_none(self):
-        """Invalid JSON returns None."""
-        cmd = Command()
-        result = cmd._parse_timeline_response("This is not JSON at all.")
-        assert result is None
-
-    def test_parse_empty_array_returns_none(self):
-        """Empty JSON array returns None (no timeline entries)."""
-        cmd = Command()
-        result = cmd._parse_timeline_response("[]")
-        assert result is None
-
-    def test_parse_missing_required_fields(self):
-        """Entries missing date or title are filtered out."""
-        cmd = Command()
-        entries = [
-            {"title": "No date entry"},
-            {"date": "2023-08-15"},
-            {"date": "2023-09-20", "title": "Valid entry"},
-        ]
-        result = cmd._parse_timeline_response(json.dumps(entries))
-        assert len(result) == 1
-        assert result[0]["date"] == "2023-09-20"
-
-    def test_parse_accepts_alternate_field_names(self):
-        """Fallback field names (date_bs, event, desc) are accepted."""
-        cmd = Command()
-        entries = [
-            {"date_bs": "2023-08-15", "event": "Alt field test", "desc": "Alt desc"},
-        ]
-        result = cmd._parse_timeline_response(json.dumps(entries))
-        assert len(result) == 1
-        assert result[0]["date"] == "2023-08-15"
-        assert result[0]["title"] == "Alt field test"
-        assert result[0]["description"] == "Alt desc"
-
-    def test_parse_rejects_non_iso_dates_in_alternate_fields(self):
-        """Entries with non-ISO dates in fallback fields are dropped."""
-        cmd = Command()
-        entries = [
-            {"date": "2023-08-15", "title": "Valid entry"},
-            {"date_bs": "15-08-2023", "event": "Bad date format"},
-            {"date_bs": "2080-04-32", "event": "Invalid calendar date"},
-        ]
-        result = cmd._parse_timeline_response(json.dumps(entries))
-        assert len(result) == 1
-        assert result[0]["date"] == "2023-08-15"
-
-    def test_parse_nested_timeline_key(self):
-        """Response with 'timeline' wrapper key is extracted."""
-        cmd = Command()
-        entries = [
-            {"date": "2023-08-15", "title": "Wrapped"},
-        ]
-        result = cmd._parse_timeline_response(json.dumps({"timeline": entries}))
-        assert len(result) == 1
-
-    # ── 6. Source content acquisition ───────────────────────────────────
-
-    def test_extract_source_from_description(self):
-        """Source content extracted from DocumentSource.description when >200 chars."""
-        source = self._create_source(
-            source_type=SourceType.LEGAL_PROCEDURAL,
-            description="Detailed case information with timeline data. " * 20,
-        )
-        case = self._create_case(
-            evidence=[{"source_id": source.source_id, "description": "test"}],
-        )
-
-        cmd = Command()
-        session = self._session()
-        content = cmd._get_source_content(case, session)
-
-        assert content is not None
-        assert "Detailed case information" in content
-
-    def test_skips_case_without_evidence(self):
-        """Cases with no evidence return None."""
-        case = self._create_case(evidence=[])
-
-        cmd = Command()
-        session = self._session()
-        content = cmd._get_source_content(case, session)
-
-        assert content is None
-
-    def test_source_from_url_when_description_short(self):
-        """When description is short, download from URL via _convert_to_markdown."""
-        source = DocumentSource.objects.create(
-            title="CIAA Press Release",
-            description="Short.",
-            url=["https://ciaa.gov.np/pressrelease/3173"],
-            source_type=SourceType.LEGAL_PROCEDURAL,
-        )
-        case = self._create_case(
-            evidence=[{"source_id": source.source_id, "description": "test"}],
-        )
-
-        cmd = Command()
-        session = self._session()
-        with patch(
-            "cases.management.commands.enrich_ciaa_timeline.convert_to_markdown",
-            return_value="Extracted text. " * 50,
-        ):
-            content = cmd._get_source_content(case, session)
-
-        assert content is not None
-        assert "Extracted text" in content
-
-    def test_combines_multiple_source_types(self):
-        """Content from LEGAL_PROCEDURAL + LEGAL_COURT_ORDER are combined."""
-        legal_proc = DocumentSource.objects.create(
-            title="CIAA Press Release",
-            description="Press release content with dates. " * 30,
-            url=["https://ciaa.gov.np/pressrelease/3173"],
-            source_type=SourceType.LEGAL_PROCEDURAL,
-        )
-        court_order = DocumentSource.objects.create(
-            title="Court Order",
-            description="Court order with hearing and verdict dates. " * 30,
-            url=["https://ngm-store.jawafdehi.org/court/123"],
-            source_type=SourceType.LEGAL_COURT_ORDER,
-        )
-        case = self._create_case(
-            evidence=[
-                {"source_id": legal_proc.source_id, "description": "press release"},
-                {"source_id": court_order.source_id, "description": "court order"},
-            ],
-        )
-
-        cmd = Command()
-        session = self._session()
-        content = cmd._get_source_content(case, session)
-
-        assert content is not None
-        assert "Press release content" in content
-        assert "Court order" in content
-        assert "---" in content
-
-    # ── 7. Dry-run safety ───────────────────────────────────────────────
-
-    def test_dry_run_no_db_writes(self):
-        """Dry-run does not modify the database."""
-        pr_source = self._create_source()
-        case = self._create_case(
-            timeline=[],
-            evidence=[{"source_id": pr_source.source_id, "description": "test"}],
-        )
-
-        with self._mock_call_llm():
-            out = StringIO()
-            call_command(
-                "enrich_ciaa_timeline",
-                f"--case-id={case.case_id}",
-                "--dry-run",
-                stdout=out,
-            )
-
-        case.refresh_from_db()
-        assert case.timeline == []
-
-    def test_production_mode_saves_timeline(self):
-        """Without --dry-run, timeline entries are saved to the database."""
-        pr_source = self._create_source()
-        case = self._create_case(
-            timeline=[],
-            evidence=[{"source_id": pr_source.source_id, "description": "test"}],
-        )
-
-        with self._mock_call_llm(
-            entries=[
-                {"date": "2023-08-15", "title": "Saved event"},
+                    "description": "x" * 250,
+                    "source": {"source_type": "CIAA_PRESS_RELEASE", "urls": []},
+                }
             ]
-        ):
+        }
+        text = cmd._get_source_content(case)
+        assert text and len(text) >= 250
 
-            out = StringIO()
-            call_command(
-                "enrich_ciaa_timeline",
-                f"--case-id={case.case_id}",
-                "--llm-api-key=test-key",
-                stdout=out,
-            )
-
-        case.refresh_from_db()
-        assert len(case.timeline) == 1
-        assert case.timeline[0]["date"] == "2023-08-15"
-        assert case.timeline[0]["title"] == "Saved event"
-
-    # ── 8. CLI flag registration ────────────────────────────────────────
-
-    def test_cli_dry_run_flag_registered(self):
-        """--dry-run flag is properly registered."""
-        parser = MagicMock()
+    def test_uses_existing_markdown_link_when_description_short(self):
         cmd = Command()
-        cmd.add_arguments(parser)
-        parser.add_argument.assert_any_call(
-            "--dry-run",
-            action="store_true",
-            help="Preview without saving to database",
-        )
+        case = {
+            "evidence": [
+                {
+                    "description": "short",
+                    "source": {
+                        "source_type": "AG_ABHIYOG_PATRA",
+                        "urls": [
+                            {
+                                "role": "MARKDOWN",
+                                "link": "https://s3.jawafdehi.org/x.md",
+                            }
+                        ],
+                    },
+                }
+            ]
+        }
+        with patch.object(Command, "_download_text", return_value="m" * 300) as mock_dl:
+            text = cmd._get_source_content(case)
+        assert text and len(text) >= 300
+        mock_dl.assert_called_once_with("https://s3.jawafdehi.org/x.md")
 
-    def test_cli_force_flag_registered(self):
-        """--force flag is properly registered."""
-        parser = MagicMock()
+    def test_creates_markdown_via_shared_converter_when_none_exists(self):
         cmd = Command()
-        cmd.add_arguments(parser)
-        parser.add_argument.assert_any_call(
-            "--force",
-            action="store_true",
-            help="Re-generate timeline even if timeline already exists",
-        )
-
-    def test_cli_fiscal_year_flag_registered(self):
-        """--fiscal-year flag is properly registered."""
-        parser = MagicMock()
-        cmd = Command()
-        cmd.add_arguments(parser)
-        parser.add_argument.assert_any_call(
-            "--fiscal-year",
-            type=str,
-            help="Filter by fiscal year (e.g., '080' or '081')",
-        )
-
-    def test_cli_case_id_flag_registered(self):
-        """--case-id flag is properly registered."""
-        parser = MagicMock()
-        cmd = Command()
-        cmd.add_arguments(parser)
-        parser.add_argument.assert_any_call(
-            "--case-id",
-            type=str,
-            help="Process a specific case by case_id",
-        )
-
-    def test_cli_limit_flag_registered(self):
-        """--limit flag is properly registered."""
-        parser = MagicMock()
-        cmd = Command()
-        cmd.add_arguments(parser)
-        parser.add_argument.assert_any_call(
-            "--limit",
-            type=int,
-            help="Maximum number of cases to process",
-        )
-
-    def test_cli_limit_enforced(self):
-        """--limit option caps the number of cases processed."""
-        for i in range(5):
-            self._create_case(
-                case_id=f"limit-test-{i:03d}",
-                timeline=[],
-            )
-
-        with self._mock_call_llm():
-            out = StringIO()
-            call_command(
-                "enrich_ciaa_timeline",
-                "--limit=1",
-                "--dry-run",
-                stdout=out,
-            )
-
-        output = out.getvalue()
-        assert "Cases processed:        1" in output
-
-    def test_cli_verbose_flag_registered(self):
-        """--verbose flag is properly registered."""
-        parser = MagicMock()
-        cmd = Command()
-        cmd.add_arguments(parser)
-        parser.add_argument.assert_any_call(
-            "--verbose",
-            action="store_true",
-            help="Enable verbose debug logging",
-        )
-
-    # ── edge cases ──────────────────────────────────────────────────────
-
-    def test_llm_error_increments_counter(self):
-        """LLM API failures are tracked in stats without crashing."""
-        pr_source = self._create_source()
-        case = self._create_case(
-            evidence=[{"source_id": pr_source.source_id, "description": "test"}],
-        )
-
-        with self._mock_call_llm_error():
-            out = StringIO()
-            call_command(
-                "enrich_ciaa_timeline",
-                f"--case-id={case.case_id}",
-                "--llm-api-key=test-key",
-                "--dry-run",
-                stdout=out,
-            )
-
-        output = out.getvalue()
-        assert "LLM errors:             1" in output
-
-    def test_llm_malformed_response_increments_counter(self):
-        """LLM response without 'content' key is counted as LLM error and
-        command continues processing remaining cases."""
-        pr_source = self._create_source()
-        self._create_case(
-            case_id="missing-content-1",
-            evidence=[{"source_id": pr_source.source_id, "description": "test"}],
-            timeline=[],
-        )
-        self._create_case(
-            case_id="missing-content-2",
-            evidence=[{"source_id": pr_source.source_id, "description": "test"}],
-            timeline=[],
-        )
-
-        side_effects = [
-            CommandError("LLM refused: I cannot help"),
-            self._mock_llm_response(
-                [{"date": "2023-08-15", "title": "Recovered", "description": ""}]
-            ),
-        ]
+        case = {
+            "evidence": [
+                {
+                    "description": "short",
+                    "source": {
+                        "source_type": "AG_ABHIYOG_PATRA",
+                        "urls": [
+                            {"role": "RAW", "link": "https://s3.jawafdehi.org/x.pdf"}
+                        ],
+                    },
+                }
+            ]
+        }
         with patch(
-            "cases.management.commands.enrich_ciaa_timeline.call_llm",
-            side_effect=side_effects,
-        ):
-            out = StringIO()
-            call_command(
-                "enrich_ciaa_timeline",
-                "--dry-run",
-                "--llm-api-key=test-key",
-                stdout=out,
+            "review.converter.convert_source",
+            return_value={"status": "converted", "markdown": "m" * 300, "note": ""},
+        ) as mock_conv:
+            text = cmd._get_source_content(case)
+        assert text and len(text) >= 300
+        # The shared converter was handed the convertible (RAW) link.
+        _, kwargs = mock_conv.call_args
+        passed = mock_conv.call_args.args[0]
+        assert passed == {"url": ["https://s3.jawafdehi.org/x.pdf"]}
+
+    def test_no_evidence_returns_none(self):
+        assert Command()._get_source_content({"evidence": []}) is None
+
+    def test_orders_by_milestone_source_type(self):
+        cmd = Command()
+        case = {
+            "evidence": [
+                {
+                    "description": "B" * 250,
+                    "source": {"source_type": "COURT_ORDER", "urls": []},
+                },
+                {
+                    "description": "A" * 250,
+                    "source": {"source_type": "AG_ABHIYOG_PATRA", "urls": []},
+                },
+            ]
+        }
+        text = cmd._get_source_content(case)
+        # AG_ABHIYOG_PATRA is higher priority, so its content comes first.
+        assert text.index("A" * 250) < text.index("B" * 250)
+
+
+# ── end-to-end process_case (mocked HTTP + LLM) ─────────────────────────────
+
+
+class TestProcessCase:
+    def _cmd(self):
+        cmd = Command()
+        cmd.stdout = MagicMock()
+        return cmd
+
+    def test_dry_run_does_not_patch(self):
+        cmd = self._cmd()
+        case = _case()
+        entries = [{"date": "2025-02-09", "date_bs": "2081-10-27", "title": "x"}]
+        with patch.object(cmd, "_fetch_case_detail", return_value=case), patch.object(
+            cmd, "_get_source_content", return_value="src"
+        ), patch.object(cmd, "_get_ngm_data", return_value=None), patch.object(
+            cmd, "_extract_timeline", return_value=entries
+        ), patch.object(
+            cmd, "_patch_timeline"
+        ) as mock_patch:
+            cmd._process_case(
+                case=case,
+                idx=1,
+                total=1,
+                dry_run=True,
+                llm_cfg={
+                    "backend": "openai",
+                    "model": "m",
+                    "base_url": "http://x/v1",
+                    "api_key": "k",
+                    "max_tokens": 4000,
+                },
+                api_base_url=API_BASE,
+                api_token="tok",
+                session=MagicMock(),
             )
+        mock_patch.assert_not_called()
+        assert cmd.stats["cases_enriched"] == 0
 
-        output = out.getvalue()
-        assert "LLM errors:             1" in output
-        assert "Cases processed:        2" in output
-        assert "Cases enriched:         0" in output
+    def test_production_patches_timeline(self):
+        cmd = self._cmd()
+        case = _case()
+        entries = [{"date": "2025-02-09", "date_bs": "2081-10-27", "title": "x"}]
+        with patch.object(cmd, "_fetch_case_detail", return_value=case), patch.object(
+            cmd, "_get_source_content", return_value="src"
+        ), patch.object(cmd, "_get_ngm_data", return_value=None), patch.object(
+            cmd, "_extract_timeline", return_value=entries
+        ), patch.object(
+            cmd, "_patch_timeline"
+        ) as mock_patch:
+            cmd._process_case(
+                case=case,
+                idx=1,
+                total=1,
+                dry_run=False,
+                llm_cfg={
+                    "backend": "openai",
+                    "model": "m",
+                    "base_url": "http://x/v1",
+                    "api_key": "k",
+                    "max_tokens": 4000,
+                },
+                api_base_url=API_BASE,
+                api_token="tok",
+                session=MagicMock(),
+            )
+        mock_patch.assert_called_once()
+        _, kwargs = mock_patch.call_args
+        assert kwargs["entries"] == entries
+        assert kwargs["case_slug"] == "case-0001-slug"
+        assert cmd.stats["cases_enriched"] == 1
 
-    def test_no_content_counted(self):
-        """Cases without usable source content count as 'No source content'."""
-        self._create_case(
-            case_id="no-source-case",
-            evidence=[],
-            timeline=[],
+    def test_no_content_skips(self):
+        cmd = self._cmd()
+        case = _case()
+        with patch.object(cmd, "_fetch_case_detail", return_value=case), patch.object(
+            cmd, "_get_source_content", return_value=None
+        ), patch.object(cmd, "_get_ngm_data", return_value=None), patch.object(
+            cmd, "_patch_timeline"
+        ) as mock_patch:
+            cmd._process_case(
+                case=case,
+                idx=1,
+                total=1,
+                dry_run=False,
+                llm_cfg={
+                    "backend": "openai",
+                    "model": "m",
+                    "base_url": "http://x/v1",
+                    "api_key": "k",
+                    "max_tokens": 4000,
+                },
+                api_base_url=API_BASE,
+                api_token="tok",
+                session=MagicMock(),
+            )
+        mock_patch.assert_not_called()
+        assert cmd.stats["cases_no_content"] == 1
+
+
+# ── PATCH payload ───────────────────────────────────────────────────────────
+
+
+class TestPatchTimeline:
+    def test_sends_json_patch_replace(self):
+        cmd = Command()
+        entries = [{"date": "2025-02-09", "date_bs": "2081-10-27", "title": "x"}]
+        captured = {}
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+        def fake_patch(url, json=None, headers=None, timeout=None):
+            captured["url"] = url
+            captured["body"] = json
+            captured["auth"] = (headers or {}).get("Authorization")
+            return _Resp()
+
+        session = MagicMock()
+        session.patch.side_effect = fake_patch
+        cmd._patch_timeline(
+            case_slug="case-0001-slug",
+            case_id="case-0001",
+            entries=entries,
+            api_base_url=API_BASE,
+            api_token="tok",
+            session=session,
         )
+        assert captured["url"] == f"{API_BASE}/cases/case-0001-slug/"
+        assert captured["auth"] == "Token tok"
+        assert captured["body"] == [
+            {"op": "replace", "path": "/timeline", "value": entries}
+        ]
+
+    def test_patch_http_error_raises_command_error(self):
+        import requests
 
         cmd = Command()
-        cmd.stats = dict.fromkeys(
-            [
-                "cases_processed",
-                "cases_enriched",
-                "cases_skipped",
-                "cases_no_content",
-                "cases_llm_error",
-                "cases_already_populated",
-                "cases_ngm_used",
-            ],
-            0,
-        )
-
-        out = StringIO()
-        call_command(
-            "enrich_ciaa_timeline",
-            "--case-id=no-source-case",
-            "--dry-run",
-            stdout=out,
-        )
-
-        output = out.getvalue()
-        assert "No source content" in output
-
-    def test_summary_printed_correctly(self):
-        """The summary section displays all stat counters."""
-        pr_source = self._create_source()
-        case = self._create_case(
-            evidence=[{"source_id": pr_source.source_id, "description": "test"}],
-        )
-
-        with self._mock_call_llm():
-            out = StringIO()
-            call_command(
-                "enrich_ciaa_timeline",
-                f"--case-id={case.case_id}",
-                "--dry-run",
-                stdout=out,
+        session = MagicMock()
+        resp = MagicMock()
+        resp.status_code = 422
+        resp.text = "bad timeline"
+        err = requests.HTTPError(response=resp)
+        resp.raise_for_status.side_effect = err
+        session.patch.return_value = resp
+        with pytest.raises(CommandError, match="422"):
+            cmd._patch_timeline(
+                case_slug="case-0001-slug",
+                case_id="case-0001",
+                entries=[{"date": "2025-02-09", "title": "x"}],
+                api_base_url=API_BASE,
+                api_token="tok",
+                session=session,
             )
 
-        output = out.getvalue()
-        assert "Cases processed:" in output
-        assert "Cases enriched:" in output
-        assert "Cases skipped:" in output
-        assert "No source content:" in output
-        assert "LLM errors:" in output
-        assert "Already populated:" in output
-        assert "NGM data used:" in output
+    def test_missing_slug_raises(self):
+        with pytest.raises(CommandError, match="no slug"):
+            Command()._patch_timeline(
+                case_slug=None,
+                case_id="case-0001",
+                entries=[],
+                api_base_url=API_BASE,
+                api_token="tok",
+                session=MagicMock(),
+            )
+
+
+# ── CLI argument handling ───────────────────────────────────────────────────
+
+
+class TestCliArguments:
+    def _run(self, **kwargs):
+        out = StringIO()
+        call_command("enrich_ciaa_timeline", stdout=out, **kwargs)
+        return out.getvalue()
+
+    def test_requires_api_token(self):
+        with pytest.raises(CommandError, match="API token is required"):
+            self._run(dry_run=True, llm_api_key="k")
+
+    def test_openai_backend_requires_llm_key(self):
+        with pytest.raises(CommandError, match="LLM API key"):
+            self._run(dry_run=True, api_token="tok", llm_backend="openai")
+
+    def test_bedrock_backend_does_not_require_llm_key(self):
+        # Default model is Opus (bedrock) — no LLM key needed; runs with 0 cases.
+        with patch.object(Command, "_get_ciaa_cases", return_value=[]):
+            output = self._run(dry_run=True, api_token="tok", llm_backend="bedrock")
+        assert "Backend: bedrock" in output
         assert "Timeline extraction complete" in output
 
-    def test_responds_to_missing_api_key_in_production(self):
-        """Production mode without API key raises appropriate error."""
-        pr_source = self._create_source()
-        case = self._create_case(
-            evidence=[{"source_id": pr_source.source_id, "description": "test"}],
-        )
-
-        with patch.dict("os.environ", {}, clear=True):
-            with pytest.raises(CommandError) as exc_info:
-                call_command(
-                    "enrich_ciaa_timeline",
-                    f"--case-id={case.case_id}",
-                )
-        assert "No LLM API key" in str(exc_info.value)
-
-    # ── NGM structured hearing data ─────────────────────────────────────
-
-    def test_get_ngm_data_returns_data_for_special_ref(self):
-        """_get_ngm_data queries NGM when special: ref exists in court_cases."""
-        case = self._create_case(
-            court_cases=["special:080-CR-0111"],
-        )
-        mock_data = self._mock_ngm_data()
-
-        cmd = Command()
-        with patch(
-            "cases.management.commands.enrich_ciaa_timeline.get_court_case_details",
-            return_value=mock_data,
-        ):
-            result = cmd._get_ngm_data(case)
-
-        assert result is not None
-        assert result["case"]["registration_date_ad"] == "2023-09-20"
-        assert len(result["hearings"]) == 2
-
-    def test_get_ngm_data_returns_none_without_special_ref(self):
-        """_get_ngm_data returns None when no special: ref in court_cases."""
-        case = self._create_case(
-            court_cases=["supreme:123"],
-        )
-
-        cmd = Command()
-        result = cmd._get_ngm_data(case)
-
-        assert result is None
-
-    def test_get_ngm_data_returns_none_empty_court_cases(self):
-        """_get_ngm_data returns None when court_cases is empty."""
-        case = self._create_case(court_cases=[])
-
-        cmd = Command()
-        result = cmd._get_ngm_data(case)
-
-        assert result is None
-
-    def test_get_ngm_data_queries_database(self):
-        """_get_ngm_data fetches real data from NGM when available."""
-        case = self._create_case(
-            court_cases=["special:080-CR-0111"],
-        )
-        mock_data = self._mock_ngm_data()
-
-        cmd = Command()
-        with patch(
-            "cases.management.commands.enrich_ciaa_timeline.get_court_case_details",
-            return_value=mock_data,
-        ):
-            result = cmd._get_ngm_data(case)
-
-        assert result is not None
-        assert result["case"]["registration_date_ad"] == "2023-09-20"
-        assert len(result["hearings"]) == 2
-
-    def test_format_ngm_section_with_data(self):
-        """_format_ngm_section produces structured text from NGM data."""
-        mock_data = self._mock_ngm_data()
-
-        cmd = Command()
-        section = cmd._format_ngm_section(mock_data)
-
-        assert "NGM STRUCTURED HEARING DATA" in section
-        assert "2023-09-20" in section
-        assert "2024-03-10" in section
-        assert "2023-11-15" in section
-        assert "सुनुवाइ भएको" in section
-
-    def test_format_ngm_section_empty(self):
-        """_format_ngm_section returns empty string for None/empty data."""
-        cmd = Command()
-        assert cmd._format_ngm_section(None) == ""
-        assert cmd._format_ngm_section({}) == ""
-
-    def test_ngm_data_passed_to_extract_timeline(self):
-        """NGM data is used in the extraction prompt."""
-        pr_source = self._create_source()
-        case = self._create_case(
-            court_cases=["special:080-CR-0111"],
-            evidence=[{"source_id": pr_source.source_id, "description": "test"}],
-        )
-        mock_ngm = self._mock_ngm_data()
-
-        with patch(
-            "cases.management.commands.enrich_ciaa_timeline.get_court_case_details",
-            return_value=mock_ngm,
-        ):
-            with self._mock_call_llm():
-                out = StringIO()
-                call_command(
-                    "enrich_ciaa_timeline",
-                    f"--case-id={case.case_id}",
-                    "--dry-run",
-                    stdout=out,
-                )
-
-        output = out.getvalue()
-        assert "NGM data: 2 hearing(s)" in output
-
-    def test_ngm_counter_incremented(self):
-        """cases_ngm_used stat is incremented when NGM data is available."""
-        pr_source = self._create_source()
-        case = self._create_case(
-            court_cases=["special:080-CR-0111"],
-            evidence=[{"source_id": pr_source.source_id, "description": "test"}],
-        )
-        mock_ngm = self._mock_ngm_data()
-
-        with patch(
-            "cases.management.commands.enrich_ciaa_timeline.get_court_case_details",
-            return_value=mock_ngm,
-        ):
-            with self._mock_call_llm():
-                out = StringIO()
-                call_command(
-                    "enrich_ciaa_timeline",
-                    f"--case-id={case.case_id}",
-                    "--dry-run",
-                    stdout=out,
-                )
-
-        output = out.getvalue()
-        assert "NGM data used:          1" in output
-
-    def test_ngm_query_failure_handled_gracefully(self):
-        """NGM query failures are caught and logged without crashing."""
-        pr_source = self._create_source()
-        case = self._create_case(
-            court_cases=["special:080-CR-0111"],
-            evidence=[{"source_id": pr_source.source_id, "description": "test"}],
-        )
-
-        with patch(
-            "cases.management.commands.enrich_ciaa_timeline.get_court_case_details",
-            side_effect=ValueError("Database error"),
-        ):
-            with self._mock_call_llm():
-                out = StringIO()
-                call_command(
-                    "enrich_ciaa_timeline",
-                    f"--case-id={case.case_id}",
-                    "--dry-run",
-                    stdout=out,
-                )
-
-        output = out.getvalue()
-        assert "NGM data: none" in output
-
-    # ── --priority flag ──────────────────────────────────────────────────
-
-    def test_cli_priority_flag_registered(self):
-        """--priority flag is properly registered."""
-        parser = MagicMock()
-        cmd = Command()
-        cmd.add_arguments(parser)
-        parser.add_argument.assert_any_call(
-            "--priority",
-            action="store_true",
-            help="Enrich only cases in the priority case list",
-        )
-
     def test_priority_and_case_id_mutually_exclusive(self):
-        """--priority and --case-id cannot be used together."""
-        out = StringIO()
-        with pytest.raises(CommandError) as exc_info:
-            call_command(
-                "enrich_ciaa_timeline",
-                "--priority",
-                "--case-id=case-001",
-                "--dry-run",
-                stdout=out,
-            )
-        assert "mutually exclusive" in str(exc_info.value)
+        with pytest.raises(CommandError, match="mutually exclusive"):
+            self._run(priority=True, case_id="x", **COMMON)
+
+    def test_invalid_fiscal_year(self):
+        with pytest.raises(CommandError, match="Invalid fiscal year"):
+            self._run(fiscal_year="20810", **COMMON)
+
+    def test_invalid_limit(self):
+        with pytest.raises(CommandError, match="Must be a positive integer"):
+            self._run(limit=-1, **COMMON)
+
+    def test_dry_run_runs_with_no_cases(self):
+        # No DB access at all: mock the case fetch to return an empty list.
+        with patch.object(Command, "_get_ciaa_cases", return_value=[]):
+            output = self._run(dry_run=True, **COMMON)
+        assert "Timeline extraction complete" in output
+
+    def test_backend_auto_detects_bedrock_for_claude_model(self):
+        cmd = Command()
+        cfg = cmd._resolve_llm_config(
+            {
+                "llm_backend": "auto",
+                "llm_model": "global.anthropic.claude-opus-4-8",
+                "llm_max_tokens": 4000,
+                "aws_profile": "",
+                "aws_region": "us-west-2",
+            }
+        )
+        assert cfg["backend"] == "bedrock"
+        assert cfg["model"] == "global.anthropic.claude-opus-4-8"
+
+    def test_backend_auto_detects_openai_for_other_model(self):
+        cmd = Command()
+        cfg = cmd._resolve_llm_config(
+            {
+                "llm_backend": "auto",
+                "llm_model": "qwen.qwen3-235b-a22b-2507",
+                "llm_max_tokens": 4000,
+                "llm_base_url": "http://x/v1",
+                "llm_api_key": "k",
+            }
+        )
+        assert cfg["backend"] == "openai"
+        assert cfg["api_key"] == "k"
