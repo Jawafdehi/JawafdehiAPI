@@ -414,11 +414,12 @@ def convert_source(source, *, overwrite=False):
             md_text = _html_to_markdown(content)
             if md_text:
                 note = "Converted via trafilatura (HTML main-content)."
-        # Legacy Word: prefer LibreOffice to produce a clean .docx (handles files
-        # the bundled antiword crashes on or rejects). Falls back to the likhit
-        # path when LibreOffice is disabled, absent, or the conversion fails.
+        # Legacy Word: optionally use LibreOffice to produce a clean .docx (it
+        # handles files the bundled antiword crashes on or rejects). Off by
+        # default; falls back to the likhit path when LibreOffice is disabled,
+        # absent, or the conversion fails.
         if not md_text and ext in (".doc", ".docx"):
-            if getattr(settings, "LIBREOFFICE_DOC_CONVERSION", True):
+            if getattr(settings, "LIBREOFFICE_DOC_CONVERSION", False):
                 soffice = _find_libreoffice()
                 if soffice:
                     docx = _libreoffice_to_docx(content, ext, soffice)
