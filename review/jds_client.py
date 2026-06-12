@@ -10,6 +10,8 @@ Used in two places:
      review system runs fully offline.
 """
 
+import time
+
 import requests
 from django.conf import settings
 
@@ -17,6 +19,9 @@ UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0 Safari/537.36 CaseworkReview/1.0"
 )
+
+# Status codes worth retrying: rate limiting + transient server errors.
+_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 
 class JdsError(Exception):
@@ -40,10 +45,50 @@ def _headers(auth=True):
     return h
 
 
+def _retry_after_seconds(response, attempt, base_delay):
+    """Seconds to wait before the next attempt.
+
+    Honor the server's ``Retry-After`` header when present (the API tells us how
+    long to back off); otherwise use exponential backoff (base_delay * 2**attempt)
+    capped at 60s.
+    """
+    header = response.headers.get("Retry-After") if response is not None else None
+    if header:
+        try:
+            return min(float(header), 60.0)
+        except ValueError:
+            pass
+    return min(base_delay * (2**attempt), 60.0)
+
+
+def _get(url, *, params=None, timeout=60, auth=True):
+    """GET with retry/backoff on rate-limit (429) and transient 5xx errors.
+
+    Max attempts and base backoff are configurable via settings
+    ``JDS_MAX_RETRIES`` (default 5) and ``JDS_RETRY_BASE_DELAY`` (default 1.0s).
+    Raises ``JdsError`` if every attempt is rate-limited/5xx.
+    """
+    max_retries = int(getattr(settings, "JDS_MAX_RETRIES", 5))
+    base_delay = float(getattr(settings, "JDS_RETRY_BASE_DELAY", 1.0))
+    last = None
+    for attempt in range(max_retries + 1):
+        r = requests.get(
+            url, headers=_headers(auth=auth), params=params, timeout=timeout
+        )
+        if r.status_code not in _RETRY_STATUSES:
+            return r
+        last = r
+        if attempt < max_retries:
+            time.sleep(_retry_after_seconds(r, attempt, base_delay))
+    # Exhausted retries — return the last (still-failing) response so the caller
+    # raises its normal HTTP error with the real status code.
+    return last
+
+
 def get_case(slug, timeout=30):
     """Fetch the full case detail object for a slug from the remote JDS API."""
     url = f"{_base()}/cases/{slug}/"
-    r = requests.get(url, headers=_headers(), timeout=timeout)
+    r = _get(url, timeout=timeout)
     if r.status_code == 404:
         raise JdsError(f"Case '{slug}' not found (404).")
     if r.status_code != 200:
@@ -56,7 +101,7 @@ def iter_paginated(path, params=None, timeout=60):
     url = f"{_base()}/{path.lstrip('/')}"
     params = dict(params or {})
     while url:
-        r = requests.get(url, headers=_headers(), params=params, timeout=timeout)
+        r = _get(url, params=params, timeout=timeout)
         if r.status_code != 200:
             raise JdsError(f"JDS list fetch failed for {url}: HTTP {r.status_code}")
         data = r.json()

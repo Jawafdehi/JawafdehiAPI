@@ -15,7 +15,7 @@ import time
 
 from django.conf import settings
 
-from . import bedrock_judge, casetype, code_rules, converter, jds_client, scorer
+from . import bedrock_judge, casetype, code_rules, converter, scorer
 
 
 class _Config:
@@ -51,34 +51,18 @@ def process_case(case, config=None, on_stage=None):
 
     t0 = time.monotonic()
 
-    # 1. Sources from the case (pure; no DB).
+    # 1+2. Sources from the case + likhit conversion — LOCAL to the poller; the
+    #    markdown is not part of the scored result. The shared converter also
+    #    returns the attach candidates: sources we actually converted that do not
+    #    already carry a MARKDOWN link, which the poller attaches back to the
+    #    DocumentSource via the maintenance endpoint (populating its MARKDOWN
+    #    url). The same routine backs the `reprocess_source_markdown` command.
     stage("converting_sources")
-    sources = jds_client.extract_sources(case)
-    source_count = len(sources)
-
-    # 2. likhit conversion — LOCAL to the poller; markdown is not uploaded as
-    #    part of the result. Instead, for sources we actually converted (ran
-    #    likhit) that do not already carry a MARKDOWN link, we collect the
-    #    markdown so the poller can attach it back to the DocumentSource via the
-    #    maintenance endpoint (populating its MARKDOWN url).
-    converted = converter.convert_all(sources)
+    converted, markdown_to_attach = converter.convert_case_to_attach_candidates(case)
+    source_count = len(converted)
     sources_converted = sum(
         1 for s in converted if s.get("conversion_status") in ("converted", "attached")
     )
-
-    markdown_to_attach = []
-    for s in converted:
-        sid = s.get("source_id")
-        md = s.get("markdown") or ""
-        # Only attach when WE produced the markdown (status "converted") for a
-        # real source id that has no MARKDOWN link yet.
-        if (
-            sid
-            and s.get("conversion_status") == "converted"
-            and md.strip()
-            and not _source_has_markdown_link(s)
-        ):
-            markdown_to_attach.append({"source_id": sid, "markdown": md})
 
     # 3. Per-source analysis (Bedrock).
     stage("analyzing_sources")
@@ -106,13 +90,3 @@ def process_case(case, config=None, on_stage=None):
         # Maintenance fix: markdown the poller should attach back to sources.
         "markdown_to_attach": markdown_to_attach,
     }
-
-
-def _source_has_markdown_link(source):
-    """True if a (converted) source dict already carries a MARKDOWN-role url."""
-    if source.get("markdown_url"):
-        return True
-    for item in source.get("urls") or []:
-        if isinstance(item, dict) and item.get("role") == "MARKDOWN":
-            return True
-    return False
