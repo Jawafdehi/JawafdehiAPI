@@ -10,7 +10,6 @@ from django.contrib.postgres.search import (
     SearchVector,
     TrigramWordSimilarity,
 )
-from django.db import connection
 from django.db.models import (
     Case as DatabaseCase,
 )
@@ -20,6 +19,7 @@ from django.db.models import (
     Exists,
     F,
     FloatField,
+    Func,
     OuterRef,
     Prefetch,
     Q,
@@ -541,24 +541,19 @@ class PostgresUnifiedSearchService(LegacyUnifiedSearchService):
         }
 
     def _tag_counts(self, related_cases):
-        compiler = related_cases.values("id").query.get_compiler(connection.alias)
-        case_ids_sql, params = compiler.as_sql()
-        with connection.cursor() as cursor:
-            # case_ids_sql is produced by Django's compiler; user values remain
-            # bound separately through params.
-            cursor.execute(
-                f"""
-                SELECT tag_value, COUNT(*) AS tag_count
-                FROM ({case_ids_sql}) related_case
-                JOIN cases_case archive_case ON archive_case.id = related_case.id
-                CROSS JOIN LATERAL jsonb_array_elements_text(archive_case.tags)
-                    AS tag_value
-                GROUP BY tag_value
-                ORDER BY tag_value
-                """,
-                params,
+        return dict(
+            related_cases.annotate(
+                tag_value=Func(
+                    F("tags"),
+                    function="jsonb_array_elements_text",
+                    output_field=TextField(),
+                )
             )
-            return dict(cursor.fetchall())
+            .values("tag_value")
+            .annotate(tag_count=Count("id"))
+            .order_by("tag_value")
+            .values_list("tag_value", "tag_count")
+        )
 
     def _case_ids_for_sources(self, source_ids):
         if not source_ids:
