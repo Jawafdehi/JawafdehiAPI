@@ -236,12 +236,9 @@ class TestURLFieldPostMigration:
         )
 
         serializer = DocumentSourceSerializer(source)
-        # Backward-compat url field returns strings
-        assert serializer.data["url"] == [
-            "https://example.com",
-            "https://backup.com",
-        ]
-        # New urls field returns dicts
+        # The deprecated string-list `url` field is no longer exposed.
+        assert "url" not in serializer.data
+        # urls field returns role-tagged dicts
         assert serializer.data["urls"] == [
             {"link": "https://example.com", "role": "RAW"},
             {"link": "https://backup.com", "role": "RAW"},
@@ -371,11 +368,9 @@ class TestSourceLinkDictFormat:
             ],
         )
         serializer = DocumentSourceSerializer(source)
+        # The deprecated string-list `url` field is no longer exposed.
+        assert "url" not in serializer.data
         # Legacy string entry is normalized to RAW on save.
-        assert serializer.data["url"] == [
-            "https://example.com/plain",
-            "https://example.com/markdown",
-        ]
         assert serializer.data["urls"] == [
             {"link": "https://example.com/plain", "role": "RAW"},
             {"link": "https://example.com/markdown", "role": "MARKDOWN"},
@@ -459,7 +454,7 @@ class TestSourceLinkDictFormat:
         # Stored value has a concrete RAW role, not None.
         assert source.url == [{"link": "https://example.com/doc", "role": "RAW"}]
         serializer = DocumentSourceSerializer(source)
-        assert serializer.data["url"] == ["https://example.com/doc"]
+        assert "url" not in serializer.data
         assert serializer.data["urls"] == [
             {"link": "https://example.com/doc", "role": "RAW"}
         ]
@@ -482,8 +477,9 @@ class TestSourceLinkDictFormat:
         )
         assert source.url == [{"link": "https://example.com/md", "role": "MARKDOWN"}]
 
-    def test_get_url_dedupes_same_link_across_roles(self):
-        """Deprecated url field collapses one link shared by two roles."""
+    def test_urls_keeps_same_link_across_roles(self):
+        """urls (dicts) keeps both role variants of one shared link; the
+        deprecated string-list url field is no longer exposed."""
         from cases.serializers import DocumentSourceSerializer
 
         source = DocumentSource.objects.create(
@@ -494,8 +490,7 @@ class TestSourceLinkDictFormat:
             ],
         )
         serializer = DocumentSourceSerializer(source)
-        # url (strings) is deduped; urls (dicts) keeps both role variants.
-        assert serializer.data["url"] == ["https://example.com/doc"]
+        assert "url" not in serializer.data
         assert serializer.data["urls"] == [
             {"link": "https://example.com/doc", "role": "RAW"},
             {"link": "https://example.com/doc", "role": "MARKDOWN"},

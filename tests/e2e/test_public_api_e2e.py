@@ -184,7 +184,8 @@ class TestPublicAPIWorkflows:
         assert evidence["source"] is not None
         assert evidence["source"]["title"] == self.corruption_source.title
         assert "source_type" in evidence["source"]
-        assert "url" in evidence["source"]
+        assert "urls" in evidence["source"]
+        assert "url" not in evidence["source"]
 
     def test_only_published_cases_accessible(self):
         """
