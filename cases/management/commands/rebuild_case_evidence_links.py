@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
+
 from django.core.management.base import BaseCommand, CommandError
 
 from cases.models import Case, CaseEvidenceSource, DocumentSource
@@ -52,27 +54,56 @@ class Command(BaseCommand):
 
     def _find_drift(self, queryset):
         drift = []
-        for case in queryset.iterator():
-            expected = set(
-                DocumentSource.objects.filter(
-                    source_id__in=[
-                        item.get("source_id")
-                        for item in case.evidence or []
-                        if isinstance(item, dict) and item.get("source_id")
-                    ]
-                ).values_list("source_id", flat=True)
-            )
-            actual = set(
-                CaseEvidenceSource.objects.filter(case=case).values_list(
-                    "document_source__source_id", flat=True
+        for cases_data in self._iter_case_evidence_batches(queryset):
+            all_source_ids = {
+                source_id for _, _, source_ids in cases_data for source_id in source_ids
+            }
+            existing_source_ids = set(
+                DocumentSource.objects.filter(source_id__in=all_source_ids).values_list(
+                    "source_id", flat=True
                 )
             )
-            if expected != actual:
-                drift.append(
-                    (
-                        case.case_id,
-                        sorted(expected),
-                        sorted(actual),
+
+            actual_links = defaultdict(set)
+            for case_id, source_id in CaseEvidenceSource.objects.filter(
+                case_id__in=[case_id for case_id, _, _ in cases_data]
+            ).values_list("case_id", "document_source__source_id"):
+                actual_links[case_id].add(source_id)
+
+            for case_id, case_identifier, source_ids in cases_data:
+                expected = source_ids & existing_source_ids
+                actual = actual_links[case_id]
+                if expected != actual:
+                    drift.append(
+                        (
+                            case_identifier,
+                            sorted(expected),
+                            sorted(actual),
+                        )
                     )
-                )
         return drift
+
+    def _iter_case_evidence_batches(self, queryset, batch_size=1000):
+        batch = []
+        for case in queryset.iterator(chunk_size=batch_size):
+            source_ids = {
+                source_id
+                for source_id in (
+                    self._evidence_source_id(item) for item in case.evidence or []
+                )
+                if source_id
+            }
+            batch.append((case.id, case.case_id, source_ids))
+            if len(batch) >= batch_size:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
+
+    def _evidence_source_id(self, item):
+        if not isinstance(item, dict):
+            return None
+        source_id = item.get("source_id")
+        if not source_id:
+            return None
+        return str(source_id).strip()

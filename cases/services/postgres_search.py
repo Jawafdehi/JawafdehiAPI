@@ -155,19 +155,21 @@ class PostgresUnifiedSearchService(LegacyUnifiedSearchService):
         )
         queryset = queryset.annotate(
             search_vector=vector,
-            title_similarity=Coalesce(
-                TrigramWordSimilarity(Value(query), "title"),
-                Value(0.0),
-            ),
-            identifier_similarity=Coalesce(
-                TrigramWordSimilarity(Value(query), "case_id"),
-                Value(0.0),
-            ),
             tags_text=Cast("tags", output_field=TextField()),
             allegations_text=Cast("key_allegations", output_field=TextField()),
             court_cases_text=Cast("court_cases", output_field=TextField()),
         )
         if query:
+            queryset = queryset.annotate(
+                title_similarity=Coalesce(
+                    TrigramWordSimilarity(Value(query), "title"),
+                    Value(0.0),
+                ),
+                identifier_similarity=Coalesce(
+                    TrigramWordSimilarity(Value(query), "case_id"),
+                    Value(0.0),
+                ),
+            )
             relation_match = self._case_relation_match(query)
             queryset = queryset.annotate(relation_match=Exists(relation_match))
             for index, term in enumerate(query.split()):
@@ -255,18 +257,18 @@ class PostgresUnifiedSearchService(LegacyUnifiedSearchService):
             queryset = queryset.filter(type_filter)
 
         vector = SearchVector("display_name", "nes_id", config="simple")
-        queryset = queryset.annotate(
-            search_vector=vector,
-            title_similarity=Coalesce(
-                TrigramWordSimilarity(Value(query), "display_name"),
-                Value(0.0),
-            ),
-            identifier_similarity=Coalesce(
-                TrigramWordSimilarity(Value(query), "nes_id"),
-                Value(0.0),
-            ),
-        )
+        queryset = queryset.annotate(search_vector=vector)
         if query:
+            queryset = queryset.annotate(
+                title_similarity=Coalesce(
+                    TrigramWordSimilarity(Value(query), "display_name"),
+                    Value(0.0),
+                ),
+                identifier_similarity=Coalesce(
+                    TrigramWordSimilarity(Value(query), "nes_id"),
+                    Value(0.0),
+                ),
+            )
             related_match = visible_relationships.filter(entity_id=OuterRef("pk"))
             for term in query.split():
                 related_match = related_match.filter(
@@ -321,18 +323,18 @@ class PostgresUnifiedSearchService(LegacyUnifiedSearchService):
             .filter(visible=True)
         )
         vector = SearchVector("title", "description", "source_id", config="simple")
-        queryset = queryset.annotate(
-            search_vector=vector,
-            title_similarity=Coalesce(
-                TrigramWordSimilarity(Value(query), "title"),
-                Value(0.0),
-            ),
-            identifier_similarity=Coalesce(
-                TrigramWordSimilarity(Value(query), "source_id"),
-                Value(0.0),
-            ),
-        )
+        queryset = queryset.annotate(search_vector=vector)
         if query:
+            queryset = queryset.annotate(
+                title_similarity=Coalesce(
+                    TrigramWordSimilarity(Value(query), "title"),
+                    Value(0.0),
+                ),
+                identifier_similarity=Coalesce(
+                    TrigramWordSimilarity(Value(query), "source_id"),
+                    Value(0.0),
+                ),
+            )
             for index, term in enumerate(query.split()):
                 related = DocumentSource.related_entities.through.objects.filter(
                     documentsource_id=OuterRef("pk")
@@ -539,8 +541,11 @@ class PostgresUnifiedSearchService(LegacyUnifiedSearchService):
         }
 
     def _tag_counts(self, related_cases):
-        case_ids_sql, params = related_cases.values("id").query.sql_with_params()
+        compiler = related_cases.values("id").query.get_compiler(connection.alias)
+        case_ids_sql, params = compiler.as_sql()
         with connection.cursor() as cursor:
+            # case_ids_sql is produced by Django's compiler; user values remain
+            # bound separately through params.
             cursor.execute(
                 f"""
                 SELECT tag_value, COUNT(*) AS tag_count

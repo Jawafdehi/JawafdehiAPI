@@ -6,6 +6,7 @@ import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import connection
+from django.test.utils import CaptureQueriesContext
 
 from cases.models import Case, CaseEvidenceSource, CaseState, CaseType, DocumentSource
 
@@ -89,3 +90,25 @@ def test_rebuild_case_evidence_links_command_checks_and_repairs_drift():
     assert list(case.evidence_links.values_list("document_source_id", flat=True)) == [
         source.id
     ]
+
+
+@pytest.mark.django_db
+def test_rebuild_case_evidence_links_check_uses_bounded_queries():
+    source = DocumentSource.objects.create(
+        source_id="source:sync:bounded",
+        title="Bounded source",
+        description="Evidence source.",
+    )
+    for index in range(3):
+        Case.objects.create(
+            case_id=f"case-evidence-bounded-{index}",
+            case_type=CaseType.CORRUPTION,
+            state=CaseState.PUBLISHED,
+            title=f"Evidence bounded {index}",
+            evidence=[{"source_id": source.source_id, "description": "Initial"}],
+        )
+
+    with CaptureQueriesContext(connection) as queries:
+        call_command("rebuild_case_evidence_links", "--check")
+
+    assert len(queries) <= 5
