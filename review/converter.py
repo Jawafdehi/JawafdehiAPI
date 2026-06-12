@@ -132,6 +132,34 @@ def _ext_from_magic(content):
     return None
 
 
+def _looks_like_html(content, content_type, ext):
+    """True if a downloaded source is an HTML page (so it needs main-content
+    extraction rather than plain document conversion).
+
+    Decided from the DOWNLOAD, not just the URL: a NEWS source's RAW link is the
+    article's own web page (a legitimate RAW per the source-link convention) but
+    has no file extension, so role/ext alone miss it. We look at the declared
+    extension, the Content-Type, and the leading bytes.
+
+    Guarded against false positives: a real document served with a wrong
+    ``text/html`` Content-Type (an Office file, or a PDF) must still go to the
+    document converter, so we bail out when the magic bytes say otherwise.
+    """
+    if ext in (".html", ".htm"):
+        return True
+    # A real document wins over a misleading content-type.
+    if _ext_from_magic(content) is not None or (content or b"")[:5] == b"%PDF-":
+        return False
+    if "html" in (content_type or "").lower():
+        return True
+    head = (content or b"")[:512].lstrip().lower()
+    return (
+        head.startswith((b"<!doctype html", b"<html", b"<?xml"))
+        or head[:200].find(b"<head") != -1
+        or head[:200].find(b"<body") != -1
+    )
+
+
 def _find_libreoffice():
     """Return the LibreOffice/soffice executable path, or None if not installed.
 
@@ -219,6 +247,14 @@ def _format_rank(url):
     return _FORMAT_RANK.get(_ext_from_url(url), 1)
 
 
+def _best_by_format(links):
+    """Return the link that converts most cleanly (highest _format_rank).
+
+    Tie -> first, so ordering from the source is preserved when formats match.
+    """
+    return max(links, key=_format_rank) if links else None
+
+
 # Some source links were persisted with the INTERNAL Cloudflare R2 S3-API
 # endpoint (``<account>.r2.cloudflarestorage.com/jawafdehi/case_uploads/...``)
 # instead of the PUBLIC custom-domain form (``s3.jawafdehi.org/case_uploads/...``).
@@ -257,6 +293,12 @@ def _pick_source_link(source):
          resort (no document file present); it is fetched and run through
          main-content extraction to drop site chrome.
 
+    Per the source-link convention (PR #196) there is exactly one RAW, but a
+    source may carry several ALTERNATE / PERMALINK links; for document targets we
+    pick the best-converting FORMAT among them, not just the first. For NEWS
+    sources the RAW is the article's own web page (the legitimate primary) and is
+    NEVER overridden by an ALTERNATE.
+
     MARKDOWN (our own output) and PERMALINK (a stable pointer, not necessarily
     fetchable) are never conversion targets. Falls back to the legacy plain
     ``url`` string list when no role-tagged ``urls`` exist.
@@ -269,21 +311,26 @@ def _pick_source_link(source):
         # Normalize internal R2 endpoint urls to the public host so the picked
         # link is actually fetchable (see _normalize_media_url).
         link = _normalize_media_url(link)
-        if link and role and role not in by_role:
-            by_role[role] = link  # first link of each role wins
+        if link and role:
+            by_role.setdefault(role, []).append(link)
 
-    raw = by_role.get("RAW")
-    alt = by_role.get("ALTERNATE")
+    is_news = (source.get("source_type") or "").upper() == "NEWS"
+    raw = _best_by_format(by_role.get("RAW"))
+    alt = _best_by_format(by_role.get("ALTERNATE"))
     if raw or alt:
         if raw and alt:
-            chosen = alt if _format_rank(alt) > _format_rank(raw) else raw
+            # Prefer a better-converting ALTERNATE over RAW (e.g. a .docx export
+            # of a scanned-PDF RAW) — but never override a NEWS article's RAW.
+            chosen = (
+                alt if (not is_news and _format_rank(alt) > _format_rank(raw)) else raw
+            )
         else:
             chosen = raw or alt
-        return chosen, ("ALTERNATE" if chosen == alt and chosen != raw else "RAW")
+        return chosen, ("ALTERNATE" if chosen is alt and chosen is not raw else "RAW")
 
     page = by_role.get("SOURCE_PAGE")
     if page:
-        return page, "SOURCE_PAGE"
+        return page[0], "SOURCE_PAGE"
 
     # Legacy sources with only plain url strings (no roles): treat as RAW.
     legacy = _normalize_media_url(_pick_url(source.get("url", [])))
@@ -312,15 +359,16 @@ def _html_to_markdown(raw_bytes):
     return (extracted or "").strip()
 
 
-def _with_frontmatter(body, source, *, source_url=None):
+def _with_frontmatter(body, source, *, source_url=None, source_role=None):
     """Prepend a YAML frontmatter block to a converted-markdown `body`.
 
     Frontmatter carries the processing timestamp plus source metadata so each
     stored markdown file is self-describing. The timestamp is stamped fresh on
     every emit, so it is NOT part of the on-disk cache (the cache holds only the
     deterministic body); any pre-existing frontmatter on `body` is stripped first
-    so re-runs don't stack blocks. ``source_url`` is the link actually converted
-    (defaults to the role-aware pick).
+    so re-runs don't stack blocks. ``source_url`` / ``source_role`` are the link
+    actually converted and its role (default to the role-aware pick), so the
+    stored markdown is traceable to which link produced it.
     """
     from django.utils import timezone
 
@@ -331,12 +379,13 @@ def _with_frontmatter(body, source, *, source_url=None):
         # not a usable conversion).
         return ""
     if source_url is None:
-        source_url, _ = _pick_source_link(source)
+        source_url, source_role = _pick_source_link(source)
     fields = {
         "processed_at": timezone.now().isoformat(),
         "source_id": source.get("source_id") or "",
         "title": source.get("title") or "",
         "source_type": source.get("source_type") or "",
+        "source_role": source_role or "",
         "source_url": source_url or "",
     }
     lines = ["---"]
@@ -395,7 +444,9 @@ def convert_source(source, *, overwrite=False):
     if cache_path.exists() and not overwrite:
         body = cache_path.read_text(encoding="utf-8")
         return {
-            "markdown": _with_frontmatter(body, source, source_url=url),
+            "markdown": _with_frontmatter(
+                body, source, source_url=url, source_role=role
+            ),
             "status": "converted",
             "url": url,
             "note": "From cache.",
@@ -410,14 +461,16 @@ def convert_source(source, *, overwrite=False):
         true_ext = _ext_from_magic(content)
         if true_ext and true_ext != ext:
             ext = true_ext
-        # HTML sources (the SOURCE_PAGE landing page, or a RAW/ALTERNATE link
-        # that is itself a web page): extract just the main content so the
-        # markdown isn't polluted with nav/header/footer chrome. Fall back to the
+        # HTML sources (the SOURCE_PAGE landing page, a NEWS article's own RAW
+        # url, or any RAW/ALTERNATE link that is itself a web page): extract just
+        # the main content so the markdown isn't polluted with nav/header/footer
+        # chrome. Detected from the download (content-type + bytes), not just the
+        # url extension, so extension-less news RAWs are caught. Fall back to the
         # plain MarkItDown conversion when extraction finds no article body.
         md_text = ""
         note = ""
         convert_ext = ext  # extension markitdown sees (LibreOffice may change it)
-        if role == "SOURCE_PAGE" or ext in (".html", ".htm"):
+        if role == "SOURCE_PAGE" or _looks_like_html(content, ctype, ext):
             md_text = _html_to_markdown(content)
             if md_text:
                 note = "Converted via trafilatura (HTML main-content)."
@@ -447,7 +500,9 @@ def convert_source(source, *, overwrite=False):
             note = note or f"Converted via likhit ({ext})."
         cache_path.write_text(md_text, encoding="utf-8")
         return {
-            "markdown": _with_frontmatter(md_text, source, source_url=url),
+            "markdown": _with_frontmatter(
+                md_text, source, source_url=url, source_role=role
+            ),
             "status": "converted",
             "url": url,
             "note": note,

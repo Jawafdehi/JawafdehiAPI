@@ -236,12 +236,14 @@ def test_convert_source_overwrite_bypasses_disk_cache(settings, tmp_path):
 # ── Role-aware link selection ────────────────────────────────
 
 
-def _pick(urls=None, url=None):
+def _pick(urls=None, url=None, source_type=None):
     src = {}
     if urls is not None:
         src["urls"] = urls
     if url is not None:
         src["url"] = url
+    if source_type is not None:
+        src["source_type"] = source_type
     return converter._pick_source_link(src)
 
 
@@ -305,6 +307,31 @@ def test_pick_skips_markdown_and_permalink():
 
 def test_pick_falls_back_to_legacy_url_strings():
     assert _pick(url=["http://x/legacy.pdf"]) == ("http://x/legacy.pdf", "RAW")
+
+
+def test_pick_does_not_override_news_raw_with_alternate():
+    # A NEWS source's RAW is the article web page (the legitimate primary); a
+    # better-format ALTERNATE must NOT replace it as the conversion target.
+    assert _pick(
+        [
+            {"link": "https://news.example.com/article", "role": "RAW"},
+            {"link": "https://x/a.docx", "role": "ALTERNATE"},
+        ],
+        source_type="NEWS",
+    ) == ("https://news.example.com/article", "RAW")
+
+
+def test_pick_chooses_best_format_among_multiple_alternates():
+    # Two ALTERNATEs: the higher-ranked .docx wins over the first-listed .pdf.
+    url, role = _pick(
+        [
+            {"link": "https://x/raw.pdf", "role": "RAW"},
+            {"link": "https://x/alt1.pdf", "role": "ALTERNATE"},
+            {"link": "https://x/alt2.docx", "role": "ALTERNATE"},
+        ],
+        source_type="COURT_ORDER",
+    )
+    assert url == "https://x/alt2.docx" and role == "ALTERNATE"
 
 
 # ── Internal R2 endpoint → public host normalization ─────────
@@ -399,6 +426,85 @@ def test_source_page_falls_back_to_markitdown_when_extraction_empty(settings, tm
         res = converter.convert_source(src, overwrite=True)
     md.assert_called_once()
     assert res["markdown"].rstrip().endswith("fallback body")
+
+
+def test_news_raw_webpage_uses_html_extraction(settings, tmp_path):
+    """A NEWS source whose RAW is the article's own web page (no extension) is
+    detected as HTML from the download and run through main-content extraction,
+    not handed to the document converter."""
+    settings.SOURCE_MARKDOWN_DIR = tmp_path
+    src = {
+        "source_id": "n1",
+        "title": "News article",
+        "source_type": "NEWS",
+        "urls": [{"link": "https://onlinekhabar.com/2025/12/1837107/x", "role": "RAW"}],
+    }
+    with patch.object(
+        converter.jds_client,
+        "download_source_file",
+        return_value=(b"<!DOCTYPE html><html><body>article</body></html>", "text/html"),
+    ), patch.object(
+        converter, "_html_to_markdown", return_value="article body"
+    ) as h2m, patch.object(
+        converter, "_markitdown"
+    ) as md:
+        res = converter.convert_source(src, overwrite=True)
+    h2m.assert_called_once()
+    md.assert_not_called()
+    assert "trafilatura" in res["note"]
+    assert 'source_role: "RAW"' in res["markdown"]
+
+
+def test_html_detected_by_magic_without_content_type(settings, tmp_path):
+    """HTML is recognised from leading bytes even when Content-Type is blank."""
+    settings.SOURCE_MARKDOWN_DIR = tmp_path
+    src = {
+        "source_id": "h1",
+        "title": "Page",
+        "source_type": "NEWS",
+        "urls": [{"link": "https://example.com/story", "role": "RAW"}],
+    }
+    with patch.object(
+        converter.jds_client,
+        "download_source_file",
+        return_value=(b"   <html><head></head><body>x</body></html>", ""),
+    ), patch.object(
+        converter, "_html_to_markdown", return_value="story body"
+    ) as h2m, patch.object(
+        converter, "_markitdown"
+    ) as md:
+        res = converter.convert_source(src, overwrite=True)
+    h2m.assert_called_once()
+    md.assert_not_called()
+    assert res["markdown"].rstrip().endswith("story body")
+
+
+def test_pdf_with_html_content_type_is_not_treated_as_html(settings, tmp_path):
+    """A PDF mis-served with Content-Type text/html must still go to the document
+    converter, not trafilatura (the false-positive guard)."""
+    settings.SOURCE_MARKDOWN_DIR = tmp_path
+    src = {
+        "source_id": "pdf1",
+        "title": "Doc",
+        "source_type": "COURT_ORDER",
+        "urls": [
+            {"link": "https://s3.jawafdehi.org/case_uploads/x.pdf", "role": "RAW"}
+        ],
+    }
+    with patch.object(
+        converter.jds_client,
+        "download_source_file",
+        return_value=(b"%PDF-1.7\nbinary...", "text/html"),
+    ), patch.object(converter, "_html_to_markdown") as h2m, patch.object(
+        converter, "_markitdown"
+    ) as md, patch.object(
+        converter, "_patch_likhit_ocr_dpi"
+    ):
+        md.return_value.convert.return_value = MagicMock(text_content="pdf body")
+        res = converter.convert_source(src, overwrite=True)
+    h2m.assert_not_called()  # not treated as HTML
+    md.assert_called_once()
+    assert res["markdown"].rstrip().endswith("pdf body")
 
 
 # ── Mislabeled-file detection (magic bytes) ──────────────────
@@ -608,6 +714,38 @@ def test_frontmatter_has_processed_at_and_source_metadata(settings, tmp_path):
     assert 'title: "My: Title"' in md
     assert 'source_type: "MEDIA_NEWS"' in md
     assert 'source_url: "http://x/a.pdf"' in md
+    # legacy url-string source resolves to RAW
+    assert 'source_role: "RAW"' in md
+
+
+def test_frontmatter_records_source_role():
+    # SOURCE_PAGE-derived markdown is tagged with its role.
+    out = converter._with_frontmatter(
+        "body",
+        {"source_id": "s", "title": "T", "source_type": "NEWS"},
+        source_url="https://x/page",
+        source_role="SOURCE_PAGE",
+    )
+    assert 'source_role: "SOURCE_PAGE"' in out
+
+
+def test_markdown_only_source_is_skipped_cleanly(settings, tmp_path):
+    """A 0-RAW source carrying only a MARKDOWN link has nothing to convert: it is
+    skipped (not errored) and produces no attach candidate."""
+    settings.SOURCE_MARKDOWN_DIR = tmp_path
+    src = {
+        "source_id": "m1",
+        "title": "Already rendered",
+        "source_type": "NEWS",
+        "urls": [
+            {"link": "https://s3.jawafdehi.org/case_uploads/x.md", "role": "MARKDOWN"}
+        ],
+    }
+    with patch.object(converter.jds_client, "download_source_file") as dl:
+        res = converter.convert_source(src, overwrite=True)
+    dl.assert_not_called()  # nothing fetchable to convert
+    assert res["status"] == "skipped"
+    assert res["markdown"] == ""
 
 
 def test_with_frontmatter_does_not_stack_or_emit_for_empty():
