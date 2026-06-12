@@ -118,7 +118,13 @@ def test_candidates_default_includes_freshly_converted():
         ],
     ):
         converted, candidates = converter.convert_case_to_attach_candidates(case)
-    assert converted and candidates == [{"source_id": 11, "markdown": "md"}]
+    # Candidate markdown is frontmatter-wrapped at the attach boundary; the body
+    # is present after the frontmatter block.
+    assert converted and len(candidates) == 1
+    cand = candidates[0]
+    assert cand["source_id"] == 11
+    assert cand["markdown"].startswith("---\n") and "processed_at:" in cand["markdown"]
+    assert cand["markdown"].rstrip().endswith("md")
 
 
 def test_candidates_default_excludes_source_with_markdown_link():
@@ -148,7 +154,8 @@ def test_candidates_overwrite_includes_source_with_markdown_link():
         _, candidates = converter.convert_case_to_attach_candidates(
             case, overwrite=True
         )
-    assert candidates == [{"source_id": 11, "markdown": "fresh"}]
+    assert len(candidates) == 1 and candidates[0]["source_id"] == 11
+    assert candidates[0]["markdown"].rstrip().endswith("fresh")
     # overwrite is threaded into convert_all.
     assert ca.call_args.kwargs.get("overwrite") is True
 
@@ -190,11 +197,11 @@ def test_convert_source_overwrite_bypasses_short_circuit(settings, tmp_path):
     ):
         md.return_value.convert.return_value = MagicMock(text_content="new md")
         res = converter.convert_source(src, overwrite=True)
-    # Output is frontmatter-wrapped; the converted body must be present and the
-    # short-circuit bypassed (we re-converted "new md", not re-served "old").
+    # convert_source returns the RAW body (no frontmatter — that's added at the
+    # attach boundary); the short-circuit is bypassed (re-converted, not "old").
     assert res["status"] == "converted"
-    assert res["markdown"].startswith("---\n") and "processed_at:" in res["markdown"]
-    assert res["markdown"].rstrip().endswith("new md")
+    assert res["markdown"] == "new md"
+    assert "---" not in res["markdown"]  # no frontmatter on the judge-facing body
 
 
 def test_convert_source_overwrite_bypasses_disk_cache(settings, tmp_path):
@@ -220,17 +227,14 @@ def test_convert_source_overwrite_bypasses_disk_cache(settings, tmp_path):
     ):
         md.return_value.convert.return_value = MagicMock(text_content="fresh")
         res = converter.convert_source(src, overwrite=True)
-    assert res["markdown"].rstrip().endswith("fresh")
-    # The cache holds the bare, frontmatter-free body (timestamp is stamped fresh
-    # on each emit, not cached).
+    assert res["markdown"] == "fresh"
+    # The cache holds the bare converted body.
     assert cache_path.read_text(encoding="utf-8") == "fresh"
 
-    # Without overwrite, the cached body is re-served (no re-download) and
-    # re-wrapped with fresh frontmatter.
+    # Without overwrite, the cached body is re-served (no re-download).
     with patch.object(converter.jds_client, "download_source_file") as dl:
         res2 = converter.convert_source(src)
-    assert res2["markdown"].rstrip().endswith("fresh") and dl.call_count == 0
-    assert "processed_at:" in res2["markdown"]
+    assert res2["markdown"] == "fresh" and dl.call_count == 0
 
 
 # ── Role-aware link selection ────────────────────────────────
@@ -452,7 +456,66 @@ def test_news_raw_webpage_uses_html_extraction(settings, tmp_path):
     h2m.assert_called_once()
     md.assert_not_called()
     assert "trafilatura" in res["note"]
-    assert 'source_role: "RAW"' in res["markdown"]
+    assert (
+        res["role"] == "RAW"
+    )  # role reported on the result (frontmatter added at attach)
+    assert res["markdown"] == "article body"  # raw body, no frontmatter
+
+
+def test_permalink_fallback_on_dead_ephemeral_raw(settings, tmp_path):
+    """When an ephemeral news RAW fails to download and the source has a
+    PERMALINK archive, conversion retries against the archive."""
+    settings.SOURCE_MARKDOWN_DIR = tmp_path
+    src = {
+        "source_id": "n2",
+        "title": "Dead news",
+        "source_type": "NEWS",
+        "urls": [
+            {"link": "https://deadnews.example.com/article", "role": "RAW"},
+            {
+                "link": "https://web.archive.org/web/2025/https://deadnews.example.com/article",
+                "role": "PERMALINK",
+            },
+        ],
+    }
+
+    def _dl(u, *a, **k):
+        if "web.archive.org" in u:
+            return (b"<html><body>archived</body></html>", "text/html")
+        raise converter.jds_client.JdsError("HTTP 404")
+
+    with patch.object(
+        converter.jds_client, "download_source_file", side_effect=_dl
+    ), patch.object(converter, "_html_to_markdown", return_value="archived body"):
+        res = converter.convert_source(src, overwrite=True)
+    assert res["status"] == "converted"
+    assert "PERMALINK" in res["note"]
+    assert res["role"] == "SOURCE_PAGE"
+    assert "web.archive.org" in res["url"]
+    assert res["markdown"] == "archived body"
+
+
+def test_no_permalink_fallback_for_durable_doc(settings, tmp_path):
+    """A failed durable document RAW (gov.np / own storage) does NOT trigger a
+    PERMALINK fallback — only one download attempt, then error."""
+    settings.SOURCE_MARKDOWN_DIR = tmp_path
+    src = {
+        "source_id": "d2",
+        "title": "Gov doc",
+        "source_type": "COURT_ORDER",
+        "urls": [
+            {"link": "https://ciaa.gov.np/files/order.pdf", "role": "RAW"},
+            {"link": "https://web.archive.org/x", "role": "PERMALINK"},
+        ],
+    }
+    with patch.object(
+        converter.jds_client,
+        "download_source_file",
+        side_effect=converter.jds_client.JdsError("HTTP 500"),
+    ) as dl:
+        res = converter.convert_source(src, overwrite=True)
+    assert res["status"] == "error"
+    assert dl.call_count == 1  # no archive retry for a durable doc
 
 
 def test_html_detected_by_magic_without_content_type(settings, tmp_path):
@@ -686,28 +749,27 @@ def _convert_with_body(src, body, *, content_type="application/pdf", ext=".pdf")
 
 
 def test_converted_markdown_is_passed_through_unmodified(settings, tmp_path):
-    """MarkItDown already emits clean markdown; convert_source must add only the
-    frontmatter and leave the body verbatim (no re-escaping of * or _)."""
+    """MarkItDown already emits clean markdown; convert_source returns the body
+    verbatim (no frontmatter, no re-escaping of * or _)."""
     settings.SOURCE_MARKDOWN_DIR = tmp_path
     src = {"source_id": "s1", "title": "Verdict", "url": ["http://x/a.pdf"]}
     body = "# शीर्षक\n\n- **बुँदा** and *italic*\n\n[link](http://x)"
     md = _convert_with_body(src, body)["markdown"]
-    assert "\\*" not in md
-    # The body appears verbatim after the frontmatter block.
-    assert md.split("---\n", 2)[-1].strip().endswith(body)
+    assert md == body  # verbatim, no frontmatter wrapper
 
 
 def test_frontmatter_has_processed_at_and_source_metadata(settings, tmp_path):
-    settings.SOURCE_MARKDOWN_DIR = tmp_path
-    src = {
-        "source_id": "src:123",
-        "title": "My: Title",  # colon — must be safely quoted
-        "source_type": "MEDIA_NEWS",
-        "url": ["http://x/a.pdf"],
-    }
-    md = _convert_with_body(src, "body", content_type="application/pdf", ext=".pdf")[
-        "markdown"
-    ]
+    # Frontmatter is built at the attach boundary by _with_frontmatter.
+    md = converter._with_frontmatter(
+        "body",
+        {
+            "source_id": "src:123",
+            "title": "My: Title",  # colon — must be safely quoted
+            "source_type": "MEDIA_NEWS",
+        },
+        source_url="http://x/a.pdf",
+        source_role="RAW",
+    )
     assert md.startswith("---\n")
     assert "processed_at:" in md
     assert 'source_id: "src:123"' in md

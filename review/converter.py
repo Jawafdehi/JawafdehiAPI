@@ -337,6 +337,51 @@ def _pick_source_link(source):
     return (legacy, "RAW") if legacy else (None, None)
 
 
+def _pick_permalink(source):
+    """First PERMALINK link of a source (normalized), or None.
+
+    PERMALINK is an archive/stable pointer (e.g. a web.archive.org capture); it
+    is used only as a link-rot FALLBACK when the primary link is a dead
+    ephemeral web page, never as a primary conversion target.
+    """
+    for item in source.get("urls") or []:
+        if (
+            isinstance(item, dict)
+            and item.get("role") == "PERMALINK"
+            and item.get("link")
+        ):
+            return _normalize_media_url(item["link"])
+    return None
+
+
+# Hosts whose links are durable primary records — an ephemeral-web archive
+# fallback should NOT trigger for these (mirrors PR #196's archive exemptions).
+_DURABLE_HOST_SUFFIXES = (
+    "jawafdehi.org",  # our own storage
+    "gov.np",  # Nepal government / court records
+    "worldbank.org",
+    "icsid.worldbank.org",
+    "un.org",
+    "web.archive.org",  # already an archive
+)
+
+
+def _is_ephemeral_web(url):
+    """True if `url` is an ephemeral web page (news/general site) that can rot.
+
+    Used to decide whether a failed primary fetch is worth retrying against a
+    PERMALINK archive. A link is NOT ephemeral when it points at a document file
+    (has a doc extension) or a durable host (own storage, official records, an
+    existing archive) — see ``_DURABLE_HOST_SUFFIXES``.
+    """
+    if not url:
+        return False
+    if _ext_from_url(url) != ".bin":  # has a recognised file extension -> a file
+        return False
+    host = (urlparse(url).hostname or "").lower()
+    return not any(host == h or host.endswith("." + h) for h in _DURABLE_HOST_SUFFIXES)
+
+
 def _html_to_markdown(raw_bytes):
     """Extract the MAIN content of an HTML page as Markdown (drops site chrome).
 
@@ -415,6 +460,7 @@ def convert_source(source, *, overwrite=False):
             "markdown": source["markdown"],
             "status": "attached",
             "url": None,
+            "role": "MARKDOWN",
             "note": "Markdown already present on source.",
         }
 
@@ -426,6 +472,7 @@ def convert_source(source, *, overwrite=False):
             "markdown": "",
             "status": "skipped",
             "url": None,
+            "role": None,
             "note": "Source has no convertible url (RAW/ALTERNATE/SOURCE_PAGE).",
         }
 
@@ -444,16 +491,30 @@ def convert_source(source, *, overwrite=False):
     if cache_path.exists() and not overwrite:
         body = cache_path.read_text(encoding="utf-8")
         return {
-            "markdown": _with_frontmatter(
-                body, source, source_url=url, source_role=role
-            ),
+            "markdown": body,
             "status": "converted",
             "url": url,
+            "role": role,
             "note": "From cache.",
         }
 
+    from_permalink = False
     try:
-        content, ctype = jds_client.download_source_file(url)
+        try:
+            content, ctype = jds_client.download_source_file(url)
+        except Exception:  # noqa: BLE001 - try a PERMALINK archive before giving up
+            # Link-rot fallback: if the primary link is an ephemeral web page
+            # (news/general site) that failed to fetch, retry against the
+            # source's PERMALINK archive (e.g. a web.archive.org capture). Only
+            # for ephemeral web pages — never for durable doc/official links.
+            permalink = _pick_permalink(source)
+            if not (permalink and _is_ephemeral_web(url)):
+                raise
+            content, ctype = jds_client.download_source_file(permalink)
+            url, role = permalink, "SOURCE_PAGE"  # archive captures are HTML pages
+            from_permalink = True
+            cache_key = hashlib.sha256(url.encode()).hexdigest()[:24]
+            cache_path = Path(settings.SOURCE_MARKDOWN_DIR) / f"{cache_key}.md"
         ext = _ext_from_url(url, ctype)
         # Correct mislabeled Office files (e.g. a .docx saved with a .doc name)
         # by sniffing the real container, so the file is routed to the converter
@@ -498,13 +559,18 @@ def convert_source(source, *, overwrite=False):
             finally:
                 os.unlink(tmp)
             note = note or f"Converted via likhit ({ext})."
+        if from_permalink:
+            note += " (via PERMALINK archive fallback)"
         cache_path.write_text(md_text, encoding="utf-8")
         return {
-            "markdown": _with_frontmatter(
-                md_text, source, source_url=url, source_role=role
-            ),
+            # Raw converted BODY (no frontmatter): this is what the Bedrock judge
+            # reads. Frontmatter is added only at the attach boundary
+            # (convert_case_to_attach_candidates), so the stored upstream file is
+            # self-describing without polluting the judge's source-analysis input.
+            "markdown": md_text,
             "status": "converted",
             "url": url,
+            "role": role,
             "note": note,
         }
     except Exception as e:  # noqa: BLE001 - surface conversion failure per source
@@ -512,6 +578,7 @@ def convert_source(source, *, overwrite=False):
             "markdown": "",
             "status": "error",
             "url": url,
+            "role": role,
             "note": f"Conversion failed: {e}",
         }
 
@@ -541,20 +608,22 @@ def convert_all(sources, *, overwrite=False):
         try:
             res = fut.result(timeout=timeout)
         except FutureTimeout:
-            url, _ = _pick_source_link(s)
+            url, role = _pick_source_link(s)
             res = {
                 "markdown": "",
                 "status": "error",
                 "url": url,
+                "role": role,
                 "note": f"Conversion timed out after {timeout}s (artifact skipped).",
             }
             fut.cancel()
         except Exception as e:  # noqa: BLE001 - never let one source kill the batch
-            url, _ = _pick_source_link(s)
+            url, role = _pick_source_link(s)
             res = {
                 "markdown": "",
                 "status": "error",
                 "url": url,
+                "role": role,
                 "note": f"Conversion failed: {e}",
             }
         finally:
@@ -564,6 +633,8 @@ def convert_all(sources, *, overwrite=False):
         s["markdown"] = res["markdown"]
         s["conversion_status"] = res["status"]
         s["conversion_note"] = res["note"]
+        s["conversion_url"] = res.get("url")
+        s["conversion_role"] = res.get("role")
         out.append(s)
     return out
 
@@ -611,17 +682,28 @@ def convert_case_to_attach_candidates(case, *, overwrite=False):
         md = s.get("markdown") or ""
         if not (sid and md.strip()):
             continue
+        # Frontmatter is added HERE, at the attach boundary — so the markdown
+        # stored upstream is self-describing, while the raw body in s["markdown"]
+        # (what the Bedrock judge reads) stays clean.
+        attach_md = _with_frontmatter(
+            md,
+            s,
+            source_url=s.get("conversion_url"),
+            source_role=s.get("conversion_role"),
+        )
+        if not attach_md:
+            continue
         if overwrite:
             # Refresh: accept freshly converted markdown (and re-emit markdown we
             # short-circuited as "attached"); the upstream replaces existing.
             if s.get("conversion_status") in ("converted", "attached"):
-                candidates.append({"source_id": sid, "markdown": md})
+                candidates.append({"source_id": sid, "markdown": attach_md})
         else:
             # Only attach when WE produced the markdown for a source that has no
             # MARKDOWN link yet.
             if s.get(
                 "conversion_status"
             ) == "converted" and not _source_has_markdown_link(s):
-                candidates.append({"source_id": sid, "markdown": md})
+                candidates.append({"source_id": sid, "markdown": attach_md})
 
     return converted, candidates
