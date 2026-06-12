@@ -189,6 +189,27 @@ def test_query_rate_uses_highest_priority_group(
 
 
 @pytest.mark.django_db
+def test_ngm_throttle_buckets_per_token(authenticated_user):
+    """NGM keeps per-token bucketing so each API token gets its own quota."""
+    from rest_framework.test import APIRequestFactory
+
+    token = Token.objects.create(user=authenticated_user)
+    throttle = api_views.NGMQueryRateThrottle()
+
+    request = APIRequestFactory().post(QUERY_URL)
+    request.user = authenticated_user
+    request.auth = token
+
+    cache_key = throttle.get_cache_key(request, view=None)
+
+    assert token.key in cache_key
+    assert cache_key == throttle.cache_format % {
+        "scope": "ngm_token",
+        "ident": token.key,
+    }
+
+
+@pytest.mark.django_db
 def test_query_endpoint_rate_limited_per_token(authenticated_client, monkeypatch):
     monkeypatch.setattr(api_views.NGMQueryRateThrottle, "DEFAULT_RATE", "2/min")
 
