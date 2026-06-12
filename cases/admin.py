@@ -24,6 +24,7 @@ from .models import (
     Feedback,
     JawafEntity,
     RelationshipType,
+    requires_accused,
 )
 from .rules.predicates import (
     can_change_case,
@@ -337,18 +338,37 @@ class CaseEntityRelationshipInlineFormSet(BaseInlineFormSet):
             return
         if self.instance.state not in {CaseState.IN_REVIEW, CaseState.PUBLISHED}:
             return
-        has_alleged = any(
-            form.cleaned_data
-            and not form.cleaned_data.get("DELETE")
-            and form.cleaned_data.get("entity")
-            and form.cleaned_data.get("relationship_type") == RelationshipType.ACCUSED
-            for form in self.forms
-        )
-        if not has_alleged:
-            raise ValidationError(
+        # CORRUPTION cases require an ACCUSED entity; other case types (e.g.
+        # TAX_EVASION) only require a named subject — any non-location entity.
+        # The accepted relationship types and the error message differ, but the
+        # form-scanning loop is otherwise identical.
+        if requires_accused(self.instance.case_type):
+
+            def is_required_entity(rel_type):
+                return rel_type == RelationshipType.ACCUSED
+
+            error = (
                 "At least one accused entity relationship is required for IN_REVIEW or PUBLISHED state. "
                 "Please add accused entities using the 'Case Entity Relationships' section below."
             )
+        else:
+
+            def is_required_entity(rel_type):
+                return rel_type != RelationshipType.LOCATION
+
+            error = (
+                "At least one non-location entity relationship is required for IN_REVIEW or PUBLISHED state. "
+                "Please add entities using the 'Case Entity Relationships' section below."
+            )
+        has_required_entity = any(
+            form.cleaned_data
+            and not form.cleaned_data.get("DELETE")
+            and form.cleaned_data.get("entity")
+            and is_required_entity(form.cleaned_data.get("relationship_type"))
+            for form in self.forms
+        )
+        if not has_required_entity:
+            raise ValidationError(error)
 
 
 class CaseEntityRelationshipInline(admin.TabularInline):
