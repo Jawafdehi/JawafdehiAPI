@@ -1,8 +1,8 @@
-"""Uploads become `url` links (single source of truth), not separate records.
+"""Uploads become `url` links (single source of truth).
 
 Covers the WS0.5 behavior: the create API and the admin both store an uploaded
-file to storage and append its URL to `DocumentSource.url`, without persisting a
-`DocumentSourceUpload` row or the legacy `uploaded_file` FileField.
+file to storage and append its URL to `DocumentSource.url`. A source's links
+live solely in `url` — there is no separate uploaded-file storage.
 """
 
 import pytest
@@ -10,7 +10,7 @@ from django.contrib import admin
 from django.core.files.uploadedfile import SimpleUploadedFile
 
 from cases.admin import DocumentSourceAdmin
-from cases.models import DocumentSource, DocumentSourceUpload, SourceLinkRole
+from cases.models import DocumentSource, SourceLinkRole
 from cases.serializers import DocumentSourceCreateSerializer
 from tests.conftest import (
     create_document_source_with_entities,
@@ -39,9 +39,6 @@ def test_create_serializer_stores_upload_as_url_link():
     raw_links = [u for u in source.url if u.get("role") == SourceLinkRole.RAW.value]
     assert len(raw_links) == 1
     assert raw_links[0]["link"].endswith(".pdf")
-    # No separate upload record, and the legacy FileField is untouched.
-    assert source.uploaded_files.count() == 0
-    assert not source.uploaded_file
 
 
 @pytest.mark.django_db
@@ -84,4 +81,3 @@ def test_admin_upload_appends_url_link(admin_user):
     assert len(source.url) == before + 1
     assert source.url[-1]["role"] == SourceLinkRole.RAW.value
     assert source.url[-1]["link"].endswith(".pdf")
-    assert DocumentSourceUpload.objects.filter(source=source).count() == 0

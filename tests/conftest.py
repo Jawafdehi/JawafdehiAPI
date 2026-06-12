@@ -31,7 +31,6 @@ from cases.models import (
     Case,
     CaseEntityRelationship,
     DocumentSource,
-    DocumentSourceUpload,
     JawafEntity,
     RelationshipType,
 )
@@ -331,7 +330,6 @@ def create_user_with_role(username, email, role, password="testpass123"):
             content_type__in=[
                 ContentType.objects.get_for_model(Case),
                 ContentType.objects.get_for_model(DocumentSource),
-                ContentType.objects.get_for_model(DocumentSourceUpload),
                 ContentType.objects.get_for_model(JawafEntity),
                 ContentType.objects.get_for_model(CaseEntityRelationship),
             ],

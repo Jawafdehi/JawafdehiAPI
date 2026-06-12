@@ -13,7 +13,6 @@ Usage::
 
 import logging
 import os
-import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -316,7 +315,7 @@ class Command(BaseCommand):
             source.source_id: source
             for source in DocumentSource.objects.filter(
                 source_id__in=source_ids, is_deleted=False
-            ).prefetch_related("uploaded_files")
+            )
         }
         logger.debug("Cached %d DocumentSource records", len(self._source_lookup))
 
@@ -367,13 +366,10 @@ class Command(BaseCommand):
         corpus_parts = [
             source.title or "",
             source.description or "",
-            source.uploaded_filename or "",
         ]
+        # Uploaded-file names are part of their URL paths, which are in url_links.
         urls = [url.strip() for url in source.url_links if url.strip()]
         corpus_parts.append(" ".join(urls))
-
-        for uploaded in source.uploaded_files.all():
-            corpus_parts.append(uploaded.filename or Path(uploaded.file.name).name)
 
         corpus = " ".join(corpus_parts).lower()
 
@@ -477,15 +473,20 @@ class Command(BaseCommand):
     def _convert_source_to_markdown(self, source, session, is_press_release=False):
         """Convert a DocumentSource to markdown text.
 
-        For press releases: tries DOCX → DOC → uploaded_file → PDF → webpage
-        For court orders: tries uploaded files first, then URLs.
+        Conversion is URL-based: a source's links (including uploaded file links)
+        all live in its ``url`` list. For press releases the URLs are tried in
+        priority order (DOCX > DOC > PDF > HTML); for court orders, in list order.
         """
         if is_press_release:
             return self._convert_press_release_to_markdown(source, session)
         return self._convert_court_order_to_markdown(source, session)
 
     def _convert_press_release_to_markdown(self, source, session):
-        """Convert press release source. Priority: DOCX > DOC > uploaded > PDF > HTML."""
+        """Convert press release source. Priority: DOCX > DOC > PDF > HTML.
+
+        File links (uploaded docs) live in the source's ``url`` list alongside
+        web URLs, so URL-based conversion covers them.
+        """
         ranked_urls = self._ranked_press_release_urls(source)
 
         # Try each URL in priority order
@@ -494,11 +495,6 @@ class Command(BaseCommand):
             if md:
                 return md
 
-        # Try uploaded files as fallback
-        uploaded_md = self._convert_uploaded_file(source)
-        if uploaded_md:
-            return uploaded_md
-
         # Fallback to description
         if source.description and len(source.description.strip()) >= 500:
             return source.description
@@ -506,11 +502,7 @@ class Command(BaseCommand):
         return None
 
     def _convert_court_order_to_markdown(self, source, session):
-        """Convert court order source. Uploaded files first, then URLs."""
-        uploaded_md = self._convert_uploaded_file(source)
-        if uploaded_md:
-            return uploaded_md
-
+        """Convert court order source from its URLs (incl. uploaded file links)."""
         urls = [url.strip() for url in source.url_links if url.strip()]
         for url in urls:
             md = convert_to_markdown(url, session)
@@ -521,51 +513,6 @@ class Command(BaseCommand):
             return source.description
 
         return None
-
-    def _convert_uploaded_file(self, source):
-        """Download and convert the best uploaded file for a source via markitdown/likhit."""
-        try:
-            import likhit  # noqa: F401
-            from markitdown import MarkItDown
-        except ImportError as exc:
-            raise CommandError(
-                "markitdown and likhit are required for document conversion."
-            ) from exc
-
-        file_field = source.uploaded_file
-        if not file_field:
-            uploaded_files = list(source.uploaded_files.all())
-            if uploaded_files and uploaded_files[0].file:
-                file_field = uploaded_files[0].file
-
-        if not file_field:
-            return None
-
-        suffix = Path(file_field.name).suffix or ""
-        tmp_path = None
-        try:
-            tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
-            tmp_path = tmp.name
-            with file_field.open("rb") as in_file:
-                while True:
-                    chunk = in_file.read(8192)
-                    if not chunk:
-                        break
-                    tmp.write(chunk)
-            tmp.close()
-
-            converter = MarkItDown(enable_plugins=True)
-            result = converter.convert(tmp_path)
-            if (
-                result
-                and result.text_content
-                and len(result.text_content.strip()) > 200
-            ):
-                return result.text_content.strip()
-            return None
-        finally:
-            if tmp_path:
-                Path(tmp_path).unlink(missing_ok=True)
 
     # ------------------------------------------------------------------
     # Intelligent truncation (Problems 4 & 5)

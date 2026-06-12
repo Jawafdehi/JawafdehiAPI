@@ -12,7 +12,6 @@ from cases.models import (
     Case,
     CaseEntityRelationship,
     DocumentSource,
-    DocumentSourceUpload,
     JawafEntity,
 )
 
@@ -26,7 +25,6 @@ class Command(BaseCommand):
         # Get content types
         case_ct = ContentType.objects.get_for_model(Case)
         source_ct = ContentType.objects.get_for_model(DocumentSource)
-        upload_ct = ContentType.objects.get_for_model(DocumentSourceUpload)
         entity_ct = ContentType.objects.get_for_model(JawafEntity)
         relationship_ct = ContentType.objects.get_for_model(CaseEntityRelationship)
 
@@ -75,30 +73,6 @@ class Command(BaseCommand):
                 codename="delete_documentsource",
                 content_type=source_ct,
                 defaults={"name": "Can delete document source"},
-            )[0],
-        }
-
-        # Get or create permissions for DocumentSourceUpload
-        upload_permissions = {
-            "view": Permission.objects.get_or_create(
-                codename="view_documentsourceupload",
-                content_type=upload_ct,
-                defaults={"name": "Can view document source upload"},
-            )[0],
-            "add": Permission.objects.get_or_create(
-                codename="add_documentsourceupload",
-                content_type=upload_ct,
-                defaults={"name": "Can add document source upload"},
-            )[0],
-            "change": Permission.objects.get_or_create(
-                codename="change_documentsourceupload",
-                content_type=upload_ct,
-                defaults={"name": "Can change document source upload"},
-            )[0],
-            "delete": Permission.objects.get_or_create(
-                codename="delete_documentsourceupload",
-                content_type=upload_ct,
-                defaults={"name": "Can delete document source upload"},
             )[0],
         }
 
@@ -168,10 +142,6 @@ class Command(BaseCommand):
                 source_permissions["add"],
                 source_permissions["change"],
                 source_permissions["delete"],
-                upload_permissions["view"],
-                upload_permissions["add"],
-                upload_permissions["change"],
-                upload_permissions["delete"],
                 entity_permissions["view"],
                 entity_permissions["add"],
                 entity_permissions["change"],
@@ -201,10 +171,6 @@ class Command(BaseCommand):
                 source_permissions["add"],
                 source_permissions["change"],
                 source_permissions["delete"],
-                upload_permissions["view"],
-                upload_permissions["add"],
-                upload_permissions["change"],
-                upload_permissions["delete"],
                 entity_permissions["view"],
                 entity_permissions["add"],
                 entity_permissions["change"],
@@ -233,10 +199,6 @@ class Command(BaseCommand):
                 source_permissions["view"],
                 source_permissions["add"],
                 source_permissions["change"],
-                upload_permissions["view"],
-                upload_permissions["add"],
-                upload_permissions["change"],
-                upload_permissions["delete"],
                 entity_permissions["view"],
                 entity_permissions["add"],
                 relationship_permissions["view"],
@@ -262,9 +224,6 @@ class Command(BaseCommand):
             [
                 source_permissions["view"],
                 source_permissions["change"],
-                # Attaching markdown creates a DocumentSourceUpload.
-                upload_permissions["view"],
-                upload_permissions["add"],
             ]
         )
 
@@ -285,7 +244,6 @@ class Command(BaseCommand):
             [
                 case_permissions["view"],
                 source_permissions["view"],
-                upload_permissions["view"],
                 entity_permissions["view"],
                 relationship_permissions["view"],
             ]
