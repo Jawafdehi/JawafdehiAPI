@@ -22,6 +22,7 @@ from django.db import connection, transaction
 from nepali.datetime import nepalidate
 
 from cases.models import Case, DocumentSource, SourceType
+from cases.services.source_files import classify_ciaa_links
 
 logger = logging.getLogger(__name__)
 
@@ -532,60 +533,37 @@ class Command(BaseCommand):
             needs_update = any(file_url not in existing_links for file_url in file_urls)
 
             if needs_update:
-                # Build complete URL list from existing link strings
-                # (existing.url has dicts, url_links gives plain strings for dedup)
-                existing_links = existing.url_links
-                url_list = [{"link": link, "role": "RAW"} for link in existing_links]
+                # Collect every link as a plain string — the press-release web
+                # URL first, then the file URLs — deduping by encoded link, then
+                # classify roles in one pass so exactly one link is RAW.
+                ordered_links = []
 
-                # Encode and add press release web URL first (ensure it's at the beginning)
-                if press_release_url and str(press_release_url).strip():
-                    pr_url_str = str(press_release_url).strip()
-                    parsed = urllib.parse.urlsplit(pr_url_str)
-                    encoded_path = urllib.parse.quote(parsed.path, safe="/")
-                    encoded_query = urllib.parse.quote(parsed.query, safe="=&")
-                    encoded_fragment = urllib.parse.quote(parsed.fragment, safe="")
-                    encoded_url = urllib.parse.urlunsplit(
+                def _add(raw):
+                    if not (raw and str(raw).strip()):
+                        return
+                    parsed = urllib.parse.urlsplit(str(raw).strip())
+                    encoded = urllib.parse.urlunsplit(
                         (
                             parsed.scheme,
                             parsed.netloc,
-                            encoded_path,
-                            encoded_query,
-                            encoded_fragment,
+                            urllib.parse.quote(parsed.path, safe="/"),
+                            urllib.parse.quote(parsed.query, safe="=&"),
+                            urllib.parse.quote(parsed.fragment, safe=""),
                         )
                     )
-                    # Remove if already exists and prepend to ensure it's first
-                    existing_idx = None
-                    for i, u in enumerate(url_list):
-                        if isinstance(u, dict) and u.get("link") == encoded_url:
-                            existing_idx = i
-                            break
-                    if existing_idx is not None:
-                        url_list.pop(existing_idx)
-                    url_list.insert(0, {"link": encoded_url, "role": "RAW"})
+                    if encoded not in ordered_links:
+                        ordered_links.append(encoded)
 
-                # Add all file URLs (skip duplicates)
+                # Press release web URL first, then existing links, then new files.
+                _add(press_release_url)
+                for link in existing.url_links:
+                    _add(link)
                 for file_url in file_urls:
-                    if file_url and str(file_url).strip():
-                        file_url_str = str(file_url).strip()
-                        parsed = urllib.parse.urlsplit(file_url_str)
-                        encoded_path = urllib.parse.quote(parsed.path, safe="/")
-                        encoded_query = urllib.parse.quote(parsed.query, safe="=&")
-                        encoded_fragment = urllib.parse.quote(parsed.fragment, safe="")
-                        encoded_url = urllib.parse.urlunsplit(
-                            (
-                                parsed.scheme,
-                                parsed.netloc,
-                                encoded_path,
-                                encoded_query,
-                                encoded_fragment,
-                            )
-                        )
-                        # Only add if not already present
-                        if not any(
-                            isinstance(u, dict) and u.get("link") == encoded_url
-                            for u in url_list
-                        ):
-                            url_list.append({"link": encoded_url, "role": "RAW"})
+                    _add(file_url)
+
+                # Classify roles: ciaa.gov.np page -> SOURCE_PAGE, the .pdf (or
+                # first file) -> RAW, other files -> ALTERNATE.
+                url_list = classify_ciaa_links(ordered_links)
 
                 # Update existing source with complete URL list
                 existing.url = url_list
@@ -622,45 +600,32 @@ class Command(BaseCommand):
                     f"Failed to parse publication date {publication_date}: {e}"
                 )
 
-        # Build URL list: web URL first, then all file URLs
-        url_list = []
+        # Collect links (web URL first, then files), deduping by encoded link,
+        # then classify roles so the ciaa.gov.np page is SOURCE_PAGE and only the
+        # document file is RAW.
+        ordered_links = []
 
-        # Add press release web URL first
-        if press_release_url and str(press_release_url).strip():
-            pr_url_str = str(press_release_url).strip()
-            parsed = urllib.parse.urlsplit(pr_url_str)
-            encoded_path = urllib.parse.quote(parsed.path, safe="/")
-            encoded_query = urllib.parse.quote(parsed.query, safe="=&")
-            encoded_fragment = urllib.parse.quote(parsed.fragment, safe="")
-            encoded_url = urllib.parse.urlunsplit(
+        def _add(raw):
+            if not (raw and str(raw).strip()):
+                return
+            parsed = urllib.parse.urlsplit(str(raw).strip())
+            encoded = urllib.parse.urlunsplit(
                 (
                     parsed.scheme,
                     parsed.netloc,
-                    encoded_path,
-                    encoded_query,
-                    encoded_fragment,
+                    urllib.parse.quote(parsed.path, safe="/"),
+                    urllib.parse.quote(parsed.query, safe="=&"),
+                    urllib.parse.quote(parsed.fragment, safe=""),
                 )
             )
-            url_list.append({"link": encoded_url, "role": "RAW"})
+            if encoded not in ordered_links:
+                ordered_links.append(encoded)
 
-        # Add all file URLs
+        _add(press_release_url)
         for file_url in file_urls:
-            if file_url and str(file_url).strip():
-                file_url_str = str(file_url).strip()
-                parsed = urllib.parse.urlsplit(file_url_str)
-                encoded_path = urllib.parse.quote(parsed.path, safe="/")
-                encoded_query = urllib.parse.quote(parsed.query, safe="=&")
-                encoded_fragment = urllib.parse.quote(parsed.fragment, safe="")
-                encoded_url = urllib.parse.urlunsplit(
-                    (
-                        parsed.scheme,
-                        parsed.netloc,
-                        encoded_path,
-                        encoded_query,
-                        encoded_fragment,
-                    )
-                )
-                url_list.append({"link": encoded_url, "role": "RAW"})
+            _add(file_url)
+
+        url_list = classify_ciaa_links(ordered_links)
 
         if not url_list:
             logger.error(f"No valid URLs for press release {press_release_url}")

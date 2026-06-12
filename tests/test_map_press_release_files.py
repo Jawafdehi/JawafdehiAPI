@@ -155,6 +155,18 @@ class TestMapPressReleaseFiles:
             assert any("ciaa.gov.np/pressrelease/3173" in link for link in links)
             assert sum("ngm-store.jawafdehi.org" in link for link in links) == 2
 
+            # Roles must follow the stored convention: exactly ONE RAW (the .pdf),
+            # the ciaa.gov.np page is SOURCE_PAGE, the .docx export is ALTERNATE.
+            roles = {u["link"]: u["role"] for u in source.url}
+            assert sum(1 for r in roles.values() if r == "RAW") == 1
+            for link, role in roles.items():
+                if "ciaa.gov.np/pressrelease" in link:
+                    assert role == "SOURCE_PAGE"
+                elif link.endswith(".pdf"):
+                    assert role == "RAW"
+                elif link.endswith(".docx"):
+                    assert role == "ALTERNATE"
+
             # Evidence description should show file count
             assert "2 documents" in evidence_entry["description"]
 

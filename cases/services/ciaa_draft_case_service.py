@@ -19,6 +19,7 @@ from cases.models import (
     RelationshipType,
     SourceType,
 )
+from cases.services.source_files import classify_ciaa_links
 
 logger = logging.getLogger(__name__)
 
@@ -408,11 +409,18 @@ class CIAADraftCaseService:
                 return source
 
         # Create new source. url_list holds bare link strings (used for the
-        # dedup lookups above); store them as canonical RAW source-link dicts.
+        # dedup lookups above); store them as canonical source-link dicts.
+        # For CIAA press releases, classify roles so the ciaa.gov.np landing
+        # page is SOURCE_PAGE and only the document file is RAW (the stored
+        # convention); other source types keep every link as RAW.
         publication_date = source_data.get("publication_date")
+        if str(source_type) == SourceType.CIAA_PRESS_RELEASE.value:
+            url_dicts = classify_ciaa_links(url_list)
+        else:
+            url_dicts = [{"link": link, "role": "RAW"} for link in url_list]
         source = DocumentSource.objects.create(
             title=title,
-            url=[{"link": link, "role": "RAW"} for link in url_list],
+            url=url_dicts,
             source_type=source_type,
             publication_date=publication_date,
         )
