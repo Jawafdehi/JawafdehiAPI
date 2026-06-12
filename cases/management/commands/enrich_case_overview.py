@@ -2292,11 +2292,34 @@ Return ONLY space-separated keywords, no punctuation, no explanation."""
             return None
 
     def _ranked_source_urls(self, source):
-        urls = [
-            url.strip()
-            for url in (source.url or [])
-            if isinstance(url, str) and url.strip()
-        ]
+        # source.url is a list of {link, role} dicts (after URL dict migration)
+        # or plain strings (legacy). Extract the link string from both formats,
+        # preferring MARKDOWN role (pre-converted text) over RAW document URLs.
+        raw_entries = source.url or []
+        markdown_urls = []
+        other_urls = []
+        for entry in raw_entries:
+            if isinstance(entry, dict):
+                link = (entry.get("link") or "").strip()
+                role = (entry.get("role") or "RAW").upper()
+            elif isinstance(entry, str):
+                link = entry.strip()
+                role = "RAW"
+            else:
+                continue
+            if not link:
+                continue
+            if role == "MARKDOWN":
+                markdown_urls.append(link)
+            else:
+                other_urls.append(link)
+
+        # MARKDOWN links are plain text — return them first, no need to rank
+        if markdown_urls:
+            return markdown_urls + other_urls
+
+        # No MARKDOWN links — rank the raw document URLs by format priority
+        urls = other_urls
         direct = [url for url in urls if _is_direct_document_url(url)]
         other = [url for url in urls if url not in direct]
         direct.sort(key=_source_url_priority, reverse=True)

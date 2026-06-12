@@ -693,8 +693,15 @@ def convert_to_markdown(url: str, session: requests.Session) -> Optional[str]:
         suffix = ".pdf"
     elif "html" in content_type:
         suffix = ".html"
-    elif any(kw in content_type for kw in ("document", "word", "docx", "msword")):
-        suffix = ".docx"
+    elif any(kw in content_type for kw in ("document", "word", "docx", "msword", "cfb")):
+        suffix = ".doc"
+
+    # Fall back to the URL's own file extension when content-type is unhelpful
+    # (e.g. S3/nginx serving .doc files as application/x-cfb or octet-stream).
+    if not suffix:
+        url_suffix = Path(urlparse(current_url).path).suffix.lower()
+        if url_suffix in (".doc", ".docx", ".pdf", ".html", ".htm", ".txt"):
+            suffix = url_suffix
 
     tmp_path = None
     try:
