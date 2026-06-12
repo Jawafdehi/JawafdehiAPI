@@ -270,7 +270,17 @@ def _entities_of_type(case, type_name):
 
 
 def accused_present(case):
-    """At least one ACCUSED entity must be present (hard requirement)."""
+    """At least one ACCUSED entity must be present (hard requirement).
+
+    Only enforced for case types that require a named accused party (currently
+    CORRUPTION). Other case types (e.g. TAX_EVASION) pass automatically. The
+    policy lives in ``cases.models.requires_accused`` so the model, admin, and
+    review engine stay in sync.
+    """
+    from cases.models import requires_accused
+
+    if not requires_accused((case.get("case_type") or "").upper()):
+        return 100, []
     accused = _entities_of_type(case, "accused")
     if not accused:
         return 0, ["No accused entity identified; at least one is required."]

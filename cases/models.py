@@ -376,6 +376,21 @@ class CaseType(models.TextChoices):
     """Enum for case types."""
 
     CORRUPTION = "CORRUPTION", "Corruption"
+    TAX_EVASION = "TAX_EVASION", "Tax Evasion"
+
+
+# Case types that must name at least one ACCUSED entity before they can leave
+# DRAFT. Every other case type only requires a non-location entity (i.e. a named
+# subject). This is the single source of truth for the accused-entity policy;
+# the model, the admin formset, and the review engine all consult it so they
+# never drift. ``requires_accused`` accepts either a ``CaseType`` member or its
+# plain string value (``TextChoices`` values are ``str`` subclasses).
+CASE_TYPES_REQUIRING_ACCUSED = frozenset({CaseType.CORRUPTION})
+
+
+def requires_accused(case_type):
+    """Whether a case of this type must tag at least one ACCUSED entity."""
+    return case_type in CASE_TYPES_REQUIRING_ACCUSED
 
 
 class CaseState(models.TextChoices):
@@ -667,14 +682,23 @@ class Case(models.Model):
 
         # Strict validation for IN_REVIEW and PUBLISHED states
         if self.state in [CaseState.IN_REVIEW, CaseState.PUBLISHED]:
-            # Require at least one accused entity for published cases
-            has_unified_alleged = self.entity_relationships.filter(
-                relationship_type=RelationshipType.ACCUSED
-            ).exists()
-            if not has_unified_alleged:
-                errors["entities"] = (
-                    "At least one accused entity is required for IN_REVIEW or PUBLISHED state"
-                )
+            # Entity requirement depends on case type. CORRUPTION cases must name
+            # at least one ACCUSED entity; other case types (e.g. TAX_EVASION)
+            # only require a named subject — any non-location entity. A
+            # location-only case is not a valid subject (the UI also excludes
+            # locations when naming a case's subject).
+            if requires_accused(self.case_type):
+                has_required_entity = self.entity_relationships.filter(
+                    relationship_type=RelationshipType.ACCUSED
+                ).exists()
+                entity_error = "At least one accused entity is required for IN_REVIEW or PUBLISHED state"
+            else:
+                has_required_entity = self.entity_relationships.exclude(
+                    relationship_type=RelationshipType.LOCATION
+                ).exists()
+                entity_error = "At least one non-location entity is required for IN_REVIEW or PUBLISHED state"
+            if not has_required_entity:
+                errors["entities"] = entity_error
 
             if not self.key_allegations or len(self.key_allegations) == 0:
                 errors["key_allegations"] = (

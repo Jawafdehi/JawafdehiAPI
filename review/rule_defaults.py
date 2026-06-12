@@ -333,12 +333,14 @@ DEFAULT_RULES = [
         "category": "Entities",
         "kind": "deterministic",
         "detector": "accused_present",
-        "condition_text": "Always active (hard gate).",
+        "condition_text": "Active for case types that name an accused (hard gate).",
         "applies_to": ALL,
         "description": (
-            "The case **must** tag at least one **accused** entity — the "
-            "person(s) or organisation(s) the allegations are against. A case "
-            "with no accused cannot be published."
+            "For case types that name an accused (e.g. corruption), the case "
+            "**must** tag at least one **accused** entity — the person(s) or "
+            "organisation(s) the allegations are against — and cannot be "
+            "published without one. Case types that do not name an accused "
+            "(e.g. tax evasion) are exempt and pass automatically."
         ),
         "weight": 1.2,
         "is_gate": True,

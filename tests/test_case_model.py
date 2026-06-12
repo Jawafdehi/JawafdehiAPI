@@ -10,7 +10,14 @@ import pytest
 from django.core.exceptions import ValidationError
 from hypothesis import given, settings
 
-from cases.models import Case, CaseState, CaseType, RelationshipType
+from cases.models import (
+    Case,
+    CaseEntityRelationship,
+    CaseState,
+    CaseType,
+    JawafEntity,
+    RelationshipType,
+)
 from tests.conftest import create_case_with_entities
 from tests.strategies import complete_case_data, minimal_case_data
 
@@ -384,3 +391,86 @@ def test_multiple_drafts_get_unique_auto_slugs():
         s and s.strip() for s in slugs
     ), "Every draft must have a non-empty auto-generated slug"
     assert len(set(slugs)) == len(slugs), "Auto-generated slugs must be unique"
+
+
+# ============================================================================
+# Case-type-conditional entity requirement (CORRUPTION vs TAX_EVASION)
+# ============================================================================
+
+
+@pytest.mark.django_db
+def test_corruption_requires_accused_entity_for_review():
+    """CORRUPTION cases still need an ACCUSED entity to leave DRAFT.
+
+    A related-only entity does not satisfy the requirement.
+    """
+    case = create_case_with_entities(
+        title="Corruption Case",
+        related_entities=["entity:person/witness"],
+        key_allegations=["Allegation"],
+        description="Description",
+        case_type=CaseType.CORRUPTION,
+    )
+    case.state = CaseState.IN_REVIEW
+
+    with pytest.raises(ValidationError) as exc_info:
+        case.validate()
+    assert "accused" in str(exc_info.value).lower()
+
+
+@pytest.mark.django_db
+def test_tax_evasion_does_not_require_accused_entity():
+    """TAX_EVASION cases pass review validation with a related-only entity."""
+    case = create_case_with_entities(
+        title="Tax Evasion Case",
+        related_entities=["entity:person/subject"],
+        key_allegations=["Allegation"],
+        description="Description",
+        case_type=CaseType.TAX_EVASION,
+    )
+    case.state = CaseState.IN_REVIEW
+
+    try:
+        case.validate()
+    except ValidationError as e:
+        pytest.fail(f"TAX_EVASION should not require an accused entity: {e}")
+
+
+@pytest.mark.django_db
+def test_tax_evasion_requires_at_least_one_entity():
+    """TAX_EVASION still requires at least one entity of any role for review."""
+    case = create_case_with_entities(
+        title="Tax Evasion Case",
+        key_allegations=["Allegation"],
+        description="Description",
+        case_type=CaseType.TAX_EVASION,
+    )
+    case.state = CaseState.IN_REVIEW
+
+    with pytest.raises(ValidationError) as exc_info:
+        case.validate()
+    assert "entity" in str(exc_info.value).lower()
+
+
+@pytest.mark.django_db
+def test_tax_evasion_location_only_entity_is_insufficient():
+    """A location-only TAX_EVASION case has no named subject and must fail.
+
+    The UI excludes locations when naming a case's subject, so a location-only
+    case would publish with no displayed subject. Validation rejects it.
+    """
+    case = create_case_with_entities(
+        title="Tax Evasion Case",
+        key_allegations=["Allegation"],
+        description="Description",
+        case_type=CaseType.TAX_EVASION,
+    )
+    entity = JawafEntity.objects.create(display_name="Kathmandu")
+    CaseEntityRelationship.objects.create(
+        case=case, entity=entity, relationship_type=RelationshipType.LOCATION
+    )
+    case.state = CaseState.IN_REVIEW
+
+    with pytest.raises(ValidationError) as exc_info:
+        case.validate()
+    assert "entity" in str(exc_info.value).lower()
