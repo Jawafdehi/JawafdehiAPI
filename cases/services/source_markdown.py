@@ -9,9 +9,6 @@ This is idempotent: a source that already has a MARKDOWN url is left untouched
 unless ``overwrite=True``.
 """
 
-from urllib.parse import urljoin
-
-from django.conf import settings
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.utils import timezone
@@ -21,19 +18,7 @@ from cases.models import (
     SourceLinkRole,
     validate_url_list,
 )
-
-
-def _absolute(url: str) -> str:
-    """Make a possibly-relative media URL absolute (validators require a scheme).
-
-    In production MEDIA_URL is already an absolute S3 URL, so file urls come back
-    absolute and this is a no-op. Locally (file storage) urls are like
-    ``/media/...``; we prefix MEDIA_PUBLIC_BASE so the stored link validates.
-    """
-    if url and url.startswith(("http://", "https://")):
-        return url
-    base = getattr(settings, "MEDIA_PUBLIC_BASE", "") or ""
-    return urljoin(base + "/", url.lstrip("/")) if base else url
+from cases.services.storage_links import absolute_media_url
 
 
 def source_has_markdown(source: DocumentSource) -> bool:
@@ -69,7 +54,7 @@ def attach_markdown(source: DocumentSource, markdown: str, *, overwrite: bool = 
     # live solely in `url`, so we do not persist a separate uploaded-file record.
     filename = f"{source.source_id}.md"
     stored_name = default_storage.save(filename, ContentFile(markdown.encode("utf-8")))
-    link = _absolute(default_storage.url(stored_name))
+    link = absolute_media_url(default_storage.url(stored_name))
 
     # Append (or replace) the MARKDOWN-role url on the source.
     urls = [

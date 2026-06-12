@@ -24,15 +24,21 @@ from cases.models import (
     SourceLinkRole,
     validate_url_list,
 )
-from cases.services.source_markdown import _absolute
+from cases.services.storage_links import absolute_media_url
 
 
 def _covered(path, links):
-    """True if some stored link contains this file's storage path / basename."""
+    """True if some stored link already points at this file.
+
+    Match on the file's basename (a sha256 hash + extension under the storage
+    prefix, e.g. ``case_uploads/<hash>.pdf``) as a complete final path segment of
+    a stored link, rather than a loose substring, so e.g. ``<hash>.pdf`` does not
+    spuriously match ``<hash>_copy.pdf``.
+    """
     if not path:
         return True  # nothing to record
     base = path.rsplit("/", 1)[-1]
-    return any((path in link) or (base in link) for link in links)
+    return any(link.rsplit("/", 1)[-1] == base for link in links)
 
 
 def _role_for(name):
@@ -65,7 +71,7 @@ class Command(BaseCommand):
                 return
             try:
                 name = file_field.name
-                url = _absolute(file_field.url)
+                url = absolute_media_url(file_field.url)
             except (ValueError, AttributeError):
                 return
             links = [u for u in source.url_links if u]
@@ -107,9 +113,12 @@ class Command(BaseCommand):
             with transaction.atomic():
                 src = DocumentSource.objects.select_for_update().get(source_id=sid)
                 existing = [u for u in src.url_links if u]
-                merged = list(src.url or [])
+                # Normalize first: legacy rows may hold plain string URLs, which
+                # validate_url_list rejects. normalize_url_list coerces them to
+                # {link, role: RAW} so the validate below passes.
+                merged = DocumentSource.normalize_url_list(list(src.url or []))
                 for d in new_links:
-                    if not _covered(d["link"].rsplit("/", 1)[-1], existing):
+                    if not _covered(d["link"], existing):
                         merged.append(d)
                 # persist only the url column (avoid full_clean on unrelated fields)
                 validate_url_list(merged)

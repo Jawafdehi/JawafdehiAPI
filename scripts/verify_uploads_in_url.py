@@ -22,7 +22,8 @@ def file_path(file_field):
     """The storage key/path of a FileField, or None if empty/broken."""
     try:
         return file_field.name or None
-    except Exception:  # noqa: BLE001 - defensive: never let a bad row crash the scan
+    except (ValueError, AttributeError):
+        # No file associated / broken descriptor — treat as nothing to record.
         return None
 
 

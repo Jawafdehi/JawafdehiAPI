@@ -835,7 +835,12 @@ class DocumentSourceAdminForm(forms.ModelForm):
                 validate_upload_file_size,
                 validate_upload_file_mimetype,
             ):
-                validator(upload_file)
+                try:
+                    validator(upload_file)
+                except ValidationError as exc:
+                    # Attach to the upload_file field so the error renders next to
+                    # the input rather than as a form-wide non-field error.
+                    self.add_error("upload_file", exc)
 
         return cleaned_data
 

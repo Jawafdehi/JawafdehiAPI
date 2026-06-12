@@ -675,17 +675,24 @@ class DocumentSourceCreateSerializer(serializers.ModelSerializer):
 
         The file is NOT persisted to the ``uploaded_file`` FileField; ``url`` is
         the single source of truth for a source's links.
+
+        The source row is created first (which runs model validation, e.g. the
+        publication_date requirement for NEWS), and the file is stored only
+        afterwards — so a validation failure never leaves an orphaned S3 object.
         """
         from cases.services.source_files import store_file_as_link
 
         uploaded_file = validated_data.pop("uploaded_file", None)
         upload_role = validated_data.pop("upload_role", SourceLinkRole.RAW.value)
 
+        instance = super().create(validated_data)
+
         if uploaded_file is not None:
             link = store_file_as_link(uploaded_file, role=upload_role)
-            validated_data["url"] = list(validated_data.get("url") or []) + [link]
+            instance.url = list(instance.url or []) + [link]
+            instance.save(update_fields=["url", "updated_at"])
 
-        return super().create(validated_data)
+        return instance
 
     def to_internal_value(self, data):
         """
