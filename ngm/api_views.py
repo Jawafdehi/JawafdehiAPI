@@ -5,9 +5,9 @@ from rest_framework import status
 from rest_framework.authentication import TokenAuthentication
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.throttling import SimpleRateThrottle
 from rest_framework.views import APIView
 
+from cases.throttles import RoleBasedRateThrottle
 from ngm.serializers import CourtCaseDetailSerializer, NGMQuerySerializer
 from ngm.services import (
     execute_select_query,
@@ -19,9 +19,8 @@ from ngm.services import (
 logger = logging.getLogger(__name__)
 
 
-class NGMQueryRateThrottle(SimpleRateThrottle):
+class NGMQueryRateThrottle(RoleBasedRateThrottle):
     scope = "ngm_token"
-    rate = None
     TIER_LIMITS = {
         "Admin": "500/hour",
         "Moderator": "500/hour",
@@ -38,35 +37,12 @@ class NGMQueryRateThrottle(SimpleRateThrottle):
         "NGM_SilverTier",
     )
 
-    def get_rate(self):
-        return self.DEFAULT_RATE
-
-    def get_user_rate(self, user):
-        if not user or not user.is_authenticated:
-            return self.DEFAULT_RATE
-
-        group_names = set(user.groups.values_list("name", flat=True))
-        for group_name in self.GROUP_PRIORITY:
-            if group_name in group_names:
-                return self.TIER_LIMITS[group_name]
-
-        return self.DEFAULT_RATE
-
-    def allow_request(self, request, view):
-        self.rate = self.get_user_rate(getattr(request, "user", None))
-        self.num_requests, self.duration = self.parse_rate(self.rate)
-        return super().allow_request(request, view)
-
-    def get_cache_key(self, request, view):
-        # For authenticated requests, use token key
+    def get_authenticated_ident(self, request):
+        # NGM uses DRF TokenAuthentication; bucket per API token so each token
+        # gets its own tier quota. Fall back to user pk if the token is absent.
         token = getattr(request, "auth", None)
         token_key = getattr(token, "key", None)
-        if token_key:
-            return self.cache_format % {"scope": self.scope, "ident": token_key}
-
-        # For anonymous requests, use IP address to enforce rate limiting
-        ident = self.get_ident(request)
-        return self.cache_format % {"scope": self.scope, "ident": ident}
+        return token_key or request.user.pk
 
 
 @extend_schema(
