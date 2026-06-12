@@ -440,9 +440,7 @@ def test_score_source_for_press_release():
     source = MagicMock()
     source.title = "CIAA Press Release FY 080/81"
     source.description = "Press release regarding corruption case"
-    source.uploaded_filename = None
-    source.url = ["https://ciaa.gov.np/pressrelease/3173"]
-    source.uploaded_files.all.return_value = []
+    source.url_links = ["https://ciaa.gov.np/pressrelease/3173"]
     source.source_type = None
 
     score = cmd._score_source_for_press_release(source)
@@ -485,13 +483,7 @@ def test_convert_source_uses_long_description_only_as_final_fallback():
 @patch(
     "cases.management.commands.enrich_ciaa_allegations.Command._download_url_to_path",
 )
-@patch(
-    "cases.management.commands.enrich_ciaa_allegations.Command._download_source_to_path",
-    return_value=None,
-)
-def test_convert_source_prefers_ngm_pdf_over_short_description(
-    mock_download_file, mock_download_url
-):
+def test_convert_source_prefers_ngm_pdf_over_short_description(mock_download_url):
     from cases.management.commands.enrich_ciaa_allegations import Command
 
     source = DocumentSource.objects.create(
@@ -566,13 +558,7 @@ def test_ranked_source_urls_no_direct_urls():
 @patch(
     "cases.management.commands.enrich_ciaa_allegations.Command._download_url_to_path",
 )
-@patch(
-    "cases.management.commands.enrich_ciaa_allegations.Command._download_source_to_path",
-    return_value=None,
-)
-def test_convert_source_tries_prioritized_urls_first(
-    mock_download_file, mock_download_url
-):
+def test_convert_source_tries_prioritized_urls_first(mock_download_url):
     from cases.management.commands.enrich_ciaa_allegations import Command
 
     source = DocumentSource.objects.create(
@@ -599,11 +585,7 @@ def test_convert_source_tries_prioritized_urls_first(
 @patch(
     "cases.management.commands.enrich_ciaa_allegations.Command._download_url_to_path",
 )
-@patch(
-    "cases.management.commands.enrich_ciaa_allegations.Command._download_source_to_path",
-    return_value=None,
-)
-def test_convert_source_fallback_to_next_url(mock_download_file, mock_download_url):
+def test_convert_source_fallback_to_next_url(mock_download_url):
     from cases.management.commands.enrich_ciaa_allegations import Command
 
     source = DocumentSource.objects.create(

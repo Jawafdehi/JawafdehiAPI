@@ -330,11 +330,10 @@ class Command(BaseCommand):
         if not getattr(self, "_verbose", False):
             return
         urls = [urllib.parse.unquote(url) for url in source.url_links]
-        upload_names = self._source_upload_names(source)
         self._log_info(
             "Source diagnostics: "
             f"type={source.source_type}; description={source.description!r}; "
-            f"uploaded_filename={source.uploaded_filename!r}; urls={urls}; uploads={upload_names}"
+            f"urls={urls}"
         )
 
     def _log_bigo_snippets(self, markdown: str) -> None:
@@ -408,7 +407,7 @@ class Command(BaseCommand):
             DocumentSource.objects.filter(
                 source_id__in=source_ids,
                 is_deleted=False,
-            ).prefetch_related("uploaded_files")
+            )
         )
         if not sources:
             return None
@@ -431,13 +430,9 @@ class Command(BaseCommand):
         # This handles cases where the source isn't properly labeled
         if len(sources) == 1:
             source = sources[0]
-            # Check if it has an uploaded PDF file
-            has_pdf = (
-                source.uploaded_file
-                and source.uploaded_file.name.lower().endswith(".pdf")
-            ) or any(
-                f.file.name.lower().endswith(".pdf")
-                for f in source.uploaded_files.all()
+            # Check if it has a PDF link (file links live in `url`).
+            has_pdf = any(
+                link.split("?")[0].lower().endswith(".pdf") for link in source.url_links
             )
             if has_pdf:
                 self._log_info(
@@ -449,18 +444,13 @@ class Command(BaseCommand):
         return None
 
     def _score_source_for_press_release(self, source: DocumentSource) -> int:
-        upload_names = [
-            file.filename or Path(file.file.name).name
-            for file in source.uploaded_files.all()
-        ]
+        # Uploaded-file names are part of their URL paths (in url_links).
         url_text = " ".join(source.url_links)
         corpus = " ".join(
             [
                 source.title or "",
                 source.description or "",
-                source.uploaded_filename or "",
                 url_text,
-                " ".join(upload_names),
             ]
         ).lower()
 
@@ -518,27 +508,7 @@ class Command(BaseCommand):
         *,
         timeout: float = 30,
     ) -> Path | None:
-        if source.uploaded_file:
-            filename = self._sanitize_download_filename(
-                source.uploaded_filename or source.uploaded_file.name,
-                source.source_id,
-            )
-            out_path = self._confined_output_path(output_dir, filename)
-            with source.uploaded_file.open("rb") as in_file:
-                self._copy_stream_to_path_with_limit(in_file, out_path)
-            return out_path
-
-        uploaded = source.uploaded_files.first()
-        if uploaded and uploaded.file:
-            filename = self._sanitize_download_filename(
-                uploaded.filename or uploaded.file.name,
-                source.source_id,
-            )
-            out_path = self._confined_output_path(output_dir, filename)
-            with uploaded.file.open("rb") as in_file:
-                self._copy_stream_to_path_with_limit(in_file, out_path)
-            return out_path
-
+        # A source's links (including uploaded file links) all live in `url`.
         source_url = self._pick_source_url(source)
         if not source_url:
             return None
@@ -702,13 +672,12 @@ class Command(BaseCommand):
         "...उपर बिगो रु. २,००,००० कायम...pdf". Prefer this deterministic signal
         before asking the LLM to read potentially noisy PDF conversion output.
         """
+        # File links (which preserve the CIAA filename) live in url_links.
         snippets = [
             source.title or "",
             source.description or "",
-            source.uploaded_filename or "",
         ]
         snippets.extend(source.url_links)
-        snippets.extend(self._source_upload_names(source))
 
         for snippet in snippets:
             bigo = self._extract_explicit_bigo_from_text(snippet)
@@ -1110,21 +1079,10 @@ Press release markdown:
             f"source_id: {source.source_id}",
             f"title: {source.title or ''}",
             f"description: {source.description or ''}",
-            f"uploaded_filename: {source.uploaded_filename or ''}",
         ]
+        # File links (which preserve filenames) are included via url_links.
         parts.extend(f"url: {urllib.parse.unquote(url)}" for url in source.url_links)
-        parts.extend(
-            f"uploaded_file: {name}" for name in self._source_upload_names(source)
-        )
         return "\n".join(parts)[:20000]
-
-    def _source_upload_names(self, source: DocumentSource) -> list[str]:
-        if not source.pk:
-            return []
-        return [
-            upload.filename or Path(upload.file.name).name
-            for upload in source.uploaded_files.all()
-        ]
 
     def _is_explicit_bigo_context(self, evidence_quote: Any) -> bool:
         if not isinstance(evidence_quote, str):

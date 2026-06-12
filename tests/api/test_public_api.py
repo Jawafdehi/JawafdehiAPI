@@ -7,12 +7,11 @@ Validates: Requirements 4.1, 6.1, 6.2, 6.3, 8.1, 8.3
 """
 
 import pytest
-from django.core.files.uploadedfile import SimpleUploadedFile
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from rest_framework.test import APIClient
 
-from cases.models import CaseState, CaseType, DocumentSourceUpload
+from cases.models import CaseState, CaseType
 from tests.conftest import (
     create_case_with_entities,
     create_document_source_with_entities,
@@ -696,33 +695,21 @@ def test_document_source_api_shows_sources_from_published_and_in_review_cases():
 
 
 @pytest.mark.django_db
-def test_document_source_api_merges_url_with_legacy_and_multiple_uploads():
-    """DocumentSource API should include URL list + legacy upload + multi-upload files without duplicates."""
-    legacy_file = SimpleUploadedFile(
-        "legacy-evidence.pdf", b"legacy", content_type="application/pdf"
-    )
+def test_document_source_api_returns_url_links_deduped():
+    """The API exposes the source's `url` links; the backward-compat `url`
+    string list dedupes a link that appears under more than one role."""
     source = create_document_source_with_entities(
         title="Merged Source",
-        description="Source with all URL variants",
-        url=["https://example.com/reference.pdf", "https://example.com/reference.pdf"],
-        uploaded_file=legacy_file,
-    )
-
-    upload_one = DocumentSourceUpload.objects.create(
-        source=source,
-        file=SimpleUploadedFile(
-            "attachment-1.pdf", b"one", content_type="application/pdf"
-        ),
-    )
-    upload_two = DocumentSourceUpload.objects.create(
-        source=source,
-        file=SimpleUploadedFile(
-            "attachment-2.pdf", b"two", content_type="application/pdf"
-        ),
+        description="Source with role-tagged links",
+        url=[
+            {"link": "https://example.com/reference.pdf", "role": "RAW"},
+            {"link": "https://example.com/reference.pdf", "role": "MARKDOWN"},
+            {"link": "https://example.com/article", "role": "RAW"},
+        ],
     )
 
     create_case_with_entities(
-        title="Published Case With Uploads",
+        title="Published Case With Links",
         alleged_entities=["entity:person/test"],
         key_allegations=["Test allegation"],
         case_type=CaseType.CORRUPTION,
@@ -731,7 +718,7 @@ def test_document_source_api_merges_url_with_legacy_and_multiple_uploads():
         evidence=[
             {
                 "source_id": source.source_id,
-                "description": "Evidence with file uploads",
+                "description": "Evidence with links",
             }
         ],
     )
@@ -740,17 +727,12 @@ def test_document_source_api_merges_url_with_legacy_and_multiple_uploads():
     response = client.get(f"/api/sources/{source.id}/")
     assert response.status_code == 200
 
-    # Check backward-compat url field (list of strings)
+    # Backward-compat url field (list of strings), deduped by link.
     raw_links = response.data["url"]
     assert raw_links.count("https://example.com/reference.pdf") == 1
-    assert any(link.endswith(source.uploaded_file.url) for link in raw_links)
-    assert any(link.endswith(upload_one.file.url) for link in raw_links)
-    assert any(link.endswith(upload_two.file.url) for link in raw_links)
+    assert "https://example.com/article" in raw_links
 
-    # Check new urls field (list of dicts)
-    merged_urls = response.data["urls"]
-    links = [u["link"] for u in merged_urls]
-    assert links.count("https://example.com/reference.pdf") == 1
-    # Uploaded files are RAW source documents, as are the external URLs here.
-    for u in merged_urls:
-        assert u["role"] == "RAW"
+    # urls field carries the role-tagged dicts.
+    role_by_link = {(u["link"], u["role"]) for u in response.data["urls"]}
+    assert ("https://example.com/reference.pdf", "MARKDOWN") in role_by_link
+    assert ("https://example.com/reference.pdf", "RAW") in role_by_link

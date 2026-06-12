@@ -18,6 +18,9 @@ from .models import (
     Feedback,
     JawafEntity,
     SourceLinkRole,
+    validate_upload_file_extension,
+    validate_upload_file_mimetype,
+    validate_upload_file_size,
 )
 
 logger = logging.getLogger(__name__)
@@ -287,7 +290,7 @@ class CaseDetailSerializer(CaseSerializer):
             s.source_id: DocumentSourceSerializer(s, context=self.context).data
             for s in DocumentSource.objects.filter(
                 source_id__in=source_ids, is_deleted=False
-            ).prefetch_related("uploaded_files")
+            )
         }
 
         return [
@@ -431,34 +434,6 @@ class DocumentSourceSerializer(serializers.ModelSerializer):
                 add_url(link, role)
             else:
                 add_url(item)
-
-        if obj.uploaded_file:
-            try:
-                add_url(obj.uploaded_file.url, "RAW")
-            except (ValueError, AttributeError) as exc:
-                logger.warning(
-                    "Skipping uploaded_file URL for source %s: %s",
-                    obj.source_id,
-                    exc,
-                )
-
-        uploaded_files = getattr(obj, "uploaded_files", None)
-        if uploaded_files is not None:
-            uploads_iterable = (
-                uploaded_files.all()
-                if hasattr(uploaded_files, "all")
-                else uploaded_files
-            )
-            for uploaded_file in uploads_iterable:
-                try:
-                    add_url(uploaded_file.file.url, "RAW")
-                except (ValueError, AttributeError) as exc:
-                    logger.warning(
-                        "Skipping uploaded file %s URL for source %s: %s",
-                        getattr(uploaded_file, "pk", "?"),
-                        obj.source_id,
-                        exc,
-                    )
 
         return merged_urls
 
@@ -645,7 +620,18 @@ class DocumentSourceCreateSerializer(serializers.ModelSerializer):
         required=False,
         default=list,
         help_text="List of external URLs for this source (e.g. original article link). "
-        "Each item may be a plain URL string or a dict with 'link' and 'role' keys.",
+        "Each item is a dict with 'link' and 'role' keys.",
+    )
+    uploaded_file = serializers.FileField(
+        required=False,
+        write_only=True,
+        validators=[
+            validate_upload_file_extension,
+            validate_upload_file_size,
+            validate_upload_file_mimetype,
+        ],
+        help_text="Optional file to ingest: stored to S3 and appended to `url` "
+        "as a link (role `upload_role`, default RAW).",
     )
     upload_role = serializers.ChoiceField(
         choices=[r.value for r in SourceLinkRole],

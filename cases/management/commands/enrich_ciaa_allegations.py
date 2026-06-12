@@ -715,7 +715,7 @@ class Command(BaseCommand):
             source.source_id: source
             for source in DocumentSource.objects.filter(
                 source_id__in=source_ids, is_deleted=False
-            ).prefetch_related("uploaded_files")
+            )
         }
         logger.debug(f"Cached {len(self._source_lookup)} DocumentSource records")
 
@@ -916,13 +916,6 @@ class Command(BaseCommand):
         return best_source if best_score > 0 else None
 
     def _describe_source(self, source: DocumentSource) -> str:
-        if source.uploaded_file:
-            name = source.uploaded_filename or source.uploaded_file.name
-            return f"uploaded file: {name} ({source.source_id})"
-        uploaded = source.uploaded_files.first()
-        if uploaded and uploaded.file:
-            name = uploaded.filename or uploaded.file.name
-            return f"uploaded file: {name} ({source.source_id})"
         urls = self._ranked_source_urls(source)
         if urls:
             parsed = urllib.parse.urlsplit(urls[0])
@@ -936,18 +929,13 @@ class Command(BaseCommand):
         return f"{source.source_id} (no content)"
 
     def _score_source_for_press_release(self, source: DocumentSource) -> int:
-        upload_names = [
-            file.filename or Path(file.file.name).name
-            for file in source.uploaded_files.all()
-        ]
+        # Uploaded-file names are part of their URL paths (in url_links).
         url_text = " ".join(source.url_links)
         corpus = " ".join(
             [
                 source.title or "",
                 source.description or "",
-                source.uploaded_filename or "",
                 url_text,
-                " ".join(upload_names),
             ]
         ).lower()
 
@@ -980,13 +968,8 @@ class Command(BaseCommand):
 
         converter = MarkItDown(enable_plugins=True)
         with tempfile.TemporaryDirectory(prefix="allegation-enrichment-") as tmp_dir:
-            temp_path = self._download_source_to_path(source, Path(tmp_dir))
-            if temp_path:
-                logger.debug("Converting uploaded source file for %s", source.source_id)
-                result = converter.convert_uri(temp_path.resolve().as_uri())
-                if result.text_content and len(result.text_content.strip()) >= 50:
-                    return result.text_content
-
+            # A source's links (including uploaded file links) all live in `url`,
+            # so conversion downloads each ranked URL.
             ranked_urls = self._ranked_source_urls(source)
 
             last_error = None
@@ -1049,32 +1032,6 @@ class Command(BaseCommand):
         except CommandError:
             out_path.unlink(missing_ok=True)
             raise
-
-    def _download_source_to_path(
-        self, source: DocumentSource, output_dir: Path
-    ) -> Path | None:
-        if source.uploaded_file:
-            filename = _sanitize_download_filename(
-                source.uploaded_filename or source.uploaded_file.name,
-                source.source_id,
-            )
-            out_path = _confined_output_path(output_dir, filename)
-            with source.uploaded_file.open("rb") as in_file:
-                _copy_stream_to_path_with_limit(in_file, out_path)
-            return out_path
-
-        uploaded = source.uploaded_files.first()
-        if uploaded and uploaded.file:
-            filename = _sanitize_download_filename(
-                uploaded.filename or uploaded.file.name,
-                source.source_id,
-            )
-            out_path = _confined_output_path(output_dir, filename)
-            with uploaded.file.open("rb") as in_file:
-                _copy_stream_to_path_with_limit(in_file, out_path)
-            return out_path
-
-        return None
 
     def _pick_source_url(self, source: DocumentSource) -> str | None:
         urls = self._ranked_source_urls(source)

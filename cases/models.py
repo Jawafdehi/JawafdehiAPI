@@ -5,7 +5,6 @@ See: .kiro/specs/accountability-platform-core/design.md
 """
 
 import enum
-import mimetypes
 import uuid
 
 from django.contrib.auth import get_user_model
@@ -800,37 +799,6 @@ class DocumentSource(models.Model):
         help_text="List of URLs for this source",
     )
 
-    # Uploaded file fields (for native file uploads)
-    # If uploaded_file is set, this source is considered an uploaded-file source
-    uploaded_file = models.FileField(
-        upload_to="jawafdehi/sources/%Y/%m/%d/",
-        null=True,
-        blank=True,
-        validators=[
-            validate_upload_file_extension,
-            validate_upload_file_size,
-            validate_upload_file_mimetype,
-        ],
-        help_text="Uploaded file (if source is from file upload)",
-    )
-    uploaded_filename = models.CharField(
-        max_length=255,
-        null=True,
-        blank=True,
-        help_text="Original filename for uploaded file",
-    )
-    uploaded_content_type = models.CharField(
-        max_length=100,
-        null=True,
-        blank=True,
-        help_text="MIME type of uploaded file (e.g., application/pdf)",
-    )
-    uploaded_file_size = models.PositiveIntegerField(
-        null=True,
-        blank=True,
-        help_text="File size in bytes",
-    )
-
     # Entity relationships
     related_entities = models.ManyToManyField(
         JawafEntity,
@@ -972,71 +940,6 @@ class DocumentSource(models.Model):
 
         # Run full model and field validation (includes validate_url_list).
         self.full_clean()
-
-        super().save(*args, **kwargs)
-
-
-class DocumentSourceUpload(models.Model):
-    """Represents one uploaded file attached to a DocumentSource."""
-
-    source = models.ForeignKey(
-        DocumentSource,
-        on_delete=models.CASCADE,
-        related_name="uploaded_files",
-        help_text="Document source this uploaded file belongs to",
-    )
-    file = models.FileField(
-        upload_to="jawafdehi/sources/%Y/%m/%d/",
-        validators=[
-            validate_upload_file_extension,
-            validate_upload_file_size,
-            validate_upload_file_mimetype,
-        ],
-        help_text="Uploaded file",
-    )
-    filename = models.CharField(
-        max_length=255,
-        blank=True,
-        help_text="Original filename (auto-populated)",
-    )
-    content_type = models.CharField(
-        max_length=100,
-        blank=True,
-        help_text="MIME type (auto-populated best-effort)",
-    )
-    file_size = models.PositiveIntegerField(
-        null=True,
-        blank=True,
-        help_text="File size in bytes (auto-populated)",
-    )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        ordering = ["-created_at"]
-
-    def __str__(self):
-        return f"{self.source.source_id} - {self.filename or self.file.name}"
-
-    def save(self, *args, **kwargs):
-        """Auto-populate metadata fields from uploaded file before saving."""
-        if self.file:
-            if not self.filename:
-                self.filename = (self.file.name or "").split("/")[-1]
-
-            if self.file_size in (None, 0):
-                self.file_size = getattr(self.file, "size", None)
-
-            if not self.content_type:
-                uploaded_content_type = getattr(
-                    getattr(self.file, "file", None), "content_type", None
-                )
-                if uploaded_content_type:
-                    self.content_type = uploaded_content_type
-                else:
-                    guessed_content_type, _ = mimetypes.guess_type(self.file.name)
-                    if guessed_content_type:
-                        self.content_type = guessed_content_type
 
         super().save(*args, **kwargs)
 

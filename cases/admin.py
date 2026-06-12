@@ -21,7 +21,6 @@ from .models import (
     CaseState,
     ChatUserIdentity,
     DocumentSource,
-    DocumentSourceUpload,
     Feedback,
     JawafEntity,
     RelationshipType,
@@ -845,37 +844,6 @@ class DocumentSourceAdminForm(forms.ModelForm):
         return cleaned_data
 
 
-class DocumentSourceUploadInline(admin.TabularInline):
-    """Inline form for managing multiple uploaded files on a source.
-
-    Uploaded files are always stored as RAW source links (the link-type
-    selector on the External URLs tab does not apply to uploads). Allowed
-    types and the size cap are surfaced as help text and an ``accept`` filter
-    so the constraint is clear before submit, not only on a validation error.
-    """
-
-    model = DocumentSourceUpload
-    extra = 1
-    fields = ("file", "filename", "content_type", "file_size", "created_at")
-    readonly_fields = ("filename", "content_type", "file_size", "created_at")
-    verbose_name = "Uploaded file"
-    verbose_name_plural = "Uploaded files"
-
-    def formfield_for_dbfield(self, db_field, request, **kwargs):
-        formfield = super().formfield_for_dbfield(db_field, request, **kwargs)
-        if db_field.name == "file" and formfield is not None:
-            max_mb = int(MAX_UPLOAD_FILE_SIZE / (1024 * 1024))
-            allowed = ", ".join(ALLOWED_UPLOAD_EXTENSIONS)
-            formfield.help_text = (
-                f"Stored as a RAW source document. Allowed types: {allowed}. "
-                f"Max size: {max_mb} MB."
-            )
-            formfield.widget.attrs["accept"] = ",".join(
-                f".{ext}" for ext in ALLOWED_UPLOAD_EXTENSIONS
-            )
-        return formfield
-
-
 @admin.register(DocumentSource)
 class DocumentSourceAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
     """
@@ -953,18 +921,6 @@ class DocumentSourceAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
     )
 
     filter_horizontal = ["related_entities", "contributors"]
-
-    def uploaded_file_url(self, obj):
-        """Return clickable URL for uploaded file in admin detail view."""
-        if not obj.uploaded_file:
-            return "-"
-
-        url = obj.uploaded_file.url
-        return format_html(
-            '<a href="{}" target="_blank" rel="noopener noreferrer">{}</a>', url, url
-        )
-
-    uploaded_file_url.short_description = "Uploaded File URL"
 
     def deletion_status(self, obj):
         """Display deletion status as a colored badge."""

@@ -13,7 +13,6 @@ Usage::
 
 import logging
 import os
-import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -316,7 +315,7 @@ class Command(BaseCommand):
             source.source_id: source
             for source in DocumentSource.objects.filter(
                 source_id__in=source_ids, is_deleted=False
-            ).prefetch_related("uploaded_files")
+            )
         }
         logger.debug("Cached %d DocumentSource records", len(self._source_lookup))
 
@@ -367,13 +366,10 @@ class Command(BaseCommand):
         corpus_parts = [
             source.title or "",
             source.description or "",
-            source.uploaded_filename or "",
         ]
+        # Uploaded-file names are part of their URL paths, which are in url_links.
         urls = [url.strip() for url in source.url_links if url.strip()]
         corpus_parts.append(" ".join(urls))
-
-        for uploaded in source.uploaded_files.all():
-            corpus_parts.append(uploaded.filename or Path(uploaded.file.name).name)
 
         corpus = " ".join(corpus_parts).lower()
 
@@ -442,10 +438,13 @@ class Command(BaseCommand):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _ranked_press_release_urls(source):
-        """Return URLs ranked by conversion preference for press releases.
+    def _ranked_document_urls(source):
+        """Return the source's URLs ranked by conversion preference.
 
-        Priority: DOCX > DOC > PDF > other (e.g., CIAA webpage HTML)
+        Priority: DOCX > DOC > PDF > other (e.g., a CIAA webpage / HTML landing
+        page). Used for both press releases and court orders so the richest
+        document format is always tried before a landing page, regardless of the
+        order links happen to sit in ``url``.
         """
         urls = [url.strip() for url in source.url_links if url.strip()]
         if not urls:
@@ -474,98 +473,25 @@ class Command(BaseCommand):
     # Document conversion
     # ------------------------------------------------------------------
 
-    def _convert_source_to_markdown(self, source, session, is_press_release=False):
+    def _convert_source_to_markdown(self, source, session):
         """Convert a DocumentSource to markdown text.
 
-        For press releases: tries DOCX → DOC → uploaded_file → PDF → webpage
-        For court orders: tries uploaded files first, then URLs.
+        Conversion is URL-based: a source's links (including uploaded file links)
+        all live in its ``url`` list, tried in document-priority order
+        (DOCX > DOC > PDF > HTML) so the richest format wins regardless of the
+        order links sit in ``url``. Falls back to the description when no URL
+        converts.
         """
-        if is_press_release:
-            return self._convert_press_release_to_markdown(source, session)
-        return self._convert_court_order_to_markdown(source, session)
-
-    def _convert_press_release_to_markdown(self, source, session):
-        """Convert press release source. Priority: DOCX > DOC > uploaded > PDF > HTML."""
-        ranked_urls = self._ranked_press_release_urls(source)
-
-        # Try each URL in priority order
-        for url in ranked_urls:
+        for url in self._ranked_document_urls(source):
             md = convert_to_markdown(url, session)
             if md:
                 return md
-
-        # Try uploaded files as fallback
-        uploaded_md = self._convert_uploaded_file(source)
-        if uploaded_md:
-            return uploaded_md
 
         # Fallback to description
         if source.description and len(source.description.strip()) >= 500:
             return source.description
 
         return None
-
-    def _convert_court_order_to_markdown(self, source, session):
-        """Convert court order source. Uploaded files first, then URLs."""
-        uploaded_md = self._convert_uploaded_file(source)
-        if uploaded_md:
-            return uploaded_md
-
-        urls = [url.strip() for url in source.url_links if url.strip()]
-        for url in urls:
-            md = convert_to_markdown(url, session)
-            if md:
-                return md
-
-        if source.description and len(source.description.strip()) >= 500:
-            return source.description
-
-        return None
-
-    def _convert_uploaded_file(self, source):
-        """Download and convert the best uploaded file for a source via markitdown/likhit."""
-        try:
-            import likhit  # noqa: F401
-            from markitdown import MarkItDown
-        except ImportError as exc:
-            raise CommandError(
-                "markitdown and likhit are required for document conversion."
-            ) from exc
-
-        file_field = source.uploaded_file
-        if not file_field:
-            uploaded_files = list(source.uploaded_files.all())
-            if uploaded_files and uploaded_files[0].file:
-                file_field = uploaded_files[0].file
-
-        if not file_field:
-            return None
-
-        suffix = Path(file_field.name).suffix or ""
-        tmp_path = None
-        try:
-            tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
-            tmp_path = tmp.name
-            with file_field.open("rb") as in_file:
-                while True:
-                    chunk = in_file.read(8192)
-                    if not chunk:
-                        break
-                    tmp.write(chunk)
-            tmp.close()
-
-            converter = MarkItDown(enable_plugins=True)
-            result = converter.convert(tmp_path)
-            if (
-                result
-                and result.text_content
-                and len(result.text_content.strip()) > 200
-            ):
-                return result.text_content.strip()
-            return None
-        finally:
-            if tmp_path:
-                Path(tmp_path).unlink(missing_ok=True)
 
     # ------------------------------------------------------------------
     # Intelligent truncation (Problems 4 & 5)
@@ -795,9 +721,7 @@ class Command(BaseCommand):
         # Press release — use more context when no court order is available
         pr_source = self._get_press_release_source(case)
         if pr_source:
-            pr_md = self._convert_source_to_markdown(
-                pr_source, session, is_press_release=True
-            )
+            pr_md = self._convert_source_to_markdown(pr_source, session)
             if pr_md:
                 # No court order → use up to PRESS_RELEASE_CHARS_NO_COURT
                 # With court order → use PRESS_RELEASE_CHARS (still more than before)
@@ -823,9 +747,7 @@ class Command(BaseCommand):
 
         # Court order — intelligent truncation
         if co_source:
-            co_md = self._convert_source_to_markdown(
-                co_source, session, is_press_release=False
-            )
+            co_md = self._convert_source_to_markdown(co_source, session)
             if co_md:
                 co_len = len(co_md)
                 truncated = self._truncate_court_order(co_md)

@@ -846,11 +846,7 @@ class DocumentSourceViewSet(
         # at all). Other callers keep the public contract below.
         user = self.request.user
         if user and user.is_authenticated and is_readonly(user):
-            return (
-                DocumentSource.objects.filter(is_deleted=False)
-                .prefetch_related("uploaded_files")
-                .distinct()
-            )
+            return DocumentSource.objects.filter(is_deleted=False).distinct()
 
         allowed_states = [CaseState.PUBLISHED, CaseState.IN_REVIEW]
         visible_cases = Case.objects.filter(state__in=allowed_states)
@@ -864,11 +860,9 @@ class DocumentSourceViewSet(
                         source_ids.add(evidence_item["source_id"])
 
         # Return sources that are referenced and not soft-deleted
-        return (
-            DocumentSource.objects.filter(source_id__in=source_ids, is_deleted=False)
-            .prefetch_related("uploaded_files")
-            .distinct()
-        )
+        return DocumentSource.objects.filter(
+            source_id__in=source_ids, is_deleted=False
+        ).distinct()
 
     def get_object(self):
         """
