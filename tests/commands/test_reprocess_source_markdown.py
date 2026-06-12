@@ -401,6 +401,47 @@ def test_source_page_falls_back_to_markitdown_when_extraction_empty(settings, tm
     assert res["markdown"].rstrip().endswith("fallback body")
 
 
+# ── Mislabeled-file detection (magic bytes) ──────────────────
+
+
+def test_ext_from_magic_detects_office_containers():
+    assert converter._ext_from_magic(b"PK\x03\x04rest") == ".docx"  # OOXML/ZIP
+    assert converter._ext_from_magic(b"\xd0\xcf\x11\xe0rest") == ".doc"  # OLE2
+    assert converter._ext_from_magic(b"%PDF-1.7") is None  # not disambiguated
+    assert converter._ext_from_magic(b"") is None
+    assert converter._ext_from_magic(b"<html>") is None
+
+
+def test_docx_mislabeled_as_doc_is_routed_by_magic(settings, tmp_path):
+    """A .docx saved with a .doc name (ZIP magic) must be converted as .docx,
+    not handed to the legacy .doc path that would reject it."""
+    settings.SOURCE_MARKDOWN_DIR = tmp_path
+    src = {
+        "source_id": "d1",
+        "title": "Mislabeled",
+        "urls": [{"link": "http://x/file.doc", "role": "RAW"}],
+    }
+    captured = {}
+
+    def _fake_convert(path):
+        captured["suffix"] = path[-5:]
+        return MagicMock(text_content="docx body")
+
+    with patch.object(
+        converter.jds_client,
+        "download_source_file",
+        # ZIP magic but a .doc url
+        return_value=(b"PK\x03\x04 zipbytes...", "application/msword"),
+    ), patch.object(converter, "_markitdown") as md, patch.object(
+        converter, "_patch_likhit_ocr_dpi"
+    ):
+        md.return_value.convert.side_effect = _fake_convert
+        res = converter.convert_source(src, overwrite=True)
+    assert res["status"] == "converted"
+    assert "(.docx)" in res["note"]  # routed as docx, not .doc
+    assert captured["suffix"] == ".docx"  # temp file given the right suffix
+
+
 # ── Frontmatter ──────────────────────────────────────────────
 
 

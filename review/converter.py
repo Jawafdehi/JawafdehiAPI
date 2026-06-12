@@ -108,6 +108,30 @@ def _ext_from_url(url, content_type=""):
     return ".bin"
 
 
+def _ext_from_magic(content):
+    """Detect a file's true extension from its leading magic bytes, or None.
+
+    Source files are routed to a converter by URL extension, but uploads are
+    frequently MISLABELED — most commonly a modern ``.docx`` (a ZIP/OOXML
+    container) saved with a ``.doc`` name. antiword then rejects it ("not a Word
+    Document ... seems to be a ZIP"). Sniffing the real container lets us route
+    such files to the right converter (MarkItDown handles ``.docx`` cleanly).
+
+    Only disambiguates the Office family we actually confuse:
+      - ``PK\\x03\\x04`` (ZIP)  -> ``.docx``  (OOXML)
+      - ``\\xd0\\xcf\\x11\\xe0`` (OLE2) -> ``.doc``  (legacy binary Word)
+    Returns None for anything else (PDF/HTML/txt/etc. keep their URL ext).
+    """
+    if not content:
+        return None
+    head = content[:8]
+    if head[:4] == b"PK\x03\x04":
+        return ".docx"
+    if head[:4] == b"\xd0\xcf\x11\xe0":
+        return ".doc"
+    return None
+
+
 # How cleanly a format converts to markdown — higher is better. Word docs are
 # structured text (best), HTML is extractable main-content, PDF may need OCR,
 # everything else is a guess. Used to decide whether an ALTERNATE link is a
@@ -308,6 +332,12 @@ def convert_source(source, *, overwrite=False):
     try:
         content, ctype = jds_client.download_source_file(url)
         ext = _ext_from_url(url, ctype)
+        # Correct mislabeled Office files (e.g. a .docx saved with a .doc name)
+        # by sniffing the real container, so the file is routed to the converter
+        # that can actually read it.
+        true_ext = _ext_from_magic(content)
+        if true_ext and true_ext != ext:
+            ext = true_ext
         # HTML sources (the SOURCE_PAGE landing page, or a RAW/ALTERNATE link
         # that is itself a web page): extract just the main content so the
         # markdown isn't polluted with nav/header/footer chrome. Fall back to the
