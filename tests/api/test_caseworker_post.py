@@ -147,3 +147,42 @@ def test_post_rejects_array_payload():
     assert "detail" in response.data
     assert response.data["detail"] == "Request body must be a JSON object."
     assert Case.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_write_response_serializes_entities_from_prefetch():
+    """
+    The create/PATCH responses re-fetch the case with
+    ``entity_relationships__entity`` prefetched before serializing with
+    CaseSerializer. This guards that mechanism: once a case is fetched that
+    way, serializing it (which calls get_entities) issues NO further queries,
+    regardless of how many related entities it has. Without the re-fetch +
+    prefetch, get_entities fires one query per entity (N+1).
+    """
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    from cases.serializers import CaseSerializer
+
+    case = Case.objects.create(title="Many entities", case_type=CaseType.CORRUPTION)
+    for i in range(5):
+        CaseEntityRelationship.objects.create(
+            case=case,
+            entity=JawafEntity.objects.create(display_name=f"Entity {i}"),
+            relationship_type=RelationshipType.ACCUSED,
+        )
+
+    # Re-fetch exactly as the create/partial_update responses do.
+    fetched = Case.objects.prefetch_related("entity_relationships__entity").get(
+        pk=case.pk
+    )
+
+    with CaptureQueriesContext(connection) as ctx:
+        data = CaseSerializer(fetched).data
+        assert len(data["entities"]) == 5
+
+    assert len(ctx.captured_queries) == 0, (
+        "serializing a prefetched case should issue no queries, but issued "
+        f"{len(ctx.captured_queries)} — entity hydration is not reusing the "
+        "prefetch cache (N+1 on the write response)"
+    )
