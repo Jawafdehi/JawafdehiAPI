@@ -65,6 +65,7 @@ from .rules.predicates import (
 from .search_serializers import SearchResponseSerializer
 from .serializers import (
     CaseDetailSerializer,
+    CaseListSerializer,
     CaseSerializer,
     DocumentSourceSerializer,
     FeedbackSerializer,
@@ -342,6 +343,10 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
             return CaseCreateSerializer
         if self.action == "retrieve":
             return CaseDetailSerializer
+        if self.action == "list":
+            # Slim payload: drops detail-only body fields (description,
+            # timeline, evidence, notes, missing_details, versionInfo).
+            return CaseListSerializer
         return CaseSerializer
 
     def get_queryset(self):
@@ -470,6 +475,11 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
                     relationship_type=RelationshipType.RELATED,
                 )
 
+        # Re-fetch with the entity prefetch so CaseSerializer.get_entities()
+        # reuses the cache instead of firing one query per related entity.
+        case = Case.objects.prefetch_related("entity_relationships__entity").get(
+            pk=case.pk
+        )
         return Response(CaseSerializer(case).data, status=status.HTTP_201_CREATED)
 
     def retrieve(self, request, *args, **kwargs):
@@ -669,6 +679,11 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
                         status=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     )
 
+        # Re-fetch with the entity prefetch so CaseSerializer.get_entities()
+        # reuses the cache instead of firing one query per related entity.
+        case = Case.objects.prefetch_related("entity_relationships__entity").get(
+            pk=case.pk
+        )
         return Response(CaseSerializer(case).data, status=status.HTTP_200_OK)
 
     def _build_snapshot(self, case: Case) -> dict:

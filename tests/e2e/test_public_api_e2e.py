@@ -479,7 +479,11 @@ class TestPublicAPIWorkflows:
         assert (
             returned_case["title"] == "Single Row Case - Updated Title"
         ), "Should return the current (updated) title"
-        assert returned_case["description"] == "Updated description"
+        # The list payload is slim and intentionally omits the full description;
+        # confirm the updated body via the detail endpoint, where it still lives.
+        detail = self.client.get(f"/api/cases/{returned_case['slug']}/")
+        assert detail.status_code == 200
+        assert detail.data["description"] == "Updated description"
 
     def test_pagination_workflow(self):
         """

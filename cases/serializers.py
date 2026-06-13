@@ -185,7 +185,11 @@ class CaseSerializer(serializers.ModelSerializer):
     def get_entities(self, obj):
         """Get entities from unified relationship system."""
         try:
-            relationships = obj.entity_relationships.select_related("entity")
+            # Use .all() (not .select_related) so we reuse the
+            # ``entity_relationships__entity`` prefetch cache populated by the
+            # viewset. Calling .select_related() here builds a fresh queryset
+            # that bypasses the cache and fires one extra query per case (N+1).
+            relationships = obj.entity_relationships.all()
             return SimplifiedEntitySerializer(relationships, many=True).data
         except (ValueError, TypeError, AttributeError) as e:
             logger.error(
@@ -307,6 +311,44 @@ class CaseDetailSerializer(CaseSerializer):
 
     class Meta(CaseSerializer.Meta):
         pass
+
+
+class CaseListSerializer(CaseSerializer):
+    """
+    Slim serializer for the case LIST endpoint (GET /api/cases/).
+
+    The list response previously reused the full ``CaseSerializer`` and shipped
+    every detail field for every case on the page, bloating the payload (and,
+    via the MCP search tool, the LLM context that consumes it). This serializer
+    drops the heavy, detail-only body fields that no list consumer reads:
+
+      - description       (list cards render ``short_description`` instead)
+      - timeline
+      - evidence
+      - notes             (also internal-only content)
+      - missing_details
+      - versionInfo
+
+    Full fidelity is preserved on the retrieve endpoint via CaseDetailSerializer.
+    ``short_description`` is returned verbatim; when blank it is simply empty
+    (no title/description fallback).
+    """
+
+    class Meta(CaseSerializer.Meta):
+        fields = [
+            f
+            for f in CaseSerializer.Meta.fields
+            if f
+            not in {
+                "description",
+                "timeline",
+                "evidence",
+                "notes",
+                "missing_details",
+                "versionInfo",
+            }
+        ]
+        read_only_fields = fields
 
 
 class SourceLinkField(serializers.Field):
