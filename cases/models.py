@@ -372,10 +372,25 @@ class CaseEntityRelationship(models.Model):
 
 
 class CaseType(models.TextChoices):
-    """Enum for case types."""
+    """Enum for case types.
 
-    CORRUPTION = "CORRUPTION", "Corruption"
-    TAX_EVASION = "TAX_EVASION", "Tax Evasion"
+    CORRUPTION stays the general/catch-all corruption type. The more specific
+    charges below branch off it (they were previously expressed only as
+    corruption-type tags) so each can diverge later with its own required
+    fields and review behaviour. Labels carry the Nepali term in brackets so
+    the Django admin and DRF browsable enum show both languages; the frontend
+    uses i18n keys instead (see ``utils/case-entities.ts``).
+    """
+
+    CORRUPTION = "CORRUPTION", "Corruption (भ्रष्टाचार)"
+    BRIBERY = "BRIBERY", "Bribery (घूस)"
+    FORGERY = "FORGERY", "Forgery (नक्कली)"
+    EMBEZZLEMENT = "EMBEZZLEMENT", "Embezzlement (अपचय)"
+    ABUSE_OF_OFFICE = "ABUSE_OF_OFFICE", "Abuse of Office (दुरुपयोग)"
+    MONEY_LAUNDERING = "MONEY_LAUNDERING", "Money Laundering (सम्पत्ति शुद्धीकरण)"
+    ILLEGAL_PROPERTY = "ILLEGAL_PROPERTY", "Illegal Property (गैरकानूनी सम्पत्ति)"
+    EXAM_RIGGING = "EXAM_RIGGING", "Exam Rigging (परीक्षा अनियमितता)"
+    TAX_EVASION = "TAX_EVASION", "Tax Evasion (कर छली)"
 
 
 # Case types that must name at least one ACCUSED entity before they can leave
@@ -384,7 +399,21 @@ class CaseType(models.TextChoices):
 # the model, the admin formset, and the review engine all consult it so they
 # never drift. ``requires_accused`` accepts either a ``CaseType`` member or its
 # plain string value (``TextChoices`` values are ``str`` subclasses).
-CASE_TYPES_REQUIRING_ACCUSED = frozenset({CaseType.CORRUPTION})
+#
+# Every corruption-derived charge is an accusation against a named party, so
+# they all share CORRUPTION's bar; only TAX_EVASION stays subject-only.
+CASE_TYPES_REQUIRING_ACCUSED = frozenset(
+    {
+        CaseType.CORRUPTION,
+        CaseType.BRIBERY,
+        CaseType.FORGERY,
+        CaseType.EMBEZZLEMENT,
+        CaseType.ABUSE_OF_OFFICE,
+        CaseType.MONEY_LAUNDERING,
+        CaseType.ILLEGAL_PROPERTY,
+        CaseType.EXAM_RIGGING,
+    }
+)
 
 
 def requires_accused(case_type):
@@ -449,7 +478,7 @@ class Case(models.Model):
 
     # Core fields
     case_type = models.CharField(
-        max_length=20,
+        max_length=32,
         choices=CaseType.choices,
         help_text="Type of case",
     )
