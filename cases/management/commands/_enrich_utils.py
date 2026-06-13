@@ -557,7 +557,12 @@ def call_bedrock_with_tools(
     client = session.client(
         "bedrock-runtime",
         config=Config(
-            read_timeout=120, connect_timeout=15, retries={"max_attempts": 4}
+            read_timeout=120,
+            connect_timeout=15,
+            # Adaptive mode adds client-side rate-limiting + backoff on
+            # ThrottlingException, which matters when several enrichment workers
+            # call Bedrock concurrently (see enrich_ciaa_description --concurrency).
+            retries={"max_attempts": 6, "mode": "adaptive"},
         ),
     )
 
