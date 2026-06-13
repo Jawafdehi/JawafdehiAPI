@@ -225,7 +225,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    "auditlog.middleware.AuditlogMiddleware",
+    "config.middleware.JWTAuditlogMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"
@@ -498,7 +498,13 @@ TESTING = os.getenv("TESTING") == "true" or any("pytest" in arg for arg in sys.a
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework_simplejwt.authentication.JWTAuthentication",
-        "rest_framework.authentication.TokenAuthentication",
+        # ChatServiceAccountAuthentication subclasses TokenAuthentication and adds
+        # X-Jawafdehi-User-Id impersonation: a request bearing the chat service
+        # account token + that header is authenticated AS the impersonated end
+        # user, so permission checks and audit attribution both see the real user
+        # (not the shared service account). For non-service-account tokens it
+        # behaves exactly like TokenAuthentication.
+        "config.auth.ChatServiceAccountAuthentication",
         "rest_framework.authentication.SessionAuthentication",
     ],
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",

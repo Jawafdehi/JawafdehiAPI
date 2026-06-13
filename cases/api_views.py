@@ -36,6 +36,7 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 from config.auth import (
     JAWAFDEHI_USER_ID_HEADER,
     SERVICE_ACCOUNT_USERNAME,
+    ChatServiceAccountAuthentication,
     resolve_or_create_identity,
 )
 
@@ -322,7 +323,10 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
     search_fields = ["title", "description", "key_allegations"]
     authentication_classes = [
         JWTAuthentication,
-        TokenAuthentication,
+        # Impersonation-aware Token auth: the chat MCP server writes with the
+        # service-account token + X-Jawafdehi-User-Id, and this resolves
+        # request.user to the impersonated end user for both authz and audit.
+        ChatServiceAccountAuthentication,
         SessionAuthentication,
     ]
 
@@ -642,7 +646,13 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
             }
             if scalar_updates:
                 case = self.get_object()
-                Case.objects.filter(pk=case.pk).update(**scalar_updates)
+                for field, value in scalar_updates.items():
+                    setattr(case, field, value)
+                # Persist via save(update_fields=...) rather than a bulk
+                # queryset .update() so django-auditlog's post_save signal
+                # fires and records the change (and the acting user). A bulk
+                # .update() bypasses signals, leaving case edits unaudited.
+                case.save(update_fields=[*scalar_updates, "updated_at"])
 
             # Persist entity relationship changes only when a /entities op
             # was explicitly included — avoids unnecessary delete/recreate on

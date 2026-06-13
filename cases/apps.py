@@ -10,8 +10,18 @@ class CasesConfig(AppConfig):
         # Register models with auditlog
         from auditlog.registry import auditlog
 
-        from cases.models import Case, DocumentSource, JawafEntity
+        from cases.models import (
+            Case,
+            CaseEntityRelationship,
+            DocumentSource,
+            Feedback,
+            JawafEntity,
+        )
 
         auditlog.register(Case)
         auditlog.register(DocumentSource)
         auditlog.register(JawafEntity)
+        # Through-model for case<->entity links: edited directly by the
+        # /api/cases PATCH entities path (delete + recreate) and admin inlines.
+        auditlog.register(CaseEntityRelationship)
+        auditlog.register(Feedback)
