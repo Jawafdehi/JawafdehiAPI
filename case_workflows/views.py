@@ -1,11 +1,11 @@
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters, status, viewsets
-from rest_framework.authentication import TokenAuthentication
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from cases.models import Case
+from config.auth import ChatServiceAccountAuthentication
 
 from .models import CaseWorkflowRun
 from .permissions import IsAdminOrModeratorOrContributorReadOnly
@@ -24,7 +24,7 @@ class CaseWorkflowRunViewSet(viewsets.ReadOnlyModelViewSet):
     Accessible by Admin and Moderator (full access), and Contributor (read-only).
     """
 
-    authentication_classes = [TokenAuthentication]
+    authentication_classes = [ChatServiceAccountAuthentication]
     permission_classes = [IsAdminOrModeratorOrContributorReadOnly]
 
     queryset = CaseWorkflowRun.objects.all().order_by("-created_at")
@@ -94,7 +94,7 @@ class EligibleCasesView(APIView):
     Accessible by Admin and Moderator (full access), and Contributor (read-only).
     """
 
-    authentication_classes = [TokenAuthentication]
+    authentication_classes = [ChatServiceAccountAuthentication]
     permission_classes = [IsAdminOrModeratorOrContributorReadOnly]
 
     def get(self, request):

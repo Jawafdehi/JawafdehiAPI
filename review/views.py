@@ -15,6 +15,7 @@ endpoint. We expose a small `me` view so the SPA can show who is signed in and
 gate the UI by role.
 """
 
+import structlog
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import generics, status
@@ -37,6 +38,8 @@ from .serializers import (
     SourceMarkdownSerializer,
     SubmitSerializer,
 )
+
+_audit_log = structlog.get_logger("jawafdehi.audit")
 
 
 @api_view(["GET"])
@@ -316,5 +319,16 @@ def regrade_all(request):
         stage="queued_for_regrade",
         error="",
         updated_at=timezone.now(),
+    )
+    # Bulk .update() bypasses auditlog signals. Per-row LogEntry would be
+    # excessive here (potentially thousands of reviews), so record one audit
+    # line attributing the actor and the scope of the regrade.
+    actor = getattr(request, "user", None)
+    _audit_log.info(
+        "casework.regrade_all",
+        actor=getattr(actor, "username", None),
+        actor_id=getattr(actor, "id", None),
+        review_count=len(ids),
+        review_ids=ids,
     )
     return Response({"regrading": len(ids), "review_ids": ids})

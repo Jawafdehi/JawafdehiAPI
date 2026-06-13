@@ -18,6 +18,7 @@ from cases.models import (
     SourceLinkRole,
     validate_url_list,
 )
+from cases.services.audit import log_field_update
 from cases.services.storage_links import absolute_media_url
 
 
@@ -70,9 +71,14 @@ def attach_markdown(source: DocumentSource, markdown: str, *, overwrite: bool = 
     # MEDIA_NEWS source missing publication_date), failing the maintenance fix
     # on otherwise-valid sources.
     validate_url_list(urls)
+    old_urls = source.url
     DocumentSource.objects.filter(pk=source.pk).update(
         url=urls, updated_at=timezone.now()
     )
     source.url = urls
+
+    # The bulk .update() above bypasses django-auditlog's signals, so record the
+    # url change (and acting user) manually to keep the source's audit trail.
+    log_field_update(source, {"url": [old_urls, urls]})
 
     return {"created": True, "link": link, "skipped": False}

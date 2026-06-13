@@ -4,7 +4,7 @@ from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
 from django.contrib.auth import get_user_model
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.db import models
+from django.db import models, transaction
 from django.forms.models import BaseInlineFormSet
 from django.template.response import TemplateResponse
 from django.utils.html import format_html
@@ -758,7 +758,26 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         """
         Bulk action to close cases.
         """
-        count = queryset.update(state=CaseState.CLOSED)
+        # Save each row instead of a bulk queryset .update() so django-auditlog
+        # records the state change (a bulk .update() bypasses model signals).
+        # Wrap the loop in a single transaction so a row that fails validation
+        # (e.g. Case.save() rejects an empty title) rolls the whole action back
+        # rather than leaving some cases closed and others not.
+        try:
+            with transaction.atomic():
+                count = 0
+                for case in queryset:
+                    case.state = CaseState.CLOSED
+                    case.save(update_fields=["state", "updated_at"])
+                    count += 1
+        except ValidationError as exc:
+            msg = exc.messages[0] if getattr(exc, "messages", None) else str(exc)
+            self.message_user(
+                request,
+                f"No cases closed — a selected case failed validation: {msg}",
+                level=messages.ERROR,
+            )
+            return
         self.message_user(request, f"{count} case(s) closed successfully.")
 
     close_cases.short_description = "Close selected cases"
@@ -1103,11 +1122,32 @@ class DocumentSourceAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
 
         return actions
 
+    def _set_sources_deleted(self, queryset, deleted: bool) -> int:
+        """Flip is_deleted via bulk UPDATE, recording a manual audit entry each.
+
+        A bulk .update() is used (rather than per-row save()) so an unrelated
+        invalid field on a selected source can't block the maintenance action,
+        but that bypasses auditlog's signals — so we log each change manually.
+        """
+        from cases.services.audit import log_field_update
+
+        # Snapshot before the bulk UPDATE so source.is_deleted holds the OLD
+        # value; only rows that actually flip are audited and counted, matching
+        # what queryset.update() would have reported.
+        sources = list(queryset)
+        queryset.update(is_deleted=deleted)
+        changed = 0
+        for source in sources:
+            if source.is_deleted != deleted:
+                log_field_update(source, {"is_deleted": [source.is_deleted, deleted]})
+                changed += 1
+        return changed
+
     def soft_delete_sources(self, request, queryset):
         """
         Bulk action to soft delete sources.
         """
-        count = queryset.update(is_deleted=True)
+        count = self._set_sources_deleted(queryset, True)
         self.message_user(request, f"{count} source(s) marked as deleted.")
 
     soft_delete_sources.short_description = "Mark selected sources as deleted"
@@ -1116,7 +1156,7 @@ class DocumentSourceAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         """
         Bulk action to restore soft-deleted sources.
         """
-        count = queryset.update(is_deleted=False)
+        count = self._set_sources_deleted(queryset, False)
         self.message_user(request, f"{count} source(s) restored.")
 
     restore_sources.short_description = "Restore selected sources"
