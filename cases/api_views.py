@@ -220,7 +220,7 @@ class UnifiedSearchView(APIView):
         Results are ordered by creation date (newest first).
 
         **Filtering:**
-        - `case_type`: Filter by case type (CORRUPTION)
+        - `case_type`: Filter by case type (e.g. CORRUPTION, BRIBERY, FORGERY)
         - `tags`: Filter cases containing a specific tag
 
         **Search:**
@@ -236,7 +236,7 @@ class UnifiedSearchView(APIView):
                 type=OpenApiTypes.STR,
                 location=OpenApiParameter.QUERY,
                 description="Filter by case type",
-                enum=["CORRUPTION"],
+                enum=CaseType.values,
                 required=False,
             ),
             OpenApiParameter(
