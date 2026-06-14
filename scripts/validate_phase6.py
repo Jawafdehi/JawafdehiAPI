@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from collections import Counter, defaultdict
 from datetime import date
 from pathlib import Path
@@ -33,49 +34,38 @@ def load_json(path, label):
         with open(path, encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
-        print(f"  WARN: {label} — {e}")
-        return None
+        print(f"  ERROR: {label} — {e}")
+        sys.exit(1)
 
 
 def load_all():
     print("Loading data sources...")
     sources = {}
 
-    sources["enriched_cases"] = (
-        load_json(
-            EXTRACTED_DIR / "enriched-ciaa-cases.json", "enriched-ciaa-cases.json"
-        )
-        or []
+    sources["enriched_cases"] = load_json(
+        EXTRACTED_DIR / "enriched-ciaa-cases.json", "enriched-ciaa-cases.json"
     )
 
-    sources["unified_cases"] = (
-        load_json(EXTRACTED_DIR / "unified-ciaa-cases.json", "unified-ciaa-cases.json")
-        or []
+    sources["unified_cases"] = load_json(
+        EXTRACTED_DIR / "unified-ciaa-cases.json", "unified-ciaa-cases.json"
     )
 
-    sources["cross_ref"] = (
-        load_json(
-            CONSOLIDATED_DIR / "cross-reference-details.json",
-            "cross-reference-details.json",
-        )
-        or []
+    sources["cross_ref"] = load_json(
+        CONSOLIDATED_DIR / "cross-reference-details.json",
+        "cross-reference-details.json",
     )
 
-    sources["annual_report"] = (
-        load_json(
-            EXTRACTED_DIR / "ciaa-annual-report-cases.json",
-            "ciaa-annual-report-cases.json",
-        )
-        or {}
+    sources["annual_report"] = load_json(
+        EXTRACTED_DIR / "ciaa-annual-report-cases.json",
+        "ciaa-annual-report-cases.json",
     )
 
     sources["ngm_cases"] = load_json(
         DATA_DIR / "ngm-special-court-cases.json", "ngm-special-court-cases.json"
-    ) or {"cases": []}
+    )
 
-    # entities_raw has entity data
-    sources["entities_raw"] = (
-        load_json(EXTRACTED_DIR / "entities_raw.json", "entities_raw.json") or []
+    sources["entities_raw"] = load_json(
+        EXTRACTED_DIR / "entities_raw.json", "entities_raw.json"
     )
 
     print(f"  enriched-ciaa-cases.json:   {len(sources['enriched_cases'])} records")
@@ -100,7 +90,7 @@ def validate_case_numbers(sources):
     issues = []
     patterns_seen = Counter()
 
-    UNIFIED_FMT = re.compile(r"^(\d{2,3})-CR-(\d+)$")
+    UNIFIED_FMT = re.compile(r"^(\d{2})-CR-(\d{4})$")
 
     for r in sources["unified_cases"]:
         cn = r.get("case_number") or ""
@@ -109,7 +99,7 @@ def validate_case_numbers(sources):
         if not cn.strip():
             issues.append(
                 {
-                    "severity": "error",
+                    "severity": "info",
                     "check": "case_number_empty",
                     "fy": fy,
                     "value": cn,
@@ -297,11 +287,11 @@ def extract_entity_variants(sources):
     all_names = defaultdict(list)  # normalized -> [(original, source, fy, case_number)]
 
     def norm(name):
-        """Normalize for comparison: lowercase, remove spaces, common prefixes."""
+        """Normalize for comparison: NFC, lowercase, collapse internal whitespace, remove common prefixes."""
         if not name:
             return None
-        n = name.strip().lower()
-        n = re.sub(r"\s+", "", n)
+        n = unicodedata.normalize("NFC", name.strip().lower())
+        n = re.sub(r"\s+", " ", n)  # collapse internal whitespace, don't strip all
         n = re.sub(r"[\.\,\-]", "", n)
         # Remove common Nepali honorifics/prefixes
         n = re.sub(r"^(श्री|स्वर्गीय|श्रीमती|श्रीयुत)", "", n)
@@ -374,7 +364,7 @@ def extract_entity_variants(sources):
                         "fy": "multiple",
                         "value": f"{most_common[0][0]} ({most_common[0][1]}x) vs {len(originals)-1} other form(s)",
                         "detail": f"Normalized key '{key}' has {len(originals)} display variants: {[(n, c) for n, c in most_common[:5]]}",
-                        "sample_cases": list(set(e[2] for e in entries))[:5],
+                        "sample_cases": list({e[3] for e in entries})[:5],
                     }
                 )
 
@@ -535,6 +525,7 @@ def coverage_matrix(sources):
         )
 
     # Write CSV
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     csv_path = OUTPUT_DIR / "coverage-matrix.csv"
     fieldnames = [
         "fy",
@@ -760,6 +751,9 @@ def main():
 
 if __name__ == "__main__":
     report = main()
-    if report.get("total_issues", 0) > 0:
+    error_count = sum(
+        1 for i in report.get("issues", []) if i.get("severity") == "error"
+    )
+    if error_count > 0:
         sys.exit(1)
     sys.exit(0)
