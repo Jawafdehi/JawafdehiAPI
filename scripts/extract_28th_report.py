@@ -10,6 +10,9 @@ import json
 import re
 import sys
 
+FISCAL_YEAR = "2074/75"
+REPORT_NAME = "28th CIAA Annual Report"
+
 
 def to_arabic(text):
     table = str.maketrans("०१२३४५६७८९", "0123456789")
@@ -182,16 +185,15 @@ def extract_type_c_defendant_table(lines, table_start_line, case_context):
                 cols = [c.strip() for c in clean.split("|")]
 
                 if idx == 0:
-                    # First line: cols = [name, karsur, ..., bigo]
+                    # First line: cols = [name, karsur, magdabi, bigo] or [name, bigo]
                     if cols:
                         name_parts.append(cols[0])
-                    if len(cols) >= 2:
+                    if len(cols) == 2:
+                        bigo_value = parse_bigo(cols[1])
+                    elif len(cols) >= 3:
                         karsur_parts.append(cols[1])
-                    if len(cols) >= 3:
                         magdabi_parts.extend(cols[2:-1])
                         bigo_value = parse_bigo(cols[-1])
-                    elif len(cols) == 2:
-                        bigo_value = parse_bigo(cols[1])
                 else:
                     # Continuation line with pipes: align from col 0
                     if cols:
@@ -212,7 +214,7 @@ def extract_type_c_defendant_table(lines, table_start_line, case_context):
             "bigo_amount_npr": bigo_value,
             "case_type": case_context.get("case_type", "unknown"),
             "case_type_nepali": case_context.get("case_type_nepali", ""),
-            "fy": "2074/75",
+            "fy": FISCAL_YEAR,
             "description": case_context.get("description", ""),
             "decision_date_bs": case_context.get("decision_date_bs"),
             "filing_date_bs": case_context.get("filing_date_bs"),
@@ -234,11 +236,12 @@ def extract_case_narrative(lines, table_start_line):
 
     for i in range(table_start_line - 1, search_end, -1):
         line = lines[i]
+        normalized_line = to_arabic(line)
 
         # Extract filing date: "मिति 2074।8।12 मा विशेष अदालत...आरोपपत्र दायर"
         m_file = re.search(
             r"मिति\s+(\d{4}[।\.]\d{1,2}[।\.]\d{1,2})\s+मा\s+विशेष\s+अदालत.*?आरोपपत्र\s+दायर",
-            line,
+            normalized_line,
         )
         if m_file and "filing_date_bs" not in context:
             context["filing_date_bs"] = norm_date(m_file.group(1))
@@ -246,7 +249,7 @@ def extract_case_narrative(lines, table_start_line):
         # Extract decision date: "आयोगको मिति २०७५।२।७ को"
         m_dec = re.search(
             r"आयोगको\s+मिति\s+(\d{4}[।\.]\d{1,2}[।\.]\d{1,2})",
-            line,
+            normalized_line,
         )
         if m_dec and "decision_date_bs" not in context:
             context["decision_date_bs"] = norm_date(m_dec.group(1))
@@ -369,14 +372,17 @@ def _map_case_type(nepali_type):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} <input_markdown> [output_json]", file=sys.stderr)
+        sys.exit(1)
     with open(sys.argv[1]) as f:
         text = f.read()
 
     lines = text.split("\n")
 
     result = {
-        "fy": "2074/75",
-        "report": "28th CIAA Annual Report",
+        "fy": FISCAL_YEAR,
+        "report": REPORT_NAME,
         "source": "likhit-markdown",
         "summary": {},
         "cases": [],
@@ -425,7 +431,7 @@ if __name__ == "__main__":
         for c in bribery_cases:
             c["case_type"] = "bribery"
             c["case_type_nepali"] = "घुस (रिसवत)"
-            c["fy"] = "2074/75"
+            c["fy"] = FISCAL_YEAR
         result["cases"].extend(bribery_cases)
         result["extraction_notes"].append(
             f"Extracted {len(bribery_cases)} bribery cases"
@@ -433,11 +439,7 @@ if __name__ == "__main__":
 
     # Type C: Revenue leakage (2.6.6)
     if revenue_leakage_idx:
-        rl_end = (
-            misc_idx
-            if misc_idx
-            else (next_section_idx if next_section_idx else len(lines))
-        )
+        rl_end = misc_idx or next_section_idx or len(lines)
         blocks = find_all_code_blocks(lines, revenue_leakage_idx, rl_end)
         rl_defendants = []
         for block_start in blocks:
