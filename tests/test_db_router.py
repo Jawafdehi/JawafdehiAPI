@@ -6,7 +6,9 @@ from django.conf import settings
 
 from config.db_router import (
     PrimaryReplicaRouter,
+    _force_primary,
     force_primary_reads,
+    install_management_command_primary_reads,
 )
 from config.middleware import ForcePrimaryReadsMiddleware
 from ngm import services
@@ -122,6 +124,33 @@ class TestForcePrimaryReadsMiddleware:
         middleware, _ = self._middleware()
         middleware(SimpleNamespace(method="POST", path="/admin/"))
         assert _force_primary() is False
+
+
+class TestManagementCommandPrimaryReads:
+    def test_command_handle_runs_with_primary_reads(self):
+        from django.core.management.base import BaseCommand
+
+        # ready() already installed the patch; this is idempotent.
+        install_management_command_primary_reads()
+
+        captured = {}
+
+        class _Cmd(BaseCommand):
+            def handle(self, *args, **options):
+                captured["force_primary"] = _force_primary()
+
+        _Cmd().run_from_argv(["manage.py", "_cmd"])
+        assert captured["force_primary"] is True
+        # Flag is released once the command finishes.
+        assert _force_primary() is False
+
+    def test_install_is_idempotent(self):
+        from django.core.management.base import BaseCommand
+
+        install_management_command_primary_reads()
+        first = BaseCommand.execute
+        install_management_command_primary_reads()
+        assert BaseCommand.execute is first
 
 
 class TestNgmReadConnection:

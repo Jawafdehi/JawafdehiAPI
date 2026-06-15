@@ -13,6 +13,7 @@ consistency run inside :func:`force_primary_reads` (the
 every unsafe-method request).
 """
 
+import functools
 import threading
 from contextlib import contextmanager
 
@@ -48,6 +49,38 @@ def force_primary_reads():
         yield
     finally:
         _state.force_primary = previous
+
+
+def install_management_command_primary_reads() -> None:
+    """Pin reads to the primary for the duration of every management command.
+
+    Management commands are not request-scoped, so ``ForcePrimaryReadsMiddleware``
+    cannot cover their read-modify-write sequences. Without this, once
+    ``DATABASE_READ_URL`` is set a command's ORM reads would hit the lagging
+    ``pg-r`` standby — e.g. a ``get_or_create`` that reads "absent" from a stale
+    replica and then creates a duplicate on the primary, or a ``select_for_update``
+    routed to a connection outside its own transaction. Wrapping
+    ``BaseCommand.execute`` keeps offline jobs (data imports, enrichment, merges)
+    reading their own writes; web GET traffic still uses the replica.
+
+    Long-running servers are unaffected: ``runserver`` serves requests in worker
+    threads (this flag is thread-local), and prod web runs through WSGI/ASGI, not
+    ``BaseCommand.execute``. Idempotent — safe to call from multiple AppConfigs.
+    """
+    from django.core.management.base import BaseCommand
+
+    if getattr(BaseCommand, "_primary_reads_patched", False):
+        return
+
+    original_execute = BaseCommand.execute
+
+    @functools.wraps(original_execute)
+    def execute(self, *args, **kwargs):
+        with force_primary_reads():
+            return original_execute(self, *args, **kwargs)
+
+    BaseCommand.execute = execute
+    BaseCommand._primary_reads_patched = True
 
 
 def _canonical(db: str) -> str:

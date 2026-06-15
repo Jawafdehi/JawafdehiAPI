@@ -22,6 +22,8 @@ from rest_framework import generics, status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 
+from config.db_router import force_primary_reads
+
 from . import case_provider, code_rules
 from .models import CaseReview, ReviewConfig
 from .permissions import (
@@ -92,7 +94,10 @@ def claim_job(request):
     poller needs to run the review without any DB access: the review id, slug,
     the resolved case dict, and the active review config.
     """
-    with transaction.atomic():
+    # force_primary_reads keeps the SELECT ... FOR UPDATE on the primary
+    # connection enrolled in this transaction; otherwise the router would send
+    # the read to the replica (a connection outside the atomic block).
+    with force_primary_reads(), transaction.atomic():
         review = (
             CaseReview.objects.select_for_update(skip_locked=True)
             .filter(status=CaseReview.STATUS_PENDING)

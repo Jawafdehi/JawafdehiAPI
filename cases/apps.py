@@ -6,6 +6,11 @@ class CasesConfig(AppConfig):
     name = "cases"
 
     def ready(self):
+        # Pin management-command reads to the primary (commands aren't covered
+        # by ForcePrimaryReadsMiddleware). No-op until DATABASE_READ_URL is set.
+        from config.db_router import install_management_command_primary_reads
+
+        install_management_command_primary_reads()
 
         # Register models with auditlog
         from auditlog.registry import auditlog
