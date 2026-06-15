@@ -9,7 +9,7 @@ from django.forms.models import BaseInlineFormSet
 from django.template.response import TemplateResponse
 from django.utils.html import format_html
 from rest_framework.authtoken.admin import TokenAdmin as BaseTokenAdmin
-from rest_framework.authtoken.models import Token
+from rest_framework.authtoken.models import TokenProxy
 
 from cases.widgets import ToastUIEditorWidget
 
@@ -37,6 +37,7 @@ from .rules.predicates import (
     is_admin_or_moderator,
     is_contributor,
     is_moderator,
+    is_readonly,
 )
 from .services import EntityMergeError, analyze_merge_impact, merge_entities_by_ids
 from .validators import COURT_CHOICES
@@ -633,7 +634,7 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         """
         Filter queryset based on user role.
 
-        - Contributors: See all non-CLOSED cases (global read access)
+        - Contributors and ReadOnly: See all non-CLOSED cases (global read access)
         - Moderators/Admins: See all cases
         """
         qs = super().get_queryset(request)
@@ -642,8 +643,8 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         if is_admin_or_moderator(request.user):
             return qs
 
-        # Contributors see all non-CLOSED cases (global read-only access)
-        if is_contributor(request.user):
+        # Contributors and ReadOnly users see all non-CLOSED cases (global read access)
+        if is_contributor(request.user) or is_readonly(request.user):
             return qs.exclude(state=CaseState.CLOSED)
 
         # No role - see nothing
@@ -981,7 +982,7 @@ class DocumentSourceAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
 
         - Admins: See all sources (including deleted)
         - Moderators: Only see active sources (exclude deleted)
-        - Contributors: See active sources they're assigned to OR sources referenced in their assigned cases
+        - Contributors and ReadOnly: See all active sources (global read access)
         """
         qs = super().get_queryset(request)
 
@@ -993,8 +994,8 @@ class DocumentSourceAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         if is_moderator(request.user):
             return qs.filter(is_deleted=False)
 
-        # Contributors see all active sources (global read access)
-        if is_contributor(request.user):
+        # Contributors and ReadOnly users see all active sources (global read access)
+        if is_contributor(request.user) or is_readonly(request.user):
             return qs.filter(is_deleted=False)
 
         # No role - see nothing
@@ -1474,13 +1475,16 @@ class FeedbackAdmin(admin.ModelAdmin):
 # Token Admin (DRF authtoken) — show full name for user
 # ============================================================================
 
+# DRF's authtoken app auto-registers TokenProxy (not Token) with its TokenAdmin.
+# Unregister that proxy and re-register it with our custom admin, otherwise both
+# Token and TokenProxy end up registered and the admin shows "Tokens" twice.
 try:
-    admin.site.unregister(Token)
+    admin.site.unregister(TokenProxy)
 except admin.sites.NotRegistered:
     pass
 
 
-@admin.register(Token)
+@admin.register(TokenProxy)
 class CustomTokenAdmin(UserFullNameAdminMixin, BaseTokenAdmin):
     raw_id_fields = ()
 
