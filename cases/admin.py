@@ -634,7 +634,7 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         """
         Filter queryset based on user role.
 
-        - Contributors: See all non-CLOSED cases (global read access)
+        - Contributors and ReadOnly: See all non-CLOSED cases (global read access)
         - Moderators/Admins: See all cases
         """
         qs = super().get_queryset(request)
@@ -982,7 +982,7 @@ class DocumentSourceAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
 
         - Admins: See all sources (including deleted)
         - Moderators: Only see active sources (exclude deleted)
-        - Contributors: See active sources they're assigned to OR sources referenced in their assigned cases
+        - Contributors and ReadOnly: See all active sources (global read access)
         """
         qs = super().get_queryset(request)
 
