@@ -1,0 +1,80 @@
+"""Primary/replica database routing for the read/write split.
+
+The CloudNativePG Postgres cluster exposes a read-write endpoint (``pg-rw``,
+the primary) and a read endpoint (``pg-r``, primary + standbys). The ORM
+``default`` / ``ngm`` aliases target the write endpoints; ``replica`` /
+``ngm_replica`` target ``pg-r``. This router sends ORM reads to the replica
+aliases and writes to the primaries, and keeps migrations off the replicas.
+
+``pg-r`` load-balances across asynchronous standbys, so a read issued right
+after a write may not observe that write. Call sites needing read-your-writes
+consistency run inside :func:`force_primary_reads` (the
+:class:`ForcePrimaryReadsMiddleware` does this for the Django admin and for
+every unsafe-method request).
+"""
+
+import threading
+from contextlib import contextmanager
+
+from django.conf import settings
+
+# Primary write alias -> its read-replica alias.
+PRIMARY_TO_REPLICA = {
+    "default": "replica",
+    "ngm": "ngm_replica",
+}
+REPLICA_TO_PRIMARY = {
+    replica: primary for primary, replica in PRIMARY_TO_REPLICA.items()
+}
+READ_ALIASES = frozenset(PRIMARY_TO_REPLICA.values())
+
+_state = threading.local()
+
+
+def _force_primary() -> bool:
+    return getattr(_state, "force_primary", False)
+
+
+@contextmanager
+def force_primary_reads():
+    """Pin ORM reads to the primary for the duration of the block.
+
+    Use around read-after-write sequences that must observe their own writes
+    (the async standby behind ``pg-r`` can otherwise serve a stale snapshot).
+    """
+    previous = getattr(_state, "force_primary", False)
+    _state.force_primary = True
+    try:
+        yield
+    finally:
+        _state.force_primary = previous
+
+
+def _canonical(db: str) -> str:
+    """Collapse a replica alias onto its primary so a pair can be compared."""
+    return REPLICA_TO_PRIMARY.get(db, db)
+
+
+class PrimaryReplicaRouter:
+    """Route reads to ``replica`` and writes to ``default`` (primary)."""
+
+    def db_for_read(self, model, **hints):
+        # Fall back to the primary when no distinct replica is configured
+        # (dev/CI/single-endpoint) or when a read-your-writes block is active.
+        if _force_primary() or "replica" not in settings.DATABASES:
+            return "default"
+        return "replica"
+
+    def db_for_write(self, model, **hints):
+        return "default"
+
+    def allow_relation(self, obj1, obj2, **hints):
+        if _canonical(obj1._state.db) == _canonical(obj2._state.db):
+            return True
+        return None
+
+    def allow_migrate(self, db, app_label, model_name=None, **hints):
+        # Schema changes only run against the primary write aliases.
+        if db in READ_ALIASES:
+            return False
+        return None
