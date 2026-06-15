@@ -33,8 +33,6 @@ from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
-from .throttles import CaseCreateRateThrottle, RoleBasedRateThrottle
-
 from config.auth import (
     JAWAFDEHI_USER_ID_HEADER,
     SERVICE_ACCOUNT_USERNAME,
@@ -75,6 +73,7 @@ from .serializers import (
     JawafEntitySerializer,
 )
 from .services.search import UnifiedSearchService
+from .throttles import CaseCreateRateThrottle
 
 logger = logging.getLogger(__name__)
 

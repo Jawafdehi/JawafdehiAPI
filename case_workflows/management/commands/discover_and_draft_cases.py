@@ -73,14 +73,16 @@ class Command(BaseCommand):
                         )
                     else:
                         try:
-                            case, was_created = Case.objects.get_or_create(
-                                ciaa_case_number=ciaa_ref,
-                                defaults={
-                                    "title": _case_title(case_number),
-                                    "case_type": CaseType.CORRUPTION,
-                                    "state": CaseState.DRAFT,
-                                },
-                            )
+                            with transaction.atomic():
+                                case, was_created = Case.objects.get_or_create(
+                                    ciaa_case_number=ciaa_ref,
+                                    defaults={
+                                        "title": _case_title(case_number),
+                                        "case_type": CaseType.CORRUPTION,
+                                        "state": CaseState.DRAFT,
+                                        "court_cases": [ciaa_ref],
+                                    },
+                                )
                         except IntegrityError:
                             case = Case.objects.filter(
                                 ciaa_case_number=ciaa_ref,

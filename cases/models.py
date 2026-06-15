@@ -591,9 +591,11 @@ class Case(models.Model):
         null=True,
         blank=True,
         db_index=True,
-        help_text="CIAA case reference from the special court (e.g. 'special:081-CR-0127'). "
-                  "Set automatically from court_cases on save. Used as the canonical "
-                  "idempotency key for deduplication across case-creation pipelines.",
+        help_text=(
+            "CIAA case reference from the special court (e.g. 'special:081-CR-0127'). "
+            "Set automatically from court_cases on save. Used as the canonical "
+            "idempotency key for deduplication across case-creation pipelines."
+        ),
     )
 
     class Meta:
@@ -684,10 +686,13 @@ class Case(models.Model):
             # Generate unique case_id for new cases
             self.case_id = f"case-{uuid.uuid4().hex[:12]}"
 
-        # Auto-populate ciaa_case_number from court_cases for CIAA cases
-        if not self.ciaa_case_number and self.court_cases:
+        # Auto-populate ciaa_case_number from court_cases for CIAA cases.
+        # Defensively guard against non-list JSONB values and non-string elements
+        # (court_cases is a JSONField — malformed data could have arrived before
+        # the migration, or via a code path that skips model validation).
+        if not self.ciaa_case_number and isinstance(self.court_cases, list):
             for cc in self.court_cases:
-                if cc.startswith("special:"):
+                if isinstance(cc, str) and cc.startswith("special:"):
                     self.ciaa_case_number = cc
                     break
 

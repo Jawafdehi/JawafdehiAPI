@@ -153,3 +153,10 @@ class CaseCreateRateThrottle(RoleBasedRateThrottle):
         "Contributor": "50/hour",
     }
     GROUP_PRIORITY = ("Admin", "Moderator", "Contributor")
+
+    def get_role_names(self, user):
+        # Treat superusers and staff as Admin so they aren't silently throttled
+        # to the default 10/hour rate.
+        if user.is_superuser or user.is_staff:
+            return {"Admin"}
+        return super().get_role_names(user)
