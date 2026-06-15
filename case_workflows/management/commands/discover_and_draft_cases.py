@@ -51,9 +51,14 @@ class Command(BaseCommand):
 
         with transaction.atomic():
             for case_number in CIAA_CASE_NUMBERS:
+                # Use the canonical CIAA case number for dedup — this is
+                # the same key used by import_ciaa_cases and the agents
+                # workflow, ensuring cross-pipeline idempotency. The unique
+                # constraint on ciaa_case_number guarantees safety under
+                # concurrent invocations.
+                ciaa_ref = f"special:{case_number}"
                 existing = Case.objects.filter(
-                    title__icontains=case_number,
-                    case_type=CaseType.CORRUPTION,
+                    ciaa_case_number=ciaa_ref,
                 ).first()
 
                 if existing:
@@ -67,19 +72,18 @@ class Command(BaseCommand):
                             f"[DRY-RUN] Would create: {_case_title(case_number)}"
                         )
                     else:
-                        # NOTE: Fully race-safe behavior requires a DB uniqueness constraint
-                        # on a dedicated CIAA case number field. This command narrows the
-                        # race window by using get_or_create on canonical title + case_type.
                         try:
                             case, was_created = Case.objects.get_or_create(
-                                title=_case_title(case_number),
-                                case_type=CaseType.CORRUPTION,
-                                defaults={"state": CaseState.DRAFT},
+                                ciaa_case_number=ciaa_ref,
+                                defaults={
+                                    "title": _case_title(case_number),
+                                    "case_type": CaseType.CORRUPTION,
+                                    "state": CaseState.DRAFT,
+                                },
                             )
                         except IntegrityError:
                             case = Case.objects.filter(
-                                title=_case_title(case_number),
-                                case_type=CaseType.CORRUPTION,
+                                ciaa_case_number=ciaa_ref,
                             ).first()
                             if case is None:
                                 raise

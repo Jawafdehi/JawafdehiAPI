@@ -132,3 +132,24 @@ class RoleBasedUserRateThrottle(RoleBasedRateThrottle):
         if user.is_superuser or user.is_staff:
             return {"Admin"}
         return super().get_role_names(user)
+
+
+class CaseCreateRateThrottle(RoleBasedRateThrottle):
+    """Strict rate throttle for the case creation endpoint.
+
+    Limits POST /api/cases/ to prevent accidental or malicious mass case
+    creation. Staff/Admin users get a higher limit; contributors a moderate
+    one; plain authenticated users the strictest tier.
+
+    Tiers are literal rate strings (not settings keys) so they are independent
+    of the global DEFAULT_THROTTLE_RATES and remain restrictive by default.
+    """
+
+    scope = "case_create"
+    DEFAULT_RATE = "10/hour"
+    TIER_LIMITS = {
+        "Admin": "100/hour",
+        "Moderator": "100/hour",
+        "Contributor": "50/hour",
+    }
+    GROUP_PRIORITY = ("Admin", "Moderator", "Contributor")

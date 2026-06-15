@@ -81,6 +81,7 @@ class CIAADraftCaseService:
                     case_start_date=case_data.get("case_start_date"),
                     case_end_date=case_data.get("case_end_date"),
                     court_cases=case_data.get("court_cases"),
+                    ciaa_case_number=case_data.get("ciaa_case_number"),
                     notes=case_data.get("notes", ""),
                     missing_details=case_data.get("missing_details"),
                 )
@@ -150,18 +151,14 @@ class CIAADraftCaseService:
         return None
 
     def check_case_exists(self, court_cases: list[str]) -> Optional[Case]:
-        """Check if case already exists by court_cases field. Returns existing Case or None."""
+        """Check if case already exists by ciaa_case_number. Returns existing Case or None."""
         primary = self._primary_ciaa_court_case(court_cases)
         if not primary:
             return None
 
-        if connection.vendor == "postgresql":
-            return Case.objects.filter(court_cases__contains=[primary]).first()
-        else:
-            for case in Case.objects.exclude(court_cases__isnull=True):
-                if isinstance(case.court_cases, list) and primary in case.court_cases:
-                    return case
-        return None
+        # Use the unique ciaa_case_number for cross-pipeline dedup.
+        # This is the canonical idempotency key shared by all case-creation paths.
+        return Case.objects.filter(ciaa_case_number=primary).first()
 
     def map_json_to_case(self, ciaa_json: dict) -> dict:
         """Map CIAA JSON fields to Case model fields. Returns dict with case data."""
@@ -217,6 +214,10 @@ class CIAADraftCaseService:
                 court_cases.append(f"{ac}:{acn}")
 
         case_data["court_cases"] = court_cases
+
+        # Extract the primary CIAA case number for the dedicated field
+        case_data["ciaa_case_number"] = self._primary_ciaa_court_case(court_cases)
+
         case_data["missing_details"] = (
             "This case has match_status='needs_review' and requires verification."
             if ciaa_json.get("meta", {}).get("match_status") == "needs_review"

@@ -33,6 +33,8 @@ from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
+from .throttles import CaseCreateRateThrottle, RoleBasedRateThrottle
+
 from config.auth import (
     JAWAFDEHI_USER_ID_HEADER,
     SERVICE_ACCOUNT_USERNAME,
@@ -329,6 +331,11 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
         ChatServiceAccountAuthentication,
         SessionAuthentication,
     ]
+
+    def get_throttles(self):
+        if self.action == "create":
+            return [CaseCreateRateThrottle()]
+        return super().get_throttles()
 
     def get_permissions(self):
         # create requires the cases.add_case model permission (DjangoModelPermissions

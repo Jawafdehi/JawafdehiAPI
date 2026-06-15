@@ -584,6 +584,18 @@ class Case(models.Model):
         help_text="Bigo (बिगो) — the total disputed or embezzled amount claimed in the case (in NPR)",
     )
 
+    # CIAA case number — unique idempotency key for CIAA corruption cases
+    ciaa_case_number = models.CharField(
+        max_length=50,
+        unique=True,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="CIAA case reference from the special court (e.g. 'special:081-CR-0127'). "
+                  "Set automatically from court_cases on save. Used as the canonical "
+                  "idempotency key for deduplication across case-creation pipelines.",
+    )
+
     class Meta:
         ordering = ["-created_at"]
 
@@ -671,6 +683,13 @@ class Case(models.Model):
         if not self.case_id:
             # Generate unique case_id for new cases
             self.case_id = f"case-{uuid.uuid4().hex[:12]}"
+
+        # Auto-populate ciaa_case_number from court_cases for CIAA cases
+        if not self.ciaa_case_number and self.court_cases:
+            for cc in self.court_cases:
+                if cc.startswith("special:"):
+                    self.ciaa_case_number = cc
+                    break
 
         # Validate title is not empty
         if not self.title or not self.title.strip():
