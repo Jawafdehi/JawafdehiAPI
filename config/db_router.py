@@ -14,8 +14,8 @@ every unsafe-method request).
 """
 
 import functools
-import threading
 from contextlib import contextmanager
+from contextvars import ContextVar
 
 from django.conf import settings
 
@@ -29,11 +29,15 @@ REPLICA_TO_PRIMARY = {
 }
 READ_ALIASES = frozenset(PRIMARY_TO_REPLICA.values())
 
-_state = threading.local()
+# ContextVar (not threading.local) so the flag is isolated correctly under both
+# sync WSGI threads and async/ASGI tasks. A freshly spawned thread starts from
+# the default (False), so a management command's force-primary scope never leaks
+# into runserver's request-handling threads.
+_force_primary_var: ContextVar[bool] = ContextVar("force_primary", default=False)
 
 
 def _force_primary() -> bool:
-    return getattr(_state, "force_primary", False)
+    return _force_primary_var.get()
 
 
 @contextmanager
@@ -43,12 +47,11 @@ def force_primary_reads():
     Use around read-after-write sequences that must observe their own writes
     (the async standby behind ``pg-r`` can otherwise serve a stale snapshot).
     """
-    previous = getattr(_state, "force_primary", False)
-    _state.force_primary = True
+    token = _force_primary_var.set(True)
     try:
         yield
     finally:
-        _state.force_primary = previous
+        _force_primary_var.reset(token)
 
 
 def install_management_command_primary_reads() -> None:
@@ -64,8 +67,9 @@ def install_management_command_primary_reads() -> None:
     reading their own writes; web GET traffic still uses the replica.
 
     Long-running servers are unaffected: ``runserver`` serves requests in worker
-    threads (this flag is thread-local), and prod web runs through WSGI/ASGI, not
-    ``BaseCommand.execute``. Idempotent — safe to call from multiple AppConfigs.
+    threads that start from the ContextVar default (replica), and prod web runs
+    through WSGI/ASGI, not ``BaseCommand.execute``. Idempotent — safe to call from
+    multiple AppConfigs.
     """
     from django.core.management.base import BaseCommand
 
