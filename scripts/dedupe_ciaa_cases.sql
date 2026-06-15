@@ -63,6 +63,10 @@ WHERE c.case_type = 'CORRUPTION'
   AND c.ciaa_case_number IS NULL
   AND c.court_cases IS NOT NULL
   AND jsonb_array_length(c.court_cases) > 0
+  AND EXISTS (
+      SELECT 1 FROM jsonb_array_elements_text(c.court_cases) AS ref
+      WHERE ref LIKE 'special:%'
+  )
 ORDER BY c.created_at;
 
 -- ==============================================================================
