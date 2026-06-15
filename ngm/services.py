@@ -137,10 +137,24 @@ def apply_row_cap(query: str, max_rows: int) -> str:
     return f"SELECT * FROM ({cleaned}) AS ngm_result LIMIT {int(max_rows)}"
 
 
+NGM_READ_ALIAS = "ngm_replica"
+
+
 def ensure_ngm_database_configured() -> None:
     database_config = settings.DATABASES.get("ngm")
     if not database_config:
         raise ValueError("NGM database is not configured")
+
+
+def ngm_read_connection():
+    """Return the connection for read-only NGM queries.
+
+    Prefers the ``ngm_replica`` alias (CNPG `pg-r`) so judicial queries hit a
+    standby, falling back to the primary ``ngm`` alias when no replica is
+    configured (dev/CI/single-endpoint deployments).
+    """
+    alias = NGM_READ_ALIAS if NGM_READ_ALIAS in settings.DATABASES else "ngm"
+    return connections[alias]
 
 
 def execute_select_query(query: str, timeout_seconds: float) -> dict:
@@ -152,9 +166,10 @@ def execute_select_query(query: str, timeout_seconds: float) -> dict:
     capped_query = apply_row_cap(query, max_rows)
 
     start_time = time.perf_counter()
+    connection = ngm_read_connection()
     try:
-        with connections["ngm"].cursor() as cursor:
-            if connections["ngm"].vendor == "postgresql":
+        with connection.cursor() as cursor:
+            if connection.vendor == "postgresql":
                 cursor.execute("SET statement_timeout = %s", [timeout_ms])
             cursor.execute(capped_query)
             rows = cursor.fetchall()
@@ -193,7 +208,7 @@ def get_court_case_details(court_identifier: str, case_number: str) -> dict | No
     ensure_ngm_database_configured()
 
     try:
-        with connections["ngm"].cursor() as cursor:
+        with ngm_read_connection().cursor() as cursor:
             # Fetch case details
             cursor.execute(
                 """

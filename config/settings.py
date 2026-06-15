@@ -217,6 +217,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "config.middleware.RequestIdMiddleware",
+    "config.middleware.ForcePrimaryReadsMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -336,6 +337,8 @@ def interpolate_db_url(url_env_name):
 
 interpolate_db_url("DATABASE_URL")
 interpolate_db_url("NGM_DATABASE_URL")
+interpolate_db_url("DATABASE_READ_URL")
+interpolate_db_url("NGM_DATABASE_READ_URL")
 
 DATABASES = {
     "default": dj_database_url.config(
@@ -364,23 +367,46 @@ if os.getenv("NGM_DATABASE_URL"):
         )
         DATABASES["ngm"] = dj_database_url.parse(new_url)
 
+
+# Read-replica aliases for the primary/replica router (config/db_router.py).
+# DATABASE_READ_URL / NGM_DATABASE_READ_URL point at the CNPG `pg-r` service
+# (primary + standbys, read-only). A replica alias is created ONLY when its
+# read URL is set; otherwise the router and the NGM read helper fall back to the
+# primary, so dev, CI, and any single-endpoint deployment behave exactly as
+# before the split (no second connection pool).
+REPLICA_OF = {"default": "replica", "ngm": "ngm_replica"}
+
+
+def _configure_replica(read_env_name, primary_alias):
+    read_url = os.getenv(read_env_name)
+    if read_url and primary_alias in DATABASES:
+        DATABASES[REPLICA_OF[primary_alias]] = dj_database_url.parse(read_url)
+
+
+_configure_replica("DATABASE_READ_URL", "default")
+_configure_replica("NGM_DATABASE_READ_URL", "ngm")
+
 # Apply SSL options to all PostgreSQL databases.
 # Must run after password interpolation so that re-parsed configs also
 # receive SSL options.
 for db_key in DATABASES:
     _apply_db_ssl_options(DATABASES[db_key])
 
-# Configure connection pooling for PostgreSQL only
-if DATABASES["default"].get("ENGINE") == "django.db.backends.postgresql":
-    DATABASES["default"]["CONN_MAX_AGE"] = 60
-    DATABASES["default"]["CONN_HEALTH_CHECKS"] = True
+# Configure connection pooling for every PostgreSQL alias (incl. replicas).
+for db_key, db_config in DATABASES.items():
+    if db_config.get("ENGINE") == "django.db.backends.postgresql":
+        db_config["CONN_MAX_AGE"] = 60
+        db_config["CONN_HEALTH_CHECKS"] = True
 
-if (
-    "ngm" in DATABASES
-    and DATABASES["ngm"].get("ENGINE") == "django.db.backends.postgresql"
-):
-    DATABASES["ngm"]["CONN_MAX_AGE"] = 60
-    DATABASES["ngm"]["CONN_HEALTH_CHECKS"] = True
+# The replica aliases are read-only mirrors of their primaries. The test runner
+# must not create/migrate a separate database for them — point each at its
+# primary's test database so the suite exercises one consistent DB per pair.
+for _primary, _replica in REPLICA_OF.items():
+    if _replica in DATABASES:
+        DATABASES[_replica].setdefault("TEST", {})["MIRROR"] = _primary
+
+# Primary/replica routing: ORM reads -> `replica`, writes -> `default`.
+DATABASE_ROUTERS = ["config.db_router.PrimaryReplicaRouter"]
 
 
 # Password validation
