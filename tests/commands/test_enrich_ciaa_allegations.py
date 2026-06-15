@@ -39,7 +39,9 @@ def _make_case(
         "case_type": CaseType.CORRUPTION,
         "state": state,
         "court_cases": (
-            court_cases if court_cases is not None else ["special:081-CR-0123"]
+            court_cases
+            if court_cases is not None
+            else [f"special:081-CR-{case_id[-4:].zfill(4)}"]
         ),
         "bigo": bigo,
         "evidence": evidence if evidence is not None else [],

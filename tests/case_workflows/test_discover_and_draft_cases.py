@@ -34,9 +34,26 @@ def _run(**kwargs) -> str:
 
 
 def _make_case(
-    title: str, case_type=CaseType.CORRUPTION, state=CaseState.DRAFT
+    title: str,
+    case_type=CaseType.CORRUPTION,
+    state=CaseState.DRAFT,
+    court_cases: list[str] | None = None,
 ) -> Case:
-    return Case.objects.create(title=title, case_type=case_type, state=state)
+    """Create a Case, optionally with court_cases (which auto-populates ciaa_case_number)."""
+    case = Case(title=title, case_type=case_type, state=state)
+    if court_cases:
+        case.court_cases = court_cases
+    case.save()
+    return case
+
+
+def _make_ciaa_case(case_number: str, **kwargs) -> Case:
+    """Create a case with a canonical CIAA court-case ref for dedup testing."""
+    return _make_case(
+        title=f"CIAA Special Court Case {case_number}",
+        court_cases=[f"special:{case_number}"],
+        **kwargs,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -87,18 +104,22 @@ class TestDiscoverAndDraftCasesCreation:
 
 class TestDiscoverAndDraftCasesIdempotency:
     @pytest.mark.django_db
-    def test_skips_case_with_case_number_in_title(self):
-        """A pre-existing case containing the case number is not duplicated."""
-        _make_case("CIAA Special Court Case 081-CR-0097")
+    def test_skips_case_with_ciaa_case_number(self):
+        """A pre-existing case with matching ciaa_case_number is not duplicated."""
+        _make_ciaa_case("081-CR-0097")
         _run()
+        assert Case.objects.filter(ciaa_case_number="special:081-CR-0097").count() == 1
         assert Case.objects.filter(title__icontains="081-CR-0097").count() == 1
 
     @pytest.mark.django_db
-    def test_skips_case_with_manually_titled_entry(self):
-        """A manually-titled case that contains the number is still skipped."""
-        _make_case("Embezzlement 081-CR-0097 investigation")
+    def test_skips_manually_titled_case_with_court_cases(self):
+        """A manually-titled case with the correct court_cases ref is skipped."""
+        _make_case(
+            "Embezzlement 081-CR-0097 investigation",
+            court_cases=["special:081-CR-0097"],
+        )
         _run()
-        assert Case.objects.filter(title__icontains="081-CR-0097").count() == 1
+        assert Case.objects.filter(ciaa_case_number="special:081-CR-0097").count() == 1
 
     @pytest.mark.django_db
     def test_idempotent_reruns(self):
@@ -112,9 +133,9 @@ class TestDiscoverAndDraftCasesIdempotency:
 
     @pytest.mark.django_db
     def test_partial_existing_creates_only_missing(self):
-        """Pre-creating 3 cases means the command creates only missing unique cases."""
+        """Pre-creating 3 cases with proper court_cases refs creates only missing cases."""
         for number in ["081-CR-0022", "081-CR-0087", "081-CR-0097"]:
-            _make_case(f"CIAA Special Court Case {number}")
+            _make_ciaa_case(number)
         _run()
         assert Case.objects.count() == len(UNIQUE_CIAA_CASE_NUMBERS)
 
@@ -148,8 +169,8 @@ class TestDiscoverAndDraftCasesOutput:
 
     @pytest.mark.django_db
     def test_skip_lines_logged(self):
-        """Pre-existing case produces a [SKIP] line with its case number."""
-        _make_case("CIAA Special Court Case 081-CR-0097")
+        """Pre-existing case with court_cases produces a [SKIP] line."""
+        _make_ciaa_case("081-CR-0097")
         output = _run()
         assert "[SKIP]" in output
         assert "081-CR-0097" in output
