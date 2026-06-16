@@ -50,6 +50,9 @@ def process_case(case, config=None, on_stage=None):
                 pass
 
     t0 = time.monotonic()
+    # Shared across the source-analysis and rule-scoring LLM calls so the result
+    # carries this review's total token usage + cost.
+    usage = bedrock_judge.UsageAccumulator()
 
     # 1+2. Sources from the case + likhit conversion — LOCAL to the poller; the
     #    markdown is not part of the scored result. The shared converter also
@@ -68,16 +71,17 @@ def process_case(case, config=None, on_stage=None):
     stage("analyzing_sources")
     ctype = casetype.detect(case)
     source_analyses = bedrock_judge.analyze_sources(
-        scorer.build_case_summary(case), converted, ctype["label"]
+        scorer.build_case_summary(case), converted, ctype["label"], usage=usage
     )
 
     # 4. Rule-centered scoring (Bedrock). Rules are code-enforced (no DB).
     stage("scoring")
     rules = code_rules.get_enabled_rules()
     result = scorer.score_case(
-        case, converted, rules, cfg, source_analyses=source_analyses
+        case, converted, rules, cfg, source_analyses=source_analyses, usage=usage
     )
     result["model_id_used"] = settings.BEDROCK_MODEL_ID
+    result["token_usage"] = usage.as_dict()
 
     return {
         "case_title": case.get("title", "") or "",
