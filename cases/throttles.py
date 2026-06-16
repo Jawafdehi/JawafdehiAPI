@@ -27,15 +27,20 @@ def get_client_ident(request):
     in-cluster proxy IP and every caller would otherwise share one throttle
     bucket. Cloudflare sets ``CF-Connecting-IP`` to the true client and
     overwrites any client-supplied value, so it is both correct and unspoofable
-    through the proxy; prefer it. Fall back to the first ``X-Forwarded-For`` hop,
-    then the peer address.
+    through the proxy; prefer it. Fall back to the first non-empty
+    ``X-Forwarded-For`` hop, then the peer address.
+
+    Every candidate is stripped and skipped if blank: a whitespace-only header
+    or a leading comma (``", 1.2.3.4"``) must not yield an empty ident, which
+    would collapse those callers back into one shared bucket.
     """
-    cf_ip = request.META.get("HTTP_CF_CONNECTING_IP")
+    cf_ip = (request.META.get("HTTP_CF_CONNECTING_IP") or "").strip()
     if cf_ip:
-        return cf_ip.strip()
-    xff = request.META.get("HTTP_X_FORWARDED_FOR")
-    if xff:
-        return xff.split(",")[0].strip()
+        return cf_ip
+    for hop in (request.META.get("HTTP_X_FORWARDED_FOR") or "").split(","):
+        hop = hop.strip()
+        if hop:
+            return hop
     return request.META.get("REMOTE_ADDR")
 
 

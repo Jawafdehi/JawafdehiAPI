@@ -157,6 +157,32 @@ def test_get_client_ident_falls_back_to_remote_addr():
     assert get_client_ident(request) == REAL_CLIENT_IP
 
 
+def test_get_client_ident_skips_blank_header_values():
+    """Whitespace-only CF header and a leading-comma XFF must not yield an empty
+    ident (which would re-collapse those callers into one bucket)."""
+    factory = APIRequestFactory()
+    request = factory.get(
+        "/api/anything/",
+        REMOTE_ADDR=PROXY_POD_IP,
+        HTTP_CF_CONNECTING_IP="   ",
+        HTTP_X_FORWARDED_FOR=f" , {REAL_CLIENT_IP}",
+    )
+
+    assert get_client_ident(request) == REAL_CLIENT_IP
+
+
+def test_get_client_ident_falls_back_when_all_headers_blank():
+    factory = APIRequestFactory()
+    request = factory.get(
+        "/api/anything/",
+        REMOTE_ADDR=PROXY_POD_IP,
+        HTTP_CF_CONNECTING_IP="",
+        HTTP_X_FORWARDED_FOR="  ,  ",
+    )
+
+    assert get_client_ident(request) == PROXY_POD_IP
+
+
 @pytest.mark.django_db
 def test_anonymous_requests_behind_proxy_bucket_by_real_client_ip():
     """Regression guard for the 429 storm: anonymous callers sharing the
