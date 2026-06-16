@@ -80,6 +80,8 @@ def process_case(case, config=None, on_stage=None):
     result = scorer.score_case(
         case, converted, rules, cfg, source_analyses=source_analyses, usage=usage
     )
+    # Reports the premium/gate tier. Under tiered routing, non-gate rules and the
+    # narrative may instead use BEDROCK_MODEL_ID_CHEAP (see bedrock_judge).
     result["model_id_used"] = settings.BEDROCK_MODEL_ID
     result["token_usage"] = usage.as_dict()
 

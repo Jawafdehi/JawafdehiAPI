@@ -205,13 +205,18 @@ def _invoke_text(content, max_tokens, model_id=None, usage=None):
     return text
 
 
-def _invoke_once(content, max_tokens=900, model_id=None, usage=None):
-    return json.loads(_invoke_text(content, max_tokens, model_id, usage))
+def _invoke_json(content, max_tokens=900, model_id=None, usage=None):
+    """Invoke the judge once and parse its JSON, salvaging dirty/truncated output.
 
-
-def _invoke_once_salvaged(content, max_tokens=900, model_id=None, usage=None):
-    """Like _invoke_once but tolerant of truncated/dirty JSON (source analysis)."""
-    return _salvage_json(_invoke_text(content, max_tokens, model_id, usage))
+    The judge occasionally prefixes the JSON with prose or gets cut off at
+    max_tokens. We fetch the assistant text a single time and recover locally
+    rather than re-invoking the model, which would double the call's cost/latency.
+    """
+    text = _invoke_text(content, max_tokens, model_id, usage)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return _salvage_json(text)
 
 
 def _model_for_rule(rule):
@@ -301,11 +306,7 @@ def analyze_source(case_summary, source, case_type_label, usage=None):
         }
     try:
         prompt = _build_source_analysis_prompt(case_summary, source, case_type_label)
-        try:
-            return _invoke_once(prompt, max_tokens=2000, usage=usage)
-        except json.JSONDecodeError:
-            # Retry parse with salvage for truncated/dirty JSON from large sources.
-            return _invoke_once_salvaged(prompt, max_tokens=2000, usage=usage)
+        return _invoke_json(prompt, max_tokens=2000, usage=usage)
     except Exception as e:  # noqa: BLE001
         return {
             "error": str(e),
@@ -386,22 +387,6 @@ def judge_rules(
     narrative = ""
     errors = []
 
-    def _invoke_json(prompt, max_tokens=900, model_id=None):
-        """Invoke, parsing strictly first, then salvaging dirty/truncated JSON.
-
-        The judge occasionally prefixes the JSON with prose or gets cut off at
-        max_tokens; without the salvage fallback such a sample is dropped and the
-        rule silently degrades to a neutral default. Mirror analyze_source.
-        """
-        try:
-            return _invoke_once(
-                prompt, max_tokens=max_tokens, model_id=model_id, usage=usage
-            )
-        except json.JSONDecodeError:
-            return _invoke_once_salvaged(
-                prompt, max_tokens=max_tokens, model_id=model_id, usage=usage
-            )
-
     def _run(task):
         kind, key, _i = task
         if kind == "narrative":
@@ -412,11 +397,12 @@ def judge_rules(
                 model_id=getattr(
                     settings, "BEDROCK_MODEL_ID_CHEAP", settings.BEDROCK_MODEL_ID
                 ),
+                usage=usage,
             )
             return ("narrative", None, parsed)
         rule = by_key[key]
         content = _build_single_rule_content(context_block, rule)
-        parsed = _invoke_json(content, model_id=_model_for_rule(rule))
+        parsed = _invoke_json(content, model_id=_model_for_rule(rule), usage=usage)
         return ("rule", key, parsed)
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:

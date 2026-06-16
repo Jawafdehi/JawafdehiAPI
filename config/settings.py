@@ -761,12 +761,7 @@ BEDROCK_MAX_WORKERS = int(os.getenv("BEDROCK_MAX_WORKERS", "8"))
 # Prompt-cache the shared rule-grading prefix (case data + source excerpts) so it
 # is billed once per case instead of once per (rule x sample) call. Kill switch
 # for regions/models where Bedrock prompt caching is unavailable.
-BEDROCK_PROMPT_CACHE = os.getenv("BEDROCK_PROMPT_CACHE", "1") not in (
-    "0",
-    "false",
-    "False",
-    "",
-)
+BEDROCK_PROMPT_CACHE = env_flag("BEDROCK_PROMPT_CACHE", default=True)
 # Tiered model routing: high-stakes GATE rules (a low score can REJECT the case)
 # are graded by the premium model above; routine non-gate rules and the narrative
 # use this cheaper SKU. Defaults to the premium model id, so routing is a no-op

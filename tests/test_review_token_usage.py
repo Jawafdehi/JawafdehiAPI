@@ -50,7 +50,7 @@ def _fake_bedrock(input_tokens, output_tokens, text='{"score": 90}'):
 def test_invoke_text_records_usage(monkeypatch):
     monkeypatch.setattr(bedrock_judge, "_bedrock", lambda: _fake_bedrock(120, 34))
     usage = UsageAccumulator()
-    parsed = bedrock_judge._invoke_once("grade this", usage=usage)
+    parsed = bedrock_judge._invoke_json("grade this", usage=usage)
     assert parsed == {"score": 90}
     assert usage.input_tokens == 120
     assert usage.output_tokens == 34
@@ -60,4 +60,4 @@ def test_invoke_text_records_usage(monkeypatch):
 def test_invoke_text_without_accumulator_is_optional(monkeypatch):
     monkeypatch.setattr(bedrock_judge, "_bedrock", lambda: _fake_bedrock(1, 1))
     # No usage accumulator passed: must not raise.
-    assert bedrock_judge._invoke_once("grade this") == {"score": 90}
+    assert bedrock_judge._invoke_json("grade this") == {"score": 90}
