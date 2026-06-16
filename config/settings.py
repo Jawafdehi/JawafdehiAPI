@@ -758,12 +758,6 @@ AWS_PROFILE = os.getenv("REVIEW_AWS_PROFILE", os.getenv("AWS_PROFILE", ""))
 AWS_REGION = os.getenv("AWS_REGION", "us-west-2")
 BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "global.anthropic.claude-opus-4-8")
 BEDROCK_MAX_WORKERS = int(os.getenv("BEDROCK_MAX_WORKERS", "8"))
-# Per-million-token USD pricing used to cost each review's LLM usage. Defaults
-# are Anthropic's published Claude Opus rates; override per model/deployment.
-BEDROCK_INPUT_PRICE_PER_MTOK = float(os.getenv("BEDROCK_INPUT_PRICE_PER_MTOK", "15.0"))
-BEDROCK_OUTPUT_PRICE_PER_MTOK = float(
-    os.getenv("BEDROCK_OUTPUT_PRICE_PER_MTOK", "75.0")
-)
 
 # Converted source markdown cache + per-source conversion timeout.
 SOURCE_MARKDOWN_DIR = Path(

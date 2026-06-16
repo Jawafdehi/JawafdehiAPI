@@ -24,11 +24,11 @@ _client = None
 
 
 class UsageAccumulator:
-    """Thread-safe tally of Bedrock token usage + cost across parallel calls.
+    """Thread-safe tally of Bedrock token usage across parallel calls.
 
     A single instance is shared by every (rule x sample) and per-source
     invocation of one review, so it must be safe to update from the judge's
-    thread pools. Cost is derived from the configured per-Mtok pricing.
+    thread pools.
     """
 
     def __init__(self):
@@ -46,21 +46,12 @@ class UsageAccumulator:
     def as_dict(self):
         with self._lock:
             in_tok, out_tok, calls = self.input_tokens, self.output_tokens, self.calls
-        # Round the per-direction costs before summing so the reported
-        # total_cost_usd is exactly input_cost_usd + output_cost_usd.
-        in_cost = round(in_tok / 1_000_000 * settings.BEDROCK_INPUT_PRICE_PER_MTOK, 6)
-        out_cost = round(
-            out_tok / 1_000_000 * settings.BEDROCK_OUTPUT_PRICE_PER_MTOK, 6
-        )
         return {
             "model_id": settings.BEDROCK_MODEL_ID,
             "calls": calls,
             "input_tokens": in_tok,
             "output_tokens": out_tok,
             "total_tokens": in_tok + out_tok,
-            "input_cost_usd": in_cost,
-            "output_cost_usd": out_cost,
-            "total_cost_usd": round(in_cost + out_cost, 6),
         }
 
 
