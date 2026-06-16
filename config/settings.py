@@ -769,6 +769,30 @@ BEDROCK_PROMPT_CACHE = env_flag("BEDROCK_PROMPT_CACHE", default=True)
 # (the operator picks the SKU — we never guess one that may not exist).
 BEDROCK_MODEL_ID_CHEAP = os.getenv("BEDROCK_MODEL_ID_CHEAP", BEDROCK_MODEL_ID)
 
+# Review-judge LLM provider. "bedrock" (default) invokes AWS Bedrock directly;
+# "proxy" routes through the in-house OpenAI-compatible llm-proxy so the judge can
+# run on non-Bedrock models without code changes. This is provider flexibility,
+# not a Bedrock replacement — the default preserves the existing behaviour.
+REVIEW_LLM_PROVIDER = os.getenv("REVIEW_LLM_PROVIDER", "bedrock").strip().lower()
+# llm-proxy (OpenAI-compatible) connection. In-cluster callers MUST use the
+# internal ClusterIP base URL: the public llm-proxy.jawafdehi.org host sits behind
+# a Cloudflare WAF that 403s the OpenAI SDK user-agent.
+LLM_PROXY_BASE_URL = os.getenv(
+    "LLM_PROXY_BASE_URL", "http://llm-proxy.app.svc.cluster.local/v1"
+)
+LLM_PROXY_API_KEY = os.getenv("LLM_PROXY_API_KEY", "")
+# Proxy model ids per tier (the proxy registry's names differ from Bedrock SKU
+# ids, so they are configured separately). Premium grades hard GATE rules; cheap
+# grades routine rules + the narrative. Cheap defaults to premium, so tiering is a
+# no-op until a real cheaper id is set. Operators pick the ids — we never guess.
+LLM_PROXY_MODEL_ID = os.getenv("LLM_PROXY_MODEL_ID", "")
+LLM_PROXY_MODEL_ID_CHEAP = os.getenv("LLM_PROXY_MODEL_ID_CHEAP", LLM_PROXY_MODEL_ID)
+# The proxied models (gpt-5.x, deepseek) are *reasoning* models: max_tokens caps
+# reasoning + answer combined. The judge's tight caps (tuned for Claude's direct
+# output) would be spent on reasoning, leaving the JSON answer empty/truncated, so
+# we add this headroom to every proxy call's budget. Bedrock (Claude) is unaffected.
+LLM_PROXY_REASONING_HEADROOM = int(os.getenv("LLM_PROXY_REASONING_HEADROOM", "8000"))
+
 # Converted source markdown cache + per-source conversion timeout.
 SOURCE_MARKDOWN_DIR = Path(
     os.getenv("SOURCE_MARKDOWN_DIR", str(BASE_DIR / "review_source_markdown"))

@@ -1,6 +1,10 @@
-"""AWS Bedrock LLM judge for rule-centered case-quality review.
+"""LLM judge for rule-centered case-quality review.
 
-Uses Opus 4.8 (global inference profile) per VOL-3 operator request.
+Defaults to AWS Bedrock (Opus 4.8 global inference profile, per VOL-3 operator
+request); set REVIEW_LLM_PROVIDER=proxy to route the same prompts through the
+in-house OpenAI-compatible llm-proxy instead (provider flexibility, not a Bedrock
+replacement). The prompt builders, scoring, caching, and fan-out are
+provider-agnostic — only the transport (`_invoke_text`) differs per provider.
 
 The judge is generic over *rules*. Because the operator expects **hundreds of
 rules**, we do NOT stuff every rule into one giant prompt. Instead each LLM
@@ -73,6 +77,11 @@ _SOURCE_EXCERPTS_CAP = int(getattr(settings, "JUDGE_SOURCE_EXCERPTS_CAP", 120000
 # (cache read) for the cache TTL, which the back-to-back fan-out keeps warm.
 PROMPT_CACHE = bool(getattr(settings, "BEDROCK_PROMPT_CACHE", True))
 
+# Active LLM backend: "bedrock" (boto3) or "proxy" (OpenAI-compatible llm-proxy).
+PROVIDER = str(getattr(settings, "REVIEW_LLM_PROVIDER", "bedrock")).strip().lower()
+
+_proxy = None
+
 
 def _bedrock():
     global _client
@@ -91,6 +100,62 @@ def _bedrock():
             ),
         )
     return _client
+
+
+def _proxy_client():
+    """Singleton OpenAI client pointed at the in-house llm-proxy.
+
+    `openai` is an optional dependency (only the proxy provider needs it), so the
+    import is deferred to here — the default Bedrock path never imports it.
+    """
+    global _proxy
+    if _proxy is None:
+        from openai import OpenAI
+
+        _proxy = OpenAI(
+            base_url=settings.LLM_PROXY_BASE_URL,
+            api_key=settings.LLM_PROXY_API_KEY or "unused",
+            timeout=120,
+            max_retries=4,
+        )
+    return _proxy
+
+
+def _model_for_tier(tier):
+    """Resolve a tier ('premium'|'cheap') to the active provider's model id."""
+    if PROVIDER == "proxy":
+        premium = settings.LLM_PROXY_MODEL_ID
+        cheap = getattr(settings, "LLM_PROXY_MODEL_ID_CHEAP", "") or premium
+        model = premium if tier == "premium" else cheap
+        if not model:
+            raise RuntimeError(
+                "REVIEW_LLM_PROVIDER=proxy but LLM_PROXY_MODEL_ID is not set"
+            )
+        return model
+    premium = settings.BEDROCK_MODEL_ID
+    cheap = getattr(settings, "BEDROCK_MODEL_ID_CHEAP", premium)
+    return premium if tier == "premium" else cheap
+
+
+def _tier_for_rule(rule):
+    """Hard GATE rules (a low score can REJECT the case) get the premium tier;
+    routine rules get the cheaper one. Mirrors the narrative, which is low-stakes
+    prose and also runs on the cheap tier."""
+    return "premium" if rule.get("is_gate") else "cheap"
+
+
+def active_premium_model():
+    """The premium-tier model id for the active provider (for run reporting)."""
+    return _model_for_tier("premium")
+
+
+def _strip_code_fence(text):
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("```")[1]
+        if text.startswith("json"):
+            text = text[4:]
+    return text
 
 
 SYSTEM = (
@@ -174,14 +239,11 @@ SOURCE DOCUMENT EXCERPTS:
 Reply EXACTLY: {{"narrative": "<str>"}}"""
 
 
-def _invoke_text(content, max_tokens, model_id=None, usage=None):
-    """Invoke the judge and return the raw assistant text (code-fence stripped).
+def _invoke_text_bedrock(content, max_tokens, model_id, usage=None):
+    """Bedrock invoke: build the Anthropic-on-Bedrock body and return raw text.
 
-    `content` is the user message content: either a plain string, or a list of
-    Anthropic content blocks (used to attach `cache_control` to the shared prefix).
-    `model_id` selects the Bedrock model (tiered routing); defaults to the premium
-    BEDROCK_MODEL_ID. When a `usage` accumulator is supplied, the response's token
-    counts are recorded into it for cost tracking.
+    When a `usage` accumulator is supplied, the response's token counts are
+    recorded into it for cost tracking.
     """
     body = {
         "anthropic_version": "bedrock-2023-05-31",
@@ -189,42 +251,76 @@ def _invoke_text(content, max_tokens, model_id=None, usage=None):
         "system": SYSTEM,
         "messages": [{"role": "user", "content": content}],
     }
-    resp = _bedrock().invoke_model(
-        modelId=model_id or settings.BEDROCK_MODEL_ID,
-        body=json.dumps(body),
-    )
+    resp = _bedrock().invoke_model(modelId=model_id, body=json.dumps(body))
     payload = json.loads(resp["body"].read())
     if usage is not None:
         u = payload.get("usage") or {}
         usage.add(u.get("input_tokens", 0), u.get("output_tokens", 0))
-    text = payload["content"][0]["text"].strip()
-    if text.startswith("```"):
-        text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
-    return text
+    return _strip_code_fence(payload["content"][0]["text"])
 
 
-def _invoke_json(content, max_tokens=900, model_id=None, usage=None):
+def _invoke_text_proxy(content, max_tokens, model_id, usage=None):
+    """llm-proxy invoke via the OpenAI chat-completions API.
+
+    Translates our Anthropic-shaped `content` (string, or text blocks) into OpenAI
+    content parts. We deliberately do NOT forward the Anthropic `cache_control`
+    markers: the proxy fronts reasoning models (gpt-5.x, deepseek) that cache the
+    stable prefix automatically, and the markers are an Anthropic-only feature
+    LiteLLM may reject for other providers. The shared context still leads the
+    message, so automatic prefix caching applies regardless.
+
+    Reasoning models count reasoning tokens against max_tokens, so we add
+    LLM_PROXY_REASONING_HEADROOM to keep the JSON answer from being truncated to
+    nothing once the model has "thought". When a `usage` accumulator is supplied,
+    the response's token counts are recorded into it for cost tracking.
+    """
+    if isinstance(content, str):
+        user_content = content
+    else:
+        user_content = [{"type": "text", "text": b["text"]} for b in content]
+    headroom = int(getattr(settings, "LLM_PROXY_REASONING_HEADROOM", 0))
+    resp = _proxy_client().chat.completions.create(
+        model=model_id,
+        max_tokens=max_tokens + headroom,
+        messages=[
+            {"role": "system", "content": SYSTEM},
+            {"role": "user", "content": user_content},
+        ],
+    )
+    if usage is not None and resp.usage is not None:
+        usage.add(
+            getattr(resp.usage, "prompt_tokens", 0) or 0,
+            getattr(resp.usage, "completion_tokens", 0) or 0,
+        )
+    return _strip_code_fence(resp.choices[0].message.content or "")
+
+
+def _invoke_text(content, max_tokens, tier="premium", usage=None):
+    """Invoke the judge and return the raw assistant text (code-fence stripped).
+
+    `content` is the user message content: either a plain string, or a list of
+    Anthropic content blocks (used to attach `cache_control` to the shared prefix).
+    `tier` ('premium'|'cheap') selects the model within the active provider. When a
+    `usage` accumulator is supplied, the call's token counts are recorded into it.
+    """
+    model_id = _model_for_tier(tier)
+    if PROVIDER == "proxy":
+        return _invoke_text_proxy(content, max_tokens, model_id, usage)
+    return _invoke_text_bedrock(content, max_tokens, model_id, usage)
+
+
+def _invoke_json(content, max_tokens=900, tier="premium", usage=None):
     """Invoke the judge once and parse its JSON, salvaging dirty/truncated output.
 
     The judge occasionally prefixes the JSON with prose or gets cut off at
     max_tokens. We fetch the assistant text a single time and recover locally
     rather than re-invoking the model, which would double the call's cost/latency.
     """
-    text = _invoke_text(content, max_tokens, model_id, usage)
+    text = _invoke_text(content, max_tokens, tier, usage)
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         return _salvage_json(text)
-
-
-def _model_for_rule(rule):
-    """Pick the Bedrock model for a rule: premium for hard gates (a low score can
-    REJECT the case, so accuracy matters most), the cheaper SKU for the rest."""
-    if rule.get("is_gate"):
-        return settings.BEDROCK_MODEL_ID
-    return getattr(settings, "BEDROCK_MODEL_ID_CHEAP", settings.BEDROCK_MODEL_ID)
 
 
 def _salvage_json(text):
@@ -394,15 +490,13 @@ def judge_rules(
             parsed = _invoke_json(
                 _build_narrative_prompt(case_summary, source_excerpts, case_type_label),
                 max_tokens=300,
-                model_id=getattr(
-                    settings, "BEDROCK_MODEL_ID_CHEAP", settings.BEDROCK_MODEL_ID
-                ),
+                tier="cheap",
                 usage=usage,
             )
             return ("narrative", None, parsed)
         rule = by_key[key]
         content = _build_single_rule_content(context_block, rule)
-        parsed = _invoke_json(content, model_id=_model_for_rule(rule), usage=usage)
+        parsed = _invoke_json(content, tier=_tier_for_rule(rule), usage=usage)
         return ("rule", key, parsed)
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
@@ -429,7 +523,7 @@ def judge_rules(
     # If nothing at all came back, surface the failure to the caller.
     if not any(samples[k] for k in keys) and not narrative:
         raise RuntimeError(
-            f"All {len(tasks)} Bedrock judge calls failed: {errors[0] if errors else 'unknown'}"
+            f"All {len(tasks)} judge calls failed: {errors[0] if errors else 'unknown'}"
         )
 
     out = {"_narrative": narrative, "_n_samples": n}

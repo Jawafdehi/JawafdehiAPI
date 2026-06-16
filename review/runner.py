@@ -13,8 +13,6 @@ uploaded — only the final scored result is submitted.
 
 import time
 
-from django.conf import settings
-
 from . import bedrock_judge, casetype, code_rules, converter, scorer
 
 
@@ -80,9 +78,10 @@ def process_case(case, config=None, on_stage=None):
     result = scorer.score_case(
         case, converted, rules, cfg, source_analyses=source_analyses, usage=usage
     )
-    # Reports the premium/gate tier. Under tiered routing, non-gate rules and the
-    # narrative may instead use BEDROCK_MODEL_ID_CHEAP (see bedrock_judge).
-    result["model_id_used"] = settings.BEDROCK_MODEL_ID
+    # Reports the active provider's premium/gate-tier model. Under tiered routing,
+    # non-gate rules and the narrative may instead use the cheap tier (see
+    # bedrock_judge); the proxy provider resolves its own model ids.
+    result["model_id_used"] = bedrock_judge.active_premium_model()
     result["token_usage"] = usage.as_dict()
 
     return {
