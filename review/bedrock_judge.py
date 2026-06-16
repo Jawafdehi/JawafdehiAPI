@@ -46,16 +46,20 @@ class UsageAccumulator:
     def as_dict(self):
         with self._lock:
             in_tok, out_tok, calls = self.input_tokens, self.output_tokens, self.calls
-        in_cost = in_tok / 1_000_000 * settings.BEDROCK_INPUT_PRICE_PER_MTOK
-        out_cost = out_tok / 1_000_000 * settings.BEDROCK_OUTPUT_PRICE_PER_MTOK
+        # Round the per-direction costs before summing so the reported
+        # total_cost_usd is exactly input_cost_usd + output_cost_usd.
+        in_cost = round(in_tok / 1_000_000 * settings.BEDROCK_INPUT_PRICE_PER_MTOK, 6)
+        out_cost = round(
+            out_tok / 1_000_000 * settings.BEDROCK_OUTPUT_PRICE_PER_MTOK, 6
+        )
         return {
             "model_id": settings.BEDROCK_MODEL_ID,
             "calls": calls,
             "input_tokens": in_tok,
             "output_tokens": out_tok,
             "total_tokens": in_tok + out_tok,
-            "input_cost_usd": round(in_cost, 6),
-            "output_cost_usd": round(out_cost, 6),
+            "input_cost_usd": in_cost,
+            "output_cost_usd": out_cost,
             "total_cost_usd": round(in_cost + out_cost, 6),
         }
 

@@ -28,6 +28,8 @@ def test_accumulator_sums_tokens_and_costs(settings):
     assert out["input_cost_usd"] == 22.5
     assert out["output_cost_usd"] == 15.0
     assert out["total_cost_usd"] == 37.5
+    # The reported total must be exactly the sum of the reported parts.
+    assert out["total_cost_usd"] == out["input_cost_usd"] + out["output_cost_usd"]
     assert out["model_id"] == settings.BEDROCK_MODEL_ID
 
 
