@@ -57,3 +57,59 @@ def get_case(slug):
         case.setdefault("slug", slug)
         return case
     return _serialize_local_case(slug)
+
+
+def _case_by_court_case_number(court_case_number):
+    """Find a local Case carrying the given court case ref ("court:number").
+
+    The ref is the exact form stored in ``Case.court_cases`` (e.g.
+    ``"special:081-CR-0079"``). Raises CaseNotFound if it is malformed or no
+    case references it.
+    """
+    from django.db import connection
+
+    from cases.models import Case
+
+    from .ngm_client import parse_court_ref
+
+    parsed = parse_court_ref(court_case_number)
+    if not parsed:
+        raise CaseNotFound(
+            f"Invalid court case number '{court_case_number}'; "
+            f"expected '<court>:<case_number>' (e.g. 'special:081-CR-0079')."
+        )
+    ref = "{}:{}".format(*parsed)
+
+    # JSONField __contains needs PostgreSQL; tests (and any non-PG backend) fall
+    # back to an in-memory scan over the (small) set of cases with court refs.
+    if connection.vendor == "postgresql":
+        case = Case.objects.filter(court_cases__contains=[ref]).first()
+    else:
+        case = next(
+            (
+                c
+                for c in Case.objects.exclude(court_cases__isnull=True)
+                if isinstance(c.court_cases, list) and ref in c.court_cases
+            ),
+            None,
+        )
+    if case is None:
+        raise CaseNotFound(f"No case references court case number '{ref}'.")
+    return case
+
+
+def resolve_target(slug=None, court_case_number=None):
+    """Verify a review target exists and return its ``(slug, title)``.
+
+    Accepts exactly one of a Jawafdehi case ``slug`` or a ``court_case_number``
+    (a "court:number" ref as stored in ``Case.court_cases``). Raises
+    CaseNotFound when the case cannot be located so the caller can surface a
+    clear error instead of queuing a doomed job.
+    """
+    if court_case_number:
+        case = _case_by_court_case_number(court_case_number)
+        return case.slug, case.title
+    if slug:
+        data = get_case(slug)
+        return data.get("slug") or slug, data.get("title", "")
+    raise CaseNotFound("Provide either a case slug or a court case number.")

@@ -64,15 +64,45 @@ def me_view(request):
 @api_view(["POST"])
 @permission_classes([HasContributorRole])
 def submit_review(request):
-    """Submit a new case slug for review.
+    """Submit a case for review by slug or court case number.
 
-    Creates the review as `pending`; the out-of-process poller claims it via
-    the job API and runs it. Nothing executes in-process here.
+    The case is verified up front (so a bad slug / unknown court case number
+    fails fast with the case title pulled for display), and only one review may
+    be active per case: a new submission is rejected while an earlier review for
+    the same case is still pending or running. Creates the review as `pending`;
+    the out-of-process poller claims it via the job API and runs it. Nothing
+    executes in-process here.
     """
     s = SubmitSerializer(data=request.data)
     s.is_valid(raise_exception=True)
-    slug = s.validated_data["slug"]
-    review = CaseReview.objects.create(slug=slug, submitted_by=request.user)
+
+    try:
+        slug, title = case_provider.resolve_target(
+            slug=s.validated_data["slug"] or None,
+            court_case_number=s.validated_data["court_case_number"] or None,
+        )
+    except case_provider.CaseNotFound as e:
+        return Response({"detail": str(e)}, status=status.HTTP_404_NOT_FOUND)
+
+    active = CaseReview.objects.filter(
+        slug=slug,
+        status__in=[CaseReview.STATUS_PENDING, CaseReview.STATUS_RUNNING],
+    ).first()
+    if active is not None:
+        return Response(
+            {
+                "detail": (
+                    f"A review for '{slug}' is already {active.status}; "
+                    f"wait for it to finish before submitting another."
+                ),
+                "review_id": active.id,
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    review = CaseReview.objects.create(
+        slug=slug, case_title=title, submitted_by=request.user
+    )
     return Response(
         CaseReviewDetailSerializer(review).data, status=status.HTTP_201_CREATED
     )

@@ -64,10 +64,33 @@ class ReviewConfigSerializer(serializers.ModelSerializer):
 
 
 class SubmitSerializer(serializers.Serializer):
-    slug = serializers.CharField(max_length=255)
+    """Submit a review by case slug OR by court case number (exactly one).
 
-    def validate_slug(self, value):
-        return value.strip().strip("/")
+    The court case number is the "court:number" ref stored on the case (e.g.
+    "special:081-CR-0079"); the view resolves either form to a concrete case.
+    """
+
+    slug = serializers.CharField(
+        max_length=255, required=False, allow_blank=True, default=""
+    )
+    court_case_number = serializers.CharField(
+        max_length=255, required=False, allow_blank=True, default=""
+    )
+
+    def validate(self, attrs):
+        slug = (attrs.get("slug") or "").strip().strip("/")
+        court_case_number = (attrs.get("court_case_number") or "").strip()
+        if not slug and not court_case_number:
+            raise serializers.ValidationError(
+                "Provide either 'slug' or 'court_case_number'."
+            )
+        if slug and court_case_number:
+            raise serializers.ValidationError(
+                "Provide only one of 'slug' or 'court_case_number', not both."
+            )
+        attrs["slug"] = slug
+        attrs["court_case_number"] = court_case_number
+        return attrs
 
 
 class SourceMarkdownSerializer(serializers.Serializer):
