@@ -27,6 +27,7 @@ from config.db_router import force_primary_reads
 
 from . import case_provider, code_rules
 from .models import CaseReview, ReviewConfig
+from .pagination import ReviewResultsPagination
 from .permissions import (
     CanManageDocumentSources,
     CanReadReview,
@@ -290,9 +291,12 @@ def attach_source_markdown(request, source_id):
 class ReviewListView(generics.ListAPIView):
     serializer_class = CaseReviewListSerializer
     permission_classes = [CanReadReview]
+    pagination_class = ReviewResultsPagination
 
     def get_queryset(self):
-        return CaseReview.objects.all()
+        # Deterministic ordering (created_at can tie) so paging through the list
+        # for lazy loading doesn't drop or duplicate rows across page boundaries.
+        return CaseReview.objects.order_by("-created_at", "-id")
 
 
 class ReviewDetailView(generics.RetrieveAPIView):
