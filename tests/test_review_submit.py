@@ -65,6 +65,23 @@ def test_submit_by_court_case_number_resolves_case(client):
     assert review.slug == "beta-case"
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://jawafdehi.org/case/alpha-case",
+        "https://jawafdehi.org/case/alpha-case/",
+        "https://jawafdehi.org/case/alpha-case?ref=share",
+        "jawafdehi.org/case/alpha-case",
+    ],
+)
+def test_submit_by_full_case_url_extracts_slug(client, value):
+    _make_case("alpha-case", "Alpha Corruption Case")
+    resp = client.post(SUBMIT_URL, {"slug": value}, format="json")
+    assert resp.status_code == 201, resp.content
+    assert resp.data["slug"] == "alpha-case"
+    assert resp.data["case_title"] == "Alpha Corruption Case"
+
+
 def test_submit_unknown_slug_is_404(client):
     resp = client.post(SUBMIT_URL, {"slug": "does-not-exist"}, format="json")
     assert resp.status_code == 404

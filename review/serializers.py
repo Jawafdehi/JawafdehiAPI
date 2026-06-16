@@ -1,3 +1,5 @@
+from urllib.parse import urlparse
+
 from rest_framework import serializers
 
 from .models import CaseReview, ReviewConfig
@@ -63,11 +65,34 @@ class ReviewConfigSerializer(serializers.ModelSerializer):
         read_only_fields = ["updated_at"]
 
 
+def slug_from_input(value):
+    """Normalize a slug field that may be a bare slug or a full case URL.
+
+    Accepts "alpha-case", "https://jawafdehi.org/case/alpha-case" (with or
+    without scheme, query string, or trailing slash). Returns the slug — the
+    path segment following "/case/" when present, otherwise the last segment.
+    """
+    value = (value or "").strip()
+    if not value:
+        return ""
+    path = urlparse(value).path
+    segments = [s for s in path.split("/") if s]
+    if not segments:
+        return ""
+    if "case" in segments:
+        idx = segments.index("case")
+        if idx + 1 < len(segments):
+            return segments[idx + 1]
+    return segments[-1]
+
+
 class SubmitSerializer(serializers.Serializer):
     """Submit a review by case slug OR by court case number (exactly one).
 
-    The court case number is the "court:number" ref stored on the case (e.g.
-    "special:081-CR-0079"); the view resolves either form to a concrete case.
+    The slug may be given as a bare slug or a full case URL (the slug is
+    extracted). The court case number is the "court:number" ref stored on the
+    case (e.g. "special:081-CR-0079"); the view resolves either form to a
+    concrete case.
     """
 
     slug = serializers.CharField(
@@ -78,7 +103,7 @@ class SubmitSerializer(serializers.Serializer):
     )
 
     def validate(self, attrs):
-        slug = (attrs.get("slug") or "").strip().strip("/")
+        slug = slug_from_input(attrs.get("slug"))
         court_case_number = (attrs.get("court_case_number") or "").strip()
         if not slug and not court_case_number:
             raise serializers.ValidationError(
