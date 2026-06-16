@@ -15,7 +15,7 @@ class Migration(migrations.Migration):
         migrations.AddConstraint(
             model_name="casereview",
             constraint=models.UniqueConstraint(
-                condition=models.Q(("status__in", ["pending", "running"])),
+                condition=models.Q(status__in=["pending", "running"]),
                 fields=("slug",),
                 name="uniq_active_review_per_case",
             ),
