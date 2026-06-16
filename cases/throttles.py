@@ -15,7 +15,41 @@ three small hooks:
 """
 
 from rest_framework.settings import api_settings
+from rest_framework.throttling import AnonRateThrottle as _AnonRateThrottle
 from rest_framework.throttling import SimpleRateThrottle
+
+
+def get_client_ident(request):
+    """Real client IP for throttling, behind Cloudflare + Traefik.
+
+    The edge is Cloudflare and the cluster ingress (klipper-svclb, Cluster
+    externalTrafficPolicy) SNATs the L3 source, so ``REMOTE_ADDR`` is a useless
+    in-cluster proxy IP and every caller would otherwise share one throttle
+    bucket. Cloudflare sets ``CF-Connecting-IP`` to the true client and
+    overwrites any client-supplied value, so it is both correct and unspoofable
+    through the proxy; prefer it. Fall back to the first non-empty
+    ``X-Forwarded-For`` hop, then the peer address.
+
+    Every candidate is stripped and skipped if blank: a whitespace-only header
+    or a leading comma (``", 1.2.3.4"``) must not yield an empty ident, which
+    would collapse those callers back into one shared bucket.
+    """
+    cf_ip = (request.META.get("HTTP_CF_CONNECTING_IP") or "").strip()
+    if cf_ip:
+        return cf_ip
+    for hop in (request.META.get("HTTP_X_FORWARDED_FOR") or "").split(","):
+        hop = hop.strip()
+        if hop:
+            return hop
+    return request.META.get("REMOTE_ADDR")
+
+
+class AnonRateThrottle(_AnonRateThrottle):
+    """``AnonRateThrottle`` that buckets by the real client IP (see
+    :func:`get_client_ident`) instead of DRF's proxy-naive ident."""
+
+    def get_ident(self, request):
+        return get_client_ident(request)
 
 
 class RoleBasedRateThrottle(SimpleRateThrottle):
@@ -79,6 +113,9 @@ class RoleBasedRateThrottle(SimpleRateThrottle):
     def get_authenticated_ident(self, request):
         """Cache identity for an authenticated caller. Defaults to user pk."""
         return request.user.pk
+
+    def get_ident(self, request):
+        return get_client_ident(request)
 
     def get_cache_key(self, request, view):
         user = getattr(request, "user", None)
