@@ -66,6 +66,13 @@ MAX_WORKERS = int(getattr(settings, "BEDROCK_MAX_WORKERS", 8))
 # budget; raise it so figures deep in a source are actually visible.
 _SOURCE_EXCERPTS_CAP = int(getattr(settings, "JUDGE_SOURCE_EXCERPTS_CAP", 120000))
 
+# Whether to prompt-cache the shared rule-grading prefix. The same case data +
+# source-excerpt block is re-sent for every (rule x sample) call; with hundreds
+# of rules that block dominates input cost. Marking it with `cache_control` makes
+# Bedrock bill it once per case (cache write) and ~free on every later call
+# (cache read) for the cache TTL, which the back-to-back fan-out keeps warm.
+PROMPT_CACHE = bool(getattr(settings, "BEDROCK_PROMPT_CACHE", True))
+
 
 def _bedrock():
     global _client
@@ -94,21 +101,30 @@ SYSTEM = (
 )
 
 
-def _build_single_rule_prompt(case_summary, source_excerpts, case_type_label, rule):
-    block = f"### Rule `{rule['key']}` — {rule['title']}\n{rule.get('description','')}"
-    if rule.get("good_examples"):
-        block += f"\nGOOD: {rule['good_examples']}"
-    if rule.get("bad_examples"):
-        block += f"\nBAD: {rule['bad_examples']}"
-    return f"""Grade this Jawafdehi case against the ONE rule below. Reply with JSON only.
+def _rule_context_block(case_summary, source_excerpts, case_type_label):
+    """The case data + source excerpts shared verbatim by every rule call.
 
-CASE TYPE: {case_type_label or "unknown"}
+    Kept as a standalone leading block so it can be marked `cache_control` and
+    billed once per case instead of once per (rule x sample) invocation.
+    """
+    return f"""CASE TYPE: {case_type_label or "unknown"}
 
 CASE DATA:
 {json.dumps(case_summary, ensure_ascii=False, indent=2)[:30000]}
 
 SOURCE DOCUMENT EXCERPTS (converted to markdown):
-{source_excerpts[:_SOURCE_EXCERPTS_CAP]}
+{source_excerpts[:_SOURCE_EXCERPTS_CAP]}"""
+
+
+def _rule_instruction_block(rule):
+    """The per-rule grading instruction (varies per call; never cached)."""
+    block = f"### Rule `{rule['key']}` — {rule['title']}\n{rule.get('description','')}"
+    if rule.get("good_examples"):
+        block += f"\nGOOD: {rule['good_examples']}"
+    if rule.get("bad_examples"):
+        block += f"\nBAD: {rule['bad_examples']}"
+    return f"""Grade the Jawafdehi case above (CASE DATA + SOURCE DOCUMENT EXCERPTS)
+against the ONE rule below. Reply with JSON only.
 
 RULE TO GRADE:
 {block}
@@ -120,6 +136,27 @@ the case against THIS rule (each suggestion an imperative one-liner, e.g.
 satisfied, return an empty suggestions list. Judge ONLY against this rule.
 Reply EXACTLY in this JSON shape:
 {{"score": <int 0-100>, "rationale": "<str>", "issues": ["<str>"], "suggestions": ["<str>"]}}"""
+
+
+def _build_single_rule_content(context_block, rule):
+    """User-message content for grading one rule against the shared context.
+
+    When prompt caching is on, return two content blocks — the shared context
+    (marked `cache_control`) followed by the per-rule instruction — so Bedrock
+    reuses the cached prefix across every rule. Otherwise fall back to a single
+    concatenated string (identical text, no cache markers).
+    """
+    instruction = _rule_instruction_block(rule)
+    if PROMPT_CACHE:
+        return [
+            {
+                "type": "text",
+                "text": context_block,
+                "cache_control": {"type": "ephemeral"},
+            },
+            {"type": "text", "text": instruction},
+        ]
+    return f"{context_block}\n\n{instruction}"
 
 
 def _build_narrative_prompt(case_summary, source_excerpts, case_type_label):
@@ -137,20 +174,23 @@ SOURCE DOCUMENT EXCERPTS:
 Reply EXACTLY: {{"narrative": "<str>"}}"""
 
 
-def _invoke_text(prompt, max_tokens, usage=None):
-    """Invoke the judge once and return its raw text reply (code-fence stripped).
+def _invoke_text(content, max_tokens, model_id=None, usage=None):
+    """Invoke the judge and return the raw assistant text (code-fence stripped).
 
-    When a `usage` accumulator is supplied, the response's token counts are
-    recorded into it for cost tracking.
+    `content` is the user message content: either a plain string, or a list of
+    Anthropic content blocks (used to attach `cache_control` to the shared prefix).
+    `model_id` selects the Bedrock model (tiered routing); defaults to the premium
+    BEDROCK_MODEL_ID. When a `usage` accumulator is supplied, the response's token
+    counts are recorded into it for cost tracking.
     """
     body = {
         "anthropic_version": "bedrock-2023-05-31",
         "max_tokens": max_tokens,
         "system": SYSTEM,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [{"role": "user", "content": content}],
     }
     resp = _bedrock().invoke_model(
-        modelId=settings.BEDROCK_MODEL_ID,
+        modelId=model_id or settings.BEDROCK_MODEL_ID,
         body=json.dumps(body),
     )
     payload = json.loads(resp["body"].read())
@@ -165,13 +205,21 @@ def _invoke_text(prompt, max_tokens, usage=None):
     return text
 
 
-def _invoke_once(prompt, max_tokens=900, usage=None):
-    return json.loads(_invoke_text(prompt, max_tokens, usage))
+def _invoke_once(content, max_tokens=900, model_id=None, usage=None):
+    return json.loads(_invoke_text(content, max_tokens, model_id, usage))
 
 
-def _invoke_once_salvaged(prompt, max_tokens=900, usage=None):
+def _invoke_once_salvaged(content, max_tokens=900, model_id=None, usage=None):
     """Like _invoke_once but tolerant of truncated/dirty JSON (source analysis)."""
-    return _salvage_json(_invoke_text(prompt, max_tokens, usage))
+    return _salvage_json(_invoke_text(content, max_tokens, model_id, usage))
+
+
+def _model_for_rule(rule):
+    """Pick the Bedrock model for a rule: premium for hard gates (a low score can
+    REJECT the case, so accuracy matters most), the cheaper SKU for the rest."""
+    if rule.get("is_gate"):
+        return settings.BEDROCK_MODEL_ID
+    return getattr(settings, "BEDROCK_MODEL_ID_CHEAP", settings.BEDROCK_MODEL_ID)
 
 
 def _salvage_json(text):
@@ -318,6 +366,12 @@ def judge_rules(
     keys = [r["key"] for r in llm_rules]
     by_key = {r["key"]: r for r in llm_rules}
 
+    # Build the case data + source-excerpt block once. It is identical for every
+    # rule, so we cache it (see _build_single_rule_content) instead of re-sending
+    # it on each of the rule x sample calls. The pool's first wave writes the
+    # cache; back-to-back calls keep its TTL warm so the rest read it cheaply.
+    context_block = _rule_context_block(case_summary, source_excerpts, case_type_label)
+
     # Build the full task list: one task per (rule, sample) + one narrative task.
     tasks = []  # (kind, key, sample_idx)
     for r in llm_rules:
@@ -332,7 +386,7 @@ def judge_rules(
     narrative = ""
     errors = []
 
-    def _invoke_json(prompt, max_tokens=900):
+    def _invoke_json(prompt, max_tokens=900, model_id=None):
         """Invoke, parsing strictly first, then salvaging dirty/truncated JSON.
 
         The judge occasionally prefixes the JSON with prose or gets cut off at
@@ -340,22 +394,29 @@ def judge_rules(
         rule silently degrades to a neutral default. Mirror analyze_source.
         """
         try:
-            return _invoke_once(prompt, max_tokens=max_tokens, usage=usage)
+            return _invoke_once(
+                prompt, max_tokens=max_tokens, model_id=model_id, usage=usage
+            )
         except json.JSONDecodeError:
-            return _invoke_once_salvaged(prompt, max_tokens=max_tokens, usage=usage)
+            return _invoke_once_salvaged(
+                prompt, max_tokens=max_tokens, model_id=model_id, usage=usage
+            )
 
     def _run(task):
         kind, key, _i = task
         if kind == "narrative":
+            # Narrative is low-stakes prose -> cheaper tier.
             parsed = _invoke_json(
                 _build_narrative_prompt(case_summary, source_excerpts, case_type_label),
                 max_tokens=300,
+                model_id=getattr(
+                    settings, "BEDROCK_MODEL_ID_CHEAP", settings.BEDROCK_MODEL_ID
+                ),
             )
             return ("narrative", None, parsed)
-        prompt = _build_single_rule_prompt(
-            case_summary, source_excerpts, case_type_label, by_key[key]
-        )
-        parsed = _invoke_json(prompt)
+        rule = by_key[key]
+        content = _build_single_rule_content(context_block, rule)
+        parsed = _invoke_json(content, model_id=_model_for_rule(rule))
         return ("rule", key, parsed)
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:

@@ -758,6 +758,21 @@ AWS_PROFILE = os.getenv("REVIEW_AWS_PROFILE", os.getenv("AWS_PROFILE", ""))
 AWS_REGION = os.getenv("AWS_REGION", "us-west-2")
 BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "global.anthropic.claude-opus-4-8")
 BEDROCK_MAX_WORKERS = int(os.getenv("BEDROCK_MAX_WORKERS", "8"))
+# Prompt-cache the shared rule-grading prefix (case data + source excerpts) so it
+# is billed once per case instead of once per (rule x sample) call. Kill switch
+# for regions/models where Bedrock prompt caching is unavailable.
+BEDROCK_PROMPT_CACHE = os.getenv("BEDROCK_PROMPT_CACHE", "1") not in (
+    "0",
+    "false",
+    "False",
+    "",
+)
+# Tiered model routing: high-stakes GATE rules (a low score can REJECT the case)
+# are graded by the premium model above; routine non-gate rules and the narrative
+# use this cheaper SKU. Defaults to the premium model id, so routing is a no-op
+# until a real cheaper model id is configured for this deployment's region/account
+# (the operator picks the SKU — we never guess one that may not exist).
+BEDROCK_MODEL_ID_CHEAP = os.getenv("BEDROCK_MODEL_ID_CHEAP", BEDROCK_MODEL_ID)
 
 # Converted source markdown cache + per-source conversion timeout.
 SOURCE_MARKDOWN_DIR = Path(

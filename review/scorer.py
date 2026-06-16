@@ -184,6 +184,8 @@ def score_case(
                 "description": r.description,
                 "good_examples": r.good_examples,
                 "bad_examples": r.bad_examples,
+                # Routes the judge model tier: gate rules -> premium model.
+                "is_gate": r.is_gate,
             }
             for r in llm_rules
         ]
