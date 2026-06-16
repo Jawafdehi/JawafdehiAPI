@@ -16,7 +16,8 @@ gate the UI by role.
 """
 
 import structlog
-from django.db import transaction
+from django.db import IntegrityError, transaction
+from django.db.models import Max
 from django.utils import timezone
 from rest_framework import generics, status
 from rest_framework.decorators import api_view, permission_classes
@@ -84,25 +85,30 @@ def submit_review(request):
     except case_provider.CaseNotFound as e:
         return Response({"detail": str(e)}, status=status.HTTP_404_NOT_FOUND)
 
-    active = CaseReview.objects.filter(
-        slug=slug,
-        status__in=[CaseReview.STATUS_PENDING, CaseReview.STATUS_RUNNING],
-    ).first()
-    if active is not None:
+    # The pre-check gives a friendly message in the common case; the DB partial
+    # unique constraint (uniq_active_review_per_case) is the source of truth and
+    # closes the check-then-create race between concurrent submits.
+    try:
+        with transaction.atomic():
+            review = CaseReview.objects.create(
+                slug=slug, case_title=title, submitted_by=request.user
+            )
+    except IntegrityError:
+        active = CaseReview.objects.filter(
+            slug=slug,
+            status__in=[CaseReview.STATUS_PENDING, CaseReview.STATUS_RUNNING],
+        ).first()
         return Response(
             {
                 "detail": (
-                    f"A review for '{slug}' is already {active.status}; "
+                    f"A review for '{slug}' is already "
+                    f"{active.status if active else 'active'}; "
                     f"wait for it to finish before submitting another."
                 ),
-                "review_id": active.id,
+                "review_id": active.id if active else None,
             },
             status=status.HTTP_409_CONFLICT,
         )
-
-    review = CaseReview.objects.create(
-        slug=slug, case_title=title, submitted_by=request.user
-    )
     return Response(
         CaseReviewDetailSerializer(review).data, status=status.HTTP_201_CREATED
     )
@@ -342,13 +348,26 @@ def config_view(request):
 @api_view(["POST"])
 @permission_classes([HasContributorRole])
 def regrade_all(request):
-    """Re-queue every existing review for regrading against the current rules.
+    """Re-queue the latest review of each case for regrading against current rules.
 
-    Each review is reset to pending in a single bulk UPDATE; the out-of-process
-    poller then claims and runs them (each review fans its LLM rules out in
-    parallel).
+    Only the most recent review per slug is re-queued, and only for cases that
+    do not already have an active (pending/running) review. This honors the
+    one-active-review-per-case constraint (uniq_active_review_per_case): the old
+    "reset every row to pending" behavior would violate it for any case with
+    more than one historical review. The out-of-process poller then claims the
+    re-queued reviews (each fans its LLM rules out in parallel).
     """
-    ids = list(CaseReview.objects.values_list("id", flat=True))
+    active_slugs = set(
+        CaseReview.objects.filter(
+            status__in=[CaseReview.STATUS_PENDING, CaseReview.STATUS_RUNNING]
+        ).values_list("slug", flat=True)
+    )
+    ids = list(
+        CaseReview.objects.exclude(slug__in=active_slugs)
+        .values("slug")
+        .annotate(latest_id=Max("id"))
+        .values_list("latest_id", flat=True)
+    )
     CaseReview.objects.filter(id__in=ids).update(
         status=CaseReview.STATUS_PENDING,
         stage="queued_for_regrade",

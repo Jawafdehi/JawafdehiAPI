@@ -80,22 +80,28 @@ def _case_by_court_case_number(court_case_number):
         )
     ref = "{}:{}".format(*parsed)
 
-    # JSONField __contains needs PostgreSQL; tests (and any non-PG backend) fall
-    # back to an in-memory scan over the (small) set of cases with court refs.
+    # JSONField __contains needs PostgreSQL (it raises NotSupportedError on
+    # SQLite, used by the test suite), so non-PG backends fall back to an
+    # in-memory scan over the (small) set of cases with court refs. Collect up
+    # to two matches so an ambiguous ref can be rejected rather than silently
+    # resolving to an arbitrary case.
     if connection.vendor == "postgresql":
-        case = Case.objects.filter(court_cases__contains=[ref]).first()
+        matches = list(Case.objects.filter(court_cases__contains=[ref])[:2])
     else:
-        case = next(
-            (
-                c
-                for c in Case.objects.exclude(court_cases__isnull=True)
-                if isinstance(c.court_cases, list) and ref in c.court_cases
-            ),
-            None,
-        )
-    if case is None:
+        matches = []
+        for c in Case.objects.exclude(court_cases__isnull=True):
+            if isinstance(c.court_cases, list) and ref in c.court_cases:
+                matches.append(c)
+                if len(matches) == 2:
+                    break
+    if not matches:
         raise CaseNotFound(f"No case references court case number '{ref}'.")
-    return case
+    if len(matches) > 1:
+        raise CaseNotFound(
+            f"Multiple cases reference court case number '{ref}'; "
+            f"resolution is ambiguous."
+        )
+    return matches[0]
 
 
 def resolve_target(slug=None, court_case_number=None):

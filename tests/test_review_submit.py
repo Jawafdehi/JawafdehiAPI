@@ -8,6 +8,7 @@ Covers the three behaviors added on top of the original slug-only submit:
 """
 
 import pytest
+from django.db import IntegrityError, transaction
 from rest_framework.test import APIClient
 
 from cases.models import Case, CaseState, CaseType
@@ -15,6 +16,7 @@ from review.models import CaseReview
 from tests.conftest import create_user_with_role
 
 SUBMIT_URL = "/api/casework/reviews/submit/"
+REGRADE_URL = "/api/casework/reviews/regrade-all/"
 
 
 @pytest.fixture
@@ -129,3 +131,57 @@ def test_resubmit_allowed_after_previous_review_finished(client):
     again = client.post(SUBMIT_URL, {"slug": "epsilon-case"}, format="json")
     assert again.status_code == 201
     assert CaseReview.objects.filter(slug="epsilon-case").count() == 2
+
+
+def test_ambiguous_court_case_number_is_404(client):
+    # Two cases sharing a court ref must not silently resolve to one of them.
+    _make_case("zeta-one", "Zeta One", ["special:081-CR-0090"])
+    _make_case("zeta-two", "Zeta Two", ["special:081-CR-0090"])
+    resp = client.post(
+        SUBMIT_URL, {"court_case_number": "special:081-CR-0090"}, format="json"
+    )
+    assert resp.status_code == 404
+    assert "ambiguous" in resp.data["detail"].lower()
+    assert not CaseReview.objects.exists()
+
+
+def test_db_constraint_blocks_second_active_review(db):
+    # The partial unique constraint is the source of truth for the race-prone
+    # check-then-create path: a second active row for the same slug is rejected.
+    CaseReview.objects.create(slug="eta-case", status=CaseReview.STATUS_PENDING)
+    with pytest.raises(IntegrityError):
+        with transaction.atomic():
+            CaseReview.objects.create(slug="eta-case", status=CaseReview.STATUS_RUNNING)
+
+
+def test_regrade_all_requeues_latest_per_slug_and_skips_active(client):
+    _make_case("theta-case", "Theta Case")
+    _make_case("iota-case", "Iota Case")
+
+    # theta-case: two finished reviews -> only the latest should re-queue.
+    CaseReview.objects.create(slug="theta-case", status=CaseReview.STATUS_DONE)
+    theta_latest = CaseReview.objects.create(
+        slug="theta-case", status=CaseReview.STATUS_FAILED
+    )
+    # iota-case: already has an active review -> must be left untouched.
+    iota_active = CaseReview.objects.create(
+        slug="iota-case", status=CaseReview.STATUS_RUNNING
+    )
+
+    resp = client.post(REGRADE_URL, {}, format="json")
+    assert resp.status_code == 200
+
+    # Exactly one active review for theta-case (the latest), none added for iota.
+    theta_pending = CaseReview.objects.filter(
+        slug="theta-case", status=CaseReview.STATUS_PENDING
+    )
+    assert list(theta_pending.values_list("id", flat=True)) == [theta_latest.id]
+
+    iota_active.refresh_from_db()
+    assert iota_active.status == CaseReview.STATUS_RUNNING
+    assert (
+        CaseReview.objects.filter(
+            slug="iota-case", status=CaseReview.STATUS_PENDING
+        ).count()
+        == 0
+    )
