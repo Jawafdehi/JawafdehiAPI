@@ -543,13 +543,13 @@ REST_FRAMEWORK = {
 
 if not TESTING:
     REST_FRAMEWORK["DEFAULT_THROTTLE_CLASSES"] = [
-        "rest_framework.throttling.AnonRateThrottle",
+        "cases.throttles.AnonRateThrottle",
         "cases.throttles.RoleBasedUserRateThrottle",
     ]
     # RoleBasedUserRateThrottle picks the highest tier the user qualifies for:
     # staff (Admin/Moderator/superuser/is_staff) > contributor > user.
     REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
-        "anon": "100/hour",
+        "anon": "1000/hour",
         "user": "1000/hour",
         "contributor": "2500/hour",
         "staff": "5000/hour",

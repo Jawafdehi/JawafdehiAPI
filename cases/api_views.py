@@ -29,7 +29,6 @@ from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import DjangoModelPermissions, IsAuthenticated
 from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
-from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
@@ -73,6 +72,7 @@ from .serializers import (
     JawafEntitySerializer,
 )
 from .services.search import UnifiedSearchService
+from .throttles import AnonRateThrottle, get_client_ident
 
 logger = logging.getLogger(__name__)
 
@@ -1226,7 +1226,7 @@ class FeedbackView(APIView):
         if serializer.is_valid():
             # Capture metadata
             feedback = serializer.save(
-                ip_address=self.get_client_ip(request),
+                ip_address=get_client_ident(request),
                 user_agent=request.META.get("HTTP_USER_AGENT", ""),
             )
 
@@ -1238,15 +1238,6 @@ class FeedbackView(APIView):
             {"error": "Validation error", "details": serializer.errors},
             status=status.HTTP_400_BAD_REQUEST,
         )
-
-    def get_client_ip(self, request):
-        """Extract client IP address from request."""
-        x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
-        if x_forwarded_for:
-            ip = x_forwarded_for.split(",")[0].strip()
-        else:
-            ip = request.META.get("REMOTE_ADDR")
-        return ip
 
 
 OEMBED_CASE_URL_PATTERN = re.compile(
