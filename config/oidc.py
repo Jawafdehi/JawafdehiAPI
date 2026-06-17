@@ -116,6 +116,13 @@ class JawafdehiOIDCBackend(OIDCAuthenticationBackend):
     resolution to key on email and sync the caller's roles into Django Groups.
     """
 
+    def get_token(self, payload):
+        """Public PKCE client: drop the empty client_secret so the token request
+        is a clean public-client call (Zitadel app auth method = none)."""
+        if not payload.get("client_secret"):
+            payload.pop("client_secret", None)
+        return super().get_token(payload)
+
     def filter_users_by_claims(self, claims):
         """Match existing users by email (case-insensitive)."""
         email = (claims.get("email") or "").lower()

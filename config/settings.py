@@ -876,9 +876,13 @@ OIDC_JWKS_URL = os.getenv("OIDC_JWKS_URL", f"{OIDC_ISSUER}/oauth/v2/keys")
 # in any real environment — set via env, not hardcoded.
 OIDC_API_AUDIENCE = os.getenv("OIDC_API_AUDIENCE", "")
 
-# Mozilla Django OIDC configuration for admin SSO
+# Mozilla Django OIDC configuration for admin SSO.
+# The admin app is a PUBLIC client (PKCE, no client secret): OIDC_RP_CLIENT_SECRET
+# stays defined-but-empty (mozilla-django-oidc requires the setting to exist), and
+# JawafdehiOIDCBackend.get_token drops the empty secret from the token request.
 OIDC_RP_CLIENT_ID = os.getenv("OIDC_RP_CLIENT_ID", "")
 OIDC_RP_CLIENT_SECRET = os.getenv("OIDC_RP_CLIENT_SECRET", "")
+OIDC_USE_PKCE = True
 OIDC_RP_SIGN_ALGO = "RS256"
 OIDC_RP_SCOPES = "openid email profile"
 OIDC_OP_AUTHORIZATION_ENDPOINT = f"{OIDC_ISSUER}/oauth/v2/authorize"
