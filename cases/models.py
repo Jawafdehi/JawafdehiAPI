@@ -5,6 +5,7 @@ See: .kiro/specs/accountability-platform-core/design.md
 """
 
 import enum
+import mimetypes
 import uuid
 
 from django.contrib.auth import get_user_model

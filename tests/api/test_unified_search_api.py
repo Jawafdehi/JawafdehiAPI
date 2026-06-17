@@ -362,6 +362,8 @@ def test_postgres_sparse_facets_use_zero_count_buckets(archive_records):
     assert role_facets[RelationshipType.ACCUSED] == 0
     assert role_facets[RelationshipType.WITNESS] == 0
     assert case_type_facets[CaseType.CORRUPTION] == 0
+
+
 def test_case_type_facet_exposes_stable_name_and_choice_label(archive_records):
     """The case_type facet keys every entry by its stable CaseType value and
     carries the CaseType choice label as ``display_name``.
