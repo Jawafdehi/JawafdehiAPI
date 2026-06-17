@@ -872,7 +872,9 @@ MEDIA_PUBLIC_BASE = os.getenv("MEDIA_PUBLIC_BASE", "http://127.0.0.1:40173")
 
 ZITADEL_ISSUER = os.getenv("ZITADEL_ISSUER", "https://auth.jawafdehi.org")
 ZITADEL_JWKS_URL = os.getenv("ZITADEL_JWKS_URL", f"{ZITADEL_ISSUER}/oauth/v2/keys")
-ZITADEL_API_AUDIENCE = os.getenv("ZITADEL_API_AUDIENCE", "377590446026654060")
+# The Zitadel project id whose `aud` the API tokens must carry. Required in any
+# real environment — set via env, not hardcoded.
+ZITADEL_API_AUDIENCE = os.getenv("ZITADEL_API_AUDIENCE", "")
 
 # Mozilla Django OIDC configuration for admin SSO
 OIDC_RP_CLIENT_ID = os.getenv("OIDC_RP_CLIENT_ID", "")

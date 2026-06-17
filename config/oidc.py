@@ -1,10 +1,15 @@
+import logging
+
 import jwt
 from django.conf import settings
 from django.contrib.auth.models import User
+from django.core.exceptions import PermissionDenied
 from mozilla_django_oidc.auth import OIDCAuthenticationBackend
 from rest_framework import authentication, exceptions
 
 from config.roles import sync_user_roles
+
+logger = logging.getLogger(__name__)
 
 # Module-level cached PyJWKClient
 _jwks_client = None
@@ -55,8 +60,8 @@ class ZitadelJWTAuthentication(authentication.BaseAuthentication):
             )
 
         try:
-            issuer = getattr(settings, "ZITADEL_ISSUER", "https://auth.jawafdehi.org")
-            audience = getattr(settings, "ZITADEL_API_AUDIENCE", "377590446026654060")
+            issuer = settings.ZITADEL_ISSUER
+            audience = settings.ZITADEL_API_AUDIENCE
 
             # Get signing key from cached PyJWKClient
             signing_key = _get_jwks_client().get_signing_key_from_jwt(token)
@@ -71,7 +76,10 @@ class ZitadelJWTAuthentication(authentication.BaseAuthentication):
                 options={"require": ["exp", "iss", "aud"]},
             )
         except jwt.PyJWTError as e:
-            raise exceptions.AuthenticationFailed(f"Invalid token: {str(e)}")
+            # Don't leak the raw library/connection error to the client; log it
+            # internally and return a generic authentication failure.
+            logger.warning("JWT validation failed: %s", e)
+            raise exceptions.AuthenticationFailed("Invalid token or signature")
 
         # Extract email (case-insensitive)
         email = (claims.get("email") or "").lower()
@@ -117,6 +125,8 @@ class JawafdehiOIDCBackend(OIDCAuthenticationBackend):
     def create_user(self, claims):
         """Create a new user from OIDC claims, keyed by email, then sync roles."""
         email = (claims.get("email") or "").lower()
+        if not email:
+            raise PermissionDenied("Email claim is required to create a user.")
         user = self.UserModel.objects.create_user(
             username=email,
             email=email,
@@ -128,7 +138,10 @@ class JawafdehiOIDCBackend(OIDCAuthenticationBackend):
 
     def update_user(self, user, claims):
         """Refresh profile fields and re-sync roles on each login."""
-        user.email = (claims.get("email") or "").lower()
+        email = (claims.get("email") or "").lower()
+        if not email:
+            raise PermissionDenied("Email claim is required to update a user.")
+        user.email = email
         user.first_name = claims.get("given_name", "")
         user.last_name = claims.get("family_name", "")
         user.save(update_fields=["email", "first_name", "last_name"])

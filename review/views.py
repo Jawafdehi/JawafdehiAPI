@@ -45,23 +45,6 @@ from .serializers import (
 _audit_log = structlog.get_logger("jawafdehi.audit")
 
 
-@api_view(["GET"])
-@permission_classes([CanReadReview])
-def me_view(request):
-    """Return the signed-in user + their roles (for the SPA header / gating)."""
-    user = request.user
-    roles = list(user.groups.values_list("name", flat=True))
-    if user.is_superuser and "Admin" not in roles:
-        roles = ["Admin"] + roles
-    return Response(
-        {
-            "username": user.username,
-            "roles": roles,
-            "is_admin": user.is_superuser or "Admin" in roles,
-        }
-    )
-
-
 @api_view(["POST"])
 @permission_classes([HasContributorRole])
 def submit_review(request):

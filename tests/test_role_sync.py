@@ -1,4 +1,14 @@
-"""Tests for config.roles.sync_user_roles."""
+"""Tests for config.roles.sync_user_roles.
+
+Role semantics (Zitadel-authoritative, full overwrite of the managed groups):
+  - `admin`            -> Admin group + is_superuser
+  - `staff`            -> is_staff only (no group, no perms)
+  - moderator/contributor/readonly/review_assistant -> matching content group
+  - is_staff/is_superuser come from the explicit staff/admin roles, NOT derived
+    from content-group membership.
+"""
+
+from unittest.mock import patch
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -11,164 +21,150 @@ User = get_user_model()
 
 @pytest.mark.django_db
 class TestSyncUserRoles:
-    """Test suite for the sync_user_roles function."""
-
-    def test_adding_roles_creates_group_membership_and_is_staff(self):
-        """Adding roles creates group membership and sets is_staff."""
+    def test_staff_role_sets_is_staff_only(self):
+        """`staff` sets is_staff and creates no group / no superuser."""
         user = User.objects.create_user(
-            username="testuser", email="test@example.com", password="testpass123"
+            username="staffuser", email="staff@example.com", password="x"
         )
-        assert user.is_staff is False
-        assert user.groups.count() == 0
-
-        sync_user_roles(user, ["Moderator"])
+        sync_user_roles(user, ["staff"])
         user.refresh_from_db()
 
         assert user.is_staff is True
-        assert user.groups.filter(name="Moderator").exists()
-
-    def test_admin_role_sets_is_superuser(self):
-        """Admin role sets is_superuser."""
-        user = User.objects.create_user(
-            username="admin_user", email="admin@example.com", password="testpass123"
-        )
         assert user.is_superuser is False
+        assert user.groups.count() == 0
 
+    def test_admin_role_sets_superuser_and_group(self):
+        """`admin` sets is_superuser and the Admin group (is_staff stays off without `staff`)."""
+        user = User.objects.create_user(
+            username="adminuser", email="admin@example.com", password="x"
+        )
         sync_user_roles(user, ["admin"])
         user.refresh_from_db()
 
         assert user.is_superuser is True
-        assert user.is_staff is True
         assert user.groups.filter(name="Admin").exists()
-
-    def test_removing_role_revokes_group_and_clears_flags(self):
-        """Removing a role revokes the managed group and clears is_superuser/is_staff."""
-        user = User.objects.create_user(
-            username="roleuser", email="roleuser@example.com", password="testpass123"
-        )
-        # Add Admin role
-        sync_user_roles(user, ["Admin"])
-        user.refresh_from_db()
-        assert user.is_superuser is True
-        assert user.is_staff is True
-
-        # Remove all roles
-        sync_user_roles(user, [])
-        user.refresh_from_db()
-
-        assert user.is_superuser is False
         assert user.is_staff is False
-        assert user.groups.count() == 0
 
-    def test_non_managed_group_is_left_untouched(self):
-        """A pre-existing group outside MANAGED_GROUPS is left untouched."""
+    def test_content_role_creates_group_without_flags(self):
+        """A content role maps to its group and sets no is_staff/is_superuser."""
         user = User.objects.create_user(
-            username="mixeduser", email="mixed@example.com", password="testpass123"
+            username="contrib", email="contrib@example.com", password="x"
         )
-        # Create a non-managed group and add user to it
-        custom_group, _ = Group.objects.get_or_create(name="CustomGroup")
-        user.groups.add(custom_group)
-
-        # Sync with a managed role
-        sync_user_roles(user, ["Contributor"])
+        sync_user_roles(user, ["contributor"])
         user.refresh_from_db()
 
-        # Managed role is added
         assert user.groups.filter(name="Contributor").exists()
-        # Custom group remains
-        assert user.groups.filter(name="CustomGroup").exists()
-        assert user.is_staff is True
+        assert user.is_staff is False
+        assert user.is_superuser is False
 
-    def test_case_insensitive_role_names(self):
-        """Role names are matched case-insensitively."""
+    def test_readonly_sets_no_flags(self):
         user = User.objects.create_user(
-            username="caseuser", email="case@example.com", password="testpass123"
+            username="ro", email="ro@example.com", password="x"
         )
-
-        sync_user_roles(user, ["ADMIN", "contributor"])
-        user.refresh_from_db()
-
-        # Both roles should be added with correct casing
-        assert user.groups.filter(name="Admin").exists()
-        assert user.groups.filter(name="Contributor").exists()
-        assert user.is_superuser is True
-        assert user.is_staff is True
-
-    def test_unknown_roles_are_ignored(self):
-        """Unknown role names are silently ignored."""
-        user = User.objects.create_user(
-            username="unknownuser",
-            email="unknown@example.com",
-            password="testpass123",
-        )
-
-        # Mix of known and unknown roles
-        sync_user_roles(user, ["Contributor", "UnknownRole", "SuperAdmin"])
-        user.refresh_from_db()
-
-        # Only the known role is added
-        assert user.groups.filter(name="Contributor").exists()
-        assert user.groups.count() == 1  # Only Contributor
-        assert user.is_staff is True
-
-    def test_readonly_role_does_not_set_is_staff(self):
-        """ReadOnly role does not set is_staff."""
-        user = User.objects.create_user(
-            username="readonly_user",
-            email="readonly@example.com",
-            password="testpass123",
-        )
-
-        sync_user_roles(user, ["ReadOnly"])
+        sync_user_roles(user, ["readonly"])
         user.refresh_from_db()
 
         assert user.groups.filter(name="ReadOnly").exists()
         assert user.is_staff is False
         assert user.is_superuser is False
 
-    def test_multiple_roles_are_synced_correctly(self):
-        """Multiple roles can be synced at once."""
+    def test_admin_and_staff_together(self):
         user = User.objects.create_user(
-            username="multiuser", email="multi@example.com", password="testpass123"
+            username="both", email="both@example.com", password="x"
         )
+        sync_user_roles(user, ["admin", "staff"])
+        user.refresh_from_db()
 
-        sync_user_roles(user, ["Moderator", "Contributor"])
+        assert user.is_superuser is True
+        assert user.is_staff is True
+        assert user.groups.filter(name="Admin").exists()
+        # staff contributes no group, so Admin is the only managed group.
+        assert set(user.groups.values_list("name", flat=True)) == {"Admin"}
+
+    def test_full_overwrite_removes_absent_roles(self):
+        """Roles no longer present in the claim are revoked (groups + flags)."""
+        user = User.objects.create_user(
+            username="overwrite", email="ow@example.com", password="x"
+        )
+        sync_user_roles(user, ["admin", "staff", "contributor"])
+        user.refresh_from_db()
+        assert user.is_superuser is True
+        assert user.is_staff is True
+
+        sync_user_roles(user, ["contributor"])
+        user.refresh_from_db()
+
+        assert user.is_superuser is False
+        assert user.is_staff is False
+        assert set(user.groups.values_list("name", flat=True)) == {"Contributor"}
+
+    def test_non_managed_group_is_left_untouched(self):
+        user = User.objects.create_user(
+            username="mixed", email="mixed@example.com", password="x"
+        )
+        custom, _ = Group.objects.get_or_create(name="CustomGroup")
+        user.groups.add(custom)
+
+        sync_user_roles(user, ["moderator"])
         user.refresh_from_db()
 
         assert user.groups.filter(name="Moderator").exists()
+        assert user.groups.filter(name="CustomGroup").exists()
+
+    def test_case_insensitive_role_keys(self):
+        user = User.objects.create_user(
+            username="case", email="case@example.com", password="x"
+        )
+        sync_user_roles(user, ["ADMIN", "Contributor", "STAFF"])
+        user.refresh_from_db()
+
+        assert user.groups.filter(name="Admin").exists()
         assert user.groups.filter(name="Contributor").exists()
-        assert user.groups.count() == 2
+        assert user.is_superuser is True
         assert user.is_staff is True
 
-    def test_role_list_none_is_handled(self):
-        """A None role list results in no groups."""
+    def test_unknown_roles_are_ignored(self):
         user = User.objects.create_user(
-            username="noneuser", email="none@example.com", password="testpass123"
+            username="unknown", email="unknown@example.com", password="x"
         )
+        sync_user_roles(user, ["contributor", "bogus", "superadmin"])
+        user.refresh_from_db()
 
+        assert set(user.groups.values_list("name", flat=True)) == {"Contributor"}
+
+    def test_non_string_claim_items_are_ignored(self):
+        """A malformed claim (non-string items) must not raise."""
+        user = User.objects.create_user(
+            username="malformed", email="malformed@example.com", password="x"
+        )
+        sync_user_roles(user, ["contributor", 123, None, {"role": "admin"}])
+        user.refresh_from_db()
+
+        assert set(user.groups.values_list("name", flat=True)) == {"Contributor"}
+        assert user.is_superuser is False
+
+    def test_none_list_is_handled(self):
+        user = User.objects.create_user(
+            username="none", email="none@example.com", password="x"
+        )
         sync_user_roles(user, None)
         user.refresh_from_db()
 
         assert user.groups.count() == 0
         assert user.is_staff is False
+        assert user.is_superuser is False
 
-    def test_user_saved_only_when_changed(self):
-        """User is only saved when flags actually change."""
+    def test_user_not_saved_when_flags_unchanged(self):
+        """sync_user_roles must not call user.save() when nothing changed."""
         user = User.objects.create_user(
-            username="unchangeduser",
-            email="unchanged@example.com",
-            password="testpass123",
+            username="unchanged", email="unchanged@example.com", password="x"
         )
-
-        # First sync
-        sync_user_roles(user, ["Contributor"])
-        user_id = user.id
-
-        # Re-fetch and sync with the same roles
-        user = User.objects.get(id=user_id)
-
-        sync_user_roles(user, ["Contributor"])
-
-        # Verify the user still reflects the same state
+        sync_user_roles(user, ["staff"])  # flips is_staff -> one save
+        user = User.objects.get(id=user.id)
         assert user.is_staff is True
-        assert user.groups.filter(name="Contributor").exists()
+
+        with patch.object(user, "save", wraps=user.save) as mock_save:
+            sync_user_roles(user, ["staff"])
+            mock_save.assert_not_called()
+
+        assert user.is_staff is True

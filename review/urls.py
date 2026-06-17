@@ -10,7 +10,6 @@ from django.urls import path
 from . import views
 
 urlpatterns = [
-    path("auth/me/", views.me_view),
     path("reviews/", views.ReviewListView.as_view()),
     path("reviews/submit/", views.submit_review),
     path("reviews/regrade-all/", views.regrade_all),
