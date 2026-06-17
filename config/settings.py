@@ -616,13 +616,15 @@ CORS_ALLOWED_ORIGINS = get_env_list(
     "CORS_ALLOWED_ORIGINS",
     "http://localhost:8080,http://127.0.0.1:8080,https://jawafdehi.org,https://beta.jawafdehi.org",
 )
-# Allow the casework portal SPA served from the project's Cloudflare workers.dev
-# domain — newnepal.workers.dev and its per-version preview subdomains
-# (e.g. abc123.newnepal.workers.dev) — to call the API (e.g. the JWT token
-# endpoint) cross-origin.
+# Allow the casework portal SPA cross-origin from:
+#   - the project's Cloudflare workers.dev domain and its per-version preview
+#     subdomains (e.g. abc123.newnepal.workers.dev)
+#   - any jawafdehi.org subdomain (e.g. beta., portal., preview hosts)
+# to call the API (e.g. the JWT token endpoint).
 CORS_ALLOWED_ORIGIN_REGEXES = get_env_list(
     "CORS_ALLOWED_ORIGIN_REGEXES",
-    r"^https://([a-z0-9-]+\.)?newnepal\.workers\.dev$",
+    r"^https://([a-z0-9-]+\.)?newnepal\.workers\.dev$,"
+    r"^https://([a-z0-9-]+\.)?jawafdehi\.org$",
 )
 CORS_ALLOW_METHODS = ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"]
 CORS_ALLOW_HEADERS = [
