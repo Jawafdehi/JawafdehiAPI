@@ -36,6 +36,7 @@ import time
 from django.conf import settings
 from django.core.management.base import BaseCommand
 
+from llm.usage import SessionUsage, render_usage_table
 from review import runner
 from review.upstream_client import UpstreamClient, UpstreamError
 
@@ -132,6 +133,20 @@ class Command(BaseCommand):
             out["status"] = "done"
             self._submit(review_id, out)
             self.stdout.write(self.style.SUCCESS(f"  finished review {review_id}"))
+            # Per-harness token usage for this job + running session total.
+            tu = (out.get("result") or {}).get("token_usage") or {}
+            if tu.get("by_provider"):
+                self.stdout.write(
+                    render_usage_table(
+                        tu["by_provider"], title=f"review {review_id} usage"
+                    )
+                )
+                self.session_usage.merge_usage_dict(tu)
+                self.stdout.write(
+                    render_usage_table(
+                        self.session_usage.totals(), title="session total"
+                    )
+                )
         except Exception as e:  # noqa: BLE001 - report failure to the API
             import traceback
 
@@ -172,6 +187,9 @@ class Command(BaseCommand):
             )
         )
 
+        # Aggregates per-harness token usage across every job this run processes.
+        self.session_usage = SessionUsage()
+
         while True:
             try:
                 job = self._claim()
@@ -189,3 +207,8 @@ class Command(BaseCommand):
             self._process_job(job)
 
         self.stdout.write(self.style.SUCCESS("review_poller: queue drained."))
+        self.stdout.write(
+            render_usage_table(
+                self.session_usage.totals(), title="session total (final)"
+            )
+        )
