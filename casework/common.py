@@ -21,13 +21,15 @@ import requests
 _DEFAULT_PROXY_URL = "https://llm-proxy.jawafdehi.org/v1"
 
 
-def bootstrap(provider: str = "proxy") -> None:
+def bootstrap(provider: str = "proxy", model: str = "") -> None:
     """Boot Django for a script: DB-optional settings + LLM env bridge.
 
     Maps the existing JAWAFDEHI_LLM_* env onto the llm package's settings BEFORE
     django.setup() (settings read env at import). `provider` selects the llm
-    backend for both tiers ("proxy" or "bedrock"); pass whatever the script's
-    --provider flag resolved to.
+    backend for both tiers ("proxy" or "bedrock"); `model` (or the
+    JAWAFDEHI_LLM_MODEL env) sets the model id for that provider. Proxy has no
+    default model, so a proxy run needs --model / JAWAFDEHI_LLM_MODEL; bedrock
+    defaults to BEDROCK_MODEL_ID.
     """
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings_scripts")
 
@@ -45,6 +47,16 @@ def bootstrap(provider: str = "proxy") -> None:
 
     os.environ["REVIEW_LLM_PROVIDER_PREMIUM"] = provider
     os.environ["REVIEW_LLM_PROVIDER_CHEAP"] = provider
+
+    # Model id for the selected provider (both tiers). Default from env.
+    model = model or os.environ.get("JAWAFDEHI_LLM_MODEL", "")
+    if model:
+        if provider == "bedrock":
+            os.environ["BEDROCK_MODEL_ID"] = model
+            os.environ["BEDROCK_MODEL_ID_CHEAP"] = model
+        else:
+            os.environ["LLM_PROXY_MODEL_ID"] = model
+            os.environ["LLM_PROXY_MODEL_ID_CHEAP"] = model
 
     import django
 
