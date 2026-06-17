@@ -1,8 +1,8 @@
 """URL configuration for the Casework Review System (review app).
 
-Mounted by config/urls.py under /api/casework/. Authentication is the shared
-jawafdehi-api JWT (clients get a token from /api/caseworker/auth/token/), and
-every endpoint requires at least the Contributor role (see permissions.py).
+Mounted by config/urls.py under /api/casework/. Authentication is a Zitadel
+OIDC access token (validated by ZitadelJWTAuthentication), and every endpoint
+requires at least the Contributor role (see permissions.py).
 """
 
 from django.urls import path

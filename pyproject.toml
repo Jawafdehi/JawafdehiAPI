@@ -29,7 +29,8 @@ jsonpatch = "^1.33"
 boto3 = "^1.35.0"
 django-storages = "^1.14.3"
 python-multipart = "^0.0.18"
-djangorestframework-simplejwt = "^5.5.0"
+mozilla-django-oidc = "^4.0"
+pyjwt = {extras = ["crypto"], version = "^2.10.1"}
 anthropic = "^0.40.0"
 nepali = "^1.2.0"
 markitdown = {extras = ["docx", "pdf", "pptx", "xlsx"], version = "^0.1.5", optional = true}

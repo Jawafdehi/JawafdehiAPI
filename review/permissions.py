@@ -8,9 +8,10 @@ Contributor) with predicates in ``cases.rules.predicates``. We reuse the
 ``has_role`` predicate (true for any of Admin / Moderator / Contributor, or a
 superuser) rather than inventing a parallel role system.
 
-Authentication itself is handled by DRF's configured classes; the review URLs
-pin JWT first (see settings.SIMPLE_JWT + the project's
-DEFAULT_AUTHENTICATION_CLASSES, which lead with JWTAuthentication).
+Authentication itself is handled by DRF's configured classes; the project's
+DEFAULT_AUTHENTICATION_CLASSES lead with ZitadelJWTAuthentication, which
+validates the Zitadel-issued OIDC access token and syncs the caller's Zitadel
+roles into the Django Groups these predicates read.
 """
 
 from rest_framework import permissions

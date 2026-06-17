@@ -20,7 +20,6 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
-from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from cases.api_views import MeView, OEmbedView
 from cases.views import docs, index
@@ -46,18 +45,10 @@ urlpatterns = [
     # for backward compatibility with the MCP server.
     path("api/caseworker/me", MeView.as_view(), name="cw-me"),
     # Casework Review System (VOL-3) — rule-centered case-quality review.
-    # Auth: shared JWT (token from /api/caseworker/auth/token/) + Contributor role.
+    # Auth: Zitadel JWT + Contributor role.
     path("api/casework/", include("review.urls")),
-    path(
-        "api/caseworker/auth/token/",
-        TokenObtainPairView.as_view(),
-        name="cw-token-obtain",
-    ),
-    path(
-        "api/caseworker/auth/token/refresh/",
-        TokenRefreshView.as_view(),
-        name="cw-token-refresh",
-    ),
+    # OIDC authentication for admin SSO
+    path("oidc/", include("mozilla_django_oidc.urls")),
 ]
 
 if settings.DEBUG and str(settings.MEDIA_URL).startswith("/"):
