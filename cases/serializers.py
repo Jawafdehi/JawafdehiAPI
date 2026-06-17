@@ -18,6 +18,9 @@ from .models import (
     Feedback,
     JawafEntity,
     SourceLinkRole,
+    validate_upload_file_extension,
+    validate_upload_file_mimetype,
+    validate_upload_file_size,
 )
 
 logger = logging.getLogger(__name__)
@@ -182,7 +185,11 @@ class CaseSerializer(serializers.ModelSerializer):
     def get_entities(self, obj):
         """Get entities from unified relationship system."""
         try:
-            relationships = obj.entity_relationships.select_related("entity")
+            # Use .all() (not .select_related) so we reuse the
+            # ``entity_relationships__entity`` prefetch cache populated by the
+            # viewset. Calling .select_related() here builds a fresh queryset
+            # that bypasses the cache and fires one extra query per case (N+1).
+            relationships = obj.entity_relationships.all()
             return SimplifiedEntitySerializer(relationships, many=True).data
         except (ValueError, TypeError, AttributeError) as e:
             logger.error(
@@ -287,17 +294,14 @@ class CaseDetailSerializer(CaseSerializer):
             s.source_id: DocumentSourceSerializer(s, context=self.context).data
             for s in DocumentSource.objects.filter(
                 source_id__in=source_ids, is_deleted=False
-            ).prefetch_related("uploaded_files")
+            )
         }
 
         return [
             entry
             | {
                 "source": (
-                    {
-                        k: sources[sid][k]
-                        for k in ["title", "source_type", "url", "urls"]
-                    }
+                    {k: sources[sid][k] for k in ["title", "source_type", "urls"]}
                     if (sid := resolve_source_id(entry)) in sources
                     else None
                 )
@@ -307,6 +311,44 @@ class CaseDetailSerializer(CaseSerializer):
 
     class Meta(CaseSerializer.Meta):
         pass
+
+
+class CaseListSerializer(CaseSerializer):
+    """
+    Slim serializer for the case LIST endpoint (GET /api/cases/).
+
+    The list response previously reused the full ``CaseSerializer`` and shipped
+    every detail field for every case on the page, bloating the payload (and,
+    via the MCP search tool, the LLM context that consumes it). This serializer
+    drops the heavy, detail-only body fields that no list consumer reads:
+
+      - description       (list cards render ``short_description`` instead)
+      - timeline
+      - evidence
+      - notes             (also internal-only content)
+      - missing_details
+      - versionInfo
+
+    Full fidelity is preserved on the retrieve endpoint via CaseDetailSerializer.
+    ``short_description`` is returned verbatim; when blank it is simply empty
+    (no title/description fallback).
+    """
+
+    class Meta(CaseSerializer.Meta):
+        fields = [
+            f
+            for f in CaseSerializer.Meta.fields
+            if f
+            not in {
+                "description",
+                "timeline",
+                "evidence",
+                "notes",
+                "missing_details",
+                "versionInfo",
+            }
+        ]
+        read_only_fields = fields
 
 
 class SourceLinkField(serializers.Field):
@@ -371,30 +413,10 @@ class DocumentSourceSerializer(serializers.ModelSerializer):
     Used for public API access to sources associated with published cases.
     """
 
-    url = serializers.SerializerMethodField(
-        help_text="Deprecated — use 'urls'. List of URL strings for this source, "
-        "including uploaded file URL when available"
-    )
     urls = serializers.SerializerMethodField(
         help_text="List of URL dicts with 'link' and 'role' keys for this source, "
         "including uploaded file URL when available"
     )
-
-    @extend_schema_field(serializers.ListField(child=serializers.URLField()))
-    def get_url(self, obj):
-        """Backward-compat: return only link strings (deprecated).
-
-        Deduplicated by link — the same link under two roles (e.g. RAW + the
-        MARKDOWN-converted view) collapses to a single string here.
-        """
-        seen = set()
-        links = []
-        for u in self.get_urls(obj):
-            link = u["link"]
-            if link not in seen:
-                seen.add(link)
-                links.append(link)
-        return links
 
     @extend_schema_field(
         inline_serializer(
@@ -432,34 +454,6 @@ class DocumentSourceSerializer(serializers.ModelSerializer):
             else:
                 add_url(item)
 
-        if obj.uploaded_file:
-            try:
-                add_url(obj.uploaded_file.url, "RAW")
-            except (ValueError, AttributeError) as exc:
-                logger.warning(
-                    "Skipping uploaded_file URL for source %s: %s",
-                    obj.source_id,
-                    exc,
-                )
-
-        uploaded_files = getattr(obj, "uploaded_files", None)
-        if uploaded_files is not None:
-            uploads_iterable = (
-                uploaded_files.all()
-                if hasattr(uploaded_files, "all")
-                else uploaded_files
-            )
-            for uploaded_file in uploads_iterable:
-                try:
-                    add_url(uploaded_file.file.url, "RAW")
-                except (ValueError, AttributeError) as exc:
-                    logger.warning(
-                        "Skipping uploaded file %s URL for source %s: %s",
-                        getattr(uploaded_file, "pk", "?"),
-                        obj.source_id,
-                        exc,
-                    )
-
         return merged_urls
 
     class Meta:
@@ -470,7 +464,6 @@ class DocumentSourceSerializer(serializers.ModelSerializer):
             "title",
             "description",
             "source_type",
-            "url",
             "urls",
             "publication_date",
             "created_at",
@@ -632,14 +625,38 @@ class JawafEntityCreateSerializer(serializers.ModelSerializer):
 
 
 class DocumentSourceCreateSerializer(serializers.ModelSerializer):
-    """Serializer for creating DocumentSource records with file uploads via API."""
+    """Serializer for creating DocumentSource records with file uploads via API.
+
+    A source's links live solely in its ``url`` list. An uploaded file is an
+    ingestion convenience: we store it to S3 and append the resulting permanent
+    URL to ``url`` (role ``upload_role``, default RAW) rather than persisting a
+    separate uploaded-file record.
+    """
 
     url = serializers.ListField(
         child=SourceLinkField(),
         required=False,
         default=list,
         help_text="List of external URLs for this source (e.g. original article link). "
-        "Each item may be a plain URL string or a dict with 'link' and 'role' keys.",
+        "Each item is a dict with 'link' and 'role' keys.",
+    )
+    uploaded_file = serializers.FileField(
+        required=False,
+        write_only=True,
+        validators=[
+            validate_upload_file_extension,
+            validate_upload_file_size,
+            validate_upload_file_mimetype,
+        ],
+        help_text="Optional file to ingest: stored to S3 and appended to `url` "
+        "as a link (role `upload_role`, default RAW).",
+    )
+    upload_role = serializers.ChoiceField(
+        choices=[r.value for r in SourceLinkRole],
+        required=False,
+        default=SourceLinkRole.RAW.value,
+        write_only=True,
+        help_text="Role to assign to an uploaded_file's link in `url` (default RAW).",
     )
 
     class Meta:
@@ -653,8 +670,33 @@ class DocumentSourceCreateSerializer(serializers.ModelSerializer):
             "url",
             "publication_date",
             "uploaded_file",
+            "upload_role",
         ]
         read_only_fields = ["id", "source_id"]
+
+    def create(self, validated_data):
+        """Store any uploaded file to S3 and record its link in ``url``.
+
+        The file is NOT persisted to the ``uploaded_file`` FileField; ``url`` is
+        the single source of truth for a source's links.
+
+        The source row is created first (which runs model validation, e.g. the
+        publication_date requirement for NEWS), and the file is stored only
+        afterwards — so a validation failure never leaves an orphaned S3 object.
+        """
+        from cases.services.source_files import store_file_as_link
+
+        uploaded_file = validated_data.pop("uploaded_file", None)
+        upload_role = validated_data.pop("upload_role", SourceLinkRole.RAW.value)
+
+        instance = super().create(validated_data)
+
+        if uploaded_file is not None:
+            link = store_file_as_link(uploaded_file, role=upload_role)
+            instance.url = list(instance.url or []) + [link]
+            instance.save(update_fields=["url", "updated_at"])
+
+        return instance
 
     def to_internal_value(self, data):
         """

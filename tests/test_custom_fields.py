@@ -150,6 +150,124 @@ def test_timeline_list_field_accepts_empty_description():
         )
 
 
+def test_timeline_list_field_accepts_date_bs():
+    """
+    Feature: accountability-platform-core, Property 2: Draft validation is lenient
+
+    TimelineListField should accept an optional date_bs (Bikram Sambat) field
+    when shaped as YYYY-MM-DD.
+    """
+    field = TimelineListField()
+
+    try:
+        field.validate(
+            [{"date": "2025-02-09", "date_bs": "2081-10-27", "title": "मुद्दा दर्ता"}],
+            None,
+        )
+    except ValidationError as e:
+        pytest.fail(f"TimelineListField should accept valid date_bs, but raised: {e}")
+
+
+def test_timeline_list_field_rejects_malformed_date_bs():
+    """
+    Feature: accountability-platform-core, Property 2: Draft validation is lenient
+
+    TimelineListField should reject a date_bs that is not a YYYY-MM-DD string.
+    """
+    field = TimelineListField()
+
+    with pytest.raises(ValidationError):
+        field.validate(
+            [{"date": "2025-02-09", "date_bs": "2081/10/27", "title": "Event"}],
+            None,
+        )
+
+    with pytest.raises(ValidationError):
+        field.validate(
+            [{"date": "2025-02-09", "date_bs": 20811027, "title": "Event"}],
+            None,
+        )
+
+
+def test_timeline_list_field_accepts_end_date_span():
+    """
+    Feature: accountability-platform-core, Property 2: Draft validation is lenient
+
+    TimelineListField should accept an optional end_date for events that span a
+    period, as long as it is on or after the start date.
+    """
+    field = TimelineListField()
+
+    try:
+        field.validate(
+            [
+                {
+                    "date": "1989-07-14",
+                    "date_bs": "2046-03-30",
+                    "end_date": "2020-07-15",
+                    "end_date_bs": "2077-03-31",
+                    "title": "जाँच अवधि",
+                }
+            ],
+            None,
+        )
+    except ValidationError as e:
+        pytest.fail(f"TimelineListField should accept valid end_date, but raised: {e}")
+
+
+def test_timeline_list_field_rejects_malformed_end_date_bs():
+    """
+    Feature: accountability-platform-core, Property 2: Draft validation is lenient
+
+    TimelineListField should reject an end_date_bs that is not a YYYY-MM-DD
+    Bikram Sambat string.
+    """
+    field = TimelineListField()
+
+    with pytest.raises(ValidationError):
+        field.validate(
+            [
+                {
+                    "date": "1989-07-14",
+                    "end_date": "2020-07-15",
+                    "end_date_bs": "2077/03/31",
+                    "title": "Event",
+                }
+            ],
+            None,
+        )
+
+
+def test_timeline_list_field_rejects_end_date_before_date():
+    """
+    Feature: accountability-platform-core, Property 2: Draft validation is lenient
+
+    TimelineListField should reject an end_date that is before the start date.
+    """
+    field = TimelineListField()
+
+    with pytest.raises(ValidationError):
+        field.validate(
+            [{"date": "2020-07-15", "end_date": "1989-07-14", "title": "Event"}],
+            None,
+        )
+
+
+def test_timeline_list_field_rejects_malformed_end_date():
+    """
+    Feature: accountability-platform-core, Property 2: Draft validation is lenient
+
+    TimelineListField should reject an end_date that is not an ISO date string.
+    """
+    field = TimelineListField()
+
+    with pytest.raises(ValidationError):
+        field.validate(
+            [{"date": "2020-07-15", "end_date": "not-a-date", "title": "Event"}],
+            None,
+        )
+
+
 # ============================================================================
 # EvidenceListField Tests
 # ============================================================================

@@ -47,6 +47,18 @@ class CaseReview(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        constraints = [
+            # At most one active (pending/running) review per case. Enforces the
+            # "no duplicate re-runs" rule at the DB level so concurrent submits
+            # can't both slip past an application-level pre-check. Literal status
+            # values mirror STATUS_PENDING / STATUS_RUNNING (Meta cannot see the
+            # class attributes by name).
+            models.UniqueConstraint(
+                fields=["slug"],
+                condition=models.Q(status__in=["pending", "running"]),
+                name="uniq_active_review_per_case",
+            )
+        ]
 
     def __str__(self):
         return f"{self.slug} [{self.status}]"

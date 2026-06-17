@@ -29,13 +29,13 @@ from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import DjangoModelPermissions, IsAuthenticated
 from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
-from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from config.auth import (
     JAWAFDEHI_USER_ID_HEADER,
     SERVICE_ACCOUNT_USERNAME,
+    ChatServiceAccountAuthentication,
     resolve_or_create_identity,
 )
 
@@ -65,12 +65,14 @@ from .rules.predicates import (
 from .search_serializers import SearchResponseSerializer
 from .serializers import (
     CaseDetailSerializer,
+    CaseListSerializer,
     CaseSerializer,
     DocumentSourceSerializer,
     FeedbackSerializer,
     JawafEntitySerializer,
 )
 from .services.search import UnifiedSearchService
+from .throttles import AnonRateThrottle, get_client_ident
 
 logger = logging.getLogger(__name__)
 
@@ -219,7 +221,7 @@ class UnifiedSearchView(APIView):
         Results are ordered by creation date (newest first).
 
         **Filtering:**
-        - `case_type`: Filter by case type (CORRUPTION)
+        - `case_type`: Filter by case type (e.g. CORRUPTION, BRIBERY, FORGERY)
         - `tags`: Filter cases containing a specific tag
 
         **Search:**
@@ -235,7 +237,7 @@ class UnifiedSearchView(APIView):
                 type=OpenApiTypes.STR,
                 location=OpenApiParameter.QUERY,
                 description="Filter by case type",
-                enum=["CORRUPTION"],
+                enum=CaseType.values,
                 required=False,
             ),
             OpenApiParameter(
@@ -321,7 +323,10 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
     search_fields = ["title", "description", "key_allegations"]
     authentication_classes = [
         JWTAuthentication,
-        TokenAuthentication,
+        # Impersonation-aware Token auth: the chat MCP server writes with the
+        # service-account token + X-Jawafdehi-User-Id, and this resolves
+        # request.user to the impersonated end user for both authz and audit.
+        ChatServiceAccountAuthentication,
         SessionAuthentication,
     ]
 
@@ -342,6 +347,10 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
             return CaseCreateSerializer
         if self.action == "retrieve":
             return CaseDetailSerializer
+        if self.action == "list":
+            # Slim payload: drops detail-only body fields (description,
+            # timeline, evidence, notes, missing_details, versionInfo).
+            return CaseListSerializer
         return CaseSerializer
 
     def get_queryset(self):
@@ -470,6 +479,11 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
                     relationship_type=RelationshipType.RELATED,
                 )
 
+        # Re-fetch with the entity prefetch so CaseSerializer.get_entities()
+        # reuses the cache instead of firing one query per related entity.
+        case = Case.objects.prefetch_related("entity_relationships__entity").get(
+            pk=case.pk
+        )
         return Response(CaseSerializer(case).data, status=status.HTTP_201_CREATED)
 
     def retrieve(self, request, *args, **kwargs):
@@ -632,7 +646,13 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
             }
             if scalar_updates:
                 case = self.get_object()
-                Case.objects.filter(pk=case.pk).update(**scalar_updates)
+                for field, value in scalar_updates.items():
+                    setattr(case, field, value)
+                # Persist via save(update_fields=...) rather than a bulk
+                # queryset .update() so django-auditlog's post_save signal
+                # fires and records the change (and the acting user). A bulk
+                # .update() bypasses signals, leaving case edits unaudited.
+                case.save(update_fields=[*scalar_updates, "updated_at"])
 
             # Persist entity relationship changes only when a /entities op
             # was explicitly included — avoids unnecessary delete/recreate on
@@ -669,6 +689,11 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
                         status=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     )
 
+        # Re-fetch with the entity prefetch so CaseSerializer.get_entities()
+        # reuses the cache instead of firing one query per related entity.
+        case = Case.objects.prefetch_related("entity_relationships__entity").get(
+            pk=case.pk
+        )
         return Response(CaseSerializer(case).data, status=status.HTTP_200_OK)
 
     def _build_snapshot(self, case: Case) -> dict:
@@ -846,11 +871,7 @@ class DocumentSourceViewSet(
         # at all). Other callers keep the public contract below.
         user = self.request.user
         if user and user.is_authenticated and is_readonly(user):
-            return (
-                DocumentSource.objects.filter(is_deleted=False)
-                .prefetch_related("uploaded_files")
-                .distinct()
-            )
+            return DocumentSource.objects.filter(is_deleted=False).distinct()
 
         allowed_states = [CaseState.PUBLISHED, CaseState.IN_REVIEW]
         visible_cases = Case.objects.filter(state__in=allowed_states)
@@ -864,11 +885,9 @@ class DocumentSourceViewSet(
                         source_ids.add(evidence_item["source_id"])
 
         # Return sources that are referenced and not soft-deleted
-        return (
-            DocumentSource.objects.filter(source_id__in=source_ids, is_deleted=False)
-            .prefetch_related("uploaded_files")
-            .distinct()
-        )
+        return DocumentSource.objects.filter(
+            source_id__in=source_ids, is_deleted=False
+        ).distinct()
 
     def get_object(self):
         """
@@ -1207,7 +1226,7 @@ class FeedbackView(APIView):
         if serializer.is_valid():
             # Capture metadata
             feedback = serializer.save(
-                ip_address=self.get_client_ip(request),
+                ip_address=get_client_ident(request),
                 user_agent=request.META.get("HTTP_USER_AGENT", ""),
             )
 
@@ -1219,15 +1238,6 @@ class FeedbackView(APIView):
             {"error": "Validation error", "details": serializer.errors},
             status=status.HTTP_400_BAD_REQUEST,
         )
-
-    def get_client_ip(self, request):
-        """Extract client IP address from request."""
-        x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
-        if x_forwarded_for:
-            ip = x_forwarded_for.split(",")[0].strip()
-        else:
-            ip = request.META.get("REMOTE_ADDR")
-        return ip
 
 
 OEMBED_CASE_URL_PATTERN = re.compile(

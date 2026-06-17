@@ -13,6 +13,7 @@ compute a real **mean + variance (confidence)** per rule.
 
 import json
 import statistics
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import boto3
@@ -20,6 +21,39 @@ from botocore.config import Config
 from django.conf import settings
 
 _client = None
+
+
+class UsageAccumulator:
+    """Thread-safe tally of Bedrock token usage across parallel calls.
+
+    A single instance is shared by every (rule x sample) and per-source
+    invocation of one review, so it must be safe to update from the judge's
+    thread pools.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.calls = 0
+
+    def add(self, input_tokens, output_tokens):
+        with self._lock:
+            self.input_tokens += int(input_tokens or 0)
+            self.output_tokens += int(output_tokens or 0)
+            self.calls += 1
+
+    def as_dict(self):
+        with self._lock:
+            in_tok, out_tok, calls = self.input_tokens, self.output_tokens, self.calls
+        return {
+            "model_id": settings.BEDROCK_MODEL_ID,
+            "calls": calls,
+            "input_tokens": in_tok,
+            "output_tokens": out_tok,
+            "total_tokens": in_tok + out_tok,
+        }
+
 
 # Bounded parallelism for Bedrock calls. Bedrock throttles aggressively, so we
 # keep this modest; with hundreds of rules this is the wall-clock divisor.
@@ -103,7 +137,12 @@ SOURCE DOCUMENT EXCERPTS:
 Reply EXACTLY: {{"narrative": "<str>"}}"""
 
 
-def _invoke_once(prompt, max_tokens=900):
+def _invoke_text(prompt, max_tokens, usage=None):
+    """Invoke the judge once and return its raw text reply (code-fence stripped).
+
+    When a `usage` accumulator is supplied, the response's token counts are
+    recorded into it for cost tracking.
+    """
     body = {
         "anthropic_version": "bedrock-2023-05-31",
         "max_tokens": max_tokens,
@@ -115,33 +154,24 @@ def _invoke_once(prompt, max_tokens=900):
         body=json.dumps(body),
     )
     payload = json.loads(resp["body"].read())
+    if usage is not None:
+        u = payload.get("usage") or {}
+        usage.add(u.get("input_tokens", 0), u.get("output_tokens", 0))
     text = payload["content"][0]["text"].strip()
     if text.startswith("```"):
         text = text.split("```")[1]
         if text.startswith("json"):
             text = text[4:]
-    return json.loads(text)
+    return text
 
 
-def _invoke_once_salvaged(prompt, max_tokens=900):
+def _invoke_once(prompt, max_tokens=900, usage=None):
+    return json.loads(_invoke_text(prompt, max_tokens, usage))
+
+
+def _invoke_once_salvaged(prompt, max_tokens=900, usage=None):
     """Like _invoke_once but tolerant of truncated/dirty JSON (source analysis)."""
-    body = {
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": max_tokens,
-        "system": SYSTEM,
-        "messages": [{"role": "user", "content": prompt}],
-    }
-    resp = _bedrock().invoke_model(
-        modelId=settings.BEDROCK_MODEL_ID,
-        body=json.dumps(body),
-    )
-    payload = json.loads(resp["body"].read())
-    text = payload["content"][0]["text"].strip()
-    if text.startswith("```"):
-        text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
-    return _salvage_json(text)
+    return _salvage_json(_invoke_text(prompt, max_tokens, usage))
 
 
 def _salvage_json(text):
@@ -202,7 +232,7 @@ each contribution list to at most 6 short items. Reply EXACTLY in this JSON shap
   "notes": "<gaps, OCR/quality issues, or why relevance is low; '' if none>"}}"""
 
 
-def analyze_source(case_summary, source, case_type_label):
+def analyze_source(case_summary, source, case_type_label, usage=None):
     """Summarise one converted source + analyse its contribution to the case.
 
     Returns the parsed JSON dict (see prompt), or an {"error": ...} dict on
@@ -224,10 +254,10 @@ def analyze_source(case_summary, source, case_type_label):
     try:
         prompt = _build_source_analysis_prompt(case_summary, source, case_type_label)
         try:
-            return _invoke_once(prompt, max_tokens=2000)
+            return _invoke_once(prompt, max_tokens=2000, usage=usage)
         except json.JSONDecodeError:
             # Retry parse with salvage for truncated/dirty JSON from large sources.
-            return _invoke_once_salvaged(prompt, max_tokens=2000)
+            return _invoke_once_salvaged(prompt, max_tokens=2000, usage=usage)
     except Exception as e:  # noqa: BLE001
         return {
             "error": str(e),
@@ -243,7 +273,7 @@ def analyze_source(case_summary, source, case_type_label):
         }
 
 
-def analyze_sources(case_summary, converted_sources, case_type_label):
+def analyze_sources(case_summary, converted_sources, case_type_label, usage=None):
     """Analyse every converted source in parallel. Returns a list aligned by
     index with `converted_sources` (each item is the analyze_source dict)."""
     if not converted_sources:
@@ -252,7 +282,7 @@ def analyze_sources(case_summary, converted_sources, case_type_label):
     workers = min(MAX_WORKERS, len(converted_sources))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {
-            ex.submit(analyze_source, case_summary, s, case_type_label): i
+            ex.submit(analyze_source, case_summary, s, case_type_label, usage): i
             for i, s in enumerate(converted_sources)
         }
         for fut in as_completed(futs):
@@ -270,7 +300,9 @@ def analyze_sources(case_summary, converted_sources, case_type_label):
     return results
 
 
-def judge_rules(case_summary, source_excerpts, case_type_label, llm_rules, n_samples=3):
+def judge_rules(
+    case_summary, source_excerpts, case_type_label, llm_rules, n_samples=3, usage=None
+):
     """Sample the judge per rule, n_samples times, all in parallel.
 
     Returns dict:
@@ -308,9 +340,9 @@ def judge_rules(case_summary, source_excerpts, case_type_label, llm_rules, n_sam
         rule silently degrades to a neutral default. Mirror analyze_source.
         """
         try:
-            return _invoke_once(prompt, max_tokens=max_tokens)
+            return _invoke_once(prompt, max_tokens=max_tokens, usage=usage)
         except json.JSONDecodeError:
-            return _invoke_once_salvaged(prompt, max_tokens=max_tokens)
+            return _invoke_once_salvaged(prompt, max_tokens=max_tokens, usage=usage)
 
     def _run(task):
         kind, key, _i = task

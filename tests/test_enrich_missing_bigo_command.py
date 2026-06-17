@@ -7,7 +7,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.core.management.base import CommandError
 
@@ -473,27 +472,6 @@ def test_sanitize_download_filename_truncates_very_long_filenames_with_hash():
     assert sanitized.endswith(".pdf")
     assert len(sanitized) <= 200
     assert "-" in sanitized
-
-
-def test_download_source_to_path_sanitizes_dot_filename_and_confines_output():
-    command = Command()
-    source = DocumentSource(
-        source_id="source-test-001",
-        title="CIAA Press Release",
-        source_type=SourceType.CIAA_PRESS_RELEASE,
-        uploaded_filename="..",
-        url=[],
-    )
-    source.uploaded_file = SimpleUploadedFile("nested/press-release.pdf", b"test-bytes")
-
-    with tempfile.TemporaryDirectory(prefix="bigo-test-") as tmp_dir:
-        output_dir = Path(tmp_dir)
-        out_path = command._download_source_to_path(source, output_dir)
-
-        assert out_path is not None
-        assert out_path.name == "source-test-001.bin"
-        assert output_dir.resolve() in out_path.resolve().parents
-        assert out_path.read_bytes() == b"test-bytes"
 
 
 def test_case_patch_url_uses_slug_not_numeric_database_id():

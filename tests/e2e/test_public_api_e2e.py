@@ -184,7 +184,8 @@ class TestPublicAPIWorkflows:
         assert evidence["source"] is not None
         assert evidence["source"]["title"] == self.corruption_source.title
         assert "source_type" in evidence["source"]
-        assert "url" in evidence["source"]
+        assert "urls" in evidence["source"]
+        assert "url" not in evidence["source"]
 
     def test_only_published_cases_accessible(self):
         """
@@ -478,7 +479,11 @@ class TestPublicAPIWorkflows:
         assert (
             returned_case["title"] == "Single Row Case - Updated Title"
         ), "Should return the current (updated) title"
-        assert returned_case["description"] == "Updated description"
+        # The list payload is slim and intentionally omits the full description;
+        # confirm the updated body via the detail endpoint, where it still lives.
+        detail = self.client.get(f"/api/cases/{returned_case['slug']}/")
+        assert detail.status_code == 200
+        assert detail.data["description"] == "Updated description"
 
     def test_pagination_workflow(self):
         """

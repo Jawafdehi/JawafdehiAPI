@@ -219,6 +219,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "config.middleware.RequestIdMiddleware",
+    "config.middleware.ForcePrimaryReadsMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -227,7 +228,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    "auditlog.middleware.AuditlogMiddleware",
+    "config.middleware.JWTAuditlogMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"
@@ -338,6 +339,8 @@ def interpolate_db_url(url_env_name):
 
 interpolate_db_url("DATABASE_URL")
 interpolate_db_url("NGM_DATABASE_URL")
+interpolate_db_url("DATABASE_READ_URL")
+interpolate_db_url("NGM_DATABASE_READ_URL")
 
 DATABASES = {
     "default": dj_database_url.config(
@@ -366,23 +369,46 @@ if os.getenv("NGM_DATABASE_URL"):
         )
         DATABASES["ngm"] = dj_database_url.parse(new_url)
 
+
+# Read-replica aliases for the primary/replica router (config/db_router.py).
+# DATABASE_READ_URL / NGM_DATABASE_READ_URL point at the CNPG `pg-r` service
+# (primary + standbys, read-only). A replica alias is created ONLY when its
+# read URL is set; otherwise the router and the NGM read helper fall back to the
+# primary, so dev, CI, and any single-endpoint deployment behave exactly as
+# before the split (no second connection pool).
+REPLICA_OF = {"default": "replica", "ngm": "ngm_replica"}
+
+
+def _configure_replica(read_env_name, primary_alias):
+    read_url = os.getenv(read_env_name)
+    if read_url and primary_alias in DATABASES:
+        DATABASES[REPLICA_OF[primary_alias]] = dj_database_url.parse(read_url)
+
+
+_configure_replica("DATABASE_READ_URL", "default")
+_configure_replica("NGM_DATABASE_READ_URL", "ngm")
+
 # Apply SSL options to all PostgreSQL databases.
 # Must run after password interpolation so that re-parsed configs also
 # receive SSL options.
 for db_key in DATABASES:
     _apply_db_ssl_options(DATABASES[db_key])
 
-# Configure connection pooling for PostgreSQL only
-if DATABASES["default"].get("ENGINE") == "django.db.backends.postgresql":
-    DATABASES["default"]["CONN_MAX_AGE"] = 60
-    DATABASES["default"]["CONN_HEALTH_CHECKS"] = True
+# Configure connection pooling for every PostgreSQL alias (incl. replicas).
+for db_key, db_config in DATABASES.items():
+    if db_config.get("ENGINE") == "django.db.backends.postgresql":
+        db_config["CONN_MAX_AGE"] = 60
+        db_config["CONN_HEALTH_CHECKS"] = True
 
-if (
-    "ngm" in DATABASES
-    and DATABASES["ngm"].get("ENGINE") == "django.db.backends.postgresql"
-):
-    DATABASES["ngm"]["CONN_MAX_AGE"] = 60
-    DATABASES["ngm"]["CONN_HEALTH_CHECKS"] = True
+# The replica aliases are read-only mirrors of their primaries. The test runner
+# must not create/migrate a separate database for them — point each at its
+# primary's test database so the suite exercises one consistent DB per pair.
+for _primary, _replica in REPLICA_OF.items():
+    if _replica in DATABASES:
+        DATABASES[_replica].setdefault("TEST", {})["MIRROR"] = _primary
+
+# Primary/replica routing: ORM reads -> `replica`, writes -> `default`.
+DATABASE_ROUTERS = ["config.db_router.PrimaryReplicaRouter"]
 
 
 # Password validation
@@ -500,7 +526,13 @@ TESTING = os.getenv("TESTING") == "true" or any("pytest" in arg for arg in sys.a
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework_simplejwt.authentication.JWTAuthentication",
-        "rest_framework.authentication.TokenAuthentication",
+        # ChatServiceAccountAuthentication subclasses TokenAuthentication and adds
+        # X-Jawafdehi-User-Id impersonation: a request bearing the chat service
+        # account token + that header is authenticated AS the impersonated end
+        # user, so permission checks and audit attribution both see the real user
+        # (not the shared service account). For non-service-account tokens it
+        # behaves exactly like TokenAuthentication.
+        "config.auth.ChatServiceAccountAuthentication",
         "rest_framework.authentication.SessionAuthentication",
     ],
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
@@ -513,12 +545,16 @@ REST_FRAMEWORK = {
 
 if not TESTING:
     REST_FRAMEWORK["DEFAULT_THROTTLE_CLASSES"] = [
-        "rest_framework.throttling.AnonRateThrottle",
-        "rest_framework.throttling.UserRateThrottle",
+        "cases.throttles.AnonRateThrottle",
+        "cases.throttles.RoleBasedUserRateThrottle",
     ]
+    # RoleBasedUserRateThrottle picks the highest tier the user qualifies for:
+    # staff (Admin/Moderator/superuser/is_staff) > contributor > user.
     REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
-        "anon": "100/hour",
+        "anon": "1000/hour",
         "user": "1000/hour",
+        "contributor": "2500/hour",
+        "staff": "5000/hour",
     }
 
 # JWT Configuration
@@ -731,6 +767,21 @@ SOURCE_MARKDOWN_DIR = Path(
 )
 SOURCE_MARKDOWN_DIR.mkdir(parents=True, exist_ok=True)
 CONVERT_SOURCE_TIMEOUT = int(os.getenv("CONVERT_SOURCE_TIMEOUT", "180"))
+
+# Use LibreOffice (headless) to convert legacy Word .doc / .docx sources to a
+# clean .docx before markdown extraction. LibreOffice handles files the bundled
+# antiword crashes on or rejects, but it is a heavy dependency (~1GB installed)
+# that prod does NOT ship, so this defaults OFF and the converter uses the
+# lighter likhit/antiword path. An operator running the reprocess command on a
+# box that HAS LibreOffice (e.g. a one-off backfill host) can opt in with
+# LIBREOFFICE_DOC_CONVERSION=true. When enabled but the binary is absent, the
+# converter degrades to the fallback automatically (no hard dependency).
+LIBREOFFICE_DOC_CONVERSION = (
+    os.getenv("LIBREOFFICE_DOC_CONVERSION", "false").lower() == "true"
+)
+# Optional explicit path to the soffice/libreoffice binary; otherwise PATH is
+# searched (including the versioned `libreoffice26.2` name).
+LIBREOFFICE_BINARY = os.getenv("LIBREOFFICE_BINARY", "")
 
 # Max number of case reviews allowed to run CONCURRENTLY. Additional submitted
 # reviews queue (status=pending) and start as running slots free up. Configurable

@@ -15,14 +15,19 @@ endpoint. We expose a small `me` view so the SPA can show who is signed in and
 gate the UI by role.
 """
 
-from django.db import transaction
+import structlog
+from django.db import IntegrityError, transaction
+from django.db.models import Max
 from django.utils import timezone
 from rest_framework import generics, status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 
+from config.db_router import force_primary_reads
+
 from . import case_provider, code_rules
 from .models import CaseReview, ReviewConfig
+from .pagination import ReviewResultsPagination
 from .permissions import (
     CanManageDocumentSources,
     CanReadReview,
@@ -37,6 +42,8 @@ from .serializers import (
     SourceMarkdownSerializer,
     SubmitSerializer,
 )
+
+_audit_log = structlog.get_logger("jawafdehi.audit")
 
 
 @api_view(["GET"])
@@ -59,15 +66,50 @@ def me_view(request):
 @api_view(["POST"])
 @permission_classes([HasContributorRole])
 def submit_review(request):
-    """Submit a new case slug for review.
+    """Submit a case for review by slug or court case number.
 
-    Creates the review as `pending`; the out-of-process poller claims it via
-    the job API and runs it. Nothing executes in-process here.
+    The case is verified up front (so a bad slug / unknown court case number
+    fails fast with the case title pulled for display), and only one review may
+    be active per case: a new submission is rejected while an earlier review for
+    the same case is still pending or running. Creates the review as `pending`;
+    the out-of-process poller claims it via the job API and runs it. Nothing
+    executes in-process here.
     """
     s = SubmitSerializer(data=request.data)
     s.is_valid(raise_exception=True)
-    slug = s.validated_data["slug"]
-    review = CaseReview.objects.create(slug=slug, submitted_by=request.user)
+
+    try:
+        slug, title = case_provider.resolve_target(
+            slug=s.validated_data["slug"] or None,
+            court_case_number=s.validated_data["court_case_number"] or None,
+        )
+    except case_provider.CaseNotFound as e:
+        return Response({"detail": str(e)}, status=status.HTTP_404_NOT_FOUND)
+
+    # The pre-check gives a friendly message in the common case; the DB partial
+    # unique constraint (uniq_active_review_per_case) is the source of truth and
+    # closes the check-then-create race between concurrent submits.
+    try:
+        with transaction.atomic():
+            review = CaseReview.objects.create(
+                slug=slug, case_title=title, submitted_by=request.user
+            )
+    except IntegrityError:
+        active = CaseReview.objects.filter(
+            slug=slug,
+            status__in=[CaseReview.STATUS_PENDING, CaseReview.STATUS_RUNNING],
+        ).first()
+        return Response(
+            {
+                "detail": (
+                    f"A review for '{slug}' is already "
+                    f"{active.status if active else 'active'}; "
+                    f"wait for it to finish before submitting another."
+                ),
+                "review_id": active.id if active else None,
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
     return Response(
         CaseReviewDetailSerializer(review).data, status=status.HTTP_201_CREATED
     )
@@ -89,7 +131,10 @@ def claim_job(request):
     poller needs to run the review without any DB access: the review id, slug,
     the resolved case dict, and the active review config.
     """
-    with transaction.atomic():
+    # force_primary_reads keeps the SELECT ... FOR UPDATE on the primary
+    # connection enrolled in this transaction; otherwise the router would send
+    # the read to the replica (a connection outside the atomic block).
+    with force_primary_reads(), transaction.atomic():
         review = (
             CaseReview.objects.select_for_update(skip_locked=True)
             .filter(status=CaseReview.STATUS_PENDING)
@@ -246,9 +291,12 @@ def attach_source_markdown(request, source_id):
 class ReviewListView(generics.ListAPIView):
     serializer_class = CaseReviewListSerializer
     permission_classes = [CanReadReview]
+    pagination_class = ReviewResultsPagination
 
     def get_queryset(self):
-        return CaseReview.objects.all()
+        # Deterministic ordering (created_at can tie) so paging through the list
+        # for lazy loading doesn't drop or duplicate rows across page boundaries.
+        return CaseReview.objects.order_by("-created_at", "-id")
 
 
 class ReviewDetailView(generics.RetrieveAPIView):
@@ -304,17 +352,41 @@ def config_view(request):
 @api_view(["POST"])
 @permission_classes([HasContributorRole])
 def regrade_all(request):
-    """Re-queue every existing review for regrading against the current rules.
+    """Re-queue the latest review of each case for regrading against current rules.
 
-    Each review is reset to pending in a single bulk UPDATE; the out-of-process
-    poller then claims and runs them (each review fans its LLM rules out in
-    parallel).
+    Only the most recent review per slug is re-queued, and only for cases that
+    do not already have an active (pending/running) review. This honors the
+    one-active-review-per-case constraint (uniq_active_review_per_case): the old
+    "reset every row to pending" behavior would violate it for any case with
+    more than one historical review. The out-of-process poller then claims the
+    re-queued reviews (each fans its LLM rules out in parallel).
     """
-    ids = list(CaseReview.objects.values_list("id", flat=True))
+    active_slugs = set(
+        CaseReview.objects.filter(
+            status__in=[CaseReview.STATUS_PENDING, CaseReview.STATUS_RUNNING]
+        ).values_list("slug", flat=True)
+    )
+    ids = list(
+        CaseReview.objects.exclude(slug__in=active_slugs)
+        .values("slug")
+        .annotate(latest_id=Max("id"))
+        .values_list("latest_id", flat=True)
+    )
     CaseReview.objects.filter(id__in=ids).update(
         status=CaseReview.STATUS_PENDING,
         stage="queued_for_regrade",
         error="",
         updated_at=timezone.now(),
+    )
+    # Bulk .update() bypasses auditlog signals. Per-row LogEntry would be
+    # excessive here (potentially thousands of reviews), so record one audit
+    # line attributing the actor and the scope of the regrade.
+    actor = getattr(request, "user", None)
+    _audit_log.info(
+        "casework.regrade_all",
+        actor=getattr(actor, "username", None),
+        actor_id=getattr(actor, "id", None),
+        review_count=len(ids),
+        review_ids=ids,
     )
     return Response({"regrading": len(ids), "review_ids": ids})

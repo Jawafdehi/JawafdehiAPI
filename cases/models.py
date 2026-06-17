@@ -5,7 +5,6 @@ See: .kiro/specs/accountability-platform-core/design.md
 """
 
 import enum
-import mimetypes
 import uuid
 
 from django.contrib.auth import get_user_model
@@ -387,9 +386,53 @@ class CaseEntityRelationship(models.Model):
 
 
 class CaseType(models.TextChoices):
-    """Enum for case types."""
+    """Enum for case types.
 
-    CORRUPTION = "CORRUPTION", "Corruption"
+    CORRUPTION stays the general/catch-all corruption type. The more specific
+    charges below branch off it (they were previously expressed only as
+    corruption-type tags) so each can diverge later with its own required
+    fields and review behaviour. Labels carry the Nepali term in brackets so
+    the Django admin and DRF browsable enum show both languages; the frontend
+    uses i18n keys instead (see ``utils/case-entities.ts``).
+    """
+
+    CORRUPTION = "CORRUPTION", "Corruption (भ्रष्टाचार)"
+    BRIBERY = "BRIBERY", "Bribery (घूस)"
+    FORGERY = "FORGERY", "Forgery (नक्कली)"
+    EMBEZZLEMENT = "EMBEZZLEMENT", "Embezzlement (अपचय)"
+    ABUSE_OF_OFFICE = "ABUSE_OF_OFFICE", "Abuse of Office (दुरुपयोग)"
+    MONEY_LAUNDERING = "MONEY_LAUNDERING", "Money Laundering (सम्पत्ति शुद्धीकरण)"
+    ILLEGAL_PROPERTY = "ILLEGAL_PROPERTY", "Illegal Property (गैरकानूनी सम्पत्ति)"
+    EXAM_RIGGING = "EXAM_RIGGING", "Exam Rigging (परीक्षा अनियमितता)"
+    TAX_EVASION = "TAX_EVASION", "Tax Evasion (कर छली)"
+
+
+# Case types that must name at least one ACCUSED entity before they can leave
+# DRAFT. Every other case type only requires a non-location entity (i.e. a named
+# subject). This is the single source of truth for the accused-entity policy;
+# the model, the admin formset, and the review engine all consult it so they
+# never drift. ``requires_accused`` accepts either a ``CaseType`` member or its
+# plain string value (``TextChoices`` values are ``str`` subclasses).
+#
+# Every corruption-derived charge is an accusation against a named party, so
+# they all share CORRUPTION's bar; only TAX_EVASION stays subject-only.
+CASE_TYPES_REQUIRING_ACCUSED = frozenset(
+    {
+        CaseType.CORRUPTION,
+        CaseType.BRIBERY,
+        CaseType.FORGERY,
+        CaseType.EMBEZZLEMENT,
+        CaseType.ABUSE_OF_OFFICE,
+        CaseType.MONEY_LAUNDERING,
+        CaseType.ILLEGAL_PROPERTY,
+        CaseType.EXAM_RIGGING,
+    }
+)
+
+
+def requires_accused(case_type):
+    """Whether a case of this type must tag at least one ACCUSED entity."""
+    return case_type in CASE_TYPES_REQUIRING_ACCUSED
 
 
 class CaseState(models.TextChoices):
@@ -449,7 +492,7 @@ class Case(models.Model):
 
     # Core fields
     case_type = models.CharField(
-        max_length=20,
+        max_length=32,
         choices=CaseType.choices,
         help_text="Type of case",
     )
@@ -720,14 +763,23 @@ class Case(models.Model):
 
         # Strict validation for IN_REVIEW and PUBLISHED states
         if self.state in [CaseState.IN_REVIEW, CaseState.PUBLISHED]:
-            # Require at least one accused entity for published cases
-            has_unified_alleged = self.entity_relationships.filter(
-                relationship_type=RelationshipType.ACCUSED
-            ).exists()
-            if not has_unified_alleged:
-                errors["entities"] = (
-                    "At least one accused entity is required for IN_REVIEW or PUBLISHED state"
-                )
+            # Entity requirement depends on case type. CORRUPTION cases must name
+            # at least one ACCUSED entity; other case types (e.g. TAX_EVASION)
+            # only require a named subject — any non-location entity. A
+            # location-only case is not a valid subject (the UI also excludes
+            # locations when naming a case's subject).
+            if requires_accused(self.case_type):
+                has_required_entity = self.entity_relationships.filter(
+                    relationship_type=RelationshipType.ACCUSED
+                ).exists()
+                entity_error = "At least one accused entity is required for IN_REVIEW or PUBLISHED state"
+            else:
+                has_required_entity = self.entity_relationships.exclude(
+                    relationship_type=RelationshipType.LOCATION
+                ).exists()
+                entity_error = "At least one non-location entity is required for IN_REVIEW or PUBLISHED state"
+            if not has_required_entity:
+                errors["entities"] = entity_error
 
             if not self.key_allegations or len(self.key_allegations) == 0:
                 errors["key_allegations"] = (
@@ -851,37 +903,6 @@ class DocumentSource(models.Model):
         blank=True,
         validators=[validate_url_list],
         help_text="List of URLs for this source",
-    )
-
-    # Uploaded file fields (for native file uploads)
-    # If uploaded_file is set, this source is considered an uploaded-file source
-    uploaded_file = models.FileField(
-        upload_to="jawafdehi/sources/%Y/%m/%d/",
-        null=True,
-        blank=True,
-        validators=[
-            validate_upload_file_extension,
-            validate_upload_file_size,
-            validate_upload_file_mimetype,
-        ],
-        help_text="Uploaded file (if source is from file upload)",
-    )
-    uploaded_filename = models.CharField(
-        max_length=255,
-        null=True,
-        blank=True,
-        help_text="Original filename for uploaded file",
-    )
-    uploaded_content_type = models.CharField(
-        max_length=100,
-        null=True,
-        blank=True,
-        help_text="MIME type of uploaded file (e.g., application/pdf)",
-    )
-    uploaded_file_size = models.PositiveIntegerField(
-        null=True,
-        blank=True,
-        help_text="File size in bytes",
     )
 
     # Entity relationships

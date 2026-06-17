@@ -124,7 +124,7 @@ class TestAPIDocumentationIntegration:
             "source_id",
             "title",
             "description",
-            "url",
+            "urls",
         ]
 
         for field in expected_fields:
@@ -150,9 +150,12 @@ class TestAPIDocumentationIntegration:
         assert "results" in api_data
         assert len(api_data["results"]) > 0
 
-        # Verify the response structure matches schema
+        # Verify the response structure matches schema. The list endpoint uses
+        # the slim CaseListSerializer, which drf-spectacular emits as its own
+        # "CaseList" component (distinct from the full "Case"/"CaseDetail"
+        # components). Validate the list response against that component.
         case_data = api_data["results"][0]
-        case_schema = schema["components"]["schemas"]["Case"]
+        case_schema = schema["components"]["schemas"]["CaseList"]
 
         # Check that all schema properties exist in the response
         for prop in case_schema["properties"]:

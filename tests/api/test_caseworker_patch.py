@@ -129,6 +129,71 @@ def test_patch_replace_timeline_item_title():
 
 
 @pytest.mark.django_db
+def test_patch_timeline_preserves_date_bs_and_span_fields():
+    """PATCH must not strip the optional date_bs/end_date/end_date_bs fields."""
+    user = _contributor("kamala")
+    case = _make_case()
+    case.contributors.add(user)
+
+    new_timeline = [
+        {
+            "date": "1989-07-14",
+            "date_bs": "2046-03-30",
+            "end_date": "2020-07-15",
+            "end_date_bs": "2077-03-31",
+            "title": "जाँच अवधि",
+            "description": "Investigation period span.",
+        },
+        {
+            "date": "2025-02-09",
+            "date_bs": "2081-10-27",
+            "title": "मुद्दा दर्ता",
+        },
+    ]
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[{"op": "replace", "path": "/timeline", "value": new_timeline}],
+        format="json",
+    )
+    assert response.status_code == 200
+    timeline = response.data["timeline"]
+    assert timeline[0]["date_bs"] == "2046-03-30"
+    assert timeline[0]["end_date"] == "2020-07-15"
+    assert timeline[0]["end_date_bs"] == "2077-03-31"
+    assert timeline[1]["date_bs"] == "2081-10-27"
+
+    case.refresh_from_db()
+    assert case.timeline[0]["end_date"] == "2020-07-15"
+    assert case.timeline[0]["end_date_bs"] == "2077-03-31"
+    assert case.timeline[1]["date_bs"] == "2081-10-27"
+
+
+@pytest.mark.django_db
+def test_patch_timeline_rejects_malformed_date_bs():
+    """A malformed date_bs in a PATCHed timeline is rejected (422)."""
+    user = _contributor("nabin")
+    case = _make_case()
+    case.contributors.add(user)
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[
+            {
+                "op": "replace",
+                "path": "/timeline",
+                "value": [
+                    {"date": "2025-02-09", "date_bs": "2081/10/27", "title": "X"}
+                ],
+            }
+        ],
+        format="json",
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.django_db
 def test_patch_add_appends_timeline_item():
     user = _contributor("ram")
     case = _make_case(timeline=[{"date": "2024-01-01", "title": "First"}])

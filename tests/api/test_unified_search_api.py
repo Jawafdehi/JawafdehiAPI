@@ -362,6 +362,29 @@ def test_postgres_sparse_facets_use_zero_count_buckets(archive_records):
     assert role_facets[RelationshipType.ACCUSED] == 0
     assert role_facets[RelationshipType.WITNESS] == 0
     assert case_type_facets[CaseType.CORRUPTION] == 0
+def test_case_type_facet_exposes_stable_name_and_choice_label(archive_records):
+    """The case_type facet keys every entry by its stable CaseType value and
+    carries the CaseType choice label as ``display_name``.
+
+    The choice label is intentionally bilingual ("English (नेपाली)") so the
+    Django admin shows both languages. The frontend therefore localizes the
+    archive-search filter from the stable ``name`` rather than rendering this
+    ``display_name`` verbatim; this test pins that contract so a label tweak
+    can't silently change the facet keys the frontend depends on.
+    """
+    response = APIClient().get("/api/search/")
+
+    assert response.status_code == 200
+    case_type_facets = {
+        item["name"]: item["display_name"]
+        for item in response.data["facets"]["case_type"]
+    }
+    # Every CaseType value is present and keyed by its stable value...
+    assert set(case_type_facets) == set(CaseType.values)
+    # ...and the display_name is the (bilingual) choice label, not the value.
+    assert case_type_facets[CaseType.CORRUPTION] == CaseType.CORRUPTION.label
+    assert "भ्रष्टाचार" in case_type_facets[CaseType.CORRUPTION]
+    assert case_type_facets[CaseType.BRIBERY] == CaseType.BRIBERY.label
 
 
 @pytest.mark.django_db

@@ -4,12 +4,12 @@ from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
 from django.contrib.auth import get_user_model
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.db import models
+from django.db import models, transaction
 from django.forms.models import BaseInlineFormSet
 from django.template.response import TemplateResponse
 from django.utils.html import format_html
 from rest_framework.authtoken.admin import TokenAdmin as BaseTokenAdmin
-from rest_framework.authtoken.models import Token
+from rest_framework.authtoken.models import TokenProxy
 
 from cases.widgets import ToastUIEditorWidget
 
@@ -21,10 +21,10 @@ from .models import (
     CaseState,
     ChatUserIdentity,
     DocumentSource,
-    DocumentSourceUpload,
     Feedback,
     JawafEntity,
     RelationshipType,
+    requires_accused,
 )
 from .rules.predicates import (
     can_change_case,
@@ -37,6 +37,7 @@ from .rules.predicates import (
     is_admin_or_moderator,
     is_contributor,
     is_moderator,
+    is_readonly,
 )
 from .services import EntityMergeError, analyze_merge_impact, merge_entities_by_ids
 from .validators import COURT_CHOICES
@@ -338,18 +339,37 @@ class CaseEntityRelationshipInlineFormSet(BaseInlineFormSet):
             return
         if self.instance.state not in {CaseState.IN_REVIEW, CaseState.PUBLISHED}:
             return
-        has_alleged = any(
-            form.cleaned_data
-            and not form.cleaned_data.get("DELETE")
-            and form.cleaned_data.get("entity")
-            and form.cleaned_data.get("relationship_type") == RelationshipType.ACCUSED
-            for form in self.forms
-        )
-        if not has_alleged:
-            raise ValidationError(
+        # CORRUPTION cases require an ACCUSED entity; other case types (e.g.
+        # TAX_EVASION) only require a named subject — any non-location entity.
+        # The accepted relationship types and the error message differ, but the
+        # form-scanning loop is otherwise identical.
+        if requires_accused(self.instance.case_type):
+
+            def is_required_entity(rel_type):
+                return rel_type == RelationshipType.ACCUSED
+
+            error = (
                 "At least one accused entity relationship is required for IN_REVIEW or PUBLISHED state. "
                 "Please add accused entities using the 'Case Entity Relationships' section below."
             )
+        else:
+
+            def is_required_entity(rel_type):
+                return rel_type != RelationshipType.LOCATION
+
+            error = (
+                "At least one non-location entity relationship is required for IN_REVIEW or PUBLISHED state. "
+                "Please add entities using the 'Case Entity Relationships' section below."
+            )
+        has_required_entity = any(
+            form.cleaned_data
+            and not form.cleaned_data.get("DELETE")
+            and form.cleaned_data.get("entity")
+            and is_required_entity(form.cleaned_data.get("relationship_type"))
+            for form in self.forms
+        )
+        if not has_required_entity:
+            raise ValidationError(error)
 
 
 class CaseEntityRelationshipInline(admin.TabularInline):
@@ -614,7 +634,7 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         """
         Filter queryset based on user role.
 
-        - Contributors: See all non-CLOSED cases (global read access)
+        - Contributors and ReadOnly: See all non-CLOSED cases (global read access)
         - Moderators/Admins: See all cases
         """
         qs = super().get_queryset(request)
@@ -623,8 +643,8 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         if is_admin_or_moderator(request.user):
             return qs
 
-        # Contributors see all non-CLOSED cases (global read-only access)
-        if is_contributor(request.user):
+        # Contributors and ReadOnly users see all non-CLOSED cases (global read access)
+        if is_contributor(request.user) or is_readonly(request.user):
             return qs.exclude(state=CaseState.CLOSED)
 
         # No role - see nothing
@@ -739,7 +759,26 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         """
         Bulk action to close cases.
         """
-        count = queryset.update(state=CaseState.CLOSED)
+        # Save each row instead of a bulk queryset .update() so django-auditlog
+        # records the state change (a bulk .update() bypasses model signals).
+        # Wrap the loop in a single transaction so a row that fails validation
+        # (e.g. Case.save() rejects an empty title) rolls the whole action back
+        # rather than leaving some cases closed and others not.
+        try:
+            with transaction.atomic():
+                count = 0
+                for case in queryset:
+                    case.state = CaseState.CLOSED
+                    case.save(update_fields=["state", "updated_at"])
+                    count += 1
+        except ValidationError as exc:
+            msg = exc.messages[0] if getattr(exc, "messages", None) else str(exc)
+            self.message_user(
+                request,
+                f"No cases closed — a selected case failed validation: {msg}",
+                level=messages.ERROR,
+            )
+            return
         self.message_user(request, f"{count} case(s) closed successfully.")
 
     close_cases.short_description = "Close selected cases"
@@ -763,13 +802,39 @@ class DocumentSourceAdminForm(forms.ModelForm):
         help_text="External URLs to the source (you can add multiple)",
     )
 
+    # Ingestion-only file upload: stored to S3 and appended to `url` as a link
+    # on save (see DocumentSourceAdmin.save_model). Not a model field — a
+    # source's links live solely in `url`.
+    upload_file = forms.FileField(
+        required=False,
+        label="Upload a file",
+        help_text=(
+            "Optional. Stored to S3 and added to External URLs as a source link. "
+            f"Allowed types: {', '.join(ALLOWED_UPLOAD_EXTENSIONS)}. "
+            f"Max size: {int(MAX_UPLOAD_FILE_SIZE / (1024 * 1024))} MB."
+        ),
+    )
+    upload_role = forms.ChoiceField(
+        required=False,
+        label="Uploaded file role",
+        help_text="Role for the uploaded file's link (default RAW).",
+    )
+
     class Meta:
         model = DocumentSource
         fields = "__all__"
 
     def __init__(self, *args, **kwargs):
+        from .models import SourceLinkRole
+
         self.request = kwargs.pop("request", None)
         super().__init__(*args, **kwargs)
+
+        # Role choices derived from the enum so new roles appear automatically.
+        self.fields["upload_role"].choices = [
+            (r.value, r.value) for r in SourceLinkRole
+        ]
+        self.fields["upload_role"].initial = SourceLinkRole.RAW.value
 
         # Restrict contributors field visibility based on user role
         if self.request:
@@ -795,38 +860,28 @@ class DocumentSourceAdminForm(forms.ModelForm):
         if not title or not title.strip():
             raise ValidationError({"title": "Title is required and cannot be empty"})
 
+        # Validate an uploaded file against the same rules as model uploads.
+        upload_file = cleaned_data.get("upload_file")
+        if upload_file:
+            from .models import (
+                validate_upload_file_extension,
+                validate_upload_file_mimetype,
+                validate_upload_file_size,
+            )
+
+            for validator in (
+                validate_upload_file_extension,
+                validate_upload_file_size,
+                validate_upload_file_mimetype,
+            ):
+                try:
+                    validator(upload_file)
+                except ValidationError as exc:
+                    # Attach to the upload_file field so the error renders next to
+                    # the input rather than as a form-wide non-field error.
+                    self.add_error("upload_file", exc)
+
         return cleaned_data
-
-
-class DocumentSourceUploadInline(admin.TabularInline):
-    """Inline form for managing multiple uploaded files on a source.
-
-    Uploaded files are always stored as RAW source links (the link-type
-    selector on the External URLs tab does not apply to uploads). Allowed
-    types and the size cap are surfaced as help text and an ``accept`` filter
-    so the constraint is clear before submit, not only on a validation error.
-    """
-
-    model = DocumentSourceUpload
-    extra = 1
-    fields = ("file", "filename", "content_type", "file_size", "created_at")
-    readonly_fields = ("filename", "content_type", "file_size", "created_at")
-    verbose_name = "Uploaded file"
-    verbose_name_plural = "Uploaded files"
-
-    def formfield_for_dbfield(self, db_field, request, **kwargs):
-        formfield = super().formfield_for_dbfield(db_field, request, **kwargs)
-        if db_field.name == "file" and formfield is not None:
-            max_mb = int(MAX_UPLOAD_FILE_SIZE / (1024 * 1024))
-            allowed = ", ".join(ALLOWED_UPLOAD_EXTENSIONS)
-            formfield.help_text = (
-                f"Stored as a RAW source document. Allowed types: {allowed}. "
-                f"Max size: {max_mb} MB."
-            )
-            formfield.widget.attrs["accept"] = ",".join(
-                f".{ext}" for ext in ALLOWED_UPLOAD_EXTENSIONS
-            )
-        return formfield
 
 
 @admin.register(DocumentSource)
@@ -841,7 +896,9 @@ class DocumentSourceAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
     """
 
     form = DocumentSourceAdminForm
-    inlines = [DocumentSourceUploadInline]
+    # File upload is handled by the form's `upload_file` control (stored to S3 and
+    # appended to `url`); no separate uploaded-file inline.
+    inlines = []
 
     # Disable "View on site" button since DocumentSource doesn't have a public detail page
     view_on_site = False
@@ -899,23 +956,11 @@ class DocumentSourceAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         ),
         (
             "External URLs",
-            {"fields": ("url",)},
+            {"fields": ("url", "upload_file", "upload_role")},
         ),
     )
 
     filter_horizontal = ["related_entities", "contributors"]
-
-    def uploaded_file_url(self, obj):
-        """Return clickable URL for uploaded file in admin detail view."""
-        if not obj.uploaded_file:
-            return "-"
-
-        url = obj.uploaded_file.url
-        return format_html(
-            '<a href="{}" target="_blank" rel="noopener noreferrer">{}</a>', url, url
-        )
-
-    uploaded_file_url.short_description = "Uploaded File URL"
 
     def deletion_status(self, obj):
         """Display deletion status as a colored badge."""
@@ -937,7 +982,7 @@ class DocumentSourceAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
 
         - Admins: See all sources (including deleted)
         - Moderators: Only see active sources (exclude deleted)
-        - Contributors: See active sources they're assigned to OR sources referenced in their assigned cases
+        - Contributors and ReadOnly: See all active sources (global read access)
         """
         qs = super().get_queryset(request)
 
@@ -949,8 +994,8 @@ class DocumentSourceAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         if is_moderator(request.user):
             return qs.filter(is_deleted=False)
 
-        # Contributors see all active sources (global read access)
-        if is_contributor(request.user):
+        # Contributors and ReadOnly users see all active sources (global read access)
+        if is_contributor(request.user) or is_readonly(request.user):
             return qs.filter(is_deleted=False)
 
         # No role - see nothing
@@ -1019,9 +1064,26 @@ class DocumentSourceAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         """
         Save the model with validation.
 
+        If a file was uploaded, store it to S3 and append its URL to `obj.url`
+        as a source link (a source's links live solely in `url`). The file is
+        not persisted as a separate uploaded-file record.
+
         Note: Model's save() method calls full_clean() which handles all validation.
-        No need for explicit validation here.
         """
+        upload_file = (
+            form.cleaned_data.get("upload_file")
+            if form is not None and hasattr(form, "cleaned_data")
+            else None
+        )
+        if upload_file:
+            from cases.services.source_files import store_file_as_link
+
+            from .models import SourceLinkRole
+
+            role = form.cleaned_data.get("upload_role") or SourceLinkRole.RAW.value
+            link = store_file_as_link(upload_file, role=role)
+            obj.url = list(obj.url or []) + [link]
+
         super().save_model(request, obj, form, change)
 
     def save_related(self, request, form, formsets, change):
@@ -1061,11 +1123,32 @@ class DocumentSourceAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
 
         return actions
 
+    def _set_sources_deleted(self, queryset, deleted: bool) -> int:
+        """Flip is_deleted via bulk UPDATE, recording a manual audit entry each.
+
+        A bulk .update() is used (rather than per-row save()) so an unrelated
+        invalid field on a selected source can't block the maintenance action,
+        but that bypasses auditlog's signals — so we log each change manually.
+        """
+        from cases.services.audit import log_field_update
+
+        # Snapshot before the bulk UPDATE so source.is_deleted holds the OLD
+        # value; only rows that actually flip are audited and counted, matching
+        # what queryset.update() would have reported.
+        sources = list(queryset)
+        queryset.update(is_deleted=deleted)
+        changed = 0
+        for source in sources:
+            if source.is_deleted != deleted:
+                log_field_update(source, {"is_deleted": [source.is_deleted, deleted]})
+                changed += 1
+        return changed
+
     def soft_delete_sources(self, request, queryset):
         """
         Bulk action to soft delete sources.
         """
-        count = queryset.update(is_deleted=True)
+        count = self._set_sources_deleted(queryset, True)
         self.message_user(request, f"{count} source(s) marked as deleted.")
 
     soft_delete_sources.short_description = "Mark selected sources as deleted"
@@ -1074,7 +1157,7 @@ class DocumentSourceAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         """
         Bulk action to restore soft-deleted sources.
         """
-        count = queryset.update(is_deleted=False)
+        count = self._set_sources_deleted(queryset, False)
         self.message_user(request, f"{count} source(s) restored.")
 
     restore_sources.short_description = "Restore selected sources"
@@ -1392,13 +1475,16 @@ class FeedbackAdmin(admin.ModelAdmin):
 # Token Admin (DRF authtoken) — show full name for user
 # ============================================================================
 
+# DRF's authtoken app auto-registers TokenProxy (not Token) with its TokenAdmin.
+# Unregister that proxy and re-register it with our custom admin, otherwise both
+# Token and TokenProxy end up registered and the admin shows "Tokens" twice.
 try:
-    admin.site.unregister(Token)
+    admin.site.unregister(TokenProxy)
 except admin.sites.NotRegistered:
     pass
 
 
-@admin.register(Token)
+@admin.register(TokenProxy)
 class CustomTokenAdmin(UserFullNameAdminMixin, BaseTokenAdmin):
     raw_id_fields = ()
 

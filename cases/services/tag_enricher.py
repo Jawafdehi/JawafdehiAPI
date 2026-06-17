@@ -13,7 +13,7 @@ import tempfile
 import urllib.request
 from urllib.parse import urlparse
 
-from cases.models import Case, DocumentSource, DocumentSourceUpload, SourceType
+from cases.models import Case, DocumentSource, SourceType
 
 logger = logging.getLogger(__name__)
 
@@ -743,10 +743,9 @@ def _collect_evidence_text(case: Case) -> str:  # noqa
     """Build a search corpus from evidence entries and source document files.
 
     Priority:
-    1. DocumentSource uploaded_file content (converted via MarkItDown)
-    2. DocumentSourceUpload file content (converted via MarkItDown)
-    3. DocumentSource title + description (metadata)
-    4. Evidence entry description
+    1. Document files referenced in the source's ``url`` (converted via MarkItDown)
+    2. DocumentSource title + description (metadata)
+    3. Evidence entry description
 
     Filters to high-value source types (press releases, court orders) that
     contain the richest information for CIAA cases.
@@ -790,21 +789,9 @@ def _collect_evidence_text(case: Case) -> str:  # noqa
 
     sources = list(itertools.chain(high_value, other))
 
-    source_ids_for_uploads = [s.id for s in sources]
-    pre_fetched_uploads = {}
-    if source_ids_for_uploads:
-        try:
-            all_uploads = DocumentSourceUpload.objects.filter(
-                source_id__in=source_ids_for_uploads
-            )
-            for upload in all_uploads:
-                pre_fetched_uploads.setdefault(upload.source_id, []).append(upload)
-        except Exception as e:
-            logger.debug(f"Failed to prefetch DocumentSourceUpload: {e}")
-
     source_count = 0
     for src in sources:
-        file_text = _convert_source_file(src, pre_fetched_uploads.get(src.id, []))
+        file_text = _convert_source_file(src)
         if file_text:
             parts.append(file_text)
             source_count += 1
@@ -830,55 +817,18 @@ except ImportError:
 _DOCUMENT_EXTENSIONS = frozenset({".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png"})
 
 
-def _convert_source_file(src: DocumentSource, pre_fetched_uploads=None) -> str:  # noqa
+def _convert_source_file(src: DocumentSource) -> str:  # noqa
     """Convert a DocumentSource's files to text using MarkItDown.
 
-    Checks sources in order:
-    1. Remote URLs in src.url (download .pdf/.doc/.docx, convert, clean up)
-    2. Local uploaded_file on src
-    3. Local DocumentSourceUpload files
-
-    When pre_fetched_uploads is provided (list of DocumentSourceUpload),
-    those are used directly instead of issuing a per-source DB query.
+    A source's links (including uploaded file links) all live in its ``url``
+    list, so conversion downloads the document URLs from there.
 
     Returns file content as markdown text, or empty string if conversion fails.
     """
     if _MD_CONVERTER is None:
         return ""
 
-    url_result = _convert_urls(src)
-    if url_result:
-        return url_result
-
-    files_to_try = []
-    if src.uploaded_file and hasattr(src.uploaded_file, "path"):
-        files_to_try.append(src.uploaded_file.path)
-
-    if pre_fetched_uploads is not None:
-        for upload in pre_fetched_uploads:
-            if upload.file and hasattr(upload.file, "path"):
-                files_to_try.append(upload.file.path)
-    else:
-        try:
-            uploads = DocumentSourceUpload.objects.filter(source_id=src.id)
-            for upload in uploads:
-                if upload.file and hasattr(upload.file, "path"):
-                    files_to_try.append(upload.file.path)
-        except Exception as e:
-            logger.debug(
-                f"Failed to fetch DocumentSourceUpload for src.id={src.id}: {e}"
-            )
-
-    for filepath in files_to_try:
-        try:
-            result = _MD_CONVERTER.convert(filepath)
-            if result and result.text_content:
-                return result.text_content[:1200]
-        except Exception as e:
-            logger.debug(f"MarkItDown conversion failed for {filepath}: {e}")
-            continue
-
-    return ""
+    return _convert_urls(src)
 
 
 _MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024
@@ -910,11 +860,8 @@ def _convert_urls(src: DocumentSource) -> str:  # noqa
 
     SSRF-safe: only http/https schemes, public hostnames, timeout + size limit.
     """
-    urls = src.url or []
     doc_urls = []
-    for u in urls:
-        if not isinstance(u, str):
-            continue
+    for u in src.url_links:
         parsed = urlparse(u)
         if parsed.scheme not in ("http", "https"):
             continue
