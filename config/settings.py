@@ -623,8 +623,12 @@ CORS_ALLOWED_ORIGINS = get_env_list(
 # to call the API (e.g. the JWT token endpoint).
 CORS_ALLOWED_ORIGIN_REGEXES = get_env_list(
     "CORS_ALLOWED_ORIGIN_REGEXES",
-    r"^https://([a-z0-9-]+\.)?newnepal\.workers\.dev$,"
-    r"^https://([a-z0-9-]+\.)?jawafdehi\.org$",
+    ",".join(
+        [
+            r"^https://([a-z0-9-]+\.)?newnepal\.workers\.dev$",
+            r"^https://([a-z0-9-]+\.)?jawafdehi\.org$",
+        ]
+    ),
 )
 CORS_ALLOW_METHODS = ["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"]
 CORS_ALLOW_HEADERS = [
