@@ -41,6 +41,7 @@ class UsageAccumulator:
         """
         input_tokens = int(input_tokens or 0)
         output_tokens = int(output_tokens or 0)
+        cost_usd = float(cost_usd or 0.0)
 
         with self._lock:
             # Update flat totals
@@ -151,10 +152,16 @@ class SessionUsage:
                             "output_tokens": 0,
                             "cost_usd": 0.0,
                         }
-                    self._totals[key]["calls"] += bucket.get("calls", 0)
-                    self._totals[key]["input_tokens"] += bucket.get("input_tokens", 0)
-                    self._totals[key]["output_tokens"] += bucket.get("output_tokens", 0)
-                    self._totals[key]["cost_usd"] += bucket.get("cost_usd", 0.0)
+                    self._totals[key]["calls"] += int(bucket.get("calls") or 0)
+                    self._totals[key]["input_tokens"] += int(
+                        bucket.get("input_tokens") or 0
+                    )
+                    self._totals[key]["output_tokens"] += int(
+                        bucket.get("output_tokens") or 0
+                    )
+                    self._totals[key]["cost_usd"] += float(
+                        bucket.get("cost_usd") or 0.0
+                    )
             else:
                 # Legacy format: flat totals
                 key = ("bedrock", "premium", token_usage.get("model_id", ""))
@@ -165,12 +172,16 @@ class SessionUsage:
                         "output_tokens": 0,
                         "cost_usd": 0.0,
                     }
-                self._totals[key]["calls"] += token_usage.get("calls", 0)
-                self._totals[key]["input_tokens"] += token_usage.get("input_tokens", 0)
-                self._totals[key]["output_tokens"] += token_usage.get(
-                    "output_tokens", 0
+                self._totals[key]["calls"] += int(token_usage.get("calls") or 0)
+                self._totals[key]["input_tokens"] += int(
+                    token_usage.get("input_tokens") or 0
                 )
-                self._totals[key]["cost_usd"] += token_usage.get("cost_usd", 0.0)
+                self._totals[key]["output_tokens"] += int(
+                    token_usage.get("output_tokens") or 0
+                )
+                self._totals[key]["cost_usd"] += float(
+                    token_usage.get("cost_usd") or 0.0
+                )
 
     def totals(self) -> list:
         """Return merged usage as a list of per-bucket dicts.

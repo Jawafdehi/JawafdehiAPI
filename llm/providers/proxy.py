@@ -66,6 +66,8 @@ class ProxyProvider(Provider):
                 tier=tier,
                 model=model_id,
             )
+        if not resp.choices:
+            raise RuntimeError("proxy: response returned no choices")
         return strip_code_fence(resp.choices[0].message.content or "")
 
     def model_for_tier(self, tier):

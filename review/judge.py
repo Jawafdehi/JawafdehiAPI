@@ -346,6 +346,11 @@ def judge_rules(
         if key not in samples or not isinstance(parsed, dict):
             return
         sc = parsed.get("score")
+        if isinstance(sc, str):
+            try:
+                sc = float(sc)  # LLMs sometimes return "score": "85"
+            except ValueError:
+                sc = None
         if isinstance(sc, (int, float)):
             samples[key].append(int(round(sc)))
         if parsed.get("rationale"):

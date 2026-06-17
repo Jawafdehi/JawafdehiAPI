@@ -167,6 +167,8 @@ class ClaudeCliProvider(_CliProvider):
             raise RuntimeError(
                 f"claude_cli: failed to parse JSON output: {e}\nOutput: {out[-500:]}"
             )
+        if not isinstance(data, dict):
+            raise RuntimeError(f"claude_cli: output is not a JSON object: {out[-500:]}")
 
         # Check for errors
         if data.get("is_error") or "result" not in data:
@@ -289,6 +291,8 @@ class CodexCliProvider(_CliProvider):
                 event = json.loads(line)
             except json.JSONDecodeError:
                 # Skip non-JSON lines (e.g. "Reading additional input from stdin...")
+                continue
+            if not isinstance(event, dict):
                 continue
 
             # Look for item.completed events with agent_message
