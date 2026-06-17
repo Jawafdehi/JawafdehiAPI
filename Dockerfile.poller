@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: Hippocratic-3.0
+# Jawafdehi review-poller: CLI-harness image for `manage.py review_poller --apply`.
+# Mirrors the main API Dockerfile but adds Node.js + the claude/codex CLIs so the
+# codex_cli / claude_cli judge providers work. The heavy node layer is kept out of
+# the lean API image. Built amd64-only (the codex npm package ships a native binary
+# that is unreliable to install under arm64 QEMU emulation) — schedule the poller on
+# an amd64 node.
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# System deps for psycopg2 + the NodeSource apt repo (which needs ca-certificates
+# and gnupg — absent from python:3.12-slim, the original cause of the failed build).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    postgresql-client \
+    curl \
+    ca-certificates \
+    gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js 22 LTS (claude-code + codex require a recent Node).
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    rm -rf /var/lib/apt/lists/*
+
+# Cloud SQL server CA certificate for TLS database connections.
+COPY cloudsql-ca.pem /etc/ssl/certs/cloudsql-ca.pem
+
+ENV DATABASE_SSL_CA_CERT_FILE=/etc/ssl/certs/cloudsql-ca.pem
+ENV DATABASE_SSL_MODE=verify-ca
+
+RUN pip install poetry
+
+COPY pyproject.toml poetry.lock ./
+RUN poetry config virtualenvs.create false && \
+    poetry install --only main --extras llm-all --no-interaction --no-root
+
+# CLI harnesses for the codex_cli / claude_cli judge providers.
+RUN npm install -g --no-fund --no-audit @anthropic-ai/claude-code @openai/codex
+
+COPY manage.py ./
+COPY config ./config
+COPY cases ./cases
+COPY case_workflows ./case_workflows
+COPY nesq ./nesq
+COPY ngm ./ngm
+COPY review ./review
+COPY static ./static
+
+# Collect static files (parity with the API image).
+RUN DEBUG=False SECRET_KEY=foo-bar ALLOWED_HOSTS=portal.jawafdehi.org \
+    python manage.py collectstatic --noinput
+
+CMD ["python", "manage.py", "review_poller", "--apply"]
