@@ -62,3 +62,74 @@ class BedrockProvider(Provider):
         if tier == "premium":
             return settings.BEDROCK_MODEL_ID
         return getattr(settings, "BEDROCK_MODEL_ID_CHEAP", settings.BEDROCK_MODEL_ID)
+
+    def invoke_with_tools(
+        self,
+        system,
+        content,
+        max_tokens,
+        model_id,
+        tier,
+        tools,
+        usage=None,
+        max_iterations=8,
+    ):
+        """Bedrock-native (Anthropic Messages) tool-use loop.
+
+        Note: no `temperature` — newer Bedrock Claude models reject it.
+        """
+        from llm.tools import run_tool
+
+        anthropic_tools = [t.to_anthropic() for t in tools]
+        messages = [{"role": "user", "content": content}]
+
+        for _ in range(max(1, max_iterations)):
+            body = {
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": max_tokens,
+                "system": system,
+                "tools": anthropic_tools,
+                "messages": messages,
+            }
+            resp = self._client().invoke_model(modelId=model_id, body=json.dumps(body))
+            payload = json.loads(resp["body"].read())
+            if usage is not None:
+                u = payload.get("usage") or {}
+                usage.add(
+                    u.get("input_tokens", 0),
+                    u.get("output_tokens", 0),
+                    provider="bedrock",
+                    tier=tier,
+                    model=model_id,
+                )
+
+            blocks = payload.get("content") or []
+            if payload.get("stop_reason") != "tool_use":
+                text = "".join(
+                    b.get("text", "")
+                    for b in blocks
+                    if isinstance(b, dict) and b.get("type") == "text"
+                ).strip()
+                if not text:
+                    raise RuntimeError("bedrock: tool loop returned empty content")
+                return strip_code_fence(text)
+
+            # Echo the assistant turn, then answer each tool_use with a tool_result.
+            messages.append({"role": "assistant", "content": blocks})
+            tool_results = []
+            for b in blocks:
+                if isinstance(b, dict) and b.get("type") == "tool_use":
+                    result = run_tool(tools, b.get("name", ""), b.get("input") or {})
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": b.get("id", ""),
+                            "content": result,
+                        }
+                    )
+            messages.append({"role": "user", "content": tool_results})
+
+        raise RuntimeError(
+            f"bedrock: exceeded {max_iterations} tool-use iterations "
+            "without a final answer"
+        )

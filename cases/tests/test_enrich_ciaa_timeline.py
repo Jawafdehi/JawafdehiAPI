@@ -273,7 +273,7 @@ class TestSourceContent:
             ]
         }
         with patch(
-            "review.converter.convert_source",
+            "sourcing.converter.convert_source",
             return_value={"status": "converted", "markdown": "m" * 300, "note": ""},
         ) as mock_conv:
             text = cmd._get_source_content(case)

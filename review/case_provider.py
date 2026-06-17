@@ -22,7 +22,7 @@ had to change when porting the casework system into jawafdehi-api.
 
 from django.conf import settings
 
-from . import jds_client
+from sourcing import jds_client
 
 
 class CaseNotFound(Exception):
@@ -69,8 +69,7 @@ def _case_by_court_case_number(court_case_number):
     from django.db import connection
 
     from cases.models import Case
-
-    from .ngm_client import parse_court_ref
+    from sourcing.ngm_client import parse_court_ref
 
     parsed = parse_court_ref(court_case_number)
     if not parsed:

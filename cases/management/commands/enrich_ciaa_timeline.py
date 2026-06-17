@@ -718,7 +718,7 @@ class Command(BaseCommand):
         1. The already-extracted evidence ``description`` when long enough.
         2. An existing MARKDOWN-role link on the source (already converted).
         3. Otherwise, create the markdown with the shared source converter
-           (``review.converter.convert_source``) — the canonical likhit/markitdown
+           (``sourcing.converter.convert_source``) — the canonical likhit/markitdown
            pipeline (PR #178), which disk-caches by URL so we don't re-convert.
         """
         description = (entry.get("description") or "").strip()
@@ -753,7 +753,7 @@ class Command(BaseCommand):
         if not convertible:
             return None
 
-        from review import converter as source_converter
+        from sourcing import converter as source_converter
 
         result = source_converter.convert_source({"url": convertible})
         if result.get("status") in ("converted", "attached"):
@@ -771,7 +771,7 @@ class Command(BaseCommand):
     @staticmethod
     def _download_text(url: str) -> Optional[str]:
         """Download an already-converted markdown link and return its text."""
-        from review import jds_client
+        from sourcing import jds_client
 
         try:
             content, _ = jds_client.download_source_file(url)

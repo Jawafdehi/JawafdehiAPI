@@ -15,8 +15,9 @@ import time
 
 from llm.routing import active_premium_model
 from llm.usage import UsageAccumulator
+from sourcing import converter
 
-from . import casetype, code_rules, converter, judge, scorer
+from . import casetype, code_rules, judge, scorer
 
 
 class _Config:

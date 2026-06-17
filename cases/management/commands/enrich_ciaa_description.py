@@ -12,7 +12,7 @@ See https://github.com/Jawafdehi/JawafdehiAPI/issues/199.
 This command is API-driven (mirrors ``enrich_ciaa_timeline``): it reads cases,
 source content and NGM hearing records over HTTP and writes via
 ``PATCH /api/cases/{slug}/``. Source documents (legacy ``.doc`` charge sheets and
-court orders) are converted to Markdown by ``review.converter.convert_source``,
+court orders) are converted to Markdown by ``sourcing.converter.convert_source``,
 which uses LibreOffice headless for the ``.doc`` -> ``.docx`` -> Markdown path.
 
 ``--dry-run`` is the DEFAULT: it prints the generated title + description and
@@ -899,7 +899,7 @@ class Command(BaseCommand):
             and u.get("role") in ("RAW", "ALTERNATE", "SOURCE_PAGE")
         ]
         if convertible:
-            from review import converter as source_converter
+            from sourcing import converter as source_converter
 
             result = source_converter.convert_source({"urls": urls})
             if result.get("status") in ("converted", "attached"):
@@ -919,7 +919,7 @@ class Command(BaseCommand):
 
     @staticmethod
     def _download_text(url: str) -> Optional[str]:
-        from review import jds_client
+        from sourcing import jds_client
 
         try:
             content, _ = jds_client.download_source_file(url)

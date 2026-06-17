@@ -15,7 +15,7 @@ This runs as a REMOTE HTTP CLIENT (no DB access), exactly like the poller:
     ``CASEWORK_POLLER_TOKEN``) via the shared ``UpstreamClient``.
 
 The conversion + attach-candidate logic is shared with the poller through
-``review.converter.convert_case_to_attach_candidates``.
+``sourcing.converter.convert_case_to_attach_candidates``.
 
 Idempotent + resumable: by default a source that already has a MARKDOWN url is
 left alone (and is therefore skipped on re-runs). ``--overwrite`` forces
@@ -36,8 +36,8 @@ import time
 
 from django.core.management.base import BaseCommand, CommandError
 
-from review import converter, jds_client
 from review.upstream_client import UpstreamClient, UpstreamError
+from sourcing import converter, jds_client
 
 
 class Command(BaseCommand):
