@@ -24,6 +24,10 @@ def sync_user_roles(user, role_names):
     Flags are driven by explicit roles, not derived from content groups:
     `admin` -> is_superuser, `staff` -> is_staff. Saves only when something changed.
     """
+    # A bare string would otherwise iterate character-by-character; treat it as
+    # a single role name.
+    if isinstance(role_names, str):
+        role_names = [role_names]
     role_set = {r.lower() for r in (role_names or []) if isinstance(r, str)}
     desired = {ROLE_TO_GROUP[r] for r in role_set if r in ROLE_TO_GROUP}
 

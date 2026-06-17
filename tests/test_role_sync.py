@@ -143,6 +143,17 @@ class TestSyncUserRoles:
         assert set(user.groups.values_list("name", flat=True)) == {"Contributor"}
         assert user.is_superuser is False
 
+    def test_bare_string_is_treated_as_single_role(self):
+        """A top-level string claim is one role, not a set of characters."""
+        user = User.objects.create_user(
+            username="barestr", email="barestr@example.com", password="x"
+        )
+        sync_user_roles(user, "admin")
+        user.refresh_from_db()
+
+        assert user.is_superuser is True
+        assert set(user.groups.values_list("name", flat=True)) == {"Admin"}
+
     def test_none_list_is_handled(self):
         user = User.objects.create_user(
             username="none", email="none@example.com", password="x"

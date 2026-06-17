@@ -1,8 +1,9 @@
 """URL configuration for the Casework Review System (review app).
 
 Mounted by config/urls.py under /api/casework/. Authentication is an OIDC
-access token (validated by OIDCJWTAuthentication), and every endpoint
-requires at least the Contributor role (see permissions.py).
+access token (validated by OIDCJWTAuthentication); read endpoints allow any
+role with read access (CanReadReview: Contributor+ / ReviewAssistant / ReadOnly)
+while mutations require at least the Contributor role (see permissions.py).
 """
 
 from django.urls import path

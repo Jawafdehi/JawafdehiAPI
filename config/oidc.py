@@ -82,15 +82,20 @@ class OIDCJWTAuthentication(authentication.BaseAuthentication):
         if not email:
             raise exceptions.AuthenticationFailed("Token missing email claim")
 
-        # Get or create user
-        user, _created = User.objects.get_or_create(
-            username=email,
-            defaults={
-                "email": email,
-                "first_name": claims.get("given_name", ""),
-                "last_name": claims.get("family_name", ""),
-            },
-        )
+        # Resolve the user by email (case-insensitive) — same lookup key the admin
+        # OIDC backend uses, so the two auth paths can't create split accounts.
+        user = User.objects.filter(email__iexact=email).first()
+        if user is None:
+            user = User.objects.create_user(
+                username=email,
+                email=email,
+                first_name=claims.get("given_name", ""),
+                last_name=claims.get("family_name", ""),
+            )
+
+        # Honor local deactivation, like the other auth backends do.
+        if not user.is_active:
+            raise exceptions.AuthenticationFailed("User account is disabled")
 
         # Sync roles from the OIDC token claims
         sync_user_roles(user, claims.get("roles", []))
