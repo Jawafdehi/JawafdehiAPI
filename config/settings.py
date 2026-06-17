@@ -523,7 +523,7 @@ TESTING = os.getenv("TESTING") == "true" or any("pytest" in arg for arg in sys.a
 # REST Framework
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "config.oidc.ZitadelJWTAuthentication",
+        "config.oidc.OIDCJWTAuthentication",
         # ChatServiceAccountAuthentication subclasses TokenAuthentication and adds
         # X-Jawafdehi-User-Id impersonation: a request bearing the chat service
         # account token + that header is authenticated AS the impersonated end
@@ -867,24 +867,24 @@ CASEWORK_POLLER_TOKEN = os.getenv("CASEWORK_POLLER_TOKEN", "")
 MEDIA_PUBLIC_BASE = os.getenv("MEDIA_PUBLIC_BASE", "http://127.0.0.1:40173")
 
 # ============================================================================
-# Zitadel OIDC Configuration
+# OIDC Configuration (auth provider — currently Zitadel, but kept provider-neutral)
 # ============================================================================
 
-ZITADEL_ISSUER = os.getenv("ZITADEL_ISSUER", "https://auth.jawafdehi.org")
-ZITADEL_JWKS_URL = os.getenv("ZITADEL_JWKS_URL", f"{ZITADEL_ISSUER}/oauth/v2/keys")
-# The Zitadel project id whose `aud` the API tokens must carry. Required in any
-# real environment — set via env, not hardcoded.
-ZITADEL_API_AUDIENCE = os.getenv("ZITADEL_API_AUDIENCE", "")
+OIDC_ISSUER = os.getenv("OIDC_ISSUER", "https://auth.jawafdehi.org")
+OIDC_JWKS_URL = os.getenv("OIDC_JWKS_URL", f"{OIDC_ISSUER}/oauth/v2/keys")
+# The audience (provider project/resource id) the API tokens must carry. Required
+# in any real environment — set via env, not hardcoded.
+OIDC_API_AUDIENCE = os.getenv("OIDC_API_AUDIENCE", "")
 
 # Mozilla Django OIDC configuration for admin SSO
 OIDC_RP_CLIENT_ID = os.getenv("OIDC_RP_CLIENT_ID", "")
 OIDC_RP_CLIENT_SECRET = os.getenv("OIDC_RP_CLIENT_SECRET", "")
 OIDC_RP_SIGN_ALGO = "RS256"
 OIDC_RP_SCOPES = "openid email profile"
-OIDC_OP_AUTHORIZATION_ENDPOINT = f"{ZITADEL_ISSUER}/oauth/v2/authorize"
-OIDC_OP_TOKEN_ENDPOINT = f"{ZITADEL_ISSUER}/oauth/v2/token"
-OIDC_OP_USER_ENDPOINT = f"{ZITADEL_ISSUER}/oidc/v1/userinfo"
-OIDC_OP_JWKS_ENDPOINT = ZITADEL_JWKS_URL
+OIDC_OP_AUTHORIZATION_ENDPOINT = f"{OIDC_ISSUER}/oauth/v2/authorize"
+OIDC_OP_TOKEN_ENDPOINT = f"{OIDC_ISSUER}/oauth/v2/token"
+OIDC_OP_USER_ENDPOINT = f"{OIDC_ISSUER}/oidc/v1/userinfo"
+OIDC_OP_JWKS_ENDPOINT = OIDC_JWKS_URL
 LOGIN_REDIRECT_URL = "/admin/"
 LOGOUT_REDIRECT_URL = "/admin/login/"
 LOGIN_URL = "/oidc/authenticate/"

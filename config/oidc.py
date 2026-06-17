@@ -16,29 +16,25 @@ _jwks_client = None
 
 
 def _get_jwks_client():
-    """Lazily initialize and cache the PyJWKClient for Zitadel JWKS."""
+    """Lazily initialize and cache the PyJWKClient for the OIDC provider's JWKS."""
     global _jwks_client
     if _jwks_client is None:
-        jwks_url = getattr(
-            settings,
-            "ZITADEL_JWKS_URL",
-            f"{getattr(settings, 'ZITADEL_ISSUER', 'https://auth.jawafdehi.org')}/oauth/v2/keys",
-        )
+        jwks_url = settings.OIDC_JWKS_URL
         _jwks_client = jwt.PyJWKClient(jwks_url)
     return _jwks_client
 
 
-class ZitadelJWTAuthentication(authentication.BaseAuthentication):
+class OIDCJWTAuthentication(authentication.BaseAuthentication):
     """
-    DRF authentication class for Zitadel OIDC JWT validation.
+    DRF authentication class for OIDC bearer-token (JWT) validation.
 
-    Validates JWT tokens issued by Zitadel, extracts user claims,
-    and syncs Zitadel roles into Django Groups.
+    Validates JWTs issued by the OIDC provider, extracts user claims, and syncs
+    the caller's roles into Django Groups.
     """
 
     def authenticate(self, request):
         """
-        Authenticate a request using a Bearer token from Zitadel.
+        Authenticate a request using a Bearer token from the OIDC provider.
 
         Returns:
             Tuple of (user, claims) or None if no valid token is present.
@@ -60,8 +56,8 @@ class ZitadelJWTAuthentication(authentication.BaseAuthentication):
             )
 
         try:
-            issuer = settings.ZITADEL_ISSUER
-            audience = settings.ZITADEL_API_AUDIENCE
+            issuer = settings.OIDC_ISSUER
+            audience = settings.OIDC_API_AUDIENCE
 
             # Get signing key from cached PyJWKClient
             signing_key = _get_jwks_client().get_signing_key_from_jwt(token)
@@ -96,7 +92,7 @@ class ZitadelJWTAuthentication(authentication.BaseAuthentication):
             },
         )
 
-        # Sync roles from Zitadel
+        # Sync roles from the OIDC token claims
         sync_user_roles(user, claims.get("roles", []))
 
         return (user, claims)
@@ -108,11 +104,11 @@ class ZitadelJWTAuthentication(authentication.BaseAuthentication):
 
 class JawafdehiOIDCBackend(OIDCAuthenticationBackend):
     """
-    OIDC backend for Django admin SSO via Zitadel.
+    OIDC backend for Django admin SSO.
 
     Subclasses mozilla-django-oidc's OIDCAuthenticationBackend so the standard
     /oidc/authenticate -> /oidc/callback flow works, and overrides user
-    resolution to key on email and sync Zitadel roles into Django Groups.
+    resolution to key on email and sync the caller's roles into Django Groups.
     """
 
     def filter_users_by_claims(self, claims):

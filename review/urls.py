@@ -1,7 +1,7 @@
 """URL configuration for the Casework Review System (review app).
 
-Mounted by config/urls.py under /api/casework/. Authentication is a Zitadel
-OIDC access token (validated by ZitadelJWTAuthentication), and every endpoint
+Mounted by config/urls.py under /api/casework/. Authentication is an OIDC
+access token (validated by OIDCJWTAuthentication), and every endpoint
 requires at least the Contributor role (see permissions.py).
 """
 

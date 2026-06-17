@@ -1,6 +1,6 @@
 from django.contrib.auth.models import Group
 
-# Zitadel project-role key -> Django Group name.
+# OIDC role key -> Django Group name.
 # `admin` and `staff` are handled separately below: they drive the is_superuser
 # and is_staff flags. `staff` intentionally maps to NO group (admin-site access
 # only, no content permissions).
@@ -17,11 +17,11 @@ STAFF_ROLE = "staff"
 
 
 def sync_user_roles(user, role_names):
-    """Zitadel-authoritative sync: overwrite the user's membership within
-    MANAGED_GROUPS to exactly mirror the Zitadel role keys. Groups outside
+    """IdP-authoritative sync: overwrite the user's membership within
+    MANAGED_GROUPS to exactly mirror the OIDC role keys. Groups outside
     MANAGED_GROUPS are never touched.
 
-    Flags are driven by explicit Zitadel roles, not derived from content groups:
+    Flags are driven by explicit roles, not derived from content groups:
     `admin` -> is_superuser, `staff` -> is_staff. Saves only when something changed.
     """
     role_set = {r.lower() for r in (role_names or []) if isinstance(r, str)}

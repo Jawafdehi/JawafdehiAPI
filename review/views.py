@@ -1,15 +1,15 @@
 """Casework Review System API views (ported into jawafdehi-api).
 
 Auth model:
-  - Clients send a Zitadel-issued OIDC access token as
-    `Authorization: Bearer <access>`; ZitadelJWTAuthentication validates it and
-    syncs the caller's Zitadel roles into Django Groups.
+  - Clients send an OIDC access token as
+    `Authorization: Bearer <access>`; OIDCJWTAuthentication validates it and
+    syncs the caller's roles into Django Groups.
   - Read endpoints (review list/detail, rules, config GET, ``me``) require a
     role with read access (CanReadReview: Contributor+ / ReviewAssistant /
     the org-wide ReadOnly role). Mutation endpoints require at least the
     Contributor role (HasContributorRole), which excludes ReadOnly.
 
-There is no login_view here; the SPA authenticates against Zitadel directly. We
+There is no login_view here; the SPA authenticates against the OIDC provider. We
 expose a small `me` view so the SPA can show who is signed in and gate the UI
 by role.
 """

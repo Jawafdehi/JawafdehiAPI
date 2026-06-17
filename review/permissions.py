@@ -9,9 +9,9 @@ Contributor) with predicates in ``cases.rules.predicates``. We reuse the
 superuser) rather than inventing a parallel role system.
 
 Authentication itself is handled by DRF's configured classes; the project's
-DEFAULT_AUTHENTICATION_CLASSES lead with ZitadelJWTAuthentication, which
-validates the Zitadel-issued OIDC access token and syncs the caller's Zitadel
-roles into the Django Groups these predicates read.
+DEFAULT_AUTHENTICATION_CLASSES lead with OIDCJWTAuthentication, which validates
+the OIDC access token and syncs the caller's roles into the Django Groups these
+predicates read.
 """
 
 from rest_framework import permissions

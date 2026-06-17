@@ -45,7 +45,7 @@ urlpatterns = [
     # for backward compatibility with the MCP server.
     path("api/caseworker/me", MeView.as_view(), name="cw-me"),
     # Casework Review System (VOL-3) — rule-centered case-quality review.
-    # Auth: Zitadel JWT + Contributor role.
+    # Auth: OIDC JWT + Contributor role.
     path("api/casework/", include("review.urls")),
     # OIDC authentication for admin SSO
     path("oidc/", include("mozilla_django_oidc.urls")),

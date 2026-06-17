@@ -1,6 +1,6 @@
 """Tests for config.roles.sync_user_roles.
 
-Role semantics (Zitadel-authoritative, full overwrite of the managed groups):
+Role semantics (IdP-authoritative, full overwrite of the managed groups):
   - `admin`            -> Admin group + is_superuser
   - `staff`            -> is_staff only (no group, no perms)
   - moderator/contributor/readonly/review_assistant -> matching content group
