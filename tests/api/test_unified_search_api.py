@@ -364,6 +364,7 @@ def test_postgres_sparse_facets_use_zero_count_buckets(archive_records):
     assert case_type_facets[CaseType.CORRUPTION] == 0
 
 
+@pytest.mark.django_db
 def test_case_type_facet_exposes_stable_name_and_choice_label(archive_records):
     """The case_type facet keys every entry by its stable CaseType value and
     carries the CaseType choice label as ``display_name``.
