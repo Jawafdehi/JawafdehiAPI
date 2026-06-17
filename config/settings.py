@@ -212,6 +212,7 @@ INSTALLED_APPS = [
     "case_workflows",
     # Casework Review System (VOL-3): rule-centered case-quality review.
     "review",
+    "llm",
 ]
 
 MIDDLEWARE = [
@@ -764,6 +765,73 @@ AWS_PROFILE = os.getenv("REVIEW_AWS_PROFILE", os.getenv("AWS_PROFILE", ""))
 AWS_REGION = os.getenv("AWS_REGION", "us-west-2")
 BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "global.anthropic.claude-opus-4-8")
 BEDROCK_MAX_WORKERS = int(os.getenv("BEDROCK_MAX_WORKERS", "8"))
+# Prompt-cache the shared rule-grading prefix (case data + source excerpts) so it
+# is billed once per case instead of once per (rule x sample) call. Kill switch
+# for regions/models where Bedrock prompt caching is unavailable.
+BEDROCK_PROMPT_CACHE = env_flag("BEDROCK_PROMPT_CACHE", default=True)
+# Tiered model routing: high-stakes GATE rules (a low score can REJECT the case)
+# are graded by the premium model above; routine non-gate rules and the narrative
+# use this cheaper SKU. Defaults to the premium model id, so routing is a no-op
+# until a real cheaper model id is configured for this deployment's region/account
+# (the operator picks the SKU — we never guess one that may not exist).
+BEDROCK_MODEL_ID_CHEAP = os.getenv("BEDROCK_MODEL_ID_CHEAP", BEDROCK_MODEL_ID)
+
+# Review-judge LLM provider. "bedrock" (default) invokes AWS Bedrock directly;
+# "proxy" routes through the in-house OpenAI-compatible llm-proxy so the judge can
+# run on non-Bedrock models without code changes. This is provider flexibility,
+# not a Bedrock replacement — the default preserves the existing behaviour.
+REVIEW_LLM_PROVIDER = os.getenv("REVIEW_LLM_PROVIDER", "bedrock").strip().lower()
+REVIEW_LLM_PROVIDER_PREMIUM = (
+    os.getenv("REVIEW_LLM_PROVIDER_PREMIUM", REVIEW_LLM_PROVIDER).strip().lower()
+)
+REVIEW_LLM_PROVIDER_CHEAP = (
+    os.getenv("REVIEW_LLM_PROVIDER_CHEAP", REVIEW_LLM_PROVIDER).strip().lower()
+)
+# llm-proxy (OpenAI-compatible) connection. In-cluster callers MUST use the
+# internal ClusterIP base URL: the public llm-proxy.jawafdehi.org host sits behind
+# a Cloudflare WAF that 403s the OpenAI SDK user-agent.
+LLM_PROXY_BASE_URL = os.getenv(
+    "LLM_PROXY_BASE_URL", "http://llm-proxy.app.svc.cluster.local/v1"
+)
+LLM_PROXY_API_KEY = os.getenv("LLM_PROXY_API_KEY", "")
+# Override the OpenAI SDK User-Agent when fronting the proxy through the public
+# Cloudflare-WAF host (which 403s the default SDK UA). Leave empty for the
+# in-cluster ClusterIP path.
+LLM_PROXY_USER_AGENT = os.getenv("LLM_PROXY_USER_AGENT", "")
+# Proxy model ids per tier (the proxy registry's names differ from Bedrock SKU
+# ids, so they are configured separately). Premium grades hard GATE rules; cheap
+# grades routine rules + the narrative. Cheap defaults to premium, so tiering is a
+# no-op until a real cheaper id is set. Operators pick the ids — we never guess.
+LLM_PROXY_MODEL_ID = os.getenv("LLM_PROXY_MODEL_ID", "")
+LLM_PROXY_MODEL_ID_CHEAP = os.getenv("LLM_PROXY_MODEL_ID_CHEAP", LLM_PROXY_MODEL_ID)
+# The proxied models (gpt-5.x, deepseek) are *reasoning* models: max_tokens caps
+# reasoning + answer combined. The judge's tight caps (tuned for Claude's direct
+# output) would be spent on reasoning, leaving the JSON answer empty/truncated, so
+# we add this headroom to every proxy call's budget. Bedrock (Claude) is unaffected.
+LLM_PROXY_REASONING_HEADROOM = int(os.getenv("LLM_PROXY_REASONING_HEADROOM", "8000"))
+
+# CLI-harness providers (codex_cli / claude_cli) — invoke locally-installed CLIs
+# authenticated by the user's SUBSCRIPTION (never API keys).
+CODEX_CLI_BIN = os.getenv("CODEX_CLI_BIN", "codex")
+CLAUDE_CLI_BIN = os.getenv("CLAUDE_CLI_BIN", "claude")
+CODEX_HOME = os.getenv("CODEX_HOME", "")  # if set, used as the codex auth dir
+CLAUDE_CLI_HOME = os.getenv(
+    "CLAUDE_CLI_HOME", ""
+)  # if set, used as $HOME for claude creds
+CODEX_MODEL_ID = os.getenv("CODEX_MODEL_ID", "")
+CLAUDE_CLI_MODEL_ID = os.getenv("CLAUDE_CLI_MODEL_ID", "")
+# Per-tier claude model selection ("opus"/"sonnet"/"haiku" or full ids) — gates
+# vs routine. Fall back to CLAUDE_CLI_MODEL_ID, then the CLI default.
+CLAUDE_CLI_MODEL_PREMIUM = os.getenv("CLAUDE_CLI_MODEL_PREMIUM", "")
+CLAUDE_CLI_MODEL_CHEAP = os.getenv("CLAUDE_CLI_MODEL_CHEAP", "")
+REVIEW_CLI_MAX_WORKERS = int(os.getenv("REVIEW_CLI_MAX_WORKERS", "2"))
+REVIEW_CLI_TIMEOUT = int(os.getenv("REVIEW_CLI_TIMEOUT", "300"))
+REVIEW_CLI_MAX_RETRIES = int(os.getenv("REVIEW_CLI_MAX_RETRIES", "3"))
+# Batch this many rules into ONE grading call on CLI-harness providers (which
+# can't reuse prompt cache across subprocess calls). 1 disables batching (per-rule
+# path; use for A/B vs batched). Only affects codex_cli / claude_cli; bedrock/proxy
+# always use the per-rule + prompt-cache path.
+REVIEW_RULE_BATCH_SIZE = int(os.getenv("REVIEW_RULE_BATCH_SIZE", "8"))
 
 # Converted source markdown cache + per-source conversion timeout.
 SOURCE_MARKDOWN_DIR = Path(

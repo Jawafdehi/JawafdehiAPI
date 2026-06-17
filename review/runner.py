@@ -13,9 +13,10 @@ uploaded — only the final scored result is submitted.
 
 import time
 
-from django.conf import settings
+from llm.routing import active_premium_model
+from llm.usage import UsageAccumulator
 
-from . import bedrock_judge, casetype, code_rules, converter, scorer
+from . import casetype, code_rules, converter, judge, scorer
 
 
 class _Config:
@@ -52,7 +53,7 @@ def process_case(case, config=None, on_stage=None):
     t0 = time.monotonic()
     # Shared across the source-analysis and rule-scoring LLM calls so the result
     # carries this review's total token usage + cost.
-    usage = bedrock_judge.UsageAccumulator()
+    usage = UsageAccumulator()
 
     # 1+2. Sources from the case + likhit conversion — LOCAL to the poller; the
     #    markdown is not part of the scored result. The shared converter also
@@ -70,7 +71,7 @@ def process_case(case, config=None, on_stage=None):
     # 3. Per-source analysis (Bedrock).
     stage("analyzing_sources")
     ctype = casetype.detect(case)
-    source_analyses = bedrock_judge.analyze_sources(
+    source_analyses = judge.analyze_sources(
         scorer.build_case_summary(case), converted, ctype["label"], usage=usage
     )
 
@@ -80,7 +81,13 @@ def process_case(case, config=None, on_stage=None):
     result = scorer.score_case(
         case, converted, rules, cfg, source_analyses=source_analyses, usage=usage
     )
-    result["model_id_used"] = settings.BEDROCK_MODEL_ID
+    # Reports the active provider's premium/gate-tier model. Under tiered routing,
+    # non-gate rules and the narrative may instead use the cheap tier (see
+    # judge); the proxy provider resolves its own model ids.
+    try:
+        result["model_id_used"] = active_premium_model()
+    except Exception:  # noqa: BLE001 - reporting must not fail a finished review
+        result["model_id_used"] = ""
     result["token_usage"] = usage.as_dict()
 
     return {

@@ -13,4 +13,5 @@ tmp/
 /nes-db
 /media/
 /workflow-runs/
+review_source_markdown/
 node_modules/
