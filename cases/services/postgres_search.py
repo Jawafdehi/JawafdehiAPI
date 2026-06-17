@@ -522,16 +522,16 @@ class PostgresUnifiedSearchService(LegacyUnifiedSearchService):
                 self._facet_item(
                     name,
                     ENTITY_TYPE_DISPLAY_NAMES[name],
-                    entity_type_counts[name],
+                    entity_type_counts.get(name, 0),
                 )
                 for name in ("person", "organization", "location", "unknown")
             ],
             "role": [
-                self._facet_item(name, label, role_counts[name])
+                self._facet_item(name, label, role_counts.get(name, 0))
                 for name, label in RelationshipType.choices
             ],
             "case_type": [
-                self._facet_item(name, label, case_type_counts[name])
+                self._facet_item(name, label, case_type_counts.get(name, 0))
                 for name, label in CaseType.choices
             ],
             "tags": [

@@ -335,6 +335,36 @@ def test_facets_are_calculated_before_pagination(archive_records):
 
 
 @pytest.mark.django_db
+@override_settings(ARCHIVE_SEARCH_USE_POSTGRES=True)
+def test_postgres_sparse_facets_use_zero_count_buckets(archive_records):
+    if connection.vendor != "postgresql":
+        pytest.skip("PostgreSQL-specific facet regression")
+
+    response = APIClient().get("/api/search/", {"q": "no matching archive record"})
+
+    assert response.status_code == 200
+    assert response.data["count"] == 0
+    entity_type_facets = {
+        item["name"]: item["count"] for item in response.data["facets"]["entity_type"]
+    }
+    role_facets = {
+        item["name"]: item["count"] for item in response.data["facets"]["role"]
+    }
+    case_type_facets = {
+        item["name"]: item["count"] for item in response.data["facets"]["case_type"]
+    }
+    assert entity_type_facets == {
+        "person": 0,
+        "organization": 0,
+        "location": 0,
+        "unknown": 0,
+    }
+    assert role_facets[RelationshipType.ACCUSED] == 0
+    assert role_facets[RelationshipType.WITNESS] == 0
+    assert case_type_facets[CaseType.CORRUPTION] == 0
+
+
+@pytest.mark.django_db
 def test_newest_sort_is_deterministic(archive_records):
     other_case = Case.objects.create(
         case_id="case-newer",
