@@ -32,6 +32,9 @@ COPY content ./content
 COPY static ./static
 COPY templates ./templates
 
+# Fail the build early if the app can't load (missing module, broken URLconf, etc.)
+RUN DEBUG=False SECRET_KEY=foo-bar ALLOWED_HOSTS=portal.jawafdehi.org python manage.py check
+
 # Collect static files
 RUN DEBUG=False SECRET_KEY=foo-bar ALLOWED_HOSTS=portal.jawafdehi.org python manage.py collectstatic --noinput
 
