@@ -245,7 +245,11 @@ def add_common_args(parser):
     parser.add_argument(
         "--slug", action="append", help="Specific case slug(s) (repeatable)"
     )
-    parser.add_argument("--case-id", help="Process a specific case by case_id")
+    parser.add_argument(
+        "--court-case",
+        action="append",
+        help="Specific court case number(s), e.g. 081-CR-0121 (repeatable)",
+    )
     parser.add_argument("--limit", type=int, help="Max number of cases to process")
     parser.add_argument("--fiscal-year", help="Filter by fiscal year (e.g. '080')")
     parser.add_argument(
@@ -381,37 +385,71 @@ def source_content(case: dict, source_types=None):
 # ── target case selection ────────────────────────────────────────────────────
 
 
+def _court_number(ref) -> str:
+    """Normalize a court ref/number for matching: 'special:081-CR-0121' or
+    '081-CR-0121' -> '081-CR-0121' (uppercased, trimmed)."""
+    if not isinstance(ref, str):
+        return ""
+    return ref.split(":")[-1].strip().upper()
+
+
 def get_target_cases(api, args, skip_field):
-    """Yield the case dicts to enrich, honoring --slug/--case-id/--fiscal-year/
-    --limit/--force. `skip_field` is the case field that, when already populated,
-    skips the case unless --force (e.g. 'timeline', 'key_allegations', 'tags')."""
+    """Yield the case dicts to enrich, honoring --slug / --court-case /
+    --fiscal-year / --limit / --force. `skip_field` is the case field that, when
+    already populated, skips the case unless --force (e.g. 'timeline', 'tags').
+
+    Cases are selected by slug or court case number (e.g. 081-CR-0121); there is
+    no internal case_id selector. --slug and --court-case fetch the case in ANY
+    state; the batch path (no selector) scans DRAFT CORRUPTION CIAA cases.
+    """
     count = 0
     limit = getattr(args, "limit", None)
     force = getattr(args, "force", False)
 
-    slugs = getattr(args, "slug", None)
-    if slugs:
-        for slug in slugs:
-            try:
-                case = api.get_case(slug)
-            except requests.HTTPError as exc:
-                log.warning("fetch %s failed: %s", slug, exc)
-                continue
-            if not is_ciaa_special_court_case(case):
-                continue
-            if not force and case.get(skip_field):
-                continue
+    def _wanted(case) -> bool:
+        return is_ciaa_special_court_case(case) and (force or not case.get(skip_field))
+
+    # 1) Explicit slugs -> direct fetch (any state).
+    for slug in getattr(args, "slug", None) or []:
+        try:
+            case = api.get_case(slug)
+        except requests.HTTPError as exc:
+            log.warning("fetch %s failed: %s", slug, exc)
+            continue
+        if _wanted(case):
             yield case
             count += 1
             if limit and count >= limit:
                 return
+    if getattr(args, "slug", None):
         return
 
-    case_id = getattr(args, "case_id", None)
+    # 2) Explicit court case numbers -> resolve by scanning court_cases (any state).
+    court_cases = getattr(args, "court_case", None)
+    if court_cases:
+        wanted_nums = {_court_number(c) for c in court_cases if c}
+        seen = set()
+        for summary in api.iter_cases(params={"case_type": "CORRUPTION"}):
+            nums = {_court_number(ref) for ref in summary.get("court_cases") or []}
+            slug = summary.get("slug")
+            if not slug or slug in seen or not (wanted_nums & nums):
+                continue
+            seen.add(slug)
+            try:
+                case = api.get_case(slug)  # authoritative full detail
+            except requests.HTTPError as exc:
+                log.warning("fetch %s failed: %s", slug, exc)
+                continue
+            if _wanted(case):
+                yield case
+                count += 1
+                if limit and count >= limit:
+                    return
+        return
+
+    # 3) Batch: all DRAFT CORRUPTION CIAA cases.
     fiscal_year = getattr(args, "fiscal_year", None)
     for case in api.iter_cases(params={"case_type": "CORRUPTION", "state": "DRAFT"}):
-        if case_id and case.get("case_id") != case_id:
-            continue
         if not is_ciaa_special_court_case(case):
             continue
         if fiscal_year and not matches_fiscal_year(case, fiscal_year):
