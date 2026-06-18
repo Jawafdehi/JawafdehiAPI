@@ -138,6 +138,33 @@ class CaseworkApi:
         )
         resp.raise_for_status()
 
+    def get_source(self, source_id: str, timeout: int = 30) -> dict:
+        """GET /api/sources/{source_id}/ — a DocumentSource (carries its own
+        `description`, which the case-detail evidence representation omits)."""
+        quoted = urllib.parse.quote(str(source_id).strip(), safe="")
+        return self.get(f"/sources/{quoted}/", timeout=timeout)
+
+    def patch_source(
+        self, source_id: str, field: str, value, timeout: int = 30
+    ) -> None:
+        """Partial-update one DocumentSource field over HTTP.
+
+        Unlike the case endpoint, /api/sources/ uses a plain DRF partial update
+        (DocumentSourceUpdateSerializer), NOT RFC-6902 JSON Patch — so the body
+        is a ``{field: value}`` object, not a list of patch ops.
+        """
+        if not source_id:
+            raise RuntimeError("cannot PATCH a source with no source_id")
+        quoted = urllib.parse.quote(str(source_id).strip(), safe="")
+        url = f"{self._api_root()}/sources/{quoted}/"
+        resp = self.session.patch(
+            url,
+            json={field: value},
+            headers={"Content-Type": "application/json"},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+
     def create_entity(
         self, display_name: str, nes_id: str = "", timeout: int = 30
     ) -> int:
@@ -608,6 +635,108 @@ def parse_extraction_response(response_text, wrapper_keys):
             except json.JSONDecodeError:
                 pass
     return None
+
+
+# ── description-adequacy judge (cheap-model gate for enrichers) ───────────────
+
+# Below this length a text can't carry a real description — judged a placeholder
+# without spending an LLM call.
+_JUDGE_MIN_CHARS = 15
+_JUDGE_TEXT_BUDGET = 2000
+
+_JUDGE_SYSTEM_PROMPT = """\
+You are a strict data-quality reviewer for Jawafdehi, a civic archive of Nepal's \
+anti-corruption cases. You judge whether a given TEXT is an ADEQUATE value for the \
+named field, or merely a PLACEHOLDER / STUB that should be regenerated.
+
+INADEQUATE (adequate=false) when the text is, for example:
+- empty, whitespace, or a placeholder ("description here", "TODO", "N/A", "-",
+  "News Source", "खाली", "विवरण यहाँ");
+- a bare restatement of the title / case number / file name with no substance;
+- auto-generated filler or a generic boilerplate line that fits any case;
+- so vague or truncated that it does not inform a reader.
+
+ADEQUATE (adequate=true) when the text conveys real, specific, substantive
+information appropriate to the field (names, amounts, dates, what the document is
+or what it shows), even if imperfect.
+
+Reply with ONLY a JSON object, no prose:
+{"adequate": true, "reason": "<short reason>"}
+"""
+
+
+def _parse_judge_verdict(response_text):
+    """Parse {"adequate": bool, "reason": str} from the judge response, scanning
+    every '{' so leading prose with braces doesn't abort the parse. Returns
+    (adequate, reason) or None when no object with a boolean `adequate` is found."""
+    import json
+
+    text = (response_text or "").strip()
+    if "```" in text:
+        start = text.find("```")
+        nl = text.find("\n", start)
+        end = text.find("```", nl + 1) if nl != -1 else -1
+        if nl != -1 and end != -1:
+            text = text[nl + 1 : end].strip()
+
+    for obj_start in range(len(text)):
+        if text[obj_start] != "{":
+            continue
+        block = balanced_object(text, obj_start)
+        if block is None:
+            continue
+        try:
+            obj = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("adequate"), bool):
+            reason = obj.get("reason")
+            reason = reason.strip() if isinstance(reason, str) else ""
+            return obj["adequate"], reason or "(no reason given)"
+    return None
+
+
+def judge_description_adequacy(
+    text, *, kind, invoke_text, usage=None, context="", tier="cheap"
+):
+    """Judge whether ``text`` is an adequate value for a ``kind`` field.
+
+    Returns ``(adequate, reason)``. Blank or sub-``_JUDGE_MIN_CHARS`` text is
+    judged inadequate WITHOUT an LLM call. Otherwise the cheap tier decides. The
+    judge fails toward ``adequate=False`` (regenerate) on an unparseable or failed
+    response — a needless regeneration is recoverable; silently keeping a
+    placeholder is not.
+
+    ``invoke_text`` is the ``llm.invoke.invoke_text`` callable (passed in after
+    bootstrap, per the casework convention of not importing ``llm`` in common).
+    """
+    stripped = (text or "").strip()
+    if len(stripped) < _JUDGE_MIN_CHARS:
+        return False, f"blank or too short (<{_JUDGE_MIN_CHARS} chars)"
+
+    user_prompt = (
+        f"FIELD: {kind}\n"
+        + (f"CONTEXT: {context}\n" if context else "")
+        + f'\nTEXT TO JUDGE:\n"""\n{stripped[:_JUDGE_TEXT_BUDGET]}\n"""\n\n'
+        "Return ONLY the JSON object."
+    )
+    try:
+        response_text = invoke_text(
+            system=_JUDGE_SYSTEM_PROMPT,
+            content=user_prompt,
+            max_tokens=300,
+            tier=tier,
+            usage=usage,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("adequacy judge call failed (%s): %s", kind, exc)
+        return False, f"judge call failed: {exc}"
+
+    verdict = _parse_judge_verdict(response_text)
+    if verdict is None:
+        log.warning("adequacy judge returned an unparseable verdict for %s", kind)
+        return False, "judge response unparseable; treating as inadequate"
+    return verdict
 
 
 # ── summary ──────────────────────────────────────────────────────────────────
