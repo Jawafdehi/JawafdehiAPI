@@ -182,6 +182,85 @@ class CaseworkApi:
         resp.raise_for_status()
         return resp.json()["id"]
 
+    def create_source(
+        self,
+        title: str,
+        description: str,
+        source_type: str,
+        url: list,
+        publication_date: str = None,
+        timeout: int = 30,
+    ) -> dict:
+        """POST /api/sources/ to create a DocumentSource; return the source dict.
+
+        `url` is a list of link objects, e.g. [{"link": "https://…", "role": "RAW"}].
+        `publication_date` (YYYY-MM-DD) is required when source_type == "NEWS".
+        The response carries the generated `source_id` used in case evidence entries.
+        """
+        api_url = f"{self._api_root()}/sources/"
+        payload = {
+            "title": title,
+            "description": description,
+            "source_type": source_type,
+            "url": url,
+        }
+        if publication_date:
+            payload["publication_date"] = publication_date
+        resp = self.session.post(
+            api_url,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def add_evidence(
+        self,
+        slug: str,
+        source_id: str,
+        description: str,
+        event_type: str = None,
+        timeout: int = 30,
+    ) -> None:
+        """RFC-6902 JSON Patch: append an evidence entry to a case over HTTP."""
+        if not slug:
+            raise RuntimeError("cannot PATCH a case with no slug")
+        quoted = urllib.parse.quote(str(slug).strip(), safe="")
+        api_url = f"{self._api_root()}/cases/{quoted}/"
+        value = {"source_id": source_id, "description": description}
+        if event_type:
+            value["event_type"] = event_type
+        patch = [{"op": "add", "path": "/evidence/-", "value": value}]
+        resp = self.session.patch(
+            api_url,
+            json=patch,
+            headers={"Content-Type": "application/json"},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+
+    def attach_markdown(
+        self, source_id: str, markdown: str, overwrite: bool = False, timeout: int = 60
+    ) -> dict:
+        """Attach converted markdown to a source as a MARKDOWN-role link.
+
+        POSTs to the casework review endpoint ``/casework/sources/<id>/markdown/``
+        (same one the reprocess command / review poller use). Idempotent: the
+        server skips a source that already has a MARKDOWN url unless overwrite.
+        Returns the parsed body (e.g. ``{"created": bool}``).
+        """
+        quoted = urllib.parse.quote(str(source_id).strip(), safe="")
+        api_url = f"{self._api_root()}/casework/sources/{quoted}/markdown/"
+        resp = self.session.post(
+            api_url,
+            json={"markdown": markdown, "overwrite": overwrite},
+            headers={"Content-Type": "application/json"},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
 
 # ── convert_date tool (AD <-> Bikram Sambat) ─────────────────────────────────
 
