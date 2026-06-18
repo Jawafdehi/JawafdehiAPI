@@ -42,7 +42,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 def _bootstrap():
     """Boot Django DB-free. Provider/token env must already be in os.environ
     (config.settings reads it at import), so set any --override BEFORE calling."""
-    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings_scripts")
+    # Force the DB-free script settings: an inherited DJANGO_SETTINGS_MODULE
+    # (e.g. config.settings from the shared API env) would otherwise boot the
+    # ORM-backed settings and defeat the "reviewer never touches a DB" guarantee.
+    os.environ["DJANGO_SETTINGS_MODULE"] = "config.settings_scripts"
     import django
 
     django.setup()
