@@ -31,12 +31,6 @@ from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from config.auth import (
-    JAWAFDEHI_USER_ID_HEADER,
-    SERVICE_ACCOUNT_USERNAME,
-    ChatServiceAccountAuthentication,
-    resolve_or_create_identity,
-)
 from config.oidc import OIDCJWTAuthentication
 
 from .admin import CaseAdminForm
@@ -323,10 +317,7 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
     search_fields = ["title", "description", "key_allegations"]
     authentication_classes = [
         OIDCJWTAuthentication,
-        # Impersonation-aware Token auth: the chat MCP server writes with the
-        # service-account token + X-Jawafdehi-User-Id, and this resolves
-        # request.user to the impersonated end user for both authz and audit.
-        ChatServiceAccountAuthentication,
+        TokenAuthentication,
         SessionAuthentication,
     ]
 
@@ -1413,72 +1404,3 @@ class OEmbedView(APIView):
             root, encoding="unicode"
         )
         return HttpResponse(xml_str, content_type="text/xml")
-
-
-class MeView(APIView):
-    """Resolve the calling chat identity to a Jawafdehi user.
-
-    Called by the jawafdehi-mcp server (GET /api/caseworker/me) using the
-    chat-jawafdehi-org service-account token plus an X-Jawafdehi-User-Id header.
-    """
-
-    authentication_classes = [TokenAuthentication]
-
-    def get(self, request):
-        if not request.user.is_authenticated:
-            return Response(
-                {"error": "Authentication required"},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
-        if not request.auth or request.auth.user.username != SERVICE_ACCOUNT_USERNAME:
-            return Response(
-                {"error": "Service account token required"},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
-        owui_user_id = (request.META.get(JAWAFDEHI_USER_ID_HEADER) or "").strip()
-        if not owui_user_id:
-            return Response(
-                {"error": "X-Jawafdehi-User-Id header is required"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        identity = resolve_or_create_identity(owui_user_id, request)
-        if identity is None:
-            return Response(
-                {"error": f"Unknown user: {owui_user_id}"},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
-        real_user = identity.user
-
-        if real_user is None:
-            return Response(
-                {
-                    "mapped": False,
-                    "owui_user_id": identity.owui_user_id,
-                    "owui_user_name": identity.owui_user_name,
-                    "message": "Chat identity is not yet mapped to a Jawafdehi user. An admin must link this identity in the admin panel.",
-                },
-                status=status.HTTP_200_OK,
-            )
-
-        if not real_user.is_active:
-            return Response(
-                {"error": "User account is inactive"},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
-        roles = list(real_user.groups.values_list("name", flat=True))
-
-        return Response(
-            {
-                "mapped": True,
-                "roles": roles,
-                "user_id": real_user.id,
-                "username": real_user.get_username(),
-                "owui_user_id": identity.owui_user_id,
-                "owui_user_name": identity.owui_user_name,
-            }
-        )

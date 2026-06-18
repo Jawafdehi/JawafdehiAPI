@@ -4,12 +4,11 @@ This is a regression guard for the audit-logging work. For every combination
 of authentication method and mutating API endpoint, it asserts that the write
 
   (a) produces a django-auditlog ``LogEntry`` (the mutation is audited), and
-  (b) attributes that entry to the *acting* user — including the impersonated
-      end user when the chat service account acts on someone's behalf.
+  (b) attributes that entry to the *acting* user.
 
 It runs through the real DRF auth classes and the full middleware stack
-(``JWTAuditlogMiddleware`` binds the lazy actor; ``ChatServiceAccountAuthentication``
-resolves impersonation), inside the test transaction, so nothing leaks.
+(``JWTAuditlogMiddleware`` binds the lazy actor), inside the test transaction,
+so nothing leaks.
 
 Endpoints deliberately excluded from auditing (CaseWorkflowRun, NESQueueItem —
 hot-path models saved in loops) are asserted to produce *no* LogEntry, so the
@@ -27,13 +26,11 @@ from cases.models import (
     Case,
     CaseState,
     CaseType,
-    ChatUserIdentity,
     DocumentSource,
     JawafEntity,
     SourceLinkRole,
     SourceType,
 )
-from config.auth import SERVICE_ACCOUNT_USERNAME
 from tests.conftest import create_user_with_role
 
 User = get_user_model()
@@ -60,31 +57,9 @@ def _drf_token_client(actor, **_):
     return client
 
 
-def _service_account_impersonation_client(actor, *, service_account):
-    """Authenticate as the chat service account, impersonating `actor`.
-
-    The audit entry (and the authz check) must resolve to `actor`, not to the
-    shared service account.
-    """
-    owui_id = f"owui-{actor.username}"
-    ChatUserIdentity.objects.update_or_create(
-        owui_user_id=owui_id,
-        defaults={"owui_user_name": actor.username, "user": actor},
-    )
-    token, _created = Token.objects.get_or_create(user=service_account)
-    client = APIClient()
-    client.credentials(
-        HTTP_AUTHORIZATION=f"Token {token.key}",
-        HTTP_X_JAWAFDEHI_USER_ID=owui_id,
-        HTTP_X_JAWAFDEHI_USER_NAME=actor.username,
-    )
-    return client
-
-
 AUTH_METHODS = [
     ("jwt", _jwt_client),
     ("drf_token", _drf_token_client),
-    ("service_account_impersonation", _service_account_impersonation_client),
 ]
 
 
@@ -162,14 +137,6 @@ def admin_actor(db):
     return create_user_with_role("matrix_admin", "matrix_admin@example.com", "Admin")
 
 
-@pytest.fixture
-def service_account(db):
-    svc, _ = User.objects.get_or_create(
-        username=SERVICE_ACCOUNT_USERNAME, defaults={"is_active": True}
-    )
-    return svc
-
-
 def _logentries_for(model, since_id):
     if isinstance(model, str):
         ct = ContentType.objects.get(model=model)
@@ -180,9 +147,7 @@ def _logentries_for(model, since_id):
 
 @pytest.mark.parametrize("auth_label,auth_factory", AUTH_METHODS)
 @pytest.mark.parametrize("ep_label,ep_factory", ENDPOINTS)
-def test_audit_matrix(
-    auth_label, auth_factory, ep_label, ep_factory, admin_actor, service_account
-):
+def test_audit_matrix(auth_label, auth_factory, ep_label, ep_factory, admin_actor):
     """Every (auth method × endpoint) cell audits the write and names the actor."""
     method, url, body, model, expected_actions = ep_factory(admin_actor)
 
@@ -190,7 +155,7 @@ def test_audit_matrix(
         LogEntry.objects.order_by("-id").values_list("id", flat=True).first() or 0
     )
 
-    client = auth_factory(admin_actor, service_account=service_account)
+    client = auth_factory(admin_actor)
     resp = getattr(client, method)(url, body, format="json")
 
     assert resp.status_code in (200, 201), (
@@ -206,16 +171,12 @@ def test_audit_matrix(
         expected_actions <= actions
     ), f"{auth_label} × {ep_label}: expected actions {expected_actions}, got {actions}"
 
-    # The acting user must be attributed — the impersonated end user for the
-    # service-account path, never the shared service account.
+    # The acting user must be attributed.
     actors = {e.actor for e in entries if e.actor is not None}
     assert admin_actor in actors, (
         f"{auth_label} × {ep_label}: audit entry not attributed to the acting "
         f"user (got actors={actors})"
     )
-    assert all(
-        a.username != SERVICE_ACCOUNT_USERNAME for a in actors
-    ), f"{auth_label} × {ep_label}: audit attributed to the shared service account"
 
 
 # ---------------------------------------------------------------------------

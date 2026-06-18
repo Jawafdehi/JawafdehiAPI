@@ -19,7 +19,6 @@ from .models import (
     Case,
     CaseEntityRelationship,
     CaseState,
-    ChatUserIdentity,
     DocumentSource,
     Feedback,
     JawafEntity,
@@ -1487,26 +1486,3 @@ except admin.sites.NotRegistered:
 @admin.register(TokenProxy)
 class CustomTokenAdmin(UserFullNameAdminMixin, BaseTokenAdmin):
     raw_id_fields = ()
-
-
-@admin.register(ChatUserIdentity)
-class ChatUserIdentityAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
-    list_display = ("owui_user_id", "owui_user_name", "user", "created_at")
-    search_fields = ("owui_user_id", "owui_user_name", "user__username", "user__email")
-    list_filter = ("created_at",)
-    autocomplete_fields = ("user",)
-    readonly_fields = ("created_at",)
-
-    fieldsets = (
-        (
-            "Identity Mapping",
-            {
-                "fields": (
-                    "owui_user_id",
-                    "owui_user_name",
-                    "user",
-                    "created_at",
-                ),
-            },
-        ),
-    )
