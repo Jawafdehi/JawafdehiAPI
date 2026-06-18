@@ -114,8 +114,7 @@ class BedrockProvider(Provider):
                     raise RuntimeError("bedrock: tool loop returned empty content")
                 return strip_code_fence(text)
 
-            # Echo the assistant turn, then answer each tool_use with a tool_result.
-            messages.append({"role": "assistant", "content": blocks})
+            # Build the tool_results for each tool_use block.
             tool_results = []
             for b in blocks:
                 if isinstance(b, dict) and b.get("type") == "tool_use":
@@ -127,6 +126,23 @@ class BedrockProvider(Provider):
                             "content": result,
                         }
                     )
+            # Guard: stop_reason said tool_use but no tool_use blocks were present.
+            # Don't append an empty tool_results turn (Anthropic rejects it) — treat
+            # any text in the reply as the final answer.
+            if not tool_results:
+                text = "".join(
+                    b.get("text", "")
+                    for b in blocks
+                    if isinstance(b, dict) and b.get("type") == "text"
+                ).strip()
+                if text:
+                    return strip_code_fence(text)
+                raise RuntimeError(
+                    "bedrock: tool_use stop with no tool calls and no text"
+                )
+
+            # Echo the assistant turn, then answer each tool_use with a tool_result.
+            messages.append({"role": "assistant", "content": blocks})
             messages.append({"role": "user", "content": tool_results})
 
         raise RuntimeError(

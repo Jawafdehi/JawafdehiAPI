@@ -434,9 +434,36 @@ def _process_case(case, idx, total, dry_run, api, usage, invoke_text, stats):
         print("  LLM returned no entities or accused notes — skipping")
         return
 
-    # Filter and build entity list for PATCH
-    # Maps relationship_type string to enum value expected by the API
+    # PATCH /entities REPLACES the case's relationship list server-side, so we
+    # MUST start from the case's EXISTING entities (accused links + any prior
+    # enrichment) and only ADD the newly-extracted location/related ones —
+    # otherwise the replace would wipe the accused relationships. Fetch the full
+    # case detail for the authoritative entity list (the iter-path summary may
+    # not include it).
+    try:
+        existing_entities = api.get_case(slug).get("entities") or []
+    except Exception:  # noqa: BLE001
+        existing_entities = case.get("entities") or []
     entities_to_patch = []
+    seen = set()
+    for existing in existing_entities:
+        if not isinstance(existing, dict):
+            continue
+        eid = existing.get("entity") or existing.get("entity_id")
+        rel = existing.get("relationship_type") or existing.get("relationship")
+        if not eid or not rel:
+            continue
+        key = (eid, rel)
+        if key in seen:
+            continue
+        seen.add(key)
+        entities_to_patch.append(
+            {
+                "entity": eid,
+                "relationship_type": rel,
+                "notes": existing.get("notes") or "",
+            }
+        )
     created_count = 0
 
     for item in entities_data:
@@ -464,6 +491,10 @@ def _process_case(case, idx, total, dry_run, api, usage, invoke_text, stats):
         # Map relationship_type string to enum
         rel_type_enum = "location" if rel_type == "location" else "related"
 
+        key = (entity_id, rel_type_enum)
+        if key in seen:
+            continue
+        seen.add(key)
         entities_to_patch.append(
             {
                 "entity": entity_id,

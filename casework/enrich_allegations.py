@@ -32,6 +32,7 @@ from casework.common import (
     bootstrap,
     content_from_evidence_entry,
     get_target_cases,
+    parse_extraction_response,
     print_summary,
     setup_logging,
 )
@@ -347,63 +348,12 @@ def _extract_allegations(
 
 
 def _parse_allegations_response(response_text: str) -> Optional[list[str]]:
-    """Parse the LLM response into clean allegations."""
-    import json
-
-    raw_text = response_text.strip()
-
-    # Try to extract JSON from the response
-    # Strategy 1: look for fenced JSON
-    if "```" in raw_text:
-        start = raw_text.find("```")
-        if start != -1:
-            nl = raw_text.find("\n", start)
-            if nl != -1:
-                end = raw_text.find("```", nl)
-                if end != -1:
-                    raw_text = raw_text[nl + 1 : end].strip()
-
-    # Strategy 2: find JSON object wrapper
-    obj_start = raw_text.find("{")
-    if obj_start != -1:
-        obj_end = raw_text.rfind("}")
-        if obj_end != -1:
-            json_str = raw_text[obj_start : obj_end + 1]
-            try:
-                data = json.loads(json_str)
-                if isinstance(data, dict):
-                    allegations = data.get("allegations")
-                    if isinstance(allegations, list):
-                        clean = [
-                            str(a).strip()
-                            for a in allegations
-                            if isinstance(a, str) and a.strip()
-                        ]
-                        if clean:
-                            return clean[:3]
-            except json.JSONDecodeError:
-                pass
-
-    # Strategy 3: try to find bare array
-    arr_start = raw_text.find("[")
-    if arr_start != -1:
-        arr_end = raw_text.rfind("]")
-        if arr_end != -1:
-            json_str = raw_text[arr_start : arr_end + 1]
-            try:
-                allegations = json.loads(json_str)
-                if isinstance(allegations, list):
-                    clean = [
-                        str(a).strip()
-                        for a in allegations
-                        if isinstance(a, str) and a.strip()
-                    ]
-                    if clean:
-                        return clean[:3]
-            except json.JSONDecodeError:
-                pass
-
-    return None
+    """Parse the LLM response into clean allegations (at most 3)."""
+    entries = parse_extraction_response(response_text, {"allegations"})
+    if not entries:
+        return None
+    clean = [str(a).strip() for a in entries if isinstance(a, str) and a.strip()]
+    return clean[:3] if clean else None
 
 
 if __name__ == "__main__":

@@ -33,6 +33,7 @@ from casework.common import (
     CaseworkApi,
     add_common_args,
     bootstrap,
+    content_from_evidence_entry,
     convert_date_tool,
     get_target_cases,
     is_valid_iso_date,
@@ -338,79 +339,13 @@ def _get_source_content(case: dict) -> Optional[str]:
     content_parts: list[str] = []
     for stype in MILESTONE_SOURCE_TYPES:
         for entry in by_type.get(stype, []):
-            text = _content_from_evidence_entry(entry)
+            text = content_from_evidence_entry(entry)
             if text:
                 content_parts.append(text)
 
     if not content_parts:
         return None
     return "\n\n---\n\n".join(content_parts)
-
-
-def _content_from_evidence_entry(entry: dict) -> Optional[str]:
-    """Return usable text for one evidence entry.
-
-    Order of preference:
-    1. The already-extracted evidence description when long enough.
-    2. An existing MARKDOWN-role link on the source.
-    3. Otherwise, create markdown with the shared source converter.
-    """
-    description = (entry.get("description") or "").strip()
-    if len(description) > 200:
-        return description
-
-    source = entry.get("source") or {}
-    urls = source.get("urls") or []
-
-    # Use an existing MARKDOWN link if present
-    md_link = next(
-        (
-            u["link"]
-            for u in urls
-            if isinstance(u, dict) and u.get("role") == "MARKDOWN" and u.get("link")
-        ),
-        None,
-    )
-    if md_link:
-        try:
-            from sourcing import jds_client
-
-            content, _ = jds_client.download_source_file(md_link)
-            text = content.decode("utf-8", errors="replace")
-            if len(text) > 200:
-                return text
-        except Exception as exc:
-            logger.warning("Failed to download markdown link %s: %s", md_link, exc)
-
-    # Otherwise, use the source converter
-    convertible = [
-        u["link"]
-        for u in urls
-        if isinstance(u, dict)
-        and u.get("link")
-        and u.get("role") in ("RAW", "ALTERNATE", "SOURCE_PAGE")
-    ]
-    if not convertible:
-        return None
-
-    try:
-        from sourcing import converter as source_converter
-
-        result = source_converter.convert_source({"url": convertible})
-        if result.get("status") in ("converted", "attached"):
-            text = (result.get("markdown") or "").strip()
-            if len(text) > 200:
-                return text
-        else:
-            logger.warning(
-                "Source conversion %s: %s",
-                result.get("status"),
-                result.get("note"),
-            )
-    except Exception as exc:
-        logger.warning("Source conversion failed: %s", exc)
-
-    return None
 
 
 def _get_ngm_data(case: dict, api: CaseworkApi) -> Optional[dict]:
