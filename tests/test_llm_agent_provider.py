@@ -271,6 +271,46 @@ class TestAgentSampling(unittest.TestCase):
         self.assertEqual(out["r2"]["mean"], 60)
 
 
+class TestAgentHardening(unittest.TestCase):
+    """Security/robustness fixes from PR review."""
+
+    @override_settings(CLAUDE_AGENT_HOME="")
+    def test_build_env_scrubs_secrets_keeps_path(self):
+        import os
+
+        p = ClaudeAgentProvider()
+        with patch.dict(
+            os.environ,
+            {
+                "PATH": "/usr/bin",
+                "DB_PASSWORD": "s",
+                "X_API_KEY": "k",
+                "AWS_SECRET": "a",
+            },
+            clear=False,
+        ):
+            env = p._build_env()
+        self.assertEqual(env["PATH"], "/usr/bin")
+        self.assertNotIn("DB_PASSWORD", env)
+        self.assertNotIn("X_API_KEY", env)
+        self.assertNotIn("AWS_SECRET", env)
+        self.assertNotIn("ANTHROPIC_API_KEY", env)
+
+    @override_settings(CLAUDE_AGENT_MCP_CONFIG="")
+    def test_strict_mcp_config_even_without_config(self):
+        argv = ClaudeAgentProvider()._build_argv("sys", "m", "/tmp/s")
+        self.assertIn("--strict-mcp-config", argv)
+        self.assertNotIn("--mcp-config", argv)
+
+    def test_judge_prompt_keeps_task_tail(self):
+        from llm.providers.agent import _build_judge_prompt
+
+        task = "HEAD_MARKER" + ("x" * 30000) + "TAIL_CONTRACT"
+        prompt = _build_judge_prompt(task, "ans")
+        self.assertIn("HEAD_MARKER", prompt)
+        self.assertIn("TAIL_CONTRACT", prompt)
+
+
 class TestNgmRender(unittest.TestCase):
     """The NGM court record renders to markdown for the judge / staged files."""
 

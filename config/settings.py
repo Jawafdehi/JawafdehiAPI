@@ -890,21 +890,22 @@ CLAUDE_AGENT_DISALLOWED_TOOLS = os.getenv(
     "CLAUDE_AGENT_DISALLOWED_TOOLS",
     "Bash Write Edit MultiEdit NotebookEdit WebFetch WebSearch",
 )
-# Upper bound on agentic turns within a single run (runaway guard).
-CLAUDE_AGENT_MAX_TURNS = int(os.getenv("CLAUDE_AGENT_MAX_TURNS", "40"))
+# Upper bound on agentic turns within a single run (runaway guard). Min 1 — a
+# zero/negative cap would make claude abort before producing a result.
+CLAUDE_AGENT_MAX_TURNS = max(1, int(os.getenv("CLAUDE_AGENT_MAX_TURNS", "40")))
 # Outer run-wild -> judge -> rerun loop cap. Mandatory ceiling (see billing note).
-CLAUDE_AGENT_MAX_ITERS = int(os.getenv("CLAUDE_AGENT_MAX_ITERS", "3"))
+CLAUDE_AGENT_MAX_ITERS = max(1, int(os.getenv("CLAUDE_AGENT_MAX_ITERS", "3")))
 # How many times to grade the full rule batch (samples per rule). The agent grades
 # all of a tier's rules in one call; running it N times gives each rule a real
 # mean+variance/confidence instead of a single-pass std 0. Cost scales linearly.
-CLAUDE_AGENT_SAMPLES = int(os.getenv("CLAUDE_AGENT_SAMPLES", "2"))
+CLAUDE_AGENT_SAMPLES = max(1, int(os.getenv("CLAUDE_AGENT_SAMPLES", "2")))
 # Provider used to judge work completeness each iteration. Defaults to the cheap
 # review provider. If it resolves to claude_agent itself, only the structural
 # (valid-JSON) check runs to avoid recursion.
 CLAUDE_AGENT_JUDGE_PROVIDER = os.getenv(
     "CLAUDE_AGENT_JUDGE_PROVIDER", REVIEW_LLM_PROVIDER_CHEAP
 )
-CLAUDE_AGENT_TIMEOUT = int(os.getenv("CLAUDE_AGENT_TIMEOUT", "900"))
+CLAUDE_AGENT_TIMEOUT = max(1, int(os.getenv("CLAUDE_AGENT_TIMEOUT", "900")))
 
 # Converted source markdown cache + per-source conversion timeout.
 SOURCE_MARKDOWN_DIR = Path(

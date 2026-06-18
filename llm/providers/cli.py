@@ -59,7 +59,11 @@ class _CliProvider(Provider):
             RuntimeError: If command fails or retries exhausted.
         """
         max_retries = int(getattr(settings, "REVIEW_CLI_MAX_RETRIES", 3))
-        timeout = int(timeout or getattr(settings, "REVIEW_CLI_TIMEOUT", 300))
+        timeout = int(
+            getattr(settings, "REVIEW_CLI_TIMEOUT", 300) if timeout is None else timeout
+        )
+        if timeout <= 0:
+            raise RuntimeError(f"{self.name}: timeout must be > 0 (got {timeout})")
 
         # One scratch cwd reused across retries (CLIs may write to it), always
         # cleaned up so a long-lived poller doesn't leak temp dirs. A caller may

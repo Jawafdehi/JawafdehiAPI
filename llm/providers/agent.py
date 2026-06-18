@@ -19,6 +19,7 @@ OAuth (no API keys).
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -33,6 +34,14 @@ logger = logging.getLogger(__name__)
 # Marker (from judge._rule_context_block) that separates the case data from the
 # source-document block, used to split the staged materials into readable files.
 _SOURCES_MARKER = "SOURCE DOCUMENT EXCERPTS"
+
+# Env var names that look like secrets — scrubbed before handing the env to the
+# claude subprocess (and its MCP children) so unrelated service credentials are
+# never forwarded to an external CLI.
+_SECRET_ENV_RE = re.compile(
+    r"KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|DATABASE_URL|_DSN|AWS_|GCP_|GOOGLE_",
+    re.IGNORECASE,
+)
 
 
 def _as_list(value):
@@ -110,6 +119,7 @@ class ClaudeAgentProvider(_CliProvider):
 
             answer = ""
             missing = []
+            complete = False
             trace = []  # numbered list of iterations, for observability
             for i in range(1, max_iters + 1):
                 stdin_text = (
@@ -132,6 +142,16 @@ class ClaudeAgentProvider(_CliProvider):
                 tier,
                 "\n".join(trace),
             )
+            if not complete:
+                # The caller still gets a best-effort answer (better than aborting
+                # the whole review), but it is flagged so the gap is visible.
+                logger.warning(
+                    "claude_agent returning a best-effort answer judged INCOMPLETE "
+                    "after %d iteration(s) [tier=%s]; missing=%s",
+                    len(trace),
+                    tier,
+                    missing,
+                )
             return answer
         finally:
             shutil.rmtree(staging, ignore_errors=True)
@@ -166,9 +186,11 @@ class ClaudeAgentProvider(_CliProvider):
 
         mcp_config = getattr(settings, "CLAUDE_AGENT_MCP_CONFIG", "")
         if mcp_config:
-            # --strict-mcp-config ignores any ambient ~/.claude MCP servers, so the
-            # agent reaches ONLY the predefined toolset (predictable + isolated).
-            argv.extend(["--mcp-config", mcp_config, "--strict-mcp-config"])
+            argv.extend(["--mcp-config", mcp_config])
+        # Always fail closed: --strict-mcp-config ignores ambient ~/.claude MCP
+        # servers regardless of whether a config was provided (empty config =>
+        # tool-less, never ambient), preserving the predefined-toolset guarantee.
+        argv.append("--strict-mcp-config")
 
         # Allowlist: file-read tools (scoped by --add-dir) + a minimal MCP set.
         # Everything else (shell, writes, web) is denied.
@@ -181,8 +203,14 @@ class ClaudeAgentProvider(_CliProvider):
         return argv
 
     def _build_env(self):
-        """Subscription OAuth via CLAUDE_AGENT_HOME; never leak an API key."""
-        env = dict(os.environ)
+        """Env for the claude subprocess: subscription OAuth, no service secrets.
+
+        Auth is the seeded OAuth creds under CLAUDE_AGENT_HOME/.claude (files, not
+        env), so we keep PATH/HOME/locale but drop anything secret-looking — the
+        external CLI and its MCP children must not inherit unrelated DB/cloud/API
+        credentials from the Django process.
+        """
+        env = {k: v for k, v in os.environ.items() if not _SECRET_ENV_RE.search(k)}
         home = getattr(settings, "CLAUDE_AGENT_HOME", "")
         if home:
             env["HOME"] = home
@@ -196,7 +224,7 @@ class ClaudeAgentProvider(_CliProvider):
         except json.JSONDecodeError as e:
             raise RuntimeError(
                 f"claude_agent: failed to parse JSON envelope: {e}\nOutput: {out[-500:]}"
-            )
+            ) from e
         if not isinstance(data, dict) or data.get("is_error") or "result" not in data:
             payload = (
                 data.get("result", "unknown error")
@@ -291,8 +319,13 @@ _JUDGE_SYSTEM = (
 
 
 def _build_judge_prompt(task, answer):
+    # Keep BOTH ends of a long task: the requested JSON shape / rule keys often
+    # sit at the TAIL (e.g. the builder appends its contract after the sources),
+    # so a head-only cut would hide what "complete" means from the judge.
+    if len(task) > 20000:
+        task = task[:12000] + "\n…\n" + task[-8000:]
     return f"""TASK GIVEN TO THE WORKER:
-{task[:20000]}
+{task}
 
 WORKER'S ANSWER:
 {answer[:40000]}

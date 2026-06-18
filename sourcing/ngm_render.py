@@ -7,7 +7,11 @@ and as a staged file for the agentic provider) so figures stated in the case can
 checked against the record rather than taken on faith.
 """
 
+import logging
+
 from sourcing import ngm_client
+
+logger = logging.getLogger(__name__)
 
 # Known scalar fields rendered first, in a sensible reading order. Any other scalar
 # fields on the record are appended after these (the NGM schema may grow).
@@ -74,8 +78,12 @@ def court_case_md(ref, record):
     hearings = record.get("hearings") or []
     if hearings:
         out.append("\n### Hearings")
-        for h in hearings[:60]:
+        shown = hearings[:60]
+        for h in shown:
             out.append(f"- {_row(h) if isinstance(h, dict) else h}")
+        if len(hearings) > len(shown):
+            # Flag the cut so the judge does not read the first 60 as the full record.
+            out.append(f"- … {len(hearings) - len(shown)} more hearing(s) omitted")
 
     return "\n".join(out)
 
@@ -94,7 +102,15 @@ def case_records(case):
         except ngm_client.NgmNotFound:
             record = None
         except Exception as e:  # noqa: BLE001 - NGM is best-effort context
-            out.append((ref, f"## NGM court record `{ref}`\n\n(lookup error: {e})"))
+            # Keep the raw error out of the prompt (it can carry internal URLs /
+            # response bodies); log it for operators instead.
+            logger.warning("NGM lookup failed for %s: %s", ref, e)
+            out.append(
+                (
+                    ref,
+                    f"## NGM court record `{ref}`\n\n(lookup error; record unavailable)",
+                )
+            )
             continue
         out.append((ref, court_case_md(ref, record)))
     return out

@@ -422,7 +422,10 @@ def judge_rules(
             f"All {len(tasks)} judge calls failed: {errors[0] if errors else 'unknown'}"
         )
 
-    out = {"_narrative": narrative, "_n_samples": n}
+    # Report the ACTUAL per-rule sample count (agent batches use CLAUDE_AGENT_SAMPLES,
+    # not n), so the result payload's confidence/llm_samples reflects reality.
+    actual_n = max((len(samples[k]) for k in keys), default=n)
+    out = {"_narrative": narrative, "_n_samples": actual_n}
     for k in keys:
         vals = samples[k] or [50]
         mean = statistics.fmean(vals)

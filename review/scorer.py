@@ -169,7 +169,9 @@ def score_case(
         except Exception:  # noqa: BLE001 - NGM is best-effort context
             ngm_md = ""
     if ngm_md:
-        excerpts = f"{excerpts}\n\n---\n\n{ngm_md}" if excerpts else ngm_md
+        # PREPEND the authoritative court record: judge._rule_context_block caps the
+        # excerpts (JUDGE_SOURCE_EXCERPTS_CAP), so appending could truncate it away.
+        excerpts = f"{ngm_md}\n\n---\n\n{excerpts}" if excerpts else ngm_md
     # When an LLM rule needs to compare the accused against the official court
     # record, pull the NGM defendant list for this case's court refs and hand it
     # to the judge inside the case summary. Done once and reused across samples.
