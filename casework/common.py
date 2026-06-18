@@ -393,6 +393,26 @@ def source_content(case: dict, source_types=None):
     return joined, len(joined)
 
 
+def env_int(name: str, default: int) -> int:
+    """Read an int from env, falling back to `default`. Lets the runner widen the
+    source-content caps for big-context models (e.g. claude 1M) without code edits."""
+    try:
+        return int(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
+def clamp(text: str, limit: int, label: str = "source") -> str:
+    """Truncate `text` to `limit` chars (<=0 = no limit) and PRINT total vs sent,
+    so an operator can see how much of each source actually reached the model."""
+    text = text or ""
+    total = len(text)
+    sent = text if (limit <= 0 or total <= limit) else text[:limit]
+    note = "" if len(sent) == total else f"  (capped at {limit:,})"
+    print(f"    {label}: {total:,} total chars, sent {len(sent):,}{note}")
+    return sent
+
+
 # ── target case selection ────────────────────────────────────────────────────
 
 

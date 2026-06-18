@@ -38,8 +38,10 @@ from casework.common import (
     add_common_args,
     balanced_object,
     bootstrap,
+    clamp,
     content_from_evidence_entry,
     convert_date_tool,
+    env_int,
     get_target_cases,
     print_summary,
     setup_logging,
@@ -60,8 +62,11 @@ DESCRIPTION_SOURCE_TYPES = (
 COURT_RE = re.compile(r"(?<![\dA-Za-z])\d{2,3}-[A-Za-z]{1,3}-\d{3,4}(?![\dA-Za-z])")
 
 # Source-budget (characters) fed to the description prompt.
-SOURCE_TEXT_BUDGET = 60000
-VERDICT_SUMMARY_TRIGGER = 12000
+# Env-tunable so the runner can widen them for big-context models (claude 1M):
+# raise the budget + verdict trigger to feed full court orders instead of an
+# LLM-summarised digest.
+SOURCE_TEXT_BUDGET = env_int("CASEWORK_SOURCE_TEXT_BUDGET", 60000)
+VERDICT_SUMMARY_TRIGGER = env_int("CASEWORK_VERDICT_SUMMARY_TRIGGER", 12000)
 VERDICT_SUMMARY_TARGET = 8000
 
 VERDICT_SUMMARY_SYSTEM_PROMPT = """\
@@ -282,6 +287,7 @@ def main():
                 total=total,
                 dry_run=args.dry_run,
                 skip_title=args.skip_title,
+                force=args.force,
                 api=api,
                 usage=usage,
                 invoke_text=invoke_text,
@@ -332,6 +338,7 @@ def _process_case(
     total: int,
     dry_run: bool,
     skip_title: bool,
+    force: bool,
     api: CaseworkApi,
     usage,
     invoke_text,
@@ -352,7 +359,7 @@ def _process_case(
         print("  (using summary instead of detail)")
 
     # Idempotency: skip cases with substantial descriptions unless --force
-    if _has_substantial_description(detail):
+    if not force and _has_substantial_description(detail):
         stats["cases_processed"] -= 1
         stats["cases_already_populated"] += 1
         print("  Already has a substantial description — skipping (use --force)")
@@ -565,7 +572,7 @@ def _assemble_source_text(
         if remaining <= 0:
             logger.warning("Budget spent; dropped a %s source", label)
             break
-        chunk = text[:remaining]
+        chunk = clamp(text, remaining, label)
         parts.append(f"[{label}]\n{chunk}")
         remaining -= len(chunk)
     return "\n\n---\n\n".join(parts)

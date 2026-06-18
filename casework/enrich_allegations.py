@@ -30,7 +30,9 @@ from casework.common import (
     CaseworkApi,
     add_common_args,
     bootstrap,
+    clamp,
     content_from_evidence_entry,
+    env_int,
     get_target_cases,
     parse_extraction_response,
     print_summary,
@@ -333,7 +335,11 @@ def _extract_allegations(
     prompt = USER_PROMPT_TEMPLATE.format(
         case_title=case_title,
         bigo=bigo,
-        press_release=press_release_text[:60000],
+        press_release=clamp(
+            press_release_text,
+            env_int("CASEWORK_PRESS_RELEASE_CHARS", 60000),
+            "press release",
+        ),
     )
 
     # Call LLM without tools (plain text generation)
