@@ -13,6 +13,7 @@ from urllib.parse import quote
 
 import markdown as md
 from django.core.management.base import BaseCommand
+from django.utils.html import escape
 
 from content.models import ArticleCategory, ArticleIndexPage, ArticlePage
 
@@ -84,7 +85,7 @@ def _documents_html(pdfs) -> str:
     if not pdfs:
         return ""
     items = "".join(
-        f'<li><a href="{quote(pdf["path"], safe="/")}">{pdf["name"]}</a></li>'
+        f'<li><a href="{quote(pdf["path"], safe="/")}">{escape(pdf["name"])}</a></li>'
         for pdf in pdfs
     )
     return f"<h2>Documents and resources</h2><ul>{items}</ul>"

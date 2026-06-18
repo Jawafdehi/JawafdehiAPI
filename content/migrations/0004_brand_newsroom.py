@@ -6,7 +6,7 @@ WAGTAIL_DEFAULT = "Welcome to your new Wagtail site!"
 
 def _rename(site_name, page_title):
     def _run(apps, schema_editor):
-        from wagtail.models import Site
+        Site = apps.get_model("wagtailcore", "Site")
 
         site = Site.objects.filter(is_default_site=True).first()
         if not site:

@@ -44,6 +44,8 @@ class HashedFilenameS3Boto3Storage(S3Boto3Storage):
         ``documents/``) are left untouched so the parent S3 backend handles
         their paths and collision suffixes normally.
         """
+        if not isinstance(name, str):
+            return False
         return "/" not in name or name.startswith(self.file_prefix)
 
     def _get_hashed_filename(self, name):
