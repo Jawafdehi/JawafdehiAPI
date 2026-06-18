@@ -15,7 +15,9 @@ OIDC provider and reads the signed-in identity/roles from the token itself.
 
 import structlog
 from django.db import IntegrityError, transaction
-from django.db.models import Max
+from django.db.models import Case as DBCase
+from django.db.models import CharField, F, Max, Value, When
+from django.db.models.functions import Concat
 from django.utils import timezone
 from rest_framework import generics, status
 from rest_framework.decorators import api_view, permission_classes
@@ -35,10 +37,19 @@ from .permissions import (
 from .serializers import (
     CaseReviewDetailSerializer,
     CaseReviewListSerializer,
+    GroupedCaseReviewSerializer,
     JobResultSerializer,
     ReviewConfigSerializer,
     SourceMarkdownSerializer,
     SubmitSerializer,
+)
+
+# Group reviews by the stable case_id; rows with no case_id (legacy/unresolved)
+# fall back to a per-slug key so they don't all collapse into one bucket.
+_GROUP_KEY = DBCase(
+    When(case_id="", then=Concat(Value("slug:"), F("slug"))),
+    default=F("case_id"),
+    output_field=CharField(),
 )
 
 _audit_log = structlog.get_logger("jawafdehi.audit")
@@ -59,8 +70,11 @@ def submit_review(request):
     s = SubmitSerializer(data=request.data)
     s.is_valid(raise_exception=True)
 
+    # jawafdehi-api identifies the case's basic details here, at submit time. The
+    # stable case_id (not the slug) is the review's primary identifier; the
+    # reviewer later fetches the full case content remotely by slug.
     try:
-        slug, title = case_provider.resolve_target(
+        details = case_provider.resolve_identity(
             slug=s.validated_data["slug"] or None,
             court_case_number=s.validated_data["court_case_number"] or None,
         )
@@ -68,22 +82,28 @@ def submit_review(request):
         return Response({"detail": str(e)}, status=status.HTTP_404_NOT_FOUND)
 
     # The pre-check gives a friendly message in the common case; the DB partial
-    # unique constraint (uniq_active_review_per_case) is the source of truth and
-    # closes the check-then-create race between concurrent submits.
+    # unique constraint (uniq_active_review_per_case, keyed on case_id) is the
+    # source of truth and closes the check-then-create race between concurrent
+    # submits.
     try:
         with transaction.atomic():
             review = CaseReview.objects.create(
-                slug=slug, case_title=title, submitted_by=request.user
+                case_id=details["case_id"],
+                slug=details["slug"],
+                case_title=details["title"],
+                case_state=details["state"],
+                case_type=details["case_type"],
+                submitted_by=request.user,
             )
     except IntegrityError:
         active = CaseReview.objects.filter(
-            slug=slug,
+            case_id=details["case_id"],
             status__in=[CaseReview.STATUS_PENDING, CaseReview.STATUS_RUNNING],
         ).first()
         return Response(
             {
                 "detail": (
-                    f"A review for '{slug}' is already "
+                    f"A review for '{details['slug']}' is already "
                     f"{active.status if active else 'active'}; "
                     f"wait for it to finish before submitting another."
                 ),
@@ -108,9 +128,11 @@ def submit_review(request):
 def claim_job(request):
     """Atomically claim the oldest pending review and return its work payload.
 
-    Returns 204 when the queue is empty. On success returns everything the
-    poller needs to run the review without any DB access: the review id, slug,
-    the resolved case dict, and the active review config.
+    Returns 204 when the queue is empty. On success returns the review id plus
+    the basic case details jawafdehi-api identified at submit time (case_id, slug,
+    title/state/type) and the active config. The reviewer fetches the full case
+    CONTENT itself, remotely over the API by slug — the server never serializes a
+    local case here, so the reviewer always grades the live remote case.
     """
     # force_primary_reads keeps the SELECT ... FOR UPDATE on the primary
     # connection enrolled in this transaction; otherwise the router would send
@@ -140,32 +162,19 @@ def claim_job(request):
             ]
         )
 
-    # Resolve the case dict server-side so the poller needs no case DB access.
-    try:
-        case = case_provider.get_case(review.slug)
-        case.setdefault("slug", review.slug)
-    except Exception as e:  # noqa: BLE001 - case lookup failure -> fail the job
-        review.status = CaseReview.STATUS_FAILED
-        review.stage = "failed"
-        review.error = f"Could not load case '{review.slug}': {e}"
-        review.completed_at = timezone.now()
-        review.save(
-            update_fields=[
-                "status",
-                "stage",
-                "error",
-                "completed_at",
-                "updated_at",
-            ]
-        )
-        return Response({"detail": review.error}, status=status.HTTP_409_CONFLICT)
-
     cfg = ReviewConfig.get_active()
     return Response(
         {
             "review_id": review.id,
+            "case_id": review.case_id,
             "slug": review.slug,
-            "case": case,
+            "case": {
+                "case_id": review.case_id,
+                "slug": review.slug,
+                "title": review.case_title,
+                "state": review.case_state,
+                "case_type": review.case_type,
+            },
             "config": {
                 "pass_threshold": cfg.pass_threshold,
                 "revise_threshold": cfg.revise_threshold,
@@ -190,6 +199,30 @@ def job_stage(request, pk):
         review.stage = stage[:64]
         review.save(update_fields=["stage", "updated_at"])
     return Response({"ok": True})
+
+
+def _summarize_reviewers(result):
+    """Compact 'which reviewer graded this' summary from the result's usage.
+
+    Derives one row per (tier, provider, model) from
+    ``result["token_usage"]["by_provider"]`` — e.g.
+    ``[{"tier": "premium", "provider": "claude_cli", "model": "opus", "calls": 7}]``.
+    Returns None when no per-provider usage is present (e.g. an older result).
+    """
+    by_provider = ((result or {}).get("token_usage") or {}).get("by_provider") or []
+    reviewers = []
+    for bucket in by_provider:
+        if not isinstance(bucket, dict):
+            continue
+        reviewers.append(
+            {
+                "tier": bucket.get("tier", ""),
+                "provider": bucket.get("provider", ""),
+                "model": bucket.get("model", ""),
+                "calls": bucket.get("calls", 0),
+            }
+        )
+    return reviewers or None
 
 
 @api_view(["POST"])
@@ -230,6 +263,7 @@ def submit_job_result(request, pk):
         review.source_count = d["source_count"]
         review.sources_converted = d["sources_converted"]
         review.result = d["result"]
+        review.reviewers = _summarize_reviewers(d["result"])
     review.completed_at = timezone.now()
     if d.get("duration_seconds") is not None:
         review.duration_seconds = d["duration_seconds"]
@@ -278,6 +312,67 @@ class ReviewListView(generics.ListAPIView):
         # Deterministic ordering (created_at can tie) so paging through the list
         # for lazy loading doesn't drop or duplicate rows across page boundaries.
         return CaseReview.objects.order_by("-created_at", "-id")
+
+
+class GroupedReviewListView(generics.ListAPIView):
+    """Reviews grouped by case, paginated BY CASE, each with its full history.
+
+    The flat ``/reviews/`` list paginates raw executions, so older runs of a case
+    can land on a later page. This endpoint instead returns one entry per case
+    (20 per page, most-recently-active first) carrying ALL of that case's
+    executions, so the SPA can show every past run of a case together.
+    """
+
+    serializer_class = GroupedCaseReviewSerializer
+    permission_classes = [CanReadReview]
+    pagination_class = ReviewResultsPagination
+
+    def get_queryset(self):
+        # One row per case group, ordered by most recent activity. Deterministic
+        # tie-break on latest_id so paging can't drop/duplicate a group.
+        return (
+            CaseReview.objects.annotate(group_key=_GROUP_KEY)
+            .values("group_key")
+            .annotate(latest_id=Max("id"), last_activity=Max("created_at"))
+            .order_by("-last_activity", "-latest_id")
+        )
+
+    def _build_groups(self, group_rows):
+        """Attach every execution to its case group, preserving page order."""
+        keys = [g["group_key"] for g in group_rows]
+        executions = (
+            CaseReview.objects.annotate(group_key=_GROUP_KEY)
+            .filter(group_key__in=keys)
+            .order_by("-id")
+        )
+        buckets = {}
+        for review in executions:
+            buckets.setdefault(review.group_key, []).append(review)
+        groups = []
+        for row in group_rows:
+            rows = buckets.get(row["group_key"])
+            if not rows:
+                continue
+            latest = rows[0]
+            groups.append(
+                {
+                    "slug": latest.slug,
+                    "case_title": latest.case_title,
+                    "latest": latest,
+                    "executions": rows,
+                }
+            )
+        return groups
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        page = self.paginate_queryset(queryset)
+        group_rows = page if page is not None else list(queryset)
+        groups = self._build_groups(group_rows)
+        serializer = self.get_serializer(groups, many=True)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
 
 
 class ReviewDetailView(generics.RetrieveAPIView):
@@ -342,14 +437,18 @@ def regrade_all(request):
     more than one historical review. The out-of-process poller then claims the
     re-queued reviews (each fans its LLM rules out in parallel).
     """
-    active_slugs = set(
+    active_case_ids = set(
         CaseReview.objects.filter(
             status__in=[CaseReview.STATUS_PENDING, CaseReview.STATUS_RUNNING]
-        ).values_list("slug", flat=True)
+        ).values_list("case_id", flat=True)
     )
+    # Group by the stable case_id (the primary identifier). Skip rows with no
+    # case_id — these are legacy/unresolvable targets the backfill couldn't
+    # resolve, which we don't want to silently re-queue.
     ids = list(
-        CaseReview.objects.exclude(slug__in=active_slugs)
-        .values("slug")
+        CaseReview.objects.exclude(case_id="")
+        .exclude(case_id__in=active_case_ids)
+        .values("case_id")
         .annotate(latest_id=Max("id"))
         .values_list("latest_id", flat=True)
     )

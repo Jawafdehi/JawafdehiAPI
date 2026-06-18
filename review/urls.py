@@ -12,6 +12,7 @@ from . import views
 
 urlpatterns = [
     path("reviews/", views.ReviewListView.as_view()),
+    path("reviews/grouped/", views.GroupedReviewListView.as_view()),
     path("reviews/submit/", views.submit_review),
     path("reviews/regrade-all/", views.regrade_all),
     # Job API for the DB-free poller: claim -> (stage) -> result.

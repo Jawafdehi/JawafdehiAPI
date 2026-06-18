@@ -18,7 +18,11 @@ def client(db):
 
 
 def _make_reviews(n):
-    CaseReview.objects.bulk_create([CaseReview(slug=f"case-{i:03d}") for i in range(n)])
+    # Distinct case_id per row: the active-review uniqueness constraint is keyed
+    # on case_id, so same-status rows must not share one.
+    CaseReview.objects.bulk_create(
+        [CaseReview(case_id=f"cid-{i:03d}", slug=f"case-{i:03d}") for i in range(n)]
+    )
 
 
 def test_list_is_paginated_with_default_page_size(client):

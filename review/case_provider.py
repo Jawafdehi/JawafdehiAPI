@@ -37,10 +37,7 @@ def _serialize_local_case(slug):
     try:
         case = Case.objects.get(slug=slug)
     except Case.DoesNotExist:
-        raise CaseNotFound(
-            f"Case '{slug}' is not in the local database. "
-            f"Seed it first with: python manage.py seed_jawafdehi --slug {slug}"
-        )
+        raise CaseNotFound(f"No case found for slug '{slug}'.")
     # context=None is fine: get_url builds relative URLs when there is no request.
     data = CaseDetailSerializer(case, context={}).data
     # Normalize to plain dict and ensure slug present.
@@ -103,18 +100,37 @@ def _case_by_court_case_number(court_case_number):
     return matches[0]
 
 
-def resolve_target(slug=None, court_case_number=None):
-    """Verify a review target exists and return its ``(slug, title)``.
+def resolve_identity(slug=None, court_case_number=None):
+    """Validate a review target and return its basic details for enqueue.
 
     Accepts exactly one of a Jawafdehi case ``slug`` or a ``court_case_number``
-    (a "court:number" ref as stored in ``Case.court_cases``). Raises
-    CaseNotFound when the case cannot be located so the caller can surface a
-    clear error instead of queuing a doomed job.
+    (a "court:number" ref as stored in ``Case.court_cases``), resolves it against
+    the case registry, and returns::
+
+        {case_id, slug, title, state, case_type}
+
+    ``case_id`` (``cases.Case.case_id``) is the stable internal identifier the
+    review system groups/dedupes by; it is resolved here, server-side, at submit
+    time — never required from the remote case payload the reviewer later fetches.
+    Raises CaseNotFound when the target can't be located so submit fails fast
+    instead of queuing a doomed job.
     """
+    from cases.models import Case
+
     if court_case_number:
         case = _case_by_court_case_number(court_case_number)
-        return case.slug, case.title
-    if slug:
-        data = get_case(slug)
-        return data.get("slug") or slug, data.get("title", "")
-    raise CaseNotFound("Provide either a case slug or a court case number.")
+    elif slug:
+        try:
+            case = Case.objects.get(slug=slug)
+        except Case.DoesNotExist:
+            raise CaseNotFound(f"No case found for slug '{slug}'.")
+    else:
+        raise CaseNotFound("Provide either a case slug or a court case number.")
+
+    return {
+        "case_id": case.case_id,
+        "slug": case.slug,
+        "title": case.title,
+        "state": case.state,
+        "case_type": case.case_type,
+    }
