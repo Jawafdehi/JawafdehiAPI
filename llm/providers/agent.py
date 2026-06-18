@@ -117,9 +117,7 @@ class ClaudeAgentProvider(_CliProvider):
                 )
                 out = self._run(argv, stdin_text, env, timeout=timeout, cwd=staging)
                 answer = self._parse_result(out, model_id, tier, usage)
-                complete, missing = self._judge_complete(
-                    judge_task, answer, tier, usage
-                )
+                complete, missing = self._judge_complete(judge_task, answer, usage)
                 trace.append(
                     f"  {i}. read+grade -> complete={complete}"
                     + ("" if complete else f"; missing={missing}")
@@ -237,7 +235,7 @@ class ClaudeAgentProvider(_CliProvider):
             "the COMPLETE, corrected JSON in the exact shape requested — nothing else."
         )
 
-    def _judge_complete(self, task, answer, tier, usage):
+    def _judge_complete(self, task, answer, usage):
         """Return (complete, missing). Structural valid-JSON check + cheap-model grade.
 
         The structural check is a free fast-path. The cheap-model grade is generic
@@ -271,6 +269,8 @@ class ClaudeAgentProvider(_CliProvider):
                 usage,
             )
             verdict = salvage_json(strip_code_fence(verdict_text))
+            if not isinstance(verdict, dict):
+                raise ValueError("completeness judge did not return a JSON object")
             complete = bool(verdict.get("complete"))
             missing = [str(m) for m in (verdict.get("missing") or [])]
             return complete, missing

@@ -57,25 +57,9 @@ PROMPT_CACHE = bool(getattr(settings, "BEDROCK_PROMPT_CACHE", True))
 CLI_PROVIDERS = ("codex_cli", "claude_cli", "claude_agent")
 # Rules per batched CLI call. 1 disables batching (per-rule path; for A/B).
 RULE_BATCH_SIZE = int(getattr(settings, "REVIEW_RULE_BATCH_SIZE", 8))
-# Agentic providers grade ALL of a tier's rules in ONE run-wild call (they fetch
-# their own sources and self-judge), so we never chunk them by RULE_BATCH_SIZE.
+# Agentic providers grade ALL of a tier's rules in ONE run-wild call (the agent
+# reads the pre-staged case materials), so we never chunk them by RULE_BATCH_SIZE.
 AGENT_PROVIDERS = ("claude_agent",)
-
-
-def pure_agent_mode():
-    """True when EVERY review tier routes to an agentic provider.
-
-    In that mode the agent fetches + converts sources itself via MCP, so the
-    runner skips local conversion/per-source analysis and the scorer hands the
-    agent a source-location manifest instead of pre-converted excerpts. Mixed
-    tiers (agent + non-agent) keep the normal local-conversion path so non-agent
-    tiers still receive excerpts.
-    """
-    from llm.routing import provider_for_tier
-
-    return all(
-        provider_for_tier(t).name in AGENT_PROVIDERS for t in ("premium", "cheap")
-    )
 
 
 REVIEW_SYSTEM = (
