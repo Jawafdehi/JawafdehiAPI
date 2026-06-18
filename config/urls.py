@@ -20,9 +20,12 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
+from wagtail.admin import urls as wagtailadmin_urls
+from wagtail.documents import urls as wagtaildocs_urls
 
 from cases.api_views import MeView, OEmbedView
 from cases.views import docs, index
+from content.api import api_router as wagtail_api_router
 
 urlpatterns = [
     path("", index, name="index"),
@@ -49,6 +52,10 @@ urlpatterns = [
     path("api/casework/", include("review.urls")),
     # OIDC authentication for admin SSO
     path("oidc/", include("mozilla_django_oidc.urls")),
+    # Wagtail CMS: editorial admin, document serving, and headless API v2.
+    path("newsroom/", include(wagtailadmin_urls)),
+    path("documents/", include(wagtaildocs_urls)),
+    path("api/cms/v2/", wagtail_api_router.urls),
 ]
 
 if settings.DEBUG and str(settings.MEDIA_URL).startswith("/"):

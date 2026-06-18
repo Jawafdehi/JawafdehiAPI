@@ -27,6 +27,7 @@ COPY nesq ./nesq
 COPY ngm ./ngm
 COPY review ./review
 COPY llm ./llm
+COPY content ./content
 COPY static ./static
 COPY templates ./templates
 

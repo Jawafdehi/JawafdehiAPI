@@ -211,6 +211,22 @@ INSTALLED_APPS = [
     # Casework Review System (VOL-3): rule-centered case-quality review.
     "review",
     "llm",
+    # Wagtail CMS (headless) — public updates/news articles.
+    "wagtail.contrib.forms",
+    "wagtail.contrib.redirects",
+    "wagtail.embeds",
+    "wagtail.sites",
+    "wagtail.users",
+    "wagtail.snippets",
+    "wagtail.documents",
+    "wagtail.images",
+    "wagtail.search",
+    "wagtail.admin",
+    "wagtail.api.v2",
+    "wagtail",
+    "modelcluster",
+    "taggit",
+    "content",
 ]
 
 MIDDLEWARE = [
@@ -226,6 +242,7 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "config.middleware.JWTAuditlogMiddleware",
+    "wagtail.contrib.redirects.middleware.RedirectMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"
@@ -510,6 +527,26 @@ MEDIA_URL = build_media_url(
     use_ssl=AWS_S3_USE_SSL,
 )
 MEDIA_ROOT = os.getenv("MEDIA_ROOT", BASE_DIR / "media")
+
+# Wagtail CMS configuration (headless — serves public updates/news via API v2).
+# Wagtail images/documents share the default storage; HashedFilenameS3Boto3Storage
+# leaves their namespaced upload paths untouched (see cases/storage.py).
+WAGTAIL_SITE_NAME = "Jawafdehi Newsroom"
+# Base URL used for absolute links in the admin (notification emails, previews).
+# Not used for public delivery — the SPA consumes the API v2 endpoints.
+WAGTAILADMIN_BASE_URL = os.getenv("WAGTAILADMIN_BASE_URL", "https://api.jawafdehi.org")
+WAGTAILSEARCH_BACKENDS = {
+    "default": {
+        "BACKEND": "wagtail.search.backends.database",
+    }
+}
+WAGTAILDOCS_EXTENSIONS = ["csv", "docx", "pdf", "pptx", "rtf", "txt", "xlsx", "zip"]
+WAGTAILDOCS_MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10 MB, matches case upload limit
+WAGTAILIMAGES_MAX_UPLOAD_SIZE = 10 * 1024 * 1024
+# Headless: pages are delivered via the API, not Wagtail's own routing.
+WAGTAIL_APPEND_SLASH = False
+# Complex StreamField pages can exceed Django's default form field cap.
+DATA_UPLOAD_MAX_NUMBER_FIELDS = 10_000
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
