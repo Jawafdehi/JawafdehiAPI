@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from casework.common import (
     CaseworkApi,
     add_common_args,
+    balanced_object,
     bootstrap,
     get_target_cases,
     print_summary,
@@ -223,6 +224,7 @@ def main():
                 stats=stats,
             )
         except Exception as exc:
+            stats["cases_llm_error"] += 1
             print(f"Unhandled error processing case: {exc}", file=sys.stderr)
             if args.verbose:
                 import traceback
@@ -484,23 +486,29 @@ def _parse_bigo_response(response_text: str) -> Optional[int]:
         except json.JSONDecodeError:
             pass
 
-    # Try plain JSON object pattern
-    for match in re.finditer(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text, re.DOTALL):
+    # Scan for balanced JSON objects (string-aware). A brace regex broke on
+    # braces inside quoted fields like evidence_quote and on deeper nesting.
+    for start in range(len(text)):
+        if text[start] != "{":
+            continue
+        block = balanced_object(text, start)
+        if not block:
+            continue
         try:
-            obj = json.loads(match.group(0))
-            if isinstance(obj, dict) and "bigo" in obj:
-                bigo_val = obj.get("bigo")
-                confidence = str(obj.get("confidence", "")).strip().lower()
-                evidence_quote = obj.get("evidence_quote")
-
-                if confidence == "low":
-                    return None
-                if not _is_explicit_bigo_context(evidence_quote):
-                    return None
-
-                return _coerce_bigo_int(bigo_val)
+            obj = json.loads(block)
         except json.JSONDecodeError:
             continue
+        if isinstance(obj, dict) and "bigo" in obj:
+            bigo_val = obj.get("bigo")
+            confidence = str(obj.get("confidence", "")).strip().lower()
+            evidence_quote = obj.get("evidence_quote")
+
+            if confidence == "low":
+                return None
+            if not _is_explicit_bigo_context(evidence_quote):
+                return None
+
+            return _coerce_bigo_int(bigo_val)
 
     return None
 
