@@ -69,6 +69,12 @@ def ensure_article_index():
     if root is None:
         return None
 
+    # A page row with this slug can linger as an orphan after migration
+    # rollbacks in tests (the ArticleIndexPage child row is dropped while the
+    # base wagtailcore_page row survives); don't try to recreate it.
+    if root.get_children().filter(slug="articles").exists():
+        return None
+
     index = ArticleIndexPage(title="Articles", slug="articles", live=True)
     root.add_child(instance=index)
     return index
@@ -78,11 +84,21 @@ def sync_cms_group_permissions(sender=None, **kwargs):
     from django.contrib.auth.management import create_permissions
     from django.contrib.auth.models import Group, Permission
     from django.contrib.contenttypes.models import ContentType
+    from django.db import connections
     from wagtail.models import (
         Collection,
         GroupCollectionPermission,
         GroupPagePermission,
     )
+
+    # No-op unless the CMS tables exist on this connection. post_migrate fires
+    # for every migrate, including partial/historical states in tests (rolling
+    # `cases` back cascade-unapplies the dependent `content` migrations), where
+    # querying these tables would raise. Nothing to bootstrap in that case.
+    connection = connections[kwargs.get("using") or "default"]
+    required = {"content_articleindexpage", "wagtailcore_page", "wagtailcore_site"}
+    if not required.issubset(set(connection.introspection.table_names())):
+        return
 
     ensure_article_index()
 
