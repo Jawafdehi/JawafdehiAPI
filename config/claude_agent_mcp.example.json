@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "jawafdehi": {
+      "type": "http",
+      "url": "http://jawafdehi-mcp.app.svc.cluster.local:8000/mcp",
+      "headers": {
+        "x-jawafdehi-user-id": "review-poller",
+        "x-jawafdehi-user-name": "review-poller"
+      }
+    }
+  }
+}

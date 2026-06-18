@@ -39,13 +39,18 @@ class _CliProvider(Provider):
     Handles subprocess invocation with retries for rate limits and timeouts.
     """
 
-    def _run(self, argv, stdin_text, env):
+    def _run(self, argv, stdin_text, env, timeout=None, cwd=None):
         """Run a CLI subprocess with retry logic for rate limits.
 
         Args:
             argv: Command line (list of strings).
             stdin_text: Input to pass via stdin.
             env: Environment dict for subprocess.
+            timeout: Per-attempt timeout in seconds. Defaults to
+                REVIEW_CLI_TIMEOUT (agentic harnesses pass a larger value).
+            cwd: Working directory for the subprocess. When None a throwaway
+                scratch dir is created and cleaned up; when given (e.g. the
+                agent's staging dir) the caller owns its lifecycle.
 
         Returns:
             stdout text if successful.
@@ -54,11 +59,14 @@ class _CliProvider(Provider):
             RuntimeError: If command fails or retries exhausted.
         """
         max_retries = int(getattr(settings, "REVIEW_CLI_MAX_RETRIES", 3))
-        timeout = int(getattr(settings, "REVIEW_CLI_TIMEOUT", 300))
+        timeout = int(timeout or getattr(settings, "REVIEW_CLI_TIMEOUT", 300))
 
         # One scratch cwd reused across retries (CLIs may write to it), always
-        # cleaned up so a long-lived poller doesn't leak temp dirs.
-        cwd = tempfile.mkdtemp(prefix="llmcli-")
+        # cleaned up so a long-lived poller doesn't leak temp dirs. A caller may
+        # supply its own cwd (then it is responsible for cleanup).
+        owns_cwd = cwd is None
+        if owns_cwd:
+            cwd = tempfile.mkdtemp(prefix="llmcli-")
         try:
             for attempt in range(max_retries):
                 try:
@@ -102,7 +110,8 @@ class _CliProvider(Provider):
                     )
             raise RuntimeError(f"{self.name}: exhausted {max_retries} retries")
         finally:
-            shutil.rmtree(cwd, ignore_errors=True)
+            if owns_cwd:
+                shutil.rmtree(cwd, ignore_errors=True)
 
 
 class ClaudeCliProvider(_CliProvider):

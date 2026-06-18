@@ -17,7 +17,7 @@ from llm.routing import active_premium_model
 from llm.usage import UsageAccumulator
 from sourcing import converter
 
-from . import casetype, code_rules, judge, scorer
+from . import casetype, code_rules, judge, ngm_render, scorer
 
 
 class _Config:
@@ -62,6 +62,8 @@ def process_case(case, config=None, on_stage=None):
     #    already carry a MARKDOWN link, which the poller attaches back to the
     #    DocumentSource via the maintenance endpoint (populating its MARKDOWN
     #    url). The same routine backs the `reprocess_source_markdown` command.
+    #    This runs for EVERY provider — the agentic provider reads the converted
+    #    markdown from staged files rather than re-fetching it.
     stage("converting_sources")
     converted, markdown_to_attach = converter.convert_case_to_attach_candidates(case)
     source_count = len(converted)
@@ -76,11 +78,25 @@ def process_case(case, config=None, on_stage=None):
         scorer.build_case_summary(case), converted, ctype["label"], usage=usage
     )
 
+    # Pull the authoritative NGM court record(s) once; the scorer appends it to the
+    # judge excerpts so claimed figures/dates can be verified against the official
+    # record (and the agentic provider stages it as a file to read).
+    try:
+        ngm_md = ngm_render.case_markdown(case)
+    except Exception:  # noqa: BLE001 - NGM is best-effort context
+        ngm_md = ""
+
     # 4. Rule-centered scoring (Bedrock). Rules are code-enforced (no DB).
     stage("scoring")
     rules = code_rules.get_enabled_rules()
     result = scorer.score_case(
-        case, converted, rules, cfg, source_analyses=source_analyses, usage=usage
+        case,
+        converted,
+        rules,
+        cfg,
+        source_analyses=source_analyses,
+        usage=usage,
+        ngm_md=ngm_md,
     )
     # Reports the active provider's premium/gate-tier model. Under tiered routing,
     # non-gate rules and the narrative may instead use the cheap tier (see

@@ -858,6 +858,54 @@ REVIEW_CLI_MAX_RETRIES = int(os.getenv("REVIEW_CLI_MAX_RETRIES", "3"))
 # always use the per-rule + prompt-cache path.
 REVIEW_RULE_BATCH_SIZE = int(os.getenv("REVIEW_RULE_BATCH_SIZE", "8"))
 
+# Agentic claude provider ("claude_agent") — unlike claude_cli (locked to a
+# single read-only plan-mode turn), this lets the claude CLI RUN WILD: multi-turn,
+# fetching its own sources through a fixed MCP toolset, then self-judging and
+# emitting the expected JSON. A cheaper model judges completeness and we re-run
+# until done or the iteration cap. Auth is the same seeded subscription OAuth as
+# claude_cli (no API keys). NOTE: the 2026-06-15 Agent-SDK billing split (paused,
+# may reactivate) would bill this headless/agent usage from a separate full-rate
+# pool — hence the hard CLAUDE_AGENT_MAX_ITERS cap.
+CLAUDE_AGENT_BIN = os.getenv("CLAUDE_AGENT_BIN", os.getenv("CLAUDE_CLI_BIN", "claude"))
+# $HOME holding .claude/.credentials.json (subscription OAuth). Defaults to the
+# same dir claude_cli uses so the existing seeded creds are reused.
+CLAUDE_AGENT_HOME = os.getenv("CLAUDE_AGENT_HOME", os.getenv("CLAUDE_CLI_HOME", ""))
+CLAUDE_AGENT_MODEL_ID = os.getenv("CLAUDE_AGENT_MODEL_ID", "")
+CLAUDE_AGENT_MODEL_PREMIUM = os.getenv("CLAUDE_AGENT_MODEL_PREMIUM", "")
+CLAUDE_AGENT_MODEL_CHEAP = os.getenv("CLAUDE_AGENT_MODEL_CHEAP", "")
+# Path to the MCP config JSON handed to `claude --mcp-config`. Defines the ONLY
+# servers/tools the agent may reach. Empty = no MCP (agent runs tool-less).
+CLAUDE_AGENT_MCP_CONFIG = os.getenv("CLAUDE_AGENT_MCP_CONFIG", "")
+# Space-separated tool allowlist. The agent reads its PRE-STAGED case materials
+# (Read/Glob/Grep, confined to the staging dir by --add-dir) and may call a minimal
+# MCP set (convert_date now; extend as new MCP tools are needed). It does NOT fetch
+# its own sources — those are pre-converted and staged for it.
+CLAUDE_AGENT_ALLOWED_TOOLS = os.getenv(
+    "CLAUDE_AGENT_ALLOWED_TOOLS",
+    "Read Glob Grep mcp__jawafdehi__convert_date",
+)
+# Built-in tools explicitly denied: no shell, no writes, no web. (Read/Glob/Grep are
+# allowed above but scoped to the staging dir via cwd + --add-dir.)
+CLAUDE_AGENT_DISALLOWED_TOOLS = os.getenv(
+    "CLAUDE_AGENT_DISALLOWED_TOOLS",
+    "Bash Write Edit MultiEdit NotebookEdit WebFetch WebSearch",
+)
+# Upper bound on agentic turns within a single run (runaway guard).
+CLAUDE_AGENT_MAX_TURNS = int(os.getenv("CLAUDE_AGENT_MAX_TURNS", "40"))
+# Outer run-wild -> judge -> rerun loop cap. Mandatory ceiling (see billing note).
+CLAUDE_AGENT_MAX_ITERS = int(os.getenv("CLAUDE_AGENT_MAX_ITERS", "3"))
+# How many times to grade the full rule batch (samples per rule). The agent grades
+# all of a tier's rules in one call; running it N times gives each rule a real
+# mean+variance/confidence instead of a single-pass std 0. Cost scales linearly.
+CLAUDE_AGENT_SAMPLES = int(os.getenv("CLAUDE_AGENT_SAMPLES", "2"))
+# Provider used to judge work completeness each iteration. Defaults to the cheap
+# review provider. If it resolves to claude_agent itself, only the structural
+# (valid-JSON) check runs to avoid recursion.
+CLAUDE_AGENT_JUDGE_PROVIDER = os.getenv(
+    "CLAUDE_AGENT_JUDGE_PROVIDER", REVIEW_LLM_PROVIDER_CHEAP
+)
+CLAUDE_AGENT_TIMEOUT = int(os.getenv("CLAUDE_AGENT_TIMEOUT", "900"))
+
 # Converted source markdown cache + per-source conversion timeout.
 SOURCE_MARKDOWN_DIR = Path(
     os.getenv("SOURCE_MARKDOWN_DIR", str(BASE_DIR / "review_source_markdown"))

@@ -39,6 +39,10 @@ def get_provider(name):
         from llm.providers.cli import ClaudeCliProvider
 
         provider = ClaudeCliProvider()
+    elif name == "claude_agent":
+        from llm.providers.agent import ClaudeAgentProvider
+
+        provider = ClaudeAgentProvider()
     else:
         raise RuntimeError(f"Unknown LLM provider: {name}")
 

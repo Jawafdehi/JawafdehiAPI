@@ -31,7 +31,7 @@ def _effective_max_workers():
     from llm.routing import provider_for_tier
 
     for tier in ("premium", "cheap"):
-        if provider_for_tier(tier).name in ("codex_cli", "claude_cli"):
+        if provider_for_tier(tier).name in CLI_PROVIDERS:
             return int(getattr(settings, "REVIEW_CLI_MAX_WORKERS", 2))
     return MAX_WORKERS
 
@@ -54,9 +54,29 @@ PROMPT_CACHE = bool(getattr(settings, "BEDROCK_PROMPT_CACHE", True))
 # cache — each call re-bills (and re-cache-writes) the whole context. For these we
 # batch many rules into one call so the expensive case context is sent once per
 # batch instead of once per rule. bedrock/proxy keep the per-rule + cache path.
-CLI_PROVIDERS = ("codex_cli", "claude_cli")
+CLI_PROVIDERS = ("codex_cli", "claude_cli", "claude_agent")
 # Rules per batched CLI call. 1 disables batching (per-rule path; for A/B).
 RULE_BATCH_SIZE = int(getattr(settings, "REVIEW_RULE_BATCH_SIZE", 8))
+# Agentic providers grade ALL of a tier's rules in ONE run-wild call (they fetch
+# their own sources and self-judge), so we never chunk them by RULE_BATCH_SIZE.
+AGENT_PROVIDERS = ("claude_agent",)
+
+
+def pure_agent_mode():
+    """True when EVERY review tier routes to an agentic provider.
+
+    In that mode the agent fetches + converts sources itself via MCP, so the
+    runner skips local conversion/per-source analysis and the scorer hands the
+    agent a source-location manifest instead of pre-converted excerpts. Mixed
+    tiers (agent + non-agent) keep the normal local-conversion path so non-agent
+    tiers still receive excerpts.
+    """
+    from llm.routing import provider_for_tier
+
+    return all(
+        provider_for_tier(t).name in AGENT_PROVIDERS for t in ("premium", "cheap")
+    )
+
 
 REVIEW_SYSTEM = (
     "You are a meticulous editorial reviewer for Jawafdehi.org, an open civic "
@@ -325,8 +345,15 @@ def judge_rules(
     for tier, rules in tier_rules.items():
         if not rules:
             continue
-        batched = RULE_BATCH_SIZE > 1 and provider_for_tier(tier).name in CLI_PROVIDERS
-        if batched:
+        pname = provider_for_tier(tier).name
+        if pname in AGENT_PROVIDERS:
+            # Agentic providers grade ALL of a tier's rules in one call; run that
+            # batch AGENT_SAMPLES times so each rule gets a real mean+variance (a
+            # single pass yields std 0 / "low" confidence regardless of quality).
+            agent_samples = max(1, int(getattr(settings, "CLAUDE_AGENT_SAMPLES", 2)))
+            for _ in range(agent_samples):
+                tasks.append(("batch", tier, list(rules)))
+        elif RULE_BATCH_SIZE > 1 and pname in CLI_PROVIDERS:
             for chunk in _chunk(rules, RULE_BATCH_SIZE):
                 tasks.append(("batch", tier, chunk))
         else:

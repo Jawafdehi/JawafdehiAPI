@@ -14,7 +14,7 @@ This replaces the old fixed 8-dimension rubric.
 
 from sourcing import ngm_client
 
-from . import casetype, judge, rules_engine
+from . import casetype, judge, ngm_render, rules_engine
 
 
 def _clamp(n):
@@ -105,7 +105,13 @@ def _source_analysis_block(source, analysis):
 
 
 def score_case(
-    case, converted_sources, rules, config, source_analyses=None, usage=None
+    case,
+    converted_sources,
+    rules,
+    config,
+    source_analyses=None,
+    usage=None,
+    ngm_md=None,
 ):
     """Score a case against a list of Rule model instances.
 
@@ -138,9 +144,9 @@ def score_case(
     ]
     llm_rules = [r for r in applicable if r.kind == r.KIND_LLM]
 
-    # 2. Bedrock judge for all applicable LLM rules (sampled for variance).
-    #    Each excerpt carries the raw markdown PLUS the source's contribution
-    #    analysis, so rule scoring is informed by what each source establishes.
+    # 2. Judge for all applicable LLM rules. Each excerpt carries the raw markdown
+    #    PLUS the source's contribution analysis, so rule scoring is informed by
+    #    what each source establishes.
     excerpts = "\n\n---\n\n".join(
         f"## [source {i + 1}] {s.get('title','source')} ({s.get('source_type','')})\n"
         + f"URLs: {_source_urls(s) or '(none)'}\n"
@@ -152,6 +158,18 @@ def score_case(
         + (s.get("markdown") or "")[:_PER_SOURCE_EXCERPT_CAP]
         for i, s in enumerate(converted_sources)
     )
+
+    # Append the authoritative NGM court record(s) so the judge can verify claimed
+    # figures/dates against the official record (this is what catches a case that
+    # states an uncorroborated final figure as fact). Pulled once — the runner
+    # passes it in to avoid a second fetch; computed here for direct callers.
+    if ngm_md is None:
+        try:
+            ngm_md = ngm_render.case_markdown(case)
+        except Exception:  # noqa: BLE001 - NGM is best-effort context
+            ngm_md = ""
+    if ngm_md:
+        excerpts = f"{excerpts}\n\n---\n\n{ngm_md}" if excerpts else ngm_md
     # When an LLM rule needs to compare the accused against the official court
     # record, pull the NGM defendant list for this case's court refs and hand it
     # to the judge inside the case summary. Done once and reused across samples.
