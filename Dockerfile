@@ -28,6 +28,7 @@ COPY ngm ./ngm
 COPY review ./review
 COPY llm ./llm
 COPY static ./static
+COPY templates ./templates
 
 # Collect static files
 RUN DEBUG=False SECRET_KEY=foo-bar ALLOWED_HOSTS=portal.jawafdehi.org python manage.py collectstatic --noinput
