@@ -929,3 +929,8 @@ OIDC_OP_JWKS_ENDPOINT = OIDC_JWKS_URL
 LOGIN_REDIRECT_URL = "/admin/"
 LOGOUT_REDIRECT_URL = "/admin/login/"
 LOGIN_URL = "/oidc/authenticate/"
+# Route the Wagtail admin (/newsroom) through the same OIDC SSO flow instead of
+# Wagtail's built-in username/password form. require_admin_access redirects
+# unauthenticated users here (with ?next=), so the OIDC callback returns them to
+# the newsroom. The /newsroom/login/ form is also redirected (see config/urls.py).
+WAGTAILADMIN_LOGIN_URL = LOGIN_URL
