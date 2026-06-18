@@ -596,7 +596,7 @@ def _summarize_verdict(verdict_text: str, invoke_text, usage) -> Optional[str]:
     chunk = max(20000, VERDICT_SUMMARY_CHUNK_CHARS)
     chunks = [verdict_text[i : i + chunk] for i in range(0, len(verdict_text), chunk)]
     n = len(chunks)
-    summaries: list[str] = []
+    summaries: list[tuple[int, str]] = []
     for idx, part in enumerate(chunks):
         framing = (
             "Summarise this Special Court judgment as instructed.\n\n"
@@ -620,13 +620,15 @@ def _summarize_verdict(verdict_text: str, invoke_text, usage) -> Optional[str]:
             )
             continue
         if result and result.strip():
-            summaries.append(result.strip())
+            summaries.append((idx + 1, result.strip()))
     if not summaries:
         return None
     if n == 1:
-        return summaries[0]
+        return summaries[0][1]
     logger.info("Verdict summarised in %d passes (of %d parts)", len(summaries), n)
-    return "\n\n".join(f"[खण्ड {i + 1}/{n}]\n{s}" for i, s in enumerate(summaries))
+    # Label with the ORIGINAL part index so a failed/skipped chunk doesn't
+    # renumber the survivors (खण्ड 3/5 must stay 3/5, not become 2/5).
+    return "\n\n".join(f"[खण्ड {part_idx}/{n}]\n{s}" for part_idx, s in summaries)
 
 
 def _format_bigo(bigo) -> str:
