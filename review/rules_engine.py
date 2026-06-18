@@ -64,7 +64,7 @@ def _sources(case):
     (``_source_titles`` et al.) and the original ``sourcing`` source count.
 
     Each source dict carries the role-tagged ``urls`` ([{link, role}]) and the
-    legacy flat ``url`` string list (see review.jds_client.extract_sources).
+    legacy flat ``url`` string list (see sourcing.jds_client.extract_sources).
     """
     return [ev.get("source") or {} for ev in (case.get("evidence") or [])]
 

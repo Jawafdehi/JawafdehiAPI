@@ -6,8 +6,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from django.core.management import call_command, load_command_class
 
-from review import converter, jds_client
 from review.upstream_client import UpstreamClient, UpstreamError
+from sourcing import converter, jds_client
 
 
 @pytest.fixture(autouse=True)
@@ -940,6 +940,6 @@ def test_upstream_client_attach_markdown_summary():
 
 def jds_client_in_cmd():
     """The jds_client module as imported by the command (one shared instance)."""
-    from review import jds_client
+    from sourcing import jds_client
 
     return jds_client

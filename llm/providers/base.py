@@ -15,6 +15,10 @@ class Provider:
     """Abstract base class for LLM providers."""
 
     name: str = None
+    # Whether the provider can run an agentic tool-use loop (invoke_with_tools).
+    # API providers (bedrock/proxy) set True; CLI harnesses leave it False and
+    # invoke_with_tools degrades to a single no-tool invoke_text for them.
+    supports_tools: bool = False
 
     def invoke_text(
         self, system, content, max_tokens, model_id, tier, usage=None
@@ -53,4 +57,30 @@ class Provider:
         """
         raise NotImplementedError(
             f"{self.__class__.__name__} must implement model_for_tier"
+        )
+
+    def invoke_with_tools(
+        self,
+        system,
+        content,
+        max_tokens,
+        model_id,
+        tier,
+        tools,
+        usage=None,
+        max_iterations=8,
+    ) -> str:
+        """Run an agentic tool-use loop and return the model's final text.
+
+        Only the API providers (bedrock, proxy) implement this. The CLI-harness
+        providers are their own agents and cannot accept a Python tool callback
+        mid-loop, so they inherit this default and raise.
+
+        Args:
+            tools: list of llm.tools.Tool the model may call.
+            max_iterations: cap on model<->tool round-trips.
+        """
+        raise NotImplementedError(
+            f"{self.name or self.__class__.__name__} does not support tool-use; "
+            "route the tool-using tier to the 'bedrock' or 'proxy' provider."
         )

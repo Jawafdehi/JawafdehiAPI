@@ -12,7 +12,9 @@ The system is a set of code-defined Rules (review.code_rules). For a given case 
 This replaces the old fixed 8-dimension rubric.
 """
 
-from . import casetype, judge, ngm_client, rules_engine
+from sourcing import ngm_client
+
+from . import casetype, judge, rules_engine
 
 
 def _clamp(n):

@@ -45,7 +45,7 @@ from cases.models import (
     JawafEntity,
     RelationshipType,
 )
-from review import jds_client
+from sourcing import jds_client
 
 # Map the JDS entity "type" string onto a CaseEntityRelationship.relationship_type.
 _REL_BY_TYPE = {c.value: c.value for c in RelationshipType}
