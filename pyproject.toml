@@ -66,6 +66,10 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 testpaths = ["tests"]
 addopts = "--reuse-db --timeout=10 -n auto"
+# Apply the per-test timeout to the test body only, not fixture setup/teardown.
+# Adding Wagtail's migrations pushes the one-time test-DB build (run in the first
+# test's setup) past 10s; that build shouldn't count against the hang timeout.
+timeout_func_only = true
 asyncio_mode = "auto"
 
 [build-system]
