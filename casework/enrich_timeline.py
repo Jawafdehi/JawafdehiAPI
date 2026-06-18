@@ -217,6 +217,7 @@ def main():
                 stats=stats,
             )
         except Exception as exc:
+            stats["cases_llm_error"] += 1
             print(f"Unhandled error processing case: {exc}", file=sys.stderr)
             if args.verbose:
                 import traceback

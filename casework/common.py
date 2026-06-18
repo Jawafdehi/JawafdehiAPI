@@ -236,6 +236,7 @@ def convert_date_tool():
             "required": ["dates", "mode"],
         },
         run=convert_date,
+        run_path="casework.common:convert_date",
     )
 
 
@@ -523,6 +524,34 @@ def is_valid_iso_date(date_str) -> bool:
         return True
     except (ValueError, TypeError):
         return False
+
+
+def balanced_object(text: str, start: int):
+    """Return the balanced ``{...}`` substring starting at ``start``, or None if
+    it never closes. JSON-string aware, so braces inside quoted values (e.g. an
+    evidence_quote) don't throw off the depth count — unlike a brace regex."""
+    depth = 0
+    in_str = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
 
 
 def parse_extraction_response(response_text, wrapper_keys):

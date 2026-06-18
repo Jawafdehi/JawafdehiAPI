@@ -36,6 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from casework.common import (
     CaseworkApi,
     add_common_args,
+    balanced_object,
     bootstrap,
     content_from_evidence_entry,
     convert_date_tool,
@@ -288,6 +289,7 @@ def main():
                 stats=stats,
             )
         except Exception as exc:
+            stats["cases_llm_error"] += 1
             print(f"Unhandled error processing case: {exc}", file=sys.stderr)
             if args.verbose:
                 import traceback
@@ -673,7 +675,7 @@ def _parse_response(response_text: str) -> Optional[dict]:
     for obj_start in range(len(text)):
         if text[obj_start] != "{":
             continue
-        block = _balanced_object(text, obj_start)
+        block = balanced_object(text, obj_start)
         if block is None:
             continue
         try:
@@ -686,35 +688,6 @@ def _parse_response(response_text: str) -> Optional[dict]:
             title = title.strip() if isinstance(title, str) else None
             return {"description": desc, "title": title or None}
     logger.warning("No JSON object with a description found in LLM response")
-    return None
-
-
-def _balanced_object(text: str, start: int) -> Optional[str]:
-    """Return the substring of the balanced {...} block starting at ``start``.
-
-    Respects JSON string quoting/escapes; None if it never closes.
-    """
-    depth = 0
-    in_str = False
-    escape = False
-    for i in range(start, len(text)):
-        ch = text[i]
-        if in_str:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_str = False
-            continue
-        if ch == '"':
-            in_str = True
-        elif ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : i + 1]
     return None
 
 

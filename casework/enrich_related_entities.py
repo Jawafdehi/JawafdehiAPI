@@ -305,6 +305,7 @@ def main():
                 stats=stats,
             )
         except Exception as exc:
+            stats["cases_llm_error"] += 1
             print(f"Unhandled error processing case: {exc}", file=sys.stderr)
             if args.verbose:
                 import traceback
@@ -444,24 +445,44 @@ def _process_case(case, idx, total, dry_run, api, usage, invoke_text, stats):
         existing_entities = api.get_case(slug).get("entities") or []
     except Exception:  # noqa: BLE001
         existing_entities = case.get("entities") or []
+    # accused_notes carry the job title/role of each primary accused; index them
+    # by name so we can fold them into the matching existing relationship's notes.
+    accused_map = {
+        (n.get("name") or "").strip(): (n.get("notes") or "").strip()
+        for n in accused_notes
+        if isinstance(n, dict) and (n.get("name") or "").strip()
+    }
+
     entities_to_patch = []
     seen = set()
     for existing in existing_entities:
         if not isinstance(existing, dict):
             continue
-        eid = existing.get("entity") or existing.get("entity_id")
-        rel = existing.get("relationship_type") or existing.get("relationship")
+        # Case-detail entities serialize FLAT (SimplifiedEntitySerializer):
+        # id == entity.id, type == relationship_type. Fall back to the write-shape
+        # names defensively. Reading the wrong keys here drops every existing
+        # relationship, so the replace-PATCH wipes the accused links.
+        eid = existing.get("id") or existing.get("entity") or existing.get("entity_id")
+        rel = (
+            existing.get("type")
+            or existing.get("relationship_type")
+            or existing.get("relationship")
+        )
         if not eid or not rel:
             continue
         key = (eid, rel)
         if key in seen:
             continue
         seen.add(key)
+        notes = existing.get("notes") or ""
+        enriched = accused_map.get((existing.get("display_name") or "").strip())
+        if enriched and not notes:
+            notes = enriched
         entities_to_patch.append(
             {
                 "entity": eid,
                 "relationship_type": rel,
-                "notes": existing.get("notes") or "",
+                "notes": notes,
             }
         )
     created_count = 0

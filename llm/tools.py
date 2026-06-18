@@ -28,6 +28,11 @@ class Tool:
     description: str
     input_schema: dict
     run: Callable[..., object]
+    # Importable "module:function" for the same executor, used to expose this
+    # tool to subprocess CLI harnesses (claude -p) via a stdio MCP server, which
+    # can't receive the in-process `run` callable. Set it when the tool should be
+    # callable under the CLI providers.
+    run_path: str | None = None
 
     def to_anthropic(self) -> dict:
         """Anthropic / Bedrock Messages tool schema (flat name/description/input_schema)."""
