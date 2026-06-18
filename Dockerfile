@@ -2,10 +2,12 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install system dependencies for psycopg2
+# Install system dependencies for psycopg2 (gcc, postgresql-client) and the
+# process_queue cron (git: clones/commits/pushes the nes-db repo).
 RUN apt-get update && apt-get install -y \
     gcc \
     postgresql-client \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Cloud SQL server CA certificate for TLS database connections.
