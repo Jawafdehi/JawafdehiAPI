@@ -16,6 +16,9 @@ from django.test import TransactionTestCase
 from cases.models import DocumentSource
 
 
+# Rolling `cases` back also reverses the dependent `content` (Wagtail CMS)
+# migrations, so these migration round-trips run longer than the default 10s.
+@pytest.mark.timeout(60)
 class TestURLMigrationProcess(TransactionTestCase):
     """
     Test the actual migration process from URLField to JSONField.
@@ -497,6 +500,7 @@ class TestSourceLinkDictFormat:
         ]
 
 
+@pytest.mark.timeout(60)
 class TestDictFormatMigration(TransactionTestCase):
     """Test the data migration that converts str entries to dict format."""
 
@@ -657,6 +661,7 @@ class TestDictFormatMigration(TransactionTestCase):
         super().tearDownClass()
 
 
+@pytest.mark.timeout(60)
 class TestRoleBackfillMigration(TransactionTestCase):
     """Test migration 0027, which backfills None/missing roles to RAW."""
 
