@@ -561,13 +561,10 @@ TESTING = os.getenv("TESTING") == "true" or any("pytest" in arg for arg in sys.a
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "config.oidc.OIDCJWTAuthentication",
-        # ChatServiceAccountAuthentication subclasses TokenAuthentication and adds
-        # X-Jawafdehi-User-Id impersonation: a request bearing the chat service
-        # account token + that header is authenticated AS the impersonated end
-        # user, so permission checks and audit attribution both see the real user
-        # (not the shared service account). For non-service-account tokens it
-        # behaves exactly like TokenAuthentication.
-        "config.auth.ChatServiceAccountAuthentication",
+        # Per-user DRF tokens for service/scripted access (e.g. the MCP stdio
+        # fallback). The previous impersonation subclass (trusting a spoofable
+        # X-Jawafdehi-User-Id header) was removed in favor of OIDC bearer auth.
+        "rest_framework.authentication.TokenAuthentication",
         "rest_framework.authentication.SessionAuthentication",
     ],
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",

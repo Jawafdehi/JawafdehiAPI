@@ -24,7 +24,7 @@ from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from wagtail.admin import urls as wagtailadmin_urls
 from wagtail.documents import urls as wagtaildocs_urls
 
-from cases.api_views import MeView, OEmbedView
+from cases.api_views import OEmbedView
 from cases.views import docs, index
 from content.api import api_router as wagtail_api_router
 
@@ -44,10 +44,6 @@ urlpatterns = [
     path("api/", include("ngm.urls")),
     # Case Workflows routes
     path("api/case-workflows/", include("case_workflows.urls")),
-    # Chat identity resolution for the jawafdehi-mcp server. This is the lone
-    # surviving endpoint from the removed caseworker agent app; the path is kept
-    # for backward compatibility with the MCP server.
-    path("api/caseworker/me", MeView.as_view(), name="cw-me"),
     # Casework Review System (VOL-3) — rule-centered case-quality review.
     # Auth: OIDC JWT + Contributor role.
     path("api/casework/", include("review.urls")),
