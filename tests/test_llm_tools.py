@@ -4,7 +4,7 @@ import io
 import json
 
 from llm.providers.bedrock import BedrockProvider
-from llm.providers.cli import ClaudeCliProvider
+from llm.providers.cli import ClaudeCliProvider, CodexCliProvider
 from llm.tools import Tool, run_tool
 from llm.usage import UsageAccumulator
 
@@ -84,10 +84,21 @@ def test_bedrock_tool_loop_executes_then_answers():
     assert usage.input_tokens == 30
 
 
-def test_cli_provider_rejects_tools():
+def test_claude_cli_provider_supports_tools():
+    # claude_cli implements tool-use via a stdio MCP server (cli_mcp_server), so
+    # it advertises support and the invoke layer routes tools to it. (Actually
+    # launching it needs the claude binary, which CI lacks, so only the contract
+    # flag is asserted here.)
+    assert ClaudeCliProvider.supports_tools is True
+
+
+def test_codex_cli_provider_rejects_tools():
+    # codex_cli has no tool loop; it must raise so the invoke layer falls back to
+    # a no-tool invoke_text instead of pretending to run tools.
     import pytest
 
+    assert CodexCliProvider.supports_tools is False
     with pytest.raises(NotImplementedError):
-        ClaudeCliProvider().invoke_with_tools(
+        CodexCliProvider().invoke_with_tools(
             "s", "c", 100, "m", "premium", [_add_one_tool({"n": 0})]
         )
