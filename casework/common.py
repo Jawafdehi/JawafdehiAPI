@@ -11,10 +11,14 @@ Every script imports this. It provides:
 These scripts never touch the ORM; reads and writes go over the API.
 """
 
+import logging
 import os
+import sys
 import urllib.parse
 
 import requests
+
+log = logging.getLogger("casework")
 
 # ── Django bootstrap (DB-free) ───────────────────────────────────────────────
 
@@ -132,6 +136,23 @@ class CaseworkApi:
         )
         resp.raise_for_status()
 
+    def create_entity(
+        self, display_name: str, nes_id: str = "", timeout: int = 30
+    ) -> int:
+        """POST /api/entities/ to create a JawafEntity; return its id."""
+        url = f"{self._api_root()}/entities/"
+        payload = {"display_name": display_name}
+        if nes_id:
+            payload["nes_id"] = nes_id
+        resp = self.session.post(
+            url,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()["id"]
+
 
 # ── convert_date tool (AD <-> Bikram Sambat) ─────────────────────────────────
 
@@ -214,3 +235,276 @@ def convert_date_tool():
         },
         run=convert_date,
     )
+
+
+# ── shared CLI args + logging ────────────────────────────────────────────────
+
+
+def add_common_args(parser):
+    """Add the flags shared by every enrichment script."""
+    parser.add_argument(
+        "--slug", action="append", help="Specific case slug(s) (repeatable)"
+    )
+    parser.add_argument("--case-id", help="Process a specific case by case_id")
+    parser.add_argument("--limit", type=int, help="Max number of cases to process")
+    parser.add_argument("--fiscal-year", help="Filter by fiscal year (e.g. '080')")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-run even if the target field is already populated",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Preview without PATCHing the API"
+    )
+    parser.add_argument(
+        "--provider", choices=("proxy", "bedrock"), default="proxy", help="LLM provider"
+    )
+    parser.add_argument(
+        "--model", default="", help="Model id (JAWAFDEHI_LLM_MODEL); required for proxy"
+    )
+    parser.add_argument(
+        "--api-base-url", default=None, help="API base URL (JAWAFDEHI_API_BASE_URL)"
+    )
+    parser.add_argument(
+        "--api-token", default=None, help="API token (JAWAFDEHI_API_TOKEN)"
+    )
+    parser.add_argument("--verbose", action="store_true", help="Debug logging")
+    return parser
+
+
+def setup_logging(verbose=False):
+    """Uniform logging: human INFO/DEBUG to stdout, chatty HTTP libs quieted."""
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(levelname)s %(name)s: %(message)s",
+        stream=sys.stdout,
+        force=True,
+    )
+    for noisy in ("httpx", "httpcore", "urllib3", "boto3", "botocore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+# ── CIAA case filtering ──────────────────────────────────────────────────────
+
+
+def is_ciaa_special_court_case(case: dict) -> bool:
+    """True if the case has a CIAA Special Court reference (court_cases 'special:...')."""
+    court_cases = case.get("court_cases") or []
+    return isinstance(court_cases, list) and any(
+        isinstance(ref, str) and ref.startswith("special:") for ref in court_cases
+    )
+
+
+def matches_fiscal_year(case: dict, fiscal_year: str) -> bool:
+    """True if a court reference's fiscal-year prefix matches `fiscal_year`."""
+    fy = fiscal_year.lstrip("0") or "0"
+    for entry in case.get("court_cases") or []:
+        if not isinstance(entry, str):
+            continue
+        case_number = entry.split(":")[-1] if ":" in entry else entry
+        if "-CR-" in case_number:
+            prefix = case_number.split("-CR-")[0].lstrip("0") or "0"
+            if prefix == fy:
+                return True
+    return False
+
+
+# ── source content ───────────────────────────────────────────────────────────
+
+
+def content_from_evidence_entry(entry: dict):
+    """Usable text for one evidence entry: an already-extracted description, an
+    existing MARKDOWN-role link, or a fresh likhit conversion of the source."""
+    description = (entry.get("description") or "").strip()
+    if len(description) > 200:
+        return description
+
+    urls = (entry.get("source") or {}).get("urls") or []
+    md_link = next(
+        (
+            u["link"]
+            for u in urls
+            if isinstance(u, dict) and u.get("role") == "MARKDOWN" and u.get("link")
+        ),
+        None,
+    )
+    if md_link:
+        try:
+            from sourcing import jds_client
+
+            content, _ = jds_client.download_source_file(md_link)
+            text = content.decode("utf-8", errors="replace")
+            if len(text) > 200:
+                return text
+        except Exception:  # noqa: BLE001
+            pass
+
+    convertible = [
+        u["link"]
+        for u in urls
+        if isinstance(u, dict)
+        and u.get("link")
+        and u.get("role") in ("RAW", "ALTERNATE", "SOURCE_PAGE")
+    ]
+    if not convertible:
+        return None
+    try:
+        from sourcing import converter as source_converter
+
+        result = source_converter.convert_source({"url": convertible})
+        if result.get("status") in ("converted", "attached"):
+            text = (result.get("markdown") or "").strip()
+            if len(text) > 200:
+                return text
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def source_content(case: dict, source_types=None):
+    """Concatenate usable evidence content (optionally only the given source_types,
+    e.g. {'CIAA_PRESS_RELEASE'}). Returns (text, char_count)."""
+    parts = []
+    for entry in case.get("evidence") or []:
+        if not isinstance(entry, dict):
+            continue
+        if source_types:
+            if (entry.get("source") or {}).get("source_type") not in source_types:
+                continue
+        text = content_from_evidence_entry(entry)
+        if text:
+            parts.append(text)
+    joined = "\n\n---\n\n".join(parts)
+    return joined, len(joined)
+
+
+# ── target case selection ────────────────────────────────────────────────────
+
+
+def get_target_cases(api, args, skip_field):
+    """Yield the case dicts to enrich, honoring --slug/--case-id/--fiscal-year/
+    --limit/--force. `skip_field` is the case field that, when already populated,
+    skips the case unless --force (e.g. 'timeline', 'key_allegations', 'tags')."""
+    count = 0
+    limit = getattr(args, "limit", None)
+    force = getattr(args, "force", False)
+
+    slugs = getattr(args, "slug", None)
+    if slugs:
+        for slug in slugs:
+            try:
+                case = api.get_case(slug)
+            except requests.HTTPError as exc:
+                log.warning("fetch %s failed: %s", slug, exc)
+                continue
+            if not is_ciaa_special_court_case(case):
+                continue
+            if not force and case.get(skip_field):
+                continue
+            yield case
+            count += 1
+            if limit and count >= limit:
+                return
+        return
+
+    case_id = getattr(args, "case_id", None)
+    fiscal_year = getattr(args, "fiscal_year", None)
+    for case in api.iter_cases(params={"case_type": "CORRUPTION", "state": "DRAFT"}):
+        if case_id and case.get("case_id") != case_id:
+            continue
+        if not is_ciaa_special_court_case(case):
+            continue
+        if fiscal_year and not matches_fiscal_year(case, fiscal_year):
+            continue
+        if not force and case.get(skip_field):
+            continue
+        yield case
+        count += 1
+        if limit and count >= limit:
+            return
+
+
+# ── LLM-response parsing (lifted from the old _enrich_utils) ──────────────────
+
+
+def is_valid_iso_date(date_str) -> bool:
+    """Strict YYYY-MM-DD validation."""
+    from datetime import date
+
+    if not isinstance(date_str, str):
+        return False
+    candidate = date_str.strip()
+    if len(candidate) != 10 or candidate[4] != "-" or candidate[7] != "-":
+        return False
+    try:
+        date.fromisoformat(candidate)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+def parse_extraction_response(response_text, wrapper_keys):
+    """Extract a JSON array from an LLM response (handles ```fences``` and
+    {"<key>": [...]} wrappers). Returns the list, or None."""
+    import json
+
+    text = (response_text or "").strip()
+    if "```" in text:
+        start = text.find("```")
+        nl = text.find("\n", start)
+        if nl != -1:
+            end = text.find("```", nl)
+            if end != -1:
+                text = text[nl + 1 : end].strip()
+
+    obj_start = text.find("{")
+    if obj_start != -1:
+        depth, obj_end = 0, -1
+        for i, ch in enumerate(text[obj_start:], obj_start):
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    obj_end = i
+                    break
+        if obj_end != -1:
+            try:
+                obj = json.loads(text[obj_start : obj_end + 1])
+                if isinstance(obj, dict):
+                    for key in wrapper_keys:
+                        if isinstance(obj.get(key), list) and obj[key]:
+                            return obj[key]
+            except json.JSONDecodeError:
+                pass
+
+    arr_start = text.find("[")
+    if arr_start != -1:
+        depth, arr_end = 0, -1
+        for i, ch in enumerate(text[arr_start:], arr_start):
+            if ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+                if depth == 0:
+                    arr_end = i
+                    break
+        if arr_end != -1:
+            try:
+                entries = json.loads(text[arr_start : arr_end + 1])
+                if isinstance(entries, list) and entries:
+                    return entries
+            except json.JSONDecodeError:
+                pass
+    return None
+
+
+# ── summary ──────────────────────────────────────────────────────────────────
+
+
+def print_summary(stats: dict, dry_run: bool, title: str):
+    """Uniform end-of-run summary from a stats dict."""
+    print("\n" + "=" * 60)
+    print(f"[DRY RUN] {title}" if dry_run else title)
+    for key, val in stats.items():
+        print(f"  {key.replace('_', ' ').capitalize():<24} {val}")
