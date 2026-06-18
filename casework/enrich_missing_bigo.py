@@ -29,7 +29,14 @@ import requests
 # Ensure the api dir is in sys.path so imports work when run as a file
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from casework.common import CaseworkApi, bootstrap
+from casework.common import (
+    CaseworkApi,
+    add_common_args,
+    bootstrap,
+    get_target_cases,
+    print_summary,
+    setup_logging,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -152,80 +159,12 @@ def main():
         description="Extract CIAA Special Court case BIGO via LLM (DB-free).",
         epilog="Reads cases and writes results entirely over HTTP via JAWAFDEHI_API_TOKEN.",
     )
-    ap.add_argument(
-        "--slug",
-        type=str,
-        action="append",
-        dest="slugs",
-        help="Process specific case(s) by slug (repeatable)",
-    )
-    ap.add_argument(
-        "--case-id",
-        type=str,
-        help="Process a specific case by case_id",
-    )
-    ap.add_argument(
-        "--limit",
-        type=int,
-        help="Maximum number of cases to process",
-    )
-    ap.add_argument(
-        "--force",
-        action="store_true",
-        help="Re-extract BIGO even if already populated",
-    )
-    ap.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Preview without PATCHing the API",
-    )
-    ap.add_argument(
-        "--provider",
-        type=str,
-        choices=("proxy", "bedrock"),
-        default="proxy",
-        help="LLM provider (default: proxy)",
-    )
-    ap.add_argument(
-        "--model",
-        type=str,
-        default="",
-        help=(
-            "Model id for the provider (proxy combo name or bedrock model id); "
-            "defaults to JAWAFDEHI_LLM_MODEL. Required for proxy."
-        ),
-    )
-    ap.add_argument(
-        "--api-base-url",
-        type=str,
-        default=None,
-        help="Jawafdehi API base URL (defaults to JAWAFDEHI_API_BASE_URL or http://127.0.0.1:8000)",
-    )
-    ap.add_argument(
-        "--api-token",
-        type=str,
-        default=None,
-        help="Jawafdehi API token (defaults to JAWAFDEHI_API_TOKEN)",
-    )
-    ap.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Enable verbose debug logging",
-    )
+    add_common_args(ap)
 
     args = ap.parse_args()
 
     # Set up logging
-    if args.verbose:
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format="%(levelname)s: %(message)s",
-        )
-    else:
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(levelname)s: %(message)s",
-        )
+    setup_logging(args.verbose)
 
     # Bootstrap Django + LLM (MUST come before importing llm/sourcing)
     try:
@@ -249,13 +188,7 @@ def main():
     usage = UsageAccumulator()
 
     # Collect target cases
-    cases = _get_target_cases(
-        api=api,
-        slugs=args.slugs,
-        case_id=args.case_id,
-        limit=args.limit,
-        force=args.force,
-    )
+    cases = list(get_target_cases(api, args, skip_field="bigo"))
 
     total = len(cases)
     if total == 0:
@@ -297,65 +230,12 @@ def main():
                 traceback.print_exc()
 
     # Print summary
-    _print_summary(stats, args.dry_run)
+    print_summary(stats, args.dry_run, "BIGO extraction")
 
     # Print usage table
     if usage.calls > 0:
         print()
         print(render_usage_table(usage.as_dict()["by_provider"], title="bigo usage"))
-
-
-def _get_target_cases(
-    api: CaseworkApi,
-    slugs: Optional[list[str]] = None,
-    case_id: Optional[str] = None,
-    limit: Optional[int] = None,
-    force: bool = False,
-) -> list[dict]:
-    """Fetch target CIAA Special Court cases with missing BIGO."""
-    selected: list[dict] = []
-
-    # If specific slugs provided, fetch them individually
-    if slugs:
-        for slug in slugs:
-            try:
-                case = api.get_case(slug)
-                if _is_ciaa_special_court_case(case):
-                    if not force and case.get("bigo"):
-                        print(f"  Skipping {slug}: bigo already populated")
-                        continue
-                    selected.append(case)
-                    if limit and len(selected) >= limit:
-                        return selected
-            except requests.HTTPError as exc:
-                print(f"  Failed to fetch case {slug}: {exc}", file=sys.stderr)
-                continue
-        return selected
-
-    # Otherwise, iterate all DRAFT CORRUPTION cases
-    params = {"case_type": "CORRUPTION", "state": "DRAFT"}
-    for case_summary in api.iter_cases(params=params):
-        if case_id and case_summary.get("case_id") != case_id:
-            continue
-        if not _is_ciaa_special_court_case(case_summary):
-            continue
-
-        if not force and case_summary.get("bigo"):
-            continue
-
-        selected.append(case_summary)
-        if limit and len(selected) >= limit:
-            return selected
-
-    return selected
-
-
-def _is_ciaa_special_court_case(case: dict) -> bool:
-    """Check if case is tried at CIAA Special Court."""
-    court_cases = case.get("court_cases") or []
-    return isinstance(court_cases, list) and any(
-        isinstance(ref, str) and ref.startswith("special:") for ref in court_cases
-    )
 
 
 def _process_case(
@@ -652,17 +532,6 @@ def _coerce_bigo_int(value: any) -> Optional[int]:
         return None
     bigo = int(digits_only)
     return bigo if bigo > 0 else None
-
-
-def _print_summary(stats: dict, dry_run: bool):
-    """Print final stats summary."""
-    print("\n" + "=" * 60)
-    print(f"{'[DRY RUN] ' if dry_run else ''}BIGO extraction complete.")
-    print(f"  Cases processed:        {stats['cases_processed']}")
-    print(f"  Cases enriched:         {stats['cases_enriched']}")
-    print(f"  Cases skipped:          {stats['cases_skipped']}")
-    print(f"  No source content:      {stats['cases_no_content']}")
-    print(f"  LLM errors:             {stats['cases_llm_error']}")
 
 
 if __name__ == "__main__":

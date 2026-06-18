@@ -18,7 +18,6 @@ Usage:
 import argparse
 import logging
 import os
-import re
 import sys
 from typing import Optional
 
@@ -27,7 +26,15 @@ import requests
 # Ensure the api dir is in sys.path so imports work when run as a file
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from casework.common import CaseworkApi, bootstrap
+from casework.common import (
+    CaseworkApi,
+    add_common_args,
+    bootstrap,
+    content_from_evidence_entry,
+    get_target_cases,
+    print_summary,
+    setup_logging,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -132,85 +139,12 @@ def main():
         description="Extract key allegations from CIAA press releases via LLM (DB-free).",
         epilog="Reads cases and writes results entirely over HTTP via JAWAFDEHI_API_TOKEN.",
     )
-    ap.add_argument(
-        "--slug",
-        type=str,
-        action="append",
-        dest="slugs",
-        help="Process specific case(s) by slug (repeatable)",
-    )
-    ap.add_argument(
-        "--case-id",
-        type=str,
-        help="Process a specific case by case_id",
-    )
-    ap.add_argument(
-        "--limit",
-        type=int,
-        help="Maximum number of cases to process",
-    )
-    ap.add_argument(
-        "--force",
-        action="store_true",
-        help="Re-generate allegations even if already populated",
-    )
-    ap.add_argument(
-        "--fiscal-year",
-        type=str,
-        help="Filter by fiscal year (e.g., '080' or '081')",
-    )
-    ap.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Preview without PATCHing the API",
-    )
-    ap.add_argument(
-        "--provider",
-        type=str,
-        choices=("proxy", "bedrock"),
-        default="proxy",
-        help="LLM provider (default: proxy)",
-    )
-    ap.add_argument(
-        "--model",
-        type=str,
-        default="",
-        help=(
-            "Model id for the provider (proxy combo name or bedrock model id); "
-            "defaults to JAWAFDEHI_LLM_MODEL. Required for proxy."
-        ),
-    )
-    ap.add_argument(
-        "--api-base-url",
-        type=str,
-        default=None,
-        help="Jawafdehi API base URL (defaults to JAWAFDEHI_API_BASE_URL or http://127.0.0.1:8000)",
-    )
-    ap.add_argument(
-        "--api-token",
-        type=str,
-        default=None,
-        help="Jawafdehi API token (defaults to JAWAFDEHI_API_TOKEN)",
-    )
-    ap.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Enable verbose debug logging",
-    )
+    add_common_args(ap)
 
     args = ap.parse_args()
 
     # Set up logging
-    if args.verbose:
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format="%(levelname)s: %(message)s",
-        )
-    else:
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(levelname)s: %(message)s",
-        )
+    setup_logging(args.verbose)
 
     # Bootstrap Django + LLM (MUST come before importing llm)
     try:
@@ -220,7 +154,6 @@ def main():
         sys.exit(1)
 
     # Import after bootstrap
-    from cases.management.commands import _enrich_utils
     from llm.invoke import invoke_text
     from llm.usage import UsageAccumulator, render_usage_table
 
@@ -231,26 +164,11 @@ def main():
         print(f"Configuration error: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    if args.fiscal_year and not re.match(r"^\d{2,3}$", args.fiscal_year):
-        print(
-            f"Invalid fiscal year: {args.fiscal_year}. "
-            "Use 2- or 3-digit format, e.g., '80' or '080'.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
     # Accumulate token usage
     usage = UsageAccumulator()
 
     # Collect target cases
-    cases = _get_target_cases(
-        api=api,
-        slugs=args.slugs,
-        case_id=args.case_id,
-        limit=args.limit,
-        force=args.force,
-        fiscal_year=args.fiscal_year,
-    )
+    cases = list(get_target_cases(api, args, skip_field="key_allegations"))
 
     total = len(cases)
     if total == 0:
@@ -285,7 +203,6 @@ def main():
                 api=api,
                 usage=usage,
                 invoke_text=invoke_text,
-                _enrich_utils=_enrich_utils,
                 stats=stats,
             )
         except Exception as exc:
@@ -296,7 +213,7 @@ def main():
                 traceback.print_exc()
 
     # Print summary
-    _print_summary(stats, args.dry_run)
+    print_summary(stats, args.dry_run, "Allegation extraction")
 
     # Print usage table
     if usage.calls > 0:
@@ -308,76 +225,6 @@ def main():
         )
 
 
-def _get_target_cases(
-    api: CaseworkApi,
-    slugs: Optional[list[str]] = None,
-    case_id: Optional[str] = None,
-    limit: Optional[int] = None,
-    force: bool = False,
-    fiscal_year: Optional[str] = None,
-) -> list[dict]:
-    """Fetch target CIAA Special Court cases to enrich."""
-    selected: list[dict] = []
-
-    # If specific slugs provided, fetch them individually
-    if slugs:
-        for slug in slugs:
-            try:
-                case = api.get_case(slug)
-                if _is_ciaa_special_court_case(case):
-                    if not force and case.get("key_allegations"):
-                        print(f"  Skipping {slug}: key_allegations already populated")
-                        continue
-                    selected.append(case)
-                    if limit and len(selected) >= limit:
-                        return selected
-            except requests.HTTPError as exc:
-                print(f"  Failed to fetch case {slug}: {exc}", file=sys.stderr)
-                continue
-        return selected
-
-    # Otherwise, iterate all DRAFT CORRUPTION cases
-    params = {"case_type": "CORRUPTION", "state": "DRAFT"}
-    for case_summary in api.iter_cases(params=params):
-        if case_id and case_summary.get("case_id") != case_id:
-            continue
-        if not _is_ciaa_special_court_case(case_summary):
-            continue
-        if fiscal_year and not _matches_fiscal_year(case_summary, fiscal_year):
-            continue
-
-        if not force and case_summary.get("key_allegations"):
-            continue
-
-        selected.append(case_summary)
-        if limit and len(selected) >= limit:
-            return selected
-
-    return selected
-
-
-def _is_ciaa_special_court_case(case: dict) -> bool:
-    """Check if case is tried at CIAA Special Court."""
-    court_cases = case.get("court_cases") or []
-    return isinstance(court_cases, list) and any(
-        isinstance(ref, str) and ref.startswith("special:") for ref in court_cases
-    )
-
-
-def _matches_fiscal_year(case: dict, fiscal_year: str) -> bool:
-    """Check if case's court reference matches the fiscal year."""
-    fy_normalized = fiscal_year.lstrip("0") or "0"
-    for entry in case.get("court_cases") or []:
-        if not isinstance(entry, str):
-            continue
-        case_number = entry.split(":")[-1] if ":" in entry else entry
-        if "-CR-" in case_number:
-            prefix = case_number.split("-CR-")[0].lstrip("0") or "0"
-            if prefix == fy_normalized:
-                return True
-    return False
-
-
 def _process_case(
     case: dict,
     idx: int,
@@ -386,7 +233,6 @@ def _process_case(
     api: CaseworkApi,
     usage,
     invoke_text,
-    _enrich_utils,
     stats: dict,
 ):
     """Process a single case: fetch detail, extract allegations, PATCH or preview."""
@@ -458,57 +304,6 @@ def _process_case(
         print(f"  Failed to PATCH allegations: {exc}")
 
 
-def _content_from_evidence_entry(entry: dict) -> Optional[str]:
-    """Usable text for one evidence entry: description, an existing MARKDOWN link,
-    or a fresh likhit conversion of the source — same logic as enrich_timeline.py."""
-    description = (entry.get("description") or "").strip()
-    if len(description) > 200:
-        return description
-
-    source = entry.get("source") or {}
-    urls = source.get("urls") or []
-
-    md_link = next(
-        (
-            u["link"]
-            for u in urls
-            if isinstance(u, dict) and u.get("role") == "MARKDOWN" and u.get("link")
-        ),
-        None,
-    )
-    if md_link:
-        try:
-            from sourcing import jds_client
-
-            content, _ = jds_client.download_source_file(md_link)
-            text = content.decode("utf-8", errors="replace")
-            if len(text) > 200:
-                return text
-        except Exception:  # noqa: BLE001
-            pass
-
-    convertible = [
-        u["link"]
-        for u in urls
-        if isinstance(u, dict)
-        and u.get("link")
-        and u.get("role") in ("RAW", "ALTERNATE", "SOURCE_PAGE")
-    ]
-    if not convertible:
-        return None
-    try:
-        from sourcing import converter as source_converter
-
-        result = source_converter.convert_source({"url": convertible})
-        if result.get("status") in ("converted", "attached"):
-            text = (result.get("markdown") or "").strip()
-            if len(text) > 200:
-                return text
-    except Exception:  # noqa: BLE001
-        pass
-    return None
-
-
 def _get_press_release_content(case: dict) -> Optional[str]:
     """Press-release markdown from case evidence (converts the source if needed)."""
     for entry in case.get("evidence") or []:
@@ -519,7 +314,7 @@ def _get_press_release_content(case: dict) -> Optional[str]:
             continue
         if source.get("source_type") != "CIAA_PRESS_RELEASE":
             continue
-        text = _content_from_evidence_entry(entry)
+        text = content_from_evidence_entry(entry)
         if text:
             return text
     return None
@@ -609,17 +404,6 @@ def _parse_allegations_response(response_text: str) -> Optional[list[str]]:
                 pass
 
     return None
-
-
-def _print_summary(stats: dict, dry_run: bool):
-    """Print final stats summary."""
-    print("\n" + "=" * 60)
-    print(f"{'[DRY RUN] ' if dry_run else ''}Allegation extraction complete.")
-    print(f"  Cases processed:        {stats['cases_processed']}")
-    print(f"  Cases enriched:         {stats['cases_enriched']}")
-    print(f"  Cases skipped:          {stats['cases_skipped']}")
-    print(f"  No source content:      {stats['cases_no_content']}")
-    print(f"  LLM errors:             {stats['cases_llm_error']}")
 
 
 if __name__ == "__main__":
