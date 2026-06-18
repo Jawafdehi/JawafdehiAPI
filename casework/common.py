@@ -447,13 +447,37 @@ def get_target_cases(api, args, skip_field):
                     return
         return
 
-    # 3) Batch: all DRAFT CORRUPTION CIAA cases.
+    # 3) Batch: pull ALL corruption cases and filter CLIENT-SIDE. The /cases/ API
+    #    ignores ?state, so we can't filter DRAFT (or court/fiscal year) server-side;
+    #    instead we select on the cheap list summary (which carries state/court_cases
+    #    and the key_allegations/tags/entities/bigo fields) and only fetch the full
+    #    detail for matches — the detail is what carries `evidence` (the list summary
+    #    omits it) and the timeline/description fields, which the enrichers need.
     fiscal_year = getattr(args, "fiscal_year", None)
-    for case in api.iter_cases(params={"case_type": "CORRUPTION", "state": "DRAFT"}):
-        if not is_ciaa_special_court_case(case):
+    scanned = 0
+    log.info("Scanning corruption cases (filtering client-side)...")
+    for summary in api.iter_cases(params={"case_type": "CORRUPTION"}):
+        scanned += 1
+        if scanned % 500 == 0:
+            log.info("  scanned %d cases (matched %d so far)...", scanned, count)
+        if summary.get("state") != "DRAFT":
             continue
-        if fiscal_year and not matches_fiscal_year(case, fiscal_year):
+        if not is_ciaa_special_court_case(summary):
             continue
+        if fiscal_year and not matches_fiscal_year(summary, fiscal_year):
+            continue
+        # Cheap skip for fields present on the summary (allegations/tags/entities/bigo).
+        if not force and summary.get(skip_field):
+            continue
+        slug = summary.get("slug")
+        if not slug:
+            continue
+        try:
+            case = api.get_case(slug)  # full detail: evidence + timeline/description
+        except requests.HTTPError as exc:
+            log.warning("fetch %s failed: %s", slug, exc)
+            continue
+        # Full skip check for fields only on the detail (timeline/description).
         if not force and case.get(skip_field):
             continue
         yield case
