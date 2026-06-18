@@ -53,6 +53,12 @@ def invoke_with_tools(
     """
     provider = routing.provider_for_tier(tier)
     model = provider.model_for_tier(tier)
+    if not getattr(provider, "supports_tools", False):
+        # CLI harnesses (claude_cli/codex_cli) are their own agents and can't take
+        # a Python tool callback mid-loop. The tools here are conveniences (e.g.
+        # date conversion), not required for a valid answer, so degrade to a
+        # single no-tool call rather than failing the whole enricher.
+        return provider.invoke_text(system, content, max_tokens, model, tier, usage)
     return provider.invoke_with_tools(
         system, content, max_tokens, model, tier, tools, usage, max_iterations
     )

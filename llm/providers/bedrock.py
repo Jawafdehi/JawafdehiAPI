@@ -15,6 +15,7 @@ class BedrockProvider(Provider):
     """LLM provider using AWS Bedrock."""
 
     name = "bedrock"
+    supports_tools = True
 
     def _client(self):
         """Singleton boto3 Bedrock client."""

@@ -15,6 +15,10 @@ class Provider:
     """Abstract base class for LLM providers."""
 
     name: str = None
+    # Whether the provider can run an agentic tool-use loop (invoke_with_tools).
+    # API providers (bedrock/proxy) set True; CLI harnesses leave it False and
+    # invoke_with_tools degrades to a single no-tool invoke_text for them.
+    supports_tools: bool = False
 
     def invoke_text(
         self, system, content, max_tokens, model_id, tier, usage=None

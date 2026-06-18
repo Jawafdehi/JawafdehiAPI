@@ -52,15 +52,17 @@ def bootstrap(provider: str = "proxy", model: str = "") -> None:
     os.environ["REVIEW_LLM_PROVIDER_PREMIUM"] = provider
     os.environ["REVIEW_LLM_PROVIDER_CHEAP"] = provider
 
-    # Model id for the selected provider (both tiers). Default from env.
+    # Model id for the selected provider (both tiers). Default from env. Each
+    # provider reads its own settings names, so route --model to the right pair.
     model = model or os.environ.get("JAWAFDEHI_LLM_MODEL", "")
     if model:
-        if provider == "bedrock":
-            os.environ["BEDROCK_MODEL_ID"] = model
-            os.environ["BEDROCK_MODEL_ID_CHEAP"] = model
-        else:
-            os.environ["LLM_PROXY_MODEL_ID"] = model
-            os.environ["LLM_PROXY_MODEL_ID_CHEAP"] = model
+        model_env = {
+            "bedrock": ("BEDROCK_MODEL_ID", "BEDROCK_MODEL_ID_CHEAP"),
+            "claude_cli": ("CLAUDE_CLI_MODEL_PREMIUM", "CLAUDE_CLI_MODEL_CHEAP"),
+            "codex_cli": ("CODEX_MODEL_ID", "CODEX_MODEL_ID"),
+        }.get(provider, ("LLM_PROXY_MODEL_ID", "LLM_PROXY_MODEL_ID_CHEAP"))
+        for name in model_env:
+            os.environ[name] = model
 
     import django
 
@@ -266,7 +268,10 @@ def add_common_args(parser):
         "--dry-run", action="store_true", help="Preview without PATCHing the API"
     )
     parser.add_argument(
-        "--provider", choices=("proxy", "bedrock"), default="proxy", help="LLM provider"
+        "--provider",
+        choices=("proxy", "bedrock", "claude_cli", "codex_cli"),
+        default="proxy",
+        help="LLM provider (claude_cli = local `claude -p` subscription harness)",
     )
     parser.add_argument(
         "--model", default="", help="Model id (JAWAFDEHI_LLM_MODEL); required for proxy"

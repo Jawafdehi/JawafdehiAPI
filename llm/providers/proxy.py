@@ -11,6 +11,7 @@ class ProxyProvider(Provider):
     """LLM provider using in-house OpenAI-compatible llm-proxy."""
 
     name = "proxy"
+    supports_tools = True
 
     def _client(self):
         """Singleton OpenAI client pointed at the in-house llm-proxy.
