@@ -199,21 +199,24 @@ class _TextExtractor(HTMLParser):
     def __init__(self):
         super().__init__()
         self.text_parts = []
-        self._skip = False
+        # Depth counter (not a bool) so nested skip tags — e.g. a <script>
+        # inside a <nav> — don't re-enable extraction when the inner tag closes.
+        self._skip_depth = 0
         self._skip_tags = {"script", "style", "noscript", "nav", "footer"}
 
     def handle_starttag(self, tag, attrs):
         if tag.lower() in self._skip_tags:
-            self._skip = True
+            self._skip_depth += 1
 
     def handle_endtag(self, tag):
-        if tag.lower() in self._skip_tags:
-            self._skip = False
-        if tag.lower() in ("p", "br", "li", "div", "h1", "h2", "h3", "h4", "h5", "h6"):
+        tag_lower = tag.lower()
+        if tag_lower in self._skip_tags:
+            self._skip_depth = max(0, self._skip_depth - 1)
+        if tag_lower in ("p", "br", "li", "div", "h1", "h2", "h3", "h4", "h5", "h6"):
             self.text_parts.append("\n")
 
     def handle_data(self, data):
-        if not self._skip:
+        if self._skip_depth == 0:
             text = data.strip()
             if text:
                 self.text_parts.append(text)
@@ -335,8 +338,24 @@ def _search_duckduckgo(query: str, timeout: int = 15) -> list[dict]:
                 return []
             resp.raise_for_status()
         except requests.RequestException as exc:
+            # Transient network errors (timeouts, resets) should retry with the
+            # same backoff as 403/429 — not abort the whole query on attempt 1.
+            if attempt < max_attempts:
+                delay = 5 * 3 ** (attempt - 1)
+                logger.warning(
+                    "DDG search attempt %d/%d failed: %s — retrying in %ds",
+                    attempt,
+                    max_attempts,
+                    exc,
+                    delay,
+                )
+                time.sleep(delay)
+                continue
             logger.warning(
-                "DuckDuckGo search failed for query '%s': %s", query[:60], exc
+                "DuckDuckGo search failed after %d attempts for '%s': %s",
+                max_attempts,
+                query[:60],
+                exc,
             )
             return []
         break  # success → exit loop
@@ -589,11 +608,18 @@ def _extract_org_name_from_title(title: str) -> str:
 
 
 def _extract_location_from_title(title: str) -> str:
-    location_match = re.search(
-        r"(?:कार्यालय|नगरपालिका|गाउँपालिका|जिल्ला)\s+(\S{1,50})", title
+    # In Nepali the place name PRECEDES the administrative division
+    # (e.g. "काठमाडौं महानगरपालिका", "ललितपुर जिल्ला"), so try that order first.
+    before = re.search(
+        r"(\S{1,50})\s*(?:महानगरपालिका|उपमहानगरपालिका|नगरपालिका|गाउँपालिका|जिल्ला)",
+        title,
     )
-    if location_match:
-        return location_match.group(1)
+    if before:
+        return before.group(1)
+    # An office ("कार्यालय") often has the place AFTER it (e.g. "नापी कार्यालय चन्द्रगढी").
+    after = re.search(r"कार्यालय\s+(\S{1,50})", title)
+    if after:
+        return after.group(1)
     loc_match2 = re.search(r"(\S{1,50})(?:को|का|मा)\s+(?:नापी|मालपोत|स्वास्थ्य)", title)
     if loc_match2:
         return loc_match2.group(1)
@@ -1065,12 +1091,12 @@ class NewsEnricher:
     def _build_verified(fr: dict, verdict: dict) -> dict:
         """Assemble an accepted-article dict from a fetch result + premium verdict."""
         article_title = (fr.get("article_title") or "").strip()
-        event_type = verdict.get("event_type")
-        if event_type is None or str(event_type).strip().lower() in {
-            "",
-            "none",
-            "unknown",
-        }:
+        # Canonicalize the model's event_type: lowercase/trim and accept only
+        # known lifecycle values, so non-canonical labels (casing, whitespace,
+        # variants) can't bypass per-event caps/ordering or leak into the PATCH.
+        raw_event_type = str(verdict.get("event_type") or "").strip().lower()
+        event_type = raw_event_type if raw_event_type in _EVENT_LIFECYCLE_ORDER else ""
+        if not event_type:
             inferred = _infer_event_type_from_reason(
                 verdict.get("reason", ""), article_title, ""
             )
@@ -1099,8 +1125,6 @@ class NewsEnricher:
             return None
         try:
             html = _fetch_article_content(url)
-            if self.fetch_delay > 0:
-                time.sleep(self.fetch_delay)
             if not html:
                 logger.debug("  Failed to fetch content: %s", url)
                 return None
@@ -1125,6 +1149,10 @@ class NewsEnricher:
             )
             stats["errors"] += 1
             return None
+        finally:
+            # Always pace requests — even on early return / error — to stay polite.
+            if self.fetch_delay > 0:
+                time.sleep(self.fetch_delay)
 
     _PAYWALL_KEYWORDS = frozenset(
         {"ciaa", "corruption", "akhtiyar", "अख्तियार", "भ्रष्टाचार"}
@@ -1152,7 +1180,13 @@ class NewsEnricher:
                 )
                 return True
 
-        if article_title and len(article_title) > 10:
+        # Skip this check when the title is English but the body is Devanagari:
+        # the English title words will never appear in a Nepali body, which would
+        # falsely reject valid Nepali articles (common on mixed-language sites).
+        english_title_nepali_body = not _DEVANAGARI_RE.search(
+            article_title
+        ) and _DEVANAGARI_RE.search(article_body)
+        if article_title and len(article_title) > 10 and not english_title_nepali_body:
             title_words = [
                 w.lower() for w in re.split(r"[\s\-–—|]+", article_title) if len(w) >= 4
             ][:5]
@@ -1453,8 +1487,12 @@ class NewsEnricher:
 
         case_linked_urls = _case_linked_news_urls(case)
         remaining_slots = self.max_articles_per_case - current_count
-        if remaining_slots <= 0 and not force:
-            return _make_stats("skipped", "max_articles_reached")
+        if remaining_slots <= 0:
+            if not force:
+                return _make_stats("skipped", "max_articles_reached")
+            # --force on a saturated case: grant a fresh budget so it can still
+            # accept articles (otherwise _collect_articles would exit immediately).
+            remaining_slots = self.max_articles_per_case
 
         candidates = self._search_candidates(queries, stats)
         new_candidates, already_linked = self._filter_new_candidates(
@@ -1509,6 +1547,7 @@ class NewsEnricher:
         slug = case.get("slug") or case.get("case_id")
         created = []  # source dicts for the transcription pass
         for article in ordered:
+            # Step 1: create the source.
             try:
                 title = _fix_mojibake(article.get("title") or "Untitled News Article")
                 source = self.api.create_source(
@@ -1519,23 +1558,46 @@ class NewsEnricher:
                     publication_date=_publication_date(article, case),
                 )
                 source_id = source["source_id"]
+            except requests.HTTPError as exc:
+                body = getattr(exc.response, "text", "")[:200]
+                logger.warning(
+                    "  Failed to create source for %s: %s %s",
+                    article["url"][:80],
+                    exc,
+                    body,
+                )
+                continue
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "  Failed to create source for %s: %s", article["url"][:80], exc
+                )
+                continue
+
+            # Step 2: link it as evidence. Source creation + evidence link are not
+            # atomic (no combined endpoint), so a failure here leaves an orphan
+            # NEWS source. Surface its id loudly so it's recoverable, and skip the
+            # transcription pass for it (an unlinked source must not be enriched).
+            try:
                 self.api.add_evidence(
                     slug=slug,
                     source_id=source_id,
                     description=_build_evidence_description(article),
                     event_type=article.get("event_type") or None,
                 )
-                created.append(
-                    {"source_id": source_id, "title": title, "url": article["url"]}
-                )
-                logger.info("  [SAVED] %s → %s", source_id, article["url"][:80])
-            except requests.HTTPError as exc:
-                body = getattr(exc.response, "text", "")[:200]
-                logger.warning(
-                    "  Failed to save %s: %s %s", article["url"][:80], exc, body
-                )
             except Exception as exc:  # noqa: BLE001
-                logger.warning("  Failed to save %s: %s", article["url"][:80], exc)
+                logger.warning(
+                    "  ORPHAN source %s created but NOT linked to case %s "
+                    "(evidence PATCH failed: %s) — needs manual cleanup",
+                    source_id,
+                    slug,
+                    exc,
+                )
+                continue
+
+            created.append(
+                {"source_id": source_id, "title": title, "url": article["url"]}
+            )
+            logger.info("  [SAVED] %s → %s", source_id, article["url"][:80])
 
         if self.transcribe and created:
             self._transcribe_sources(created, stats)

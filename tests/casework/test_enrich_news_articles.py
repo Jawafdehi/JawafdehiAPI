@@ -635,3 +635,101 @@ def test_verify_batch_infers_missing_event_type():
     )
     assert len(out) == 1
     assert out[0]["event_type"] == "verdict"  # inferred from reason text
+
+
+# ── review-comment regression tests ───────────────────────────────────────────
+
+
+def test_text_extractor_handles_nested_skip_tags():
+    # A <script> nested inside <nav>: the inner </script> must not re-enable
+    # extraction for the rest of the <nav>.
+    html = "<nav>MENU<script>var x=1;</script>STILLNAV</nav><p>Real body</p>"
+    text = nea._extract_text_from_html(html)
+    assert "Real body" in text
+    assert "MENU" not in text
+    assert "STILLNAV" not in text
+    assert "var x" not in text
+
+
+def test_extract_location_division_after_place():
+    # Nepali: place precedes the division.
+    assert (
+        nea._extract_location_from_title("काठमाडौं महानगरपालिकाको भ्रष्टाचार")
+        == "काठमाडौं"
+    )
+    assert nea._extract_location_from_title("कैलाली जिल्ला अदालत") == "कैलाली"
+
+
+def test_extract_location_office_before_place():
+    # An office ("कार्यालय") keeps place-after-division support.
+    assert (
+        nea._extract_location_from_title("नापी कार्यालय चन्द्रगढीका प्रमुख")
+        == "चन्द्रगढीका"
+    )
+
+
+def test_build_verified_normalizes_noncanonical_event_type():
+    fr = _fetch_result("https://x/a")
+    # Mixed casing + whitespace should canonicalize to the lifecycle value.
+    out = nea.NewsEnricher._build_verified(
+        fr, {"relevant": True, "event_type": " Filing ", "reason": "r", "summary": "s"}
+    )
+    assert out["event_type"] == "filing"
+
+
+def test_build_verified_falls_back_for_unknown_event_type():
+    fr = _fetch_result("https://x/a")
+    # An unrecognized label is not trusted; it falls back to inference/other.
+    out = nea.NewsEnricher._build_verified(
+        fr,
+        {
+            "relevant": True,
+            "event_type": "weird-label",
+            "reason": "no signal",
+            "summary": "s",
+        },
+    )
+    assert out["event_type"] == nea._EVENT_OTHER
+
+
+def test_is_thin_or_missing_skips_english_title_nepali_body():
+    enricher = _make_enricher(FakeApi())
+    stats = nea._make_stats()
+    nepali_body = (
+        "अख्तियार दुरुपयोग अनुसन्धान आयोगले विशेष अदालतमा मुद्दा दायर गरेको छ। " * 10
+    )
+    # English title, Nepali body: must NOT be rejected by the title-keyword check.
+    assert (
+        enricher._is_thin_or_missing(
+            nepali_body,
+            "CIAA files corruption case at Special Court",
+            "https://x/a",
+            stats,
+        )
+        is False
+    )
+    assert stats["rejected"] == 0
+
+
+def test_enrich_case_force_grants_budget_on_saturated(monkeypatch):
+    api = FakeApi()
+    enricher = nea.NewsEnricher(
+        api=api, invoke_json=lambda **k: {}, usage=None, max_articles_per_case=2
+    )
+    case = _news_case("filing", "verdict")  # already at max=2
+    case["case_id"] = "case-x"
+    case["title"] = "नेपाल सरकार विरुद्ध राम बहादुर"
+
+    captured = {}
+
+    def fake_collect(candidates, c, stats, prt, max_to_accept):
+        captured["max_to_accept"] = max_to_accept
+        return []
+
+    monkeypatch.setattr(enricher, "_search_candidates", lambda q, s: [])
+    monkeypatch.setattr(enricher, "_collect_articles", fake_collect)
+    monkeypatch.setattr(enricher, "_retry_with_fallbacks", lambda *a, **k: [])
+
+    enricher.enrich_case(case, dry_run=True, force=True, case_num=1, total=1)
+    # Without the fix this would be 0 (max - current = 2 - 2); force must grant budget.
+    assert captured["max_to_accept"] == 2
