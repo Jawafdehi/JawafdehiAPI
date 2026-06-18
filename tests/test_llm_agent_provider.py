@@ -275,7 +275,7 @@ class TestNgmRender(unittest.TestCase):
     """The NGM court record renders to markdown for the judge / staged files."""
 
     def test_court_case_md_renders_fields(self):
-        from review.ngm_render import court_case_md
+        from sourcing.ngm_render import court_case_md
 
         md = court_case_md(
             "special:081-CR-0079",
@@ -297,7 +297,7 @@ class TestNgmRender(unittest.TestCase):
         self.assertIn("Hearings", md)
 
     def test_court_case_md_missing_record(self):
-        from review.ngm_render import court_case_md
+        from sourcing.ngm_render import court_case_md
 
         self.assertIn("no matching record", court_case_md("special:nope", None))
 

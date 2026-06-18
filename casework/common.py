@@ -59,6 +59,7 @@ def bootstrap(provider: str = "proxy", model: str = "") -> None:
         model_env = {
             "bedrock": ("BEDROCK_MODEL_ID", "BEDROCK_MODEL_ID_CHEAP"),
             "claude_cli": ("CLAUDE_CLI_MODEL_PREMIUM", "CLAUDE_CLI_MODEL_CHEAP"),
+            "claude_agent": ("CLAUDE_AGENT_MODEL_PREMIUM", "CLAUDE_AGENT_MODEL_CHEAP"),
             "codex_cli": ("CODEX_MODEL_ID", "CODEX_MODEL_ID"),
         }.get(provider, ("LLM_PROXY_MODEL_ID", "LLM_PROXY_MODEL_ID_CHEAP"))
         for name in model_env:
@@ -376,9 +377,12 @@ def add_common_args(parser):
     )
     parser.add_argument(
         "--provider",
-        choices=("proxy", "bedrock", "claude_cli", "codex_cli"),
+        choices=("proxy", "bedrock", "claude_cli", "claude_agent", "codex_cli"),
         default="proxy",
-        help="LLM provider (claude_cli = local `claude -p` subscription harness)",
+        help=(
+            "LLM provider (claude_cli = local `claude -p` subscription harness; "
+            "claude_agent = file-staged agentic harness with a completeness judge)"
+        ),
     )
     parser.add_argument(
         "--model", default="", help="Model id (JAWAFDEHI_LLM_MODEL); required for proxy"
