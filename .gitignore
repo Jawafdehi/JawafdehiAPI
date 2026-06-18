@@ -15,6 +15,3 @@ tmp/
 /workflow-runs/
 review_source_markdown/
 node_modules/
-
-# casework enrichment run logs
-/logs/
