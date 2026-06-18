@@ -30,6 +30,22 @@ class HashedFilenameS3Boto3Storage(S3Boto3Storage):
         self.file_prefix = os.getenv("FILE_STORAGE_PREFIX", "case_uploads/")
         super().__init__(*args, **kwargs)
 
+    def _is_managed(self, name):
+        """
+        Whether ``name`` should get the case-upload filename hashing.
+
+        Case uploads are saved under bare filenames (e.g. ``foo.pdf``) and must
+        keep their deterministic, suffix-free hashed name so re-uploading the
+        same content dedupes to the same key. Internal re-entry from ``save``
+        passes names already under ``file_prefix``, which must stay managed too.
+
+        Other callers that share this default storage (e.g. Wagtail, which
+        uploads under namespaced paths like ``original_images/`` or
+        ``documents/``) are left untouched so the parent S3 backend handles
+        their paths and collision suffixes normally.
+        """
+        return "/" not in name or name.startswith(self.file_prefix)
+
     def _get_hashed_filename(self, name):
         """
         Generate a hashed filename from the original filename.
@@ -65,6 +81,9 @@ class HashedFilenameS3Boto3Storage(S3Boto3Storage):
         Returns:
             str: The hashed filename used for storage
         """
+        if not self._is_managed(name):
+            return super().save(name, content, max_length)
+
         # Generate hashed filename
         hashed_name = self._get_hashed_filename(name)
 
@@ -103,6 +122,8 @@ class HashedFilenameS3Boto3Storage(S3Boto3Storage):
 
         For hashed storage, we return the hashed version.
         """
+        if not self._is_managed(name):
+            return super().get_valid_filename(name)
         return self._get_hashed_filename(name)
 
     def get_available_name(self, name, max_length=None):
@@ -114,4 +135,6 @@ class HashedFilenameS3Boto3Storage(S3Boto3Storage):
         delegating to super(), which would append a numeric/random suffix when
         the object already exists and thereby break the deterministic guarantee.
         """
+        if not self._is_managed(name):
+            return super().get_available_name(name, max_length)
         return self._get_hashed_filename(name)
