@@ -850,6 +850,8 @@ CLAUDE_CLI_MODEL_ID = os.getenv("CLAUDE_CLI_MODEL_ID", "")
 # vs routine. Fall back to CLAUDE_CLI_MODEL_ID, then the CLI default.
 CLAUDE_CLI_MODEL_PREMIUM = os.getenv("CLAUDE_CLI_MODEL_PREMIUM", "")
 CLAUDE_CLI_MODEL_CHEAP = os.getenv("CLAUDE_CLI_MODEL_CHEAP", "")
+# claude -p reasoning budget: low/medium/high/xhigh/max ("" -> CLI default).
+CLAUDE_CLI_EFFORT = os.getenv("CLAUDE_CLI_EFFORT", "")
 REVIEW_CLI_MAX_WORKERS = int(os.getenv("REVIEW_CLI_MAX_WORKERS", "2"))
 REVIEW_CLI_TIMEOUT = int(os.getenv("REVIEW_CLI_TIMEOUT", "300"))
 REVIEW_CLI_MAX_RETRIES = int(os.getenv("REVIEW_CLI_MAX_RETRIES", "3"))
