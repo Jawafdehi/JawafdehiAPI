@@ -210,8 +210,13 @@ def _process_case(
     want_title = only in ("title", "both")
     want_short = only in ("short", "both")
 
-    need_title = want_title and (
-        force or not _title_is_valid(current_title, court_number)
+    # Without a court number the title can never satisfy the format contract
+    # (must end in "(<court-number>)"), so regenerating would only burn an LLM
+    # call on a title that's guaranteed to be rejected — skip it.
+    need_title = (
+        want_title
+        and bool(court_number)
+        and (force or not _title_is_valid(current_title, court_number))
     )
     need_short = False
     if want_short:

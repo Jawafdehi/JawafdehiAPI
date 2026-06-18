@@ -220,9 +220,14 @@ def _process_case(
     allegations = detail.get("key_allegations")
     entities = detail.get("entities")
 
-    evidence = detail.get("evidence") or []
+    # Only entries with a resolvable source_id: the loop skips the rest anyway,
+    # and including them would put an empty source_id into the /evidence replace
+    # payload, which fails EvidenceListField validation and aborts the whole
+    # PATCH. Filtering here keeps `evidence` and `writable` index-aligned. Validly
+    # stored evidence always carries a source_id, so nothing real is dropped.
+    evidence = [e for e in (detail.get("evidence") or []) if _resolve_source_id(e)]
     if not evidence:
-        print("  No evidence — skipping")
+        print("  No valid evidence entries — skipping")
         return
 
     writable = _writable_evidence(evidence)
