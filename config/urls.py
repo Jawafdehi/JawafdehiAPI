@@ -19,6 +19,7 @@ from django.conf import settings
 from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
+from django.views.generic.base import RedirectView
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 from wagtail.admin import urls as wagtailadmin_urls
 from wagtail.documents import urls as wagtaildocs_urls
@@ -53,6 +54,14 @@ urlpatterns = [
     # OIDC authentication for admin SSO
     path("oidc/", include("mozilla_django_oidc.urls")),
     # Wagtail CMS: editorial admin, document serving, and headless API v2.
+    # Retire Wagtail's built-in password form — send /newsroom/login/ to OIDC SSO.
+    # Must precede the wagtailadmin include so it wins URL resolution.
+    path(
+        "newsroom/login/",
+        RedirectView.as_view(
+            url="/oidc/authenticate/?next=/newsroom/", query_string=False
+        ),
+    ),
     path("newsroom/", include(wagtailadmin_urls)),
     path("documents/", include(wagtaildocs_urls)),
     path("api/cms/v2/", wagtail_api_router.urls),
