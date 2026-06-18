@@ -1,8 +1,9 @@
 """URL configuration for the Casework Review System (review app).
 
-Mounted by config/urls.py under /api/casework/. Authentication is the shared
-jawafdehi-api JWT (clients get a token from /api/caseworker/auth/token/), and
-every endpoint requires at least the Contributor role (see permissions.py).
+Mounted by config/urls.py under /api/casework/. Authentication is an OIDC
+access token (validated by OIDCJWTAuthentication); read endpoints allow any
+role with read access (CanReadReview: Contributor+ / ReviewAssistant / ReadOnly)
+while mutations require at least the Contributor role (see permissions.py).
 """
 
 from django.urls import path
@@ -10,7 +11,6 @@ from django.urls import path
 from . import views
 
 urlpatterns = [
-    path("auth/me/", views.me_view),
     path("reviews/", views.ReviewListView.as_view()),
     path("reviews/submit/", views.submit_review),
     path("reviews/regrade-all/", views.regrade_all),

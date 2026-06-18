@@ -12,7 +12,6 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 import os
 import sys
-from datetime import timedelta
 from pathlib import Path
 
 import dj_database_url
@@ -199,8 +198,7 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "rest_framework",
     "rest_framework.authtoken",
-    "rest_framework_simplejwt",
-    "rest_framework_simplejwt.token_blacklist",
+    "mozilla_django_oidc",
     "drf_spectacular",
     "django_filters",
     "corsheaders",
@@ -235,7 +233,7 @@ ROOT_URLCONF = "config.urls"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [],
+        "DIRS": [BASE_DIR / "templates"],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -430,6 +428,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 # Authentication backends
 AUTHENTICATION_BACKENDS = [
+    "config.oidc.JawafdehiOIDCBackend",
     "rules.permissions.ObjectPermissionBackend",
     "django.contrib.auth.backends.ModelBackend",
 ]
@@ -524,7 +523,7 @@ TESTING = os.getenv("TESTING") == "true" or any("pytest" in arg for arg in sys.a
 # REST Framework
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        "config.oidc.OIDCJWTAuthentication",
         # ChatServiceAccountAuthentication subclasses TokenAuthentication and adds
         # X-Jawafdehi-User-Id impersonation: a request bearing the chat service
         # account token + that header is authenticated AS the impersonated end
@@ -555,16 +554,6 @@ if not TESTING:
         "contributor": "2500/hour",
         "staff": "5000/hour",
     }
-
-# JWT Configuration
-SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(hours=24),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
-    "ROTATE_REFRESH_TOKENS": True,
-    "BLACKLIST_AFTER_ROTATION": True,
-    "ALGORITHM": "HS256",
-    "SIGNING_KEY": SECRET_KEY,
-}
 
 
 SPECTACULAR_SETTINGS = {
@@ -876,3 +865,30 @@ CASEWORK_POLLER_TOKEN = os.getenv("CASEWORK_POLLER_TOKEN", "")
 # MEDIA_URL is already an absolute S3 URL so this is unused; locally it makes the
 # stored markdown link a valid absolute URL.
 MEDIA_PUBLIC_BASE = os.getenv("MEDIA_PUBLIC_BASE", "http://127.0.0.1:40173")
+
+# ============================================================================
+# OIDC Configuration (auth provider — currently Zitadel, but kept provider-neutral)
+# ============================================================================
+
+OIDC_ISSUER = os.getenv("OIDC_ISSUER", "https://auth.jawafdehi.org")
+OIDC_JWKS_URL = os.getenv("OIDC_JWKS_URL", f"{OIDC_ISSUER}/oauth/v2/keys")
+# The audience (provider project/resource id) the API tokens must carry. Required
+# in any real environment — set via env, not hardcoded.
+OIDC_API_AUDIENCE = os.getenv("OIDC_API_AUDIENCE", "")
+
+# Mozilla Django OIDC configuration for admin SSO.
+# The admin app is a PUBLIC client (PKCE, no client secret): OIDC_RP_CLIENT_SECRET
+# stays defined-but-empty (mozilla-django-oidc requires the setting to exist), and
+# JawafdehiOIDCBackend.get_token drops the empty secret from the token request.
+OIDC_RP_CLIENT_ID = os.getenv("OIDC_RP_CLIENT_ID", "")
+OIDC_RP_CLIENT_SECRET = os.getenv("OIDC_RP_CLIENT_SECRET", "")
+OIDC_USE_PKCE = True
+OIDC_RP_SIGN_ALGO = "RS256"
+OIDC_RP_SCOPES = "openid email profile"
+OIDC_OP_AUTHORIZATION_ENDPOINT = f"{OIDC_ISSUER}/oauth/v2/authorize"
+OIDC_OP_TOKEN_ENDPOINT = f"{OIDC_ISSUER}/oauth/v2/token"
+OIDC_OP_USER_ENDPOINT = f"{OIDC_ISSUER}/oidc/v1/userinfo"
+OIDC_OP_JWKS_ENDPOINT = OIDC_JWKS_URL
+LOGIN_REDIRECT_URL = "/admin/"
+LOGOUT_REDIRECT_URL = "/admin/login/"
+LOGIN_URL = "/oidc/authenticate/"

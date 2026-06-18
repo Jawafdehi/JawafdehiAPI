@@ -30,7 +30,6 @@ from rest_framework.permissions import DjangoModelPermissions, IsAuthenticated
 from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from config.auth import (
     JAWAFDEHI_USER_ID_HEADER,
@@ -38,6 +37,7 @@ from config.auth import (
     ChatServiceAccountAuthentication,
     resolve_or_create_identity,
 )
+from config.oidc import OIDCJWTAuthentication
 
 from .admin import CaseAdminForm
 from .caseworker_serializers import (
@@ -322,7 +322,7 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
     filterset_fields = ["case_type"]
     search_fields = ["title", "description", "key_allegations"]
     authentication_classes = [
-        JWTAuthentication,
+        OIDCJWTAuthentication,
         # Impersonation-aware Token auth: the chat MCP server writes with the
         # service-account token + X-Jawafdehi-User-Id, and this resolves
         # request.user to the impersonated end user for both authz and audit.

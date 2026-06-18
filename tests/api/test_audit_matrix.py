@@ -22,7 +22,6 @@ from django.contrib.auth import get_user_model
 from django.contrib.contenttypes.models import ContentType
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
-from rest_framework_simplejwt.tokens import AccessToken
 
 from cases.models import (
     Case,
@@ -50,8 +49,7 @@ pytestmark = pytest.mark.django_db
 
 def _jwt_client(actor, **_):
     client = APIClient()
-    token = AccessToken.for_user(actor)
-    client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+    client.force_authenticate(user=actor)
     return client
 
 
