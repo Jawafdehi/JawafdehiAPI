@@ -48,7 +48,9 @@ COPY nesq ./nesq
 COPY ngm ./ngm
 COPY review ./review
 COPY llm ./llm
+COPY content ./content
 COPY static ./static
+COPY templates ./templates
 
 # Collect static files (parity with the API image).
 RUN DEBUG=False SECRET_KEY=foo-bar ALLOWED_HOSTS=portal.jawafdehi.org \
