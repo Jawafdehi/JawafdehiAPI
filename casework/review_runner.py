@@ -142,6 +142,35 @@ class Reviewer:
                 )
             print(f"  review {review_id} failed: {e}", file=sys.stderr)
 
+    # ---- dry run -----------------------------------------------------
+
+    def dry_run(self, slug, config=None):
+        """Fetch ONE case by slug and grade it locally — no claim, no submit.
+
+        Sources a prod case over the API and runs the full scoring pipeline so an
+        operator can validate the reviewer (and a given harness/model) end to end
+        without touching the queue or writing anything back. Returns the result
+        payload."""
+        print(f"[DRY RUN] grading case '{slug}' (no claim, no submit)")
+        case = self.cases.get_case(slug)
+        case.setdefault("slug", slug)
+        out = self.runner.process_case(
+            case, config, on_stage=lambda s: print(f"  stage: {s}")
+        )
+        out.pop("markdown_to_attach", None)
+        result = out.get("result") or {}
+        print(f"\n  case:           {out.get('case_title') or slug}")
+        print(f"  overall_score:  {result.get('overall_score')}")
+        print(f"  disposition:    {result.get('disposition')}")
+        print(
+            f"  sources:        {out.get('sources_converted')}/{out.get('source_count')}"
+            f"   duration: {out.get('duration_seconds')}s"
+        )
+        tu = result.get("token_usage") or {}
+        if tu.get("by_provider"):
+            print(self._render_usage_table(tu["by_provider"], title="usage"))
+        return out
+
     # ---- main loop ---------------------------------------------------
 
     def run(self, *, apply, once, poll):
@@ -186,6 +215,15 @@ def main():
     )
     parser.add_argument(
         "--poll", type=float, default=3.0, help="Seconds between polls when idle."
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Grade a single case (--slug) locally and print the result; never "
+        "claims or submits. For validating the reviewer/harness against a prod case.",
+    )
+    parser.add_argument(
+        "--slug", default=None, help="With --dry-run: the case slug to grade."
     )
     parser.add_argument(
         "--premium-provider",
@@ -236,12 +274,23 @@ def main():
 
     setup_logging(args.verbose)
 
+    cases = CaseworkApi(base_url=args.api_base_url, token=args.api_token)
+
+    # Dry run needs only the case API (no job queue), so don't require the job
+    # client / its token here.
+    if args.dry_run:
+        if not args.slug:
+            print("--dry-run requires --slug", file=sys.stderr)
+            raise SystemExit(2)
+        reviewer = Reviewer(None, cases, runner, SessionUsage, render_usage_table)
+        reviewer.dry_run(args.slug)
+        return
+
     try:
         jobs = UpstreamClient()
     except UpstreamError as e:
         print(f"job API client error: {e}", file=sys.stderr)
         raise SystemExit(1)
-    cases = CaseworkApi(base_url=args.api_base_url, token=args.api_token)
 
     reviewer = Reviewer(jobs, cases, runner, SessionUsage, render_usage_table)
     reviewer.run(apply=args.apply, once=args.once, poll=args.poll)
