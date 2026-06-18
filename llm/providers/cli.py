@@ -9,6 +9,7 @@ import os
 import random
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -112,6 +113,54 @@ class ClaudeCliProvider(_CliProvider):
     """
 
     name = "claude_cli"
+    supports_tools = True
+
+    def _claude_env(self):
+        """Env for the claude subprocess: subscription auth (no API key)."""
+        env = dict(os.environ)
+        cli_home = getattr(settings, "CLAUDE_CLI_HOME", "")
+        if cli_home:
+            env["HOME"] = cli_home
+        env.pop("ANTHROPIC_API_KEY", None)
+        return env
+
+    def _finalize(self, out, model_id, effective_model, tier, usage):
+        """Parse claude -p --output-format json output; record usage; return text."""
+        try:
+            data = json.loads(out)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(
+                f"claude_cli: failed to parse JSON output: {e}\nOutput: {out[-500:]}"
+            )
+        if not isinstance(data, dict):
+            raise RuntimeError(f"claude_cli: output is not a JSON object: {out[-500:]}")
+        if data.get("is_error") or "result" not in data:
+            raise RuntimeError(
+                f"claude_cli error: {data.get('result', 'unknown error')}\n"
+                f"Payload: {out[-500:]}"
+            )
+        if usage is not None:
+            usage_data = data.get("usage", {})
+            model_usage = data.get("modelUsage", {})
+            reported_model = (
+                list(model_usage.keys())[0]
+                if model_usage
+                else (effective_model or model_id or "claude")
+            )
+            input_tokens = (
+                usage_data.get("input_tokens", 0)
+                + usage_data.get("cache_creation_input_tokens", 0)
+                + usage_data.get("cache_read_input_tokens", 0)
+            )
+            usage.add(
+                input_tokens,
+                usage_data.get("output_tokens", 0),
+                provider="claude_cli",
+                tier=tier,
+                model=reported_model,
+                cost_usd=data.get("total_cost_usd", 0.0),
+            )
+        return strip_code_fence(data["result"])
 
     def invoke_text(self, system, content, max_tokens, model_id, tier, usage=None):
         """Invoke claude -p --output-format json.
@@ -130,6 +179,10 @@ class ClaudeCliProvider(_CliProvider):
         Raises:
             RuntimeError: If invocation fails or output is malformed.
         """
+        # NB: no --permission-mode plan. Plan mode makes claude -p emit a plan and
+        # then try to ExitPlanMode (a tool turn); with --max-turns 1 and no tools
+        # that aborts as error_max_turns before producing a result. Tools are
+        # already disabled via --allowedTools "", so default mode never prompts.
         argv = [
             getattr(settings, "CLAUDE_CLI_BIN", "claude"),
             "-p",
@@ -141,8 +194,6 @@ class ClaudeCliProvider(_CliProvider):
             "1",
             "--allowedTools",
             "",
-            "--permission-mode",
-            "plan",
         ]
 
         # model_id is already routing.invoke_text's resolved model_for_tier(tier).
@@ -150,60 +201,88 @@ class ClaudeCliProvider(_CliProvider):
         if effective_model:
             argv.extend(["--model", effective_model])
 
-        # Prepare environment (use CLAUDE_CLI_HOME if set, remove API key)
-        env = dict(os.environ)
-        cli_home = getattr(settings, "CLAUDE_CLI_HOME", "")
-        if cli_home:
-            env["HOME"] = cli_home
-        env.pop("ANTHROPIC_API_KEY", None)
+        out = self._run(argv, _flatten(content), self._claude_env())
+        return self._finalize(out, model_id, effective_model, tier, usage)
 
-        # Run subprocess
-        out = self._run(argv, _flatten(content), env)
+    def invoke_with_tools(
+        self,
+        system,
+        content,
+        max_tokens,
+        model_id,
+        tier,
+        tools,
+        usage=None,
+        max_iterations=8,
+    ):
+        """Real tool-use for claude -p: expose `tools` via a stdio MCP server.
 
-        # Parse output
+        claude -p can only call custom tools through MCP, so we launch
+        llm.cli_mcp_server with the given tools (those that carry a run_path) and
+        allow exactly those tool names. max_iterations becomes the turn budget so
+        the model can call a tool and then answer. Tools without a run_path can't
+        be exposed to a subprocess, so we fall back to a no-tool call.
+        """
+        exposable = [t for t in tools if getattr(t, "run_path", None)]
+        if not exposable:
+            return self.invoke_text(system, content, max_tokens, model_id, tier, usage)
+
+        registry = [
+            {
+                "name": t.name,
+                "description": t.description,
+                "input_schema": t.input_schema,
+                "run_path": t.run_path,
+            }
+            for t in exposable
+        ]
+        # repo root holds both `llm` and the tools' packages (e.g. casework).
+        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        tmpdir = tempfile.mkdtemp(prefix="llmcli-mcp-")
         try:
-            data = json.loads(out)
-        except json.JSONDecodeError as e:
-            raise RuntimeError(
-                f"claude_cli: failed to parse JSON output: {e}\nOutput: {out[-500:]}"
-            )
-        if not isinstance(data, dict):
-            raise RuntimeError(f"claude_cli: output is not a JSON object: {out[-500:]}")
+            reg_path = os.path.join(tmpdir, "tools.json")
+            with open(reg_path, "w") as f:
+                json.dump(registry, f, ensure_ascii=False)
+            mcp_cfg = {
+                "mcpServers": {
+                    "llmtools": {
+                        "command": sys.executable,
+                        "args": ["-m", "llm.cli_mcp_server"],
+                        "env": {
+                            "LLM_CLI_TOOLS_REGISTRY": reg_path,
+                            "LLM_CLI_TOOLS_PYPATH": repo_root,
+                            "PYTHONPATH": repo_root,
+                        },
+                    }
+                }
+            }
+            cfg_path = os.path.join(tmpdir, "mcp.json")
+            with open(cfg_path, "w") as f:
+                json.dump(mcp_cfg, f)
 
-        # Check for errors
-        if data.get("is_error") or "result" not in data:
-            raise RuntimeError(
-                f"claude_cli error: {data.get('result', 'unknown error')}\nPayload: {out[-500:]}"
-            )
+            argv = [
+                getattr(settings, "CLAUDE_CLI_BIN", "claude"),
+                "-p",
+                "--output-format",
+                "json",
+                "--system-prompt",
+                system,
+                "--max-turns",
+                str(max(2, max_iterations)),
+                "--mcp-config",
+                cfg_path,
+                "--strict-mcp-config",
+                "--allowedTools",
+                *[f"mcp__llmtools__{t.name}" for t in exposable],
+            ]
+            effective_model = model_id
+            if effective_model:
+                argv[1:1] = ["--model", effective_model]
 
-        # Record usage
-        if usage is not None:
-            usage_data = data.get("usage", {})
-            model_usage = data.get("modelUsage", {})
-            reported_model = (
-                list(model_usage.keys())[0]
-                if model_usage
-                else (effective_model or model_id or "claude")
-            )
-
-            input_tokens = (
-                usage_data.get("input_tokens", 0)
-                + usage_data.get("cache_creation_input_tokens", 0)
-                + usage_data.get("cache_read_input_tokens", 0)
-            )
-            output_tokens = usage_data.get("output_tokens", 0)
-            cost_usd = data.get("total_cost_usd", 0.0)
-
-            usage.add(
-                input_tokens,
-                output_tokens,
-                provider="claude_cli",
-                tier=tier,
-                model=reported_model,
-                cost_usd=cost_usd,
-            )
-
-        return strip_code_fence(data["result"])
+            out = self._run(argv, _flatten(content), self._claude_env())
+            return self._finalize(out, model_id, effective_model, tier, usage)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def model_for_tier(self, tier):
         """Resolve tier to a claude CLI model id/alias.

@@ -236,6 +236,7 @@ def convert_date_tool():
             "required": ["dates", "mode"],
         },
         run=convert_date,
+        run_path="casework.common:convert_date",
     )
 
 
