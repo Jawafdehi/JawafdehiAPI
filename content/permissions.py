@@ -47,6 +47,33 @@ ROLE_PERMISSIONS = {
 }
 
 
+def ensure_article_index():
+    """Create the single ArticleIndexPage under the default site root if absent.
+
+    Done in post_migrate (real models, clean transaction) rather than a data
+    migration — Wagtail's page save/treebeard logic aborts the migration
+    transaction on PostgreSQL.
+    """
+    from wagtail.models import Page, Site
+
+    from content.models import ArticleIndexPage
+
+    existing = ArticleIndexPage.objects.first()
+    if existing is not None:
+        return existing
+
+    site = Site.objects.filter(is_default_site=True).first()
+    root = site.root_page if site else Page.objects.filter(depth=2).first()
+    if root is None:
+        root = Page.objects.filter(depth=1).first()
+    if root is None:
+        return None
+
+    index = ArticleIndexPage(title="Articles", slug="articles", live=True)
+    root.add_child(instance=index)
+    return index
+
+
 def sync_cms_group_permissions(sender=None, **kwargs):
     from django.contrib.auth.management import create_permissions
     from django.contrib.auth.models import Group, Permission
@@ -57,7 +84,7 @@ def sync_cms_group_permissions(sender=None, **kwargs):
         GroupPagePermission,
     )
 
-    from content.models import ArticleIndexPage
+    ensure_article_index()
 
     # Defensive: ensure the permissions we reference have been materialised,
     # regardless of post_migrate signal ordering on a first-time deploy.
@@ -75,7 +102,7 @@ def sync_cms_group_permissions(sender=None, **kwargs):
         content_type__app_label="wagtailadmin", codename="access_admin"
     ).first()
     page_ct = ContentType.objects.filter(app_label="wagtailcore", model="page").first()
-    index = ArticleIndexPage.objects.first()
+    index = ensure_article_index()
     root_collection = Collection.objects.filter(depth=1).order_by("path").first()
 
     for name, group in groups.items():
