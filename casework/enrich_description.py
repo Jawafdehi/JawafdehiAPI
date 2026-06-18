@@ -67,7 +67,13 @@ COURT_RE = re.compile(r"(?<![\dA-Za-z])\d{2,3}-[A-Za-z]{1,3}-\d{3,4}(?![\dA-Za-z
 # LLM-summarised digest.
 SOURCE_TEXT_BUDGET = env_int("CASEWORK_SOURCE_TEXT_BUDGET", 60000)
 VERDICT_SUMMARY_TRIGGER = env_int("CASEWORK_VERDICT_SUMMARY_TRIGGER", 12000)
-VERDICT_SUMMARY_TARGET = 8000
+VERDICT_SUMMARY_TARGET = env_int("CASEWORK_VERDICT_SUMMARY_TARGET", 8000)
+# Verdicts above the trigger are summarised. Long ones are summarised in MULTIPLE
+# passes (one per chunk) so the WHOLE judgment is covered — a single truncated
+# pass missed the फैसला, which sits at the end of a long document. Per-pass output
+# size and chunk size are tunable for bigger, richer digests.
+VERDICT_SUMMARY_MAX_TOKENS = env_int("CASEWORK_VERDICT_SUMMARY_MAX_TOKENS", 8000)
+VERDICT_SUMMARY_CHUNK_CHARS = env_int("CASEWORK_VERDICT_SUMMARY_CHUNK_CHARS", 150000)
 
 VERDICT_SUMMARY_SYSTEM_PROMPT = """\
 You are a Nepali legal analyst. You are given the full text of a Special Court \
@@ -579,20 +585,48 @@ def _assemble_source_text(
 
 
 def _summarize_verdict(verdict_text: str, invoke_text, usage) -> Optional[str]:
-    """First-pass LLM summary of a long Special Court verdict document."""
-    try:
-        result = invoke_text(
-            system=VERDICT_SUMMARY_SYSTEM_PROMPT,
-            content="Summarise this Special Court judgment as instructed.\n\n"
-            + verdict_text[:120000],
-            tier="premium",
-            usage=usage,
-            max_tokens=4000,
+    """LLM summary of a long Special Court verdict.
+
+    Long judgments are summarised in MULTIPLE passes (one per chunk) and the
+    per-chunk summaries concatenated, so the WHOLE document is covered. The prior
+    single pass over verdict_text[:120000] silently dropped everything past 120k —
+    including the फैसला/ठहर, which sits at the end of a long judgment — and capped
+    the digest at ~4k tokens. Chunk + per-pass output sizes are tunable.
+    """
+    chunk = max(20000, VERDICT_SUMMARY_CHUNK_CHARS)
+    chunks = [verdict_text[i : i + chunk] for i in range(0, len(verdict_text), chunk)]
+    n = len(chunks)
+    summaries: list[str] = []
+    for idx, part in enumerate(chunks):
+        framing = (
+            "Summarise this Special Court judgment as instructed.\n\n"
+            if n == 1
+            else f"This is part {idx + 1} of {n} of a long Special Court judgment "
+            "(split only by length, mid-sentence boundaries possible). Summarise the "
+            "substantive content of THIS part as instructed; the फैसला/ठहर may appear "
+            "in a later part.\n\n"
         )
-        return result.strip() if result else None
-    except Exception as exc:
-        logger.warning("Verdict summarisation failed: %s", exc)
+        try:
+            result = invoke_text(
+                system=VERDICT_SUMMARY_SYSTEM_PROMPT,
+                content=framing + part,
+                tier="premium",
+                usage=usage,
+                max_tokens=VERDICT_SUMMARY_MAX_TOKENS,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Verdict part %d/%d summarisation failed: %s", idx + 1, n, exc
+            )
+            continue
+        if result and result.strip():
+            summaries.append(result.strip())
+    if not summaries:
         return None
+    if n == 1:
+        return summaries[0]
+    logger.info("Verdict summarised in %d passes (of %d parts)", len(summaries), n)
+    return "\n\n".join(f"[खण्ड {i + 1}/{n}]\n{s}" for i, s in enumerate(summaries))
 
 
 def _format_bigo(bigo) -> str:
