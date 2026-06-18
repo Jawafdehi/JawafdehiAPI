@@ -253,6 +253,11 @@ def add_common_args(parser):
     parser.add_argument("--limit", type=int, help="Max number of cases to process")
     parser.add_argument("--fiscal-year", help="Filter by fiscal year (e.g. '080')")
     parser.add_argument(
+        "--priority",
+        action="store_true",
+        help="Only process cases listed in cases/data/priority_cases.json",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Re-run even if the target field is already populated",
@@ -454,6 +459,12 @@ def get_target_cases(api, args, skip_field):
     #    detail for matches — the detail is what carries `evidence` (the list summary
     #    omits it) and the timeline/description fields, which the enrichers need.
     fiscal_year = getattr(args, "fiscal_year", None)
+    priority_nums = None
+    if getattr(args, "priority", False):
+        from cases.services.priority_case_loader import load_priority_cases
+
+        priority_nums = {_court_number(n) for n in load_priority_cases()}
+        log.info("Priority mode: %d priority case number(s) loaded", len(priority_nums))
     scanned = 0
     log.info("Scanning corruption cases (filtering client-side)...")
     for summary in api.iter_cases(params={"case_type": "CORRUPTION"}):
@@ -466,6 +477,10 @@ def get_target_cases(api, args, skip_field):
             continue
         if fiscal_year and not matches_fiscal_year(summary, fiscal_year):
             continue
+        if priority_nums is not None:
+            nums = {_court_number(ref) for ref in summary.get("court_cases") or []}
+            if not (priority_nums & nums):
+                continue
         # Cheap skip for fields present on the summary (allegations/tags/entities/bigo).
         if not force and summary.get(skip_field):
             continue
