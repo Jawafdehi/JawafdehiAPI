@@ -31,6 +31,7 @@ from casework.common import (
     add_common_args,
     bootstrap,
     content_from_evidence_entry,
+    env_int,
     get_target_cases,
     parse_extraction_response,
     print_summary,
@@ -43,12 +44,14 @@ logger = logging.getLogger(__name__)
 # Slicing constants (match the original)
 # ─────────────────────────────────────────────────────────────────────────────
 COURT_ORDER_FULL_THRESHOLD = 8_000
-COURT_ORDER_HEAD_CHARS = 4_000
-COURT_ORDER_TAIL_CHARS = 2_000
-COURT_ORDER_THAHAR_CHARS = 12_000
+COURT_ORDER_HEAD_CHARS = env_int("CASEWORK_RE_COURT_ORDER_HEAD_CHARS", 4_000)
+COURT_ORDER_TAIL_CHARS = env_int("CASEWORK_RE_COURT_ORDER_TAIL_CHARS", 2_000)
+COURT_ORDER_THAHAR_CHARS = env_int("CASEWORK_RE_COURT_ORDER_THAHAR_CHARS", 12_000)
 
-PRESS_RELEASE_CHARS = 3_000
-PRESS_RELEASE_CHARS_NO_COURT = 18_000
+PRESS_RELEASE_CHARS = env_int("CASEWORK_RE_PRESS_RELEASE_CHARS", 3_000)
+PRESS_RELEASE_CHARS_NO_COURT = env_int(
+    "CASEWORK_RE_PRESS_RELEASE_CHARS_NO_COURT", 18_000
+)
 
 PROMPT_HARD_MAX = 25_000
 

@@ -115,6 +115,12 @@ class ClaudeCliProvider(_CliProvider):
     name = "claude_cli"
     supports_tools = True
 
+    def _effort_args(self):
+        """`--effort <level>` (low/medium/high/xhigh/max) when configured; the CLI
+        reasoning budget. Empty -> CLI default."""
+        eff = getattr(settings, "CLAUDE_CLI_EFFORT", "")
+        return ["--effort", eff] if eff else []
+
     def _claude_env(self):
         """Env for the claude subprocess: subscription auth (no API key)."""
         env = dict(os.environ)
@@ -200,6 +206,7 @@ class ClaudeCliProvider(_CliProvider):
         effective_model = model_id
         if effective_model:
             argv.extend(["--model", effective_model])
+        argv.extend(self._effort_args())
 
         out = self._run(argv, _flatten(content), self._claude_env())
         return self._finalize(out, model_id, effective_model, tier, usage)
@@ -272,6 +279,7 @@ class ClaudeCliProvider(_CliProvider):
                 "--mcp-config",
                 cfg_path,
                 "--strict-mcp-config",
+                *self._effort_args(),
                 "--allowedTools",
                 *[f"mcp__llmtools__{t.name}" for t in exposable],
             ]

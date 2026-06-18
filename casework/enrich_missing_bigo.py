@@ -34,6 +34,8 @@ from casework.common import (
     add_common_args,
     balanced_object,
     bootstrap,
+    clamp,
+    env_int,
     get_target_cases,
     print_summary,
     setup_logging,
@@ -412,7 +414,7 @@ def _build_source_context_from_entry(entry: dict) -> str:
     for u in urls:
         if isinstance(u, dict) and u.get("link"):
             parts.append(f"url: {urllib.parse.unquote(u['link'])}")
-    return "\n".join(parts)[:20000]
+    return "\n".join(parts)[: env_int("CASEWORK_BIGO_SOURCE_CHARS", 20000)]
 
 
 def _extract_bigo_from_source(
@@ -428,7 +430,9 @@ def _extract_bigo_from_source(
         case_id=case_id,
         case_title=case_title,
         source_context=source_context,
-        markdown=source_text[:100000],
+        markdown=clamp(
+            source_text, env_int("CASEWORK_BIGO_FEED_CHARS", 100000), "bigo source"
+        ),
     )
 
     # Call LLM (plain chat, no tools)
