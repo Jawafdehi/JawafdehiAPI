@@ -8,6 +8,7 @@ case's court_cases list.
 """
 
 import pytest
+from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 
 from cases.models import CaseState, CaseType
@@ -106,3 +107,45 @@ def test_court_case_lookup_returns_most_recent_when_multiple_cases_match():
 
     assert response.status_code == 200
     assert response.data["case_id"] == newer.case_id
+
+
+@pytest.mark.django_db
+def test_court_case_lookup_is_case_insensitive_on_court_identifier():
+    case = create_case_with_entities(
+        title="Mixed Case Identifier",
+        case_type=CaseType.CORRUPTION,
+        state=CaseState.PUBLISHED,
+        court_cases=["supreme:081-CR-0081"],
+    )
+
+    response = APIClient().get("/api/cases/Supreme:081-CR-0081/")
+
+    assert response.status_code == 200
+    assert response.data["case_id"] == case.case_id
+
+
+@pytest.mark.django_db
+def test_court_case_lookup_does_not_shadow_published_with_unauthorized_draft():
+    older_published = create_case_with_entities(
+        title="Older Published Case",
+        case_type=CaseType.CORRUPTION,
+        state=CaseState.PUBLISHED,
+        court_cases=["supreme:081-CR-0081"],
+    )
+    create_case_with_entities(
+        title="Newer Draft Case",
+        case_type=CaseType.CORRUPTION,
+        state=CaseState.DRAFT,
+        court_cases=["supreme:081-CR-0081"],
+    )
+
+    user = get_user_model().objects.create_user(
+        username="regular_user", password="password"
+    )
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    response = client.get("/api/cases/supreme:081-CR-0081/")
+
+    assert response.status_code == 200
+    assert response.data["case_id"] == older_published.case_id

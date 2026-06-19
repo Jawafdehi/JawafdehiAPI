@@ -503,13 +503,15 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
 
     def _get_object_by_court_case(self, lookup_value):
         court_identifier, _, raw_case_number = lookup_value.partition(":")
-        court_identifier = court_identifier.strip()
+        # court_cases JSON containment is case-sensitive and identifiers are
+        # stored lowercase, so normalize the identifier casing too.
+        court_identifier = court_identifier.strip().lower()
         raw_case_number = raw_case_number.strip()
 
         try:
             case_number = normalize_case_number(raw_case_number)
         except ValueError:
-            raise NotFound(f"No case found for court case '{lookup_value}'.")
+            raise NotFound(f"No case found for court case '{lookup_value}'.") from None
 
         identifier = f"{court_identifier}:{case_number}"
         queryset = self.filter_queryset(self.get_queryset())
@@ -520,15 +522,24 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(court_cases__contains=[identifier])
         else:
             matching_ids = [
-                case.id
-                for case in queryset
-                if case.court_cases and identifier in case.court_cases
+                case_id
+                for case_id, court_cases in queryset.values_list("id", "court_cases")
+                if court_cases and identifier in court_cases
             ]
             queryset = queryset.filter(id__in=matching_ids)
 
-        # Ordered by -created_at in get_queryset(), so when several cases cite
-        # the same court case the most recently created visible one wins.
-        obj = queryset.first()
+        # Ordered by -created_at in get_queryset(). When several cases cite the
+        # same court case, return the most recent one the caller may view, so a
+        # newer unviewable DRAFT does not shadow an older viewable case.
+        obj = next(
+            (
+                case
+                for case in queryset
+                if case.state != CaseState.DRAFT
+                or can_view_case(self.request.user, case)
+            ),
+            None,
+        )
         if obj is None:
             raise NotFound(f"No case found for court case '{identifier}'.")
 
