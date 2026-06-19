@@ -694,7 +694,7 @@ if not DEBUG:
     SECURE_HSTS_PRELOAD = env_flag("SECURE_HSTS_PRELOAD", False)
     SECURE_SSL_REDIRECT = True
     # vmagent scrapes http://<pod-ip>:8080/metrics in-cluster; don't 302 it to https.
-    SECURE_REDIRECT_EXEMPT = [r"^metrics$"]
+    SECURE_REDIRECT_EXEMPT = [r"^metrics/?$"]
     CSRF_COOKIE_SECURE = True
     SESSION_COOKIE_SECURE = True
     SESSION_COOKIE_HTTPONLY = True
