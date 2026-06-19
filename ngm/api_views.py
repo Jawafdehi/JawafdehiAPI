@@ -8,6 +8,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from cases.throttles import RoleBasedRateThrottle
+from config.oidc import OIDCJWTAuthentication
 from ngm.serializers import CourtCaseDetailSerializer, NGMQuerySerializer
 from ngm.services import (
     execute_select_query,
@@ -64,7 +65,10 @@ class NGMQueryRateThrottle(RoleBasedRateThrottle):
     request=NGMQuerySerializer,
 )
 class NGMJudicialQueryView(APIView):
-    authentication_classes = [TokenAuthentication]
+    # OIDC bearer (e.g. forwarded by jawafdehi-mcp) + DRF token for scripted
+    # access. Previously TokenAuthentication only, which 401s the MCP's
+    # Authorization: Bearer; the per-token throttle falls back to user pk.
+    authentication_classes = [OIDCJWTAuthentication, TokenAuthentication]
     permission_classes = [IsAuthenticated]
     throttle_classes = [NGMQueryRateThrottle]
 
