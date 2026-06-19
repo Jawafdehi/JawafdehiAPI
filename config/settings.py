@@ -136,6 +136,12 @@ if not DEBUG and not ALLOWED_HOSTS:
         "Set it to a comma-separated list of allowed hostnames "
         "(e.g. ALLOWED_HOSTS=jawafdehi.org,beta.jawafdehi.org)."
     )
+# In-cluster Prometheus scrapes hit /metrics on the pod IP directly, so the Host
+# header is the pod IP (not a public hostname). Allow the pod's own IP, injected
+# via the downward API (POD_IP), so the scrape isn't rejected as a DisallowedHost.
+_pod_ip = os.getenv("POD_IP")
+if _pod_ip:
+    ALLOWED_HOSTS.append(_pod_ip)
 
 CSRF_TRUSTED_ORIGINS = get_env_list("CSRF_TRUSTED_ORIGINS")
 
@@ -687,6 +693,8 @@ if not DEBUG:
     SECURE_HSTS_INCLUDE_SUBDOMAINS = env_flag("SECURE_HSTS_INCLUDE_SUBDOMAINS", False)
     SECURE_HSTS_PRELOAD = env_flag("SECURE_HSTS_PRELOAD", False)
     SECURE_SSL_REDIRECT = True
+    # vmagent scrapes http://<pod-ip>:8080/metrics in-cluster; don't 302 it to https.
+    SECURE_REDIRECT_EXEMPT = [r"^metrics/?$"]
     CSRF_COOKIE_SECURE = True
     SESSION_COOKIE_SECURE = True
     SESSION_COOKIE_HTTPONLY = True
