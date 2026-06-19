@@ -196,6 +196,7 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    "django_prometheus",
     "rest_framework",
     "rest_framework.authtoken",
     "mozilla_django_oidc",
@@ -230,6 +231,8 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # Must be first: starts the per-request timer / in-flight gauge.
+    "django_prometheus.middleware.PrometheusBeforeMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "config.middleware.RequestIdMiddleware",
     "config.middleware.ForcePrimaryReadsMiddleware",
@@ -243,6 +246,8 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "config.middleware.JWTAuditlogMiddleware",
     "wagtail.contrib.redirects.middleware.RedirectMiddleware",
+    # Must be last: records latency/status/count, labelled by resolved view.
+    "django_prometheus.middleware.PrometheusAfterMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"

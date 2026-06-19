@@ -31,6 +31,9 @@ from content.api import api_router as wagtail_api_router
 urlpatterns = [
     path("", index, name="index"),
     path("docs/", docs, name="docs"),
+    # Prometheus exposition (django-prometheus). Scraped in-cluster by vmagent on
+    # the pod IP; blocked from the public ingress via a Traefik ipAllowList.
+    path("", include("django_prometheus.urls")),
     path("admin/", admin.site.urls),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path(
