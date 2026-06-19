@@ -22,6 +22,7 @@ COPY pyproject.toml poetry.lock ./
 RUN poetry config virtualenvs.create false && poetry install --only main --extras llm-all --no-interaction --no-root
 
 COPY manage.py ./
+COPY gunicorn.conf.py ./
 COPY config ./config
 COPY cases ./cases
 COPY case_workflows ./case_workflows
@@ -42,4 +43,4 @@ RUN DEBUG=False SECRET_KEY=foo-bar ALLOWED_HOSTS=portal.jawafdehi.org python man
 
 EXPOSE 8080
 
-CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8080", "--workers", "2", "--threads", "4", "--timeout", "60", "--access-logfile", "-", "--error-logfile", "-"]
+CMD ["gunicorn", "-c", "gunicorn.conf.py", "config.wsgi:application"]
