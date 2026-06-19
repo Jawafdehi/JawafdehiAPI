@@ -16,6 +16,13 @@ class CaseReview(models.Model):
         (STATUS_FAILED, "Failed"),
     ]
 
+    # Stable internal case identifier (cases.Case.case_id, e.g. "case-a1b2c3d4").
+    # This — not the slug — is the review's primary case reference: it is resolved
+    # once at submit time and is what executions are grouped/deduped by. Kept as a
+    # plain indexed string (not a FK) so the review system stays decoupled from the
+    # case table and the reviewer can run fully over HTTP. Blank only for legacy
+    # rows whose slug could not be resolved by the backfill migration.
+    case_id = models.CharField(max_length=100, blank=True, default="", db_index=True)
     slug = models.CharField(max_length=255)
     status = models.CharField(
         max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING
@@ -38,6 +45,14 @@ class CaseReview(models.Model):
     # Full structured review result (per-rule score+confidence, overall, gates)
     result = models.JSONField(null=True, blank=True)
 
+    # Which reviewer(s) produced this grade: a compact summary derived from the
+    # result's per-provider token usage, e.g.
+    #   [{"tier": "premium", "provider": "claude_cli", "model": "opus", "calls": 7},
+    #    {"tier": "cheap",   "provider": "codex_cli",  "model": "gpt-5-codex", "calls": 41}]
+    # Grading is multi-provider per review (gate rules -> premium, routine ->
+    # cheap), so this is a list, not a single value. Populated on result submit.
+    reviewers = models.JSONField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     started_at = models.DateTimeField(null=True, blank=True)
@@ -50,11 +65,12 @@ class CaseReview(models.Model):
         constraints = [
             # At most one active (pending/running) review per case. Enforces the
             # "no duplicate re-runs" rule at the DB level so concurrent submits
-            # can't both slip past an application-level pre-check. Literal status
-            # values mirror STATUS_PENDING / STATUS_RUNNING (Meta cannot see the
-            # class attributes by name).
+            # can't both slip past an application-level pre-check. Keyed on the
+            # stable case_id (the primary case reference), not the slug. Literal
+            # status values mirror STATUS_PENDING / STATUS_RUNNING (Meta cannot
+            # see the class attributes by name).
             models.UniqueConstraint(
-                fields=["slug"],
+                fields=["case_id"],
                 condition=models.Q(status__in=["pending", "running"]),
                 name="uniq_active_review_per_case",
             )

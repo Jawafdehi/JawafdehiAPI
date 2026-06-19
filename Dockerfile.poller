@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Hippocratic-3.0
-# Jawafdehi review-poller: CLI-harness image for `manage.py review_poller --apply`.
-# Mirrors the main API Dockerfile but adds Node.js + the claude/codex CLIs so the
-# codex_cli / claude_cli judge providers work. The heavy node layer is kept out of
-# the lean API image. Built amd64-only (the codex npm package ships a native binary
-# that is unreliable to install under arm64 QEMU emulation) — schedule the poller on
-# an amd64 node.
+# Jawafdehi review-poller: CLI-harness image for the standalone casework reviewer
+# (`casework/review_runner.py`). Mirrors the main API Dockerfile but adds Node.js +
+# the claude/codex CLIs (codex_cli / claude_cli judge providers), LibreOffice +
+# the document-conversion deps (so evidence PDFs/docs convert to text instead of
+# 0 chars). Built amd64-only (the codex npm package ships a native binary that is
+# unreliable to install under arm64 QEMU emulation) — schedule on an amd64 node.
 
 FROM python:3.12-slim
 
@@ -14,10 +14,21 @@ WORKDIR /app
 # and gnupg — absent from python:3.12-slim, the original cause of the failed build).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
+    git \
     postgresql-client \
     curl \
     ca-certificates \
     gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# LibreOffice (headless) provides the `soffice` binary that sourcing.converter
+# uses to turn scanned/legacy PDFs and office docs (.doc/.docx/.xls/.ppt) into a
+# form MarkItDown/likhit can read; without it those sources convert to 0 chars.
+# Writer/Calc/Impress pull in libreoffice-core (which carries soffice).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libreoffice-writer \
+    libreoffice-calc \
+    libreoffice-impress \
     && rm -rf /var/lib/apt/lists/*
 
 # Node.js 22 LTS (claude-code + codex require a recent Node).
@@ -35,7 +46,8 @@ RUN pip install poetry
 
 COPY pyproject.toml poetry.lock ./
 RUN poetry config virtualenvs.create false && \
-    poetry install --only main --extras llm-all --no-interaction --no-root
+    poetry install --only main --extras llm-all --extras bigo-enrichment \
+    --no-interaction --no-root
 
 # CLI harnesses for the codex_cli / claude_cli judge providers.
 RUN npm install -g --no-fund --no-audit @anthropic-ai/claude-code @openai/codex
@@ -49,6 +61,7 @@ COPY ngm ./ngm
 COPY review ./review
 COPY llm ./llm
 COPY sourcing ./sourcing
+COPY casework ./casework
 COPY content ./content
 COPY static ./static
 COPY templates ./templates
@@ -61,4 +74,6 @@ RUN DEBUG=False SECRET_KEY=foo-bar ALLOWED_HOSTS=portal.jawafdehi.org \
 RUN DEBUG=False SECRET_KEY=foo-bar ALLOWED_HOSTS=portal.jawafdehi.org \
     python manage.py collectstatic --noinput
 
-CMD ["python", "manage.py", "review_poller", "--apply"]
+# Read-only by default (lists the pending queue); the k8s deployment overrides
+# this with `... casework/review_runner.py --apply` to actually process reviews.
+CMD ["python", "casework/review_runner.py"]

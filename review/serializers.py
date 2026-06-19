@@ -23,6 +23,8 @@ class CaseReviewListSerializer(serializers.ModelSerializer):
             "overall_score",
             "disposition",
             "case_type",
+            # Which reviewer(s) graded this run (tier/provider/model/calls).
+            "reviewers",
             "created_at",
             "completed_at",
             "duration_seconds",
@@ -33,6 +35,21 @@ class CaseReviewListSerializer(serializers.ModelSerializer):
 
     def get_disposition(self, obj):
         return (obj.result or {}).get("disposition") if obj.result else None
+
+
+class GroupedCaseReviewSerializer(serializers.Serializer):
+    """One case and ALL of its review executions (newest first).
+
+    Used by the grouped review list so the SPA can show a case (by slug/title)
+    with its full execution history — including older runs that would otherwise
+    fall onto a later page of the flat review list. The internal case_id is the
+    grouping key but is deliberately NOT exposed.
+    """
+
+    slug = serializers.CharField()
+    case_title = serializers.CharField()
+    latest = CaseReviewListSerializer()
+    executions = CaseReviewListSerializer(many=True)
 
 
 class CaseReviewDetailSerializer(serializers.ModelSerializer):
@@ -50,6 +67,7 @@ class CaseReviewDetailSerializer(serializers.ModelSerializer):
             "source_count",
             "sources_converted",
             "result",
+            "reviewers",
             "created_at",
             "updated_at",
             "started_at",
