@@ -25,6 +25,7 @@ from drf_spectacular.utils import (
 )
 from rest_framework import filters, mixins, serializers, status, viewsets
 from rest_framework.authentication import SessionAuthentication, TokenAuthentication
+from rest_framework.exceptions import NotFound
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import DjangoModelPermissions, IsAuthenticated
 from rest_framework.renderers import JSONRenderer
@@ -32,6 +33,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from config.oidc import OIDCJWTAuthentication
+from ngm.services import normalize_case_number
 
 from .admin import CaseAdminForm
 from .caseworker_serializers import (
@@ -263,7 +265,13 @@ class UnifiedSearchView(APIView):
         description="""
         Retrieve detailed information about a specific case.
 
-        The endpoint accepts either a numeric ID (deprecated) or a slug (preferred format: kebab-case).
+        The endpoint accepts either a numeric ID (deprecated), a slug (preferred
+        format: kebab-case), or a court case reference of the form
+        `{court_identifier}:{case_number}` (e.g. `supreme:081-CR-0081`). The case
+        number in a court case reference is normalized like NGM (Devanagari
+        digits, casing, zero-padding) and matched against the case's
+        `court_cases` list; when several cases cite the same court case, the most
+        recently created visible one is returned.
 
         This endpoint includes complete case data (title, description, allegations,
         evidence, timeline) and any internal notes.
@@ -280,7 +288,7 @@ class UnifiedSearchView(APIView):
                 name="id",
                 type=OpenApiTypes.STR,
                 location=OpenApiParameter.PATH,
-                description="Case identifier - either numeric ID (deprecated) or slug",
+                description="Case identifier - numeric ID (deprecated), slug, or court case reference {court_identifier}:{case_number} (e.g. supreme:081-CR-0081)",
                 required=True,
             ),
         ],
@@ -477,9 +485,73 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
         )
         return Response(CaseSerializer(case).data, status=status.HTTP_201_CREATED)
 
+    def get_object(self):
+        """
+        Resolve the detail lookup value as a slug or a court case reference.
+
+        Slugs never contain a colon, so a lookup value shaped like
+        ``{court_identifier}:{case_number}`` (e.g. ``supreme:81-cr-81``) is
+        treated as a court case reference: the case number is normalized the
+        same way NGM normalizes it and matched against the ``court_cases``
+        JSON list. Restricted to retrieve so PATCH keeps its single-target
+        slug semantics.
+        """
+        lookup_value = self.kwargs.get(self.lookup_field) or ""
+        if self.action == "retrieve" and ":" in lookup_value:
+            return self._get_object_by_court_case(lookup_value)
+        return super().get_object()
+
+    def _get_object_by_court_case(self, lookup_value):
+        court_identifier, _, raw_case_number = lookup_value.partition(":")
+        # court_cases JSON containment is case-sensitive and identifiers are
+        # stored lowercase, so normalize the identifier casing too.
+        court_identifier = court_identifier.strip().lower()
+        raw_case_number = raw_case_number.strip()
+
+        try:
+            case_number = normalize_case_number(raw_case_number)
+        except ValueError:
+            raise NotFound(f"No case found for court case '{lookup_value}'.") from None
+
+        identifier = f"{court_identifier}:{case_number}"
+        queryset = self.filter_queryset(self.get_queryset())
+
+        # JSONField containment is only available on PostgreSQL; SQLite (tests)
+        # filters in Python, mirroring the tag-filter path in get_queryset().
+        if connection.vendor == "postgresql":
+            queryset = queryset.filter(court_cases__contains=[identifier])
+        else:
+            matching_ids = [
+                case_id
+                for case_id, court_cases in queryset.values_list("id", "court_cases")
+                if court_cases and identifier in court_cases
+            ]
+            queryset = queryset.filter(id__in=matching_ids)
+
+        # Ordered by -created_at in get_queryset(). When several cases cite the
+        # same court case, return the most recent one the caller may view, so a
+        # newer unviewable DRAFT does not shadow an older viewable case.
+        obj = next(
+            (
+                case
+                for case in queryset
+                if case.state != CaseState.DRAFT
+                or can_view_case(self.request.user, case)
+            ),
+            None,
+        )
+        if obj is None:
+            raise NotFound(f"No case found for court case '{identifier}'.")
+
+        self.check_object_permissions(self.request, obj)
+        return obj
+
     def retrieve(self, request, *args, **kwargs):
         """
         GET /api/cases/{id}/
+
+        The detail lookup value may be a slug or a court case reference
+        (``{court_identifier}:{case_number}``); see get_object().
 
         Retrieve a case with permission-based access control:
         - PUBLISHED and IN_REVIEW cases: accessible to everyone
