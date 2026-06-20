@@ -65,6 +65,20 @@ REVIEW_SYSTEM = (
     "English. You ALWAYS reply with a single valid JSON object and nothing else."
 )
 
+# Shared guidance that keeps the score focused on material problems. Trivial /
+# cosmetic findings are still surfaced (for transparency) but in a separate,
+# non-scoring `notes` channel so they do not drag the grade down.
+_MATERIALITY_GUIDANCE = (
+    "Separate MATERIAL problems from TRIVIAL ones. `issues` and your SCORE are "
+    "for MATERIAL problems only — things that genuinely affect the case's "
+    "accuracy, completeness, sourcing, fairness, or a reader's understanding. "
+    "Cosmetic / sub-material findings — paisa-level rounding, a single news "
+    "outlet's typo'd figure when the authoritative figure matches, markdown "
+    "formatting, description length/ordering — go in `notes` (informational). "
+    "Such trivial findings MUST NOT appear in `issues` and MUST NOT reduce the "
+    "score; surface them in `notes` so the caseworker still sees them."
+)
+
 
 def _rule_context_block(case_summary, source_excerpts, case_type_label):
     """The case data + source excerpts shared verbatim by every rule call.
@@ -94,13 +108,18 @@ against the ONE rule below. Reply with JSON only.
 RULE TO GRADE:
 {block}
 
-Score the rule 0-100 with a short rationale, the concrete issues you found, and
-a list of concrete, actionable SUGGESTIONS the caseworker can apply to improve
-the case against THIS rule (each suggestion an imperative one-liner, e.g.
+Score the rule 0-100 with a short rationale, the concrete (material) issues you
+found, any trivial/cosmetic observations as `notes`, and a list of concrete,
+actionable SUGGESTIONS the caseworker can apply to improve the case against THIS
+rule (each suggestion an imperative one-liner, e.g.
 "Add the special-court verdict date to the timeline"). If the rule is fully
-satisfied, return an empty suggestions list. Judge ONLY against this rule.
+satisfied, return empty `issues` and `suggestions` lists. Judge ONLY against
+this rule.
+
+{_MATERIALITY_GUIDANCE}
+
 Reply EXACTLY in this JSON shape:
-{{"score": <int 0-100>, "rationale": "<str>", "issues": ["<str>"], "suggestions": ["<str>"]}}"""
+{{"score": <int 0-100>, "rationale": "<str>", "issues": ["<str>"], "notes": ["<str>"], "suggestions": ["<str>"]}}"""
 
 
 def _build_single_rule_content(context_block, rule):
@@ -141,11 +160,16 @@ against EACH of the {len(rules)} rules below. Reply with JSON only.
 RULES TO GRADE:
 {rules_block}
 
-For EACH rule: score 0-100 with a short rationale, the concrete issues you found,
-and a list of concrete, actionable SUGGESTIONS (imperative one-liners; empty list
-if the rule is fully satisfied). Judge each rule INDEPENDENTLY against ONLY that
-rule. Return exactly one entry per rule key. Reply EXACTLY in this JSON shape:
-{{"rules": {{"<rule_key>": {{"score": <int 0-100>, "rationale": "<str>", "issues": ["<str>"], "suggestions": ["<str>"]}}}}}}"""
+For EACH rule: score 0-100 with a short rationale, the concrete (material) issues
+you found, any trivial/cosmetic observations as `notes`, and a list of concrete,
+actionable SUGGESTIONS (imperative one-liners; empty list if the rule is fully
+satisfied). Judge each rule INDEPENDENTLY against ONLY that rule. Return exactly
+one entry per rule key.
+
+{_MATERIALITY_GUIDANCE}
+
+Reply EXACTLY in this JSON shape:
+{{"rules": {{"<rule_key>": {{"score": <int 0-100>, "rationale": "<str>", "issues": ["<str>"], "notes": ["<str>"], "suggestions": ["<str>"]}}}}}}"""
 
 
 def _build_batch_content(context_block, rules):
@@ -338,6 +362,7 @@ def judge_rules(
     samples = {k: [] for k in keys}
     last_rationale = {k: "" for k in keys}
     last_issues = {k: [] for k in keys}
+    last_notes = {k: [] for k in keys}
     last_suggestions = {k: [] for k in keys}
     narrative = ""
     errors = []
@@ -357,6 +382,8 @@ def judge_rules(
             last_rationale[key] = parsed["rationale"]
         if parsed.get("issues"):
             last_issues[key] = parsed["issues"]
+        if parsed.get("notes"):
+            last_notes[key] = parsed["notes"]
         if parsed.get("suggestions"):
             last_suggestions[key] = parsed["suggestions"]
 
@@ -423,6 +450,7 @@ def judge_rules(
             "samples": vals,
             "rationale": last_rationale[k],
             "issues": last_issues[k],
+            "notes": last_notes[k],
             "suggestions": last_suggestions[k],
         }
     return out
