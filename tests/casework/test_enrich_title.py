@@ -68,6 +68,12 @@ class TestParseTitle:
     def test_rejects_multiline_prose(self):
         assert c.parse_title("Here is your title:\nमुद्दा (080-CR-0047)") is None
 
+    def test_rejects_bare_line_without_court_number(self):
+        # A confirmation sentence (no court-case number) must NOT be accepted as
+        # a title and PATCHed — the fallback only takes title-shaped bare lines.
+        assert c.parse_title("Sure, here is your headline") is None
+        assert c.parse_title("शीर्षक तयार छ।") is None
+
     def test_empty_returns_none(self):
         assert c.parse_title("") is None
 
@@ -90,21 +96,21 @@ def test_format_bigo():
     assert c.format_bigo(None) == "(unknown)"
 
 
-# ── script idempotency helper ────────────────────────────────────────────────
+# ── shared title-acceptance predicate ────────────────────────────────────────
 
 
-class TestTitleIsValid:
+class TestTitleIsAcceptable:
     def test_valid(self):
-        assert et._title_is_valid("मुद्दा (080-CR-0047)", "080-CR-0047")
+        assert c.title_is_acceptable("मुद्दा (080-CR-0047)", "080-CR-0047")
 
     def test_headcount_invalid(self):
-        assert not et._title_is_valid("१२ जना (080-CR-0047)", "080-CR-0047")
+        assert not c.title_is_acceptable("१२ जना (080-CR-0047)", "080-CR-0047")
 
     def test_missing_court_number_context_invalid(self):
-        assert not et._title_is_valid("मुद्दा (080-CR-0047)", None)
+        assert not c.title_is_acceptable("मुद्दा (080-CR-0047)", None)
 
     def test_no_trailing_number_invalid(self):
-        assert not et._title_is_valid("कुनै मुद्दा", "080-CR-0047")
+        assert not c.title_is_acceptable("कुनै मुद्दा", "080-CR-0047")
 
 
 # ── prompt assembly ──────────────────────────────────────────────────────────
