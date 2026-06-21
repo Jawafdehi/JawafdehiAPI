@@ -9,9 +9,9 @@ letters/numbers/hyphens, starts with a letter, max 50 chars).
 
 Default behaviour WRITES A PROPOSALS FILE (``--output``, default
 ``slug-enrichment-proposals.json``) — a list of records each carrying the current
-slug, the proposed slug, and a ready-to-apply RFC-6902 ``patch_ops`` — for a human
-to review and PATCH manually afterwards. Pass ``--apply`` to PATCH valid proposals
-directly (the API only allows a slug change while the case is in DRAFT).
+slug, the proposed slug, and whether it is valid — for a human to review and patch
+manually afterwards. Pass ``--apply`` to PATCH valid proposals directly (the API
+only allows a slug change while the case is in DRAFT).
 
 Like the sibling enrichers, this reads cases entirely over the Jawafdehi HTTP API
 and never touches the database.
@@ -293,18 +293,15 @@ def _process_case(case, idx, total, args, api, usage, invoke_text, stats, propos
     else:
         stats["slugs_proposed"] += 1
 
-    record = {
-        "case_id": case_id,
-        "slug_current": slug_current,
-        "slug_proposed": slug_proposed,
-        "valid": valid,
-        "validation_error": error,
-    }
-    if valid:
-        record["patch_ops"] = [
-            {"op": "replace", "path": "/slug", "value": slug_proposed}
-        ]
-    proposals.append(record)
+    proposals.append(
+        {
+            "case_id": case_id,
+            "slug_current": slug_current,
+            "slug_proposed": slug_proposed,
+            "valid": valid,
+            "validation_error": error,
+        }
+    )
 
     if args.apply and valid and not args.dry_run:
         try:

@@ -129,7 +129,7 @@ def _run(case, llm_slug, *, apply=False, dry_run=False, force=False):
     return api, stats, proposals
 
 
-def test_valid_slug_recorded_with_patch_ops():
+def test_valid_slug_recorded():
     api, stats, proposals = _run(_case(), "sunil-poudel-land-fraud-080-cr-0047")
     assert api.patched == []  # default does not apply
     assert stats["slugs_proposed"] == 1
@@ -137,13 +137,7 @@ def test_valid_slug_recorded_with_patch_ops():
     record = proposals[0]
     assert record["valid"] is True
     assert record["slug_proposed"] == "sunil-poudel-land-fraud-080-cr-0047"
-    assert record["patch_ops"] == [
-        {
-            "op": "replace",
-            "path": "/slug",
-            "value": "sunil-poudel-land-fraud-080-cr-0047",
-        }
-    ]
+    assert "patch_ops" not in record
 
 
 def test_apply_patches_valid_slug():
@@ -207,9 +201,6 @@ def test_write_proposals_is_well_formed_json(tmp_path):
             "slug_proposed": "sunil-poudel-080-cr-0047",
             "valid": True,
             "validation_error": None,
-            "patch_ops": [
-                {"op": "replace", "path": "/slug", "value": "sunil-poudel-080-cr-0047"}
-            ],
         }
     ]
     out = tmp_path / "proposals.json"
