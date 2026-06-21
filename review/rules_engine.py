@@ -202,8 +202,8 @@ def structural_completeness(case):
     pts += min(len(entities) / 3.0, 1.0) * 12
     pts += min(len(tags) / 3.0, 1.0) * 8
     issues = []
-    if len(allegations) < 3:
-        issues.append(f"Only {len(allegations)} key allegations (org min: 3).")
+    if len(allegations) < 2:
+        issues.append(f"Only {len(allegations)} key allegations (org min: 2).")
     if len(timeline) < 3:
         issues.append(f"Only {len(timeline)} timeline events (org min: 3).")
     if not entities:

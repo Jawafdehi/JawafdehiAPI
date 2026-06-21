@@ -89,7 +89,12 @@ DEFAULT_RULES = [
             "The `description` must accurately and completely **summarise the "
             "case**: who is accused, what they allegedly did, the amount/scheme, "
             "the agency (CIAA etc.), and the current status — faithful to the "
-            "source documents."
+            "source documents.\n\n"
+            "Score on substance. Cosmetic matters — overall length, section "
+            "ordering, a malformed markdown table, minor wording — belong in "
+            "`notes`, not `issues`, and must not lower the score; only a "
+            "substantive failure (missing the core allegation/amount/status, or "
+            "contradicting the sources) is a scored issue."
         ),
         "good_examples": "A reader who only reads the description understands the whole case and it matches the sources.",
         "bad_examples": "Description omits the core allegation, the amount, or contradicts the sources; or is a stub.",
@@ -114,7 +119,12 @@ DEFAULT_RULES = [
             "the `bigo` figure. Allow for unit phrasing (e.g. arba/karod/lakh vs. "
             "plain rupees) and rounding, but flag a genuine mismatch in the "
             "figure. If the press release states the amount in a foreign currency "
-            "with an NPR conversion, compare against the NPR total."
+            "with an NPR conversion, compare against the NPR total.\n\n"
+            "Treat paisa-level rounding (e.g. dropping a trailing `.85`) and a "
+            "single divergent news-outlet figure — when the authoritative "
+            "press-release / charge-sheet amount still matches `bigo` — as a "
+            "`notes` observation, NOT a scored issue: keep the score at 100. Only "
+            "an actual contradiction with the authoritative figure is an `issue`."
         ),
         "good_examples": (
             "Press release states रु. ३.२१ अर्ब and `bigo` is 3,218,377,182 — the "
@@ -680,30 +690,119 @@ DEFAULT_RULES = [
         "condition_text": "Always active.",
         "applies_to": ALL,
         "description": (
-            "Known gaps and uncertainties in the record must be **openly "
-            "declared** (in `missing_details` / notes) rather than papered over "
-            "or hidden.\n\n"
-            "Judge honesty, not just presence: compare what the description and "
-            "sources imply is still unknown or unverified against what the case "
-            "actually declares as missing. The case should acknowledge things "
-            "like undisclosed amounts, pending documents, unconfirmed parties, or "
-            "unresolved status — instead of stating uncertain things as settled "
-            "fact or silently omitting them.\n\n"
-            "Flag where the record glosses over an obvious gap, and credit a "
-            "case that candidly lists what it still lacks."
+            "`missing_details` is for honest disclosure of the **sources and "
+            "documents the caseworker could not obtain** while researching the "
+            "case — research/sourcing limitations — NOT a restatement of every "
+            "uncertain case fact.\n\n"
+            "Judge whether the case is honest about what **evidence it is "
+            "missing**: name primary documents that were sought but not found or "
+            "not yet available (e.g. the full charge sheet, the signed "
+            "special-court verdict text, an audit report), and flag any claim that "
+            "rests on secondary reporting because the primary record could not be "
+            "retrieved.\n\n"
+            "Do **NOT** penalise the case for failing to declare an uncertain "
+            "*case fact* as 'missing' — e.g. whether an appeal was filed, the "
+            "appellate outcome, or a still-pending status. Those belong in the "
+            "narrative / timeline, not in `missing_details`, and their absence "
+            "from `missing_details` is **not** a gap-honesty problem.\n\n"
+            "Still flag genuine **dishonesty**: a contested or unconfirmed figure "
+            "presented as settled fact, or the case leaning on a source while "
+            "hiding that the primary document was never obtained."
         ),
         "good_examples": (
-            "`missing_details` notes that the special-court verdict is still "
-            "pending and the exact bigo for two defendants is not yet confirmed — "
-            "matching gaps visible in the sources."
+            "`missing_details` states that the full charge sheet and the signed "
+            "special-court verdict could not be obtained, so some figures rely on "
+            "the CIAA press release and news reporting — an honest disclosure of "
+            "which sources are missing."
         ),
         "bad_examples": (
-            "The narrative presents a contested or unconfirmed figure as final "
-            "and declares no missing details, even though the sources show the "
-            "case is still sub judice."
+            "The case relies on a news figure as if it were the official "
+            "charge-sheet amount without noting the primary document was never "
+            "retrieved; or it presents a contested bigo as final fact. NOT bad: "
+            "simply not listing 'appeal status unknown' in `missing_details` — "
+            "that is a case fact, not a source gap, and must not be penalised."
         ),
         "weight": 0.6,
         "enabled": True,
         "order": 100,
+    },
+    # ---------------- Title quality (LLM) ----------------
+    # NOTE: appended at the END of the list on purpose. CodeRule.id is the
+    # definition index (+1), so inserting mid-list would renumber every later
+    # rule's id. `order: 46` keeps it in its intended DISPLAY slot (right after
+    # the slug rule) without shifting any existing ids.
+    {
+        "key": "title_quality",
+        "title": "Title is a clear, strong headline",
+        "category": "Completeness",
+        "kind": "llm",
+        "detector": "",
+        "condition_text": "Always active (judges the case `title` only, not section headings).",
+        "applies_to": ALL,
+        "description": (
+            "The case `title` is the public headline, so it should read like a "
+            "good news headline — not a bureaucratic file label. Judge ONLY the "
+            "title string (ignore the slug and the in-body section headings).\n\n"
+            "A strong title:\n"
+            "1. **Leads with the recognisable subject** — the named scheme "
+            "(e.g. `टेरामक्स (TERAMOCS)`), the place / project / institution "
+            "(`भरत ताल`, `औरही गाउँपालिका १५ शैय्या अस्पताल`), or a notable "
+            "person.\n"
+            "2. **Names the offence** (`गैरकानूनी सम्पत्ति आर्जन`, `भ्रष्टाचार`, "
+            "`घोटाला`, `ठेक्का अनियमितता`).\n"
+            "3. Is a **concise headline, not a clause-stuffed sentence**.\n"
+            "4. Uses **clean grammar and spelling**.\n\n"
+            "**Memorability hook — REWARD WHEN WARRANTED, never required.** A clean "
+            "plain title is already full marks when the case has nothing dramatic "
+            "to surface (e.g. a routine procurement case). Reward a hook only when "
+            "the case data actually supports one, and only mark a title "
+            "'could be stronger' (a MILD deduction, never a fail) when the case "
+            "carries a salient fact that the title **buries**. Hooks worth "
+            "surfacing, drawn from the case data:\n"
+            "- a large `bigo` / loss amount in words (`३.२ अर्ब`, `३३ करोड`) — "
+            "e.g. a 3.2-arba procurement case whose title omits the figure is "
+            "weaker than it could be;\n"
+            "- a count of accused (`X समेत १८ जना विरुद्ध`);\n"
+            "- a marquee named scheme or public figure;\n"
+            "- a vivid concrete scale (`१५ शैय्याको अस्पताल`).\n"
+            "A colon split (`<punchy lead>: <detail>`) is a good way to carry a "
+            "hook. Do NOT force a hook onto a small/routine case, and do NOT "
+            "deduct for its absence there.\n\n"
+            "**Accuracy guard.** A number in the title must not contradict the "
+            "case's own figures: if the title states an amount that conflicts with "
+            "`bigo` / the cited loss (allowing for the legitimate loss-vs-bigo "
+            "distinction and rounding), flag it — a catchy but wrong headline is "
+            "worse than a plain one. (Deep figure-vs-source matching stays with "
+            "the bigo rule; here just catch an internally contradictory number.)\n\n"
+            "**Do NOT penalise** the title for carrying the court case number in "
+            "parentheses (e.g. `(081-CR-0095)`) — that is required and enforced "
+            "elsewhere. Score the headline quality, not the presence of the "
+            "number."
+        ),
+        "good_examples": (
+            "`NTC मा ३३ करोडको घोटाला: सुनिल पौडेलसमेत १८ जनाविरुद्ध मुद्दा "
+            "(081-CR-0111)` — subject + amount + count, colon headline. "
+            "`टेरामक्स (TERAMOCS) खरिदमा ३.२ अर्बको भ्रष्टाचार मुद्दा (081-CR-0095)` "
+            "— named scheme with the big number surfaced. "
+            "`औरही गाउँपालिकामा १५ शैय्याको अस्पताल निर्माण ठेक्कामा भ्रष्टाचार "
+            "(081-CR-0121)` — concise, vivid scale hook. "
+            "`पशुपति शवदाह गृह मेसिन खरिद भ्रष्टाचार मुद्दा (081-CR-0129)` — plain "
+            "but clear; full marks because the case has no salient quantifiable to "
+            "surface."
+        ),
+        "bad_examples": (
+            "`CIAA Special Court Case 93-068-0194: विश्वनाथ प्रसाद तेली` — "
+            "bureaucratic file label: court number + a bare name, no subject or "
+            "offence. "
+            "`काठमाडौँ महानगरपालिका तत्कालीन इन्जिनियर (उपनिर्देशक) रामबाबु महतो "
+            "कोईरी उपर गैरकानूनी सम्पत्ति आर्जन भ्रष्टाचार मुद्दा (081-CR-0116)` — "
+            "reads like a clause-stuffed sentence, not a headline. "
+            "A title whose stated amount (`छपन्न करोड` / 56 cr) contradicts the "
+            "case's own `bigo` (~5.67 cr) — catchy but internally inconsistent. "
+            "A title with spelling errors (`बिरुद्द`, `भष्ट्राचार`)."
+        ),
+        "weight": 1.0,
+        "enabled": True,
+        "order": 46,
     },
 ]

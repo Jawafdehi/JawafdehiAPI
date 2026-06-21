@@ -222,6 +222,7 @@ def score_case(
                 variance = jd["variance"]
                 std = jd["std"]
                 issues = jd.get("issues", [])
+                notes = jd.get("notes", [])
                 suggestions = jd.get("suggestions", [])
                 rationale = jd.get("rationale", "")
                 samples = jd.get("samples", [])
@@ -233,6 +234,7 @@ def score_case(
                 # judge failed -> neutral default, explicitly low confidence
                 score, variance, std, samples = 50, 0.0, 0.0, []
                 issues = []
+                notes = []
                 suggestions = []
                 rationale = (
                     f"Judge unavailable: {judge_err}" if judge_err else "Judge not run."
@@ -243,6 +245,7 @@ def score_case(
             if fn is None:
                 continue
             score, issues = fn(case)
+            notes = []
             suggestions = []
             variance, std, samples = 0.0, 0.0, []
             rationale = ""
@@ -272,6 +275,7 @@ def score_case(
                 "std": std,
                 "samples": samples,
                 "issues": issues,
+                "notes": notes,
                 "suggestions": suggestions,
                 "rationale": rationale,
                 "description": r.description,
@@ -317,6 +321,13 @@ def score_case(
         for issue in rr["issues"]:
             gaps.append({"rule": rr["title"], "issue": issue})
 
+    # Informational, non-scoring notes (trivial / cosmetic findings). Surfaced
+    # separately from `gaps` so they are visible without reading as grading gaps.
+    info = []
+    for rr in rule_results:
+        for note in rr["notes"]:
+            info.append({"rule": rr["title"], "note": note})
+
     return {
         "slug": case.get("slug"),
         "title": case.get("title"),
@@ -330,6 +341,7 @@ def score_case(
         "gates_pass": gates_pass,
         "narrative": narrative,
         "gaps": gaps,
+        "info": info,
         "judge_error": judge_err,
         "llm_samples": n_samples,
         "thresholds": {"pass": pass_t, "revise": revise_t},
