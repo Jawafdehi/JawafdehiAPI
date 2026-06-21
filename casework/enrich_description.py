@@ -23,7 +23,6 @@ import argparse
 import json
 import logging
 import os
-import re
 import sys
 import urllib.parse
 from typing import Optional
@@ -34,6 +33,7 @@ import requests
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from casework.common import (
+    TITLE_RULES,
     VERDICT_SUMMARY_TARGET,
     VERDICT_SUMMARY_TRIGGER,
     CaseworkApi,
@@ -44,10 +44,16 @@ from casework.common import (
     content_from_evidence_entry,
     convert_date_tool,
     env_int,
+    format_bigo,
+    format_entities,
+    format_list,
     get_target_cases,
     print_summary,
     setup_logging,
+    special_court_number,
     summarize_verdict,
+    title_has_headcount,
+    validate_title,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,10 +66,6 @@ DESCRIPTION_SOURCE_TYPES = (
     "COURT_FILING_OTHER",
 )
 
-# A court case number like 080-CR-0047 / 081-WO-1234. Case-insensitive to match
-# the review gate's detector. The negative lookbehind/ahead anchor the token.
-COURT_RE = re.compile(r"(?<![\dA-Za-z])\d{2,3}-[A-Za-z]{1,3}-\d{3,4}(?![\dA-Za-z])")
-
 # Source-budget (characters) fed to the description prompt.
 # Env-tunable so the runner can widen them for big-context models (claude 1M):
 # raise the budget + verdict trigger to feed full court orders instead of an
@@ -71,7 +73,8 @@ COURT_RE = re.compile(r"(?<![\dA-Za-z])\d{2,3}-[A-Za-z]{1,3}-\d{3,4}(?![\dA-Za-z
 # live in casework.common (shared with enrich_timeline).
 SOURCE_TEXT_BUDGET = env_int("CASEWORK_SOURCE_TEXT_BUDGET", 60000)
 
-EXTRACTION_SYSTEM_PROMPT = """\
+EXTRACTION_SYSTEM_PROMPT = (
+    """\
 You are a Nepali legal analyst writing the public case summary (description) for \
 Jawafdehi, a civic accountability archive of Nepal's anti-corruption cases. The \
 case was investigated by the CIAA (अख्तियार दुरुपयोग अनुसन्धान आयोग) and tried at \
@@ -132,29 +135,15 @@ QUALITY RULES:
 - This is an official public record drawn from government/court documents; do not
   soften, editorialise, or add commentary. Neutral, factual tone only.
 
-TITLE RULES (when asked to regenerate the title):
-- Produce a concise, engaging, SEARCHABLE Nepali headline that names the real
-  subject of the case — the institution/scheme and/or the principal accused, and
-  ideally the बिगो amount or the nature of the offence.
-- Vary the construction across cases; do not use a rigid template. Be catchy but
-  strictly factual.
-- NEVER put a defendant HEADCOUNT in the title. Forbidden: any "<संख्या> जना",
-  "समेत X जना", "X प्रतिवादी(माथि/मा)", "तीन/चार… अध्यक्षसहित", or similar count
-  of people. This applies even when there are many defendants.
-    * Many defendants → name the ONE principal accused (or the institution) and
-      use "लगायत" / "सहित" with NO number, e.g.
-      "…सचिव संजय शर्मासहित…", NOT "…सचिवसमेत १२ जना…".
-    * BAD:  "…पदाधिकारीसमेत १२ जना सबैले सफाई" / "…२४९ प्रतिवादीमाथि…"
-      GOOD: "…सामुदायिक वनका पदाधिकारीसहित सबैलाई सफाई" /
-            "…तत्कालीन अध्यक्ष <नाम> लगायतमाथि भ्रष्टाचार अभियोग"
-- The title MUST end with the special-court case number in parentheses, exactly
-  as given to you, e.g. "… (080-CR-0047)".
-- Keep it under ~160 characters.
+"""
+    + TITLE_RULES
+    + """
 
 OUTPUT FORMAT — return ONLY a single JSON object, no markdown fences, no prose:
 {"title": "नेपाली शीर्षक (080-CR-0047)", "description": "### क) …\\n…"}
 When title regeneration is disabled you may omit "title" or set it to null.
 """
+)
 
 EXTRACTION_USER_PROMPT = """\
 Write the Jawafdehi case description for the following CIAA Special Court case.
@@ -303,18 +292,6 @@ def _has_substantial_description(case: dict) -> bool:
     return len((case.get("description") or "").strip()) >= 600
 
 
-def _special_court_number(case: dict) -> Optional[str]:
-    """Extract special-court case number from court_cases."""
-    for ref in case.get("court_cases") or []:
-        if isinstance(ref, str) and ref.startswith("special:"):
-            return ref.split(":", 1)[1]
-    # Fall back to any court number present
-    for ref in case.get("court_cases") or []:
-        if isinstance(ref, str) and ":" in ref:
-            return ref.split(":", 1)[1]
-    return None
-
-
 def _process_case(
     case: dict,
     idx: int,
@@ -381,7 +358,7 @@ def _process_case(
             traceback.print_exc()
         return
 
-    court_number = _special_court_number(detail)
+    court_number = special_court_number(detail)
 
     # Generate description via LLM
     try:
@@ -420,12 +397,12 @@ def _process_case(
         print(f"    | ... ({len(description.splitlines())} lines total)")
 
     # Validate title
-    title_issue = _validate_title(new_title, court_number) if new_title else None
+    title_issue = validate_title(new_title, court_number) if new_title else None
     if title_issue:
         print(f"  TITLE WARNING: {title_issue}")
 
-    title_has_headcount = bool(new_title and _title_has_headcount(new_title))
-    if title_has_headcount:
+    has_headcount = bool(new_title and title_has_headcount(new_title))
+    if has_headcount:
         print(
             "  TITLE WARNING: contains a defendant headcount "
             "(e.g. 'X जना' / 'X प्रतिवादी') — title NOT written."
@@ -438,9 +415,7 @@ def _process_case(
     # Decide what to PATCH
     patch_title = (
         new_title
-        if (
-            not skip_title and new_title and not title_issue and not title_has_headcount
-        )
+        if (not skip_title and new_title and not title_issue and not has_headcount)
         else None
     )
 
@@ -561,40 +536,6 @@ def _assemble_source_text(
     return "\n\n---\n\n".join(parts)
 
 
-def _format_bigo(bigo) -> str:
-    """Render the bigo for the prompt."""
-    try:
-        value = int(bigo)
-    except (TypeError, ValueError):
-        return "(unknown)"
-    return f"{value:,}" if value > 0 else "(unknown)"
-
-
-def _format_list(items) -> str:
-    """Format a list of items for the prompt."""
-    if not items:
-        return "(none provided)"
-    return "\n".join(f"- {x}" for x in items)
-
-
-def _format_entities(entities) -> str:
-    """Format entities for the prompt."""
-    if not entities:
-        return "(none provided)"
-    lines = []
-    for e in entities:
-        if not isinstance(e, dict):
-            continue
-        name = e.get("display_name") or ""
-        etype = e.get("type") or ""
-        notes = e.get("notes") or ""
-        line = f"- [{etype}] {name}"
-        if notes:
-            line += f" — {notes}"
-        lines.append(line)
-    return "\n".join(lines) or "(none provided)"
-
-
 def _generate_description(
     detail: dict,
     court_number: Optional[str],
@@ -608,12 +549,12 @@ def _generate_description(
     prompt = EXTRACTION_USER_PROMPT.format(
         case_title=detail.get("title", ""),
         court_number=court_number or "(unknown)",
-        bigo=_format_bigo(detail.get("bigo")),
+        bigo=format_bigo(detail.get("bigo")),
         court_cases=", ".join(detail.get("court_cases") or []) or "(none)",
         title_instruction=TITLE_OFF if skip_title else TITLE_ON,
-        key_allegations=_format_list(detail.get("key_allegations")),
+        key_allegations=format_list(detail.get("key_allegations")),
         timeline=json.dumps(detail.get("timeline") or [], ensure_ascii=False),
-        entities=_format_entities(detail.get("entities")),
+        entities=format_entities(detail.get("entities")),
         ngm_section=_format_ngm_section(ngm_data),
         source_text=source_text,
     )
@@ -662,34 +603,6 @@ def _parse_response(response_text: str) -> Optional[dict]:
             return {"description": desc, "title": title or None}
     logger.warning("No JSON object with a description found in LLM response")
     return None
-
-
-def _validate_title(title: str, court_number: Optional[str]) -> Optional[str]:
-    """Validate the regenerated title."""
-    nums = {m.group(0).upper() for m in COURT_RE.finditer(title)}
-    if not nums:
-        return "regenerated title has no court case number"
-    if court_number and court_number.upper() not in nums:
-        return (
-            f"title number(s) {sorted(nums)} do not include the special-court "
-            f"number {court_number}"
-        )
-    if court_number:
-        expected = f"({court_number.upper()})"
-        if not title.upper().rstrip().endswith(expected):
-            return (
-                f"title must end with the special-court case number "
-                f"in parentheses, e.g. '… {expected}'"
-            )
-    return None
-
-
-_HEADCOUNT_RE = re.compile(r"[०-९0-9]+\s*(जना|व्यक्ति|प्रतिवादी)")
-
-
-def _title_has_headcount(title: str) -> bool:
-    """Check if title contains a defendant headcount."""
-    return bool(_HEADCOUNT_RE.search(title or ""))
 
 
 if __name__ == "__main__":
