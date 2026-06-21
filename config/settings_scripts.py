@@ -21,6 +21,17 @@ os.environ.setdefault("ALLOWED_HOSTS", "localhost")
 
 from config.settings import *  # noqa: F401,F403,E402
 
+# The review-poller image (Dockerfile.poller) ships LibreOffice, so default the
+# legacy .doc/.docx → soffice conversion ON here, overriding config.settings'
+# OFF default (which targets the lean API image that does not ship soffice).
+# This is the more robust path on the arm64 poller, where pyantiword's bundled
+# x86_64 binary fails with "Exec format error". An operator can still force it
+# off with LIBREOFFICE_DOC_CONVERSION=false; the converter degrades to the
+# antiword fallback automatically if soffice is somehow absent.
+LIBREOFFICE_DOC_CONVERSION = (
+    os.getenv("LIBREOFFICE_DOC_CONVERSION", "true").lower() == "true"
+)
+
 # Force a throwaway in-memory DB and disable routing; scripts never query the ORM.
 DATABASES = {
     "default": {

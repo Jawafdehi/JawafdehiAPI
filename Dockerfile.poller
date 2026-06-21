@@ -25,10 +25,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # uses to turn scanned/legacy PDFs and office docs (.doc/.docx/.xls/.ppt) into a
 # form MarkItDown/likhit can read; without it those sources convert to 0 chars.
 # Writer/Calc/Impress pull in libreoffice-core (which carries soffice).
+# `antiword` is the likhit fallback for legacy `.doc`; the Debian arm64 package
+# replaces pyantiword's bundled x86_64 binary (which fails "Exec format error" on
+# the arm64 poller node) so the fallback still works if LibreOffice is disabled.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libreoffice-writer \
     libreoffice-calc \
     libreoffice-impress \
+    antiword \
     && rm -rf /var/lib/apt/lists/*
 
 # Node.js 22 LTS (claude-code + codex require a recent Node).

@@ -880,10 +880,12 @@ CONVERT_SOURCE_TIMEOUT = int(os.getenv("CONVERT_SOURCE_TIMEOUT", "180"))
 
 # Use LibreOffice (headless) to convert legacy Word .doc / .docx sources to a
 # clean .docx before markdown extraction. LibreOffice handles files the bundled
-# antiword crashes on or rejects, but it is a heavy dependency (~1GB installed)
-# that prod does NOT ship, so this defaults OFF and the converter uses the
-# lighter likhit/antiword path. An operator running the reprocess command on a
-# box that HAS LibreOffice (e.g. a one-off backfill host) can opt in with
+# antiword crashes on or rejects, but it is a heavy dependency (~1GB installed).
+# The lean API image does NOT ship it, so this defaults OFF here and the converter
+# uses the lighter likhit/antiword path. The review-poller image DOES ship it
+# (see Dockerfile.poller), and config.settings_scripts (which the poller boots)
+# overrides this default to ON. An operator running the reprocess command on a
+# box that HAS LibreOffice (e.g. a one-off backfill host) can also opt in with
 # LIBREOFFICE_DOC_CONVERSION=true. When enabled but the binary is absent, the
 # converter degrades to the fallback automatically (no hard dependency).
 LIBREOFFICE_DOC_CONVERSION = (
