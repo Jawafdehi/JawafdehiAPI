@@ -890,6 +890,8 @@ def summarize_verdict(verdict_text: str, invoke_text, usage):
     head-truncated pass drops the फैसला/ठहर, which sits at the end. Returns the
     summary string, or None on total failure.
     """
+    if not verdict_text or not invoke_text:
+        return None
     chunk = max(20000, VERDICT_SUMMARY_CHUNK_CHARS)
     chunks = [verdict_text[i : i + chunk] for i in range(0, len(verdict_text), chunk)]
     n = len(chunks)
