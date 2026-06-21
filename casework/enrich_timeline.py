@@ -30,28 +30,42 @@ import requests
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from casework.common import (
+    VERDICT_SUMMARY_TARGET,
+    VERDICT_SUMMARY_TRIGGER,
     CaseworkApi,
     add_common_args,
     bootstrap,
+    clamp,
     content_from_evidence_entry,
     convert_date_tool,
+    env_int,
     get_target_cases,
     is_valid_iso_date,
     parse_extraction_response,
     print_summary,
     setup_logging,
+    summarize_verdict,
 )
 
 logger = logging.getLogger(__name__)
 
 # Source types (matched as plain strings from the API payload).
-# Ordered by usefulness for factual milestones.
+# Ordered by usefulness for factual milestones. The COURT_ORDER carries the
+# granular pre-complaint factual chain (and the verdict outcome); the charge
+# sheet is richer still but is unavailable for ~all priority cases, so the court
+# order must not be truncated away — see _assemble_source_text.
 MILESTONE_SOURCE_TYPES = (
     "AG_ABHIYOG_PATRA",  # charge sheet — richest factual detail
+    "COURT_ORDER",  # granular incident chain + verdict outcome (fed before PR)
     "CIAA_PRESS_RELEASE",  # complaint / investigation / chargesheet dates
-    "COURT_ORDER",  # verdict
     "COURT_FILING_OTHER",
 )
+
+# Total source characters fed to the extractor, and the extractor's output cap.
+# Env-tunable so the big-context profile (claude 1M) can feed full court orders
+# and emit a long granular timeline instead of a clipped one.
+TIMELINE_SOURCE_CHARS = env_int("CASEWORK_TIMELINE_SOURCE_CHARS", 60000)
+TIMELINE_MAX_TOKENS = env_int("CASEWORK_TIMELINE_MAX_TOKENS", 8000)
 
 EXTRACTION_SYSTEM_PROMPT = """\
 You are a Nepali legal analyst reconstructing the FACTUAL TIMELINE of a \
@@ -65,10 +79,15 @@ Bibaran by case number, so DO NOT emit one entry per hearing. Use the hearing \
 records only to anchor the dates of the milestones below.
 
 MILESTONES TO EXTRACT (include each only when grounded in the sources):
-1. Factual incident period — the span the alleged offence covers, BEFORE the
-   complaint (the CIAA "jaanch awadhi" / जाँच अवधि, or the period the accused
-   held office or the conduct occurred). Emit as a SINGLE entry with both
-   "date" (start) and "end_date" (end).
+1. Initial factual events (THE PRIORITY) — the dated acts that make up the alleged
+   scheme, BEFORE the complaint. Emit EACH distinct dated event as its OWN entry —
+   e.g. for procurement: bid submission, technical-committee formation, bid call,
+   evaluation / parameter-tailoring, award, contract, each payment; for
+   fraud/property: each fraudulent registration or alteration, acquisition,
+   transfer, or payment. This pre-complaint chain is exactly what reviewers find
+   missing, so extract it in detail from the charge sheet / court order. Emit a
+   SINGLE span entry (with "date" + "end_date") ONLY when the sources give no
+   granular dates — e.g. just a जाँच अवधि or a period the accused held office.
 2. Complaint (उजुरी निवेदन) — when the complaint was registered at the CIAA.
 3. CIAA investigation (अनुसन्धान) — when the CIAA began/decided to investigate,
    if distinct from the complaint.
@@ -110,6 +129,19 @@ QUALITY RULES:
   events, amounts, or outcomes.
 - Omit a milestone entirely if the sources do not support it. Fewer, accurate
   entries are better than padded ones.
+- RESTRAINT — do NOT over-granularise. Suppress routine repetition: no per-hearing
+  पेशी, no per-day evaluation/committee meeting, no per-tranche payment row, no
+  per-order धरौटी/थुनछेक entry. MERGE such repetitive series into ONE span entry
+  (e.g. a single "थुनछेक/धरौटी आदेशहरू" span). Keep milestone 1 to the events that
+  move the scheme forward, not every clerical step.
+- If the Special Court ACQUITTED (सफाई), the pre-complaint factual events are
+  ALLEGATIONS, not established facts — phrase their titles/descriptions as alleged
+  (e.g. end with "...गरेको आरोप"), and attribute acts only to the accused the charge
+  sheet names (not co-defendants from a linked मुद्दा).
+- Trust "date_bs" EXACTLY as written in the source; convert it with convert_date. If
+  an AD gloss in the source disagrees with the BS, keep the BS and use the tool's AD.
+- The Special Court verdict entry (milestone 7) MUST state the outcome
+  (दोषी / सफाई / आंशिक), per defendant or overall — never omit it.
 - Do NOT emit routine hearing/पेशी entries — synthesize them into milestone 7.
 """
 
@@ -123,8 +155,9 @@ Instructions:
   support.
 - Every entry needs "date" (AD YYYY-MM-DD), "date_bs" (BS YYYY-MM-DD), and a
   Nepali "title".
-- Express the factual incident period (milestone 1) as ONE entry with "date" +
-  "end_date" (and "date_bs" + "end_date_bs").
+- Break milestone 1 into MULTIPLE entries — one per distinct dated initial-fact
+  event the sources give (see the system prompt). Use a single "date" + "end_date"
+  span (with "date_bs" + "end_date_bs") ONLY when no granular dates exist.
 - Convert every date with the convert_date tool — do not convert dates yourself.
   Source dates are BS (use bs_to_ad); NGM dates are AD (use ad_to_bs).
 - Use the NGM hearing data only to anchor milestone dates (chargesheet
@@ -165,7 +198,7 @@ def main():
         sys.exit(1)
 
     # Import after bootstrap
-    from llm.invoke import invoke_with_tools
+    from llm.invoke import invoke_text, invoke_with_tools
     from llm.usage import UsageAccumulator, render_usage_table
 
     # Validate config
@@ -213,6 +246,7 @@ def main():
                 dry_run=args.dry_run,
                 api=api,
                 usage=usage,
+                invoke_text=invoke_text,
                 invoke_with_tools=invoke_with_tools,
                 stats=stats,
             )
@@ -242,6 +276,7 @@ def _process_case(
     dry_run: bool,
     api: CaseworkApi,
     usage,
+    invoke_text,
     invoke_with_tools,
     stats: dict,
 ):
@@ -258,8 +293,12 @@ def _process_case(
         detail = case
         print("  (using summary instead of detail)")
 
-    # Get source content
-    source_text = _get_source_content(detail)
+    # Assemble source content (oversized court orders summarised; budgeted so the
+    # court order's granular incident chain isn't truncated away).
+    source_parts = _get_source_parts(detail)
+    source_text = (
+        _assemble_source_text(source_parts, invoke_text, usage) if source_parts else ""
+    )
     ngm_data = _get_ngm_data(detail, api)
 
     if not source_text and not ngm_data:
@@ -267,8 +306,12 @@ def _process_case(
         print("  No source content found — skipping")
         return
 
-    if source_text:
-        print(f"  Source content: {len(source_text)} chars")
+    if source_parts:
+        print(
+            "  Sources: "
+            + ", ".join(f"{s}({len(t):,})" for s, t in source_parts)
+            + f" | assembled {len(source_text):,} chars"
+        )
     if ngm_data:
         hearings = ngm_data.get("hearings") or []
         print(f"  NGM data: {len(hearings)} hearing(s)")
@@ -320,13 +363,12 @@ def _process_case(
         print(f"  Failed to PATCH timeline: {exc}")
 
 
-def _get_source_content(case: dict) -> Optional[str]:
-    """Assemble source document text for the milestone-relevant source types."""
+def _get_source_parts(case: dict) -> list[tuple[str, str]]:
+    """Return [(source_type, text)] for milestone-relevant sources, priority order."""
     evidence = case.get("evidence") or []
     if not evidence:
-        return None
+        return []
 
-    # Group evidence by source_type to honour milestone priority
     by_type: dict[str, list[dict]] = {}
     for entry in evidence:
         if not isinstance(entry, dict):
@@ -334,19 +376,55 @@ def _get_source_content(case: dict) -> Optional[str]:
         source = entry.get("source")
         if not isinstance(source, dict):
             continue
-        stype = source.get("source_type")
-        by_type.setdefault(stype, []).append(entry)
+        by_type.setdefault(source.get("source_type"), []).append(entry)
 
-    content_parts: list[str] = []
+    parts: list[tuple[str, str]] = []
     for stype in MILESTONE_SOURCE_TYPES:
         for entry in by_type.get(stype, []):
             text = content_from_evidence_entry(entry)
             if text:
-                content_parts.append(text)
+                parts.append((stype, text))
+    return parts
 
-    if not content_parts:
-        return None
-    return "\n\n---\n\n".join(content_parts)
+
+def _assemble_source_text(source_parts, invoke_text, usage) -> str:
+    """Build the source block within TIMELINE_SOURCE_CHARS.
+
+    An oversized COURT_ORDER verdict is summarised first (the summariser is told to
+    keep every dated event) so a long judgment's tail — the ठहर/outcome and the late
+    factual findings — isn't truncated away. The charge sheet and press release pass
+    through whole. Sections are added in milestone-priority order (court order before
+    the press release) so the granular incident chain is never crowded out.
+    """
+    prepared: list[tuple[str, str]] = []
+    # Summarise a court order whenever it won't fit whole — not only past the
+    # verdict trigger — so a judgment in the (budget, trigger) band gets a
+    # date-preserving digest instead of a head-clamp that drops its tail/verdict.
+    summary_threshold = min(VERDICT_SUMMARY_TRIGGER, TIMELINE_SOURCE_CHARS)
+    for stype, text in source_parts:
+        if stype == "COURT_ORDER" and len(text) > summary_threshold:
+            summary = summarize_verdict(text, invoke_text, usage)
+            if summary:
+                logger.info(
+                    "Verdict summarised: %d -> %d chars", len(text), len(summary)
+                )
+                prepared.append(("COURT_ORDER (फैसला सारांश)", summary))
+                continue
+            # Summary failed — fall back to a truncated head.
+            prepared.append((stype, text[:VERDICT_SUMMARY_TARGET]))
+            continue
+        prepared.append((stype, text))
+
+    parts: list[str] = []
+    remaining = TIMELINE_SOURCE_CHARS
+    for label, text in prepared:
+        if remaining <= 0:
+            logger.warning("Timeline source budget spent; dropped a %s source", label)
+            break
+        chunk = clamp(text, remaining, label)
+        parts.append(f"[{label}]\n{chunk}")
+        remaining -= len(chunk)
+    return "\n\n---\n\n".join(parts)
 
 
 def _get_ngm_data(case: dict, api: CaseworkApi) -> Optional[dict]:
@@ -424,10 +502,11 @@ def _extract_timeline(
     ngm_data: Optional[dict] = None,
 ) -> Optional[list[dict]]:
     """Call the LLM (with the convert_date tool) to extract timeline entries."""
+    # source_text is already budgeted by _assemble_source_text (TIMELINE_SOURCE_CHARS).
     prompt = EXTRACTION_USER_PROMPT.format(
         case_title=case_title,
         ngm_section=_format_ngm_section(ngm_data),
-        source_text=source_text[:40000],
+        source_text=source_text,
     )
 
     # Call LLM with tool support
@@ -435,7 +514,7 @@ def _extract_timeline(
         system=EXTRACTION_SYSTEM_PROMPT,
         content=prompt,
         tools=[convert_date_tool()],
-        max_tokens=4000,
+        max_tokens=TIMELINE_MAX_TOKENS,
         tier="premium",
         usage=usage,
         max_iterations=30,
