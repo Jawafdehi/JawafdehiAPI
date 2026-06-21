@@ -535,6 +535,9 @@ def get_target_cases(api, args, skip_field):
     """Yield the case dicts to enrich, honoring --slug / --court-case /
     --fiscal-year / --limit / --force. `skip_field` is the case field that, when
     already populated, skips the case unless --force (e.g. 'timeline', 'tags').
+    Pass ``skip_field=None`` to select every matching case (no field-based skip),
+    for enrichers whose 'already done' check isn't a single field's presence
+    (e.g. the title enricher, which decides on title validity per-case).
 
     Cases are selected by slug or court case number (e.g. 081-CR-0121); there is
     no internal case_id selector. --slug and --court-case fetch the case in ANY
@@ -831,6 +834,19 @@ def title_has_headcount(title) -> bool:
     return bool(_HEADCOUNT_RE.search(title or ""))
 
 
+def title_is_acceptable(title, court_number) -> bool:
+    """True when a title satisfies the full public contract: it ends with its
+    special-court number in parentheses AND carries no defendant headcount. The
+    shared predicate behind both the 'current title already good, skip it'
+    idempotency check and the 'accept this regenerated title' write gate."""
+    return (
+        bool(title)
+        and bool(court_number)
+        and validate_title(title, court_number) is None
+        and not title_has_headcount(title)
+    )
+
+
 def format_bigo(bigo) -> str:
     """Render the बिगो for a prompt: thousands-separated NPR, or '(unknown)'."""
     try:
@@ -897,9 +913,12 @@ def parse_title(response_text):
             if title:
                 return title
 
-    # No JSON object — accept a bare single-line title (but not multi-line prose,
-    # which signals the model didn't follow the contract).
-    if text and "{" not in text and "\n" not in text:
+    # No JSON object — accept a bare single-line title ONLY when it looks like a
+    # title: one line, no stray brace, and carrying a court-case number (every
+    # valid headline ends in one). This keeps the fallback for frugal models that
+    # emit the bare title while rejecting prose/chatter the model wasn't asked
+    # for (e.g. a confirmation sentence), which must never be PATCHed as a title.
+    if text and "{" not in text and "\n" not in text and COURT_RE.search(text):
         return text
     return None
 

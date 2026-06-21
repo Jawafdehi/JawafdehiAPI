@@ -53,6 +53,7 @@ from casework.common import (
     setup_logging,
     special_court_number,
     title_has_headcount,
+    title_is_acceptable,
     validate_title,
 )
 
@@ -61,12 +62,6 @@ logger = logging.getLogger(__name__)
 # A snippet of the existing description is plenty of context for a headline and
 # keeps this single, no-source-fetch call token-frugal.
 DESCRIPTION_SNIPPET_BUDGET = 2000
-
-# get_target_cases skips a case when summary[skip_field] is truthy, but
-# "title already valid" is not a case field — so select on a key cases never
-# carry (nothing is skipped at selection) and do the already-valid idempotency
-# check per-case in _process_case instead.
-_NO_SKIP_FIELD = "__title_always_consider__"
 
 SYSTEM_PROMPT = (
     """\
@@ -147,7 +142,9 @@ def main():
 
     usage = UsageAccumulator()
 
-    cases = list(get_target_cases(api, args, skip_field=_NO_SKIP_FIELD))
+    # skip_field=None: select every matching case (no field-presence skip); the
+    # "already valid title" idempotency check happens per-case in _process_case.
+    cases = list(get_target_cases(api, args, skip_field=None))
     total = len(cases)
     if total == 0:
         print("No CIAA draft cases to process.", file=sys.stderr)
@@ -197,18 +194,6 @@ def main():
         print(render_usage_table(usage.as_dict()["by_provider"], title="title usage"))
 
 
-def _title_is_valid(title, court_number) -> bool:
-    """A title is 'already valid' when it ends with its special-court number in
-    parens AND carries no defendant headcount — the contract the review gate
-    enforces. Such titles are skipped unless --force."""
-    return (
-        bool(title)
-        and bool(court_number)
-        and validate_title(title, court_number) is None
-        and not title_has_headcount(title)
-    )
-
-
 def _process_case(case, idx, total, dry_run, force, api, usage, invoke_text, stats):
     """Process one case: fetch detail, regenerate the title, validate, PATCH."""
     stats["cases_processed"] += 1
@@ -225,7 +210,7 @@ def _process_case(case, idx, total, dry_run, force, api, usage, invoke_text, sta
     current_title = detail.get("title", current_title)
     court_number = special_court_number(detail)
 
-    if not force and _title_is_valid(current_title, court_number):
+    if not force and title_is_acceptable(current_title, court_number):
         stats["cases_processed"] -= 1
         stats["cases_already_valid"] += 1
         print("  Current title already valid — skipping (use --force)")
