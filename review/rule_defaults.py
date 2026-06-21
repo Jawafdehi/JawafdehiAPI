@@ -184,81 +184,6 @@ DEFAULT_RULES = [
         "enabled": True,
         "order": 45,
     },
-    # ---------------- Title quality (LLM) ----------------
-    {
-        "key": "title_quality",
-        "title": "Title is a clear, strong headline",
-        "category": "Completeness",
-        "kind": "llm",
-        "detector": "",
-        "condition_text": "Always active (judges the case `title` only, not section headings).",
-        "applies_to": ALL,
-        "description": (
-            "The case `title` is the public headline, so it should read like a "
-            "good news headline — not a bureaucratic file label. Judge ONLY the "
-            "title string (ignore the slug and the in-body section headings).\n\n"
-            "A strong title:\n"
-            "1. **Leads with the recognisable subject** — the named scheme "
-            "(e.g. `टेरामक्स (TERAMOCS)`), the place / project / institution "
-            "(`भरत ताल`, `औरही गाउँपालिका १५ शैय्या अस्पताल`), or a notable "
-            "person.\n"
-            "2. **Names the offence** (`गैरकानूनी सम्पत्ति आर्जन`, `भ्रष्टाचार`, "
-            "`घोटाला`, `ठेक्का अनियमितता`).\n"
-            "3. Is a **concise headline, not a clause-stuffed sentence**.\n"
-            "4. Uses **clean grammar and spelling**.\n\n"
-            "**Memorability hook — REWARD WHEN WARRANTED, never required.** A clean "
-            "plain title is already full marks when the case has nothing dramatic "
-            "to surface (e.g. a routine procurement case). Reward a hook only when "
-            "the case data actually supports one, and only mark a title "
-            "'could be stronger' (a MILD deduction, never a fail) when the case "
-            "carries a salient fact that the title **buries**. Hooks worth "
-            "surfacing, drawn from the case data:\n"
-            "- a large `bigo` / loss amount in words (`३.२ अर्ब`, `३३ करोड`) — "
-            "e.g. a 3.2-arba procurement case whose title omits the figure is "
-            "weaker than it could be;\n"
-            "- a count of accused (`X समेत १८ जना विरुद्ध`);\n"
-            "- a marquee named scheme or public figure;\n"
-            "- a vivid concrete scale (`१५ शैय्याको अस्पताल`).\n"
-            "A colon split (`<punchy lead>: <detail>`) is a good way to carry a "
-            "hook. Do NOT force a hook onto a small/routine case, and do NOT "
-            "deduct for its absence there.\n\n"
-            "**Accuracy guard.** A number in the title must not contradict the "
-            "case's own figures: if the title states an amount that conflicts with "
-            "`bigo` / the cited loss (allowing for the legitimate loss-vs-bigo "
-            "distinction and rounding), flag it — a catchy but wrong headline is "
-            "worse than a plain one. (Deep figure-vs-source matching stays with "
-            "the bigo rule; here just catch an internally contradictory number.)\n\n"
-            "**Do NOT penalise** the title for carrying the court case number in "
-            "parentheses (e.g. `(081-CR-0095)`) — that is required and enforced "
-            "elsewhere. Score the headline quality, not the presence of the "
-            "number."
-        ),
-        "good_examples": (
-            "`NTC मा ३३ करोडको घोटाला: सुनिल पौडेलसमेत १८ जनाविरुद्ध मुद्दा "
-            "(081-CR-0111)` — subject + amount + count, colon headline. "
-            "`टेरामक्स (TERAMOCS) खरिदमा ३.२ अर्बको भ्रष्टाचार मुद्दा (081-CR-0095)` "
-            "— named scheme with the big number surfaced. "
-            "`औरही गाउँपालिकामा १५ शैय्याको अस्पताल निर्माण ठेक्कामा भ्रष्टाचार "
-            "(081-CR-0121)` — concise, vivid scale hook. "
-            "`पशुपति शवदाह गृह मेसिन खरिद भ्रष्टाचार मुद्दा (081-CR-0129)` — plain "
-            "but clear; full marks because the case has no salient quantifiable to "
-            "surface."
-        ),
-        "bad_examples": (
-            "`CIAA Special Court Case 93-068-0194: विश्वनाथ प्रसाद तेली` — "
-            "bureaucratic file label: court number + a bare name, no subject or "
-            "offence. "
-            "`काठमाडौँ महानगरपालिका तत्कालीन इन्जिनियर (उपनिर्देशक) रामबाबु महतो "
-            "कोईरी उपर गैरकानूनी सम्पत्ति आर्जन भ्रष्टाचार मुद्दा (081-CR-0116)` — "
-            "reads like a clause-stuffed sentence, not a headline. "
-            "A title whose stated amount (`छपन्न करोड` / 56 cr) contradicts the "
-            "case's own `bigo` (~5.67 cr) — catchy but internally inconsistent. "
-            "A title with spelling errors (`बिरुद्द`, `भष्ट्राचार`)."
-        ),
-        "weight": 1.0,
-        "enabled": True,
-        "order": 46,
-    },
     # ---------------- Tonal neutrality (LLM) ----------------
     {
         "key": "tonal_neutrality",
@@ -800,5 +725,84 @@ DEFAULT_RULES = [
         "weight": 0.6,
         "enabled": True,
         "order": 100,
+    },
+    # ---------------- Title quality (LLM) ----------------
+    # NOTE: appended at the END of the list on purpose. CodeRule.id is the
+    # definition index (+1), so inserting mid-list would renumber every later
+    # rule's id. `order: 46` keeps it in its intended DISPLAY slot (right after
+    # the slug rule) without shifting any existing ids.
+    {
+        "key": "title_quality",
+        "title": "Title is a clear, strong headline",
+        "category": "Completeness",
+        "kind": "llm",
+        "detector": "",
+        "condition_text": "Always active (judges the case `title` only, not section headings).",
+        "applies_to": ALL,
+        "description": (
+            "The case `title` is the public headline, so it should read like a "
+            "good news headline — not a bureaucratic file label. Judge ONLY the "
+            "title string (ignore the slug and the in-body section headings).\n\n"
+            "A strong title:\n"
+            "1. **Leads with the recognisable subject** — the named scheme "
+            "(e.g. `टेरामक्स (TERAMOCS)`), the place / project / institution "
+            "(`भरत ताल`, `औरही गाउँपालिका १५ शैय्या अस्पताल`), or a notable "
+            "person.\n"
+            "2. **Names the offence** (`गैरकानूनी सम्पत्ति आर्जन`, `भ्रष्टाचार`, "
+            "`घोटाला`, `ठेक्का अनियमितता`).\n"
+            "3. Is a **concise headline, not a clause-stuffed sentence**.\n"
+            "4. Uses **clean grammar and spelling**.\n\n"
+            "**Memorability hook — REWARD WHEN WARRANTED, never required.** A clean "
+            "plain title is already full marks when the case has nothing dramatic "
+            "to surface (e.g. a routine procurement case). Reward a hook only when "
+            "the case data actually supports one, and only mark a title "
+            "'could be stronger' (a MILD deduction, never a fail) when the case "
+            "carries a salient fact that the title **buries**. Hooks worth "
+            "surfacing, drawn from the case data:\n"
+            "- a large `bigo` / loss amount in words (`३.२ अर्ब`, `३३ करोड`) — "
+            "e.g. a 3.2-arba procurement case whose title omits the figure is "
+            "weaker than it could be;\n"
+            "- a count of accused (`X समेत १८ जना विरुद्ध`);\n"
+            "- a marquee named scheme or public figure;\n"
+            "- a vivid concrete scale (`१५ शैय्याको अस्पताल`).\n"
+            "A colon split (`<punchy lead>: <detail>`) is a good way to carry a "
+            "hook. Do NOT force a hook onto a small/routine case, and do NOT "
+            "deduct for its absence there.\n\n"
+            "**Accuracy guard.** A number in the title must not contradict the "
+            "case's own figures: if the title states an amount that conflicts with "
+            "`bigo` / the cited loss (allowing for the legitimate loss-vs-bigo "
+            "distinction and rounding), flag it — a catchy but wrong headline is "
+            "worse than a plain one. (Deep figure-vs-source matching stays with "
+            "the bigo rule; here just catch an internally contradictory number.)\n\n"
+            "**Do NOT penalise** the title for carrying the court case number in "
+            "parentheses (e.g. `(081-CR-0095)`) — that is required and enforced "
+            "elsewhere. Score the headline quality, not the presence of the "
+            "number."
+        ),
+        "good_examples": (
+            "`NTC मा ३३ करोडको घोटाला: सुनिल पौडेलसमेत १८ जनाविरुद्ध मुद्दा "
+            "(081-CR-0111)` — subject + amount + count, colon headline. "
+            "`टेरामक्स (TERAMOCS) खरिदमा ३.२ अर्बको भ्रष्टाचार मुद्दा (081-CR-0095)` "
+            "— named scheme with the big number surfaced. "
+            "`औरही गाउँपालिकामा १५ शैय्याको अस्पताल निर्माण ठेक्कामा भ्रष्टाचार "
+            "(081-CR-0121)` — concise, vivid scale hook. "
+            "`पशुपति शवदाह गृह मेसिन खरिद भ्रष्टाचार मुद्दा (081-CR-0129)` — plain "
+            "but clear; full marks because the case has no salient quantifiable to "
+            "surface."
+        ),
+        "bad_examples": (
+            "`CIAA Special Court Case 93-068-0194: विश्वनाथ प्रसाद तेली` — "
+            "bureaucratic file label: court number + a bare name, no subject or "
+            "offence. "
+            "`काठमाडौँ महानगरपालिका तत्कालीन इन्जिनियर (उपनिर्देशक) रामबाबु महतो "
+            "कोईरी उपर गैरकानूनी सम्पत्ति आर्जन भ्रष्टाचार मुद्दा (081-CR-0116)` — "
+            "reads like a clause-stuffed sentence, not a headline. "
+            "A title whose stated amount (`छपन्न करोड` / 56 cr) contradicts the "
+            "case's own `bigo` (~5.67 cr) — catchy but internally inconsistent. "
+            "A title with spelling errors (`बिरुद्द`, `भष्ट्राचार`)."
+        ),
+        "weight": 1.0,
+        "enabled": True,
+        "order": 46,
     },
 ]

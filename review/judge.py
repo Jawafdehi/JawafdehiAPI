@@ -193,6 +193,20 @@ def _chunk(seq, size):
         yield seq[i : i + size]
 
 
+def _as_str_list(val):
+    """Coerce an LLM-returned field to a list[str].
+
+    The judge sometimes returns a bare string (or a list with non-string items)
+    where a list of strings is expected; normalise so callers that iterate the
+    value don't walk a string character-by-character.
+    """
+    if isinstance(val, str):
+        return [val.strip()] if val.strip() else []
+    if isinstance(val, list):
+        return [str(x).strip() for x in val if str(x).strip()]
+    return []
+
+
 def _build_narrative_prompt(case_summary, source_excerpts, case_type_label):
     return f"""Give a 2-3 sentence overall editorial assessment (narrative) of this
 Jawafdehi case quality. Reply with JSON only.
@@ -380,12 +394,15 @@ def judge_rules(
             samples[key].append(int(round(sc)))
         if parsed.get("rationale"):
             last_rationale[key] = parsed["rationale"]
+        # These come straight from LLM output, which sometimes returns a bare
+        # string instead of a list; coerce so downstream iteration never walks a
+        # string character-by-character.
         if parsed.get("issues"):
-            last_issues[key] = parsed["issues"]
+            last_issues[key] = _as_str_list(parsed["issues"])
         if parsed.get("notes"):
-            last_notes[key] = parsed["notes"]
+            last_notes[key] = _as_str_list(parsed["notes"])
         if parsed.get("suggestions"):
-            last_suggestions[key] = parsed["suggestions"]
+            last_suggestions[key] = _as_str_list(parsed["suggestions"])
 
     def _run(task):
         kind = task[0]
