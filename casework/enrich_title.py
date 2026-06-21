@@ -17,6 +17,11 @@ pass ``--dry-run`` to preview. A title that already passes validation (ends with
 its special-court number in parentheses, carries no headcount) is skipped unless
 ``--force``.
 
+The LLM call goes through the llm package, defaulting to the local ``claude -p``
+subscription harness (provider ``claude_cli``) so the headline is written by a
+real Opus — the shared llm-proxy relabels opus->deepseek and can't. Override with
+``--provider`` / ``--model`` (e.g. ``--provider proxy --model <id>``).
+
 Usage:
     python casework/enrich_title.py --dry-run
     python casework/enrich_title.py --slug case-0123
@@ -103,7 +108,7 @@ Return ONLY the JSON object described in the system prompt.
 """
 
 
-def main():
+def _build_parser():
     ap = argparse.ArgumentParser(
         description=(
             "Regenerate CIAA Special Court case titles via LLM "
@@ -112,7 +117,16 @@ def main():
         epilog="Reads and writes entirely over HTTP via JAWAFDEHI_API_TOKEN.",
     )
     add_common_args(ap)
-    args = ap.parse_args()
+    # Title generation must run on a real Opus via the local `claude -p`
+    # subscription harness (the llm package's claude_cli provider): the shared
+    # llm-proxy relabels opus->deepseek, so it can't produce a real Opus headline.
+    # Operators can still override with --provider / --model.
+    ap.set_defaults(provider="claude_cli")
+    return ap
+
+
+def main():
+    args = _build_parser().parse_args()
 
     setup_logging(args.verbose)
 

@@ -117,6 +117,21 @@ def test_system_prompt_embeds_shared_rules():
     assert '{"title"' in et.SYSTEM_PROMPT
 
 
+# ── provider default ─────────────────────────────────────────────────────────
+
+
+def test_defaults_to_claude_cli_provider():
+    # Titles must be written by a real Opus via `claude -p`, not the
+    # opus->deepseek-relabelling proxy.
+    args = et._build_parser().parse_args([])
+    assert args.provider == "claude_cli"
+
+
+def test_provider_is_overridable():
+    args = et._build_parser().parse_args(["--provider", "proxy"])
+    assert args.provider == "proxy"
+
+
 # ── per-case pipeline (fake API + fake LLM) ──────────────────────────────────
 
 
