@@ -107,19 +107,29 @@ Markdown table (क्र.सं | प्रतिवादी | भूमिक
 
 ### ग) विशेष अदालतको फैसलाको सार
 The verdict: the judgment date, the bench (इजलास / न्यायाधीशहरू), and the outcome
-for each defendant (दोषी / सफाई). Briefly state the court's reasoning and any
-legal principle (नजिर) it established.
+for each defendant (दोषी / सफाई), with the बिगो/sentence and the court's key
+reasoning. Do NOT include procedural or registry orders — the appeal म्याद
+(e.g. "३५ दिनभित्र पुनरावेदन गर्न"), धरौटी सदर/फिर्ता, लगत कायम, and similar routine
+"अन्य आदेश" are court-procedure, not the substantive फैसला; leave them out. A
+विशेष अदालत ruling does NOT set precedent, so do not call its reasoning a नजिर here.
 
 ### घ) पुनरावेदनको सार
-Only if the sources or a supreme-court reference show an appeal: the grounds and
-legal basis of the appeal and who filed it.
+Only if the sources or a supreme-court reference show an appeal was ACTUALLY
+filed: the grounds and legal basis of the appeal and who filed it. The routine
+appeal म्याद granted in the verdict (e.g. "३५ दिनभित्र पुनरावेदन गर्न जाने") is NOT
+an appeal — do not emit this section for it; OMIT the section entirely unless an
+appeal was really lodged.
 
 ### ङ) सर्वोच्च अदालतको फैसलाको सार
 Only if a Supreme Court judgment is in the sources: date, bench, and final
 outcome.
 
 ### च) नजिरको सार
-Only if the judgment establishes a precedent: state the key principle only.
+Include ONLY when a सर्वोच्च अदालत (Supreme Court) judgment in the sources
+establishes a legal principle — ideally one published in the Nepal Kanoon Patrika
+(नेपाल कानून पत्रिका). A विशेष अदालत (Special Court) decision is NEVER a precedent;
+if no qualifying Supreme Court principle is in the sources, OMIT this section
+entirely. State only the key principle.
 
 QUALITY RULES:
 - Ground every sentence in the provided sources/case data. Do NOT fabricate
