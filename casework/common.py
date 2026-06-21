@@ -1039,7 +1039,8 @@ Capture ONLY what the judgment states — never infer or invent:
 - नि.नं. / मुद्दा नं. and the parties (वादी / प्रतिवादीहरू).
 - For EACH defendant: the outcome — दोषी (convicted, with कैद/जरिवाना/बिगो असुल) or
   सफाई (acquitted) — and the court's key reasoning for it.
-- Any legal principle / नजिर the court established.
+- Any legal principle the court applied or relied on, noting whether it cites a
+  Supreme Court precedent (नजिर) — a Special Court ruling does not itself set one.
 - The disputed बिगो the court accepted or rejected, and why.
 - Every concrete DATE the judgment cites for a factual event (the alleged conduct,
   bids, committee decisions, payments, registrations, complaint, chargesheet) —
