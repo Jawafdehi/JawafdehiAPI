@@ -7,13 +7,13 @@ User = get_user_model()
 
 
 class Command(BaseCommand):
-    help = "Create or update the chat-jawafdehi-org service account"
+    help = "Create or update the sa-chat-jawafdehi-org service account"
 
     def handle(self, *args, **options):
         user, created = User.objects.get_or_create(
-            username="chat-jawafdehi-org",
+            username="sa-chat-jawafdehi-org",
             defaults={
-                "email": "chat-jawafdehi-org@jawafdehi.org",
+                "email": "sa-chat-jawafdehi-org@jawafdehi.org",
                 "is_active": True,
             },
         )
