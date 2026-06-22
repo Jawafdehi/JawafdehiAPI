@@ -3,6 +3,7 @@ import uuid
 import structlog
 from auditlog.middleware import AuditlogMiddleware as _BaseAuditlogMiddleware
 from django.conf import settings
+from django.utils.cache import patch_cache_control
 from django.utils.functional import SimpleLazyObject
 
 from config.db_router import force_primary_reads
@@ -61,6 +62,75 @@ class RequestIdMiddleware:
         response[REQUEST_ID_HEADER] = request_id
         structlog.contextvars.unbind_contextvars("request_id")
 
+        return response
+
+
+def _strip_vary_cookie(response):
+    """Remove the ``Cookie`` token from a response's ``Vary`` header.
+
+    DRF ``SessionAuthentication`` makes Django add ``Vary: Cookie``, which marks
+    the response uncacheable by shared caches. We drop only ``Cookie`` and keep
+    any other tokens (``Origin``, ``Accept-Encoding``, …); there is no stdlib
+    helper that removes a Vary token, only one that adds.
+    """
+    vary = response.headers.get("Vary")
+    if not vary:
+        return
+    kept = [tok.strip() for tok in vary.split(",") if tok.strip().lower() != "cookie"]
+    if kept:
+        response.headers["Vary"] = ", ".join(kept)
+    else:
+        del response.headers["Vary"]
+
+
+class PublicCacheHeadersMiddleware:
+    """Make anonymous public GET responses edge-cacheable.
+
+    For an anonymous (no ``Authorization`` header, no session cookie) GET/HEAD
+    request on an allowlisted path, emit ``Cache-Control: public, s-maxage=…``
+    and strip ``Cookie`` from ``Vary`` so Cloudflare can cache the response at
+    the edge.
+
+    The anonymous gate is the safety boundary: anonymous and staff callers see
+    different data from the same URL (e.g. only staff see DRAFT cases — see
+    ``CaseViewSet.get_queryset``), so authenticated responses must never be made
+    cacheable. Responses that already carry a ``Set-Cookie`` are left alone since
+    a shared cache cannot cache them anyway.
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+        self.enabled = getattr(settings, "PUBLIC_CACHE_ENABLED", True)
+        self.smaxage = getattr(settings, "PUBLIC_CACHE_SMAXAGE", 300)
+        self.maxage = getattr(settings, "PUBLIC_CACHE_MAXAGE", 300)
+        self.paths = tuple(getattr(settings, "PUBLIC_CACHE_PATHS", ()))
+
+    def _is_anonymous_public_get(self, request):
+        if request.method not in ("GET", "HEAD"):
+            return False
+        if request.META.get("HTTP_AUTHORIZATION"):
+            return False
+        if settings.SESSION_COOKIE_NAME in request.COOKIES:
+            return False
+        return request.path.startswith(self.paths)
+
+    def __call__(self, request):
+        response = self.get_response(request)
+        if not self.enabled or not self.paths:
+            return response
+        # Django keeps cookies in response.cookies until render, so a Set-Cookie
+        # header may not exist yet — check both. A shared cache can't cache a
+        # response that carries a cookie.
+        if response.status_code != 200:
+            return response
+        if response.cookies or response.has_header("Set-Cookie"):
+            return response
+        if not self._is_anonymous_public_get(request):
+            return response
+        patch_cache_control(
+            response, public=True, s_maxage=self.smaxage, max_age=self.maxage
+        )
+        _strip_vary_cookie(response)
         return response
 
 
