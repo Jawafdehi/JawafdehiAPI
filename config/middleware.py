@@ -76,7 +76,11 @@ def _strip_vary_cookie(response):
     vary = response.headers.get("Vary")
     if not vary:
         return
-    kept = [tok.strip() for tok in vary.split(",") if tok.strip().lower() != "cookie"]
+    kept = [
+        tok.strip()
+        for tok in vary.split(",")
+        if tok.strip() and tok.strip().lower() != "cookie"
+    ]
     if kept:
         response.headers["Vary"] = ", ".join(kept)
     else:
@@ -107,6 +111,13 @@ class PublicCacheHeadersMiddleware:
 
     def _is_anonymous_public_get(self, request):
         if request.method not in ("GET", "HEAD"):
+            return False
+        # DRF auth runs inside the view (before this post-processing) and writes
+        # request.user through to the HttpRequest, so by now an authenticated
+        # principal is visible here regardless of *how* it authenticated. This is
+        # the backstop that keeps any non-anonymous response out of the cache.
+        user = getattr(request, "user", None)
+        if user is not None and user.is_authenticated:
             return False
         if request.META.get("HTTP_AUTHORIZATION"):
             return False

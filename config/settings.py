@@ -262,7 +262,7 @@ MIDDLEWARE = [
 # PublicCacheHeadersMiddleware: which anonymous GET endpoints may be edge-cached,
 # and for how long. Only anonymous (unauthenticated, no session) GETs on these
 # path prefixes get `Cache-Control: public, s-maxage=...` + Vary:Cookie stripped.
-PUBLIC_CACHE_ENABLED = os.getenv("PUBLIC_CACHE_ENABLED", "true").lower() == "true"
+PUBLIC_CACHE_ENABLED = env_flag("PUBLIC_CACHE_ENABLED", True)
 PUBLIC_CACHE_SMAXAGE = int(os.getenv("PUBLIC_CACHE_SMAXAGE", "300"))  # CDN edge TTL
 PUBLIC_CACHE_MAXAGE = int(os.getenv("PUBLIC_CACHE_MAXAGE", "300"))  # browser TTL
 PUBLIC_CACHE_PATHS = (

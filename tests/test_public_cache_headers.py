@@ -66,6 +66,18 @@ class TestPublicCacheHeaders:
         assert not out.has_header("Cache-Control")
         assert out["Vary"] == "Cookie"
 
+    def test_authenticated_user_bypasses(self):
+        class FakeUser:
+            is_authenticated = True
+
+        resp = HttpResponse("ok")
+        resp["Vary"] = "Cookie"
+        request = rf.get("/api/statistics/")
+        request.user = FakeUser()
+        out = _mw(resp)(request)
+        assert not out.has_header("Cache-Control")
+        assert out["Vary"] == "Cookie"
+
     def test_non_allowlisted_path_untouched(self):
         resp = HttpResponse("ok")
         resp["Vary"] = "Cookie"
