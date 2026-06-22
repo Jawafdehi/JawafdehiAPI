@@ -240,6 +240,9 @@ MIDDLEWARE = [
     # Must be first: starts the per-request timer / in-flight gauge.
     "django_prometheus.middleware.PrometheusBeforeMiddleware",
     "django.middleware.security.SecurityMiddleware",
+    # Outermost app middleware (only PrometheusAfter runs later): rewrites
+    # response cache headers, so it must wrap whatever set Vary:Cookie.
+    "config.middleware.PublicCacheHeadersMiddleware",
     "config.middleware.RequestIdMiddleware",
     "config.middleware.ForcePrimaryReadsMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
@@ -255,6 +258,19 @@ MIDDLEWARE = [
     # Must be last: records latency/status/count, labelled by resolved view.
     "django_prometheus.middleware.PrometheusAfterMiddleware",
 ]
+
+# PublicCacheHeadersMiddleware: which anonymous GET endpoints may be edge-cached,
+# and for how long. Only anonymous (unauthenticated, no session) GETs on these
+# path prefixes get `Cache-Control: public, s-maxage=...` + Vary:Cookie stripped.
+PUBLIC_CACHE_ENABLED = env_flag("PUBLIC_CACHE_ENABLED", True)
+PUBLIC_CACHE_SMAXAGE = int(os.getenv("PUBLIC_CACHE_SMAXAGE", "300"))  # CDN edge TTL
+PUBLIC_CACHE_MAXAGE = int(os.getenv("PUBLIC_CACHE_MAXAGE", "300"))  # browser TTL
+PUBLIC_CACHE_PATHS = (
+    "/api/statistics/",
+    "/api/cases/",  # list + retrieve; anon sees PUBLISHED only
+    "/api/entities/",
+    "/api/oembed/",
+)
 
 ROOT_URLCONF = "config.urls"
 
