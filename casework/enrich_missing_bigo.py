@@ -543,15 +543,17 @@ def _coerce_bigo_int(value: any) -> Optional[int]:
 
     normalized = value.translate(_NEPALI_TO_ASCII_DIGITS)
     # CIAA writes paisa after a danda '।', slash '/', or dot '.' (e.g. ...३२४।५७,
-    # ...२२५/९०, ...324.57). Stripping all non-digits would fold the paisa digits
-    # into the rupee figure and inflate it 10-100x (e.g. 237546324।57 ->
-    # 2375463245). Anchor at the first digit before cutting paisa so a leading
-    # currency prefix ('रु.') isn't mistaken for a paisa separator. Rupee grouping
-    # uses commas only, so cutting at the first '।'/'/'/'.' after the digits is safe.
+    # ...२२५/९०, ...324.57). OCR frequently misreads the danda '।' as a vertical
+    # pipe '|', so treat that as a separator too. Stripping all non-digits would
+    # fold the paisa digits into the rupee figure and inflate it 10-100x (e.g.
+    # 237546324।57 -> 2375463245). Anchor at the first digit before cutting paisa
+    # so a leading currency prefix ('रु.') isn't mistaken for a paisa separator.
+    # Rupee grouping uses commas only, so cutting at the first '।'/'|'/'/'/'.'
+    # after the digits is safe.
     first_digit = re.search(r"\d", normalized)
     if not first_digit:
         return None
-    rupees = re.split(r"[।/.]", normalized[first_digit.start() :], maxsplit=1)[0]
+    rupees = re.split(r"[।|/.]", normalized[first_digit.start() :], maxsplit=1)[0]
     digits_only = re.sub(r"[^\d]", "", rupees)
     if not digits_only:
         return None

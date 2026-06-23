@@ -18,6 +18,10 @@ class TestCoerceBigoInt:
         # 080-CR-0181
         assert emb._coerce_bigo_int("रु.२६,६३,३७,३९८।१२") == 266337398
 
+    def test_pipe_paisa_dropped(self):
+        # OCR frequently misreads the danda '।' as a vertical pipe '|'.
+        assert emb._coerce_bigo_int("२३,७५,४६,३२४|५७") == 237546324
+
     def test_slash_paisa_dropped(self):
         assert emb._coerce_bigo_int("१,४६,८१,२२५/९०") == 14681225
 
