@@ -557,6 +557,14 @@ class Case(models.Model):
         help_text="Internal notes about the case (markdown supported)",
     )
 
+    # Internal-only notes, never exposed via the public API serializers. Used for
+    # caseworker/reviewer annotations such as the NO_BIGO: justification marker.
+    internal_notes = models.TextField(
+        blank=True,
+        default="",
+        help_text="Internal-only notes; not exposed via the public API.",
+    )
+
     # New fields for case identification and tracking
     slug = models.SlugField(
         max_length=50,

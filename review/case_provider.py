@@ -43,6 +43,10 @@ def _serialize_local_case(slug):
     # Normalize to plain dict and ensure slug present.
     data = dict(data)
     data.setdefault("slug", slug)
+    # internal_notes is deliberately NOT in the public serializer; inject it here
+    # so the (internal) review engine can read the NO_BIGO justification marker
+    # without exposing the field on the public API.
+    data["internal_notes"] = case.internal_notes or ""
     return data
 
 

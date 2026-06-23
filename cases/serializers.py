@@ -25,6 +25,11 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
+# internal_notes is published on read endpoints but capped so list/detail
+# responses never ship an unbounded internal blob (the full value is used by the
+# review pipeline and set via PATCH).
+INTERNAL_NOTES_PREVIEW_CHARS = 500
+
 
 class JawafEntitySerializer(serializers.ModelSerializer):
     """
@@ -230,6 +235,28 @@ class CaseSerializer(serializers.ModelSerializer):
         required=False,
     )
 
+    internal_notes = serializers.SerializerMethodField(
+        help_text=(
+            "Internal caseworker/reviewer notes. Truncated to "
+            f"{INTERNAL_NOTES_PREVIEW_CHARS} characters on read endpoints; the "
+            "full value is only used internally (review pipeline) and set via PATCH."
+        )
+    )
+
+    @extend_schema_field(OpenApiTypes.STR)
+    def get_internal_notes(self, obj):
+        """Return a length-capped preview of internal_notes for read endpoints.
+
+        The API is open source and internal_notes is not a secret, so it is
+        published — but capped so list/detail payloads never ship an unbounded
+        internal blob. The full value remains available to the review pipeline
+        (which reads the model directly) and is settable via the caseworker PATCH.
+        """
+        text = getattr(obj, "internal_notes", "") or ""
+        if len(text) <= INTERNAL_NOTES_PREVIEW_CHARS:
+            return text
+        return text[:INTERNAL_NOTES_PREVIEW_CHARS] + "…"
+
     class Meta:
         model = Case
         fields = [
@@ -251,6 +278,7 @@ class CaseSerializer(serializers.ModelSerializer):
             "timeline",
             "evidence",
             "notes",
+            "internal_notes",
             "court_cases",
             "missing_details",
             "bigo",
