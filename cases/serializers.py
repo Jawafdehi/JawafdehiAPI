@@ -230,6 +230,32 @@ class CaseSerializer(serializers.ModelSerializer):
         required=False,
     )
 
+    def _viewer_can_see_internal_notes(self) -> bool:
+        """internal_notes is staff/readonly-only — never part of the public payload.
+
+        Visible to authenticated Admin / Moderator / Contributor (staff) and the
+        org-wide ReadOnly role. Anonymous and any other caller never see it. When
+        there is no request in context (e.g. the review case_provider), treat as
+        not visible — the reviewer injects internal_notes itself out-of-band.
+        """
+        from .rules.predicates import (
+            is_admin_or_moderator,
+            is_contributor,
+            is_readonly,
+        )
+
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if user is None or not user.is_authenticated:
+            return False
+        return is_admin_or_moderator(user) or is_contributor(user) or is_readonly(user)
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if "internal_notes" in data and not self._viewer_can_see_internal_notes():
+            data.pop("internal_notes")
+        return data
+
     class Meta:
         model = Case
         fields = [
@@ -251,6 +277,7 @@ class CaseSerializer(serializers.ModelSerializer):
             "timeline",
             "evidence",
             "notes",
+            "internal_notes",
             "court_cases",
             "missing_details",
             "bigo",

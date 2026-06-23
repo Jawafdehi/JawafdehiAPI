@@ -106,7 +106,10 @@ def test_patch_replace_scalar_field():
 
 
 @pytest.mark.django_db
-def test_patch_internal_notes_persists_but_stays_private():
+def test_patch_internal_notes_persists_and_visible_to_staff_author():
+    # The contributor (staff) can write internal_notes and, being staff, also
+    # sees it back. Public/anonymous hiding is covered in
+    # tests/api/test_internal_notes_visibility.py.
     user = _contributor("manju")
     case = _make_case()
     case.contributors.add(user)
@@ -121,10 +124,10 @@ def test_patch_internal_notes_persists_but_stays_private():
     assert response.status_code == 200
     case.refresh_from_db()
     assert case.internal_notes == marker
-    # internal_notes must never be exposed on the public detail response.
-    assert "internal_notes" not in response.data
+    # Staff author sees the written value back.
+    assert response.data.get("internal_notes") == marker
     get_resp = client.get(URL.format(case.slug))
-    assert "internal_notes" not in get_resp.data
+    assert get_resp.data.get("internal_notes") == marker
 
 
 @pytest.mark.django_db
