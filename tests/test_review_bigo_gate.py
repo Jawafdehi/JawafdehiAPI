@@ -40,7 +40,10 @@ def test_non_numeric_bigo_fails():
 
 def test_no_bigo_marker_passes_with_null():
     score, issues = bigo_amount_present(
-        {"bigo": None, "internal_notes": "NO_BIGO: record_offence — बिगो रकम उल्लेख छैन"}
+        {
+            "bigo": None,
+            "internal_notes": "NO_BIGO: record_offence — बिगो रकम उल्लेख छैन",
+        }
     )
     assert score == 100
     assert not issues
