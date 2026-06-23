@@ -758,10 +758,7 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
         case = Case.objects.prefetch_related("entity_relationships__entity").get(
             pk=case.pk
         )
-        return Response(
-            CaseSerializer(case, context={"request": request}).data,
-            status=status.HTTP_200_OK,
-        )
+        return Response(CaseSerializer(case).data, status=status.HTTP_200_OK)
 
     def _build_snapshot(self, case: Case) -> dict:
         """Return a writable dict representing the patchable surface of a case."""

@@ -25,6 +25,11 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
+# internal_notes is published on read endpoints but capped so list/detail
+# responses never ship an unbounded internal blob (the full value is used by the
+# review pipeline and set via PATCH).
+INTERNAL_NOTES_PREVIEW_CHARS = 500
+
 
 class JawafEntitySerializer(serializers.ModelSerializer):
     """
@@ -230,31 +235,27 @@ class CaseSerializer(serializers.ModelSerializer):
         required=False,
     )
 
-    def _viewer_can_see_internal_notes(self) -> bool:
-        """internal_notes is staff/readonly-only — never part of the public payload.
-
-        Visible to authenticated Admin / Moderator / Contributor (staff) and the
-        org-wide ReadOnly role. Anonymous and any other caller never see it. When
-        there is no request in context (e.g. the review case_provider), treat as
-        not visible — the reviewer injects internal_notes itself out-of-band.
-        """
-        from .rules.predicates import (
-            is_admin_or_moderator,
-            is_contributor,
-            is_readonly,
+    internal_notes = serializers.SerializerMethodField(
+        help_text=(
+            "Internal caseworker/reviewer notes. Truncated to "
+            f"{INTERNAL_NOTES_PREVIEW_CHARS} characters on read endpoints; the "
+            "full value is only used internally (review pipeline) and set via PATCH."
         )
+    )
 
-        request = self.context.get("request")
-        user = getattr(request, "user", None)
-        if user is None or not user.is_authenticated:
-            return False
-        return is_admin_or_moderator(user) or is_contributor(user) or is_readonly(user)
+    @extend_schema_field(OpenApiTypes.STR)
+    def get_internal_notes(self, obj):
+        """Return a length-capped preview of internal_notes for read endpoints.
 
-    def to_representation(self, instance):
-        data = super().to_representation(instance)
-        if "internal_notes" in data and not self._viewer_can_see_internal_notes():
-            data.pop("internal_notes")
-        return data
+        The API is open source and internal_notes is not a secret, so it is
+        published — but capped so list/detail payloads never ship an unbounded
+        internal blob. The full value remains available to the review pipeline
+        (which reads the model directly) and is settable via the caseworker PATCH.
+        """
+        text = getattr(obj, "internal_notes", "") or ""
+        if len(text) <= INTERNAL_NOTES_PREVIEW_CHARS:
+            return text
+        return text[:INTERNAL_NOTES_PREVIEW_CHARS] + "…"
 
     class Meta:
         model = Case

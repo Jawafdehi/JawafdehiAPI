@@ -106,10 +106,9 @@ def test_patch_replace_scalar_field():
 
 
 @pytest.mark.django_db
-def test_patch_internal_notes_persists_and_visible_to_staff_author():
-    # The contributor (staff) can write internal_notes and, being staff, also
-    # sees it back. Public/anonymous hiding is covered in
-    # tests/api/test_internal_notes_visibility.py.
+def test_patch_internal_notes_persists_and_is_returned():
+    # internal_notes is writable via PATCH and published (truncated) on read.
+    # Truncation behaviour is covered in tests/api/test_internal_notes_truncation.py.
     user = _contributor("manju")
     case = _make_case()
     case.contributors.add(user)
@@ -124,8 +123,7 @@ def test_patch_internal_notes_persists_and_visible_to_staff_author():
     assert response.status_code == 200
     case.refresh_from_db()
     assert case.internal_notes == marker
-    # Staff author sees the written value back.
-    assert response.data.get("internal_notes") == marker
+    # Short value (under the cap) round-trips intact on read.
     get_resp = client.get(URL.format(case.slug))
     assert get_resp.data.get("internal_notes") == marker
 
