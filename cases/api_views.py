@@ -699,6 +699,7 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
                 "court_cases",
                 "missing_details",
                 "bigo",
+                "internal_notes",
             ]
         )
 
@@ -791,6 +792,7 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
             "court_cases": list(case.court_cases) if case.court_cases else [],
             "missing_details": case.missing_details,
             "bigo": case.bigo,
+            "internal_notes": case.internal_notes,
         }
 
 

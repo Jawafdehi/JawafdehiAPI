@@ -252,12 +252,19 @@ class CasePatchSerializer(serializers.Serializer):
         min_value=-9223372036854775808,
         max_value=9223372036854775807,
     )
+    internal_notes = serializers.CharField(
+        required=False, allow_blank=True, allow_null=True
+    )
 
     def validate_missing_details(self, value):
         """Normalize empty/whitespace missing_details to None."""
         if value is None or (isinstance(value, str) and not value.strip()):
             return None
         return value
+
+    def validate_internal_notes(self, value):
+        """internal_notes is a non-null TextField; coerce None to empty string."""
+        return value or ""
 
     def validate_slug(self, value):
         """

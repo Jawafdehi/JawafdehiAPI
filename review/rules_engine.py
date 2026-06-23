@@ -151,22 +151,45 @@ def court_number_in_title(case):
     return 100, []
 
 
+# A case legitimately has no bigo when the charge sheet fixes no quantified sum
+# (record/process offences under दफा ११/८, non-CIAA jurisdictions, or pre-charge
+# allegations). Such cases certify that by recording a marker line in
+# internal_notes, e.g. "NO_BIGO: record_offence — आरोपपत्रमा बिगो रकम उल्लेख छैन".
+_NO_BIGO_MARKER = re.compile(r"(?im)^\s*no[_\s-]?bigo\b")
+
+
+def _has_no_bigo_marker(internal_notes):
+    """True if internal_notes certifies a legitimate no-bigo case via a NO_BIGO line."""
+    return bool(internal_notes) and bool(_NO_BIGO_MARKER.search(str(internal_notes)))
+
+
 def bigo_amount_present(case):
     """The bigo (बिगो) amount — total disputed/embezzled sum in NPR — must be set.
 
     Required for CIAA cases: the figure anchors the allegation. A missing or
-    non-positive bigo fails the gate.
+    non-positive bigo fails the gate UNLESS the case certifies a legitimate
+    no-bigo via a ``NO_BIGO:`` marker line in ``internal_notes`` (a rare, explicit
+    opt-out for record/process offences, non-CIAA jurisdictions, or pre-charge
+    allegations). A bare null still fails — that catches the common data gap.
     """
     bigo = case.get("bigo")
-    if bigo is None or bigo == "":
-        return 0, ["Bigo (बिगो) amount is not set; it is required for CIAA cases."]
-    try:
-        value = int(bigo)
-    except (TypeError, ValueError):
-        return 0, [f"Bigo amount is not a valid number: {bigo!r}."]
-    if value <= 0:
-        return 0, [f"Bigo amount must be a positive figure (got {value})."]
-    return 100, []
+    if bigo is not None and bigo != "":
+        try:
+            value = int(bigo)
+        except (TypeError, ValueError):
+            return 0, [f"Bigo amount is not a valid number: {bigo!r}."]
+        if value > 0:
+            return 100, []
+        if value < 0:
+            return 0, [f"Bigo amount must not be negative (got {value})."]
+        # value == 0 falls through to the no-bigo certification check below.
+
+    if _has_no_bigo_marker(case.get("internal_notes")):
+        return 100, []
+    return 0, [
+        "Bigo (बिगो) amount is not set and no NO_BIGO justification is recorded "
+        "in internal_notes; it is required for CIAA cases."
+    ]
 
 
 def additional_description(case):

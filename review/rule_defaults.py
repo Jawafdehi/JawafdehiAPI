@@ -124,7 +124,10 @@ DEFAULT_RULES = [
             "single divergent news-outlet figure — when the authoritative "
             "press-release / charge-sheet amount still matches `bigo` — as a "
             "`notes` observation, NOT a scored issue: keep the score at 100. Only "
-            "an actual contradiction with the authoritative figure is an `issue`."
+            "an actual contradiction with the authoritative figure is an `issue`.\n\n"
+            "If the case is a certified no-bigo case (empty `bigo` with a "
+            "`NO_BIGO:` marker in `internal_notes`), there is no figure to match — "
+            "keep the score at 100."
         ),
         "good_examples": (
             "Press release states रु. ३.२१ अर्ब and `bigo` is 3,218,377,182 — the "
@@ -594,7 +597,16 @@ DEFAULT_RULES = [
             "Every CIAA case **must** record the **bigo (बिगो)** — the total "
             "disputed / embezzled amount claimed in the case, in NPR. This figure "
             "anchors the allegation, so a missing or non-positive bigo **fails "
-            "the review**."
+            "the review**.\n\n"
+            "**Exception — legitimate no-bigo cases.** A few cases genuinely have "
+            "no quantified bigo: record/process offences (दफा ११ / ८ — forgery, "
+            "land-record or citizenship tampering where harm is not monetized), "
+            "non-CIAA jurisdictions where the bigo concept does not map, or "
+            "pre-charge allegations with no charge sheet. These pass **only** "
+            "when an explicit `NO_BIGO:` marker line is recorded in the case's "
+            "internal `internal_notes` field (e.g. `NO_BIGO: record_offence — "
+            "आरोपपत्रमा बिगो रकम उल्लेख छैन`). A bare empty bigo with no marker "
+            "still fails — that is the common data-extraction gap we want to catch."
         ),
         "weight": 1.2,
         "is_gate": True,

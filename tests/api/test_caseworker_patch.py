@@ -106,6 +106,28 @@ def test_patch_replace_scalar_field():
 
 
 @pytest.mark.django_db
+def test_patch_internal_notes_persists_but_stays_private():
+    user = _contributor("manju")
+    case = _make_case()
+    case.contributors.add(user)
+
+    client = _authed_client(user)
+    marker = "NO_BIGO: record_offence — आरोपपत्रमा बिगो रकम उल्लेख छैन"
+    response = client.patch(
+        URL.format(case.slug),
+        data=[{"op": "replace", "path": "/internal_notes", "value": marker}],
+        format="json",
+    )
+    assert response.status_code == 200
+    case.refresh_from_db()
+    assert case.internal_notes == marker
+    # internal_notes must never be exposed on the public detail response.
+    assert "internal_notes" not in response.data
+    get_resp = client.get(URL.format(case.slug))
+    assert "internal_notes" not in get_resp.data
+
+
+@pytest.mark.django_db
 def test_patch_replace_timeline_item_title():
     user = _contributor("sita")
     case = _make_case(
