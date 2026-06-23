@@ -541,7 +541,8 @@ def get_target_cases(api, args, skip_field):
 
     Cases are selected by slug or court case number (e.g. 081-CR-0121); there is
     no internal case_id selector. --slug and --court-case fetch the case in ANY
-    state; the batch path (no selector) scans DRAFT CORRUPTION CIAA cases.
+    state; the batch path (no selector) scans DRAFT and IN_REVIEW CORRUPTION
+    CIAA cases (PUBLISHED cases are left untouched).
     """
     count = 0
     limit = getattr(args, "limit", None)
@@ -607,7 +608,9 @@ def get_target_cases(api, args, skip_field):
         scanned += 1
         if scanned % 500 == 0:
             log.info("  scanned %d cases (matched %d so far)...", scanned, count)
-        if summary.get("state") != "DRAFT":
+        # Enrich pre-publication cases: DRAFT and IN_REVIEW (the priority set has
+        # been promoted to IN_REVIEW). PUBLISHED cases are left untouched.
+        if summary.get("state") not in ("DRAFT", "IN_REVIEW"):
             continue
         if not is_ciaa_special_court_case(summary):
             continue
