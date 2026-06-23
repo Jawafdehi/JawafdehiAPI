@@ -468,16 +468,52 @@ DEFAULT_RULES = [
     },
     {
         "key": "location_entity_count",
-        "title": "Location entities (1-5, 3 preferred)",
+        "title": "Location entities (where applicable)",
         "category": "Entities",
-        "kind": "deterministic",
-        "detector": "location_entity_count",
-        "condition_text": "Always active (hard gate on 0 locations).",
+        "kind": "llm",
+        "detector": "",
+        # Gate stays, but judged on the cheap tier (see _tier_for_rule): the
+        # judgment is simple enough not to need the premium model.
+        "tier": "cheap",
+        "condition_text": "Always active.",
         "applies_to": ALL,
         "description": (
-            "The case **must** be tagged with **1-5 location entities**, with "
-            "**3** being the preferred count. Zero locations fails the gate; "
-            "tagging more than five is treated as over-tagging and is penalised."
+            "Judge whether the case is tagged with the place(s) where the case "
+            "events actually happened or where the assets/funds at issue are "
+            "located — the district (जिल्ला), municipality (नगरपालिका), or "
+            "province. Look at the `entities` list (type `location`) and weigh it "
+            "against the description and sources.\n\n"
+            "**Locations are NOT always required.** Many legitimate cases have no "
+            "district-level scene: central-government procurement, ministry / "
+            "authority / board / corporation HQ-level matters, and policy-level "
+            "cases are administered centrally and may correctly carry **zero** "
+            "location entities. When the case is clearly central / national in "
+            "scope (the related and accused entities are national bodies, the "
+            "events are a head-office procurement or policy decision), zero "
+            "locations is CORRECT — score it high.\n\n"
+            "Score LOW only when the sources or description clearly establish a "
+            "specific district/municipality where the events occurred (a local "
+            "project, a district office, a municipality scheme) and that location "
+            "was NOT tagged. One good location is plenty for a single-district "
+            "case; a few are fine for a case that genuinely spans districts.\n\n"
+            "Also penalise WRONG or over-tagged locations: an accused person's "
+            "home/birthplace/permanent address, the seat of the court or the "
+            "CIAA inquiry office tagged as if it were the event location, or a "
+            "long list of marginal places (more than ~5) that dilutes the signal."
+        ),
+        "good_examples": (
+            "A district-level scheme tagged with its district, e.g. "
+            "'साझा भण्डार सहकारी - सुर्खेत जिल्ला'. A central NTA telecom "
+            "procurement or Nepal Airlines aircraft-purchase case with zero "
+            "location entities, because there is no district-level scene — only "
+            "the head office in Kathmandu, which is correctly left untagged."
+        ),
+        "bad_examples": (
+            "A local municipality embezzlement case whose sources name the "
+            "municipality but carries no location entity. A case tagged only with "
+            "the accused's home district, or with 'काठमाडौं' solely because that "
+            "is where the court / CIAA office sits. A case over-tagged with seven "
+            "loosely-related places."
         ),
         "weight": 1.0,
         "is_gate": True,

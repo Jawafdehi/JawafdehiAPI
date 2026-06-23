@@ -186,8 +186,10 @@ def score_case(
                 "description": r.description,
                 "good_examples": r.good_examples,
                 "bad_examples": r.bad_examples,
-                # Routes the judge model tier: gate rules -> premium model.
+                # Routes the judge model tier: an explicit `tier` wins, else
+                # gate rules -> premium model, routine rules -> cheap.
                 "is_gate": r.is_gate,
+                "tier": r.tier,
             }
             for r in llm_rules
         ]

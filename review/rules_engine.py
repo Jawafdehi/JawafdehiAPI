@@ -393,43 +393,6 @@ def related_entity_present(case):
     return 100, []
 
 
-def location_entity_count(case):
-    """Score the number of LOCATION entities on the case.
-
-    A case should have 1-5 location entities, with 3 being the preferred count:
-      - 3 locations           -> 100 (ideal)
-      - 1, 2, 4 or 5 locations -> within the acceptable band, lightly penalised
-                                  by distance from the preferred 3.
-      - 0 locations            -> 0 (none identified)
-      - more than 5 locations  -> over-tagged; penalised, floors at 40.
-    """
-    entities = case.get("entities") or []
-    locations = [e for e in entities if (e.get("type") or "").lower() == "location"]
-    n = len(locations)
-    issues = []
-
-    if n == 0:
-        return 0, ["No location entities identified (1-5 expected, 3 preferred)."]
-    if n > 5:
-        # Over-tagged: start below the in-band edge (n=5 scores 70) and fall
-        # 10 per extra location, never below 40. 6 -> 60, 7 -> 50, 8 -> 40.
-        score = max(40, 70 - (n - 5) * 10)
-        issues.append(
-            f"{n} location entities; expected 1-5 (3 preferred). Likely over-tagged."
-        )
-        return _clamp(score), issues
-
-    # 1..5 locations: full marks at the preferred 3, -15 per step away from it.
-    score = 100 - abs(n - 3) * 15
-    if n < 3:
-        ent_word = "entity" if n == 1 else "entities"
-        issues.append(
-            f"Are you sure there {'is' if n == 1 else 'are'} only {n} location "
-            f"{ent_word}? 3 are preferred."
-        )
-    return _clamp(score), issues
-
-
 DETECTORS = {
     "court_case_number": court_case_number,
     "additional_description": additional_description,
@@ -444,7 +407,6 @@ DETECTORS = {
     "bigo_amount_present": bigo_amount_present,
     "accused_present": accused_present,
     "related_entity_present": related_entity_present,
-    "location_entity_count": location_entity_count,
 }
 
 

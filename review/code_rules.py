@@ -38,6 +38,9 @@ class CodeRule:
         self.weight = spec.get("weight", 1.0)
         self.is_gate = spec.get("is_gate", False)
         self.gate_min = spec.get("gate_min", 50)
+        # Optional model-tier override for LLM rules ("premium"/"cheap"). Empty
+        # means "auto": gate rules -> premium, routine rules -> cheap.
+        self.tier = spec.get("tier", "")
         self.enabled = spec.get("enabled", True)
         self.order = spec.get("order", 100)
 
@@ -82,6 +85,7 @@ def as_dict(rule):
         "weight": rule.weight,
         "is_gate": rule.is_gate,
         "gate_min": rule.gate_min,
+        "tier": rule.tier,
         "enabled": rule.enabled,
         "order": rule.order,
     }

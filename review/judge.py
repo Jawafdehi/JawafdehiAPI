@@ -253,9 +253,17 @@ each contribution list to at most 6 short items. Reply EXACTLY in this JSON shap
 
 
 def _tier_for_rule(rule):
-    """Hard GATE rules (a low score can REJECT the case) get the premium tier;
-    routine rules get the cheaper one. Mirrors the narrative, which is low-stakes
-    prose and also runs on the cheap tier."""
+    """Pick the judge model tier for a rule.
+
+    An explicit per-rule `tier` ("premium"/"cheap") wins — this lets a gate rule
+    opt into the cheap model when its judgment is robust enough not to need the
+    premium one (e.g. the location rule). Otherwise the default applies: hard
+    GATE rules (a low score can REJECT the case) get premium, routine rules get
+    the cheaper one — mirroring the narrative, which is low-stakes prose on cheap.
+    """
+    tier = rule.get("tier")
+    if tier in ("premium", "cheap"):
+        return tier
     return "premium" if rule.get("is_gate") else "cheap"
 
 
