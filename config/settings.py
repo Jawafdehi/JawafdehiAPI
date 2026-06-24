@@ -573,10 +573,12 @@ WAGTAILADMIN_BASE_URL = os.getenv(
 # tablet and mobile — instead of a server-rendered template that doesn't exist.
 WAGTAIL_HEADLESS_PREVIEW = {
     "CLIENT_URLS": {
+        # rstrip so a stray trailing slash in the env value can't break the
+        # redirect URL or the worker's frame-allow path match.
         "default": os.getenv(
             "WAGTAIL_HEADLESS_PREVIEW_CLIENT_URL",
             "https://jawafdehi.org/updates/preview",
-        ),
+        ).rstrip("/"),
     },
     "REDIRECT_ON_PREVIEW": True,
     # Keep the redirect URL slash-free so it matches the SPA's `/updates/preview`
