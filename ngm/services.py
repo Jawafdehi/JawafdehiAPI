@@ -196,6 +196,31 @@ def execute_select_query(query: str, timeout_seconds: float) -> dict:
     }
 
 
+def court_case_exists(court_identifier: str, case_number: str) -> bool:
+    """Return True when NGM has a court_cases row for (court_identifier, case_number).
+
+    Both values are matched verbatim: NGM holds the authoritative (government-
+    supplied) formatting, and cases.COURT_CHOICES uses NGM's court-identifier
+    spellings, so a value not present in NGM is treated as not existing.
+
+    Raises:
+        ValueError: if the NGM database is unconfigured or the query fails. Callers
+        that must not block on NGM availability should treat this as "unknown".
+    """
+    ensure_ngm_database_configured()
+    try:
+        with ngm_read_connection().cursor() as cursor:
+            cursor.execute(
+                "SELECT 1 FROM court_cases "
+                "WHERE court_identifier = %s AND case_number = %s LIMIT 1",
+                [court_identifier, case_number],
+            )
+            return cursor.fetchone() is not None
+    except DatabaseError as exc:
+        logger.exception("NGM court-case existence check failed")
+        raise ValueError("Database query failed") from exc
+
+
 def get_court_case_details(court_identifier: str, case_number: str) -> dict | None:
     """
     Fetch complete case details including hearings and entities.

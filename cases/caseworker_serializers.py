@@ -16,7 +16,11 @@ from .models import (
     JawafEntity,
     RelationshipType,
 )
-from .validators import validate_court_cases, validate_slug
+from .validators import (
+    validate_court_cases,
+    validate_slug,
+    verify_court_cases_in_ngm,
+)
 
 # Paths that callers are not permitted to target in a patch operation.
 # The view rejects any op whose `path` equals or is prefixed by one of these.
@@ -207,6 +211,12 @@ class CaseCreateSerializer(CaseEntityValidationMixin, serializers.Serializer):
         """Normalize empty/whitespace slugs to None."""
         if value is None or (isinstance(value, str) and not value.strip()):
             return None
+        return value
+
+    def validate_court_cases(self, value):
+        """Beyond structure (field validators), require each reference to exist
+        in NGM. Runs on create, where court_cases is always being set."""
+        verify_court_cases_in_ngm(value)
         return value
 
 
