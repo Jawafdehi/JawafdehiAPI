@@ -210,3 +210,95 @@ class TestNormalizeCaseNumber:
         assert normalize_case_number("1234-CR-0081") == "1234-CR-0081"
         # Last part longer than 4 digits
         assert normalize_case_number("081-CR-12345") == "081-CR-12345"
+
+
+class _ExistsCursor:
+    """Cursor stub that records executed params and returns a fixed fetchone."""
+
+    def __init__(self, result, raise_on_execute=None):
+        self._result = result
+        self._raise = raise_on_execute
+        self.executed = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, query, params=None):
+        if self._raise is not None:
+            raise self._raise
+        self.executed.append((query, params))
+
+    def fetchone(self):
+        return self._result
+
+
+class _ExistsConnection:
+    vendor = "postgresql"
+
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def cursor(self):
+        return self._cursor
+
+
+def _wire_ngm(monkeypatch, cursor):
+    monkeypatch.setitem(
+        services.settings.DATABASES, "ngm", {"ENGINE": "django.db.backends.postgresql"}
+    )
+    monkeypatch.setattr(services, "connections", {"ngm": _ExistsConnection(cursor)})
+
+
+def test_court_case_exists_true_when_row_found(monkeypatch):
+    from ngm.services import court_case_exists
+
+    cursor = _ExistsCursor(result=(1,))
+    _wire_ngm(monkeypatch, cursor)
+
+    assert court_case_exists("special", "081-CR-0095") is True
+    # case number is matched verbatim against NGM's authoritative formatting
+    assert cursor.executed[0][1] == ["special", "081-CR-0095"]
+
+
+def test_court_case_exists_false_when_no_row(monkeypatch):
+    from ngm.services import court_case_exists
+
+    _wire_ngm(monkeypatch, _ExistsCursor(result=None))
+
+    assert court_case_exists("special", "O81-CR-0095") is False
+
+
+def test_court_case_exists_translates_court_identifier(monkeypatch):
+    """cases-app spellings are mapped to NGM's before querying."""
+    from ngm.services import court_case_exists
+
+    cursor = _ExistsCursor(result=(1,))
+    _wire_ngm(monkeypatch, cursor)
+
+    court_case_exists("birgunjhc", "080-CR-0001")
+
+    assert cursor.executed[0][1] == ["birganjhc", "080-CR-0001"]
+
+
+def test_court_case_exists_wraps_database_error(monkeypatch):
+    from ngm.services import court_case_exists
+
+    _wire_ngm(
+        monkeypatch,
+        _ExistsCursor(result=None, raise_on_execute=DatabaseError("boom")),
+    )
+
+    with pytest.raises(ValueError, match="Database query failed"):
+        court_case_exists("special", "081-CR-0095")
+
+
+def test_court_case_exists_raises_when_ngm_unconfigured(monkeypatch):
+    from ngm.services import court_case_exists
+
+    monkeypatch.delitem(services.settings.DATABASES, "ngm", raising=False)
+
+    with pytest.raises(ValueError, match="NGM database is not configured"):
+        court_case_exists("special", "081-CR-0095")

@@ -5,9 +5,13 @@ This module provides centralized validation logic for case fields,
 following Django's convention of separating validation concerns.
 """
 
+import logging
 import re
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
+
+logger = logging.getLogger(__name__)
 
 COURT_CHOICES = [
     ("supreme", "Supreme Court"),
@@ -199,4 +203,49 @@ def validate_court_cases(value):
             raise ValidationError(
                 f"Invalid court identifier '{court_identifier}'. "
                 f"Valid identifiers are: {valid_list}"
+            )
+
+
+def verify_court_cases_in_ngm(value):
+    """Verify that every reference in a ``court_cases`` list exists in NGM.
+
+    NGM (the court-scraper dataset) is the authoritative source of court case
+    numbers, so a reference that has no matching NGM row is rejected. This is what
+    catches typos such as a letter ``O`` standing in for a zero: the malformed
+    number simply is not in NGM. ``value`` is assumed to have already passed
+    :func:`validate_court_cases` (well-formed ``<court>:<number>`` items).
+
+    Intended for *writes* of ``court_cases`` (case creation, or a PATCH that
+    explicitly changes the field) — NOT for re-validating an unchanged value on
+    every patch. A slice of historical references predate current NGM coverage,
+    so re-checking them on unrelated edits would wrongly block those writes.
+
+    Fail-open: when NGM is unconfigured or unreachable (dev, CI, tests, or an NGM
+    outage) the check is skipped with a warning, so case writes are never blocked
+    by NGM availability. Only a definitive "not found" from a reachable NGM raises.
+
+    Raises:
+        ValidationError: if a reachable NGM has no record for a reference.
+    """
+    if not value:
+        return
+    if not getattr(settings, "VALIDATE_COURT_CASES_AGAINST_NGM", True):
+        return
+
+    # Lazy import keeps cases.validators importable without the ngm app loaded.
+    from ngm.services import court_case_exists
+
+    for item in value:
+        court_identifier, case_number = item.split(":", 1)
+        try:
+            exists = court_case_exists(court_identifier, case_number)
+        except ValueError:
+            logger.warning(
+                "Skipping NGM existence check for %r — NGM unavailable", item
+            )
+            return
+        if not exists:
+            raise ValidationError(
+                f"Court case '{item}' was not found in NGM. Court case references "
+                "must match a record in the NGM court-case dataset."
             )

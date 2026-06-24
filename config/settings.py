@@ -413,6 +413,14 @@ if os.getenv("NGM_DATABASE_URL"):
         )
         DATABASES["ngm"] = dj_database_url.parse(new_url)
 
+# When true, writes that set/change a case's court_cases verify each reference
+# against the NGM court-case dataset (the authoritative source). The check fails
+# open when NGM is unconfigured/unreachable, so this flag is only an explicit
+# kill switch for the enforcement. See cases.validators.verify_court_cases_in_ngm.
+VALIDATE_COURT_CASES_AGAINST_NGM = (
+    os.getenv("VALIDATE_COURT_CASES_AGAINST_NGM", "true").lower() == "true"
+)
+
 
 # Read-replica aliases for the primary/replica router (config/db_router.py).
 # DATABASE_READ_URL / NGM_DATABASE_READ_URL point at the CNPG `pg-r` service

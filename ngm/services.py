@@ -41,6 +41,23 @@ FORBIDDEN_KEYWORDS = [
     "revoke",
 ]
 
+# A handful of court identifiers are romanized differently in
+# cases.validators.COURT_CHOICES than in the spellings the NGM scraper stores in
+# court_cases.court_identifier. Translate them before querying NGM so existence
+# checks for these courts resolve instead of spuriously missing.
+COURT_IDENTIFIER_NGM_OVERRIDES = {
+    "arghakhanchidc": "argakhanchidc",
+    "birgunjhc": "birganjhc",
+    "ilamhc": "illamhc",
+    "ramechhapdc": "ramechapdc",
+    "tehrathumdc": "therathumdc",
+}
+
+
+def to_ngm_court_identifier(court_identifier: str) -> str:
+    """Map a cases-app court identifier to the spelling NGM stores."""
+    return COURT_IDENTIFIER_NGM_OVERRIDES.get(court_identifier, court_identifier)
+
 
 def normalize_case_number(case_number: str) -> str:
     """
@@ -194,6 +211,32 @@ def execute_select_query(query: str, timeout_seconds: float) -> dict:
         "max_rows": max_rows,
         "query_time_ms": query_time_ms,
     }
+
+
+def court_case_exists(court_identifier: str, case_number: str) -> bool:
+    """Return True when NGM has a court_cases row for (court_identifier, case_number).
+
+    The court identifier is translated to NGM's spelling first; the case number is
+    matched verbatim, since NGM holds the authoritative (government-supplied)
+    formatting — a value not present in NGM is treated as not existing.
+
+    Raises:
+        ValueError: if the NGM database is unconfigured or the query fails. Callers
+        that must not block on NGM availability should treat this as "unknown".
+    """
+    ensure_ngm_database_configured()
+    identifier = to_ngm_court_identifier(court_identifier)
+    try:
+        with ngm_read_connection().cursor() as cursor:
+            cursor.execute(
+                "SELECT 1 FROM court_cases "
+                "WHERE court_identifier = %s AND case_number = %s LIMIT 1",
+                [identifier, case_number],
+            )
+            return cursor.fetchone() is not None
+    except DatabaseError as exc:
+        logger.exception("NGM court-case existence check failed")
+        raise ValueError("Database query failed") from exc
 
 
 def get_court_case_details(court_identifier: str, case_number: str) -> dict | None:

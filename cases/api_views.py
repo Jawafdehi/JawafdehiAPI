@@ -655,6 +655,29 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
 
         validated = serializer.validated_data
 
+        # Verify court-case references against NGM, but only when this PATCH
+        # explicitly sets/changes court_cases. The validated snapshot always
+        # carries the case's *existing* court_cases, and a slice of historical
+        # references predate current NGM coverage — re-checking them on unrelated
+        # field edits would wrongly block those PATCHes (e.g. routine enrichment).
+        # Gating on an actual /court_cases op vets new values while leaving legacy
+        # cases editable.
+        court_cases_touched = any(
+            op.get("path") == "/court_cases"
+            or op.get("path", "").startswith("/court_cases/")
+            for op in patch_ops
+        )
+        if court_cases_touched:
+            from .validators import verify_court_cases_in_ngm
+
+            try:
+                verify_court_cases_in_ngm(validated.get("court_cases") or [])
+            except ValidationError as exc:
+                return Response(
+                    {"detail": exc.messages[0] if exc.messages else str(exc)},
+                    status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+
         target_state = validated.get("state")
         if target_state is not None and not can_transition_case_state(
             request.user, case, target_state
