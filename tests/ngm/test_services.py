@@ -302,3 +302,16 @@ def test_court_case_exists_raises_when_ngm_unconfigured(monkeypatch):
 
     with pytest.raises(ValueError, match="NGM database is not configured"):
         court_case_exists("special", "081-CR-0095")
+
+
+def test_get_court_case_details_translates_court_identifier(monkeypatch):
+    """The case-lookup path maps cases-app spellings to NGM's before querying."""
+    from ngm.services import get_court_case_details
+
+    # First query returns no row, so the function short-circuits to None after
+    # recording the (translated) params it queried with.
+    cursor = _ExistsCursor(result=None)
+    _wire_ngm(monkeypatch, cursor)
+
+    assert get_court_case_details("ilamhc", "069-CR-0001") is None
+    assert cursor.executed[0][1] == ["illamhc", "069-CR-0001"]

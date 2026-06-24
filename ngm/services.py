@@ -249,6 +249,7 @@ def get_court_case_details(court_identifier: str, case_number: str) -> dict | No
     - entities: list of entity dicts
     """
     ensure_ngm_database_configured()
+    identifier = to_ngm_court_identifier(court_identifier)
 
     try:
         with ngm_read_connection().cursor() as cursor:
@@ -263,7 +264,7 @@ def get_court_case_details(court_identifier: str, case_number: str) -> dict | No
                 FROM court_cases
                 WHERE court_identifier = %s AND case_number = %s
                 """,
-                [court_identifier, case_number],
+                [identifier, case_number],
             )
             case_row = cursor.fetchone()
 
@@ -283,7 +284,7 @@ def get_court_case_details(court_identifier: str, case_number: str) -> dict | No
                 WHERE court_identifier = %s AND case_number = %s
                 ORDER BY hearing_date_ad DESC NULLS LAST
                 """,
-                [court_identifier, case_number],
+                [identifier, case_number],
             )
             hearing_rows = cursor.fetchall()
             hearing_columns = [col[0] for col in cursor.description]
@@ -297,7 +298,7 @@ def get_court_case_details(court_identifier: str, case_number: str) -> dict | No
                 WHERE court_identifier = %s AND case_number = %s
                 ORDER BY side, name
                 """,
-                [court_identifier, case_number],
+                [identifier, case_number],
             )
             entity_rows = cursor.fetchall()
             entity_columns = [col[0] for col in cursor.description]
