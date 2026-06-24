@@ -271,18 +271,6 @@ def test_court_case_exists_false_when_no_row(monkeypatch):
     assert court_case_exists("special", "O81-CR-0095") is False
 
 
-def test_court_case_exists_translates_court_identifier(monkeypatch):
-    """cases-app spellings are mapped to NGM's before querying."""
-    from ngm.services import court_case_exists
-
-    cursor = _ExistsCursor(result=(1,))
-    _wire_ngm(monkeypatch, cursor)
-
-    court_case_exists("birgunjhc", "080-CR-0001")
-
-    assert cursor.executed[0][1] == ["birganjhc", "080-CR-0001"]
-
-
 def test_court_case_exists_wraps_database_error(monkeypatch):
     from ngm.services import court_case_exists
 
@@ -304,14 +292,14 @@ def test_court_case_exists_raises_when_ngm_unconfigured(monkeypatch):
         court_case_exists("special", "081-CR-0095")
 
 
-def test_get_court_case_details_translates_court_identifier(monkeypatch):
-    """The case-lookup path maps cases-app spellings to NGM's before querying."""
+def test_get_court_case_details_queries_with_given_identifier(monkeypatch):
+    """The case-lookup path queries NGM with the court identifier verbatim."""
     from ngm.services import get_court_case_details
 
     # First query returns no row, so the function short-circuits to None after
-    # recording the (translated) params it queried with.
+    # recording the params it queried with.
     cursor = _ExistsCursor(result=None)
     _wire_ngm(monkeypatch, cursor)
 
-    assert get_court_case_details("ilamhc", "069-CR-0001") is None
+    assert get_court_case_details("illamhc", "069-CR-0001") is None
     assert cursor.executed[0][1] == ["illamhc", "069-CR-0001"]
