@@ -62,7 +62,7 @@ Accept: application/json
 ### Example Request
 
 ```bash
-curl -X POST "https://api.jawafdehi.org/api/feedback/" \
+curl -X POST "https://portal.jawafdehi.org/api/feedback/" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json" \
   -d '{
@@ -89,7 +89,7 @@ curl -X POST "https://api.jawafdehi.org/api/feedback/" \
 ### Minimal Example (Anonymous Feedback)
 
 ```bash
-curl -X POST "https://api.jawafdehi.org/api/feedback/" \
+curl -X POST "https://portal.jawafdehi.org/api/feedback/" \
   -H "Content-Type: application/json" \
   -d '{
     "feedbackType": "general",
@@ -513,7 +513,7 @@ interface FeedbackResponse {
 
 ```typescript
 const submitFeedback = async (feedback: FeedbackSubmission): Promise<FeedbackResponse> => {
-  const response = await fetch('https://api.jawafdehi.org/api/feedback/', {
+  const response = await fetch('https://portal.jawafdehi.org/api/feedback/', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

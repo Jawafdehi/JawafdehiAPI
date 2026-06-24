@@ -6,6 +6,7 @@ from wagtail.fields import StreamField
 from wagtail.images.api.fields import ImageRenditionField
 from wagtail.models import Page
 from wagtail.search import index
+from wagtail_headless_preview.models import HeadlessPreviewMixin
 
 from .blocks import ArticleStreamBlock
 from .serializers import RelatedCaseSerializer
@@ -28,8 +29,13 @@ class ArticleIndexPage(Page):
     api_fields = [APIField("intro")]
 
 
-class ArticlePage(Page):
-    """An update or news article, delivered headless via the API v2."""
+class ArticlePage(HeadlessPreviewMixin, Page):
+    """An update or news article, delivered headless via the API v2.
+
+    ``HeadlessPreviewMixin`` overrides ``serve_preview`` so the edit-screen
+    preview iframe redirects to the SPA (which renders the real article) rather
+    than rendering a server-side template — these pages have none.
+    """
 
     category = models.CharField(
         max_length=20,

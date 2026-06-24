@@ -231,6 +231,9 @@ INSTALLED_APPS = [
     "wagtail.admin",
     "wagtail.api.v2",
     "wagtail",
+    # Redirects the page-preview iframe to the SPA so editors preview the real
+    # headless article instead of a (non-existent) server-rendered template.
+    "wagtail_headless_preview",
     "modelcluster",
     "taggit",
     "content",
@@ -561,7 +564,27 @@ MEDIA_ROOT = os.getenv("MEDIA_ROOT", BASE_DIR / "media")
 WAGTAIL_SITE_NAME = "Jawafdehi Newsroom"
 # Base URL used for absolute links in the admin (notification emails, previews).
 # Not used for public delivery — the SPA consumes the API v2 endpoints.
-WAGTAILADMIN_BASE_URL = os.getenv("WAGTAILADMIN_BASE_URL", "https://api.jawafdehi.org")
+WAGTAILADMIN_BASE_URL = os.getenv(
+    "WAGTAILADMIN_BASE_URL", "https://portal.jawafdehi.org"
+)
+# Headless preview: the edit-screen preview iframe 302-redirects to the public
+# SPA's article preview route (which fetches the unsaved draft from the
+# page_preview API by token), so editors see the real styled article — desktop,
+# tablet and mobile — instead of a server-rendered template that doesn't exist.
+WAGTAIL_HEADLESS_PREVIEW = {
+    "CLIENT_URLS": {
+        # rstrip so a stray trailing slash in the env value can't break the
+        # redirect URL or the worker's frame-allow path match.
+        "default": os.getenv(
+            "WAGTAIL_HEADLESS_PREVIEW_CLIENT_URL",
+            "https://jawafdehi.org/updates/preview",
+        ).rstrip("/"),
+    },
+    "REDIRECT_ON_PREVIEW": True,
+    # Keep the redirect URL slash-free so it matches the SPA's `/updates/preview`
+    # route and the worker's frame-allow check exactly.
+    "ENFORCE_TRAILING_SLASH": False,
+}
 WAGTAILSEARCH_BACKENDS = {
     "default": {
         "BACKEND": "wagtail.search.backends.database",
