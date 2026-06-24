@@ -375,6 +375,21 @@ def test_patch_400_for_invalid_json_patch_operation():
 
 
 @pytest.mark.django_db
+def test_patch_400_for_non_string_path():
+    """A non-string path must yield a clean 400, not a 500 from path.startswith()."""
+    user = _contributor("kabita")
+    case = _make_case()
+    case.contributors.add(user)
+
+    response = _authed_client(user).patch(
+        URL.format(case.slug),
+        data=[{"op": "replace", "path": None, "value": "x"}],
+        format="json",
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
 def test_patch_403_for_unauthorized_state_transition_to_published():
     user = _contributor("deepak")
     case = _make_case()

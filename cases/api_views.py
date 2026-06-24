@@ -614,6 +614,14 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             path = op.get("path", "")
+            # Guard before any path.startswith() below (and the court_cases check
+            # later): a non-string path (e.g. explicit null) would otherwise raise
+            # AttributeError and 500 instead of a clean 400.
+            if not isinstance(path, str):
+                return Response(
+                    {"detail": "Each patch operation must have a string 'path'."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
             if path == "/state" and op.get("op") != "replace":
                 return Response(
