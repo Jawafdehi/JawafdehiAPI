@@ -24,7 +24,7 @@ None required. This endpoint returns current statistics for all cases.
 ### Example Request
 
 ```bash
-curl -X GET "https://api.jawafdehi.org/api/statistics/" \
+curl -X GET "https://portal.jawafdehi.org/api/statistics/" \
   -H "Accept: application/json"
 ```
 
@@ -175,7 +175,7 @@ const useStatistics = () => {
   return useQuery<CaseStatistics>({
     queryKey: ['statistics'],
     queryFn: async () => {
-      const response = await fetch('https://api.jawafdehi.org/api/statistics/');
+      const response = await fetch('https://portal.jawafdehi.org/api/statistics/');
       if (!response.ok) {
         throw new Error('Failed to fetch statistics');
       }
