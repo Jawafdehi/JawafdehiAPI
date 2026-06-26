@@ -70,6 +70,9 @@ NEWS_DOMAINS = frozenset(
         "moneymitra.com",
         "sharesansar.com",
         "janaaastha.com",
+        "shuvabihani.com",
+        "khabarhub.com",
+        "palpalkokhabar.com",
         "bbc.com",
         "bbc.co.uk",
     }
@@ -187,6 +190,18 @@ def _domain_matches(host: str, domains: frozenset[str]) -> bool:
     return any(host == d or host.endswith(f".{d}") for d in domains)
 
 
+def _is_official_host(host: str) -> bool:
+    """True if *host* is a Nepal government / court host.
+
+    Primary official documents — court orders and filings, charge sheets,
+    press releases, audit reports, laws — are published on the ``*.gov.np``
+    namespace (ciaa.gov.np, supremecourt.gov.np, lawcommission.gov.np, …). A
+    generic non-``.gov.np`` web host is therefore third-party coverage, never
+    the primary court record itself.
+    """
+    return host == "gov.np" or host.endswith(".gov.np")
+
+
 def _keyword_in(corpus: str, keyword: str) -> bool:
     """Whether *keyword* occurs in (already-lowercased) *corpus*.
 
@@ -297,6 +312,19 @@ def classify_source_type(
     if hit is None:
         hit = _match_keywords(f"{title} {description}".lower(), clean_urls)
     if hit is not None:
+        # Guard: a court order/filing is a primary court record, published on a
+        # *.gov.np host or held in our own storage — it is never hosted *only*
+        # on a generic external web domain. When the sole external host is such
+        # a domain (a news/blog outlet not in NEWS_DOMAINS), court keywords in
+        # the headline (फैसला, पुनरावेदन, सर्वोच्च अदालत …) are reporting *about*
+        # the case, not the document itself — so the source is coverage (NEWS).
+        # This stops a news article on an unlisted outlet from being mistyped a
+        # court document just because its title quotes the verdict/appeal.
+        if hit in (SourceType.COURT_ORDER, SourceType.COURT_FILING_OTHER):
+            has_official_host = any(_is_official_host(h) for h in signal_hosts)
+            has_external_web_host = any(not _is_official_host(h) for h in signal_hosts)
+            if has_external_web_host and not has_official_host:
+                return SourceType.NEWS
         return hit
 
     # 4: legislation by issuing-body domain (no document keyword present).
