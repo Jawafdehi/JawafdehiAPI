@@ -177,3 +177,86 @@ def test_ambiguous_legacy_label_falls_through_to_misc():
         )
         == SourceType.MISC
     )
+
+
+# ── News-about-a-court-action must not be typed a court document ──────────────
+# Regression for the Supreme-Court-appeal mistyping bug: a news article whose
+# headline quotes the verdict/appeal (फैसला, पुनरावेदन, सर्वोच्च अदालत) was being
+# classified COURT_ORDER / COURT_FILING_OTHER instead of NEWS.
+
+
+def test_appeal_news_on_unlisted_outlet_is_news_not_court_order():
+    """A news report about a Supreme Court appeal, hosted on an outlet NOT in
+    NEWS_DOMAINS, is coverage (NEWS) — not the court order it talks about.
+
+    The headline contains फैसला (a COURT_ORDER keyword); without the structural
+    guard the keyword rule wins and mistypes it. The only external host is a
+    generic web domain (no *.gov.np), so it must resolve to NEWS.
+    """
+    assert (
+        classify_source_type(
+            "विशेष अदालतको फैसलामा चित्त नबुझेपछि अख्तियारले दियो सर्वोच्चमा पुनरावेदन",
+            "आयोगका प्रवक्ताका अनुसार वैशाख १३ को फैसला विरुद्ध सर्वोच्चमा पुनरावेदन।",
+            [
+                "https://www.some-unlisted-outlet.com/archives/7103",
+                "https://s3.jawafdehi.org/case_uploads/abc.md",
+            ],
+        )
+        == SourceType.NEWS
+    )
+
+
+def test_filing_report_on_unlisted_outlet_is_news_not_court_filing():
+    """A news report that a writ/appeal was *filed*, on an unlisted outlet, is
+    NEWS — the COURT_FILING_OTHER keyword (पुनरावेदन/रिट) is reporting on it."""
+    assert (
+        classify_source_type(
+            "अख्तियारले सर्वोच्चमा पुनरावेदन दर्ता गर्‍यो",
+            "",
+            ["https://www.another-unlisted-portal.com/artha-banijya/1431"],
+        )
+        == SourceType.NEWS
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.shuvabihani.com/archives/7103",
+        "https://english.khabarhub.com/2025/14/457912/",
+        "https://palpalkokhabar.com/artha-banijya/1431",
+    ],
+)
+def test_newly_listed_outlets_classify_as_news(url):
+    """The three outlets confirmed in the audit (cases 0014/0070/0071) are now
+    recognised news domains, so they classify as NEWS by publisher identity."""
+    assert classify_source_type("सर्वोच्चमा पुनरावेदन", "", [url]) == SourceType.NEWS
+
+
+def test_court_order_in_own_storage_still_classifies_as_court_order():
+    """Guard must NOT over-reach: a genuine uploaded court order (RAW on our
+    ngm-store, no external host at all) keeps COURT_ORDER."""
+    assert (
+        classify_source_type(
+            "Court Order - 080-CR-0014",
+            "विशेष अदालतको फैसला",
+            [
+                "https://ngm-store.jawafdehi.org/uploads/court-orders/special/080-CR-0014.1.pdf",
+                "https://s3.jawafdehi.org/case_uploads/abc.md",
+            ],
+        )
+        == SourceType.COURT_ORDER
+    )
+
+
+def test_court_order_on_government_host_still_classifies_as_court_order():
+    """A court record published on a *.gov.np host is the primary document and
+    must stay COURT_ORDER even though a .gov.np host is present."""
+    assert (
+        classify_source_type(
+            "Supreme Court verdict",
+            "",
+            ["https://supremecourt.gov.np/web/judgment/12345"],
+        )
+        == SourceType.COURT_ORDER
+    )
