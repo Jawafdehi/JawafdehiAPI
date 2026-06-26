@@ -13,11 +13,15 @@ Per VOL-3 operator guidance (latest), cases fall into FOUR families:
                         available. These carry the most detailed information, so
                         the bar is highest.
   4. NON_CIAA         — cases not initiated by the CIAA (e.g. the Rabi
-                        Lamichhane cooperative-fraud cases). No CIAA press
-                        release and no CIAA charge sheet.
+                        Lamichhane cooperative-fraud / money-laundering cases).
+                        No CIAA press release.
 
-Detection is heuristic, driven by source titles/types and the court_cases
-field. It returns a dict the scorer and UI can consume.
+CIAA-ness is gated on the CIAA press release (the CIAA_PRESS_RELEASE source
+type, or a source whose title names अख्तियार). The charge sheet (AG_ABHIYOG_PATRA)
+and the Special-Court venue do NOT discriminate CIAA from non-CIAA — the Attorney
+General files abhiyog patra for non-CIAA cases (e.g. money laundering) tried at
+the same Special Court — so they only tier an already-CIAA case. Returns a dict
+the scorer and UI can consume.
 """
 
 # Nepali + English signal keywords (lower-cased substring match).
@@ -56,16 +60,25 @@ def detect(case):
     tt = _titles_and_types(case)
     court_cases = case.get("court_cases") or []
 
+    # A source typed CIAA_PRESS_RELEASE is the decisive, issuer-specific CIAA
+    # signal (per SourceType: "issuer-prefixed types name documents from a
+    # specific authority"). The title-keyword branch is only a soft fallback for
+    # a press release that was mistyped at ingest.
     has_press_release = any(
-        (_any(t, _PRESS_RELEASE) and (_any(t, _CIAA) or st == "OFFICIAL_GOVERNMENT"))
-        or _any(t, _CIAA)
-        and _any(t, _PRESS_RELEASE)
+        st == "CIAA_PRESS_RELEASE" or (_any(t, _PRESS_RELEASE) and _any(t, _CIAA))
         for t, st in tt
     )
     has_ciaa_source = any(_any(t, _CIAA) for t, _ in tt)
-    has_chargesheet = any(_any(t, _CHARGESHEET) for t, _ in tt)
+    # AG_ABHIYOG_PATRA is the charge-sheet source type. Used only to tier an
+    # already-CIAA case (EXTENDED), never to gate CIAA-ness — see is_ciaa below.
+    has_chargesheet = any(
+        st == "AG_ABHIYOG_PATRA" or _any(t, _CHARGESHEET) for t, st in tt
+    )
     has_verdict = any(_any(t, _VERDICT) for t, _ in tt)
-    has_court_order = any(_any(t, _COURT_ORDER) for t, _ in tt)
+    # COURT_ORDER source type == "Court Order/Verdict"; title keywords are a
+    # fallback. Mirrors court_record, so a COURT_ORDER-typed document whose title
+    # carries no आदेश/फैसला keyword still classifies the case as HAS_VERDICT.
+    has_court_order = any(st == "COURT_ORDER" or _any(t, _COURT_ORDER) for t, st in tt)
     has_special_court = any(_any(t, _SPECIAL_COURT) for t, _ in tt)
     has_court_case_no = bool(court_cases)
 
@@ -84,7 +97,14 @@ def detect(case):
         "verdict_text_available": has_verdict_text,
     }
 
-    is_ciaa = has_chargesheet or has_press_release or has_ciaa_source
+    # Gate CIAA-ness ONLY on CIAA-issuer signals: the CIAA press release, or a
+    # source whose title names the CIAA (अख्तियार) as a soft fallback. The charge
+    # sheet (AG_ABHIYOG_PATRA) and the Special-Court venue are deliberately
+    # EXCLUDED — the Attorney General files abhiyog patra for non-CIAA cases
+    # (e.g. money laundering), which are tried at the Special Court too, so
+    # neither discriminates CIAA from non-CIAA. They only tier an already-CIAA
+    # case below (BASIC -> EXTENDED -> HAS_VERDICT).
+    is_ciaa = has_press_release or has_ciaa_source
 
     if is_ciaa and has_verdict_text:
         # Strongest / most detailed family: the special-court verdict full text

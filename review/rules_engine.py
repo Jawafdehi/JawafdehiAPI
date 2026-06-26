@@ -26,8 +26,6 @@ _PRESS_RELEASE = [
 ]
 _CIAA = ["अख्तियार", "ciaa", "commission for the investigation"]
 _CHARGESHEET = ["अभियोग", "charge sheet", "chargesheet"]
-_VERDICT = ["फैसला", "verdict", "judgement", "judgment"]
-_COURT_ORDER = ["आदेश", "court order"]
 
 
 def _clamp(n):
@@ -250,7 +248,13 @@ def sourcing(case):
     pts = 0
     pts += min(n / GOLD_SOURCES, 1.0) * 40
     pts += (with_raw / n if n else 0) * 30
-    strong = {t for t in types if t.startswith("OFFICIAL") or t.startswith("LEGAL")}
+    # Primary official/legal source types (CIAA/AG/OAG/court), defined on the
+    # model so this tracks the post-revamp taxonomy (migration 0027). The old
+    # check matched OFFICIAL_*/LEGAL_* prefixes — values that no longer exist —
+    # so `strong` was always empty and every case was wrongly flagged.
+    from cases.models import OFFICIAL_LEGAL_SOURCE_TYPES
+
+    strong = {t.upper() for t in types} & OFFICIAL_LEGAL_SOURCE_TYPES
     pts += min(len(types) / 3.0, 1.0) * 15
     pts += 15 if strong else 0
     issues = []
@@ -261,7 +265,10 @@ def sourcing(case):
             f"{n - with_raw} of {n} sources have no canonical (RAW) document link."
         )
     if not strong:
-        issues.append("No OFFICIAL_GOVERNMENT or LEGAL_* source type present.")
+        issues.append(
+            "No primary official/legal source attached (CIAA press release, "
+            "AG charge sheet, OAG audit report, or court order)."
+        )
     return _clamp(pts), issues
 
 
@@ -305,9 +312,11 @@ def source_link_roles_valid(case):
 
 def ciaa_press_release(case):
     tt = _source_titles(case)
+    # A CIAA_PRESS_RELEASE-typed source is the decisive signal; the title-keyword
+    # branch is only a fallback for a press release mistyped at ingest. (Mirrors
+    # the gate in review.casetype.detect.)
     present = any(
-        (_any(t, _PRESS_RELEASE) and (_any(t, _CIAA) or st == "OFFICIAL_GOVERNMENT"))
-        or (_any(t, _CIAA) and _any(t, _PRESS_RELEASE))
+        st == "CIAA_PRESS_RELEASE" or (_any(t, _PRESS_RELEASE) and _any(t, _CIAA))
         for t, st in tt
     )
     if present:
@@ -321,27 +330,34 @@ def ciaa_press_release(case):
 
 
 def charge_sheet(case):
+    # Backs the RETIRED charge_sheet_attached rule (disabled — the CIAA does not
+    # publish charge sheets). Kept correct in case it is ever re-enabled: reads
+    # the AG_ABHIYOG_PATRA source type, not just the अभियोग title keyword.
     tt = _source_titles(case)
-    has_cs = any(_any(t, _CHARGESHEET) for t, _ in tt)
+    has_cs = any(st == "AG_ABHIYOG_PATRA" or _any(t, _CHARGESHEET) for t, st in tt)
     if has_cs:
         return 100, []
     return 0, ["No charge sheet (अभियोग पत्र) document among sources."]
 
 
 def court_record(case):
-    tt = _source_titles(case)
-    has_cs = any(_any(t, _CHARGESHEET) for t, _ in tt)
-    has_verdict = any(_any(t, _VERDICT) for t, _ in tt)
-    has_order = any(_any(t, _COURT_ORDER) for t, _ in tt)
-    pts = 0
-    pts += 50 if has_cs else 0
-    pts += 50 if (has_verdict or has_order) else 0
-    issues = []
-    if not has_cs:
-        issues.append("No charge sheet (अभियोग पत्र) document among sources.")
-    if not (has_verdict or has_order):
-        issues.append("No special-court verdict (फैसला) or order (आदेश) among sources.")
-    return _clamp(pts), issues
+    # A CIAA_HAS_VERDICT case must ATTACH the special-court verdict/order as an
+    # actual document — detected by the COURT_ORDER source type, NOT a फैसला/आदेश
+    # title keyword (which any news headline can contain, and which is already
+    # what classifies the case as HAS_VERDICT — so a title-keyword check here
+    # would be a tautology). The charge-sheet half was retired: the CIAA does not
+    # publish अभियोग पत्र, so penalising its absence is unactionable (see the
+    # disabled charge_sheet_attached rule).
+    has_order = any(
+        (src.get("source_type") or "").upper() == "COURT_ORDER"
+        for src in _sources(case)
+    )
+    if has_order:
+        return 100, []
+    return 0, [
+        "No special-court verdict/order document (COURT_ORDER source type) "
+        "attached, though the case is typed as having a verdict."
+    ]
 
 
 def timeline(case):
