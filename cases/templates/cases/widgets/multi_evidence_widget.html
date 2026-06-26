@@ -37,9 +37,14 @@
 
 <script>
 (function() {
+    // Each option is HTML-escaped (|escape) before being JS-string-escaped (|escapejs):
+    // this string is assigned via innerHTML, so a source title like
+    // "<img src=x onerror=…>" must be neutralised as text, not just kept inside the
+    // JS literal. |escapejs alone would still inject markup once the literal decodes.
     var sourceOptions = [
+        '<option value="">---------</option>',
         {% for source_id, source_title, source_url in sources %}
-        '<option value="{{ source_id }}">{{ source_title|escapejs }}</option>'
+        '<option value="{{ source_id|escape|escapejs }}">{{ source_title|escape|escapejs }}</option>'
         {% if not forloop.last %},{% endif %}
         {% endfor %}
     ].join('');
@@ -47,7 +52,7 @@
     var sourceUrlMap = {
         {% for source_id, source_title, source_url in sources %}
         {% if source_url %}
-        '{{ source_id }}': '{{ source_url|escapejs }}'
+        '{{ source_id|escapejs }}': '{{ source_url|escapejs }}'
         {% if not forloop.last %},{% endif %}
         {% endif %}
         {% endfor %}
