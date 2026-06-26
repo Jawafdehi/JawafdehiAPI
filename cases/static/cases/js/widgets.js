@@ -261,6 +261,15 @@ window.MultiWidgetConfigs = {
             const select = row.querySelector('.source-select');
             const viewBtn = row.querySelector('.view-source-btn');
 
+            // Populate the source dropdown from a single shared option list rather
+            // than inlining ~800 <option>s into every row server-side (which bloated
+            // the case change page to ~1.7MB). Existing rows carry the saved value in
+            // data-selected; new rows start blank.
+            if (select && select.options.length === 0 && manager.config.sourceOptionsHTML) {
+                select.innerHTML = manager.config.sourceOptionsHTML;
+                select.value = select.dataset.selected || '';
+            }
+
             if (select && viewBtn && manager.config.sourceUrlMap) {
                 const updateViewButton = () => {
                     const sourceId = select.value;
