@@ -272,16 +272,17 @@ DEFAULT_RULES = [
     },
     {
         "key": "court_record_attached",
-        "title": "Charge sheet + special-court verdict attached",
+        "title": "Special-court verdict/order attached",
         "category": "Sourcing",
         "kind": "deterministic",
         "detector": "court_record",
         "condition_text": "Active for CIAA cases with the special-court verdict available.",
         "applies_to": ["CIAA_HAS_VERDICT"],
         "description": (
-            "Cases that have reached a special-court verdict must attach the "
-            "charge sheet (अभियोग पत्र) AND the court verdict (फैसला) or order "
-            "(आदेश). These are the highest-detail primary documents."
+            "A case that has reached a special-court verdict must attach that "
+            "verdict/order as a document (the COURT_ORDER source type) — the "
+            "highest-detail primary record. The charge-sheet half of this rule "
+            "was retired: the CIAA does not publish अभियोग पत्र."
         ),
         "weight": 1.2,
         "enabled": True,
@@ -289,19 +290,21 @@ DEFAULT_RULES = [
     },
     {
         "key": "charge_sheet_attached",
-        "title": "Charge sheet attached",
+        "title": "Charge sheet attached (retired)",
         "category": "Sourcing",
         "kind": "deterministic",
         "detector": "charge_sheet",
-        "condition_text": "Active for CIAA cases that have reached the charge-sheet stage.",
+        "condition_text": "Retired — disabled.",
         "applies_to": ["CIAA_EXTENDED", "CIAA_HAS_VERDICT"],
         "description": (
-            "Once a CIAA case is filed in special court, the charge sheet "
-            "(अभियोग पत्र) is the defining primary document and must be among "
-            "the sources."
+            "RETIRED (disabled): the CIAA does not publish charge sheets "
+            "(अभियोग पत्र), so penalising their absence is unactionable noise. "
+            "Kept as a disabled rule for provenance; re-enable only if charge "
+            "sheets become routinely obtainable. The detector still reads the "
+            "AG_ABHIYOG_PATRA source type so it is correct if revived."
         ),
         "weight": 1.1,
-        "enabled": True,
+        "enabled": False,
         "order": 67,
     },
     {

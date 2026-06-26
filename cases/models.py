@@ -460,6 +460,23 @@ class SourceType(models.TextChoices):
     MISC = "MISC", "Miscellaneous"
 
 
+# Source types that count as a primary official/legal document — issued by the
+# CIAA, the Attorney General, the Office of the Auditor General, or the court.
+# A case should be verifiable from at least one of these; news / social /
+# statute-text (LAW_OR_BILL) / other-filing citations are supporting context,
+# not a primary source. The review engine imports this (review.rules_engine)
+# so the model and the scorer cannot drift apart again after the source-type
+# revamp (migration 0027 replaced the old OFFICIAL_GOVERNMENT/LEGAL_* taxonomy).
+OFFICIAL_LEGAL_SOURCE_TYPES = frozenset(
+    {
+        SourceType.CIAA_PRESS_RELEASE.value,
+        SourceType.AG_ABHIYOG_PATRA.value,
+        SourceType.OAG_AUDIT_REPORT.value,
+        SourceType.COURT_ORDER.value,
+    }
+)
+
+
 class Case(models.Model):
     """
     Core model representing a case of alleged misconduct.
