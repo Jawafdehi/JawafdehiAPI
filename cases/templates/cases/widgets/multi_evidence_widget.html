@@ -8,13 +8,10 @@
         <div class="evidence-field-group">
             <label>Document Source</label>
             <div class="evidence-source-wrapper">
-                <select class="evidence-input source-select">
-                    {% for source_id, source_title, source_url in sources %}
-                    <option value="{{ source_id }}" {% if source_id == item.source_id %}selected{% endif %}>
-                        {{ source_title }}
-                    </option>
-                    {% endfor %}
-                </select>
+                <!-- Options are injected once from the shared sourceOptions list in JS
+                     (see setupRowCallback) rather than inlined per row, which previously
+                     rendered ~800 <option>s in every evidence row and bloated the page. -->
+                <select class="evidence-input source-select" data-selected="{{ item.source_id }}"></select>
                 <a href="#" class="btn btn-sm btn-info view-source-btn" target="_blank"
                    {% if not item.source_id %}style="display: none;"{% endif %}>
                     <i class="fas fa-eye"></i> View
@@ -64,9 +61,7 @@
         '<div class="evidence-field-group">',
         '<label>Document Source</label>',
         '<div class="evidence-source-wrapper">',
-        '<select class="evidence-input source-select">',
-        sourceOptions,
-        '</select>',
+        '<select class="evidence-input source-select"></select>',
         '<a href="#" class="btn btn-sm btn-info view-source-btn" target="_blank" style="display: none;">',
         '<i class="fas fa-eye"></i> View',
         '</a>',
@@ -87,7 +82,8 @@
         'evidence',
         {
             rowTemplate: rowTemplate,
-            sourceUrlMap: sourceUrlMap
+            sourceUrlMap: sourceUrlMap,
+            sourceOptionsHTML: sourceOptions
         }
     );
 })();
