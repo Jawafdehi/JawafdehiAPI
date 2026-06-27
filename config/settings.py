@@ -494,12 +494,65 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # applied by JAW-60 would cause 429s in the test suite).
 TESTING = os.getenv("TESTING") == "true" or any("pytest" in arg for arg in sys.argv)
 
+# OIDC (Zitadel) authentication
+# -----------------------------------------------------------------------------
+# The API is an OIDC resource server: it validates Zitadel-issued JWT access
+# tokens locally via JWKS (see config/oidc_auth.py). Zitadel is the source of
+# truth for roles; the role claim is synced into the existing Django Groups /
+# django-rules predicate machinery per request.
+#
+# Required in any environment that serves the API:
+#   OIDC_ISSUER   — Zitadel instance issuer URL (e.g. https://auth.jawafdehi.org)
+#   OIDC_AUDIENCE — the resource identifier the API expects in `aud`
+#                   (for Zitadel, the project ID; comma-separated for multiple).
+# OIDC_JWKS_URI defaults to ${OIDC_ISSUER}/oauth/v2/keys (Zitadel's JWKS path).
+OIDC_ISSUER = os.getenv("OIDC_ISSUER", "")
+_oidc_audience = get_env_list("OIDC_AUDIENCE")
+# PyJWT accepts a str or a list for `audience`; pass a list only when several
+# are configured, else the single string.
+OIDC_AUDIENCE = (
+    _oidc_audience[0] if len(_oidc_audience) == 1 else (_oidc_audience or None)
+)
+OIDC_JWKS_URI = os.getenv("OIDC_JWKS_URI") or (
+    f"{ensure_trailing_slash(OIDC_ISSUER)}oauth/v2/keys" if OIDC_ISSUER else ""
+)
+# Zitadel project-roles claim. Prefer the per-project variant
+# urn:zitadel:iam:org:project:{projectId}:roles if you enable it.
+OIDC_ROLES_CLAIM = os.getenv("OIDC_ROLES_CLAIM", "urn:zitadel:iam:org:project:roles")
+OIDC_ALGORITHMS = get_env_list("OIDC_ALGORITHMS", "RS256")
+OIDC_LEEWAY = int(os.getenv("OIDC_LEEWAY", "30"))  # clock-skew tolerance, seconds
+OIDC_JWKS_CACHE_SECONDS = int(os.getenv("OIDC_JWKS_CACHE_SECONDS", "300"))
+
+# Service-account recognition (replaces the retired chat-jawafdehi-org DRF
+# token). A Zitadel service account is a normal OIDC principal — there is no
+# machine-vs-human claim — so the chat impersonation layer identifies it
+# out-of-band on its `sub` and/or a granted role. These are read by that
+# (future) app-layer step, not by OIDCAuthentication itself.
+OIDC_SERVICE_ACCOUNT_SUBJECTS = get_env_list("OIDC_SERVICE_ACCOUNT_SUBJECTS")
+OIDC_SERVICE_ACCOUNT_ROLE = os.getenv("OIDC_SERVICE_ACCOUNT_ROLE", "contributor")
+
+if not DEBUG and not TESTING and not OIDC_ISSUER:
+    raise ImproperlyConfigured(
+        "OIDC_ISSUER environment variable must be set in production. "
+        "OIDC (Zitadel) is the only authentication method for the API."
+    )
+
 # REST Framework
+# OIDC-only: DRF TokenAuthentication and SessionAuthentication have been
+# REMOVED (DEFAULT_AUTHENTICATION_CLASSES is a full replacement, not a merge).
+# The Django admin still uses session auth via SessionMiddleware /
+# AuthenticationMiddleware — that is independent of this DRF default.
+#
+# TODO(oidc-migration): some views still pin
+# `authentication_classes = [TokenAuthentication]` (case_workflows/views.py,
+# cases/api_views.py — incl. the chat-only MeView, nesq/api_views.py,
+# ngm/api_views.py). Once the Zitadel service account is provisioned, drop those
+# per-view pins so they inherit OIDCAuthentication, and remove
+# config.auth.ChatServiceAccountAuthentication + setup_chat_service_account
+# along with the authtoken / simplejwt apps below.
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
-        "rest_framework.authentication.TokenAuthentication",
-        "rest_framework.authentication.SessionAuthentication",
+        "config.oidc_auth.OIDCAuthentication",
     ],
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 20,

@@ -30,6 +30,9 @@ boto3 = "^1.35.0"
 django-storages = "^1.14.3"
 python-multipart = "^0.0.18"
 djangorestframework-simplejwt = "^5.5.0"
+# OIDC (Zitadel) resource-server JWT validation via local JWKS.
+# [crypto] pulls in `cryptography` for RS256 signature verification.
+pyjwt = {extras = ["crypto"], version = "^2.10"}
 anthropic = "^0.40.0"
 nepali = "^1.2.0"
 markitdown = {extras = ["docx", "pdf", "pptx", "xlsx"], version = "^0.1.5", optional = true}
