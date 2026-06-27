@@ -1,3 +1,18 @@
+"""Helpers for the (deprecated) backend NGM proxy.
+
+DEPRECATION (Decision Q13 — RETIRE the backend NGM proxy):
+    The direct-Postgres query helpers in this module
+    (``ensure_ngm_database_configured``, ``execute_select_query``,
+    ``get_court_case_details``) are NO LONGER on the request path. The
+    ``ngm/api_views.py`` proxy now forwards to the standalone NGM API service
+    over REST (see ``ngm/client.py``) instead of querying ``connections["ngm"]``.
+    These three functions are retained only for the transition / rollback and
+    are scheduled for removal together with the ``ngm`` DATABASES alias.
+
+    Still in use by the proxy views (and to be carried into the NGM service):
+    ``validate_query``, ``apply_row_cap``, ``normalize_case_number``.
+"""
+
 import logging
 import re
 import time
@@ -138,13 +153,20 @@ def apply_row_cap(query: str, max_rows: int) -> str:
 
 
 def ensure_ngm_database_configured() -> None:
+    # DEPRECATED: only used by the retired direct-DB query path below.
     database_config = settings.DATABASES.get("ngm")
     if not database_config:
         raise ValueError("NGM database is not configured")
 
 
 def execute_select_query(query: str, timeout_seconds: float) -> dict:
-    """Execute a validated query against the NGM database alias."""
+    """Execute a validated query against the NGM database alias.
+
+    DEPRECATED / removal-pending: the proxy now forwards to the NGM service via
+    ``ngm.client.query_judicial`` instead of calling this. Retained for
+    rollback during the migration (Decision Q13); remove with the ``ngm`` DB
+    alias.
+    """
     ensure_ngm_database_configured()
 
     timeout_ms = int(timeout_seconds * 1000)
@@ -184,6 +206,11 @@ def execute_select_query(query: str, timeout_seconds: float) -> dict:
 def get_court_case_details(court_identifier: str, case_number: str) -> dict | None:
     """
     Fetch complete case details including hearings and entities.
+
+    DEPRECATED / removal-pending: the proxy now forwards to the NGM service via
+    ``ngm.client.get_court_case`` instead of calling this. Retained for
+    rollback during the migration (Decision Q13); remove with the ``ngm`` DB
+    alias.
 
     Returns None if case not found, otherwise returns dict with:
     - case: dict of case details

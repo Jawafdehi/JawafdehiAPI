@@ -92,9 +92,9 @@ def test_query_endpoint_returns_503_when_ngm_not_configured(
     authenticated_client, monkeypatch
 ):
     def raise_not_configured(query, timeout_seconds):
-        raise ValueError("NGM database is not configured")
+        raise api_views.client.NGMServiceNotConfigured("NGM service is not configured")
 
-    monkeypatch.setattr(api_views, "execute_select_query", raise_not_configured)
+    monkeypatch.setattr(api_views.client, "query_judicial", raise_not_configured)
 
     response = authenticated_client.post(
         QUERY_URL,
@@ -105,16 +105,17 @@ def test_query_endpoint_returns_503_when_ngm_not_configured(
     payload = response.json()
     assert payload["success"] is False
     assert "not configured" in payload["error"].lower()
+    assert response["Deprecation"]
 
 
 @pytest.mark.django_db
-def test_query_endpoint_returns_500_for_unexpected_execution_errors(
+def test_query_endpoint_returns_500_when_service_errors(
     authenticated_client, monkeypatch
 ):
-    def raise_unexpected(query, timeout_seconds):
-        raise RuntimeError("unexpected failure")
+    def raise_service_error(query, timeout_seconds):
+        raise api_views.client.NGMServiceError("upstream boom")
 
-    monkeypatch.setattr(api_views, "execute_select_query", raise_unexpected)
+    monkeypatch.setattr(api_views.client, "query_judicial", raise_service_error)
 
     response = authenticated_client.post(
         QUERY_URL,
@@ -124,17 +125,60 @@ def test_query_endpoint_returns_500_for_unexpected_execution_errors(
 
     assert response.status_code == 500
     payload = response.json()
-    assert payload == {
-        "success": False,
-        "data": None,
-        "error": "Internal server error",
-        "query_time_ms": 0,
-    }
+    assert payload["success"] is False
+    # Internal upstream details are not leaked to the caller.
+    assert payload["error"] == "Database query failed"
+
+
+@pytest.mark.django_db
+def test_query_endpoint_returns_500_for_unexpected_execution_errors(
+    authenticated_client, monkeypatch
+):
+    def raise_unexpected(query, timeout_seconds):
+        raise RuntimeError("unexpected failure")
+
+    monkeypatch.setattr(api_views.client, "query_judicial", raise_unexpected)
+
+    response = authenticated_client.post(
+        QUERY_URL,
+        data={"query": "SELECT * FROM court_cases", "timeout": 5},
+        format="json",
+    )
+
+    assert response.status_code == 500
+    payload = response.json()
+    assert payload["success"] is False
+    assert payload["data"] is None
+    assert payload["error"] == "Internal server error"
+    assert payload["query_time_ms"] == 0
+
+
+@pytest.mark.django_db
+def test_query_endpoint_forwards_service_rejection(authenticated_client, monkeypatch):
+    """A query the NGM service rejects (e.g. its own validation) preserves the
+    service's 400 + message."""
+
+    def raise_rejected(query, timeout_seconds):
+        raise api_views.client.NGMQueryRejected("Only SELECT queries are allowed")
+
+    monkeypatch.setattr(api_views.client, "query_judicial", raise_rejected)
+
+    # Use a query that passes the LOCAL validate_query so we reach the client
+    # call and exercise the forwarded-rejection path.
+    response = authenticated_client.post(
+        QUERY_URL,
+        data={"query": "SELECT * FROM court_cases", "timeout": 5},
+        format="json",
+    )
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["success"] is False
+    assert "Only SELECT queries are allowed" in payload["error"]
 
 
 @pytest.mark.django_db
 def test_query_endpoint_success_response_shape(authenticated_client, monkeypatch):
-    def fake_execute(query, timeout_seconds):
+    def fake_query(query, timeout_seconds):
         assert query == "SELECT case_number FROM court_cases"
         assert timeout_seconds == 10
         return {
@@ -145,7 +189,7 @@ def test_query_endpoint_success_response_shape(authenticated_client, monkeypatch
             "query_time_ms": 12,
         }
 
-    monkeypatch.setattr(api_views, "execute_select_query", fake_execute)
+    monkeypatch.setattr(api_views.client, "query_judicial", fake_query)
 
     response = authenticated_client.post(
         QUERY_URL,
@@ -162,6 +206,26 @@ def test_query_endpoint_success_response_shape(authenticated_client, monkeypatch
     assert payload["data"]["row_count"] == 1
     assert payload["data"]["max_rows"] == 500
     assert payload["query_time_ms"] == 12
+    # Proxy responses are tagged deprecated.
+    assert response["Deprecation"]
+
+
+@pytest.mark.django_db
+def test_query_endpoint_rejects_non_select_locally(authenticated_client, monkeypatch):
+    """Non-SELECT is rejected locally before any forward to the NGM service."""
+
+    def must_not_forward(query, timeout_seconds):
+        raise AssertionError("non-SELECT must be rejected before forwarding")
+
+    monkeypatch.setattr(api_views.client, "query_judicial", must_not_forward)
+
+    response = authenticated_client.post(
+        QUERY_URL,
+        data={"query": "DELETE FROM court_cases", "timeout": 5},
+        format="json",
+    )
+    assert response.status_code == 400
+    assert "Only SELECT queries are allowed" in response.json()["error"]
 
 
 @pytest.mark.django_db
@@ -201,7 +265,7 @@ def test_query_endpoint_rate_limited_per_token(authenticated_client, monkeypatch
             "query_time_ms": 1,
         }
 
-    monkeypatch.setattr(api_views, "execute_select_query", fake_execute)
+    monkeypatch.setattr(api_views.client, "query_judicial", fake_execute)
 
     payload = {"query": "SELECT case_number FROM court_cases", "timeout": 5}
 
@@ -248,7 +312,7 @@ def test_court_case_detail_public_access_and_throttling(
             "entities": [],
         }
 
-    monkeypatch.setattr(api_views, "get_court_case_details", fake_get_details)
+    monkeypatch.setattr(api_views.client, "get_court_case", fake_get_details)
 
     # Test 1: Unauthenticated request should succeed (public endpoint)
     response = api_client.get(
@@ -284,7 +348,7 @@ def test_court_case_detail_not_found(api_client, clear_cache, monkeypatch):
     def fake_get_details(court_identifier, case_number):
         return None
 
-    monkeypatch.setattr(api_views, "get_court_case_details", fake_get_details)
+    monkeypatch.setattr(api_views.client, "get_court_case", fake_get_details)
 
     response = api_client.get(
         CASE_DETAIL_URL_TEMPLATE.format(case_id="supreme:999-XX-9999")
@@ -360,7 +424,7 @@ def test_court_case_detail_success(api_client, clear_cache, monkeypatch):
             ],
         }
 
-    monkeypatch.setattr(api_views, "get_court_case_details", fake_get_details)
+    monkeypatch.setattr(api_views.client, "get_court_case", fake_get_details)
 
     response = api_client.get(
         CASE_DETAIL_URL_TEMPLATE.format(case_id="supreme:081-CR-0081")
@@ -384,9 +448,9 @@ def test_court_case_detail_returns_503_when_ngm_not_configured(
     api_client, clear_cache, monkeypatch
 ):
     def raise_not_configured(court_identifier, case_number):
-        raise ValueError("NGM database is not configured")
+        raise api_views.client.NGMServiceNotConfigured("NGM service is not configured")
 
-    monkeypatch.setattr(api_views, "get_court_case_details", raise_not_configured)
+    monkeypatch.setattr(api_views.client, "get_court_case", raise_not_configured)
 
     response = api_client.get(
         CASE_DETAIL_URL_TEMPLATE.format(case_id="supreme:081-CR-0081")
@@ -430,7 +494,7 @@ def test_court_case_detail_lowercase_normalization(
             "entities": [],
         }
 
-    monkeypatch.setattr(api_views, "get_court_case_details", fake_get_details)
+    monkeypatch.setattr(api_views.client, "get_court_case", fake_get_details)
 
     response = api_client.get(
         CASE_DETAIL_URL_TEMPLATE.format(case_id="supreme:081-cr-0081")
@@ -472,7 +536,7 @@ def test_court_case_detail_missing_zeros_normalization(
             "entities": [],
         }
 
-    monkeypatch.setattr(api_views, "get_court_case_details", fake_get_details)
+    monkeypatch.setattr(api_views.client, "get_court_case", fake_get_details)
 
     response = api_client.get(
         CASE_DETAIL_URL_TEMPLATE.format(case_id="supreme:81-cr-81")
@@ -514,7 +578,7 @@ def test_court_case_detail_devanagari_normalization(
             "entities": [],
         }
 
-    monkeypatch.setattr(api_views, "get_court_case_details", fake_get_details)
+    monkeypatch.setattr(api_views.client, "get_court_case", fake_get_details)
 
     response = api_client.get(
         CASE_DETAIL_URL_TEMPLATE.format(case_id="supreme:०८१-CR-००८१")
@@ -564,7 +628,7 @@ def test_court_case_detail_combined_normalization(api_client, clear_cache, monke
             "entities": [],
         }
 
-    monkeypatch.setattr(api_views, "get_court_case_details", fake_get_details)
+    monkeypatch.setattr(api_views.client, "get_court_case", fake_get_details)
 
     # Test with Devanagari and missing zeros
     response = api_client.get(

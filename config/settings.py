@@ -682,7 +682,21 @@ NES_API_URL = os.getenv("NES_API_URL", "https://nes.jawafdehi.org/api")
 NES_DB_PATH = os.getenv("NES_DB_PATH")
 
 # NGM Database Configuration (for read-only SQL endpoint)
+# DEPRECATED: NGM_QUERY_MAX_ROWS only applied to the legacy direct-DB proxy
+# (ngm/services.py), which is being retired in favour of the standalone NGM
+# service. The NGM service now enforces the row cap server-side. Kept for the
+# transition; remove with ngm/services.py.
 NGM_QUERY_MAX_ROWS = int(os.getenv("NGM_QUERY_MAX_ROWS", "500"))
+
+# NGM API service (standalone FastAPI service, `ngm` repo). The backend's
+# /api/ngm/* endpoints forward here over REST instead of querying the NGM
+# Postgres directly (see ngm/client.py). NGM_API_BASE_URL is the service root
+# (e.g. https://ngm.jawafdehi.org); when unset the proxy returns 503 ("not
+# configured"). NGM_API_TOKEN is an optional static OIDC bearer token for
+# local/dev until the service-account client-credentials grant is wired up.
+NGM_API_BASE_URL = os.getenv("NGM_API_BASE_URL", "")
+NGM_API_TOKEN = os.getenv("NGM_API_TOKEN", "")
+NGM_API_TIMEOUT_SECONDS = float(os.getenv("NGM_API_TIMEOUT_SECONDS", "30"))
 
 # Case Workflow Configuration
 _case_workflows_work_dir_env = os.getenv("CASE_WORKFLOWS_WORK_DIR")
