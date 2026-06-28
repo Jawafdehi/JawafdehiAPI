@@ -14,7 +14,6 @@ account is recognised out-of-band via ``settings.OIDC_SERVICE_ACCOUNT_SUBJECTS``
 (see ``config/oidc_auth.py``).
 """
 
-SERVICE_ACCOUNT_USERNAME = "chat-jawafdehi-org"
 JAWAFDEHI_USER_ID_HEADER = "HTTP_X_JAWAFDEHI_USER_ID"
 JAWAFDEHI_USER_NAME_HEADER = "HTTP_X_JAWAFDEHI_USER_NAME"
 

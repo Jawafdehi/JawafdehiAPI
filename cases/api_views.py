@@ -34,7 +34,6 @@ from rest_framework.views import APIView
 
 from config.auth import (
     JAWAFDEHI_USER_ID_HEADER,
-    SERVICE_ACCOUNT_USERNAME,
     resolve_or_create_identity,
 )
 
@@ -1407,8 +1406,7 @@ class MeView(APIView):
 
     A Zitadel service account is indistinguishable from a human at the
     transport layer, so the caller is recognised out-of-band: its `sub` must be
-    in settings.OIDC_SERVICE_ACCOUNT_SUBJECTS (the legacy chat-jawafdehi-org
-    username is also accepted for the transition).
+    in settings.OIDC_SERVICE_ACCOUNT_SUBJECTS.
     """
 
     def _is_service_account(self, request):
@@ -1418,10 +1416,7 @@ class MeView(APIView):
         allowed_subjects = set(
             getattr(settings, "OIDC_SERVICE_ACCOUNT_SUBJECTS", []) or []
         )
-        return (
-            user.username in allowed_subjects
-            or user.username == SERVICE_ACCOUNT_USERNAME
-        )
+        return user.username in allowed_subjects
 
     def get(self, request):
         if not request.user.is_authenticated:

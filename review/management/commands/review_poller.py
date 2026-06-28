@@ -14,11 +14,14 @@ Execution is assumed NON-distributed for now: a single poller, one job at a
 time. The server's claim endpoint is still atomic (select_for_update), so this
 is safe to scale to multiple pollers later without changing the protocol.
 
-Auth: the poller authenticates with a long-lived DRF auth token (NOT a
-username/password login) sent as `Authorization: Token <key>`. The token is
-configured via CASEWORK_POLLER_TOKEN and belongs to a dedicated service account
-with the Contributor (or ReviewAssistant) role. Create one with:
-  manage.py drf_create_token <service-account-username>
+Auth: the API is now OIDC-only (the legacy DRF authtoken scheme was removed in
+phase5). The poller authenticates as a dedicated Zitadel service account with
+the Contributor (or ReviewAssistant) role, presenting its OIDC access token as
+`Authorization: Bearer <token>`. The credential is supplied via
+CASEWORK_POLLER_TOKEN. Obtain it from the service account's Zitadel client
+(client-credentials grant) rather than `manage.py drf_create_token`, which no
+longer works. NOTE: wiring the request layer to fetch/refresh the bearer token
+is a pending follow-up.
 
 By default the poller is READ-ONLY: it lists the currently-pending reviews and
 exits without touching them. Claiming a review (pending->running) and submitting
@@ -190,9 +193,9 @@ class Command(BaseCommand):
         self.token = settings.CASEWORK_POLLER_TOKEN
         if not self.token:
             raise PollerError(
-                "CASEWORK_POLLER_TOKEN is not set. Create a DRF token for the "
-                "poller's service account (manage.py drf_create_token <user>) "
-                "and set it in the environment."
+                "CASEWORK_POLLER_TOKEN is not set. Provide the poller service "
+                "account's Zitadel OIDC bearer token (client-credentials grant; "
+                "drf_create_token no longer works) and set it in the environment."
             )
 
         # Read-only by default: just report the pending queue and exit. Claiming
