@@ -203,7 +203,6 @@ INSTALLED_APPS = [
     "auditlog",
     "rules.apps.AutodiscoverRulesConfig",
     "cases",
-    "nesq",
     "ngm",
     "case_workflows",
     # Casework Review System (VOL-3): rule-centered case-quality review.

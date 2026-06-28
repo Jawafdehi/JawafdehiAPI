@@ -69,19 +69,6 @@ else:
     hypothesis_settings.load_profile("default")
 
 
-def pytest_collection_modifyitems(config, items):
-    """
-    Mark NESQ tests as integration.
-
-    This preserves full-suite execution while still allowing marker-based
-    selection when needed.
-    """
-    for item in items:
-        normalized_path = str(item.fspath).replace("\\", "/")
-        if "/tests/nesq/" in normalized_path:
-            item.add_marker(pytest.mark.integration)
-
-
 @pytest.fixture(autouse=True, scope="session")
 def configure_test_settings():
     """

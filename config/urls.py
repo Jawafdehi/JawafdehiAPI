@@ -36,7 +36,6 @@ urlpatterns = [
     ),
     path("api/", include("cases.urls")),
     path("oembed/", OEmbedView.as_view(), name="oembed"),
-    path("api/", include("nesq.urls")),
     path("api/", include("ngm.urls")),
     # Case Workflows routes
     path("api/case-workflows/", include("case_workflows.urls")),

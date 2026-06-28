@@ -23,7 +23,6 @@ COPY manage.py ./
 COPY config ./config
 COPY cases ./cases
 COPY case_workflows ./case_workflows
-COPY nesq ./nesq
 COPY ngm ./ngm
 COPY review ./review
 COPY static ./static
