@@ -19,6 +19,34 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class _LLMResponse:
+    """Minimal response wrapper exposing ``.content`` (the interface
+    ``TagEnricher._invoke_llm`` relies on)."""
+
+    def __init__(self, content: str):
+        self.content = content
+
+
+class _OpenAIChatClient:
+    """Tiny adapter over the OpenAI SDK exposing the ``.invoke(prompt) -> .content``
+    interface that ``TagEnricher`` expects. Replaces the former
+    ``langchain_openai.ChatOpenAI`` so the LangChain dependency can be dropped;
+    the OpenAI SDK is already a direct dependency."""
+
+    def __init__(self, client, model: str):
+        self._client = client
+        self._model = model
+
+    def invoke(self, prompt: str) -> _LLMResponse:
+        completion = self._client.chat.completions.create(
+            model=self._model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=1024,
+        )
+        return _LLMResponse(completion.choices[0].message.content or "")
+
+
 class Command(BaseCommand):
     help = "Enrich CIAA draft cases with tags using rule-based + LLM classification"
 
@@ -185,22 +213,18 @@ class Command(BaseCommand):
 
     def _build_llm_client(self, base_url: str, api_key: str, model: str):
         try:
-            from langchain_openai import ChatOpenAI
+            from openai import OpenAI
         except ImportError:
             self.stderr.write(
                 self.style.ERROR(
-                    "langchain-openai not installed. Install with: "
-                    "pip install langchain-openai"
+                    "openai not installed. Install with: pip install openai"
                 )
             )
             raise
 
-        return ChatOpenAI(
-            base_url=base_url,
-            api_key=api_key,
+        return _OpenAIChatClient(
+            client=OpenAI(base_url=base_url, api_key=api_key),
             model=model,
-            temperature=0.3,
-            max_tokens=1024,
         )
 
     def _log_summary(self, stats: dict, dry_run: bool):

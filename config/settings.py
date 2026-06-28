@@ -204,7 +204,6 @@ INSTALLED_APPS = [
     "rules.apps.AutodiscoverRulesConfig",
     "cases",
     "ngm",
-    "case_workflows",
     # Casework Review System (VOL-3): rule-centered case-quality review.
     "review",
 ]
@@ -691,14 +690,6 @@ NGM_API_BASE_URL = os.getenv("NGM_API_BASE_URL", "")
 NGM_API_TOKEN = os.getenv("NGM_API_TOKEN", "")
 NGM_API_TIMEOUT_SECONDS = float(os.getenv("NGM_API_TIMEOUT_SECONDS", "30"))
 
-# Case Workflow Configuration
-_case_workflows_work_dir_env = os.getenv("CASE_WORKFLOWS_WORK_DIR")
-CASE_WORKFLOWS_WORK_DIR = (
-    Path(_case_workflows_work_dir_env)
-    if _case_workflows_work_dir_env
-    else BASE_DIR / "workflow-runs"
-)
-
 # Cache Configuration
 CACHES = {
     "default": {
@@ -775,7 +766,8 @@ REVIEW_CASE_SOURCE = os.getenv("REVIEW_CASE_SOURCE", "local")
 # Live JDS API (used by the seed_jawafdehi CLI and by REVIEW_CASE_SOURCE="remote").
 # Auth is OIDC-only: jds_client.py / ngm_client.py send a Zitadel bearer obtained
 # from the CASEWORK_OIDC_* settings below. JAWAFDEHI_API_TOKEN is retained for
-# other readers (e.g. case_workflows) but is no longer used by jds_client.
+# other readers (e.g. the enrich_missing_bigo command) but is no longer used by
+# jds_client.
 JAWAFDEHI_API_BASE = os.getenv("JAWAFDEHI_API_BASE", "https://portal.jawafdehi.org/api")
 JAWAFDEHI_API_TOKEN = os.getenv("JAWAFDEHI_API_TOKEN", "")
 JAWAFDEHI_S3_BASE = os.getenv("JAWAFDEHI_S3_BASE", "https://s3.jawafdehi.org")

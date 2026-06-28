@@ -14,8 +14,8 @@ from typing import List
 from pydantic import BaseModel, Field
 
 # NOTE: ``google-genai`` / ``google-auth`` are only present when the optional
-# ``llm-all`` extra is installed (via ``langchain-google-genai``). CaseScraper is
-# the sole consumer, yet this module is imported eagerly at startup
+# ``llm-all`` extra is installed (they are declared explicitly there). CaseScraper
+# is the sole consumer, yet this module is imported eagerly at startup
 # (cases.admin -> cases.services.__init__). To keep the app bootable on installs
 # without that extra (e.g. a likhit-only poller box), the Google imports are done
 # lazily inside the methods that use them rather than at module load.

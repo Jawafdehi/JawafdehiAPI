@@ -7,9 +7,7 @@ to unassigned resources.
 
 import pytest
 from django.contrib.auth import get_user_model
-from django.test import RequestFactory
 
-from case_workflows.permissions import IsAdminOrModeratorOrContributorReadOnly
 from cases.models import Case, CaseState, CaseType
 from tests.conftest import (
     create_case_with_entities,
@@ -18,28 +16,6 @@ from tests.conftest import (
 )
 
 User = get_user_model()
-
-
-# ============================================================================
-# Helper: build a mock request + DRF view for permission class testing
-# ============================================================================
-
-
-class _MockView:
-    """Minimal mock DRF view for testing permission classes."""
-
-    def __init__(self, action=None):
-        self.action = action
-        self.detail = action in ("retrieve", "partial_update", "destroy")
-
-
-def _build_request(method="GET", user=None):
-    """Build a DRF Request-like object with the given method and user."""
-    factory = RequestFactory()
-    req = factory.generic(method, "/")
-    req.user = user
-    req.method = method
-    return req
 
 
 # ============================================================================
@@ -111,52 +87,6 @@ def test_contributor_can_change_assigned_case():
     from cases.rules.predicates import can_change_case
 
     assert can_change_case(request.user, case)
-
-
-# ============================================================================
-# DRF permission class — workflow endpoints
-# ============================================================================
-
-
-@pytest.mark.django_db
-class TestIsAdminOrModeratorOrContributorReadOnly:
-
-    def test_contributor_read_allowed(self):
-        user = _make_contributor()
-        perm = IsAdminOrModeratorOrContributorReadOnly()
-        assert perm.has_permission(_build_request("GET", user), _MockView())
-
-    def test_contributor_write_denied(self):
-        user = _make_contributor()
-        perm = IsAdminOrModeratorOrContributorReadOnly()
-        assert not perm.has_permission(_build_request("POST", user), _MockView())
-        assert not perm.has_permission(_build_request("PATCH", user), _MockView())
-        assert not perm.has_permission(_build_request("DELETE", user), _MockView())
-
-    def test_admin_write_allowed(self):
-        admin = create_user_with_role("admin1", "admin@example.com", "Admin")
-        perm = IsAdminOrModeratorOrContributorReadOnly()
-        assert perm.has_permission(_build_request("POST", admin), _MockView())
-        assert perm.has_permission(_build_request("PATCH", admin), _MockView())
-
-    def test_moderator_write_allowed(self):
-        mod = create_user_with_role("mod1", "mod@example.com", "Moderator")
-        perm = IsAdminOrModeratorOrContributorReadOnly()
-        assert perm.has_permission(_build_request("POST", mod), _MockView())
-
-    def test_unauthenticated_denied(self):
-        perm = IsAdminOrModeratorOrContributorReadOnly()
-        req = _build_request("GET")
-        req.user = None
-        assert not perm.has_permission(req, _MockView())
-
-    def test_unauthorized_user_denied(self):
-        # NoRole is not a real group; create a plain user
-        plain = User.objects.create_user(
-            username="plain", email="plain@example.com", password="testpass123"
-        )
-        perm = IsAdminOrModeratorOrContributorReadOnly()
-        assert not perm.has_permission(_build_request("GET", plain), _MockView())
 
 
 # ============================================================================

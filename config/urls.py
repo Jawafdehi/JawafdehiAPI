@@ -37,8 +37,6 @@ urlpatterns = [
     path("api/", include("cases.urls")),
     path("oembed/", OEmbedView.as_view(), name="oembed"),
     path("api/", include("ngm.urls")),
-    # Case Workflows routes
-    path("api/case-workflows/", include("case_workflows.urls")),
     # Chat identity resolution for the jawafdehi-mcp server. This is the lone
     # surviving endpoint from the removed caseworker agent app; the path is kept
     # for backward compatibility with the MCP server.
