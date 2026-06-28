@@ -531,7 +531,14 @@ OIDC_JWKS_CACHE_SECONDS = int(os.getenv("OIDC_JWKS_CACHE_SECONDS", "300"))
 OIDC_SERVICE_ACCOUNT_SUBJECTS = get_env_list("OIDC_SERVICE_ACCOUNT_SUBJECTS")
 OIDC_SERVICE_ACCOUNT_ROLE = os.getenv("OIDC_SERVICE_ACCOUNT_ROLE", "contributor")
 
-if not DEBUG and not TESTING and not OIDC_ISSUER:
+# Build/admin management commands (e.g. collectstatic, migrate) don't serve auth
+# and run at image-build time before OIDC_ISSUER is injected — don't fail them on
+# the production guard. The guard still protects the running server (runserver/
+# gunicorn/uvicorn import settings without these argv markers).
+_BUILD_TIME_COMMANDS = {"collectstatic", "makemigrations", "migrate", "compilemessages"}
+_running_build_command = any(cmd in sys.argv for cmd in _BUILD_TIME_COMMANDS)
+
+if not DEBUG and not TESTING and not _running_build_command and not OIDC_ISSUER:
     raise ImproperlyConfigured(
         "OIDC_ISSUER environment variable must be set in production. "
         "OIDC (Zitadel) is the only authentication method for the API."
@@ -668,7 +675,9 @@ if not DEBUG:
     SECURE_HSTS_SECONDS = int(os.getenv("SECURE_HSTS_SECONDS", "300"))
     SECURE_HSTS_INCLUDE_SUBDOMAINS = env_flag("SECURE_HSTS_INCLUDE_SUBDOMAINS", False)
     SECURE_HSTS_PRELOAD = env_flag("SECURE_HSTS_PRELOAD", False)
-    SECURE_SSL_REDIRECT = True
+    # Default on in prod, but overridable for local HTTP dev (the compose stack
+    # serves plain HTTP behind no TLS terminator).
+    SECURE_SSL_REDIRECT = env_flag("SECURE_SSL_REDIRECT", True)
     CSRF_COOKIE_SECURE = True
     SESSION_COOKIE_SECURE = True
     SESSION_COOKIE_HTTPONLY = True
