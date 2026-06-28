@@ -13,6 +13,8 @@ Used in two places:
 import requests
 from django.conf import settings
 
+from review.oidc_client_credentials import OIDCTokenError, bearer_header
+
 UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0 Safari/537.36 CaseworkReview/1.0"
@@ -29,14 +31,18 @@ def _base():
     ).rstrip("/")
 
 
-def _token():
-    return getattr(settings, "JAWAFDEHI_API_TOKEN", "") or ""
-
-
 def _headers(auth=True):
     h = {"User-Agent": UA, "Accept": "application/json"}
-    if auth and _token():
-        h["Authorization"] = f"Token {_token()}"
+    if auth:
+        # The JDS API is OIDC-only: authenticate as the casework service account
+        # with a Zitadel client-credentials bearer token. If credentials are not
+        # configured we send no Authorization header (unauthenticated request),
+        # rather than failing — public/unauthenticated reads still work and the
+        # server returns 401 if auth is required.
+        try:
+            h.update(bearer_header())
+        except OIDCTokenError:
+            pass
     return h
 
 

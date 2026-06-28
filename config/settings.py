@@ -769,10 +769,14 @@ JAZZMIN_SETTINGS = {
 
 # Where the review pipeline gets case data:
 #   "local"  -> serialize a cases.Case from THIS database (offline; default).
-#   "remote" -> fetch from the live Jawafdehi public API (needs JAWAFDEHI_API_TOKEN).
+#   "remote" -> fetch from the live Jawafdehi API (jds_client authenticates with
+#               the CASEWORK_OIDC_* client-credentials bearer; see below).
 REVIEW_CASE_SOURCE = os.getenv("REVIEW_CASE_SOURCE", "local")
 
 # Live JDS API (used by the seed_jawafdehi CLI and by REVIEW_CASE_SOURCE="remote").
+# Auth is OIDC-only: jds_client.py / ngm_client.py send a Zitadel bearer obtained
+# from the CASEWORK_OIDC_* settings below. JAWAFDEHI_API_TOKEN is retained for
+# other readers (e.g. case_workflows) but is no longer used by jds_client.
 JAWAFDEHI_API_BASE = os.getenv("JAWAFDEHI_API_BASE", "https://portal.jawafdehi.org/api")
 JAWAFDEHI_API_TOKEN = os.getenv("JAWAFDEHI_API_TOKEN", "")
 JAWAFDEHI_S3_BASE = os.getenv("JAWAFDEHI_S3_BASE", "https://s3.jawafdehi.org")
@@ -801,15 +805,35 @@ REVIEW_MAX_PARALLEL = int(os.getenv("REVIEW_MAX_PARALLEL", "3"))
 #
 # AUTH MIGRATION (phase5): the API is now OIDC-only and no longer accepts the
 # legacy `Authorization: Token <key>` DRF auth token. The poller and the
-# review/ HTTP clients (jds_client.py, ngm_client.py) must be reconfigured to
-# send a Zitadel service-account access token as `Authorization: Bearer
-# <access>` once the service-account client-credentials grant is provisioned.
-# CASEWORK_POLLER_TOKEN is retained as the carrier for that bearer token; until
-# the clients are switched over to the Bearer scheme they will receive 401 from
-# this server. Locally the API is this same server on :40173.
+# review/ HTTP clients (jds_client.py, ngm_client.py) authenticate as a Zitadel
+# service account via the client-credentials grant and send the resulting JWT
+# access token as `Authorization: Bearer <access>`. The token is fetched/cached/
+# refreshed by review.oidc_client_credentials from the settings below. Locally
+# the API is this same server on :40173.
 CASEWORK_API_BASE = os.getenv(
     "CASEWORK_API_BASE", "http://127.0.0.1:40173/api/casework"
 )
+
+# Zitadel service-account credentials for the casework outbound clients
+# (client-credentials grant against ${OIDC_ISSUER}/oauth/v2/token).
+#   CASEWORK_OIDC_CLIENT_ID / CASEWORK_OIDC_CLIENT_SECRET — the service account's
+#     OIDC app credentials (the account is granted the Contributor /
+#     ReviewAssistant project role).
+#   CASEWORK_OIDC_SCOPE — the space-separated scope string. Must include the
+#     mandatory audience scope `urn:zitadel:iam:org:project:id:<projectId>:aud`
+#     (so the API's `aud` check passes) and, to carry roles, the role scope
+#     `urn:zitadel:iam:org:projects:roles` (note the plural `projects`).
+#   CASEWORK_OIDC_AUDIENCE — optional explicit `audience` form field for
+#     deployments that honour it in addition to the audience scope.
+CASEWORK_OIDC_CLIENT_ID = os.getenv("CASEWORK_OIDC_CLIENT_ID", "")
+CASEWORK_OIDC_CLIENT_SECRET = os.getenv("CASEWORK_OIDC_CLIENT_SECRET", "")
+CASEWORK_OIDC_SCOPE = os.getenv("CASEWORK_OIDC_SCOPE", "")
+CASEWORK_OIDC_AUDIENCE = os.getenv("CASEWORK_OIDC_AUDIENCE", "")
+
+# DEPRECATED (phase5): a static DRF `Authorization: Token <key>` is no longer
+# accepted by the OIDC-only API. Retained only so the poller can detect the
+# legacy-only misconfiguration and fail with a clear message. Use the
+# CASEWORK_OIDC_* client-credentials settings above instead.
 CASEWORK_POLLER_TOKEN = os.getenv("CASEWORK_POLLER_TOKEN", "")
 
 # Base used to absolutize relative media URLs (e.g. a locally-stored MARKDOWN

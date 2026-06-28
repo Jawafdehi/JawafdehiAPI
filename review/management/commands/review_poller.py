@@ -17,11 +17,11 @@ is safe to scale to multiple pollers later without changing the protocol.
 Auth: the API is now OIDC-only (the legacy DRF authtoken scheme was removed in
 phase5). The poller authenticates as a dedicated Zitadel service account with
 the Contributor (or ReviewAssistant) role, presenting its OIDC access token as
-`Authorization: Bearer <token>`. The credential is supplied via
-CASEWORK_POLLER_TOKEN. Obtain it from the service account's Zitadel client
-(client-credentials grant) rather than `manage.py drf_create_token`, which no
-longer works. NOTE: wiring the request layer to fetch/refresh the bearer token
-is a pending follow-up.
+`Authorization: Bearer <token>`. The access token is obtained (and cached/
+refreshed) by ``review.oidc_client_credentials`` from the service account's
+client-credentials grant, configured via CASEWORK_OIDC_CLIENT_ID /
+CASEWORK_OIDC_CLIENT_SECRET (+ OIDC_ISSUER). The legacy CASEWORK_POLLER_TOKEN
+static token is deprecated and no longer used.
 
 By default the poller is READ-ONLY: it lists the currently-pending reviews and
 exits without touching them. Claiming a review (pending->running) and submitting
@@ -41,6 +41,7 @@ from django.conf import settings
 from django.core.management.base import BaseCommand
 
 from review import runner
+from review.oidc_client_credentials import OIDCTokenError, get_provider
 
 
 class PollerError(Exception):
@@ -76,7 +77,7 @@ class Command(BaseCommand):
 
     def _headers(self):
         return {
-            "Authorization": f"Token {self.token}",
+            "Authorization": f"Bearer {self.token_provider.get_token()}",
             "Content-Type": "application/json",
         }
 
@@ -190,13 +191,27 @@ class Command(BaseCommand):
         apply = opts["apply"]
         once = opts["once"]
         poll = float(opts["poll"])
-        self.token = settings.CASEWORK_POLLER_TOKEN
-        if not self.token:
+
+        # Deprecation: a static CASEWORK_POLLER_TOKEN no longer works against the
+        # OIDC-only API. Fail loudly if someone set ONLY the old token, so the
+        # misconfiguration is obvious rather than surfacing as opaque 401s.
+        if settings.CASEWORK_POLLER_TOKEN and not (
+            settings.CASEWORK_OIDC_CLIENT_ID and settings.CASEWORK_OIDC_CLIENT_SECRET
+        ):
             raise PollerError(
-                "CASEWORK_POLLER_TOKEN is not set. Provide the poller service "
-                "account's Zitadel OIDC bearer token (client-credentials grant; "
-                "drf_create_token no longer works) and set it in the environment."
+                "CASEWORK_POLLER_TOKEN is deprecated and no longer accepted: the "
+                "API is OIDC-only. Configure the poller's Zitadel service account "
+                "via CASEWORK_OIDC_CLIENT_ID / CASEWORK_OIDC_CLIENT_SECRET "
+                "(+ OIDC_ISSUER) for the client-credentials grant."
             )
+
+        self.token_provider = get_provider()
+        # Fail fast on missing/invalid credentials before entering the loop,
+        # turning OIDCTokenError into the command's PollerError.
+        try:
+            self.token_provider.get_token()
+        except OIDCTokenError as e:
+            raise PollerError(str(e)) from e
 
         # Read-only by default: just report the pending queue and exit. Claiming
         # and submitting results (the mutating path) require an explicit --apply.

@@ -19,6 +19,8 @@ from urllib.parse import quote
 import requests
 from django.conf import settings
 
+from review.oidc_client_credentials import OIDCTokenError, bearer_header
+
 
 class NgmError(Exception):
     pass
@@ -32,10 +34,6 @@ def _base():
     return getattr(
         settings, "JAWAFDEHI_API_BASE", "https://portal.jawafdehi.org/api"
     ).rstrip("/")
-
-
-def _token():
-    return getattr(settings, "JAWAFDEHI_API_TOKEN", "") or ""
 
 
 # Court refs come from case data (operator-entered), so validate strictly before
@@ -75,7 +73,8 @@ def get_court_case(case_ref, timeout=30):
     """Fetch one NGM court case (with hearings + entities) by ``court:number``.
 
     Returns the full record dict, or raises NgmNotFound (404) / NgmError.
-    The endpoint is public (no auth required); we send the token if present.
+    The endpoint is public (no auth required); we send the OIDC bearer if the
+    casework service-account credentials are configured.
     """
     parsed = parse_court_ref(case_ref)
     if not parsed:
@@ -85,8 +84,13 @@ def get_court_case(case_ref, timeout=30):
     court, number = parsed
 
     headers = {"Accept": "application/json"}
-    if _token():
-        headers["Authorization"] = f"Token {_token()}"
+    # The court_case endpoint is public, but the API is OIDC-only for anything
+    # gated: send the casework service account's Zitadel bearer token when its
+    # client-credentials are configured, otherwise call unauthenticated.
+    try:
+        headers.update(bearer_header())
+    except OIDCTokenError:
+        pass
     # Rebuild + percent-encode from the validated parts (never interpolate the
     # raw ref) so the path segment can't break out into the URL path/query.
     safe_ref = quote(f"{court}:{number}", safe="")

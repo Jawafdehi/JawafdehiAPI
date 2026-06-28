@@ -89,7 +89,11 @@ class Command(BaseCommand):
         parser.add_argument(
             "--token",
             default=None,
-            help="Remote JDS API token (overrides settings.JAWAFDEHI_API_TOKEN).",
+            help=(
+                "DEPRECATED: the JDS API is OIDC-only; jds_client now "
+                "authenticates with a Zitadel client-credentials bearer "
+                "(CASEWORK_OIDC_CLIENT_ID/SECRET). This static token is ignored."
+            ),
         )
         parser.add_argument(
             "--sources-only",
@@ -107,7 +111,16 @@ class Command(BaseCommand):
         if opts.get("api_base"):
             settings.JAWAFDEHI_API_BASE = opts["api_base"].rstrip("/")
         if opts.get("token"):
+            # The JDS API is OIDC-only now; jds_client authenticates with a
+            # Zitadel client-credentials bearer. Keep the setting assignment for
+            # any other reader, but warn that it no longer drives auth.
             settings.JAWAFDEHI_API_TOKEN = opts["token"]
+            self.stdout.write(
+                self.style.WARNING(
+                    "--token is deprecated and no longer used for JDS auth "
+                    "(OIDC-only); set CASEWORK_OIDC_CLIENT_ID/SECRET instead."
+                )
+            )
 
         base = getattr(settings, "JAWAFDEHI_API_BASE", "")
         self.stdout.write(self.style.MIGRATE_HEADING(f"Seeding from {base}"))
