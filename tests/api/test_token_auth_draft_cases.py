@@ -1,13 +1,15 @@
 """
-Tests for token-based authorization to access DRAFT cases.
+Tests for role-based authorization to access DRAFT cases via GET /cases/<id>.
 
-Feature: Allow optional token-based authorization for GET /cases/<id> endpoint
+Originally these exercised the DRF auth-token transport; after the OIDC-only
+migration (which removed DRF token auth) they use force_authenticate to set
+request.user directly. The behavior under test — which roles can read DRAFT
+cases — is unchanged and auth-scheme-agnostic.
 """
 
 import pytest
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
-from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
 from cases.models import CaseState, CaseType
@@ -18,7 +20,7 @@ User = get_user_model()
 
 @pytest.mark.django_db
 class TestTokenAuthDraftCases:
-    """Test token-based access to DRAFT cases."""
+    """Test role-based access to DRAFT cases."""
 
     def setup_method(self):
         """Set up test data for each test."""
@@ -30,20 +32,17 @@ class TestTokenAuthDraftCases:
         )
         self.admin_user.is_superuser = True
         self.admin_user.save()
-        self.admin_token = Token.objects.create(user=self.admin_user)
 
         self.contributor_user = User.objects.create_user(
             username="contributor", password="password"
         )
         contributor_group, _ = Group.objects.get_or_create(name="Contributor")
         self.contributor_user.groups.add(contributor_group)
-        self.contributor_token = Token.objects.create(user=self.contributor_user)
 
         self.other_contributor = User.objects.create_user(
             username="other_contributor", password="password"
         )
         self.other_contributor.groups.add(contributor_group)
-        self.other_contributor_token = Token.objects.create(user=self.other_contributor)
 
     def test_draft_case_not_accessible_without_authorization(self):
         """DRAFT case should return 404 for unauthenticated/unauthorized requests."""
@@ -74,8 +73,8 @@ class TestTokenAuthDraftCases:
             state=CaseState.DRAFT,
         )
 
-        # Access with admin token
-        self.client.credentials(HTTP_AUTHORIZATION=f"Token {self.admin_token.key}")
+        # Access as admin
+        self.client.force_authenticate(user=self.admin_user)
         response = self.client.get(f"/api/cases/{case.slug}/")
 
         assert response.status_code == 200
@@ -97,10 +96,8 @@ class TestTokenAuthDraftCases:
         # Assign contributor to the case
         case.contributors.add(self.contributor_user)
 
-        # Access with contributor token
-        self.client.credentials(
-            HTTP_AUTHORIZATION=f"Token {self.contributor_token.key}"
-        )
+        # Access as contributor
+        self.client.force_authenticate(user=self.contributor_user)
         response = self.client.get(f"/api/cases/{case.slug}/")
 
         assert response.status_code == 200
@@ -120,10 +117,8 @@ class TestTokenAuthDraftCases:
         )
         case.contributors.add(self.contributor_user)
 
-        # Access with other_contributor token (not assigned to case)
-        self.client.credentials(
-            HTTP_AUTHORIZATION=f"Token {self.other_contributor_token.key}"
-        )
+        # Access as other_contributor (not assigned to case)
+        self.client.force_authenticate(user=self.other_contributor)
         response = self.client.get(f"/api/cases/{case.slug}/")
 
         assert response.status_code == 200
@@ -189,10 +184,8 @@ class TestTokenAuthDraftCases:
             state=CaseState.PUBLISHED,
         )
 
-        # Access list endpoint with contributor token
-        self.client.credentials(
-            HTTP_AUTHORIZATION=f"Token {self.contributor_token.key}"
-        )
+        # Access list endpoint as contributor
+        self.client.force_authenticate(user=self.contributor_user)
         response = self.client.get("/api/cases/")
 
         assert response.status_code == 200

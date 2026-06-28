@@ -2,7 +2,6 @@ import logging
 
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
-from rest_framework.authentication import TokenAuthentication
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import SimpleRateThrottle
@@ -72,11 +71,12 @@ class NGMQueryRateThrottle(SimpleRateThrottle):
         return super().allow_request(request, view)
 
     def get_cache_key(self, request, view):
-        # For authenticated requests, use token key
-        token = getattr(request, "auth", None)
-        token_key = getattr(token, "key", None)
-        if token_key:
-            return self.cache_format % {"scope": self.scope, "ident": token_key}
+        # For authenticated requests, throttle per authenticated user (keyed on
+        # the OIDC `sub`-derived Django user). Under OIDC auth `request.auth` is
+        # the decoded claims dict, not a DRF Token, so there is no `.key`.
+        user = getattr(request, "user", None)
+        if user and user.is_authenticated:
+            return self.cache_format % {"scope": self.scope, "ident": user.pk}
 
         # For anonymous requests, use IP address to enforce rate limiting
         ident = self.get_ident(request)
@@ -93,8 +93,8 @@ class NGMQueryRateThrottle(SimpleRateThrottle):
     - timeout (float, optional): Statement timeout in seconds (1-15, default: 15)
 
     Security controls:
-    - Requires DRF token authentication
-    - Rate limited per token based on NGM tier or staff role
+    - Requires OIDC (Zitadel) Bearer access-token authentication
+    - Rate limited per authenticated user based on NGM tier or staff role
     - Only SELECT queries are allowed
     - Only allowlisted judicial tables may be referenced
     - Server enforces statement timeout (max 15 seconds) and row cap
@@ -102,7 +102,7 @@ class NGMQueryRateThrottle(SimpleRateThrottle):
     request=NGMQuerySerializer,
 )
 class NGMJudicialQueryView(APIView):
-    authentication_classes = [TokenAuthentication]
+    # Auth: inherit the OIDC-only DEFAULT_AUTHENTICATION_CLASSES (no per-view pin).
     permission_classes = [IsAuthenticated]
     throttle_classes = [NGMQueryRateThrottle]
 

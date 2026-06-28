@@ -16,7 +16,6 @@ import logging
 
 from pydantic import ValidationError as PydanticValidationError
 from rest_framework import status
-from rest_framework.authentication import TokenAuthentication
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -72,7 +71,7 @@ class SubmitNESChangeView(APIView):
     Supported actions: ADD_NAME, CREATE_ENTITY, UPDATE_ENTITY.
     """
 
-    authentication_classes = [TokenAuthentication]
+    # Auth: inherit the OIDC-only DEFAULT_AUTHENTICATION_CLASSES (no per-view pin).
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -207,7 +206,7 @@ class ListMySubmissionsView(APIView):
         page_size — Items per page (default: 20, max: 100).
     """
 
-    authentication_classes = [TokenAuthentication]
+    # Auth: inherit the OIDC-only DEFAULT_AUTHENTICATION_CLASSES (no per-view pin).
     permission_classes = [IsAuthenticated]
 
     def get(self, request):

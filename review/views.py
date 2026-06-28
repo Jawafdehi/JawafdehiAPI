@@ -2,9 +2,10 @@
 
 Auth model change vs. the standalone casework system:
   - The standalone app issued its own DRF auth token via /auth/login/.
-  - Here we reuse jawafdehi-api's JWT. Clients obtain a token pair from the
-    existing /api/caseworker/auth/token/ endpoint (SimpleJWT TokenObtainPair)
-    and send it as `Authorization: Bearer <access>`.
+  - As of the phase5 OIDC-only migration, clients authenticate with a Zitadel
+    OIDC access token sent as `Authorization: Bearer <access>` (validated by
+    config.oidc_auth.OIDCAuthentication). The old SimpleJWT
+    /api/caseworker/auth/token/ mint endpoint has been removed.
   - Read endpoints (review list/detail, rules, config GET, ``me``) require a
     role with read access (CanReadReview: Contributor+ / ReviewAssistant /
     the org-wide ReadOnly role). Mutation endpoints require at least the

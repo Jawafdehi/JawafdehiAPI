@@ -8,9 +8,11 @@ Contributor) with predicates in ``cases.rules.predicates``. We reuse the
 ``has_role`` predicate (true for any of Admin / Moderator / Contributor, or a
 superuser) rather than inventing a parallel role system.
 
-Authentication itself is handled by DRF's configured classes; the review URLs
-pin JWT first (see settings.SIMPLE_JWT + the project's
-DEFAULT_AUTHENTICATION_CLASSES, which lead with JWTAuthentication).
+Authentication itself is handled by DRF's configured classes. As of the
+phase5 OIDC-only migration the sole authenticator is
+config.oidc_auth.OIDCAuthentication (the global DEFAULT_AUTHENTICATION_CLASSES);
+clients send a Zitadel access token as ``Authorization: Bearer <access>``. The
+old SimpleJWT path has been removed.
 """
 
 from rest_framework import permissions

@@ -20,7 +20,6 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
-from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from cases.api_views import MeView, OEmbedView
 from cases.views import docs, index
@@ -46,18 +45,11 @@ urlpatterns = [
     # for backward compatibility with the MCP server.
     path("api/caseworker/me", MeView.as_view(), name="cw-me"),
     # Casework Review System (VOL-3) — rule-centered case-quality review.
-    # Auth: shared JWT (token from /api/caseworker/auth/token/) + Contributor role.
+    # Auth: OIDC (Zitadel) Bearer access token + a read/write role (CanReadReview
+    # / HasContributorRole). The legacy SimpleJWT token-mint endpoints
+    # (/api/caseworker/auth/token/[refresh/]) were REMOVED in phase5: the API is
+    # OIDC-only, so clients obtain access tokens from Zitadel, not from here.
     path("api/casework/", include("review.urls")),
-    path(
-        "api/caseworker/auth/token/",
-        TokenObtainPairView.as_view(),
-        name="cw-token-obtain",
-    ),
-    path(
-        "api/caseworker/auth/token/refresh/",
-        TokenRefreshView.as_view(),
-        name="cw-token-refresh",
-    ),
 ]
 
 if settings.DEBUG and str(settings.MEDIA_URL).startswith("/"):

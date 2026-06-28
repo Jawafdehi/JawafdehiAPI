@@ -8,8 +8,6 @@ from django.db import models
 from django.forms.models import BaseInlineFormSet
 from django.template.response import TemplateResponse
 from django.utils.html import format_html
-from rest_framework.authtoken.admin import TokenAdmin as BaseTokenAdmin
-from rest_framework.authtoken.models import Token
 
 from cases.widgets import ToastUIEditorWidget
 
@@ -1431,18 +1429,10 @@ class FeedbackAdmin(admin.ModelAdmin):
 
 
 # ============================================================================
-# Token Admin (DRF authtoken) — show full name for user
+# Token Admin (DRF authtoken) — REMOVED in phase5 (OIDC-only migration).
+# The rest_framework.authtoken app is no longer installed, so there is no Token
+# model to register an admin for.
 # ============================================================================
-
-try:
-    admin.site.unregister(Token)
-except admin.sites.NotRegistered:
-    pass
-
-
-@admin.register(Token)
-class CustomTokenAdmin(UserFullNameAdminMixin, BaseTokenAdmin):
-    raw_id_fields = ()
 
 
 @admin.register(ChatUserIdentity)

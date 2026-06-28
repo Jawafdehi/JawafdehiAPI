@@ -1,7 +1,6 @@
 """Tests for POST /api/cases/ draft creation endpoint."""
 
 import pytest
-from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
 from cases.models import (
@@ -18,9 +17,11 @@ URL = "/api/cases/"
 
 
 def _authed_client(user):
-    token, _ = Token.objects.get_or_create(user=user)
+    # OIDC-only migration: DRF token auth was removed. force_authenticate sets
+    # request.user directly (auth-scheme-agnostic) so the authorization logic
+    # under test is still exercised.
     client = APIClient()
-    client.credentials(HTTP_AUTHORIZATION=f"Token {token.key}")
+    client.force_authenticate(user=user)
     return client
 
 

@@ -23,7 +23,6 @@ from asgiref.sync import sync_to_async
 from django.utils import timezone
 from nes.database.file_database import FileDatabase
 from nes.services.publication import PublicationService
-from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
 from nesq.admin import NESQueueItemAdmin
@@ -106,21 +105,22 @@ def moderator_user(db):
     return create_user_with_role("hari-integ", "hari-integ@example.np", "Moderator")
 
 
+# OIDC-only migration: DRF token auth was removed. force_authenticate sets
+# request.user directly (auth-scheme-agnostic) so the authorization logic under
+# test is still exercised.
 @pytest.fixture
 def contributor_client(contributor):
     """API client authenticated as a contributor."""
-    token = Token.objects.create(user=contributor)
     client = APIClient()
-    client.credentials(HTTP_AUTHORIZATION=f"Token {token.key}")
+    client.force_authenticate(user=contributor)
     return client
 
 
 @pytest.fixture
 def admin_client(admin_user):
     """API client authenticated as an admin."""
-    token = Token.objects.create(user=admin_user)
     client = APIClient()
-    client.credentials(HTTP_AUTHORIZATION=f"Token {token.key}")
+    client.force_authenticate(user=admin_user)
     return client
 
 

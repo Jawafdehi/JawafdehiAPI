@@ -2,7 +2,6 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
 from django.core.cache import cache
-from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
 from ngm import api_views
@@ -39,10 +38,11 @@ def authenticated_user(db):
 
 @pytest.fixture
 def authenticated_client(authenticated_user):
-    user = authenticated_user
-    token = Token.objects.create(user=user)
+    # OIDC-only migration: DRF token auth was removed. force_authenticate sets
+    # request.user directly (auth-scheme-agnostic); the NGM throttle keys on the
+    # authenticated user's pk, so per-user rate-limit tests still hold.
     client = APIClient()
-    client.credentials(HTTP_AUTHORIZATION=f"Token {token.key}")
+    client.force_authenticate(user=authenticated_user)
     return client
 
 
@@ -253,7 +253,12 @@ def test_query_rate_uses_highest_priority_group(
 
 
 @pytest.mark.django_db
-def test_query_endpoint_rate_limited_per_token(authenticated_client, monkeypatch):
+def test_query_endpoint_rate_limited_per_user(
+    authenticated_client, clear_cache, monkeypatch
+):
+    # clear_cache: the throttle now keys on the authenticated user's pk (DRF
+    # token auth was removed), and pks are reused across DB-reset tests, so the
+    # shared LocMemCache must be cleared to isolate this test's request budget.
     monkeypatch.setattr(api_views.NGMQueryRateThrottle, "DEFAULT_RATE", "2/min")
 
     def fake_execute(query, timeout_seconds):

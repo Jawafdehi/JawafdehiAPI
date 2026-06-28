@@ -1,6 +1,5 @@
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters, status, viewsets
-from rest_framework.authentication import TokenAuthentication
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -24,7 +23,7 @@ class CaseWorkflowRunViewSet(viewsets.ReadOnlyModelViewSet):
     Accessible by Admin and Moderator (full access), and Contributor (read-only).
     """
 
-    authentication_classes = [TokenAuthentication]
+    # Auth: inherit the OIDC-only DEFAULT_AUTHENTICATION_CLASSES (no per-view pin).
     permission_classes = [IsAdminOrModeratorOrContributorReadOnly]
 
     queryset = CaseWorkflowRun.objects.all().order_by("-created_at")
@@ -94,7 +93,7 @@ class EligibleCasesView(APIView):
     Accessible by Admin and Moderator (full access), and Contributor (read-only).
     """
 
-    authentication_classes = [TokenAuthentication]
+    # Auth: inherit the OIDC-only DEFAULT_AUTHENTICATION_CLASSES (no per-view pin).
     permission_classes = [IsAdminOrModeratorOrContributorReadOnly]
 
     def get(self, request):

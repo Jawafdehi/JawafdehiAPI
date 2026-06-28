@@ -1,46 +1,22 @@
-from rest_framework.authentication import TokenAuthentication
+"""Chat service-account identity helpers.
+
+The DRF-token-based ``ChatServiceAccountAuthentication`` that used to live here
+was REMOVED in phase5 (the OIDC-only migration): it subclassed
+``rest_framework.authentication.TokenAuthentication`` and so recognised the
+legacy ``Authorization: Token <key>`` scheme, which is exactly what the
+migration retires. The API is now OIDC-only.
+
+The end-user impersonation (``X-Jawafdehi-User-Id`` header ->
+``ChatUserIdentity`` -> real Django user) is an application-layer concern that
+layers on top of OIDCAuthentication. ``cases.api_views.MeView`` performs that
+resolution after authentication using the helpers below; the Zitadel service
+account is recognised out-of-band via ``settings.OIDC_SERVICE_ACCOUNT_SUBJECTS``
+(see ``config/oidc_auth.py``).
+"""
 
 SERVICE_ACCOUNT_USERNAME = "chat-jawafdehi-org"
 JAWAFDEHI_USER_ID_HEADER = "HTTP_X_JAWAFDEHI_USER_ID"
 JAWAFDEHI_USER_NAME_HEADER = "HTTP_X_JAWAFDEHI_USER_NAME"
-
-
-class ChatServiceAccountAuthentication(TokenAuthentication):
-    """
-    DRF authentication class extending TokenAuthentication for service account
-    impersonation.
-
-    When a request is authenticated with the chat-jawafdehi-org service account
-    token AND includes an X-Jawafdehi-User-Id header, get-or-creates a
-    ChatUserIdentity record and — if the identity is mapped to a real Django
-    user — returns that user for downstream permission checks.
-
-    If the identity exists but is not yet mapped to a Django user, returns None
-    to deny authorization.
-    """
-
-    def authenticate(self, request):
-        auth_result = super().authenticate(request)
-        if auth_result is None:
-            return None
-
-        user, token = auth_result
-
-        if user.username != SERVICE_ACCOUNT_USERNAME:
-            return auth_result
-
-        owui_user_id = (request.META.get(JAWAFDEHI_USER_ID_HEADER) or "").strip()
-        if not owui_user_id:
-            return auth_result
-
-        identity = resolve_or_create_identity(owui_user_id, request)
-        if identity is None:
-            return None
-
-        if identity.user is None or not identity.user.is_active:
-            return None
-
-        return (identity.user, token)
 
 
 def resolve_or_create_identity(owui_user_id, request):

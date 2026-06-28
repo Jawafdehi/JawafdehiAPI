@@ -16,7 +16,6 @@ Tests cover:
 """
 
 import pytest
-from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
 from nesq.models import NESQueueItem, QueueAction, QueueStatus
@@ -70,30 +69,30 @@ def moderator_user(db):
     return create_user_with_role("hari_mod", "hari@example.np", "Moderator")
 
 
+# OIDC-only migration: DRF token auth was removed. These fixtures use
+# force_authenticate (auth-scheme-agnostic) to set request.user directly so the
+# permission/authorization logic under test is still exercised.
 @pytest.fixture
 def contributor_client(contributor):
     """API client authenticated as a contributor."""
-    token = Token.objects.create(user=contributor)
     client = APIClient()
-    client.credentials(HTTP_AUTHORIZATION=f"Token {token.key}")
+    client.force_authenticate(user=contributor)
     return client
 
 
 @pytest.fixture
 def admin_client(admin_user):
     """API client authenticated as an admin."""
-    token = Token.objects.create(user=admin_user)
     client = APIClient()
-    client.credentials(HTTP_AUTHORIZATION=f"Token {token.key}")
+    client.force_authenticate(user=admin_user)
     return client
 
 
 @pytest.fixture
 def moderator_client(moderator_user):
     """API client authenticated as a moderator."""
-    token = Token.objects.create(user=moderator_user)
     client = APIClient()
-    client.credentials(HTTP_AUTHORIZATION=f"Token {token.key}")
+    client.force_authenticate(user=moderator_user)
     return client
 
 
@@ -119,12 +118,18 @@ class TestSubmitAuthentication:
         )
         assert response.status_code == 401
 
-    def test_invalid_token_returns_401(self):
-        """Submit endpoint rejects requests with an invalid token."""
+    def test_legacy_token_scheme_not_recognized_returns_401(self):
+        """OIDC-only: the legacy `Authorization: Token <key>` scheme is no longer
+        recognized. OIDCAuthentication ignores the non-Bearer header (it never
+        even parses it as a token), so DRF returns 401 with a Bearer challenge —
+        NOT a TokenAuthentication "Invalid token." response."""
         client = APIClient()
         client.credentials(HTTP_AUTHORIZATION="Token invalidtoken12345")
         response = client.post(SUBMIT_URL, data=VALID_SUBMIT_DATA, format="json")
         assert response.status_code == 401
+        # The challenge proves the Token scheme is not handled: only the OIDC
+        # Bearer authenticator contributes a WWW-Authenticate header.
+        assert response.headers["WWW-Authenticate"].startswith("Bearer")
 
 
 # ============================================================================

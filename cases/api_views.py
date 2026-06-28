@@ -9,6 +9,7 @@ import re
 from xml.etree.ElementTree import Element, SubElement, tostring
 
 import jsonpatch
+from django.conf import settings
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db import connection, transaction
@@ -24,14 +25,12 @@ from drf_spectacular.utils import (
     extend_schema_view,
 )
 from rest_framework import filters, mixins, serializers, status, viewsets
-from rest_framework.authentication import SessionAuthentication, TokenAuthentication
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import DjangoModelPermissions, IsAuthenticated
 from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
-from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from config.auth import (
     JAWAFDEHI_USER_ID_HEADER,
@@ -319,11 +318,9 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ["case_type"]
     search_fields = ["title", "description", "key_allegations"]
-    authentication_classes = [
-        JWTAuthentication,
-        TokenAuthentication,
-        SessionAuthentication,
-    ]
+    # Auth: inherit the OIDC-only DEFAULT_AUTHENTICATION_CLASSES (no per-view
+    # pin). Unauthenticated reads still work because the actions use
+    # get_permissions()/get_queryset() to gate visibility, not authentication.
 
     def get_permissions(self):
         # create requires the cases.add_case model permission (DjangoModelPermissions
@@ -1403,10 +1400,28 @@ class MeView(APIView):
     """Resolve the calling chat identity to a Jawafdehi user.
 
     Called by the jawafdehi-mcp server (GET /api/caseworker/me) using the
-    chat-jawafdehi-org service-account token plus an X-Jawafdehi-User-Id header.
+    Zitadel service-account OIDC access token plus an X-Jawafdehi-User-Id
+    header. Auth: inherits the OIDC-only DEFAULT_AUTHENTICATION_CLASSES (no
+    per-view pin), so `request.user` is the service-account principal keyed on
+    its OIDC `sub` and `request.auth` is the decoded claims dict.
+
+    A Zitadel service account is indistinguishable from a human at the
+    transport layer, so the caller is recognised out-of-band: its `sub` must be
+    in settings.OIDC_SERVICE_ACCOUNT_SUBJECTS (the legacy chat-jawafdehi-org
+    username is also accepted for the transition).
     """
 
-    authentication_classes = [TokenAuthentication]
+    def _is_service_account(self, request):
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+        allowed_subjects = set(
+            getattr(settings, "OIDC_SERVICE_ACCOUNT_SUBJECTS", []) or []
+        )
+        return (
+            user.username in allowed_subjects
+            or user.username == SERVICE_ACCOUNT_USERNAME
+        )
 
     def get(self, request):
         if not request.user.is_authenticated:
@@ -1415,9 +1430,9 @@ class MeView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        if not request.auth or request.auth.user.username != SERVICE_ACCOUNT_USERNAME:
+        if not self._is_service_account(request):
             return Response(
-                {"error": "Service account token required"},
+                {"error": "Service account credentials required"},
                 status=status.HTTP_403_FORBIDDEN,
             )
 

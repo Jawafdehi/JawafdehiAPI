@@ -4,7 +4,6 @@ Tests for PATCH /api/cases/{id}/ (RFC 6902 JSON Patch endpoint).
 
 import pytest
 from django.contrib.auth import get_user_model
-from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
 from cases.models import (
@@ -42,9 +41,11 @@ def _make_case(**kwargs) -> Case:
 
 
 def _authed_client(user) -> APIClient:
-    token, _ = Token.objects.get_or_create(user=user)
+    # OIDC-only migration: DRF token auth was removed. force_authenticate sets
+    # request.user directly (auth-scheme-agnostic) so the authorization logic
+    # under test is still exercised.
     client = APIClient()
-    client.credentials(HTTP_AUTHORIZATION=f"Token {token.key}")
+    client.force_authenticate(user=user)
     return client
 
 

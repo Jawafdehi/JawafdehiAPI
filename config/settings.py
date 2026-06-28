@@ -12,7 +12,6 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 import os
 import sys
-from datetime import timedelta
 from pathlib import Path
 
 import dj_database_url
@@ -198,9 +197,6 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
-    "rest_framework.authtoken",
-    "rest_framework_simplejwt",
-    "rest_framework_simplejwt.token_blacklist",
     "drf_spectacular",
     "django_filters",
     "corsheaders",
@@ -545,18 +541,18 @@ if not DEBUG and not TESTING and not _running_build_command and not OIDC_ISSUER:
     )
 
 # REST Framework
-# OIDC-only: DRF TokenAuthentication and SessionAuthentication have been
-# REMOVED (DEFAULT_AUTHENTICATION_CLASSES is a full replacement, not a merge).
-# The Django admin still uses session auth via SessionMiddleware /
-# AuthenticationMiddleware — that is independent of this DRF default.
+# OIDC-only: DRF TokenAuthentication, SessionAuthentication and the SimpleJWT
+# authentication have all been REMOVED. OIDCAuthentication is the SOLE API
+# authenticator (DEFAULT_AUTHENTICATION_CLASSES is a full replacement, not a
+# merge) and no per-view authentication_classes pin re-introduces another
+# scheme. Consequently the `Authorization: Token <key>` and the legacy
+# HS256-minted `Bearer` (SimpleJWT) schemes are no longer recognised — an
+# unknown scheme is simply not authenticated and yields a 401 challenge for
+# `Bearer realm="api"`.
 #
-# TODO(oidc-migration): some views still pin
-# `authentication_classes = [TokenAuthentication]` (case_workflows/views.py,
-# cases/api_views.py — incl. the chat-only MeView, nesq/api_views.py,
-# ngm/api_views.py). Once the Zitadel service account is provisioned, drop those
-# per-view pins so they inherit OIDCAuthentication, and remove
-# config.auth.ChatServiceAccountAuthentication + setup_chat_service_account
-# along with the authtoken / simplejwt apps below.
+# The Django admin still uses session auth via SessionMiddleware /
+# AuthenticationMiddleware — that is independent of this DRF default and is
+# unaffected.
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "config.oidc_auth.OIDCAuthentication",
@@ -578,17 +574,6 @@ if not TESTING:
         "anon": "100/hour",
         "user": "1000/hour",
     }
-
-# JWT Configuration
-SIMPLE_JWT = {
-    "ACCESS_TOKEN_LIFETIME": timedelta(hours=24),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
-    "ROTATE_REFRESH_TOKENS": True,
-    "BLACKLIST_AFTER_ROTATION": True,
-    "ALGORITHM": "HS256",
-    "SIGNING_KEY": SECRET_KEY,
-}
-
 
 SPECTACULAR_SETTINGS = {
     "TITLE": "Jawafdehi Public Accountability API",
@@ -812,11 +797,16 @@ CONVERT_SOURCE_TIMEOUT = int(os.getenv("CONVERT_SOURCE_TIMEOUT", "180"))
 REVIEW_MAX_PARALLEL = int(os.getenv("REVIEW_MAX_PARALLEL", "3"))
 
 # Casework job poller: the poller talks ONLY to the casework HTTP API (claim ->
-# process locally -> submit result) and never touches the DB. It authenticates
-# with a long-lived DRF auth token (Authorization: Token <key>) belonging to a
-# dedicated service account — NOT a username/password login. Create the token
-# with `manage.py drf_create_token <service-account-username>` and supply it via
-# CASEWORK_POLLER_TOKEN. Locally the API is this same server on :40173.
+# process locally -> submit result) and never touches the DB.
+#
+# AUTH MIGRATION (phase5): the API is now OIDC-only and no longer accepts the
+# legacy `Authorization: Token <key>` DRF auth token. The poller and the
+# review/ HTTP clients (jds_client.py, ngm_client.py) must be reconfigured to
+# send a Zitadel service-account access token as `Authorization: Bearer
+# <access>` once the service-account client-credentials grant is provisioned.
+# CASEWORK_POLLER_TOKEN is retained as the carrier for that bearer token; until
+# the clients are switched over to the Bearer scheme they will receive 401 from
+# this server. Locally the API is this same server on :40173.
 CASEWORK_API_BASE = os.getenv(
     "CASEWORK_API_BASE", "http://127.0.0.1:40173/api/casework"
 )

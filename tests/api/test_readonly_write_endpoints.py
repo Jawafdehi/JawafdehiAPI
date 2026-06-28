@@ -11,7 +11,6 @@ payload shape is irrelevant for the denial cases.
 import pytest
 from django.contrib.auth.models import Permission
 from django.core.cache import cache
-from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
 
 from cases.models import (
@@ -36,9 +35,12 @@ def clear_cache():
 
 
 def _authed_client(user):
-    token, _ = Token.objects.get_or_create(user=user)
+    # OIDC-only migration: DRF token auth was removed. force_authenticate sets
+    # request.user directly (bypassing the auth class), which is the
+    # auth-scheme-agnostic way to exercise the permission/authorization logic
+    # under test.
     client = APIClient()
-    client.credentials(HTTP_AUTHORIZATION=f"Token {token.key}")
+    client.force_authenticate(user=user)
     return client
 
 
