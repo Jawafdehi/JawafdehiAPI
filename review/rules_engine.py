@@ -189,7 +189,11 @@ def bigo_amount_present(case):
         # via the marker. Keep the gate passing (don't regress legitimate no-bigo
         # cases on a heuristic) but surface a warning for the caseworker.
         blob = f"{case.get('title') or ''} {case.get('short_description') or ''}"
-        if re.search(r"रु[\.\s]?\s*[०-९\d]|[०-९\d]\s*(अर्ब|करोड|लाख)", blob):
+        if re.search(
+            r"(?i)(?:रु|rs\.?|npr)[\.\s]?\s*[०-९\d]"
+            r"|[०-९\d]\s*(?:अर्ब|करोड|लाख|हजार|crore|lakh|million|billion|thousand)",
+            blob,
+        ):
             return 100, [
                 "A NO_BIGO marker is recorded, but the title/description states a "
                 "monetary amount — verify a real bigo is not being suppressed "

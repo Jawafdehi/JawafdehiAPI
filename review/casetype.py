@@ -78,13 +78,16 @@ def detect(case):
     # COURT_ORDER source type == "Court Order/Verdict"; title keywords are a
     # fallback. Mirrors court_record, so a COURT_ORDER-typed document whose title
     # carries no आदेश/फैसला keyword still classifies the case as HAS_VERDICT.
-    # The title-keyword fallback is allowed ONLY for non-NEWS sources. A NEWS
-    # headline that merely reports an INTERIM court order (e.g. "...खाता विवरण
-    # झिकाउन आदेश") must NOT promote a pre-verdict case to HAS_VERDICT — only a
-    # COURT_ORDER-typed document does (a genuine final verdict is also caught by
-    # `has_verdict` via the फैसला/verdict keyword on any source type).
+    # The title-keyword fallback is allowed ONLY for non-NEWS, non-social-media
+    # sources. A NEWS / SOCIAL_MEDIA headline that merely reports an INTERIM court
+    # order (e.g. "...खाता विवरण झिकाउन आदेश") must NOT promote a pre-verdict case
+    # to HAS_VERDICT — only a COURT_ORDER-typed document does (a genuine final
+    # verdict is also caught by `has_verdict` via the फैसला/verdict keyword on any
+    # source type).
     has_court_order = any(
-        st == "COURT_ORDER" or (st != "NEWS" and _any(t, _COURT_ORDER)) for t, st in tt
+        st == "COURT_ORDER"
+        or (st not in ("NEWS", "SOCIAL_MEDIA") and _any(t, _COURT_ORDER))
+        for t, st in tt
     )
     has_special_court = any(_any(t, _SPECIAL_COURT) for t, _ in tt)
     has_court_case_no = bool(court_cases)
