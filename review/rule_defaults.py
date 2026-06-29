@@ -113,6 +113,50 @@ DEFAULT_RULES = [
         "order": 40,
     },
     {
+        "key": "key_allegation_consolidation",
+        "title": "Key allegations are consolidated by scheme",
+        "category": "Accuracy",
+        "kind": "llm",
+        "detector": "",
+        "condition_text": "Always active.",
+        "applies_to": ALL,
+        "description": (
+            "The `key_allegations` must identify and CONSOLIDATE the CIAA's core "
+            "claims — not list every fact / paragraph in the charge sheet as a "
+            "separate allegation. Facts arising from the SAME conduct, "
+            "transaction, scheme, or course of conduct belong in ONE key "
+            "allegation. Create SEPARATE allegations only when the nature of the "
+            "accusation, the legal question, or the accused's role genuinely "
+            "differs.\n\n"
+            "Score by SUBSTANCE, not count. A single consolidated allegation is "
+            "fully correct for a single-scheme case and MUST NOT be penalised as "
+            "'thin'; equally, do NOT reward inflating the count. Lower the score "
+            "when several listed allegations are facets of one scheme that should "
+            "be merged (over-splitting), or when genuinely distinct conducts are "
+            "mashed into one. Cosmetic wording goes in `notes`."
+        ),
+        "good_examples": (
+            "Illegal-assets case as ONE allegation: 'अभियुक्तले सार्वजनिक सेवामा "
+            "रहँदा आफ्नो वैध आयस्रोतले नधानेको सम्पत्ति (जग्गा, घर, शेयर, बैंक "
+            "मौज्दात तथा अन्य लगानी) आर्जन गरी अस्वाभाविक उच्च जीवनस्तर कायम गरेको।' "
+            "Splitting ONLY where roles differ: (1) some accused made fake "
+            "documents and registered public land in private names; (2) other "
+            "accused then illegally sold that land for gain — two allegations, "
+            "because the conduct and the accused's roles differ."
+        ),
+        "bad_examples": (
+            "Four allegations that are one illegal-assets scheme — 'bought land' / "
+            "'deposited money in the bank' / 'spent on a house' / 'bought shares' — "
+            "facets of the single claim that the accused acquired assets beyond "
+            "lawful income; they must be merged into one. Likewise splitting one "
+            "private-company scheme into 'bought shares' / 'became director' / "
+            "'signed the contract' / 'took salary' / 'took profit'."
+        ),
+        "weight": 1.0,
+        "enabled": True,
+        "order": 40.5,
+    },
+    {
         "key": "bigo_matches_press_release",
         "title": "Bigo amount matches the press release",
         "category": "Accuracy",
@@ -215,6 +259,47 @@ DEFAULT_RULES = [
         "weight": 1.0,
         "enabled": True,
         "order": 45,
+    },
+    {
+        "key": "case_overview_date_format",
+        "title": "Case Overview dates are well-formed (Devanagari + era marker)",
+        "category": "Completeness",
+        "kind": "llm",
+        "detector": "",
+        "condition_text": "Always active.",
+        "applies_to": ALL,
+        "description": (
+            "Dates that the case AUTHORS write in the Case Overview / description "
+            "and narrative must be reader-friendly and consistent: **Devanagari "
+            "numerals**, **YYYY-MM-DD** order, each prefixed with its Nepali era "
+            "marker — **`वि सं`** for Bikram Sambat or **`सन्`** for the "
+            "Gregorian / AD year. Do NOT use Latin numerals, English month names "
+            "(e.g. 'October'), or Latin 'AD' / 'BS' markers, and do not leave a BS "
+            "date bare without `वि सं`. Each date carries its own marker; pairing "
+            "BS and AD is encouraged but not required.\n\n"
+            "EXEMPTIONS (never penalise): (1) a date QUOTED verbatim inside a "
+            "source excerpt / source title is out of scope — only AUTHORED case "
+            "text is judged; (2) a year-only date is fine when only the year is "
+            "known (do not invent a month / day). Score 100 when every authored "
+            "date is Devanagari + era-marked (or legitimately year-only); lower "
+            "the score per malformed authored date (Latin numerals, an English "
+            "month, or a missing era marker)."
+        ),
+        "good_examples": (
+            "'अभियुक्त सन् १९९८-१०-२२ मा सार्वजनिक सेवामा नियुक्त भएका थिए।'; "
+            "'अख्तियारले वि. सं २०८०-०३-०७ मा विशेष अदालतमा आरोपपत्र दायर गरेको "
+            "थियो।'; 'अभियुक्तको जाँच अवधि वि सं २०५४/०७/०५ देखि २०७८/०८/२१ सम्म "
+            "कायम गरिएको।'"
+        ),
+        "bad_examples": (
+            "'AD 22 October 1998' (Latin numerals + English month); a bare "
+            "'२०५४/०७/०५' with no वि सं marker; 'BS 2080-03-07' / 'AD 2023-03-07' "
+            "(Latin numerals + Latin era markers); mixing '2054/07/05 ... 6 "
+            "December 2021' in one paragraph."
+        ),
+        "weight": 0.8,
+        "enabled": True,
+        "order": 45.5,
     },
     # ---------------- Tonal neutrality (LLM) ----------------
     {
