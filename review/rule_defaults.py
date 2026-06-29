@@ -94,7 +94,17 @@ DEFAULT_RULES = [
             "ordering, a malformed markdown table, minor wording — belong in "
             "`notes`, not `issues`, and must not lower the score; only a "
             "substantive failure (missing the core allegation/amount/status, or "
-            "contradicting the sources) is a scored issue."
+            "contradicting the sources) is a scored issue.\n\n"
+            "CONTRADICTION WITH OWN SOURCES (scored issue): the description must "
+            "NOT assert that an outcome / verdict / per-defendant result / figure "
+            "is unavailable or unknown when one of the case's OWN attached sources "
+            "actually reports it — flag it and cite the source. When this same "
+            "fact is also the root cause of a `gap_honesty` flag, score it HERE "
+            "and downgrade the parallel gap_honesty mention to a note. A lead "
+            "figure that is internally consistent with the case bigo but disputed "
+            "on fiscal-year grounds is a bigo/data issue (score under "
+            "`bigo_matches_press_release`), not a description failure — note it "
+            "here, do not double-deduct."
         ),
         "good_examples": "A reader who only reads the description understands the whole case and it matches the sources.",
         "bad_examples": "Description omits the core allegation, the amount, or contradicts the sources; or is a stub.",
@@ -127,7 +137,20 @@ DEFAULT_RULES = [
             "an actual contradiction with the authoritative figure is an `issue`.\n\n"
             "If the case is a certified no-bigo case (empty `bigo` with a "
             "`NO_BIGO:` marker in `internal_notes`), there is no figure to match — "
-            "keep the score at 100."
+            "keep the score at 100.\n\n"
+            "Honor a documented convention: if `internal_notes` carries a "
+            "`BIGO_CONVENTION:` line naming the bigo figure and its basis (the "
+            "court-determined / अदालतले कायम गरेको amount vs the higher "
+            "CIAA-alleged loss the court reduced or rejected; or a deliberate "
+            "lead-defendant vs scheme-total choice) AND that figure is internally "
+            "consistent with the cited court order / press release, score 100 and "
+            "record the divergence as a NOTE. The court-determined बिगो is "
+            "AUTHORITATIVE for a decided case and is NOT a mismatch against the "
+            "higher CIAA-alleged amount. Fire a scored issue only when (a) no "
+            "convention is documented AND the figure contradicts the "
+            "authoritative source, or (b) the figure traces to a DIFFERENT case / "
+            "wrong fiscal year (e.g. the identical bigo appears on a sibling case "
+            "for a different आ.व.)."
         ),
         "good_examples": (
             "Press release states रु. ३.२१ अर्ब and `bigo` is 3,218,377,182 — the "
@@ -166,7 +189,13 @@ DEFAULT_RULES = [
             "ONLY a bare code, number, or hash with no descriptive words — or when "
             "it is misleading relative to what the case is actually about. Judge "
             "whether a member of the public reading the slug would correctly "
-            "anticipate the case's title, summary and key allegations."
+            "anticipate the case's title, summary and key allegations.\n\n"
+            "Naming a genuine party or the scheme — even a SECONDARY one — is "
+            "acceptable: do NOT deduct merely because a DIFFERENT party would have "
+            "made a better lead. A better-lead-available situation is a NOTE, "
+            "never a sub-90 issue. Reserve scored deductions for slugs that are "
+            "opaque (a bare code/hash with no descriptive words), name the WRONG "
+            "party, or contradict the title."
         ),
         "good_examples": (
             "`baluwatar-land-grab-singha-durbar` for a case about a land-grab "
@@ -199,7 +228,13 @@ DEFAULT_RULES = [
         "description": (
             "Language is neutral and non-speculative. Unproven claims are hedged "
             "as **alleged** (आरोप). No editorialising, loaded adjectives, or "
-            "conclusions stated as established fact before a verdict."
+            "conclusions stated as established fact before a verdict.\n\n"
+            "PRECISION: tie a loaded-term deduction to verdict status. A vivid but "
+            "accurate offence term (भ्रष्टाचार, अनियमितता — or घोटाला where a "
+            "conviction stands) is acceptable; deduct specifically when the term "
+            "asserts guilt the record does not support — e.g. labelling a matter "
+            "घोटाला / 'scam' where the defendants were acquitted or the verdict is "
+            "still pending."
         ),
         "good_examples": '"X is accused of (आरोप) misappropriating Rs. Y" — hedged, factual.',
         "bad_examples": '"X is a corrupt official who stole Rs. Y" — verdict asserted, loaded.',
@@ -375,7 +410,15 @@ DEFAULT_RULES = [
             "RAW being a URL is fine), each source has a single RAW, and extra "
             "links use the right roles. Lower the score the more sources put a "
             "bare web page as a non-news RAW, carry multiple RAW links, or "
-            "mis-file supporting links as RAW."
+            "mis-file supporting links as RAW.\n\n"
+            "ROLES NOT OBSERVABLE: if the per-link role assignments are NOT present "
+            "in the data you are given (no role tags are shown on the sources) AND "
+            "the deterministic `source_link_roles_valid` check passes for this "
+            "case, this rule MUST score 100 and record any 'verify the PDF is RAW' "
+            "guidance as a NOTE only — never a deduction. The stored roles are "
+            "already valid; do not penalise on data you cannot see. Reserve "
+            "deductions for cases where the roles ARE visible and a bare web page "
+            "is genuinely tagged as a non-news RAW, or several links are tagged RAW."
         ),
         "good_examples": (
             "A CIAA press-release source whose RAW is the uploaded PDF/scan, with "
@@ -428,7 +471,11 @@ DEFAULT_RULES = [
             "exposed to link rot."
         ),
         "weight": 0.6,
-        "enabled": True,
+        # Web-archiving of ephemeral news sources is NOT REQUIRED (operator
+        # decision 2026-06-29): it never changes a disposition and only adds bulk
+        # noise. Disabled so it is not scored; re-enable if archiving becomes a
+        # requirement.
+        "enabled": False,
         "order": 68.7,
     },
     # ---------------- Timeline ----------------
@@ -505,7 +552,14 @@ DEFAULT_RULES = [
             "Also penalise WRONG or over-tagged locations: an accused person's "
             "home/birthplace/permanent address, the seat of the court or the "
             "CIAA inquiry office tagged as if it were the event location, or a "
-            "long list of marginal places (more than ~5) that dilutes the signal."
+            "long list of marginal places (more than ~5) that dilutes the signal.\n\n"
+            "ILLEGAL-ASSETS EXCEPTION: for illegal-assets / disproportionate-assets "
+            "(अकुत / स्रोत नखुलेको सम्पत्ति) cases, the district(s) where the "
+            "disputed IMMOVABLE assets sit (land, house, family-held property named "
+            "in the press release / charge sheet) ARE the relevant scene and SHOULD "
+            "be tagged, even when the accused works at a central / HQ office. Do "
+            "NOT treat such a case as location-exempt, and do not accept the "
+            "accused's home district as a substitute for the asset district."
         ),
         "good_examples": (
             "A district-level scheme tagged with its district, e.g. "
@@ -538,7 +592,11 @@ DEFAULT_RULES = [
         "description": (
             "The case **should** tag at least one **related** entity — anything "
             "that is neither the accused nor a location (e.g. a related "
-            "organisation, official body, or other involved party)."
+            "organisation, official body, or other involved party). For a "
+            "public-office corruption or illegal-assets case, the accused's own "
+            "employing body (the ministry / municipality / authority / office "
+            "named in the charge sheet) is the canonical related entity and should "
+            "be tagged."
         ),
         "weight": 1.0,
         "enabled": True,
@@ -638,7 +696,16 @@ DEFAULT_RULES = [
             "NGM defendants that were not captured as accused.\n\n"
             "If `ngm_court_record.court_refs` is empty (no court number) or a "
             "lookup error is present, say the match could not be verified rather "
-            "than penalising heavily."
+            "than penalising heavily.\n\n"
+            "IMPORTANT — the charge sheet beats NGM: the `ngm_court_record` list "
+            "is a truncated, OCR-error-prone mirror of supremecourt.gov.np, and "
+            "the charge sheet / court-order excerpt is AUTHORITATIVE. When an "
+            "accused entity is present in the charge sheet/court-order excerpt "
+            "but absent from `ngm_court_record` (JV/firm/deceased-heir defendants "
+            "are exactly what NGM truncates), treat the charge sheet as correct "
+            "and KEEP the score high — an NGM-only absence is NEVER by itself a "
+            "scored issue. Only flag when an accused appears in NEITHER NGM nor "
+            "the charge-sheet/court-order excerpt, or directly contradicts them."
         ),
         "good_examples": (
             "All accused entities appear among the NGM defendants for the "
@@ -674,7 +741,21 @@ DEFAULT_RULES = [
             "are not missing from the case's entities.\n\n"
             "Flag any non-accused entity that cannot be traced to a source "
             "(possible mis-tag), and any clearly-relevant party/place in the "
-            "sources that was not captured."
+            "sources that was not captured.\n\n"
+            "TRUNCATION GUARD: when the provided source excerpt is visibly "
+            "truncated / cut off (it ends mid-table or mid-listing), a non-accused "
+            "entity that is plausibly named in the unshown portion (a family "
+            "member, co-defendant, bank / insurer, consultant, asset counterparty) "
+            "MUST be recorded as a NOTE (verify-against-full-document), NOT a "
+            "scored issue — keep the score at 100. The caseworker tags from the "
+            "FULL document, not the truncated machine view; only score an issue "
+            "when the entity is implausible for the document type, clearly "
+            "contradicts the sources, or the full untruncated document is "
+            "available and the entity is genuinely absent.\n\n"
+            "If the SAME party (modulo spelling / spacing / script — e.g. व↔ब, "
+            "इ↔ई, a Devanagari name vs its English form) is tagged BOTH `accused` "
+            "and `related`, flag it as a removable DUPLICATE (delete the "
+            "non-accused copy) — a clean one-line fix, not a sourcing gap."
         ),
         "good_examples": (
             "Every related organisation and location tagged on the case is named "
@@ -758,7 +839,15 @@ DEFAULT_RULES = [
             "from `missing_details` is **not** a gap-honesty problem.\n\n"
             "Still flag genuine **dishonesty**: a contested or unconfirmed figure "
             "presented as settled fact, or the case leaning on a source while "
-            "hiding that the primary document was never obtained."
+            "hiding that the primary document was never obtained.\n\n"
+            "BANDING — a placement miss is not dishonesty: when `missing_details` "
+            "is null/empty BUT the case narrative / description already honestly "
+            "discloses the same source/document gap, this is at most a minor NOTE "
+            "(cap any deduction at ~10 pts) — never a sub-70 integrity score. "
+            "De-duplication: where a structured figure (bigo) contradicts the "
+            "authoritative per-document figure, DEFER the figure scoring to "
+            "`bigo_matches_press_release` and keep only the disclosure aspect here "
+            "— do not double-count one defect across two rules."
         ),
         "good_examples": (
             "`missing_details` states that the full charge sheet and the signed "
