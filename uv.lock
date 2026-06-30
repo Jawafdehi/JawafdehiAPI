@@ -824,6 +824,7 @@ dependencies = [
     { name = "jawafdehi-service" },
     { name = "jawafdehi-shared", extra = ["search"] },
     { name = "mozilla-django-oidc" },
+    { name = "nepali" },
     { name = "nes-service" },
     { name = "ngm-service" },
 ]
@@ -843,6 +844,7 @@ requires-dist = [
     { name = "jawafdehi-service", editable = "services/jawafdehi" },
     { name = "jawafdehi-shared", extras = ["search"], editable = "shared" },
     { name = "mozilla-django-oidc", specifier = ">=5.0.2" },
+    { name = "nepali", specifier = ">=1.2.0" },
     { name = "nes-service", editable = "services/nes" },
     { name = "ngm-service", editable = "services/ngm" },
 ]
