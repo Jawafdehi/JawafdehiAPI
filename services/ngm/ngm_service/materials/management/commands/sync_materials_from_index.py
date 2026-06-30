@@ -28,6 +28,7 @@ from jawafdehi_shared.entities.ids import build_material_iri
 from ...jsonld import (
     INDEX_SOURCE_TYPE_TO_MATERIAL,
     MaterialType,
+    court_order_to_jsonld,
     manuscript_jsonld,
 )
 from ...models import Material
@@ -50,6 +51,24 @@ def bs_to_ad_iso(date_bs) -> str | None:
         return nepalidate(y, m, d).to_datetime().date().isoformat()
     except Exception:
         return None
+
+
+def parse_court_order_id(document_id) -> tuple[str, str] | None:
+    """``ngm:court-order:<court>:<case_number>`` → ``(court, case_number)``.
+
+    Court orders are reconciled to the importer's canonical model: the @id is
+    minted by ``court_order_material_iri`` (hyphen-preserving — matching the
+    case-number key, the courtcase IRI, and the read view's ``hasPart``) and the
+    body by ``court_order_to_jsonld`` — so this sync path and the importer's
+    ``--materialize-orders`` produce the IDENTICAL Material (one row, no
+    hyphen/underscore IRI fork). Returns ``None`` for non-court-order ids.
+    """
+    parts = [p for p in str(document_id).split(":") if p]
+    if parts and parts[0] == "ngm":
+        parts = parts[1:]
+    if len(parts) >= 3 and parts[0] == "court-order":
+        return parts[1], ":".join(parts[2:])
+    return None
 
 
 def fallback_iri(document_id: str) -> str:
@@ -84,7 +103,14 @@ class Command(BaseCommand):
         parser.add_argument("--dry-run", action="store_true")
         parser.add_argument(
             "--reindex", action="store_true",
-            help="Run reindex_materials --rebuild after the upsert.",
+            help="After the upsert, INCREMENTALLY reindex only the materials this "
+            "run touched (reindex_materials --since <run start>) — no full rebuild. "
+            "This is the scheduled-cron default; the index is never dropped.",
+        )
+        parser.add_argument(
+            "--rebuild-index", action="store_true",
+            help="Full reindex_materials --rebuild instead of the incremental "
+            "reindex (rare — drops + recreates the whole ngm-materials index).",
         )
 
     def handle(self, *args, **opts):
@@ -114,24 +140,38 @@ class Command(BaseCommand):
                     try:
                         links = json.loads(links) if isinstance(links, str) else (links or [])
                         meta = json.loads(meta) if isinstance(meta, str) else (meta or {})
-                        doc = manuscript_jsonld({
-                            "document_id": did, "source_type": st, "links": links,
-                            "url": purl or hurl, "metadata": {**meta, "title": title},
-                        })
-                        if not doc.get("@id"):
-                            doc["@id"] = fallback_iri(did)
-                            doc["identifier"] = did
-                        # BS publication date → AD datePublished; preserve the BS.
-                        bs = pub_bs or meta.get("publication_date") or meta.get("date")
-                        doc.pop("datePublished", None)
-                        if bs:
-                            ad = bs_to_ad_iso(bs)
-                            if ad:
-                                doc["datePublished"] = ad; bs_ok += 1
-                            else:
-                                bs_fail += 1
-                            doc["jawafdehi:datePublishedBS"] = str(bs)
-                        mt = INDEX_SOURCE_TYPE_TO_MATERIAL.get(st, MaterialType.DOCUMENT)
+                        court_order = (
+                            parse_court_order_id(did) if st == "COURT_ORDER" else None
+                        )
+                        if court_order:
+                            # Canonical court_order Material — IDENTICAL @id + shape
+                            # to the importer's --materialize-orders, so the two
+                            # paths reconcile to one row (no duplicate).
+                            court, case_number = court_order
+                            doc = court_order_to_jsonld(
+                                {"document_id": did, "url": links},
+                                court_identifier=court, case_number=case_number,
+                            )
+                            mt = MaterialType.COURT_ORDER
+                        else:
+                            doc = manuscript_jsonld({
+                                "document_id": did, "source_type": st, "links": links,
+                                "url": purl or hurl, "metadata": {**meta, "title": title},
+                            })
+                            if not doc.get("@id"):
+                                doc["@id"] = fallback_iri(did)
+                                doc["identifier"] = did
+                            # BS publication date → AD datePublished; preserve the BS.
+                            bs = pub_bs or meta.get("publication_date") or meta.get("date")
+                            doc.pop("datePublished", None)
+                            if bs:
+                                ad = bs_to_ad_iso(bs)
+                                if ad:
+                                    doc["datePublished"] = ad; bs_ok += 1
+                                else:
+                                    bs_fail += 1
+                                doc["jawafdehi:datePublishedBS"] = str(bs)
+                            mt = INDEX_SOURCE_TYPE_TO_MATERIAL.get(st, MaterialType.DOCUMENT)
                         obj = Material.from_jsonld(doc, material_type=mt)
                         obj.created_at = obj.updated_at = now
                         objs[obj.iri] = obj
@@ -155,6 +195,13 @@ class Command(BaseCommand):
             f"DONE total={total} upserted={upserted} bs_converted={bs_ok} "
             f"bs_unconvertible={bs_fail} errors={errors}"
         ))
-        if opts["reindex"] and not opts["dry_run"]:
-            self.stdout.write("reindexing materials…")
+        if opts["dry_run"]:
+            return
+        if opts["rebuild_index"]:
+            self.stdout.write("rebuilding materials index (full)…")
             call_command("reindex_materials", rebuild=True)
+        elif opts["reindex"]:
+            # INCREMENTAL: index only what this run upserted (their updated_at was
+            # set to ``now``), NOT a rebuild — so a daily cron never drops the index.
+            self.stdout.write("reindexing materials (incremental, --since run start)…")
+            call_command("reindex_materials", since=now.isoformat())

@@ -23,11 +23,21 @@ class Command(BaseCommand):
             action="store_true",
             help="Drop and recreate the index before reindexing.",
         )
+        parser.add_argument(
+            "--since",
+            help="Only (re)index materials with updated_at >= this ISO datetime "
+            "(incremental). Ignored with --rebuild (a full rebuild must re-stream "
+            "every material). Lets a sync run reindex ONLY the materials it just "
+            "upserted instead of rebuilding the whole index.",
+        )
 
     def handle(self, *args, **options):
+        qs = Material.objects.all()
+        if options.get("since") and not options["rebuild"]:
+            qs = qs.filter(updated_at__gte=options["since"])
         result = reindex(
             index=MATERIAL_INDEX,
-            records=Material.objects.all().iterator(),
+            records=qs.order_by("iri").iterator(),
             build_doc=search_index.build_doc,
             rebuild=options["rebuild"],
         )
