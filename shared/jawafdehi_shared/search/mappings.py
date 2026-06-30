@@ -197,6 +197,16 @@ def common_mappings() -> dict[str, Any]:
                 # date mapping (BS has no OpenSearch calendar support; convert at
                 # ingest if a Gregorian value is also needed).
                 "date_bs": {"type": "keyword"},
+                # NGM court-case verdict/status facets (from the re-added CourtCase
+                # columns). verdict_date_bs MUST be keyword for the SAME reason as
+                # date_bs: a BS string like "2081-09-32" (day 32 is valid in BS,
+                # not Gregorian) would be rejected by a dynamically-inferred `date`
+                # mapping and the doc would silently drop from the index. The AD
+                # verdict_date is a real Gregorian date.
+                "verdict_date_bs": {"type": "keyword"},
+                "verdict_date": {"type": "date"},
+                "verdict_type": {"type": "keyword"},
+                "status": {"type": "keyword"},
                 # Full serialized JSON-LD / record, return-only (not searchable).
                 "raw": {"type": "object", "enabled": False},
             }

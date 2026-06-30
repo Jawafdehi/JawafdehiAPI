@@ -78,6 +78,24 @@ class CourtCase(models.Model):
     case_status = models.CharField(max_length=100, null=True, blank=True, db_index=True)
     plaintiff = models.TextField(null=True, blank=True)
     defendant = models.TextField(null=True, blank=True)
+    # ── Re-added load-bearing legacy columns (spec 01 §5a) ───────────────────
+    # These columns PHYSICALLY pre-exist on the shared ngm_v1 ``court_cases``
+    # table (written by the SQLAlchemy scraper/enrichment side). They were left
+    # out of the original ORM projection; re-adding them makes verdict/subject/
+    # status first-class, queryable, and indexable. ``status`` is the scraper's
+    # enrichment skip-flag (pending/enriched/failed) — the importer READS it but
+    # never WRITES it (the scraper owns the value). Migration 0003 adds these to
+    # Django's state; in prod it is applied ``--fake`` (no DDL — the columns
+    # already exist), exactly like 0001 for these managed tables. The remaining
+    # 7 low-value legacy columns stay in ``extra_data`` (ORM-invisible).
+    status = models.CharField(max_length=50, null=True, blank=True, db_index=True)
+    verdict_type = models.CharField(max_length=200, null=True, blank=True)
+    verdict_date_bs = models.CharField(max_length=50, null=True, blank=True)
+    verdict_date_ad = models.DateField(null=True, blank=True, db_index=True)
+    verdict_judge = models.CharField(max_length=500, null=True, blank=True)
+    case_subject = models.TextField(null=True, blank=True)
+    hearing_count = models.IntegerField(null=True, blank=True)
+    registration_number = models.CharField(max_length=100, null=True, blank=True)
     # Canonical NES entity @id IRI (https://<base>/entity/<prefix>/<slug>) — the
     # cross-service join key. Widened to 300 for full IRIs; IRI-validated.
     nes_id = models.CharField(

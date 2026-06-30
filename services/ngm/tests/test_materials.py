@@ -165,8 +165,14 @@ class CourtCaseJsonLdTests(_DbAPITestCase):
         about_ids = {a["@id"] for a in doc["about"]}
         self.assertIn("https://jawafdehi.org/entity/org/ciaa", about_ids)
         self.assertIn("https://jawafdehi.org/entity/person/ram", about_ids)
-        # document_sources -> associatedMedia MediaObjects.
-        self.assertEqual(len(doc["associatedMedia"]), 3)
+        # LOCKED #1: orders are referenced as standalone court_order Materials
+        # via hasPart (NOT embedded associatedMedia). This case has one order.
+        self.assertNotIn("associatedMedia", doc)
+        self.assertEqual(len(doc["hasPart"]), 1)
+        self.assertEqual(
+            doc["hasPart"][0]["@id"],
+            "https://jawafdehi.org/material/court_order/kathmandudc.082-oa-0503",
+        )
 
     def test_jsonld_passes_validator(self):
         validate_material_jsonld(court_case_to_jsonld(self.case))
@@ -306,7 +312,8 @@ class MaterialEndpointTests(_DbAPITestCase):
         resp = self.client.get("/api/ngm/materials/", {"iri": iri})
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["additionalType"], "jawafdehi:CourtCase")
-        self.assertEqual(len(resp.data["associatedMedia"]), 1)
+        # LOCKED #1: one order referenced via hasPart, not embedded media.
+        self.assertEqual(len(resp.data["hasPart"]), 1)
 
     def test_missing_material_is_404(self):
         resp = self.client.get("/api/ngm/materials/nkp/does-not-exist")

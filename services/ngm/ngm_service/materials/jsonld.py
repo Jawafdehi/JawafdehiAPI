@@ -172,6 +172,11 @@ def media_objects_from_document_sources(
 
 #: ``source`` segment of a court material IRI (``/material/court/<ident>``).
 COURT_SOURCE = "court"
+#: ``source`` segment of a STANDALONE court-order material IRI
+#: (``/material/court_order/<ident>``). Underscore — the material IRI source
+#: grammar (``_SOURCE``) forbids hyphens, so the stored ``source`` column value
+#: is ``court_order`` (matching ``_manuscript_material_iri``'s ``-``→``_`` slug).
+COURT_ORDER_SOURCE = "court_order"
 
 
 def court_case_material_iri(court_identifier: str, case_number: str) -> str:
@@ -184,14 +189,93 @@ def court_case_material_iri(court_identifier: str, case_number: str) -> str:
     return build_material_iri(COURT_SOURCE, ident)
 
 
+def court_order_material_iri(
+    court_identifier: str, case_number: str, n: int | None = None
+) -> str:
+    """The canonical ``@id`` IRI for a STANDALONE court-order Material.
+
+    ``/material/court_order/<court>.<case_number>[.<n>]`` (lowercased). One order
+    on a case → no ``n`` suffix; multiple orders → a stable 1-based ``.n`` suffix
+    (ordered by ``document_sources``). The importer OWNS this namespace; the
+    Jawafdehi case-source converter (spec 06) reuses these IRIs for dedup so a
+    court order cited by a case AND scraped by NGM is ONE Material.
+    """
+    ident = f"{court_identifier}.{case_number}".lower()
+    if n is not None:
+        ident = f"{ident}.{n}"
+    return build_material_iri(COURT_ORDER_SOURCE, ident)
+
+
+def case_order_sources(
+    document_sources: list[dict[str, Any]] | None,
+) -> list[tuple[dict[str, Any], int | None]]:
+    """Pair each order ``DocumentSource`` on a case with its IRI ``n`` suffix.
+
+    Returns ``[(document_source, n), ...]`` where ``n`` is ``None`` when the case
+    has exactly one order (the sole order takes no suffix) and a stable 1-based
+    index when it has several. The SINGLE source of the order↔suffix mapping, so
+    ``court_case_to_jsonld`` (which emits the ``hasPart`` order refs) and the
+    importer's ``_materialize_orders`` (which shapes the order Materials) agree on
+    every ``@id``.
+    """
+    sources = [s for s in (document_sources or []) if isinstance(s, dict)]
+    if not sources:
+        return []
+    if len(sources) == 1:
+        return [(sources[0], None)]
+    return [(src, i + 1) for i, src in enumerate(sources)]
+
+
+def court_order_to_jsonld(
+    document_source: dict[str, Any],
+    *,
+    court_identifier: str,
+    case_number: str,
+    n: int | None = None,
+) -> dict[str, Any]:
+    """Shape ONE court-order ``DocumentSource`` into its own Material JSON-LD.
+
+    LOCKED #1: each order doc is a STANDALONE Material (``court_order``,
+    ``@type [Manuscript, DigitalDocument]``) carrying the order's roled file links
+    as ``associatedMedia``. It ``isPartOf`` the case record's Material
+    (``court_case_material_iri``) — the inverse of that record's ``hasPart``. ``n``
+    disambiguates multiple orders on one case (``None`` → the sole order).
+    """
+    schema_type, additional_type = type_for(MaterialType.COURT_ORDER)
+    iri = court_order_material_iri(court_identifier, case_number, n)
+    document_id = (
+        document_source.get("document_id") if isinstance(document_source, dict) else None
+    )
+    doc: dict[str, Any] = {
+        "@context": MATERIAL_CONTEXT,
+        "@type": schema_type,  # ["Manuscript", "DigitalDocument"]
+        "@id": iri,
+        "name": {"ne": str(document_id or f"{case_number} आदेश")},
+        "inLanguage": "ne",
+        "isPartOf": {"@id": court_case_material_iri(court_identifier, case_number)},
+        "jawafdehi:court": court_identifier,
+        "jawafdehi:caseNumber": case_number,
+    }
+    if additional_type:
+        doc["additionalType"] = additional_type
+    if document_id:
+        doc["identifier"] = document_id
+    media = media_objects_from_document_sources([document_source])
+    if media:
+        doc["associatedMedia"] = media
+    return doc
+
+
 def court_case_to_jsonld(case: Any) -> dict[str, Any]:
     """Project a ``CourtCase`` ORM row into its schema.org CreativeWork JSON-LD.
 
     The case RECORD maps to ``CreativeWork`` + ``jawafdehi:CourtCase`` (schema.org
     has no LegalCase). Bilingual party/subject text rides in language-tagged
-    ``name``/``description`` where known; the ``document_sources`` modality
-    becomes ``associatedMedia`` MediaObjects; resolved party IRIs (``nes_id`` on
-    the case + on CaseEntity rows) ride as ``about`` entity references.
+    ``name``/``description`` where known; each order in ``document_sources`` is
+    REFERENCED as a standalone ``court_order`` Material via ``hasPart`` (LOCKED
+    #1 — the order bytes hang off that order Material, not embedded here);
+    resolved party IRIs (``nes_id`` on the case + on CaseEntity rows) ride as
+    ``about`` entity references.
     """
     schema_type, additional_type = type_for(MaterialType.COURT_CASE)
     iri = court_case_material_iri(case.court_id, case.case_number)
@@ -230,9 +314,17 @@ def court_case_to_jsonld(case: Any) -> dict[str, Any]:
     if about:
         doc["about"] = about
 
-    media = media_objects_from_document_sources(case.document_sources)
-    if media:
-        doc["associatedMedia"] = media
+    # LOCKED #1: each order in document_sources is a STANDALONE court_order
+    # Material; the case record REFERENCES them via hasPart rather than embedding
+    # their media. The order @ids are derivable from the (court, case_number)[, n]
+    # key, so they are emitted whether or not the order Material rows have been
+    # materialized yet (importer --materialize-orders creates the rows).
+    order_parts = [
+        {"@id": court_order_material_iri(case.court_id, case.case_number, n)}
+        for _src, n in case_order_sources(case.document_sources)
+    ]
+    if order_parts:
+        doc["hasPart"] = order_parts
 
     return doc
 

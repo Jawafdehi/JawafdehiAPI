@@ -29,6 +29,7 @@ from jawafdehi_shared.search.indexing import (
     upsert_doc,
 )
 from jawafdehi_shared.search.opensearch import COURTCASE_INDEX, make_client
+from ngm_service.courts.normalize import is_verdict_sentinel
 
 SOURCE_APP = "ngm"
 TYPE_TOKEN = "jawafdehi:CourtCase"
@@ -161,6 +162,40 @@ def build_doc(obj: Any) -> dict[str, Any]:
     reg_bs = getattr(obj, "registration_date_bs", None)
     if reg_bs:
         doc["date_bs"] = str(reg_bs)
+
+    # Re-added legacy fields (spec 01 §5a): verdict / subject / status become
+    # queryable facets + search body. The verdict_date_bs sentinel (`**** ** **`)
+    # is NEVER surfaced as data (§6.1): dropped here; the physical column is left
+    # as the scraper wrote it.
+    case_subject = getattr(obj, "case_subject", None)
+    if case_subject:
+        keywords.append(case_subject)  # same list object as doc["keywords"]
+        doc["body"] = f"{doc['body']} · {case_subject}" if doc.get("body") else case_subject
+    status = getattr(obj, "status", None)
+    if status:
+        doc["status"] = status
+    verdict_type = getattr(obj, "verdict_type", None)
+    if verdict_type:
+        doc["verdict_type"] = verdict_type
+    verdict_ad = getattr(obj, "verdict_date_ad", None)
+    if verdict_ad is not None:
+        doc["verdict_date"] = (
+            verdict_ad.isoformat() if hasattr(verdict_ad, "isoformat") else str(verdict_ad)
+        )
+    verdict_bs = getattr(obj, "verdict_date_bs", None)
+    verdict_bs = None if is_verdict_sentinel(verdict_bs) else str(verdict_bs)
+    if verdict_bs:
+        doc["verdict_date_bs"] = verdict_bs
+    doc["raw"].update(
+        {
+            "status": status,
+            "verdict_type": verdict_type,
+            "verdict_judge": getattr(obj, "verdict_judge", None),
+            "case_subject": case_subject,
+            "verdict_date_ad": doc.get("verdict_date"),
+            "verdict_date_bs": verdict_bs,
+        }
+    )
 
     created = getattr(obj, "created_at", None)
     updated = getattr(obj, "updated_at", None)

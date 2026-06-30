@@ -25,11 +25,21 @@ class Command(BaseCommand):
             action="store_true",
             help="Drop and recreate the index before reindexing.",
         )
+        parser.add_argument(
+            "--since",
+            help="Only (re)index cases with updated_at >= this AD date/ISO "
+            "datetime (incremental). Ignored with --rebuild (a full rebuild "
+            "must re-stream every case). Lets the importer drive a cheap "
+            "incremental reindex instead of re-streaming the whole corpus.",
+        )
 
     def handle(self, *args, **options):
+        qs = CourtCase.objects.select_related("court")
+        if options.get("since") and not options["rebuild"]:
+            qs = qs.filter(updated_at__gte=options["since"])
         result = reindex(
             index=COURTCASE_INDEX,
-            records=CourtCase.objects.select_related("court").iterator(),
+            records=qs.order_by("court_id", "case_number").iterator(),
             build_doc=search_index.build_doc,
             rebuild=options["rebuild"],
         )

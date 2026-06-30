@@ -60,3 +60,18 @@ def best_effort_normalize(case_number: str) -> str:
         return normalize_case_number(case_number)
     except ValueError:
         return case_number
+
+
+def is_verdict_sentinel(value: object) -> bool:
+    """True iff ``value`` is the legacy "no verdict date" sentinel.
+
+    The scraper stores ``**** ** **`` (and kin) in ``verdict_date_bs`` when no
+    real date exists. Such a value must never reach a CONSUMER as data — the
+    importer counts it and the search/material shapers drop it. A value made up
+    ONLY of stars / spaces / dashes (after stripping) is a sentinel; an empty or
+    None value is treated as absent (also "sentinel" for the drop decision).
+    """
+    if value is None:
+        return True
+    stripped = str(value).replace("*", "").replace(" ", "").replace("-", "")
+    return stripped == ""
