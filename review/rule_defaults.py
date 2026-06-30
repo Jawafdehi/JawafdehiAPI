@@ -280,10 +280,14 @@ DEFAULT_RULES = [
             "EXEMPTIONS (never penalise): (1) a date QUOTED verbatim inside a "
             "source excerpt / source title is out of scope — only AUTHORED case "
             "text is judged; (2) a year-only date is fine when only the year is "
-            "known (do not invent a month / day). Score 100 when every authored "
-            "date is Devanagari + era-marked (or legitimately year-only); lower "
-            "the score per malformed authored date (Latin numerals, an English "
-            "month, or a missing era marker)."
+            "known (do not invent a month / day).\n\n"
+            "SCORING — currently NOTE-ONLY (transitional, while the corpus is "
+            "normalised): ALWAYS score 100. Report any date-format deviation "
+            "(Latin numerals, an English month, a `/` or `।` separator, or a "
+            "missing `वि सं`/`सन्` era marker on an authored date) in `notes` so a "
+            "batch pass can fix it — but do NOT lower the score for it. Flip this "
+            "back to a scored deduction once authored dates are normalised "
+            "corpus-wide."
         ),
         "good_examples": (
             "'अभियुक्त सन् १९९८-१०-२२ मा सार्वजनिक सेवामा नियुक्त भएका थिए।'; "
