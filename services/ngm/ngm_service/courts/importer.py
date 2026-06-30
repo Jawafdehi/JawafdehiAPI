@@ -141,6 +141,9 @@ class CourtCaseImporter:
         self.out = stdout
         self.style = style
         self.res = ImportResult()
+        # Courts already upserted this run (the 97-row master table) — upsert each
+        # ONCE, not once per case (copy mode).
+        self._seen_courts: set[str] = set()
         # A dry-run is STRICTLY read-only — it issues NO writes to any DB, not
         # even ones that roll back (the statement still executes, and the source
         # ngm_v1 is FROZEN read-only during the v2 migration, so an UPDATE/INSERT
@@ -212,12 +215,25 @@ class CourtCaseImporter:
     @contextmanager
     def _signals_muted(self) -> Iterator[None]:
         from ngm_service.courts import signals as s
+        from ngm_service.materials import signals as ms
+        from ngm_service.materials.models import Material
 
+        # Mute BOTH the courtcase signals AND the material signals. The material
+        # post_save indexer (fired by order/case materialization) calls
+        # make_client() — an UNCACHED, brand-new OpenSearch client — per material,
+        # and its on_commit hook isn't pinned to the ngm connection so it fires
+        # synchronously inside the batch transaction. At 1.6M rows that
+        # per-material client-churn dominates runtime (≈0.9s/case in testing). We
+        # bulk-(re)index instead: courtcases via importer.reindex(), materials via
+        # a separate `reindex_materials` pass (both reuse ONE client + the bulk
+        # API).
         specs = [
             (post_save, CourtCase, "ngm_courtcase_search_index", s._index_courtcase),
             (post_delete, CourtCase, "ngm_courtcase_search_delete", s._delete_courtcase),
             (post_save, CaseEntity, "ngm_caseentity_reindex", s._reindex_on_party_change),
             (post_delete, CaseEntity, "ngm_caseentity_reindex_del", s._reindex_on_party_change),
+            (post_save, Material, "ngm_material_search_index", ms._index_material),
+            (post_delete, Material, "ngm_material_search_delete", ms._delete_material),
         ]
         disconnected = []
         for sig, sender, uid, func in specs:
@@ -454,14 +470,16 @@ class CourtCaseImporter:
 
     def _upsert_case_copy(self, row: dict[str, Any]) -> CourtCase:
         court_id = row["court_identifier"]
-        Court.objects.using("ngm").update_or_create(
-            identifier=court_id,
-            defaults={
-                "court_type": row.get("court_type") or "",
-                "full_name_nepali": row.get("court_full_name_nepali") or "",
-                "full_name_english": row.get("court_full_name_english"),
-            },
-        )
+        if court_id not in self._seen_courts:
+            Court.objects.using("ngm").update_or_create(
+                identifier=court_id,
+                defaults={
+                    "court_type": row.get("court_type") or "",
+                    "full_name_nepali": row.get("court_full_name_nepali") or "",
+                    "full_name_english": row.get("court_full_name_english"),
+                },
+            )
+            self._seen_courts.add(court_id)
         defaults = {f: row.get(f) for f in _COPY_CASE_FIELDS if f in row}
         case, _ = CourtCase.objects.using("ngm").update_or_create(
             court_id=court_id, case_number=row["case_number"], defaults=defaults
