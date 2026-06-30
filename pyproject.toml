@@ -29,6 +29,7 @@ dependencies = [
     "ngm-service",
     "jawafdehi-service",
     "gunicorn>=23.0",
+    "mozilla-django-oidc>=5.0.2",
 ]
 
 [tool.uv.workspace]

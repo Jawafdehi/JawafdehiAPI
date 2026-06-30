@@ -250,6 +250,7 @@ INSTALLED_APPS = [
     # only on PostgreSQL and no-ops on sqlite (see nes_service.entities).
     "django.contrib.postgres",
     "rest_framework",
+    "mozilla_django_oidc",
     "drf_spectacular",
     "django_filters",
     "corsheaders",
@@ -442,6 +443,9 @@ AUTH_PASSWORD_VALIDATORS = [
 
 AUTHENTICATION_BACKENDS = [
     "rules.permissions.ObjectPermissionBackend",
+    # Django-admin SSO (Zitadel via mozilla-django-oidc). ModelBackend stays for
+    # local break-glass superusers created with createsuperuser.
+    "monolith.config.oidc_admin.AdminOIDCBackend",
     "django.contrib.auth.backends.ModelBackend",
 ]
 
@@ -528,6 +532,24 @@ if not DEBUG and not TESTING and not _running_build_command and not OIDC_ISSUER:
         "OIDC_ISSUER environment variable must be set in production. "
         "OIDC (Zitadel) is the only authentication method for the API."
     )
+
+# ---------------------------------------------------------------------------
+# Django-admin SSO (mozilla-django-oidc, session login). Separate from the DRF
+# bearer auth above: /django-admin/ flows through Zitadel using the SAME public
+# PKCE client the SPA uses (no client secret). Roles -> Groups/is_staff via
+# monolith.config.oidc_admin.AdminOIDCBackend.
+# ---------------------------------------------------------------------------
+OIDC_RP_CLIENT_ID = os.getenv("OIDC_RP_CLIENT_ID", "")
+OIDC_RP_CLIENT_SECRET = os.getenv("OIDC_RP_CLIENT_SECRET", "")  # empty = public PKCE client
+OIDC_USE_PKCE = True
+OIDC_RP_SIGN_ALGO = "RS256"
+OIDC_RP_SCOPES = "openid email profile"
+OIDC_OP_AUTHORIZATION_ENDPOINT = f"{ensure_trailing_slash(OIDC_ISSUER)}oauth/v2/authorize"
+OIDC_OP_TOKEN_ENDPOINT = f"{ensure_trailing_slash(OIDC_ISSUER)}oauth/v2/token"
+OIDC_OP_USER_ENDPOINT = f"{ensure_trailing_slash(OIDC_ISSUER)}oidc/v1/userinfo"
+OIDC_OP_JWKS_ENDPOINT = OIDC_JWKS_URI
+LOGIN_URL = "/oidc/authenticate/"
+LOGOUT_REDIRECT_URL = "/django-admin/login/"
 
 # ---------------------------------------------------------------------------
 # REST Framework — single config. OIDC is the sole API authenticator. The

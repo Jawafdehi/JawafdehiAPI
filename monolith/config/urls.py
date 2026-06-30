@@ -35,6 +35,7 @@ from django.conf import settings
 from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
+from django.views.generic.base import RedirectView
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 
 from cases.api_views import MeView, OEmbedView
@@ -52,6 +53,15 @@ urlpatterns = [
     # Django's built-in admin lives at /django-admin/ so the SPA's React admin
     # panel can own the /admin/* path (served by the frontend, proxied per the
     # /api tree — never /admin). Superuser/model tasks stay reachable here.
+    # Django-admin SSO: /django-admin/login/ -> Zitadel (mozilla-django-oidc),
+    # bypassing the username/password form. Must precede admin.site.urls so the
+    # explicit login route wins. /oidc/* is the authenticate + callback flow.
+    path("oidc/", include("mozilla_django_oidc.urls")),
+    path(
+        "django-admin/login/",
+        RedirectView.as_view(url="/oidc/authenticate/", query_string=True),
+        name="admin-oidc-login",
+    ),
     path("django-admin/", admin.site.urls),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path(
