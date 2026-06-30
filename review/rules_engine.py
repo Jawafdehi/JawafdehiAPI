@@ -183,6 +183,22 @@ def bigo_amount_present(case):
         # value == 0 falls through to the no-bigo certification check below.
 
     if _has_no_bigo_marker(case.get("internal_notes")):
+        # A NO_BIGO certification is only valid for genuinely unquantified
+        # (record/process) offences. If the title / short_description states a
+        # concrete monetary amount, the figure should be POPULATED, not suppressed
+        # via the marker. Keep the gate passing (don't regress legitimate no-bigo
+        # cases on a heuristic) but surface a warning for the caseworker.
+        blob = f"{case.get('title') or ''} {case.get('short_description') or ''}"
+        if re.search(
+            r"(?i)(?:रु|rs\.?|npr)[\.\s]?\s*[०-९\d]"
+            r"|[०-९\d]\s*(?:अर्ब|करोड|लाख|हजार|crore|lakh|million|billion|thousand)",
+            blob,
+        ):
+            return 100, [
+                "A NO_BIGO marker is recorded, but the title/description states a "
+                "monetary amount — verify a real bigo is not being suppressed "
+                "(NO_BIGO is for record/process offences with no monetised harm)."
+            ]
         return 100, []
     return 0, [
         "Bigo (बिगो) amount is not set and no NO_BIGO justification is recorded "
@@ -217,16 +233,21 @@ def structural_completeness(case):
     tags = case.get("tags") or []
     pts = 0
     pts += 14 if desc else 0
-    pts += min(len(allegations) / 4.0, 1.0) * 24
-    pts += min(len(timeline) / GOLD_TIMELINE, 1.0) * 22
+    # Presence-and-materiality, NOT raw count: a single consolidated key
+    # allegation is fully correct (don't reward inflating the count), and timeline
+    # depth/conciseness is judged by the dedicated key-allegation / timeline
+    # rules. Credit presence and reach full at the org minimum; keep a floor only
+    # for genuinely empty fields.
+    pts += 24 if allegations else 0
+    pts += min(len(timeline) / 3.0, 1.0) * 22
     pts += min(len(evidence) / GOLD_SOURCES, 1.0) * 20
     pts += min(len(entities) / 3.0, 1.0) * 12
     pts += min(len(tags) / 3.0, 1.0) * 8
     issues = []
-    if len(allegations) < 2:
-        issues.append(f"Only {len(allegations)} key allegations (org min: 2).")
-    if len(timeline) < 3:
-        issues.append(f"Only {len(timeline)} timeline events (org min: 3).")
+    if not allegations:
+        issues.append("No key allegations populated.")
+    if len(timeline) < 2:
+        issues.append(f"Only {len(timeline)} timeline event(s) populated.")
     if not entities:
         issues.append("No entities populated.")
     return _clamp(pts), issues
@@ -367,22 +388,23 @@ def timeline(case):
     n = len(tl)
     with_bs = sum(1 for t in tl if t.get("date_bs"))
     with_ad = sum(1 for t in tl if t.get("date"))
-    detailed = sum(1 for t in tl if len((t.get("description") or "")) > 60)
     dates = [t.get("date") for t in tl if t.get("date")]
     ordered = dates == sorted(dates)
     pts = 0
-    pts += min(n / GOLD_TIMELINE, 1.0) * 35
-    pts += (with_ad / n) * 15
-    pts += (with_bs / n) * 15
-    pts += (detailed / n) * 25
-    pts += 10 if ordered else 0
+    # Completeness = event COUNT + dual BS/AD dates + chronological order. There
+    # is deliberately NO per-event character-length reward/penalty: a concise
+    # "date + brief event" entry is the editorial standard, so the old <60-char
+    # "thin" check punished correct timelines and rewarded verbose
+    # mini-paragraphs. Its 25 points are redistributed to the real signals.
+    pts += min(n / GOLD_TIMELINE, 1.0) * 45
+    pts += (with_ad / n) * 20
+    pts += (with_bs / n) * 20
+    pts += 15 if ordered else 0
     issues = []
     if with_bs < n:
         issues.append(f"{n - with_bs} events missing Bikram Sambat (date_bs).")
     if not ordered:
         issues.append("Timeline events are not in chronological order.")
-    if detailed < n:
-        issues.append(f"{n - detailed} timeline events are thin (<60 chars).")
     return _clamp(pts), issues
 
 
