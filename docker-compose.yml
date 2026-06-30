@@ -1,0 +1,195 @@
+# Jawafdehi platform — local dev stack (consolidated monolith).
+#
+# CONSOLIDATION (Option C): NES, NGM and Jawafdehi now run as Django apps in ONE
+# project / ONE image (build context = repo root; see ./Dockerfile). The three
+# former api services + three migrate sidecars are replaced by a single `platform`
+# service + a single `platform-migrate` sidecar. Database-per-service is kept:
+# the one image connects to all three Postgres DBs and a DB router pins each app's
+# models to its DB. Infra (postgres/minio/opensearch/zitadel) is unchanged.
+#
+#   cp .env.example .env
+#   docker compose up -d --build
+
+name: jawafdehi-platform
+
+services:
+  # ── Shared infra ─────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres-init:/docker-entrypoint-initdb.d:ro
+    ports: ["${POSTGRES_PORT:-45432}:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes: ["miniodata:/data"]
+    ports:
+      - "${MINIO_API_PORT:-49000}:9000"
+      - "${MINIO_CONSOLE_PORT:-49001}:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  opensearch:
+    # Custom image with analysis-icu (free Apache-2.0) BAKED IN — the bilingual
+    # Nepali analyzers (icu_normalizer/icu_tokenizer/icu_transform/icu_folding)
+    # require it and it is NOT bundled in the stock image. Baking it in (vs the
+    # old install-at-boot command override) makes startup deterministic and
+    # offline-friendly. See infra/opensearch/Dockerfile.
+    build:
+      context: ./infra/opensearch
+      args:
+        OPENSEARCH_VERSION: "2.13.0"
+    image: jawafdehi-opensearch-icu:2.13.0
+    environment:
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      - DISABLE_SECURITY_PLUGIN=true
+      - DISABLE_INSTALL_DEMO_CONFIG=true
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    volumes: ["osdata:/usr/share/opensearch/data"]
+    ports: ["${OPENSEARCH_PORT:-49200}:9200"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  zitadel:
+    image: ghcr.io/zitadel/zitadel:latest
+    command: 'start-from-init --masterkey "${ZITADEL_MASTERKEY:-MasterkeyNeedsToHave32Characters}" --tlsMode disabled'
+    environment:
+      ZITADEL_DATABASE_POSTGRES_HOST: postgres
+      ZITADEL_DATABASE_POSTGRES_PORT: 5432
+      ZITADEL_DATABASE_POSTGRES_DATABASE: zitadel
+      ZITADEL_DATABASE_POSTGRES_USER_USERNAME: ${POSTGRES_USER:-postgres}
+      ZITADEL_DATABASE_POSTGRES_USER_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE: disable
+      ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME: ${POSTGRES_USER:-postgres}
+      ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: disable
+      ZITADEL_EXTERNALSECURE: "false"
+      ZITADEL_EXTERNALDOMAIN: ${ZITADEL_HOST:-localhost}
+      ZITADEL_EXTERNALPORT: ${ZITADEL_PORT:-48080}
+      ZITADEL_MACHINE_IDENTIFICATION_PRIVATEIP_ENABLED: "false"
+      ZITADEL_MACHINE_IDENTIFICATION_WEBHOOK_ENABLED: "false"
+      ZITADEL_MACHINE_IDENTIFICATION_HOSTNAME_ENABLED: "true"
+    depends_on:
+      postgres: { condition: service_healthy }
+    ports: ["${ZITADEL_PORT:-48080}:8080"]
+
+  # ── The consolidated platform (ONE Django project / image) ────────────────
+  # NES, NGM and Jawafdehi run as apps in one process (monolith.config.settings).
+  # The image still talks to all THREE Postgres databases (DATABASE_URL /
+  # NES_DB_URL / NGM_DATABASE_URL); the DB router pins each app's models to its DB.
+  platform:
+    image: jawafdehi-platform:latest
+    build: { context: ., dockerfile: Dockerfile }
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/jawafdehi
+      NES_DB_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/nes
+      NGM_DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/ngm
+      DATABASE_SSL_MODE: disable
+      OPENSEARCH_URL: http://opensearch:9200
+      OIDC_ISSUER: http://zitadel:8080
+      OIDC_AUDIENCE: ${OIDC_AUDIENCE:-jawafdehi-platform-dev}
+      SECRET_KEY: ${PLATFORM_SECRET_KEY:-local-dev-only-9f3a2c7e1b6d4058a1e2c3d4e5f60718}
+      DEBUG: "False"
+      ALLOWED_HOSTS: "*"
+      SECURE_SSL_REDIRECT: "False"
+      # DRF rate-throttle rates (env-tunable, no rebuild). The anon bucket
+      # defaults to a generous 1000/hour in settings.py — high enough that the
+      # unauthenticated integration-test suite runs without 429-ing while still
+      # capping abusive scrapers. Override here to tighten/loosen per environment.
+      THROTTLE_RATE_ANON: ${THROTTLE_RATE_ANON:-1000/hour}
+      THROTTLE_RATE_USER: ${THROTTLE_RATE_USER:-5000/hour}
+    depends_on:
+      postgres: { condition: service_healthy }
+      platform-migrate: { condition: service_completed_successfully }
+    ports: ["${PLATFORM_API_PORT:-48000}:8080"]
+
+  # ── Frontend (Vite dev server) ────────────────────────────────────────────
+  # Local-dev only: runs `vite` with hot reload, source bind-mounted. All /api,
+  # /admin and /static are proxied to the `platform` service (the consolidated
+  # backend that serves unified search AND the per-app APIs). Build context is the
+  # sibling ../frontend repo. For a production build the SPA deploys to Cloudflare
+  # (see frontend/package.json `deploy`), not this container.
+  frontend:
+    image: jawafdehi-frontend-dev:latest
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile.dev
+    environment:
+      # Bind to all interfaces so the published port is reachable from the host.
+      VITE_DEV_HOST: "0.0.0.0"
+      # In-network backend target (service name + container port, not host port).
+      VITE_API_PROXY_TARGET: "http://platform:8080"
+      # SAME-ORIGIN relative API base URLs so requests go through the Vite proxy
+      # above (to the local monolith) instead of the production defaults baked into
+      # the API clients. Jawafdehi cases + unified search live under /api; NES
+      # entities under /api/nes (see monolith/config/urls.py).
+      VITE_JDS_API_BASE_URL: "/api"
+      VITE_NES_API_BASE_URL: "/api/nes"
+      VITE_API_BASE_URL: "/api/nes"
+      # NGM materials + court cases live under /api/ngm on the same monolith; a
+      # same-origin relative base keeps NGM detail-page fetches on the Vite proxy.
+      VITE_NGM_API_BASE_URL: "/api/ngm"
+    volumes:
+      # Live source for hot reload; anonymous volume keeps the image's installed
+      # node_modules from being shadowed by the host mount.
+      - ../frontend:/app
+      - /app/node_modules
+    ports: ["${FRONTEND_PORT:-40114}:40114"]
+    depends_on:
+      platform: { condition: service_started }
+
+  # ONE migrate sidecar. Migration runs ONCE PER DATABASE (the DB router's
+  # allow_migrate keeps each app's tables in its own DB): --database=default
+  # (Jawafdehi + django.contrib.*), --database=nes (entities), --database=ngm
+  # (courts/materials).
+  platform-migrate:
+    image: jawafdehi-platform:latest
+    build: { context: ., dockerfile: Dockerfile }
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/jawafdehi
+      NES_DB_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/nes
+      NGM_DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/ngm
+      DATABASE_SSL_MODE: disable
+      OIDC_ISSUER: http://zitadel:8080
+      SECRET_KEY: ${PLATFORM_SECRET_KEY:-local-dev-only-9f3a2c7e1b6d4058a1e2c3d4e5f60718}
+      DEBUG: "False"
+      ALLOWED_HOSTS: "*"
+    command:
+      - sh
+      - -c
+      - >-
+        uv run python manage.py migrate --noinput --database=default &&
+        uv run python manage.py migrate --noinput --database=nes &&
+        uv run python manage.py migrate --noinput --database=ngm
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+
+volumes:
+  pgdata:
+  miniodata:
+  osdata:

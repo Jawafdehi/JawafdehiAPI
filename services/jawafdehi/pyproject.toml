@@ -1,0 +1,90 @@
+[project]
+name = "jawafdehi-service"
+version = "0.1.0"
+description = "Jawafdehi — public-accountability case portal (Django/DRF) over the cases/entities/sources + casework-review data."
+requires-python = ">=3.12"
+# Jawafdehi's OWN dependencies only. A service image installs just these + shared,
+# not the other services' deps (per the per-service-isolation decision).
+#
+# Ported from the source app's Poetry [tool.poetry.dependencies] (wt-backend-v2,
+# v2 branch). The OIDC auth dep that used to be carried per-service (pyjwt[crypto])
+# now comes transitively via `jawafdehi-shared`, which owns the single
+# OIDCAuthentication implementation.
+dependencies = [
+    "jawafdehi-shared",              # workspace source: OIDC auth, entity-id, DRF bases
+    "django>=5.2,<6",
+    "djangorestframework>=3.16",
+    "django-cors-headers>=4.9",
+    "psycopg2-binary>=2.9.11",       # Postgres (jawafdehi DB)
+    "python-dotenv>=1.2",
+    "django-filter>=25.2",
+    "drf-spectacular>=0.29",
+    "dj-database-url>=3.0",          # parse DATABASE_URL → DATABASES
+    "django-jazzmin==3.0.1",
+    "django-tinymce>=5.0",
+    "rules>=3.5",                    # django-rules predicates (permission model)
+    "whitenoise>=6.11",
+    "django-auditlog>=3.3",
+    "gunicorn>=23.0",
+    "pydantic>=2.12",
+    "jsonpatch>=1.33",
+    "boto3>=1.35",                   # R2/S3 access for document-source storage
+    "django-storages>=1.14.3",
+    "python-multipart>=0.0.18",
+    "anthropic>=0.40",
+    "nepali>=1.2",                   # Bikram Sambat date conversion (top-level import)
+    "structlog>=25.5",
+    "sentry-sdk>=2.0",               # imported at settings load (init only if SENTRY_DSN set)
+    # NOTE: the old `nepal-entity-service` git dep (the deprecated FastAPI NES)
+    # was REMOVED — NES is now an in-process Django app (`nes_service`) and entity
+    # id validation uses `jawafdehi_shared.entities.ids`, so nothing imports the
+    # `nes.*` package anymore. (Dropped the git dep + its build-time git requirement.)
+    # LLM clients (raw SDKs — the LangChain/LangGraph/deepagents stack was dropped
+    # 2026-06-30 with the `case_workflows` app, which was its sole consumer):
+    #   - `openai`: enrich_ciaa_tags (OpenAI-compatible chat) + enrich_missing_bigo.
+    #   - `google-genai`: cases.services.case_scraper (Gemini). Previously pulled in
+    #     transitively via `langchain-google-genai`; now a direct dep since that
+    #     LangChain package is gone. Imported lazily inside case_scraper methods.
+    "openai>=2.30,<3",
+    "google-genai>=1.0",
+]
+
+[project.optional-dependencies]
+# Document-conversion enrichment (BIGO / CIAA). In the source these were the
+# `bigo-enrichment` Poetry extra; here they stay optional because they are only
+# imported lazily inside management commands (markitdown / likhit), not at
+# startup, so the base service image need not carry them.
+bigo-enrichment = [
+    "markitdown[docx,pdf,pptx,xlsx]>=0.1.5",
+    "likhit",
+]
+
+[tool.uv.sources]
+jawafdehi-shared = { workspace = true }
+# Git source for the optional bigo-enrichment extra only (likhit is imported
+# lazily inside management commands / the review converter, never at startup).
+likhit = { git = "https://github.com/Jawafdehi/likhit.git", rev = "main" }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# The Jawafdehi app code keeps its top-level layout (the
+# `cases`/`case_workflows`/`review`/`ngm` apps + the `config` app-support
+# package — auth/middleware/structlog_config — live directly under
+# services/jawafdehi/), so the importable packages are those dirs.
+#
+# NOTE (monolith collapse): the standalone Django *project* entrypoints
+# (config/settings.py, config/urls.py, config/wsgi.py, config/asgi.py,
+# manage.py) were removed — the single project now lives in the repo-root
+# `monolith` package (DJANGO_SETTINGS_MODULE=monolith.config.settings). The
+# `config` package is retained ONLY for its app-support modules
+# (config.auth / config.middleware / config.structlog_config), which app code
+# and the monolith settings still import.
+[tool.hatch.build.targets.wheel]
+packages = ["config", "cases", "case_workflows", "review", "ngm"]
+
+# Pytest config (DJANGO_SETTINGS_MODULE, testpaths) is owned by the repo-root
+# pyproject.toml, which points at monolith.config.settings — the single source
+# of truth after the collapse. This package no longer sets its own pytest
+# settings module, so per-package pytest runs don't load pre-collapse settings.

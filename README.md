@@ -1,305 +1,61 @@
-# Jawafdehi API
+# Jawafdehi Platform (monorepo)
 
-A Django-based public accountability platform for tracking allegations of corruption and misconduct by public entities in Nepal.
+All three services on **Django/DRF**, in one **uv workspace**, sharing a common
+library — the framework-consolidation end-state (migrated from FastAPI/Poetry).
 
-## About the Meta Repository
+```
+jawafdehi-platform/
+  pyproject.toml          uv workspace root (no runtime deps; declares members)
+  uv.lock                 single lockfile for the whole workspace
+  shared/                 jawafdehi-shared: OIDC auth, entity-id contract, OpenSearch, DRF bases
+  services/
+    ngm/                  Django project (courts/cases/hearings, gated query, lakehouse svc)
+    nes/                  Django project (entities, bulk-ingest, write API, search)   [pending]
+    jawafdehi/            Django project (cases/sources/entities, casework, review)    [pending]
+```
 
-Contributors to this repository should be aware of the [Jawafdehi meta-repository](https://github.com/Jawafdehi/jawafdehi-meta). The meta repo provides documentation, specs, and other shared resources across the Jawafdehi product family.
+## Principles (locked decisions)
+- **One framework**: Django/DRF everywhere → one auth (`jawafdehi_shared.auth.oidc`),
+  one admin/migrations/test pattern. No duplicate FastAPI OIDC code.
+- **Per-service dependency isolation**: each `services/<x>/pyproject.toml` declares
+  ONLY that service's deps + `jawafdehi-shared`. A service image installs just its
+  own deps — e.g. DuckDB/boto3 live on NGM only.
+- **Database-per-service**: each service has its own settings + `DATABASES` pointing
+  at its own DB; no shared Django models; cross-service access is REST-only.
+- **Independent deploy**: each service its own `Dockerfile` + wsgi + image.
+- **uv** (not poetry) for dependency management.
 
-**For Jawafdehi team members and interns**: Working from the meta repo setup is strongly encouraged, as it provides rich context for AI-powered development tools (Cursor, Kiro, GitHub Copilot, etc.) and makes cross-service coordination easier.
-
-**For open source contributors**: You can contribute directly to this repository by cloning it and submitting a PR. The meta repo is optional for external contributors.
-
-
-## Setup Instructions
-
-### Prerequisites
-
-- Python 3.12+
-- Poetry (Python package manager)
-- PostgreSQL (for production) or SQLite (for development)
-
-### Installation
-
-1. **Clone the repository and navigate to the project**
-   ```bash
-   cd services/jawafdehi-api
-   ```
-
-2. **Install dependencies with Poetry**
-   ```bash
-   poetry install
-   ```
-
-3. **Activate the virtual environment**
-   ```bash
-   poetry shell
-   ```
-
-4. **Verify Django installation**
-   ```bash
-   python manage.py --version
-   # Should output: 5.2.9
-   ```
-
-5. **Configure environment variables**
-
-   Copy the example environment file and update it:
-   ```bash
-   cp .env.example .env
-   ```
-
-   Edit `.env` with your configuration:
-   - `SECRET_KEY`: Django secret key
-   - `DEBUG`: Set to `True` for development
-   - `DATABASE_URL`: PostgreSQL connection string (or use SQLite for dev)
-   - `NES_API_URL`: Nepal Entity Service API URL
-   - `ALLOWED_HOSTS`: Comma-separated hostnames
-   - `CSRF_TRUSTED_ORIGINS`: Comma-separated origins
-
-6. **Run database migrations**
-   ```bash
-   python manage.py migrate
-   ```
-
-7. **Create user groups (Admin/Moderator/Contributor)**
-   ```bash
-   python manage.py create_groups
-   ```
-
-8. **Create a superuser account**
-   ```bash
-   python manage.py createsuperuser
-   ```
-
-   Follow the prompts to set username, email, and password.
-
-9. **Start the development server**
-   ```bash
-   python manage.py runserver
-   ```
-
-   The API will be available at `http://localhost:8000`
-
-10. **Access the admin portal**
-
-    Navigate to `http://localhost:8000/admin` and login with your superuser credentials.
-
-### Seed Data (Optional)
-
-To populate the database with sample allegations for testing:
-
+## Common commands
 ```bash
-python manage.py seed_allegations
+uv sync                                     # install the monolith (all apps) + dev tools
+uv run python manage.py check               # one manage.py / one settings (monolith.config.settings)
+docker build -t jawafdehi .                 # single image, context = repo root
 ```
 
-### Running Tests
+## Status
+- [x] Workspace skeleton + `shared/` (OIDC auth, entity-id contract, OpenSearch, DRF bases).
+- [x] **NGM** — Django: courts/cases/hearings/entities/firms read plane, gated `/api/query`
+      (SELECT-only guard + OIDC role), ingestion stubs, search 501, lakehouse svc ported. 19 tests.
+- [x] **NES** — Django: Pydantic core + publication + bulk-ingest (≥2-source HOLD) reused;
+      JSONB persistence via Django ORM; read + OIDC-gated write API. **Data-migration runner DROPPED**
+      (see `services/nes/MIGRATION-DROPPED.md`). 19 tests.
+- [x] **Jawafdehi** — moved into the monorepo; local `oidc_auth.py` DELETED → uses shared.
+      Poetry→uv. 747 tests collect; OIDC/permission tests pass.
+- [x] **docker-compose** (per-service Dockerfiles, uv builds, migrate sidecars) + infra.
+      All 3 `manage.py check` clean; NGM image builds via uv + boots live (health 200,
+      /api/courts/ 200, /api/query unauth 401 via shared OIDC).
+- [ ] Build NES + Jawafdehi images + full `compose up` e2e re-prove (NGM proven)
+- [x] Integration-test suite carried over; repo pushed to `origin`.
 
-```bash
-poetry run pytest
-```
+> **Note:** sections above describe the *pre-monolith-collapse* shape (separate
+> per-service images, REST-between-services). The services have since been collapsed
+> into one Django project / one image / in-process calls — see `../think-big/ARCHITECTURE.md`
+> for the current state.
 
-### Code Quality
+## Working model
+Trunk is **`main`** (pushed to `origin`; the old `v2` line was retired 2026-06-29). New
+work goes on a feature branch → PR → `main`. **Do local changes in git worktrees**
+(`git worktree add <path> main` or a feature branch), not by checking out branches in the
+primary tree. Commits authored `oopsy <oopsy@claudy.com>`.
 
-Format code:
-```bash
-poetry run black .
-poetry run isort .
-```
-
-Lint code:
-```bash
-poetry run flake8
-```
-
-## Features
-
-- Track allegations against public entities
-- Document evidence with sources
-- Timeline management for allegations
-- Response system for accused entities
-- RESTful API with OpenAPI documentation
-- Integration with Nepal Entity Service (NES)
-- Admin interface powered by Jazzmin (Bootstrap 4)
-
-## Permissions Model
-
-### Case Revisions
-
-Each allegation uses a revision system to track changes:
-- **Published version** - The current live allegation visible to the public
-- **Draft revision** - Edits create a new revision in Draft status
-- Revisions maintain history of all changes to an allegation
-
-### Allegation Status Workflow
-
-#### Creating New Allegations
-1. **Draft** - Initial status when an allegation is created
-2. **In Review** - Contributor submits the draft for review (visible to Moderators)
-3. **Published/Closed** - Moderator approves and sets final status
-
-#### Editing Existing Allegations
-Editing a published allegation creates a new revision:
-1. User edits the allegation (creates a new draft revision)
-2. Submits for review (revision status: **In Review**)
-3. Moderator approves, changing revision status to **Draft**, **Published**, or **Closed**
-4. If approved as Published, the new revision becomes the live version
-
-### User Roles
-
-#### Admin
-- Manage all Moderators (create, edit, delete, assign permissions)
-- Manage all Contributors (create, edit, delete, assign to cases)
-- Full access to all Allegations, Evidence, Sources, and Responses
-- Assign Contributors to specific cases
-
-#### Moderator
-- Manage Contributors (create, edit, delete, assign to cases)
-- Full access to all Allegations, Evidence, Sources, and Responses
-- Assign Contributors to specific cases
-
-#### Contributor
-- Create new Allegations (initial status: Draft)
-- Submit drafts for review (changes status to In Review)
-- Access Evidence, Sources, and Responses only for assigned cases
-- Edit content only for assigned cases
-- Change case status only between "Draft" and "In Review"
-
-### Permission Matrix
-
-| Action | Admin | Moderator | Contributor |
-|--------|-------|-----------|-------------|
-| Manage Moderators | ✓ | ✗ | ✗ |
-| Manage Contributors | ✓ | ✓ | ✗ |
-| Create Allegations | ✓ | ✓ | ✓ |
-| Assign Contributors to Cases | ✓ | ✓ | ✗ |
-| Access All Cases | ✓ | ✓ | ✗ |
-| Access Assigned Cases | ✓ | ✓ | ✓ |
-| Manage Evidence (assigned cases) | ✓ | ✓ | ✓ |
-| Manage Sources (assigned cases) | ✓ | ✓ | ✓ |
-| Manage Responses (assigned cases) | ✓ | ✓ | ✓ |
-| Change Case Status (all statuses) | ✓ | ✓ | ✗ |
-| Change Case Status (Draft ↔ In Review) | ✓ | ✓ | ✓ |
-| Approve & Publish/Close Cases | ✓ | ✓ | ✗ |
-
-### Case Assignment
-
-Contributors must be explicitly assigned to cases by Admins or Moderators. Once assigned, Contributors gain access to:
-- View and edit the Allegation
-- Add and manage Evidence
-- Document Sources
-- Handle Responses
-
-Contributors cannot access cases they are not assigned to.
-
-## User Workflows
-
-### Public (Unauthenticated) Workflows
-
-#### Browse Cases
-```
-1. View list of published cases
-2. Apply filters (entity, category, status)
-3. Search cases by keyword
-4. Select case to view details
-```
-
-#### View Case Details
-```
-1. Read case content
-2. View associated evidence
-3. Review documented sources
-4. Read entity responses
-5. View case timeline
-```
-
-#### Access API
-```
-1. Query cases via RESTful API
-2. Access OpenAPI documentation
-3. Retrieve public data programmatically
-```
-
-### Contributor Workflows
-
-#### Create New Case
-```
-1. Create case (status ← Draft)
-2. Add evidence and sources
-3. Submit for review (status ← In Review)
-4. Wait for moderator/admin approval
-```
-
-#### Edit Assigned Case
-```
-1. Access assigned case
-2. Edit case (creates new draft revision)
-3. Modify evidence and sources
-4. Submit revision (status ← In Review)
-5. Wait for moderator/admin to approve and publish
-```
-
-#### Manage Case Content (Assigned Cases Only)
-```
-1. Add/edit evidence
-2. Document sources
-3. Toggle status between Draft and In Review
-```
-
-### Moderator Workflows
-
-#### Manage Contributors
-```
-1. Create/edit/delete contributor accounts
-2. Assign contributors to specific cases
-```
-
-#### Manage Cases
-```
-1. Create new case (status ← Draft)
-2. Edit any case (creates new revision)
-3. Review submissions (status = In Review)
-4. Approve revision (status ← Published or Closed)
-5. Access all cases regardless of assignment
-```
-
-#### Manage Content
-```
-1. Add/edit/delete evidence for any case
-2. Document sources for any case
-3. Handle responses for any case
-```
-
-### Admin Workflows
-
-#### Manage Moderators
-```
-1. Create/edit/delete moderator accounts
-2. Assign permissions to moderators
-```
-
-#### Manage Contributors
-```
-1. Create/edit/delete contributor accounts
-2. Assign contributors to specific cases
-```
-
-#### Manage Cases
-```
-1. Create new case (status ← Draft)
-2. Edit any case (creates new revision)
-3. Review submissions (status = In Review)
-4. Approve revision (status ← Published or Closed)
-5. Access all cases regardless of assignment
-```
-
-#### Manage Content
-```
-1. Add/edit/delete evidence for any case
-2. Document sources for any case
-3. Handle responses for any case
-```
-
-## License
-
-This project is licensed under the [Hippocratic License Version 3.0 (HL3)](./LICENSE), an [Ethical Source](https://ethicalsource.dev) license. See [LICENSING.md](./LICENSING.md) for more information.
+See `../think-big/django-consolidation-plan.md`.

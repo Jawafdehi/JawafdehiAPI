@@ -1,0 +1,24 @@
+[project]
+name = "jawafdehi-integration-tests"
+version = "0.1.0"
+description = "Cross-service integration tests for the unified Jawafdehi platform (NES + NGM + Jawafdehi)"
+requires-python = ">=3.12"
+dependencies = [
+    "pytest>=8.0",
+    "httpx>=0.27",
+    "pytest-dotenv>=0.5.2",
+    "tenacity>=8.2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "smoke: fast per-service contract checks (health, basic endpoints)",
+    "cross_service: multi-service flows exercising the seams",
+    "slow: full-stack flows that need the whole compose stack warm",
+    "live: needs a reachable service (gated by the require_stack fixture); pure-contract tests omit it",
+]
+addopts = "-ra"
+# Make `fixtures/` and the repo root importable so `from fixtures.sample_data ...`
+# resolves under `pytest --collect-only` without an installed package.
+pythonpath = ["."]

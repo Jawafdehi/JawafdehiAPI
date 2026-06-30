@@ -1,0 +1,94 @@
+<div id="{{ widget_id }}_container" class="multiple-input-container">
+    {% for item in values %}
+    <div class="input-row evidence-row" draggable="true">
+        <span class="drag-handle">⋮⋮</span>
+        <button type="button" class="btn btn-sm btn-danger remove-input">
+            <i class="fas fa-times"></i>
+        </button>
+        <div class="evidence-field-group">
+            <label>Document Source</label>
+            <div class="evidence-source-wrapper">
+                <select class="evidence-input source-select">
+                    {% for source_id, source_title, source_url in sources %}
+                    <option value="{{ source_id }}" {% if source_id == item.source_id %}selected{% endif %}>
+                        {{ source_title }}
+                    </option>
+                    {% endfor %}
+                </select>
+                <a href="#" class="btn btn-sm btn-info view-source-btn" target="_blank"
+                   {% if not item.source_id %}style="display: none;"{% endif %}>
+                    <i class="fas fa-eye"></i> View
+                </a>
+            </div>
+            <div class="create-source-link">
+                <a href="/admin/cases/documentsource/add/" target="_blank">+ Create new document source</a>
+            </div>
+        </div>
+        <div class="evidence-field-group">
+            <label>Description</label>
+            <textarea class="evidence-input">{{ item.description }}</textarea>
+        </div>
+    </div>
+    {% endfor %}
+    <div style="margin-bottom: 8px;">
+        <button type="button" id="{{ widget_id }}_add" class="btn btn-sm btn-success add-widget-btn">
+            <i class="fas fa-plus"></i> Add Evidence
+        </button>
+    </div>
+</div>
+<input type="hidden" name="{{ name }}" id="{{ widget_id }}" value="{{ values_json }}">
+
+<script>
+(function() {
+    var sourceOptions = [
+        {% for source_id, source_title, source_url in sources %}
+        '<option value="{{ source_id }}">{{ source_title|escapejs }}</option>'
+        {% if not forloop.last %},{% endif %}
+        {% endfor %}
+    ].join('');
+
+    var sourceUrlMap = {
+        {% for source_id, source_title, source_url in sources %}
+        {% if source_url %}
+        '{{ source_id }}': '{{ source_url|escapejs }}'
+        {% if not forloop.last %},{% endif %}
+        {% endif %}
+        {% endfor %}
+    };
+
+    var rowTemplate = [
+        '<span class="drag-handle">⋮⋮</span>',
+        '<button type="button" class="btn btn-sm btn-danger remove-input">',
+        '<i class="fas fa-times"></i>',
+        '</button>',
+        '<div class="evidence-field-group">',
+        '<label>Document Source</label>',
+        '<div class="evidence-source-wrapper">',
+        '<select class="evidence-input source-select">',
+        sourceOptions,
+        '</select>',
+        '<a href="#" class="btn btn-sm btn-info view-source-btn" target="_blank" style="display: none;">',
+        '<i class="fas fa-eye"></i> View',
+        '</a>',
+        '</div>',
+        '<div class="create-source-link">',
+        '<a href="/admin/cases/documentsource/add/" target="_blank">+ Create new document source</a>',
+        '</div>',
+        '</div>',
+        '<div class="evidence-field-group">',
+        '<label>Description</label>',
+        '<textarea class="evidence-input"></textarea>',
+        '</div>'
+    ].join('');
+
+    window.initMultiWidget(
+        '{{ widget_id }}_container',
+        '{{ widget_id }}',
+        'evidence',
+        {
+            rowTemplate: rowTemplate,
+            sourceUrlMap: sourceUrlMap
+        }
+    );
+})();
+</script>

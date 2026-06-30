@@ -1,0 +1,35 @@
+# Integration tests against an ephemeral monolith stack.
+# STUB for later wiring (the user will enable GitHub CI). Documents intent:
+# stand up the monolith compose stack, wait for health, run the suite.
+name: integration-tests
+
+on:
+  workflow_dispatch: {}
+  # pull_request:  # enable once repos are pushed and the stack builds in CI
+  # push:
+  #   branches: [v2]
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The monolith compose file lives at the repo root; in CI the image would be
+      # built here (or pulled from a registry) and brought up on the one host.
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install -e .
+
+      # - name: Bring up platform (monolith)
+      #   run: docker compose -f ../docker-compose.yml up -d --wait
+
+      - name: Run integration tests
+        env:
+          SKIP_IF_STACK_DOWN: "1"  # until the stack is wired in CI
+        run: pytest -v

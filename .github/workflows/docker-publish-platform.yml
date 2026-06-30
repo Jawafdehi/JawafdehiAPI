@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Hippocratic-3.0
 
-# v2 monolith image (api.jawafdehi.org). Builds docker.io/jawafdehi/jawafdehi-platform from the
-# v2 branch; Keel watches the mutable :v2 tag. The build job is GUARDED on the presence of
-# monolith/config/wsgi.py — the gunicorn target of the wholesale-ported monolith — so this stays
-# a no-op until the port lands at the repo root, then auto-builds the real monolith image (no
-# misleading "old api" image is published in the meantime). Mirrors docker-publish.yml.
+# Builds the v2 monolith image docker.io/jawafdehi/jawafdehi-platform from this branch (the repo IS
+# the monolith after the wholesale port). Keel watches the mutable :v2 tag and rolls it onto the
+# jawafdehi-platform Deployment (api.jawafdehi.org). Mirrors the legacy docker-publish.yml's pinned
+# actions + DockerHub secrets.
 name: Docker Publish (platform monolith)
 on:
   push:
@@ -19,8 +18,6 @@ env:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    # Skip until the wholesale monolith port exists at the repo root.
-    if: hashFiles('monolith/config/wsgi.py') != ''
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
       - uses: docker/setup-qemu-action@eaefd20f597840d8870070b5b0e1bd33d2fff867
