@@ -12,6 +12,11 @@ import re
 
 GOLD_DESC_CHARS = 12000
 GOLD_TIMELINE = 20
+# Event count at which the timeline COUNT component reaches full credit: a case
+# with this many material, dated, ordered events is "complete enough" and must
+# not be docked for not reaching the gold length — concise timelines are the
+# editorial standard, not 20-event ones.
+ENOUGH_TIMELINE = 6
 GOLD_SOURCES = 7
 SUBSTANTIAL_DESC_CHARS = 600
 
@@ -395,8 +400,10 @@ def timeline(case):
     # is deliberately NO per-event character-length reward/penalty: a concise
     # "date + brief event" entry is the editorial standard, so the old <60-char
     # "thin" check punished correct timelines and rewarded verbose
-    # mini-paragraphs. Its 25 points are redistributed to the real signals.
-    pts += min(n / GOLD_TIMELINE, 1.0) * 45
+    # mini-paragraphs. The count reaches full credit at ENOUGH_TIMELINE events
+    # (not the gold length), so a complete-but-concise timeline scores ~100
+    # instead of being docked for not having ~20 events.
+    pts += min(n / ENOUGH_TIMELINE, 1.0) * 45
     pts += (with_ad / n) * 20
     pts += (with_bs / n) * 20
     pts += 15 if ordered else 0
