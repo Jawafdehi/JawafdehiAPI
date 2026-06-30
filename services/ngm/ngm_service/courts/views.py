@@ -12,8 +12,11 @@ Ports the FastAPI NGM API plane to DRF:
   timeout) is enforced in the view.
 - Ingestion plane (``POST /ingestion/*``): OIDC + NGM-role gated write stubs
   (501), mirroring the FastAPI ingestion routes.
-- Search plane (``GET /search``): 501 stub until the shared OpenSearch substrate
-  is wired; ``q`` is required (422 when missing).
+
+Search is NOT served here: the former NGM ``GET /search`` 501 stub was removed in
+the unified-search cutover. Platform search lives at ``GET /api/search/`` (the
+``search`` app), which indexes NGM materials + court cases alongside entities and
+cases.
 """
 
 from __future__ import annotations

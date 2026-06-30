@@ -1,4 +1,4 @@
-"""NGM API routes (read plane + gated query + ingestion + search).
+"""NGM API routes (read plane + gated query + ingestion).
 
 The case sub-resources are keyed on the composite (court, case_number), so those
 paths are declared explicitly *before* the router's ``cases`` registration — the
@@ -11,10 +11,10 @@ from rest_framework.routers import DefaultRouter
 from . import views
 
 # URL namespace. Mounted alongside NES + Jawafdehi in one project
-# (monolith.config.urls); route names / DRF basenames such as ``case``,
-# ``entity`` and ``search`` collide with those trees. Namespacing keeps
-# reverse() / drf-spectacular operationIds unambiguous (``ngm-courts:case-
-# detail`` etc.) while leaving every URL PATH unchanged.
+# (monolith.config.urls); route names / DRF basenames such as ``case`` and
+# ``entity`` collide with those trees. Namespacing keeps reverse() /
+# drf-spectacular operationIds unambiguous (``ngm-courts:case-detail`` etc.)
+# while leaving every URL PATH unchanged.
 app_name = "ngm-courts"
 
 router = DefaultRouter()
