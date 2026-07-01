@@ -11,15 +11,32 @@ This doc is **grounded in the code on `v2` as it stands today** (audited 2026-06
 ## 1. Scope & shape (decided)
 
 - **Home:** the monolith (`JawafdehiAPI@v2`, layout `services/{nes,ngm,jawafdehi}` + `monolith/` + `shared/`). This *is* the productionized branch.
-- **ONE namespace, THREE resource kinds. No `/nes` vs `/ngm` split.** The internal
-  code split into `services/nes` and `services/ngm` stays (DB router, in-process
-  calls), but the *public API* is one surface keyed by schema.org `@id` IRIs:
+- **ONE flat code surface — no `services/{nes,ngm,jawafdehi}` split (decided).** The
+  three-service directory tree is collapsed into flat Django apps under one project
+  (e.g. `app/{entities,courts,materials,cases}/`). This is already barely a boundary:
+  `cases/api_views.py:43-45` plain-imports `StoredEntity`, `Court`, `CourtCase`,
+  `Material` across all three "services" — there is no REST wall, it's one Django
+  project. The collapse is a **mechanical dir move + import rewrite**, no behavior change.
+  - **KEEP the 3 Postgres DBs + the router (decided).** The router keys on Django
+    `app_label`, NOT directory path (`monolith/config/db_router.py:48 _db_for_label`).
+    So flattening dirs is safe *as long as each app keeps its current label*:
+    `entities`→`nes` DB, `courts`/`materials`→`ngm` DB, `cases`→`default`. No data
+    migration, router untouched, `allow_relation` still forbids cross-DB FKs.
+  - Out of scope (explicitly deferred): merging the 3 DBs into one. That's a
+    ~182k-row cross-DB data migration with FK-boundary implications — a separate
+    project, not this one.
+- **ONE namespace, resource kinds keyed by `@id` IRI. No `/nes` vs `/ngm` prefix.**
+  The public API is one surface:
 
   | Resource | Route | What it is |
   |---|---|---|
   | **Entities** | `/api/entities` | Every *thing*: people, organizations, **courts** (`Courthouse`), **firms** (`Organization`), government bodies, locations. schema.org JSON-LD by `@id`. |
   | **Materials** | `/api/materials` | Every *document*: court orders, charge sheets, reports, manuscripts, legal corpus. JSON-LD `CreativeWork` by `@id`, file-bearing (`associatedMedia`). |
-  | **Cases** | `/api/cases` | The one irreducibly-relational **record**: `CourtCase` (composite key) + `hearings`/`parties` sub-resources. System of record; also projects to a Material. |
+  | **Court cases** | `/api/courtcases` | The irreducibly-relational NGM **record**: `CourtCase` (composite key) + `hearings`/`parties` sub-resources. System of record; also projects to a Material. |
+
+  Plus the pre-existing **Jawafdehi corruption cases** at `/api/cases` — a *different*
+  resource (curated corruption cases, `CaseViewSet`), left where it is. See the
+  naming note below.
 
 - **Courts and firms are ENTITIES, not their own endpoints.** Verified in code:
   NES validation already accepts `Courthouse` + `GovernmentOrganization` as
@@ -33,18 +50,28 @@ This doc is **grounded in the code on `v2` as it stands today** (audited 2026-06
     NES has **no relationship model** in the monolith yet, so blacklist status rides
     as an entity attribute (or a small `cases`-adjacent record) — NOT a new endpoint.
     See D5.
-- **Why `/cases` survives as relational** (not folded into Materials): filtered
-  queries over promoted/indexed columns (`?court=&status=&date_from=&type=`), cheap
-  incremental 1:N hearing upserts, and the gated `SELECT` `/query` plane all need
-  real tables. A case still *projects* to a Material (`court_case_to_jsonld` →
-  `GET /api/materials/court/<case>`); the relational row is the system of record,
+- **Naming: `cases` ≠ `courtcases` — keep them distinct.** `/api/cases` is ALREADY
+  taken by **Jawafdehi corruption cases** (`cases.CaseViewSet`, mounted at `/api/`,
+  `@id = /case/<slug>`). NGM **court cases** are a different resource
+  (`@id = /courtcase/<court>/<case_number>`). The public REST paths mirror the
+  canonical IRIs (verified in `shared/jawafdehi_shared/entities/ids.py:6-7`):
+  - `/api/cases` → Jawafdehi corruption cases (unchanged)
+  - `/api/courtcases` → NGM court cases (renamed from `/api/ngm/cases`)
+  Do **not** collapse court cases onto `/api/cases`; that was an error in the first
+  draft (it would merge two unrelated resources).
+- **Why `/api/courtcases` survives as relational** (not folded into Materials):
+  filtered queries over promoted/indexed columns (`?court=&status=&date_from=&type=`),
+  cheap incremental 1:N hearing upserts, and the gated `SELECT` `/query` plane all
+  need real tables. A court case still *projects* to a Material (`court_case_to_jsonld`
+  → `GET /api/materials/court/<case>`); the relational row is the system of record,
   the Material is the publication view.
 - **Upload mechanism:** **multipart through the API** (decided). Client POSTs the
   file to `/api/materials/.../file`; the monolith streams it to R2 and upserts the
   Material JSON-LD in one call. Mirrors the proven case-evidence upload path.
 - **Auth:** one OIDC/Zitadel gate. Writes to `/api/entities` need `nes_contributor`;
-  writes to `/api/materials` + `/api/cases` need the NGM role. (Role *names* may
-  converge later; the gate stays per-resource.)
+  writes to `/api/materials` + `/api/courtcases` need the NGM role; `/api/cases`
+  (corruption cases) keeps its existing caseworker gate. (Role *names* may converge
+  later; the gate stays per-resource.)
 
 ---
 
@@ -88,10 +115,11 @@ This doc is **grounded in the code on `v2` as it stands today** (audited 2026-06
 |---|---|---|
 | `/api/nes/entities…` | `/api/entities…` | drop `/nes` prefix |
 | `/api/ngm/materials…` | `/api/materials…` | drop `/ngm` prefix |
-| `/api/ngm/cases…` (+ hearings/parties) | `/api/cases…` | drop `/ngm` prefix; stays relational |
+| `/api/ngm/cases…` (+ hearings/parties) | `/api/courtcases…` | renamed (NOT `/api/cases` — that's Jawafdehi corruption cases); stays relational |
+| `/api/cases…` (Jawafdehi corruption cases) | `/api/cases…` | unchanged — pre-existing, different resource |
 | `/api/ngm/courts/` | **removed** | a court is an `entities` row (`@type Courthouse`); `Court` table → FK lookup behind `nes_id` |
 | `/api/ngm/firms/` | **removed** | a firm is an `entities` row (`@type Organization`); blacklist status per D5 |
-| `/api/ngm/entities/?nes_id=` (case-party resolver) | `/api/cases/{…}/parties` + entity resolve | party rows resolve to `/api/entities` via `nes_id` |
+| `/api/ngm/entities/?nes_id=` (case-party resolver) | `/api/courtcases/{…}/parties` + entity resolve | party rows resolve to `/api/entities` via `nes_id` |
 | `/api/ngm/query/` | `/api/query/` (or keep `/ngm/query`) | SQL plane over court tables; internal-only, prefix optional |
 | `/api/ngm/ingestion/*` | `/api/ingestion/*` | drop prefix |
 
