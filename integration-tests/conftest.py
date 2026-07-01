@@ -1,19 +1,22 @@
-"""Shared fixtures: monolith service clients, OIDC token, health gating.
+"""Shared fixtures: monolith clients, OIDC token, health gating.
 
-The platform is now a SINGLE monolith image — all former services run in one
-process behind ONE host/port (the ``platform`` service, default
-``http://localhost:48000``). The three former services are mounted under
-distinct path prefixes on that one host:
+The platform is a SINGLE image — everything runs in one process behind ONE
+host/port (default ``http://localhost:48000``). After the 2026-07-01 HARD CUT
+there are no per-service ``/api/nes`` or ``/api/ngm`` prefixes: every resource
+lives under ONE unified ``/api/`` surface, keyed by resource kind:
 
-  * Jawafdehi      -> ``/api/...``        (cases/, sources/, search/)
-  * NES (entities) -> ``/api/nes/...``    (entities, entity_prefixes, health)
-  * NGM (gov data) -> ``/api/ngm/...``    (courts/, cases/, query/, ingestion/)
-  * Unified search -> ``/api/search/``    (replaces the old per-service search)
-  * Discovery      -> ``/sitemap.xml``, ``/.well-known/resourcesync``, ``/robots.txt``
+  * Corruption cases -> ``/api/cases/``, ``/api/sources/``   (Jawafdehi)
+  * Entities         -> ``/api/entities``, ``/api/entity_prefixes``, ``/api/health``
+  * Court cases      -> ``/api/courtcases/`` (+ hearings/parties), ``/api/courtcase-entities/``
+  * Materials        -> ``/api/materials/``
+  * Gated SQL        -> ``/api/query/`` ; batch write -> ``/api/ingestion/*``
+  * Unified search   -> ``/api/search/``
+  * Discovery        -> ``/sitemap.xml``, ``/.well-known/resourcesync``, ``/robots.txt``
 
-The ``clients`` fixture therefore yields one httpx client PER former service,
-but they all share the same base host and only differ by their mounted path
-prefix (so test bodies still read ``clients["nes"].get("/api/nes/health")``).
+The ``clients`` fixture yields one httpx client per legacy key, but they are now
+just cosmetic HANDLES onto the SAME unified host — the key no longer selects a
+prefix. They are kept so existing test bodies keep working; new tests can use
+any handle (e.g. ``clients["platform"]``) since they are identical.
 
 Auth is OIDC/Zitadel client-credentials only — DRF tokens are not used anywhere
 on the platform (a legacy ``Token`` header is ignored, not honored).
@@ -64,7 +67,7 @@ class _ThrottleRetryTransport(httpx.HTTPTransport):
             ra = resp.headers.get("Retry-After", "?")
             resp.close()
             pytest.skip(
-                f"rate-throttled by the monolith (429, Retry-After={ra}s) — "
+                f"rate-throttled by the platform (429, Retry-After={ra}s) — "
                 "shared anon quota exhausted; not a contract failure."
             )
         return resp
@@ -90,18 +93,19 @@ def skip_if_throttled(resp) -> None:
     """
     if resp.status_code == 429:
         ra = resp.headers.get("Retry-After", "?")
-        pytest.skip(f"rate-throttled by the monolith (429, Retry-After={ra}s)")
+        pytest.skip(f"rate-throttled by the platform (429, Retry-After={ra}s)")
 
 
 SKIP_IF_DOWN = _env("SKIP_IF_STACK_DOWN", "0") == "1"
 
-# ONE host for the whole monolith. ``PLATFORM_BASE_URL`` is the single source of
+# ONE host for the whole platform. ``PLATFORM_BASE_URL`` is the single source of
 # truth; the per-service ``*_API_BASE_URL`` vars are kept for back-compat but
 # default to the SAME host (they are no longer separate ports).
 PLATFORM_BASE_URL = _env("PLATFORM_BASE_URL", "http://localhost:48000")
 
-# Every former service shares the one monolith host; they differ only by the
-# path prefix their routes are mounted under (see config/urls.py).
+# Every legacy key resolves to the one unified platform host; after the hard cut
+# they no longer differ by path prefix — the routes are all under /api/ (see
+# config/urls.py). The keys are kept only as cosmetic handles for existing tests.
 SERVICES = {
     "platform": _env("PLATFORM_BASE_URL", PLATFORM_BASE_URL),
     "nes": _env("NES_API_BASE_URL", PLATFORM_BASE_URL),
@@ -141,7 +145,7 @@ def oidc_token() -> str:
 
 @pytest.fixture(scope="session")
 def clients(oidc_token):
-    """One httpx client per former service, all pointing at the one monolith host.
+    """One httpx client per former service, all pointing at the one platform host.
 
     The clients are distinguished only by convention (which path prefix the
     tests pass), so they all share the same base URL. follow_redirects=False so
@@ -156,8 +160,8 @@ def clients(oidc_token):
 
 
 def _is_up(base_url: str) -> bool:
-    """The monolith is up iff its Jawafdehi API root answers (<500)."""
-    for path in ("/api/", "/api/nes/health", "/"):
+    """The platform is up iff its API root answers (<500)."""
+    for path in ("/api/", "/api/health", "/"):
         try:
             if httpx.get(f"{base_url}{path}", timeout=3).status_code < 500:
                 return True
@@ -168,13 +172,13 @@ def _is_up(base_url: str) -> bool:
 
 @pytest.fixture(scope="session")
 def _stack_status() -> list[str]:
-    """Empty if the monolith is reachable; otherwise names it as down."""
+    """Empty if the platform is reachable; otherwise names it as down."""
     return [] if _is_up(PLATFORM_BASE_URL) else ["platform"]
 
 
 @pytest.fixture(autouse=True)
 def require_stack(request, _stack_status):
-    """Gate *live* tests on the monolith being reachable.
+    """Gate *live* tests on the platform being reachable.
 
     Only tests marked ``@pytest.mark.live`` need a running stack. Pure-contract
     tests (e.g. the entity-id IRI shape checks against fixtures) run regardless,

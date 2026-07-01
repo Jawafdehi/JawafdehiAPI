@@ -1,8 +1,9 @@
 """Cross-service invariants — the seams no single service can test alone.
 
-These encode the platform contracts for the unified monolith: one host, prefixed
-mounts (``/api/nes/``, ``/api/ngm/``, ``/api/``), the unified search endpoint, the
-public discovery surfaces, and OpenSearch as a hard search dependency.
+These encode the platform contracts for the unified monolith: one host, ONE
+unified ``/api/`` surface (no ``/api/nes`` or ``/api/ngm`` prefixes after the
+2026-07-01 hard cut), the unified search endpoint, the public discovery
+surfaces, and OpenSearch as a hard search dependency.
 
 The entity-id *shape* contract has its own dedicated module
 (``test_entity_id_contract.py``); this file holds the broader multi-service and
@@ -20,18 +21,18 @@ pytestmark = [pytest.mark.cross_service, pytest.mark.slow]
 @pytest.mark.xfail(
     reason="PENDING-DATA: NGM court tables empty, so no party nes_id to resolve "
     "yet (nes_id write-back lands with court data). Contract is correct against "
-    "the monolith read plane (/api/ngm/cases/ -> DRF results); flips green when data lands.",
+    "the platform read plane (/api/courtcases/ -> DRF results); flips green when data lands.",
     strict=False,
 )
 def test_ngm_court_party_resolves_to_nes_id(clients):
     """An NGM court party that's been resolved carries a valid NES entity @id IRI."""
-    r = clients["ngm"].get("/api/ngm/cases/", params={"limit": 1})
+    r = clients["ngm"].get("/api/courtcases/", params={"limit": 1})
     r.raise_for_status()
     cases = r.json().get("results", [])
     assert cases, "no court cases available"
     case = cases[0]
     parties = clients["ngm"].get(
-        f"/api/ngm/cases/{case['court_identifier']}/{case['case_number']}/entities/"
+        f"/api/courtcases/{case['court_identifier']}/{case['case_number']}/entities/"
     ).json()
     for p in parties.get("results", []):
         if p.get("nes_id"):
@@ -43,15 +44,15 @@ def test_ngm_court_party_resolves_to_nes_id(clients):
 def test_services_reject_unauthenticated_writes(clients):
     """Write endpoints must require an OIDC bearer; no DRF-token path exists.
 
-    All three prefixes enforce auth on writes (the OIDC-only contract is
-    consistent across the platform):
-      * NGM ingestion (``POST /api/ngm/ingestion/cases/``) -> 401,
-      * NES entity write (``POST /api/nes/entities``)       -> 401 (no-slash path),
-      * Jawafdehi case write (``POST /api/cases/``)         -> 401.
+    Every resource on the unified surface enforces auth on writes (the OIDC-only
+    contract is consistent across the platform):
+      * ingestion    (``POST /api/ingestion/cases/``) -> 401,
+      * entity write (``POST /api/entities``)         -> 401 (no-slash path),
+      * corruption case write (``POST /api/cases/``)  -> 401.
     """
     checks = [
-        (clients["ngm"].base_url, "/api/ngm/ingestion/cases/", {"items": []}),
-        (clients["nes"].base_url, "/api/nes/entities", {}),
+        (clients["ngm"].base_url, "/api/ingestion/cases/", {"items": []}),
+        (clients["nes"].base_url, "/api/entities", {}),
         (clients["jawafdehi"].base_url, "/api/cases/", {}),
     ]
     for base, path, payload in checks:

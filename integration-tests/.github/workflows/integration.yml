@@ -1,6 +1,6 @@
-# Integration tests against an ephemeral monolith stack.
+# Integration tests against an ephemeral platform stack.
 # STUB for later wiring (the user will enable GitHub CI). Documents intent:
-# stand up the monolith compose stack, wait for health, run the suite.
+# stand up the platform compose stack, wait for health, run the suite.
 name: integration-tests
 
 on:
@@ -26,7 +26,7 @@ jobs:
       - name: Install deps
         run: pip install -e .
 
-      # - name: Bring up platform (monolith)
+      # - name: Bring up platform 
       #   run: docker compose -f ../docker-compose.yml up -d --wait
 
       - name: Run integration tests

@@ -10,15 +10,6 @@ resolution-markers = [
     "python_full_version < '3.13' and sys_platform != 'win32'",
 ]
 
-[manifest]
-members = [
-    "jawafdehi-monolith",
-    "jawafdehi-service",
-    "jawafdehi-shared",
-    "nes-service",
-    "ngm-service",
-]
-
 [[package]]
 name = "annotated-doc"
 version = "0.0.4"
@@ -816,52 +807,9 @@ wheels = [
 ]
 
 [[package]]
-name = "jawafdehi-monolith"
+name = "jawafdehi"
 version = "0.1.0"
 source = { editable = "." }
-dependencies = [
-    { name = "gunicorn" },
-    { name = "jawafdehi-service" },
-    { name = "jawafdehi-shared", extra = ["search"] },
-    { name = "mozilla-django-oidc" },
-    { name = "nepali" },
-    { name = "nes-service" },
-    { name = "ngm-service" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "hypothesis" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-django" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "gunicorn", specifier = ">=23.0" },
-    { name = "jawafdehi-service", editable = "services/jawafdehi" },
-    { name = "jawafdehi-shared", extras = ["search"], editable = "shared" },
-    { name = "mozilla-django-oidc", specifier = ">=5.0.2" },
-    { name = "nepali", specifier = ">=1.2.0" },
-    { name = "nes-service", editable = "services/nes" },
-    { name = "ngm-service", editable = "services/ngm" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "hypothesis", specifier = ">=6.0" },
-    { name = "pytest", specifier = ">=8.0" },
-    { name = "pytest-asyncio", specifier = ">=0.24" },
-    { name = "pytest-django", specifier = ">=4.8" },
-    { name = "ruff", specifier = ">=0.6" },
-]
-
-[[package]]
-name = "jawafdehi-service"
-version = "0.1.0"
-source = { editable = "services/jawafdehi" }
 dependencies = [
     { name = "anthropic" },
     { name = "boto3" },
@@ -875,14 +823,19 @@ dependencies = [
     { name = "django-tinymce" },
     { name = "djangorestframework" },
     { name = "drf-spectacular" },
+    { name = "duckdb" },
     { name = "google-genai" },
     { name = "gunicorn" },
-    { name = "jawafdehi-shared" },
+    { name = "indic-transliteration" },
     { name = "jsonpatch" },
+    { name = "mozilla-django-oidc" },
     { name = "nepali" },
     { name = "openai" },
+    { name = "opensearch-py" },
+    { name = "psycopg", extra = ["binary"] },
     { name = "psycopg2-binary" },
     { name = "pydantic" },
+    { name = "pyjwt", extra = ["crypto"] },
     { name = "python-dotenv" },
     { name = "python-multipart" },
     { name = "rules" },
@@ -895,6 +848,15 @@ dependencies = [
 bigo-enrichment = [
     { name = "likhit" },
     { name = "markitdown", extra = ["docx", "pdf", "pptx", "xlsx"] },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "hypothesis" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-django" },
+    { name = "ruff" },
 ]
 
 [package.metadata]
@@ -911,16 +873,21 @@ requires-dist = [
     { name = "django-tinymce", specifier = ">=5.0" },
     { name = "djangorestframework", specifier = ">=3.16" },
     { name = "drf-spectacular", specifier = ">=0.29" },
+    { name = "duckdb", specifier = ">=1.4.0" },
     { name = "google-genai", specifier = ">=1.0" },
     { name = "gunicorn", specifier = ">=23.0" },
-    { name = "jawafdehi-shared", editable = "shared" },
+    { name = "indic-transliteration", specifier = ">=2.3.82" },
     { name = "jsonpatch", specifier = ">=1.33" },
     { name = "likhit", marker = "extra == 'bigo-enrichment'", git = "https://github.com/Jawafdehi/likhit.git?rev=main" },
     { name = "markitdown", extras = ["docx", "pdf", "pptx", "xlsx"], marker = "extra == 'bigo-enrichment'", specifier = ">=0.1.5" },
-    { name = "nepali", specifier = ">=1.2" },
+    { name = "mozilla-django-oidc", specifier = ">=5.0.2" },
+    { name = "nepali", specifier = ">=1.2.0" },
     { name = "openai", specifier = ">=2.30,<3" },
+    { name = "opensearch-py", specifier = ">=2.4" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "psycopg2-binary", specifier = ">=2.9.11" },
     { name = "pydantic", specifier = ">=2.12" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10" },
     { name = "python-dotenv", specifier = ">=1.2" },
     { name = "python-multipart", specifier = ">=0.0.18" },
     { name = "rules", specifier = ">=3.5" },
@@ -930,31 +897,14 @@ requires-dist = [
 ]
 provides-extras = ["bigo-enrichment"]
 
-[[package]]
-name = "jawafdehi-shared"
-version = "0.1.0"
-source = { editable = "shared" }
-dependencies = [
-    { name = "django" },
-    { name = "djangorestframework" },
-    { name = "pyjwt", extra = ["crypto"] },
+[package.metadata.requires-dev]
+dev = [
+    { name = "hypothesis", specifier = ">=6.0" },
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "pytest-django", specifier = ">=4.8" },
+    { name = "ruff", specifier = ">=0.6" },
 ]
-
-[package.optional-dependencies]
-search = [
-    { name = "indic-transliteration" },
-    { name = "opensearch-py" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "django", specifier = ">=5.0" },
-    { name = "djangorestframework", specifier = ">=3.15" },
-    { name = "indic-transliteration", marker = "extra == 'search'", specifier = ">=2.3.82" },
-    { name = "opensearch-py", marker = "extra == 'search'", specifier = ">=2.4" },
-    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10" },
-]
-provides-extras = ["search"]
 
 [[package]]
 name = "jiter"
@@ -1332,72 +1282,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/42/6e/26c0f7b544c978ec7
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f1/e5/4aea4554803da821bce158b14ca66f7622f11daa281e9e720e4b97861b3f/nepali-1.2.0-py3-none-any.whl", hash = "sha256:1f9244b2fcb51e6b9e710cc1c483024f8600954d545a9a12a2accf53213911b1", size = 69502, upload-time = "2026-02-02T15:06:32.689Z" },
 ]
-
-[[package]]
-name = "nes-service"
-version = "0.1.0"
-source = { editable = "services/nes" }
-dependencies = [
-    { name = "dj-database-url" },
-    { name = "django" },
-    { name = "djangorestframework" },
-    { name = "gunicorn" },
-    { name = "jawafdehi-shared" },
-    { name = "jsonpatch" },
-    { name = "psycopg", extra = ["binary"] },
-]
-
-[package.optional-dependencies]
-search = [
-    { name = "jawafdehi-shared", extra = ["search"] },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "dj-database-url", specifier = ">=2.2" },
-    { name = "django", specifier = ">=5.0" },
-    { name = "djangorestframework", specifier = ">=3.15" },
-    { name = "gunicorn", specifier = ">=23.0" },
-    { name = "jawafdehi-shared", editable = "shared" },
-    { name = "jawafdehi-shared", extras = ["search"], marker = "extra == 'search'", editable = "shared" },
-    { name = "jsonpatch", specifier = ">=1.33" },
-    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
-]
-provides-extras = ["search"]
-
-[[package]]
-name = "ngm-service"
-version = "0.1.0"
-source = { editable = "services/ngm" }
-dependencies = [
-    { name = "boto3" },
-    { name = "dj-database-url" },
-    { name = "django" },
-    { name = "djangorestframework" },
-    { name = "duckdb" },
-    { name = "gunicorn" },
-    { name = "jawafdehi-shared" },
-    { name = "psycopg", extra = ["binary"] },
-]
-
-[package.optional-dependencies]
-search = [
-    { name = "jawafdehi-shared", extra = ["search"] },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "boto3", specifier = ">=1.34" },
-    { name = "dj-database-url", specifier = ">=2.2" },
-    { name = "django", specifier = ">=5.0" },
-    { name = "djangorestframework", specifier = ">=3.15" },
-    { name = "duckdb", specifier = ">=1.4.0" },
-    { name = "gunicorn", specifier = ">=23.0" },
-    { name = "jawafdehi-shared", editable = "shared" },
-    { name = "jawafdehi-shared", extras = ["search"], marker = "extra == 'search'", editable = "shared" },
-    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
-]
-provides-extras = ["search"]
 
 [[package]]
 name = "npttf2utf"
