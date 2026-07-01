@@ -295,13 +295,13 @@ class MaterialEndpointTests(_DbAPITestCase):
         )
 
     def test_get_stored_material_by_path(self):
-        resp = self.client.get("/api/ngm/materials/nkp/2080-act-1")
+        resp = self.client.get("/api/materials/nkp/2080-act-1")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["@type"], "Legislation")
 
     def test_get_stored_material_by_iri_query(self):
         resp = self.client.get(
-            "/api/ngm/materials/", {"iri": "https://jawafdehi.org/material/nkp/2080-act-1"}
+            "/api/materials/", {"iri": "https://jawafdehi.org/material/nkp/2080-act-1"}
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["@id"], self.material.iri)
@@ -309,22 +309,22 @@ class MaterialEndpointTests(_DbAPITestCase):
     def test_get_derived_court_case_material(self):
         # No stored row; materialized on the fly from the court tables.
         iri = court_case_material_iri("kathmandudc", "082-OA-0503")
-        resp = self.client.get("/api/ngm/materials/", {"iri": iri})
+        resp = self.client.get("/api/materials/", {"iri": iri})
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["additionalType"], "jawafdehi:CourtCase")
         # LOCKED #1: one order referenced via hasPart, not embedded media.
         self.assertEqual(len(resp.data["hasPart"]), 1)
 
     def test_missing_material_is_404(self):
-        resp = self.client.get("/api/ngm/materials/nkp/does-not-exist")
+        resp = self.client.get("/api/materials/nkp/does-not-exist")
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_iri_query_required(self):
-        resp = self.client.get("/api/ngm/materials/")
+        resp = self.client.get("/api/materials/")
         self.assertEqual(resp.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
 
     def test_case_detail_exposes_material_id(self):
-        resp = self.client.get("/api/ngm/cases/kathmandudc/082-OA-0503")
+        resp = self.client.get("/api/courtcases/kathmandudc/082-OA-0503")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertTrue(is_valid_material_iri(resp.data["material_id"]))
 

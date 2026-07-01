@@ -84,18 +84,19 @@ class ReadPlaneTests(_DbAPITestCase):
         )
 
     def test_health(self):
-        resp = self.client.get("/api/ngm/health/")
+        # NGM's per-plane health was dropped in the unified-surface cutover; the
+        # single canonical /api/health (entities.urls) serves the whole platform.
+        resp = self.client.get("/api/health")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(resp.data["service"], "ngm-api")
 
     def test_list_courts_public(self):
-        resp = self.client.get("/api/ngm/courts/")
+        resp = self.client.get("/api/courts/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data), 1)
         self.assertEqual(resp.data[0]["identifier"], "kathmandudc")
 
     def test_list_cases_paginated_shape(self):
-        resp = self.client.get("/api/ngm/cases/")
+        resp = self.client.get("/api/courtcases/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         # Platform cursor pagination -> {results, next}
         self.assertIn("results", resp.data)
@@ -103,7 +104,7 @@ class ReadPlaneTests(_DbAPITestCase):
         self.assertEqual(len(resp.data["results"]), 1)
 
     def test_case_detail_composite_key(self):
-        resp = self.client.get("/api/ngm/cases/kathmandudc/082-OA-0503")
+        resp = self.client.get("/api/courtcases/kathmandudc/082-OA-0503")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["case_number"], "082-OA-0503")
         self.assertEqual(resp.data["court_identifier"], "kathmandudc")
@@ -116,30 +117,30 @@ class ReadPlaneTests(_DbAPITestCase):
 
     def test_case_detail_normalizes_loose_case_number(self):
         # lowercase + Devanagari digits should normalize to the stored form.
-        resp = self.client.get("/api/ngm/cases/kathmandudc/82-oa-503")
+        resp = self.client.get("/api/courtcases/kathmandudc/82-oa-503")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["case_number"], "082-OA-0503")
 
     def test_case_sub_resources(self):
-        h = self.client.get("/api/ngm/cases/kathmandudc/082-OA-0503/hearings")
+        h = self.client.get("/api/courtcases/kathmandudc/082-OA-0503/hearings")
         self.assertEqual(h.status_code, status.HTTP_200_OK)
         self.assertEqual(len(h.data["results"]), 1)
 
-        e = self.client.get("/api/ngm/cases/kathmandudc/082-OA-0503/entities")
+        e = self.client.get("/api/courtcases/kathmandudc/082-OA-0503/entities")
         self.assertEqual(e.status_code, status.HTTP_200_OK)
         self.assertEqual(e.data["results"][0]["nes_id"], "https://jawafdehi.org/entity/person/ram-bahadur")
 
-        d = self.client.get("/api/ngm/cases/kathmandudc/082-OA-0503/documents")
+        d = self.client.get("/api/courtcases/kathmandudc/082-OA-0503/documents")
         self.assertEqual(d.status_code, status.HTTP_200_OK)
         self.assertEqual(d.data["results"][0]["document_id"], "ngm:doc:1")
 
     def test_firms_public(self):
-        resp = self.client.get("/api/ngm/firms/")
+        resp = self.client.get("/api/firms/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["results"][0]["firm_name"], "Acme Builders")
 
     def test_entities_search(self):
-        resp = self.client.get("/api/ngm/entities/", {"nes_id": "https://jawafdehi.org/entity/person/ram-bahadur"})
+        resp = self.client.get("/api/courtcase-entities/", {"nes_id": "https://jawafdehi.org/entity/person/ram-bahadur"})
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["results"]), 1)
 
@@ -147,12 +148,13 @@ class ReadPlaneTests(_DbAPITestCase):
 class SearchRetiredTests(_DbAPITestCase):
     """The NGM 501 search stub was retired in the unified-search cutover.
 
-    Search now lives at the platform-wide ``GET /api/search/`` (the ``search``
-    app over OpenSearch); the old ``/api/ngm/search/`` route is gone (404).
+    NGM has no search route of its own; platform search lives at the ``search``
+    app (``GET /api/search/``). The old NGM-scoped ``courtcases/search`` never
+    existed post-cutover.
     """
 
-    def test_ngm_search_route_removed(self):
-        resp = self.client.get("/api/ngm/search/", {"q": "bribery"})
+    def test_ngm_has_no_own_search_route(self):
+        resp = self.client.get("/api/courtcases/search/", {"q": "bribery"})
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
 
@@ -168,38 +170,38 @@ class QueryGateTests(_DbAPITestCase):
         cls.nobody = User.objects.create(username="oidc-sub-norole")
 
     def test_unauth_is_401(self):
-        resp = self.client.post("/api/ngm/query/", {"query": "SELECT 1"}, format="json")
+        resp = self.client.post("/api/query/", {"query": "SELECT 1"}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_bogus_token_is_401(self):
         # A Bearer attempt with an unverifiable token -> authenticator 401.
         self.client.credentials(HTTP_AUTHORIZATION="Bearer not-a-real-jwt")
-        resp = self.client.post("/api/ngm/query/", {"query": "SELECT 1"}, format="json")
+        resp = self.client.post("/api/query/", {"query": "SELECT 1"}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_authed_without_ngm_role_is_403(self):
         self.client.force_authenticate(user=self.nobody)
-        resp = self.client.post("/api/ngm/query/", {"query": "SELECT 1"}, format="json")
+        resp = self.client.post("/api/query/", {"query": "SELECT 1"}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_non_select_is_400(self):
         self.client.force_authenticate(user=self.user)
         resp = self.client.post(
-            "/api/ngm/query/", {"query": "DELETE FROM court_cases"}, format="json"
+            "/api/query/", {"query": "DELETE FROM court_cases"}, format="json"
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_disallowed_table_is_400(self):
         self.client.force_authenticate(user=self.user)
         resp = self.client.post(
-            "/api/ngm/query/", {"query": "SELECT * FROM scraped_dates"}, format="json"
+            "/api/query/", {"query": "SELECT * FROM scraped_dates"}, format="json"
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_valid_select_runs(self):
         self.client.force_authenticate(user=self.user)
         resp = self.client.post(
-            "/api/ngm/query/", {"query": "SELECT identifier FROM courts"}, format="json"
+            "/api/query/", {"query": "SELECT identifier FROM courts"}, format="json"
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertIn("rows", resp.data)
@@ -212,7 +214,7 @@ class QueryGateTests(_DbAPITestCase):
             user=self.nobody, token={"scope": "openid ngm.query"}
         )
         resp = self.client.post(
-            "/api/ngm/query/", {"query": "SELECT identifier FROM courts"}, format="json"
+            "/api/query/", {"query": "SELECT identifier FROM courts"}, format="json"
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
@@ -221,7 +223,7 @@ class QueryGateTests(_DbAPITestCase):
         self.client.force_authenticate(
             user=self.nobody, token={"scope": "openid profile"}
         )
-        resp = self.client.post("/api/ngm/query/", {"query": "SELECT 1"}, format="json")
+        resp = self.client.post("/api/query/", {"query": "SELECT 1"}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
 
@@ -233,15 +235,15 @@ class IngestionGateTests(_DbAPITestCase):
         cls.user.groups.add(g)
 
     def test_unauth_ingestion_is_401(self):
-        resp = self.client.post("/api/ngm/ingestion/cases/", {"items": []}, format="json")
+        resp = self.client.post("/api/ingestion/cases/", {"items": []}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_authed_ingestion_is_501(self):
         self.client.force_authenticate(user=self.user)
         for path in (
-            "/api/ngm/ingestion/cases/",
-            "/api/ngm/ingestion/entities/resolve/",
-            "/api/ngm/ingestion/documents/",
+            "/api/ingestion/cases/",
+            "/api/ingestion/entities/resolve/",
+            "/api/ingestion/documents/",
         ):
             resp = self.client.post(path, {}, format="json")
             self.assertEqual(
@@ -252,7 +254,7 @@ class IngestionGateTests(_DbAPITestCase):
         # Clean-slate: the resolve write plane IRI-validates before write-back.
         self.client.force_authenticate(user=self.user)
         resp = self.client.post(
-            "/api/ngm/ingestion/entities/resolve/",
+            "/api/ingestion/entities/resolve/",
             {"items": [{"nes_id": "entity:person/ram"}]},
             format="json",
         )
@@ -261,7 +263,7 @@ class IngestionGateTests(_DbAPITestCase):
     def test_resolve_accepts_iri_nes_id_then_501(self):
         self.client.force_authenticate(user=self.user)
         resp = self.client.post(
-            "/api/ngm/ingestion/entities/resolve/",
+            "/api/ingestion/entities/resolve/",
             {"items": [{"nes_id": "https://jawafdehi.org/entity/person/ram"}]},
             format="json",
         )

@@ -55,7 +55,7 @@ class CourtWriteTests(_DbAPITestCase):
     def test_create_court_authed(self):
         self.client.force_authenticate(user=self.user)
         resp = self.client.post(
-            "/api/ngm/courts/",
+            "/api/courts/",
             {
                 "identifier": "patandc",
                 "court_type": "district",
@@ -73,7 +73,7 @@ class CourtWriteTests(_DbAPITestCase):
         )
         self.client.force_authenticate(user=self.user)
         resp = self.client.patch(
-            "/api/ngm/courts/patandc/",
+            "/api/courts/patandc/",
             {"full_name_english": "District Court Patan"},
             format="json",
         )
@@ -84,7 +84,7 @@ class CourtWriteTests(_DbAPITestCase):
 
     def test_unauth_create_is_401(self):
         resp = self.client.post(
-            "/api/ngm/courts/",
+            "/api/courts/",
             {"identifier": "x", "court_type": "d", "full_name_nepali": "x"},
             format="json",
         )
@@ -92,7 +92,7 @@ class CourtWriteTests(_DbAPITestCase):
 
     def test_read_courts_still_public(self):
         Court.objects.create(identifier="sc", court_type="supreme", full_name_nepali="स")
-        resp = self.client.get("/api/ngm/courts/")
+        resp = self.client.get("/api/courts/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
 
@@ -126,7 +126,7 @@ class CourtCaseWriteTests(_DbAPITestCase):
 
     def test_create_case_then_read_roundtrip(self):
         self.client.force_authenticate(user=self.user)
-        resp = self.client.post("/api/ngm/cases/", self._payload(), format="json")
+        resp = self.client.post("/api/courtcases/", self._payload(), format="json")
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
         self.assertEqual(resp.data["case_number"], "082-OA-0503")
         self.assertEqual(resp.data["court_identifier"], "kathmandudc")
@@ -135,7 +135,7 @@ class CourtCaseWriteTests(_DbAPITestCase):
         self.assertIn("courtcase_iri", resp.data)
 
         # Round-trips via the composite read endpoint.
-        read = self.client.get("/api/ngm/cases/kathmandudc/082-OA-0503")
+        read = self.client.get("/api/courtcases/kathmandudc/082-OA-0503")
         self.assertEqual(read.status_code, status.HTTP_200_OK)
         self.assertEqual(read.data["nes_id"], IRI)
         self.assertEqual(read.data["plaintiff"], "राम")
@@ -146,7 +146,7 @@ class CourtCaseWriteTests(_DbAPITestCase):
         )
         self.client.force_authenticate(user=self.user)
         resp = self.client.patch(
-            "/api/ngm/cases/kathmandudc/082-OA-0503",
+            "/api/courtcases/kathmandudc/082-OA-0503",
             {"case_status": "फैसला", "defendant": "हरि"},
             format="json",
         )
@@ -161,19 +161,19 @@ class CourtCaseWriteTests(_DbAPITestCase):
         )
         self.client.force_authenticate(user=self.user)
         resp = self.client.put(
-            "/api/ngm/cases/kathmandudc/082-OA-0503", self._payload(), format="json"
+            "/api/courtcases/kathmandudc/082-OA-0503", self._payload(), format="json"
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         case = CourtCase.objects.get(court_id="kathmandudc", case_number="082-OA-0503")
         self.assertEqual(case.nes_id, IRI)
 
     def test_create_unauth_is_401(self):
-        resp = self.client.post("/api/ngm/cases/", self._payload(), format="json")
+        resp = self.client.post("/api/courtcases/", self._payload(), format="json")
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_create_authed_without_role_is_403(self):
         self.client.force_authenticate(user=self.norole)
-        resp = self.client.post("/api/ngm/cases/", self._payload(), format="json")
+        resp = self.client.post("/api/courtcases/", self._payload(), format="json")
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_update_unauth_is_401(self):
@@ -181,7 +181,7 @@ class CourtCaseWriteTests(_DbAPITestCase):
             case_number="082-OA-0503", court=self.court, case_status="चालु"
         )
         resp = self.client.patch(
-            "/api/ngm/cases/kathmandudc/082-OA-0503",
+            "/api/courtcases/kathmandudc/082-OA-0503",
             {"case_status": "फैसला"},
             format="json",
         )
@@ -190,7 +190,7 @@ class CourtCaseWriteTests(_DbAPITestCase):
     def test_create_invalid_nes_id_is_400(self):
         self.client.force_authenticate(user=self.user)
         resp = self.client.post(
-            "/api/ngm/cases/", self._payload(nes_id=BAD_NES_ID), format="json"
+            "/api/courtcases/", self._payload(nes_id=BAD_NES_ID), format="json"
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn("nes_id", resp.data)
@@ -198,7 +198,7 @@ class CourtCaseWriteTests(_DbAPITestCase):
     def test_create_blank_nes_id_allowed(self):
         self.client.force_authenticate(user=self.user)
         resp = self.client.post(
-            "/api/ngm/cases/", self._payload(nes_id=""), format="json"
+            "/api/courtcases/", self._payload(nes_id=""), format="json"
         )
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
 
@@ -214,7 +214,7 @@ class BlacklistedFirmWriteTests(_DbAPITestCase):
     def test_create_firm_authed(self):
         self.client.force_authenticate(user=self.user)
         resp = self.client.post(
-            "/api/ngm/firms/",
+            "/api/firms/",
             {"firm_name": "Acme Builders", "blacklist_date_bs": "2080-01-01"},
             format="json",
         )
@@ -225,14 +225,14 @@ class BlacklistedFirmWriteTests(_DbAPITestCase):
         firm = BlacklistedFirm.objects.create(firm_name="Acme Builders")
         self.client.force_authenticate(user=self.user)
         resp = self.client.patch(
-            f"/api/ngm/firms/{firm.id}/", {"reason": "fraud"}, format="json"
+            f"/api/firms/{firm.id}/", {"reason": "fraud"}, format="json"
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(BlacklistedFirm.objects.get(pk=firm.id).reason, "fraud")
 
     def test_create_unauth_is_401(self):
         resp = self.client.post(
-            "/api/ngm/firms/", {"firm_name": "X"}, format="json"
+            "/api/firms/", {"firm_name": "X"}, format="json"
         )
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
@@ -257,7 +257,7 @@ class MaterialWriteTests(_DbAPITestCase):
     def test_create_material_then_get_by_iri(self):
         self.client.force_authenticate(user=self.user)
         iri = "https://jawafdehi.org/material/nkp/2080-act-1"
-        resp = self.client.post("/api/ngm/materials/", self._doc(iri), format="json")
+        resp = self.client.post("/api/materials/", self._doc(iri), format="json")
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
         self.assertEqual(resp.data["@id"], iri)
         self.assertTrue(Material.objects.filter(pk=iri).exists())
@@ -265,16 +265,16 @@ class MaterialWriteTests(_DbAPITestCase):
 
         # GET-resolvable by IRI (query form) AND by path component.
         self.client.force_authenticate(user=None)
-        by_iri = self.client.get("/api/ngm/materials/", {"iri": iri})
+        by_iri = self.client.get("/api/materials/", {"iri": iri})
         self.assertEqual(by_iri.status_code, status.HTTP_200_OK)
         self.assertEqual(by_iri.data["@type"], "Legislation")
-        by_path = self.client.get("/api/ngm/materials/nkp/2080-act-1")
+        by_path = self.client.get("/api/materials/nkp/2080-act-1")
         self.assertEqual(by_path.status_code, status.HTTP_200_OK)
 
     def test_create_material_envelope_with_explicit_type(self):
         self.client.force_authenticate(user=self.user)
         resp = self.client.post(
-            "/api/ngm/materials/",
+            "/api/materials/",
             {"material": self._doc(), "material_type": "official_report"},
             format="json",
         )
@@ -292,14 +292,14 @@ class MaterialWriteTests(_DbAPITestCase):
         self.client.force_authenticate(user=self.user)
         new_doc = self._doc(iri)
         new_doc["name"] = {"ne": "संशोधित ऐन"}
-        resp = self.client.put("/api/ngm/materials/nkp/2080-act-1", new_doc, format="json")
+        resp = self.client.put("/api/materials/nkp/2080-act-1", new_doc, format="json")
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         self.assertEqual(Material.objects.get(pk=iri).data["name"], {"ne": "संशोधित ऐन"})
 
     def test_put_iri_mismatch_is_400(self):
         self.client.force_authenticate(user=self.user)
         resp = self.client.put(
-            "/api/ngm/materials/nkp/2080-act-1",
+            "/api/materials/nkp/2080-act-1",
             self._doc("https://jawafdehi.org/material/nkp/other"),
             format="json",
         )
@@ -309,19 +309,19 @@ class MaterialWriteTests(_DbAPITestCase):
         self.client.force_authenticate(user=self.user)
         # Unknown @type -> validator rejects.
         resp = self.client.post(
-            "/api/ngm/materials/",
+            "/api/materials/",
             {"@type": "Banana", "@id": "https://jawafdehi.org/material/x/y", "name": "n"},
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_create_unauth_is_401(self):
-        resp = self.client.post("/api/ngm/materials/", self._doc(), format="json")
+        resp = self.client.post("/api/materials/", self._doc(), format="json")
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_create_authed_without_role_is_403(self):
         self.client.force_authenticate(user=self.norole)
-        resp = self.client.post("/api/ngm/materials/", self._doc(), format="json")
+        resp = self.client.post("/api/materials/", self._doc(), format="json")
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_get_material_remains_public_no_regression(self):
@@ -331,7 +331,7 @@ class MaterialWriteTests(_DbAPITestCase):
             data=self._doc(iri),
         )
         # No auth.
-        resp = self.client.get("/api/ngm/materials/nkp/2080-act-1")
+        resp = self.client.get("/api/materials/nkp/2080-act-1")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["@id"], iri)
 
@@ -347,6 +347,6 @@ class MaterialWriteTests(_DbAPITestCase):
             ],
         )
         iri = court_case_material_iri("kathmandudc", "082-OA-0503")
-        resp = self.client.get("/api/ngm/materials/", {"iri": iri})
+        resp = self.client.get("/api/materials/", {"iri": iri})
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["additionalType"], "jawafdehi:CourtCase")

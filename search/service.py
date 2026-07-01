@@ -427,10 +427,10 @@ def _api_url(result_type: str, source: dict[str, Any]) -> str | None:
         court = raw.get("court")
         number = raw.get("case_number")
         # Composite-key detail route (courts.urls): the case sub-tree is
-        # ``cases/<court>/<case_number>`` mounted at /api/ngm/ — NOT nested under
+        # ``cases/<court>/<case_number>`` mounted at /api/ — NOT nested under
         # ``courts/`` (that router only serves the bare /courts list).
         if court and number:
-            return f"/api/ngm/cases/{court}/{number}/"
+            return f"/api/courtcases/{court}/{number}/"
         return None
     return None
 

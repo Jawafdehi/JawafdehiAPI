@@ -112,9 +112,9 @@ class ResourceListTests(TestCase):
             for el in root.iter(f"{RS}ln")
             if el.get("rel") == "describedby"
         ]
-        assert any("/api/nes/entities/person/ram-bahadur" in h for h in describedby)
+        assert any("/api/entities/person/ram-bahadur" in h for h in describedby)
         assert any(
-            "/api/ngm/materials/court/kathmandudc.082-oa-0503" in h
+            "/api/materials/court/kathmandudc.082-oa-0503" in h
             for h in describedby
         )
 

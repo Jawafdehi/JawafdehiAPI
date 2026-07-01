@@ -4,22 +4,22 @@ CLEAN-SLATE remodel (2026-06-28): entities are stored as raw schema.org JSON-LD
 keyed by their ``@id`` IRI (``https://jawafdehi.org/entity/<prefix>/<slug>``).
 Every id in every request/response is that IRI.
 
-All routes below are mounted under ``/api/nes/`` (config.urls); the
+All routes below are mounted under ``/api/`` (config.urls); the
 paths shown are relative to that prefix.
 
 - Read plane (public, ``AllowAny``):
-    GET /api/nes/entities             — list/search (+ filters), batch by ids
-    GET /api/nes/entities/{ref}       — detail (ref = url-encoded IRI OR prefix/slug)
-    GET /api/nes/entities/{ref}/versions
-    GET /api/nes/entities/tags
-    GET /api/nes/entity_prefixes
+    GET /api/entities             — list/search (+ filters), batch by ids
+    GET /api/entities/{ref}       — detail (ref = url-encoded IRI OR prefix/slug)
+    GET /api/entities/{ref}/versions
+    GET /api/entities/tags
+    GET /api/entity_prefixes
   List shape: ``{entities, total, limit, offset}``; detail: the stored JSON-LD doc.
   (Batch-by-ids returns ``{entities, total, requested, not_found}`` instead.)
 - Write plane (OIDC + ``nes_contributor`` via ``HasNesContributorRole``):
-    POST  /api/nes/entities           — create (JSON-LD or authoring shape)
-    PATCH /api/nes/entities/{ref}     — RFC-6902 jsonpatch (immutable @id/@type guarded)
+    POST  /api/entities           — create (JSON-LD or authoring shape)
+    PATCH /api/entities/{ref}     — RFC-6902 jsonpatch (immutable @id/@type guarded)
 - Admin plane (OIDC + ``nes_admin`` via ``HasNesAdminRole``):
-    POST  /api/nes/admin/reindex      — reindex stub (no-op until search backend wired)
+    POST  /api/admin/reindex      — reindex stub (no-op until search backend wired)
 
 The detail ``{ref}`` is resolved to the canonical @id IRI by ``_resolve_ref``:
 a value already starting with ``http`` is taken as the IRI; otherwise it is the
@@ -339,7 +339,7 @@ def list_entity_prefixes(request):
 
 
 class ReindexView(APIView):
-    """POST /api/nes/admin/reindex — OIDC + ``nes_admin`` gated stub."""
+    """POST /api/admin/reindex — OIDC + ``nes_admin`` gated stub."""
 
     permission_classes = [HasNesAdminRole]
 

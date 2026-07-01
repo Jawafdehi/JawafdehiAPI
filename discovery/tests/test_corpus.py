@@ -70,7 +70,7 @@ class CorpusEnumeratorTests(TestCase):
         assert r.iri == "https://jawafdehi.org/entity/person/ram-bahadur"
         assert r.type == corpus.TYPE_ENTITY
         assert r.lastmod is not None
-        assert r.jsonld_url == "/api/nes/entities/person/ram-bahadur"
+        assert r.jsonld_url == "/api/entities/person/ram-bahadur"
 
     def test_material_resource_shape(self):
         _make_material()
@@ -78,7 +78,7 @@ class CorpusEnumeratorTests(TestCase):
         assert len(resources) == 1
         r = resources[0]
         assert r.iri == "https://jawafdehi.org/material/nkp/2080-act-1"
-        assert r.jsonld_url == "/api/ngm/materials/nkp/2080-act-1"
+        assert r.jsonld_url == "/api/materials/nkp/2080-act-1"
 
     def test_courtcase_resource_shape(self):
         _make_courtcase()
@@ -87,7 +87,7 @@ class CorpusEnumeratorTests(TestCase):
         r = resources[0]
         assert r.iri == "https://jawafdehi.org/courtcase/kathmandudc/082-oa-0503"
         # describedby points at the court-case MATERIAL JSON-LD.
-        assert r.jsonld_url == "/api/ngm/materials/court/kathmandudc.082-oa-0503"
+        assert r.jsonld_url == "/api/materials/court/kathmandudc.082-oa-0503"
 
     def test_published_case_is_public(self):
         case = Case(case_type=CaseType.CORRUPTION, title="A published case")

@@ -232,7 +232,7 @@ def test_search_merges_into_common_envelope():
     # /courtcase/); api_url derives from court + case_number.
     courtcase = out["results"][2]
     assert courtcase["url"] == "/courtcase/supreme/081-cr-0081"
-    assert courtcase["api_url"] == "/api/ngm/cases/supreme/081-CR-0081/"
+    assert courtcase["api_url"] == "/api/courtcases/supreme/081-CR-0081/"
 
 
 def test_entity_frontend_path_strips_iri_to_tail():

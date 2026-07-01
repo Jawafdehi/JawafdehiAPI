@@ -1,14 +1,14 @@
 """Reusable client for the NGM (Nepal Governance Modernization) judicial DB.
 
 Talks to the in-process NGM read plane (``courts``), mounted at
-``<host>/api/ngm/`` on the same platform that serves the Jawafdehi API. The old
-``/api/ngm/court_case/<court>:<case_number>`` proxy (which forwarded to a
+``<host>/api/`` on the same platform that serves the Jawafdehi API. The old
+``/api/courtcases/<court>:<case_number>`` proxy (which forwarded to a
 standalone NGM service) was retired in the service consolidation; this client now
 targets the read plane directly:
 
-  * ``GET {ngm_base}/cases/{court}/{number}``            → the case record
-  * ``GET {ngm_base}/cases/{court}/{number}/entities``   → parties (paginated)
-  * ``GET {ngm_base}/cases/{court}/{number}/hearings``   → hearings (paginated)
+  * ``GET {ngm_base}/courtcases/{court}/{number}``            → the case record
+  * ``GET {ngm_base}/courtcases/{court}/{number}/entities``   → parties (paginated)
+  * ``GET {ngm_base}/courtcases/{court}/{number}/hearings``   → hearings (paginated)
 
 It still speaks HTTP (not the ORM) because casework can run against a REMOTE
 portal (``JAWAFDEHI_API_BASE`` may point at portal.jawafdehi.org while the
@@ -47,18 +47,18 @@ class NgmNotFound(NgmError):
 
 
 def _ngm_base():
-    """Base URL of the in-process NGM read plane (``<host>/api/ngm``).
+    """Base URL of the unified ``/api`` surface (``<host>/api``).
 
-    Derived from ``JAWAFDEHI_API_BASE`` (the Jawafdehi ``/api`` base on the same
-    platform): the NGM plane is a sibling mounted at ``/api/ngm``. Strip a
-    trailing ``/api`` from the configured base, then append ``/api/ngm``.
+    Court-case records live at ``<host>/api/courtcases/...`` on the same platform
+    that serves the Jawafdehi API. Derived from ``JAWAFDEHI_API_BASE``, which is
+    already the ``/api`` base; normalize to end in exactly ``/api``.
     """
     base = getattr(
         settings, "JAWAFDEHI_API_BASE", "https://portal.jawafdehi.org/api"
     ).rstrip("/")
-    if base.endswith("/api"):
-        base = base[: -len("/api")]
-    return f"{base}/api/ngm"
+    if not base.endswith("/api"):
+        base = f"{base}/api"
+    return base
 
 
 # Court refs come from case data (operator-entered), so validate strictly before
@@ -160,7 +160,7 @@ def get_court_case(case_ref, timeout=30):
 
     # Rebuild + percent-encode from the validated parts (never interpolate the
     # raw ref) so neither segment can break out into the URL path/query.
-    base = f"{_ngm_base()}/cases/{quote(court, safe='')}/{quote(number, safe='')}"
+    base = f"{_ngm_base()}/courtcases/{quote(court, safe='')}/{quote(number, safe='')}"
     case = _get(base, timeout)
     if not isinstance(case, dict):
         raise NgmError(f"Unexpected NGM case payload for '{case_ref}'.")

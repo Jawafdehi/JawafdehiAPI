@@ -79,7 +79,7 @@ class Resource:
 
 
 def _iter_entities() -> Iterator[Resource]:
-    """Every NES entity (all public). JSON-LD: ``/api/nes/entities/<prefix>/<slug>``."""
+    """Every NES entity (all public). JSON-LD: ``/api/entities/<prefix>/<slug>``."""
     from entities.models import StoredEntity
 
     qs = StoredEntity.objects.all().values_list(
@@ -90,12 +90,12 @@ def _iter_entities() -> Iterator[Resource]:
             iri=iri,
             lastmod=updated_at,
             type=TYPE_ENTITY,
-            jsonld_url=f"/api/nes/entities/{prefix}/{slug}",
+            jsonld_url=f"/api/entities/{prefix}/{slug}",
         )
 
 
 def _iter_materials() -> Iterator[Resource]:
-    """Every NGM material (all public). JSON-LD: ``/api/ngm/materials/<source>/<ident>``."""
+    """Every NGM material (all public). JSON-LD: ``/api/materials/<source>/<ident>``."""
     from materials.models import Material
 
     qs = Material.objects.all().values_list("iri", "source", "ident", "updated_at")
@@ -104,7 +104,7 @@ def _iter_materials() -> Iterator[Resource]:
             iri=iri,
             lastmod=updated_at,
             type=TYPE_MATERIAL,
-            jsonld_url=f"/api/ngm/materials/{source}/{ident}",
+            jsonld_url=f"/api/materials/{source}/{ident}",
         )
 
 
@@ -114,7 +114,7 @@ def _iter_courtcases() -> Iterator[Resource]:
     The courtcase ``@id`` IRI (``/courtcase/<court>/<case_number>``) identifies
     the court-case ROW; its schema.org JSON-LD lives under the corresponding
     MATERIAL IRI (``/material/court/<court>.<case_number>``), served at
-    ``/api/ngm/materials/court/<court>.<case_number>`` — used for describedby.
+    ``/api/materials/court/<court>.<case_number>`` — used for describedby.
     """
     from courts.models import CourtCase
     from materials.jsonld import court_case_material_iri
@@ -144,7 +144,7 @@ def _iter_courtcases() -> Iterator[Resource]:
             iri=iri,
             lastmod=updated_at,
             type=TYPE_COURTCASE,
-            jsonld_url=f"/api/ngm/materials/{parsed.source}/{parsed.ident}",
+            jsonld_url=f"/api/materials/{parsed.source}/{parsed.ident}",
         )
 
 

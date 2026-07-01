@@ -14,7 +14,7 @@ from django.urls import path, re_path
 
 from . import views
 
-# URL namespace — distinct from ngm-courts (both are mounted at /api/ngm/).
+# URL namespace — distinct from ngm-courts (both are mounted at /api/).
 # Keeps reverse() / drf-spectacular operationIds unambiguous
 # (``ngm-materials:material-detail``) without changing any URL PATH.
 app_name = "ngm-materials"

@@ -1,34 +1,28 @@
-"""Unified URL configuration for the unified platform.
+"""Unified URL configuration — ONE ``/api/`` surface, no per-service prefixes.
 
-The three former services are mounted under DISTINCT path prefixes so their
-route trees don't collide. Each former app's ``urls.py`` assumed it was mounted
-at ``/api/`` in its own project; several of those trees overlap (NGM and
-Jawafdehi BOTH define ``cases/``, ``search/``, and ``entities/`` — for entirely
-different models). Mounting them at the same prefix would shadow one another, so
-each service keeps its own routes under its own prefix:
+All resources live under a single ``/api/`` root, keyed by resource kind (which
+maps to the schema.org ``@id`` IRI shape), NOT by which former service owns them:
 
-    /api/nes/   -> entities.urls   (entities/, entity_prefixes, ...)
-    /api/ngm/   -> courts.urls + materials.urls
-                   (courts/, cases/, query/, search/, materials/, ...)
-    /api/       -> Jawafdehi (cases/, sources/, search/, statistics/, ...)
-    /api/casework/        -> review.urls
+    /api/entities        -> entities.urls   (people, orgs, courts, firms, ...)
+    /api/materials       -> materials.urls  (documents; file-bearing)
+    /api/courtcases      -> courts.urls     (NGM court-case records + query + ingestion)
+    /api/cases           -> cases.urls      (Jawafdehi CORRUPTION cases — DISTINCT)
+    /api/sources         -> cases.urls      (corruption-case document sources)
+    /api/search          -> search.urls
+    /api/casework/       -> review.urls
 
-All platform APIs now live under a single ``/api/`` root: Jawafdehi at the bare
-``/api/`` tree (unchanged paths), NES under ``/api/nes/`` and NGM under
-``/api/ngm/``. The NES/NGM subtrees are mounted BEFORE the bare ``/api/`` include
-so they own their prefixes unambiguously. (Earlier these lived at ``/nes/api/`` /
-``/ngm/api/``; renamespaced to ``/api/nes/`` / ``/api/ngm/`` 2026-06-30.)
+HARD CUT (2026-07-01): the former ``/api/nes/`` and ``/api/ngm/`` prefixes are
+REMOVED with NO redirects/aliases. Consumers are rewired in the same change.
 
-URL-NAME NAMESPACES: beyond the path prefixes, several route NAMES and DRF
-router basenames also collide across the trees (Jawafdehi, NES and NGM-courts
-all define ``case`` / ``search`` / ``entity``). To keep ``reverse()`` and
-drf-spectacular operationIds unambiguous, the NES + NGM URLConfs declare an
-``app_name`` (``nes`` / ``ngm-courts`` / ``ngm-materials``), so their names are
-reached as ``nes:entity-detail``, ``ngm-courts:case-detail``, etc. The
-Jawafdehi ``cases.urls`` tree is intentionally left UN-namespaced — it is the
-primary ``/api/`` tree and its bare names (``case-list``, ``unified-search``,
-...) are what the portal/casework clients already reverse. The URL *paths* are
-unchanged by namespacing.
+Path collisions resolved by renaming (not prefixing): NGM court cases are
+``courtcases`` (Jawafdehi owns ``cases``); the NGM case-party resolver is
+``courtcase-entities`` (NES owns ``entities``); health is a single ``/api/health``.
+
+URL-NAME NAMESPACES are retained (``nes`` / ``ngm-courts`` / ``ngm-materials``
+``app_name``s) so ``reverse()`` and drf-spectacular operationIds stay unambiguous
+even though the underlying route NAMES (``case`` / ``entity``) still collide. The
+Jawafdehi ``cases.urls`` tree stays UN-namespaced (its bare names are what the
+portal/casework clients reverse).
 """
 
 from django.conf import settings
@@ -69,15 +63,15 @@ urlpatterns = [
         SpectacularSwaggerView.as_view(url_name="schema"),
         name="swagger-ui",
     ),
-    # ── Unified platform search (replaces the old cases-scoped /api/search/ and
-    #    the NGM 501 stub). Mounted BEFORE cases.urls so it owns /api/search/. ──
+    # ── Unified platform search. Mounted BEFORE cases.urls so it owns /api/search/. ──
     path("api/search/", include("search.urls")),
-    # ── NES (nes DB) — mounted BEFORE the bare /api/ (cases) tree so the
-    #    /api/nes/ subtree owns its prefix unambiguously. ──────────────────────
-    path("api/nes/", include("entities.urls")),
-    # ── NGM (ngm DB) ─────────────────────────────────────────────────────────
-    path("api/ngm/", include("courts.urls")),
-    path("api/ngm/", include("materials.urls")),
+    # ── One /api/ surface. NES entities + NGM courts/materials are mounted at the
+    #    SAME /api/ root as Jawafdehi; collisions were renamed away (courtcases,
+    #    courtcase-entities) so each include owns distinct paths. The prefixed
+    #    includes come BEFORE cases.urls (whose router has a catch-all-ish tree). ──
+    path("api/", include("entities.urls")),
+    path("api/", include("courts.urls")),
+    path("api/", include("materials.urls")),
     path("api/", include("cases.urls")),
     path("oembed/", OEmbedView.as_view(), name="oembed"),
     path("api/caseworker/me", MeView.as_view(), name="cw-me"),
