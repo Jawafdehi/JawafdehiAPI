@@ -4,5 +4,6 @@ __pycache__/
 .pytest_cache/
 *.sqlite3
 .env
-services/jawafdehi/media/
+media/
+staticfiles/
 docker-compose.override.yml
