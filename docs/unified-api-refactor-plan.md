@@ -19,19 +19,28 @@
 
 ## 1. Target end-state
 
-**One flat app layout, one API namespace, 3 DBs behind the router.**
+**ONE installable package, one flat app layout, one API namespace, 3 DBs behind the router.**
+(No uv workspace, no 4 member packages — see R1.)
 
 ```
-<project>/                 (was monolith/ — renamed; R2)
-  config/  settings, urls, wsgi, asgi, db_router
-  search/  discovery/      (unchanged apps, just no longer under "monolith")
-app/                       (was services/{nes,ngm,jawafdehi}/ — flattened; R1)
-  entities/   (label=entities → nes DB)      was services/nes/nes_service/entities
-  courts/     (label=courts   → ngm DB)      was services/ngm/ngm_service/courts
-  materials/  (label=materials→ ngm DB)      was services/ngm/ngm_service/materials
-  cases/      (label=cases    → default)     was services/jawafdehi/cases
-  review/     (label=review   → default)     was services/jawafdehi/review
+pyproject.toml             ONE project (all deps merged), no [tool.uv.workspace]
+config/                    (was monolith/) settings, urls, wsgi, asgi, db_router
+search/  discovery/        unchanged apps (no longer under "monolith")
+jawafdehi_shared/          shared libs (auth/oidc, entities/ids, search, drf) — folded in from shared/
+entities/   (label=entities → nes DB)      was services/nes/nes_service/entities
+courts/     (label=courts   → ngm DB)      was services/ngm/ngm_service/courts
+materials/  (label=materials→ ngm DB)      was services/ngm/ngm_service/materials
+cases/      (label=cases    → default)     was services/jawafdehi/cases
+review/     (label=review   → default)     was services/jawafdehi/review
+ngm/                                       was services/jawafdehi/ngm (proxy app)
+platform_support/ (auth/middleware/…)      was services/jawafdehi/config — RENAMED to avoid
+                                           colliding with the project `config/` above
 ```
+> ⚠️ **Name collision to resolve in R1:** the project package (`monolith/config`) and the
+> Jawafdehi app-support package (`services/jawafdehi/config` → `config.auth`,
+> `config.middleware`, `config.structlog_config`) BOTH want top-level `config`. Rename one —
+> proposal: project → `config/`, app-support → `platform_support/` (or similar). Touches the
+> `config.auth`/`config.middleware` import sites — count + fix in R1.
 
 **Public API (R3):**
 | Path | Resource | Backing app | Auth |
@@ -54,33 +63,43 @@ consumer rewiring must land together with R3, not after.
 
 ## 2. Phases (ordered; each is one reviewable checkpoint, not many commits)
 
-### Phase R1 — Flatten `services/{nes,ngm,jawafdehi}` → `app/`
-> ⚠️ **RE-SCOPED 2026-07-01: this is NOT mechanical/low-risk.** The split is a **uv
-> workspace with 4 installable member packages** (`shared`, `services/*`), each with its
-> own `pyproject.toml` + build packaging + source roots, PLUS a deliberately intricate
-> test-collision fix (pyproject.toml:82–110 + root conftest sys.path manipulation): the
-> `__init__.py` placement making NES vs NGM `tests/test_api.py` resolve uniquely, and the
-> Jawafdehi bare-`tests` package winning over a dependency's site-packages `tests`.
-> Flattening = restructuring workspace membership + build config + source roots + that
-> test scheme, on a PRODUCTIONIZED branch. **R1 is DEFERRED / optional** — it's cosmetic
-> relative to the goal. The unified API surface is delivered by **R3, which does NOT
-> depend on R1** (app_name namespaces already decouple URL paths from code layout).
-> Do R1 only if the internal tidiness is worth the churn; otherwise skip to R3.
+### Phase R1 — Collapse to ONE installable package (decided 2026-07-01)
+**The 4-member uv workspace is vestigial and gets removed.** The root pyproject already
+admits it: *"the DEPLOYABLE is this root project… one install pulls every app"*, and the
+per-service-isolation rationale (*"a service image installs just these + shared"*) is DEAD —
+there are no per-service images; the Dockerfile builds ONE image (`COPY services/ ./services/`,
+one `uv sync`, one gunicorn `monolith.config.wsgi`). So the split buys nothing.
 
-**Scope (measured):** 43 files carry `from nes_service` / `from ngm_service` imports; ~135 cross-app import statements; 5 INSTALLED_APPS entries; 7 `include()` lines; PLUS 4 member `pyproject.toml`, workspace `members`/`sources`, hatch wheel packages, and the conftest/`__init__.py` test scheme.
-**Steps:**
-1. `git mv` each app dir to its flat home; **keep each `apps.py` `label=` exactly as-is** (router depends on labels, not paths).
-2. Decide the import root: rename the Python import packages `nes_service.entities`→`app.entities`, `ngm_service.courts`→`app.courts`, etc. (or drop the `_service` package and expose `entities`, `courts`, … directly).
-3. Rewrite imports across the 43 files (mechanical; a scripted `sed` + a full test run).
-4. Update INSTALLED_APPS (5 entries), the 7 `include()`s, and `db_router.py`'s label sets **only if labels changed** (they should not).
-**Risk:** low (mechanical). **Verify:** `manage.py check`, `makemigrations --check --dry-run` (must be NO-OP — proves labels/models unchanged), full test suite.
-**Gotcha:** NES + NGM both have a `tests/` dir; the collapse must preserve the `services/{,nes/,ngm/}__init__` test-collision fix (see think-big memory). Confirm pytest still collects cleanly.
+**Target:** one `pyproject.toml`, one project, apps as plain top-level subpackages.
+1. **Merge deps** — union the 4 members' `dependencies` into the root `[project].dependencies`
+   (they already all install together; NGM's duckdb/boto3, Jawafdehi's big list, NES's jsonpatch,
+   shared's pyjwt — all become root deps; keep the `bigo-enrichment` + `search` extras + the
+   `likhit` git source at root). Delete `[tool.uv.workspace]`, `[tool.uv.sources]`, and the 3
+   `services/*/pyproject.toml` + `shared/pyproject.toml`.
+2. **Flatten dirs** so each is a top-level import package, `apps.py` `label=` UNCHANGED (router
+   keys on label, not path → no migration): `entities` (was nes_service.entities), `courts`,
+   `materials` (was ngm_service.*), `cases`, `review`, `ngm` (Jawafdehi proxy), `config`
+   (app-support), `jawafdehi_shared`.
+3. **Rewrite imports** — `nes_service.entities`→`entities`, `ngm_service.courts`→`courts`, etc.
+   across the 43 files (scripted sed + full test run). Fix INSTALLED_APPS (5) + `include()`s (7).
+4. **The test-collision hack DISSOLVES** — once apps are flat, `services/nes/tests` vs
+   `services/ngm/tests` become `entities/tests` vs `courts/tests` (unique names), so the
+   `services/{,nes/,ngm/}__init__.py` + root-conftest `sys.path` juggling (pyproject.toml:82–110)
+   can be deleted. Verify pytest still collects cleanly WITHOUT it.
+5. **hatch packaging** — one `[tool.hatch.build.targets.wheel] packages = [...]` listing the flat
+   app packages + `config` + `jawafdehi_shared`. Update Dockerfile COPY lines to the flat layout.
 
-### Phase R2 — Rename the `monolith/` package
-**Scope (measured):** 8 Python imports + 9 Django string bindings + 2 entry points ≈ 17 files. Bindings: `manage.py:20`, `settings.py` (ROOT_URLCONF:287, WSGI:288, DATABASE_ROUTERS:435, INSTALLED_APPS:268/270), `urls.py:52/74`, `pyproject.toml:73`, `settings_test.py:40`.
-**Decision needed:** target name — `config/` + top-level apps, or `platform/`, or fold `search`/`discovery` into `app/`. (Pick in review.)
-**Risk:** low but touches boot path — do it as its own checkpoint, not mixed with R1.
-**Verify:** app boots (`manage.py check`), test settings import, WSGI/ASGI import.
+**Also folds in the `monolith/` rename** (see §5 Q2 for target name — `config`/`platform`(stdlib
+shadow, avoid)/other). ~8 imports + 9 Django string bindings + 2 entry points
+(`manage.py:20`, settings ROOT_URLCONF/WSGI/DATABASE_ROUTERS/INSTALLED_APPS, urls, pyproject,
+settings_test).
+**Scope:** 43 files w/ cross-app imports + ~135 import stmts + 4 pyproject deletions + Dockerfile
++ workspace/hatch config + test-scheme removal. **Risk:** MEDIUM — touches packaging + boot +
+test collection, on the productionized branch. Do as its OWN checkpoint, verified end-to-end.
+**Verify:** `uv sync` resolves; `manage.py check`; `makemigrations --check --dry-run` NO-OP
+(proves labels/models unchanged); FULL test suite green; `docker build` succeeds; gunicorn boots.
+**Independence:** R1 still does NOT gate the unified API surface (R3 delivers that). It can run
+before or after R3; sequencing below runs it first so later phases target the flat layout once.
 
 ### Phase R3 — Unify the URL surface (drop prefixes, rename courtcases)
 **Steps:**
@@ -153,15 +172,15 @@ Carried from the design doc — need a ruling:
 ---
 
 ## 4. Sequencing (decided, revised 2026-07-01)
-**R3 (URL unify, HARD cut) + R4 (consumers, same checkpoint) → R5a (backend CRUD gaps) →
-R5b (React admin full CRUD) → R6 (upload feature).** R1 (flatten) and R2 (rename `monolith/`)
-are **DEFERRED as optional cleanup** — they're internal cosmetics that do NOT gate the
-unified API surface (R3 delivers that; app_name namespaces decouple paths from code layout).
-R1 in particular is a workspace/packaging restructure, not a mechanical move — not worth its
-risk on the productionized branch unless explicitly wanted.
-Rationale: R3 is the actual "one unified surface." Everything downstream (admin CRUD, upload)
-binds to the final `/api/{entities,materials,courtcases,cases}` paths exactly once. R3+R4 must
-land together — hard cut, no alias grace period.
+**R1 (collapse to one package) → R3 (URL unify, HARD cut) + R4 (consumers, same checkpoint) →
+R5a (backend CRUD gaps) → R5b (React admin full CRUD) → R6 (upload feature).**
+R1 now runs FIRST (user wants one installable package, not 4) so every later phase targets the
+flat layout once. R1 is its own verified checkpoint (packaging + boot + test collection). It
+still doesn't strictly *gate* the unified surface (R3 does), but doing it first avoids editing
+URLs/consumers against a layout that's about to move. (R2 "rename monolith/" is folded INTO R1.)
+Rationale: R3 is the actual "one unified surface"; downstream work (admin CRUD, upload) binds to
+the final `/api/{entities,materials,courtcases,cases}` paths exactly once. R3+R4 land together —
+hard cut, no alias grace period.
 
 **Baseline verify command** (works in this env):
 `SECRET_KEY=dev-check-only ALLOWED_HOSTS='*' DJANGO_SETTINGS_MODULE=monolith.config.settings_test uv run python manage.py check` — currently green.
@@ -169,8 +188,8 @@ land together — hard cut, no alias grace period.
 ---
 
 ## 5. Open questions for review
-1. R1 import root: `app.entities` etc., or expose `entities`/`courts`/`materials` at top level (drop the `_service` packages)?
-2. R2 target name for the `monolith/` package: `config` + top-level apps, `platform/`, or something else?
+1. R1 import root: expose apps at top level (`entities`, `courts`, `materials`, `cases`, …) — recommended, matches how `cases`/`review`/`ngm` already resolve. Confirm no residual need for the `nes_service`/`ngm_service` namespaces.
+2. R1 name for the current `monolith/` package (holds settings/urls/wsgi/db_router): `config`? (NOT `platform` — stdlib shadow.) Or fold `search`/`discovery` in somewhere specific?
 3. R3: keep `/api/query` and `/api/ingestion` unprefixed, or namespace them (`/api/courtcases/query`)? They're court-table operations.
 4. Sequencing: upload last (clean surface) vs. upload first (earlier delivery)?
 5. Do we rename `label=entities` etc. at all, or leave labels permanently as the router contract? (Leaving them is zero-risk; renaming would force migration-state churn for no gain.)
