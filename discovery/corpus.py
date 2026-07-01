@@ -231,11 +231,15 @@ def count_resources(types: tuple[str, ...] | None = None) -> int:
     from cases.models import Case, CaseState
     from entities.models import StoredEntity
     from courts.models import CourtCase
-    from materials.models import Material
+    from materials.models import Material, Visibility
 
     counters: dict[str, Callable[[], int]] = {
         TYPE_ENTITY: lambda: StoredEntity.objects.count(),
-        TYPE_MATERIAL: lambda: Material.objects.count(),
+        # Must match _iter_materials: only LISTED, non-deleted materials are
+        # public in the sitemap, so the paging count must exclude the rest.
+        TYPE_MATERIAL: lambda: Material.objects.filter(
+            is_deleted=False, visibility=Visibility.LISTED
+        ).count(),
         TYPE_COURTCASE: lambda: CourtCase.objects.count(),
         TYPE_CASE: lambda: Case.objects.filter(state=CaseState.PUBLISHED).count(),
     }
@@ -259,14 +263,18 @@ def max_lastmod(types: tuple[str, ...] | None = None) -> datetime | None:
     from cases.models import Case, CaseState
     from entities.models import StoredEntity
     from courts.models import CourtCase
-    from materials.models import Material
+    from materials.models import Material, Visibility
 
     def _agg(qs) -> datetime | None:
         return qs.aggregate(m=Max("updated_at"))["m"]
 
     aggregators: dict[str, Callable[[], datetime | None]] = {
         TYPE_ENTITY: lambda: _agg(StoredEntity.objects),
-        TYPE_MATERIAL: lambda: _agg(Material.objects),
+        # Match _iter_materials so a PRIVATE/soft-deleted material's mtime can't
+        # drive the public sitemap lastmod / corpus-version cache key.
+        TYPE_MATERIAL: lambda: _agg(
+            Material.objects.filter(is_deleted=False, visibility=Visibility.LISTED)
+        ),
         TYPE_COURTCASE: lambda: _agg(CourtCase.objects),
         TYPE_CASE: lambda: _agg(Case.objects.filter(state=CaseState.PUBLISHED)),
     }

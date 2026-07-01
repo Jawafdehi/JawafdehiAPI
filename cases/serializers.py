@@ -233,15 +233,25 @@ class CaseDetailSerializer(CaseSerializer):
         if not refs:
             return []
         resolved = resolve_materials(ref.material_iri for ref in refs)
+
+        def _material(iri):
+            # resolve_materials is total over TRUTHY ids; a blank/None material_iri
+            # (only reachable via a non-API write) would KeyError, so fall back to
+            # a stub rather than 500 the whole case detail.
+            rec = resolved.get(iri)
+            if rec is None:
+                return {"display_name": None, "material_type": None, "urls": []}
+            return {
+                "display_name": rec["display_name"],
+                "material_type": rec["material_type"],
+                "urls": rec["urls"],
+            }
+
         return [
             {
                 "material_iri": ref.material_iri,
                 "additional_details": ref.additional_details,
-                "material": {
-                    "display_name": resolved[ref.material_iri]["display_name"],
-                    "material_type": resolved[ref.material_iri]["material_type"],
-                    "urls": resolved[ref.material_iri]["urls"],
-                },
+                "material": _material(ref.material_iri),
             }
             for ref in refs
         ]

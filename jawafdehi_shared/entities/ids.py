@@ -208,15 +208,25 @@ def build_source_material_iri(source_id: str, base: str | None = None) -> str:
     """Canonical material ``@id`` IRI for a Jawafdehi case-source document.
 
     The legacy ``DocumentSource.source_id`` (``source:YYYYMMDD:hex8``) carries
-    colons, which the material ident grammar forbids. Normalize to a stable,
-    reconstructable ident by dropping the ``source:`` prefix and mapping the
-    remaining ``:`` separators to ``.`` (``source:20240115:ab12cd`` →
-    ``jawafdehi/20240115.ab12cd``). Idempotent for an already-normalized id.
+    colons, which the material ident grammar (``[a-z0-9][a-z0-9._-]*``) forbids.
+    Normalize to a stable, reconstructable ident: drop the ``source:`` prefix,
+    map ``:`` separators to ``.``, lowercase, then coerce any remaining
+    out-of-grammar characters to ``-`` and ensure a valid leading char so an
+    arbitrary caller-supplied ``source_id`` never raises
+    (``source:20240115:ab12cd`` → ``jawafdehi/20240115.ab12cd``). Idempotent for
+    an already-normalized id. Raises ``ValueError`` only if the id is empty after
+    normalization.
     """
     ident = source_id.strip()
     if ident.startswith("source:"):
         ident = ident[len("source:"):]
     ident = ident.replace(":", ".").lower()
+    # Coerce anything outside the ident grammar's tail class to '-'.
+    ident = re.sub(r"[^a-z0-9._-]", "-", ident)
+    # The grammar requires the first char to be alphanumeric.
+    ident = ident.lstrip("._-")
+    if not ident:
+        raise ValueError(f"source_id normalizes to an empty material ident: {source_id!r}")
     return build_material_iri(JAWAF_SOURCE, ident, base)
 
 

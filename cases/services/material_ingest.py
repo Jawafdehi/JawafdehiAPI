@@ -21,10 +21,13 @@ stable natural key (e.g. a hashed URL) as ``source_id``.
 from __future__ import annotations
 
 import hashlib
+import logging
 from typing import Any, Iterable
 
 from materials.jsonld import documentsource_to_jsonld
 from materials.single_source_ingest import upsert_single_source_material
+
+logger = logging.getLogger(__name__)
 
 
 def _normalize_url_list(url: Any) -> list[dict[str, str]]:
@@ -167,4 +170,18 @@ def ingest_source_as_evidence(
         additional_details=additional_details or description or "",
         ordinal=ordinal,
     )
+    # A freshly-upserted Material is born at the model default visibility=LISTED,
+    # and its post_save signal has already indexed it into public search. Ingest
+    # runs outside the API's on_commit recompute (e.g. management commands), so
+    # recompute NOW from the binding case's state — else a DRAFT case's evidence
+    # is momentarily (or lastingly) public. This is the ADR draft-leak guard on
+    # the ingest path. Best-effort: never let a visibility issue abort the ingest.
+    try:
+        from materials.visibility import recompute_material_visibility
+
+        recompute_material_visibility(material_iri)
+    except Exception:  # noqa: BLE001 - visibility is best-effort, never fatal
+        logger.warning(
+            "material-visibility recompute failed for %s", material_iri, exc_info=True
+        )
     return material_iri

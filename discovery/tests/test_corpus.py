@@ -80,6 +80,37 @@ class CorpusEnumeratorTests(TestCase):
         assert r.iri == "https://jawafdehi.org/material/nkp/2080-act-1"
         assert r.jsonld_url == "/api/materials/nkp/2080-act-1"
 
+    def test_nonlisted_materials_absent_from_iter_count_and_lastmod(self):
+        # A LISTED material is public; UNLISTED/PRIVATE/soft-deleted must be
+        # excluded from iter_resources, count_resources, AND max_lastmod (else a
+        # non-public material leaks into the sitemap / drives its lastmod).
+        from materials.models import Visibility
+
+        listed = _make_material()
+        private = Material.from_jsonld(
+            {
+                "@context": MATERIAL_CONTEXT,
+                "@type": "Legislation",
+                "@id": "https://jawafdehi.org/material/nkp/2080-act-2",
+                "name": {"ne": "गोप्य"},
+            },
+            material_type=MaterialType.LEGAL_CORPUS,
+        )
+        private.visibility = Visibility.PRIVATE
+        private.save()
+        # Force the private row to have the newest updated_at.
+        Material.objects.filter(pk=private.pk).update(
+            updated_at=datetime(2030, 1, 1, tzinfo=timezone.utc)
+        )
+
+        iris = {r.iri for r in corpus.iter_resources((corpus.TYPE_MATERIAL,))}
+        assert iris == {listed.iri}
+        assert corpus.count_resources((corpus.TYPE_MATERIAL,)) == 1
+        # lastmod must come from the LISTED row, not the newer PRIVATE one.
+        assert corpus.max_lastmod((corpus.TYPE_MATERIAL,)) != datetime(
+            2030, 1, 1, tzinfo=timezone.utc
+        )
+
     def test_courtcase_resource_shape(self):
         _make_courtcase()
         resources = list(corpus.iter_resources((corpus.TYPE_COURTCASE,)))

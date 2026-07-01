@@ -12,7 +12,7 @@ from cases.services.material_ingest import (
     ingest_source_as_evidence,
     upsert_source_material,
 )
-from materials.models import Material
+from materials.models import Material, Visibility
 
 
 def _case(slug="ingest-case"):
@@ -87,6 +87,27 @@ class TestBindAndIngest:
         case = _case()
         assert ingest_source_as_evidence(case, title="") is None
         assert case.material_references.count() == 0
+
+    def test_ingest_into_draft_case_does_not_leak_public(self):
+        # Regression: a Material is born LISTED; ingest must recompute from the
+        # DRAFT case's state so the evidence is not publicly searchable/crawlable.
+        case = _case("draft-leak", )
+        assert case.state == CaseState.DRAFT
+        iri = ingest_source_as_evidence(
+            case, title="Secret charge sheet", source_id="source:20240301:secret1"
+        )
+        mat = Material.objects.get(iri=iri)
+        assert mat.visibility == Visibility.PRIVATE
+
+    def test_ingest_into_published_case_is_listed(self):
+        case = _case("pub-ok")
+        case.state = CaseState.PUBLISHED
+        case.save()
+        iri = ingest_source_as_evidence(
+            case, title="Public charge sheet", source_id="source:20240301:public1"
+        )
+        mat = Material.objects.get(iri=iri)
+        assert mat.visibility == Visibility.LISTED
 
 
 @pytest.mark.django_db
