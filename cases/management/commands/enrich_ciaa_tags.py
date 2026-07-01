@@ -80,6 +80,12 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):  # noqa
+        raise NotImplementedError(
+            "This command creates/reads DocumentSource rows, which have been "
+            "removed (ADR: cases own no documents). It must be rewired to create "
+            "Material + CaseMaterialReference records before use. See "
+            "docs/jawafdehi/sources-to-materials-prod-migration.md."
+        )
         dry_run = options["dry_run"]
         case_id = options.get("case_id")
         priority = options["priority"]
@@ -162,13 +168,10 @@ class Command(BaseCommand):
             if dry_run:
                 from auditlog.registry import auditlog
 
-                from cases.models import DocumentSource
-
                 auditlog.unregister(Case)
-                auditlog.unregister(DocumentSource)
                 auditlog_disabled = True
                 logger.info(
-                    "Audit logging suppressed for dry-run (unregistered Case, DocumentSource)"
+                    "Audit logging suppressed for dry-run (unregistered Case)"
                 )
 
             enricher = TagEnricher(use_llm=use_llm, llm_client=llm_client)
@@ -178,7 +181,6 @@ class Command(BaseCommand):
         finally:
             if auditlog_disabled:
                 auditlog.register(Case)
-                auditlog.register(DocumentSource)
                 logger.debug("Audit logging re-registered")
 
         self._log_summary(stats, dry_run)

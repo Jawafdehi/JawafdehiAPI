@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-import ipaddress
-import itertools
 import json
 import logging
-import os
 import re
-import socket
-import tempfile
-import urllib.request
-from urllib.parse import urlparse
 
-from cases.models import Case, DocumentSource, SourceType
+from cases.models import Case
 
 logger = logging.getLogger(__name__)
+
+_DOCUMENTSOURCE_REMOVED_MSG = (
+    "This function reads DocumentSource rows, which have been removed "
+    "(ADR: cases own no documents). It must be rewired to read Material + "
+    "CaseMaterialReference records before use. See "
+    "docs/jawafdehi/sources-to-materials-prod-migration.md."
+)
 
 SECTOR_TAGS = [
     "Local Government",
@@ -740,70 +740,21 @@ def _collect_case_text(case: Case) -> str:
 
 
 def _collect_evidence_text(case: Case) -> str:  # noqa
-    """Build a search corpus from evidence entries and source document files.
+    """Neutralized: source-document evidence collection is removed.
 
-    Priority:
-    1. Document files referenced in the source's ``url`` (converted via MarkItDown)
-    2. DocumentSource title + description (metadata)
-    3. Evidence entry description
-
-    Filters to high-value source types (press releases, court orders) that
-    contain the richest information for CIAA cases.
+    This used to build a corpus from ``case.evidence`` DocumentSource rows and
+    their document files. DocumentSource and ``Case.evidence`` were removed
+    (ADR: cases own no documents), so there is no source text to collect. It
+    returns an empty string, which makes ``TagEnricher`` fall back to
+    metadata/rule-based classification. Rewire to Material +
+    CaseMaterialReference to restore source-document tagging. See
+    docs/jawafdehi/sources-to-materials-prod-migration.md.
     """
-    HIGH_VALUE_SOURCE_TYPES = (
-        SourceType.CIAA_PRESS_RELEASE,
-        SourceType.AG_ABHIYOG_PATRA,
-        SourceType.COURT_ORDER,
+    logger.info(
+        "  Source-document evidence collection is disabled "
+        "(DocumentSource/Case.evidence removed); using metadata/rules only"
     )
-
-    parts = []
-    if not case.evidence:
-        logger.info("  No evidence entries found")
-        return ""
-
-    source_ids = []
-    for entry in case.evidence:
-        if isinstance(entry, dict):
-            desc = entry.get("description", "")
-            if desc:
-                parts.append(desc)
-            sid = entry.get("source_id", "")
-            if sid:
-                source_ids.append(sid)
-
-    if not source_ids:
-        logger.info("  No source IDs in evidence entries")
-        return " ".join(parts)
-
-    try:
-        all_sources = DocumentSource.objects.filter(source_id__in=source_ids)
-        high_value = all_sources.filter(source_type__in=HIGH_VALUE_SOURCE_TYPES)
-        other = all_sources.exclude(source_type__in=HIGH_VALUE_SOURCE_TYPES)
-    except Exception as e:
-        logger.warning(f"  Failed to fetch DocumentSource records: {e}")
-        return " ".join(parts)
-
-    all_count = len(source_ids)
-    hv_count = high_value.count()
-    logger.info(f"  Found {hv_count}/{all_count} high-value sources")
-
-    sources = list(itertools.chain(high_value, other))
-
-    source_count = 0
-    for src in sources:
-        file_text = _convert_source_file(src)
-        if file_text:
-            parts.append(file_text)
-            source_count += 1
-        else:
-            if src.title:
-                parts.append(src.title)
-            if src.description:
-                parts.append(src.description)
-
-    result = " ".join(parts)
-    logger.info(f"  Extracted {len(result)} chars from {source_count} source documents")
-    return result
+    return ""
 
 
 try:
@@ -817,116 +768,15 @@ except ImportError:
 _DOCUMENT_EXTENSIONS = frozenset({".pdf", ".doc", ".docx", ".jpg", ".jpeg", ".png"})
 
 
-def _convert_source_file(src: DocumentSource) -> str:  # noqa
-    """Convert a DocumentSource's files to text using MarkItDown.
+def _convert_source_file(src) -> str:  # noqa
+    """Removed: this converted a DocumentSource's document files to text.
 
-    A source's links (including uploaded file links) all live in its ``url``
-    list, so conversion downloads the document URLs from there.
-
-    Returns file content as markdown text, or empty string if conversion fails.
+    DocumentSource was removed (ADR: cases own no documents), so there are no
+    source files to convert. Rewire to Material + CaseMaterialReference to
+    restore document conversion. See
+    docs/jawafdehi/sources-to-materials-prod-migration.md.
     """
-    if _MD_CONVERTER is None:
-        return ""
-
-    return _convert_urls(src)
-
-
-_MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024
-_REQUEST_TIMEOUT = 20
-
-
-def _is_public_hostname(hostname: str) -> bool:
-    """Resolve hostname and reject private/link-local addresses."""
-    try:
-        infos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
-    except socket.gaierror:
-        return False
-    for info in infos:
-        addr = ipaddress.ip_address(info[4][0])
-        if addr.is_private or addr.is_link_local or addr.is_loopback:
-            return False
-        if isinstance(addr, ipaddress.IPv6Address):
-            if addr.is_multicast or addr.ipv4_mapped:
-                mapped = addr.ipv4_mapped
-                if mapped and (
-                    mapped.is_private or mapped.is_link_local or mapped.is_loopback
-                ):
-                    return False
-    return True
-
-
-def _convert_urls(src: DocumentSource) -> str:  # noqa
-    """Download remote document URLs from src.url, convert via MarkItDown.
-
-    SSRF-safe: only http/https schemes, public hostnames, timeout + size limit.
-    """
-    doc_urls = []
-    for u in src.url_links:
-        parsed = urlparse(u)
-        if parsed.scheme not in ("http", "https"):
-            continue
-        ext = os.path.splitext(parsed.path.lower())[1]
-        if ext not in _DOCUMENT_EXTENSIONS:
-            continue
-        hostname = parsed.hostname
-        if not hostname or not _is_public_hostname(hostname):
-            continue
-        doc_urls.append(u)
-
-    if not doc_urls:
-        return ""
-
-    parts = []
-    saved_timeout = socket.getdefaulttimeout()
-    socket.setdefaulttimeout(max(_REQUEST_TIMEOUT, saved_timeout or 0))
-    try:
-        for url in doc_urls:
-            tmp_path = None
-            try:
-                suffix = os.path.splitext(urlparse(url).path.lower())[1] or ".tmp"
-                tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
-                tmp_path = tmp.name
-                tmp.close()
-
-                req = urllib.request.Request(
-                    url, headers={"User-Agent": "JawafdehiAPI/1.0"}
-                )
-                with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
-                    content_length = resp.headers.get("Content-Length")
-                    try:
-                        cl_val = int(content_length) if content_length else 0
-                    except (TypeError, ValueError):
-                        cl_val = 0
-                    if cl_val > _MAX_DOWNLOAD_BYTES:
-                        logger.debug(
-                            f"Skipping {url}: too large"
-                            f" ({cl_val} > {_MAX_DOWNLOAD_BYTES})"
-                        )
-                        continue
-                    data = resp.read(_MAX_DOWNLOAD_BYTES + 1)
-                    if len(data) > _MAX_DOWNLOAD_BYTES:
-                        logger.debug(f"Skipping {url}: >{_MAX_DOWNLOAD_BYTES} bytes")
-                        continue
-                    with open(tmp_path, "wb") as f:
-                        f.write(data)
-
-                doc_result = _MD_CONVERTER.convert(tmp_path)
-                if doc_result and doc_result.text_content:
-                    parts.append(doc_result.text_content)
-            except Exception as e:
-                logger.debug(f"URL download/conversion failed for {url}: {e}")
-            finally:
-                if tmp_path and os.path.exists(tmp_path):
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
-    finally:
-        socket.setdefaulttimeout(saved_timeout)
-
-    if parts:
-        return " ".join(parts)[:1200]
-    return ""
+    raise NotImplementedError(_DOCUMENTSOURCE_REMOVED_MSG)
 
 
 def _precompile_keyword_map(

@@ -17,7 +17,6 @@ from cases.models import (
     CaseEntityRelationship,
     CaseState,
     CaseType,
-    DocumentSource,
     RelationshipType,
 )
 from tests.conftest import (
@@ -826,65 +825,6 @@ class TestDjangoAdminWorkflows:
         assert "Caseworkers can only transition between DRAFT and IN_REVIEW" in str(
             form.errors["state"]
         ), "Contributor should NOT be able to transition to CLOSED"
-
-    def test_document_source_soft_deletion(self):
-        """
-        E2E Test: Verify DocumentSource soft deletion preserves data.
-
-        Workflow:
-        1. Create a document source
-        2. Mark it as deleted (is_deleted=True)
-        3. Verify source still exists in database
-        4. Verify source is marked as deleted
-
-        Validates: Requirements 4.2
-        """
-        # Step 1: Create a document source
-        source = DocumentSource(
-            title="Test Source", description="Test source description"
-        )
-        source.save()
-        source.related_entities = create_entities_from_ids(
-            ["https://jawafdehi.org/entity/person/test"]
-        )
-        source.save()
-
-        source_id = source.id
-        source_source_id = source.source_id
-
-        # Step 2: Mark it as deleted
-        source.is_deleted = True
-        source.save()
-
-        # Step 3: Verify source still exists in database
-        deleted_source = DocumentSource.objects.get(id=source_id)
-        assert (
-            deleted_source is not None
-        ), "Source should still exist in database after soft delete"
-
-        # Step 4: Verify source is marked as deleted
-        assert deleted_source.is_deleted is True, "Source should be marked as deleted"
-        assert deleted_source.title == "Test Source", "Source data should be preserved"
-        assert (
-            deleted_source.source_id == source_source_id
-        ), "Source ID should be preserved"
-
-        # Verify we can query all sources including deleted ones
-        all_sources = DocumentSource.objects.all()
-        assert (
-            deleted_source in all_sources
-        ), "Deleted source should be queryable with all()"
-
-        # Verify filtering by is_deleted works
-        deleted_sources = DocumentSource.objects.filter(is_deleted=True)
-        assert (
-            deleted_source in deleted_sources
-        ), "Should be able to filter for deleted sources"
-
-        active_sources = DocumentSource.objects.filter(is_deleted=False)
-        assert (
-            deleted_source not in active_sources
-        ), "Deleted source should not appear in active sources filter"
 
     def test_contributor_login_create_minimal_case_and_view_workflow(self):
         """

@@ -22,7 +22,6 @@ Usage::
 
 import logging
 import os
-import re
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -37,9 +36,8 @@ from cases.management.commands._enrich_utils import (
     convert_to_markdown,
     is_valid_iso_date,
     parse_extraction_response,
-    resolve_api_key,
 )
-from cases.models import Case, DocumentSource, SourceType
+from cases.models import Case
 from cases.services.ngm_court_records import get_court_case_details
 from cases.services.priority_case_loader import filter_by_priority, load_priority_cases
 
@@ -201,95 +199,12 @@ class Command(BaseCommand):
         return self._http_session
 
     def handle(self, *args, **options):
-        dry_run = options["dry_run"]
-        case_id = options.get("case_id")
-        limit = options.get("limit")
-
-        if limit is not None:
-            try:
-                limit_int = int(limit)
-            except (ValueError, TypeError):
-                raise CommandError(
-                    f"Invalid --limit value: {limit}. Must be a positive integer."
-                )
-            if limit_int <= 0:
-                raise CommandError(
-                    f"Invalid --limit: {limit_int}. Must be a positive integer."
-                )
-            limit = limit_int
-        llm_model = options["llm_model"]
-        llm_base_url = options["llm_base_url"]
-        llm_api_key = options.get("llm_api_key")
-        force = options.get("force")
-        fiscal_year = options.get("fiscal_year")
-        priority = options.get("priority")
-        verbose = options.get("verbose")
-
-        if priority and case_id:
-            raise CommandError("--priority and --case-id are mutually exclusive")
-
-        if verbose:
-            logger.setLevel(logging.DEBUG)
-
-        if not logger.handlers:
-            handler = logging.StreamHandler(self.stdout)
-            handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
-            logger.addHandler(handler)
-            logger.propagate = False
-
-        if dry_run:
-            self.stdout.write(self.style.WARNING("[DRY RUN] No changes will be saved."))
-
-        api_key = resolve_api_key(llm_api_key)
-        if not dry_run and not api_key:
-            raise CommandError(
-                "No LLM API key provided. Set JAWAFDEHI_LLM_API_KEY or "
-                "ANTHROPIC_API_KEY environment variable, or use --llm-api-key."
-            )
-
-        if fiscal_year and not re.match(r"^\d{2,3}$", fiscal_year):
-            raise CommandError(
-                f"Invalid fiscal year: {fiscal_year}. "
-                "Use 2- or 3-digit format, e.g., '80' or '080'."
-            )
-
-        cases = self._get_ciaa_cases(
-            case_id=case_id,
-            limit=limit,
-            force=force,
-            fiscal_year=fiscal_year,
-            priority=priority,
+        raise NotImplementedError(
+            "This command creates/reads DocumentSource rows, which have been "
+            "removed (ADR: cases own no documents). It must be rewired to create "
+            "Material + CaseMaterialReference records before use. See "
+            "docs/jawafdehi/sources-to-materials-prod-migration.md."
         )
-        total = len(cases)
-
-        self.stdout.write(
-            f"Found {total} CIAA draft cases to process. Model: {llm_model}"
-        )
-        if force:
-            self.stdout.write(
-                self.style.WARNING("  --force: re-generating even for populated cases")
-            )
-        if fiscal_year:
-            self.stdout.write(f"  Fiscal year filter: {fiscal_year}")
-        if priority:
-            priority_list = load_priority_cases()
-            self.stdout.write(f"  Priority mode: {len(priority_list)} cases")
-
-        session = self._get_session()
-        for idx, case in enumerate(cases, 1):
-            self._process_case(
-                case=case,
-                idx=idx,
-                total=total,
-                dry_run=dry_run,
-                llm_model=llm_model,
-                llm_base_url=llm_base_url,
-                llm_api_key=api_key,
-                session=session,
-                force=force,
-            )
-
-        self._print_summary(dry_run)
 
     # ── helpers ──────────────────────────────────────────────────────────
 
@@ -451,71 +366,6 @@ class Command(BaseCommand):
                 self.stdout.write(self.style.ERROR(f"  Failed to save timeline: {exc}"))
 
     # ── source acquisition with tiered fallback ──────────────────────────
-
-    def _get_source_content(
-        self, case: Case, session: requests.Session
-    ) -> Optional[str]:
-        """Acquire source document text for timeline extraction.
-
-        Priority order:
-        1. AG_ABHIYOG_PATRA description (already extracted) — use if len > 200
-        2. AG_ABHIYOG_PATRA URLs — download + likhit/markitdown convert
-        3. COURT_ORDER URLs — supplement with court order data
-        4. CIAA_PRESS_RELEASE description/URLs — use if available
-        """
-        if not case.evidence:
-            logger.debug("  No evidence entries on case")
-            return None
-
-        source_ids = [
-            entry["source_id"]
-            for entry in case.evidence
-            if isinstance(entry, dict) and entry.get("source_id")
-        ]
-        if not source_ids:
-            logger.debug("  No source_ids in evidence")
-            return None
-
-        sources = list(
-            DocumentSource.objects.filter(
-                source_id__in=source_ids, is_deleted=False
-            ).only("source_id", "description", "title", "url", "source_type")
-        )
-        if not sources:
-            logger.debug("  No DocumentSource records found")
-            return None
-
-        source_by_id = {s.source_id: s for s in sources}
-
-        content_parts = []
-
-        self._append_source_content(
-            source_ids,
-            source_by_id,
-            SourceType.AG_ABHIYOG_PATRA,
-            content_parts,
-            session,
-        )
-        self._append_source_content(
-            source_ids,
-            source_by_id,
-            SourceType.COURT_ORDER,
-            content_parts,
-            session,
-        )
-        self._append_source_content(
-            source_ids,
-            source_by_id,
-            SourceType.CIAA_PRESS_RELEASE,
-            content_parts,
-            session,
-        )
-
-        if not content_parts:
-            logger.debug("  No usable content from any source type")
-            return None
-
-        return "\n\n---\n\n".join(content_parts)
 
     def _append_source_content(
         self,

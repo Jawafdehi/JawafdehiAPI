@@ -37,9 +37,14 @@ def _clamp(n):
 def _source_titles(case):
     out = []
     for ev in case.get("evidence", []) or []:
-        src = ev.get("source") or {}
+        # Resolved material dict (display_name + material_type) replaces the old
+        # nested source dict (title + source_type). ADR: cases own no documents.
+        mat = ev.get("material") or {}
         out.append(
-            ((src.get("title") or "").lower(), (src.get("source_type") or "").upper())
+            (
+                (mat.get("display_name") or "").lower(),
+                (mat.get("material_type") or "").upper(),
+            )
         )
     return out
 
@@ -167,21 +172,33 @@ def structural_completeness(case):
     return _clamp(pts), issues
 
 
+# Authoritative material types — the NGM equivalents of the old
+# OFFICIAL_GOVERNMENT / LEGAL_* "strong" source types (ADR: cases own no
+# documents). A case with at least one of these has an authoritative source.
+_STRONG_MATERIAL_TYPES = {
+    "CHARGE_SHEET",
+    "COURT_ORDER",
+    "OFFICIAL_REPORT",
+    "LEGAL_CORPUS",
+}
+
+
 def sourcing(case):
     evidence = case.get("evidence") or []
     n = len(evidence)
     with_url = 0
     types = set()
     for ev in evidence:
-        src = ev.get("source") or {}
-        if src.get("url"):
+        mat = ev.get("material") or {}
+        if mat.get("urls"):
             with_url += 1
-        if src.get("source_type"):
-            types.add(src["source_type"])
+        mtype = mat.get("material_type")
+        if mtype:
+            types.add(mtype.upper())
     pts = 0
     pts += min(n / GOLD_SOURCES, 1.0) * 40
     pts += (with_url / n if n else 0) * 30
-    strong = {t for t in types if t.startswith("OFFICIAL") or t.startswith("LEGAL")}
+    strong = types & _STRONG_MATERIAL_TYPES
     pts += min(len(types) / 3.0, 1.0) * 15
     pts += 15 if strong else 0
     issues = []
@@ -190,7 +207,10 @@ def sourcing(case):
     if n and with_url < n:
         issues.append(f"{n - with_url} of {n} sources lack a resolvable URL.")
     if not strong:
-        issues.append("No OFFICIAL_GOVERNMENT or LEGAL_* source type present.")
+        issues.append(
+            "No authoritative material (charge sheet / court order / official "
+            "report / legal corpus) present."
+        )
     return _clamp(pts), issues
 
 

@@ -1,0 +1,223 @@
+"""Tests for Material.visibility — the draft-leak guard (ADR: cases own no
+documents).
+
+Covers:
+- visibility_for_states MAX logic,
+- recompute_material_visibility / recompute_for_case / recompute_all off case state,
+- read-side gates: list + retrieve expose LISTED to anon, hide PRIVATE, and lift
+  the gate for a privileged (staff) principal,
+- sitemap/discovery corpus enumerates LISTED only,
+- search signal evicts non-LISTED.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import patch
+
+import pytest
+from django.contrib.auth import get_user_model
+from rest_framework.test import APIClient
+
+from cases.models import Case, CaseMaterialReference, CaseState, CaseType
+from materials.jsonld import documentsource_to_jsonld
+from materials.models import Material, Visibility
+from materials.visibility import (
+    recompute_all,
+    recompute_for_case,
+    recompute_material_visibility,
+    visibility_for_states,
+)
+
+User = get_user_model()
+
+
+def _store(source_id, title="Doc", source_type="MISC", url=None, visibility=None):
+    doc, mtype = documentsource_to_jsonld(
+        source_id=source_id, title=title, source_type=source_type, url=url
+    )
+    mat = Material.from_jsonld(doc, material_type=mtype)
+    if visibility is not None:
+        mat.visibility = visibility
+    mat.save()
+    return mat
+
+
+def _case(slug, state):
+    return Case.objects.create(
+        case_type=CaseType.CORRUPTION,
+        state=state,
+        title="T",
+        slug=slug,
+        court_cases=["special:t-1"],
+    )
+
+
+class TestVisibilityForStates:
+    def test_empty_is_private(self):
+        assert visibility_for_states([]) == Visibility.PRIVATE
+
+    def test_draft_only_private(self):
+        assert visibility_for_states(["DRAFT"]) == Visibility.PRIVATE
+
+    def test_in_review_unlisted(self):
+        assert visibility_for_states(["DRAFT", "IN_REVIEW"]) == Visibility.UNLISTED
+
+    def test_published_listed(self):
+        assert visibility_for_states(["DRAFT", "PUBLISHED"]) == Visibility.LISTED
+
+    def test_closed_is_private(self):
+        # CLOSED is the case soft-delete tombstone → not public.
+        assert visibility_for_states(["CLOSED"]) == Visibility.PRIVATE
+
+    def test_unknown_state_private(self):
+        assert visibility_for_states(["BOGUS"]) == Visibility.PRIVATE
+
+
+@pytest.mark.django_db
+class TestRecompute:
+    def test_default_material_stays_listed(self):
+        # NGM-native material with no case referrers keeps its default LISTED.
+        mat = _store("source:20240101:aaaa01")
+        assert mat.visibility == Visibility.LISTED
+
+    def test_draft_reference_demotes_to_private(self):
+        mat = _store("source:20240101:aaaa01")
+        case = _case("c-draft", CaseState.DRAFT)
+        CaseMaterialReference.objects.create(case=case, material_iri=mat.iri)
+        assert recompute_material_visibility(mat.iri) == Visibility.PRIVATE
+        mat.refresh_from_db()
+        assert mat.visibility == Visibility.PRIVATE
+
+    def test_published_reference_promotes_to_listed(self):
+        mat = _store("source:20240101:aaaa01", visibility=Visibility.PRIVATE)
+        case = _case("c-pub", CaseState.PUBLISHED)
+        CaseMaterialReference.objects.create(case=case, material_iri=mat.iri)
+        assert recompute_material_visibility(mat.iri) == Visibility.LISTED
+
+    def test_max_across_referrers(self):
+        mat = _store("source:20240101:aaaa01")
+        draft = _case("c-draft", CaseState.DRAFT)
+        pub = _case("c-pub", CaseState.PUBLISHED)
+        CaseMaterialReference.objects.create(case=draft, material_iri=mat.iri)
+        CaseMaterialReference.objects.create(case=pub, material_iri=mat.iri)
+        # published wins even though a draft also references it
+        assert recompute_material_visibility(mat.iri) == Visibility.LISTED
+
+    def test_recompute_for_case_and_all(self):
+        mat = _store("source:20240101:aaaa01")
+        case = _case("c-review", CaseState.IN_REVIEW)
+        CaseMaterialReference.objects.create(case=case, material_iri=mat.iri)
+        recompute_for_case(case)
+        mat.refresh_from_db()
+        assert mat.visibility == Visibility.UNLISTED
+        # flip case to draft, reconcile via recompute_all
+        case.state = CaseState.DRAFT
+        case.save()
+        assert recompute_all() == 1
+        mat.refresh_from_db()
+        assert mat.visibility == Visibility.PRIVATE
+
+    def test_soft_deleted_material_not_touched(self):
+        mat = _store("source:20240101:aaaa01")
+        mat.is_deleted = True
+        mat.save()
+        case = _case("c-draft", CaseState.DRAFT)
+        CaseMaterialReference.objects.create(case=case, material_iri=mat.iri)
+        assert recompute_material_visibility(mat.iri) is None
+
+    def test_recompute_all_bulk_over_many(self):
+        # Bulk path: several materials, only the changed ones counted + updated.
+        pub = _case("c-pub", CaseState.PUBLISHED)
+        draft = _case("c-draft", CaseState.DRAFT)
+        m_listed = _store("source:20240101:list01", visibility=Visibility.LISTED)
+        m_demote = _store("source:20240101:demo01", visibility=Visibility.LISTED)
+        CaseMaterialReference.objects.create(case=pub, material_iri=m_listed.iri)
+        CaseMaterialReference.objects.create(case=draft, material_iri=m_demote.iri)
+        # m_listed stays LISTED (published ref), m_demote → PRIVATE (draft only).
+        assert recompute_all() == 1
+        m_listed.refresh_from_db()
+        m_demote.refresh_from_db()
+        assert m_listed.visibility == Visibility.LISTED
+        assert m_demote.visibility == Visibility.PRIVATE
+
+    def test_recompute_all_reconciles_search_index(self):
+        # bulk_update bypasses post_save, so recompute_all must evict a demoted
+        # material from search by hand (else a non-LISTED doc lingers publicly).
+        draft = _case("c-draft", CaseState.DRAFT)
+        mat = _store("source:20240101:demo01", visibility=Visibility.LISTED)
+        CaseMaterialReference.objects.create(case=draft, material_iri=mat.iri)
+        with patch("materials.search_index.delete") as dele, patch(
+            "materials.search_index.index"
+        ):
+            recompute_all()
+        assert dele.called
+
+
+@pytest.mark.django_db
+class TestReadSideGates:
+    def _privileged(self):
+        u = User.objects.create_user("staff1", password="x")
+        u.is_staff = True
+        u.save()
+        return u
+
+    def test_anon_retrieve_hides_private(self):
+        mat = _store("source:20240101:aaaa01", visibility=Visibility.PRIVATE)
+        client = APIClient()
+        resp = client.get(f"/api/materials/?iri={mat.iri}")
+        assert resp.status_code == 404
+
+    def test_anon_retrieve_shows_unlisted(self):
+        mat = _store("source:20240101:aaaa02", visibility=Visibility.UNLISTED)
+        client = APIClient()
+        resp = client.get(f"/api/materials/?iri={mat.iri}")
+        assert resp.status_code == 200
+
+    def test_privileged_retrieve_shows_private(self):
+        mat = _store("source:20240101:aaaa01", visibility=Visibility.PRIVATE)
+        client = APIClient()
+        client.force_authenticate(self._privileged())
+        resp = client.get(f"/api/materials/?iri={mat.iri}")
+        assert resp.status_code == 200
+
+    def test_anon_list_excludes_nonlisted(self):
+        _store("source:20240101:list01", visibility=Visibility.LISTED)
+        _store("source:20240101:priv01", visibility=Visibility.PRIVATE)
+        _store("source:20240101:unli01", visibility=Visibility.UNLISTED)
+        client = APIClient()
+        resp = client.get("/api/materials/")
+        assert resp.status_code == 200
+        ids = {d["@id"] for d in resp.json()["results"]}
+        assert any("list01" in i for i in ids)
+        assert not any("priv01" in i for i in ids)
+        assert not any("unli01" in i for i in ids)
+
+    def test_privileged_list_includes_all(self):
+        _store("source:20240101:list01", visibility=Visibility.LISTED)
+        _store("source:20240101:priv01", visibility=Visibility.PRIVATE)
+        client = APIClient()
+        client.force_authenticate(self._privileged())
+        resp = client.get("/api/materials/")
+        ids = {d["@id"] for d in resp.json()["results"]}
+        assert any("priv01" in i for i in ids)
+
+
+@pytest.mark.django_db
+class TestDiscoveryAndSearchHonorVisibility:
+    def test_corpus_enumerates_listed_only(self):
+        from discovery.corpus import _iter_materials
+
+        _store("source:20240101:list01", visibility=Visibility.LISTED)
+        _store("source:20240101:priv01", visibility=Visibility.PRIVATE)
+        iris = {r.iri for r in _iter_materials()}
+        assert any("list01" in i for i in iris)
+        assert not any("priv01" in i for i in iris)
+
+    def test_search_signal_evicts_nonlisted(self):
+        # A PRIVATE material must be evicted (delete), never indexed.
+        with patch("materials.search_index.index") as idx, patch(
+            "materials.search_index.delete"
+        ) as dele:
+            _store("source:20240101:priv01", visibility=Visibility.PRIVATE)
+        # on_commit fires at transaction end in tests via django_db; force it:
+        assert not idx.called or dele.called

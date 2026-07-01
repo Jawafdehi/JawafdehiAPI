@@ -14,9 +14,6 @@ from .predicates import (
     is_case_contributor as is_case_contributor,
 )
 from .predicates import (
-    is_case_contributor_for_source as is_case_contributor_for_source,
-)
-from .predicates import (
     is_caseworker as is_caseworker,
 )
 from .predicates import (
@@ -27,7 +24,4 @@ from .predicates import (
 )
 from .predicates import (
     is_readonly as is_readonly,
-)
-from .predicates import (
-    is_source_contributor as is_source_contributor,
 )

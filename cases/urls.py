@@ -9,7 +9,6 @@ from rest_framework.routers import DefaultRouter
 
 from .api_views import (
     CaseViewSet,
-    DocumentSourceViewSet,
     FeedbackView,
     OEmbedView,
     StatisticsView,
@@ -23,7 +22,6 @@ from .api_views import (
 # JawafEntity-backed entities endpoint was removed with the JawafEntity model.
 router = DefaultRouter()
 router.register(r"cases", CaseViewSet, basename="case")
-router.register(r"sources", DocumentSourceViewSet, basename="documentsource")
 
 urlpatterns = [
     # NOTE: ``search/`` is no longer mounted here. The platform-wide unified

@@ -24,7 +24,7 @@ from drf_spectacular.utils import (
     extend_schema,
     extend_schema_view,
 )
-from rest_framework import filters, mixins, status, viewsets
+from rest_framework import filters, status, viewsets
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny, DjangoModelPermissions, IsAuthenticated
 from rest_framework.renderers import JSONRenderer
@@ -53,8 +53,8 @@ from .caseworker_serializers import (
 from .models import (
     Case,
     CaseEntityRelationship,
+    CaseMaterialReference,
     CaseState,
-    DocumentSource,
     RelationshipType,
 )
 from .rules.predicates import (
@@ -68,11 +68,40 @@ from .rules.predicates import (
 from .serializers import (
     CaseDetailSerializer,
     CaseSerializer,
-    DocumentSourceSerializer,
     FeedbackSerializer,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _recompute_material_visibility(material_iris) -> None:
+    """Schedule a visibility recompute for the given material IRIs (on commit).
+
+    A material's visibility is the MAX over its referring cases' states (ADR:
+    cases own no documents), so whenever a case's evidence set OR state changes,
+    every affected material — including ones just REMOVED from the case — must be
+    recomputed, else a draft/closed case could leave evidence stale-LISTED (a
+    leak) or a published case's evidence stuck PRIVATE. Best-effort: the materials
+    app is cross-DB, so a failure here must never break the case write.
+    """
+    iris = [iri for iri in dict.fromkeys(material_iris) if iri]
+    if not iris:
+        return
+
+    def _run():
+        try:
+            from materials.visibility import recompute_material_visibility
+
+            for iri in iris:
+                recompute_material_visibility(iri)
+        except Exception:  # noqa: BLE001 - visibility is best-effort, never fatal
+            logger.warning(
+                "material-visibility recompute failed for %d material(s)",
+                len(iris),
+                exc_info=True,
+            )
+
+    transaction.on_commit(_run)
 
 
 # NOTE: the former Jawafdehi-scoped ``UnifiedSearchView`` (an in-process ORM
@@ -370,7 +399,37 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
                     relationship_type=RelationshipType.RELATED,
                 )
 
+            # Create evidence binds (NGM material ids) — the CaseMaterialReference
+            # join. Ordinal preserves the submitted order (ADR: cases own no docs).
+            self._write_material_references(
+                case, serializer.validated_data.get("evidence", [])
+            )
+
+        # Newly-created evidence may reference materials whose visibility now
+        # depends on this case's state — recompute (best-effort, on_commit).
+        _recompute_material_visibility(
+            case.material_references.values_list("material_iri", flat=True)
+        )
+
         return Response(CaseSerializer(case).data, status=status.HTTP_201_CREATED)
+
+    @staticmethod
+    def _write_material_references(case, evidence_items):
+        """Replace a case's CaseMaterialReference rows from validated evidence.
+
+        ``evidence_items`` is a list of ``{material_iri, additional_details}``
+        (order = display order). Existing rows are deleted and recreated so the
+        set + ordering match the submitted evidence exactly (mirrors the
+        entity-relationship rewrite).
+        """
+        case.material_references.all().delete()
+        for ordinal, item in enumerate(evidence_items):
+            CaseMaterialReference.objects.create(
+                case=case,
+                material_iri=item["material_iri"],
+                additional_details=item.get("additional_details") or "",
+                ordinal=ordinal,
+            )
 
     def retrieve(self, request, *args, **kwargs):
         """
@@ -505,6 +564,18 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
             for op in patch_ops
         )
 
+        # Gate the evidence (material-reference) rewrite to actual /evidence ops,
+        # for the same reason as entities: the snapshot always carries "evidence",
+        # so writing unconditionally would wipe references on every scalar PATCH.
+        evidence_touched = any(
+            isinstance(op, dict)
+            and (
+                op.get("path") == "/evidence"
+                or op.get("path", "").startswith("/evidence/")
+            )
+            for op in patch_ops
+        )
+
         # Fields that map directly to Case model columns (updated via bulk UPDATE)
         scalar_fields = frozenset(
             [
@@ -518,7 +589,11 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
                 "tags",
                 "key_allegations",
                 "timeline",
-                "evidence",
+                # NOTE: "evidence" is intentionally NOT a scalar field. It is no
+                # longer a Case column (it's the CaseMaterialReference join), so it
+                # must never be written via Case.objects.update(). It is persisted
+                # separately below via _write_material_references when a /evidence
+                # patch op is present (evidence_touched).
                 "slug",
                 "court_cases",
                 "missing_details",
@@ -548,6 +623,20 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
                         relationship_type=item["relationship_type"],
                         notes=item.get("notes") or "",
                     )
+
+            # Persist evidence (material-reference) changes only when a /evidence
+            # op was explicitly included. Capture the pre-rewrite IRIs so removed
+            # materials are recomputed too (a material dropped from a published
+            # case must be re-evaluated, else it stays LISTED via a stale referrer).
+            affected_material_iris: set[str] = set()
+            if evidence_touched:
+                affected_material_iris.update(
+                    case.material_references.values_list("material_iri", flat=True)
+                )
+                self._write_material_references(case, validated.get("evidence", []))
+                affected_material_iris.update(
+                    case.material_references.values_list("material_iri", flat=True)
+                )
 
             case.refresh_from_db()
 
@@ -579,6 +668,17 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
 
         transaction.on_commit(lambda: _index_case(case))
 
+        # A state transition OR an evidence-set change alters the visibility of
+        # the referenced materials (visibility = MAX over referring case states).
+        # Recompute the union of currently-referenced + just-removed materials so
+        # a demoted case can't leave stale-LISTED evidence behind (ADR draft-leak
+        # guard). Skipped only on pure scalar/entity PATCHes.
+        if evidence_touched or (target_state is not None):
+            affected_material_iris.update(
+                case.material_references.values_list("material_iri", flat=True)
+            )
+            _recompute_material_visibility(affected_material_iris)
+
         return Response(CaseSerializer(case).data, status=status.HTTP_200_OK)
 
     def destroy(self, request, *args, **kwargs):
@@ -604,10 +704,20 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
                 {"detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN
             )
 
+        # Capture the referenced materials BEFORE the soft-delete so their
+        # visibility is recomputed after: a CLOSED (soft-deleted) case must not
+        # keep its evidence publicly LISTED (ADR draft-leak guard).
+        referenced_iris = list(
+            case.material_references.values_list("material_iri", flat=True)
+        )
+
         # Case.delete() is overridden to soft-delete (state -> CLOSED + versionInfo
         # audit entry); it never hard-removes the row. The post-transition CLOSED
         # state is evicted from the search index by the case save signal.
         case.delete()
+
+        _recompute_material_visibility(referenced_iris)
+
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     def _build_snapshot(self, case: Case) -> dict:
@@ -629,7 +739,18 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
                 list(case.key_allegations) if case.key_allegations else []
             ),
             "timeline": list(case.timeline) if case.timeline else [],
-            "evidence": list(case.evidence) if case.evidence else [],
+            # Evidence is now the CaseMaterialReference join (case.material_references),
+            # not a JSON blob on Case. It is read-only in the patch snapshot for now;
+            # material-reference writes move to a dedicated CaseMaterialReference path
+            # in a follow-up.
+            "evidence": [
+                {
+                    "material_iri": ref.material_iri,
+                    "additional_details": ref.additional_details or "",
+                    "ordinal": ref.ordinal,
+                }
+                for ref in case.material_references.all()
+            ],
             "entities": [
                 {
                     "nes_id": rel.nes_id,
@@ -643,212 +764,6 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
             "missing_details": case.missing_details,
             "bigo": case.bigo,
         }
-
-
-@extend_schema_view(
-    list=extend_schema(
-        summary="List document sources",
-        description="""
-        Retrieve a paginated list of document sources.
-
-        Sources associated with published or in-review cases are accessible to
-        all callers. Users in the org-wide ReadOnly role get a system-wide read:
-        every non-deleted source, including those referenced only by DRAFT cases
-        or not referenced by any case. Soft-deleted sources (is_deleted=True) are
-        always excluded.
-
-        **Pagination:**
-        - Results are paginated with 20 items per page
-        - Use `page` parameter to navigate pages
-        """,
-        parameters=[
-            OpenApiParameter(
-                name="page",
-                type=OpenApiTypes.INT,
-                location=OpenApiParameter.QUERY,
-                description="Page number for pagination",
-                required=False,
-            ),
-        ],
-        tags=["sources"],
-    ),
-    retrieve=extend_schema(
-        summary="Retrieve a document source",
-        description="""
-        Retrieve detailed information about a specific document source.
-
-        The endpoint accepts either the database id (numeric) or the source_id
-        (e.g., 'source:20240115:abc123').
-
-        Only sources associated with at least one published or in-review case are accessible.
-        """,
-        tags=["sources"],
-    ),
-    create=extend_schema(
-        summary="Create a new document source",
-        description="""
-        Create a new document source with an optional file upload.
-
-        Requires authentication and the `cases.add_documentsource` permission.
-        Accepts multipart form data.
-        """,
-        tags=["sources"],
-    ),
-)
-class DocumentSourceViewSet(
-    mixins.ListModelMixin,
-    mixins.RetrieveModelMixin,
-    mixins.CreateModelMixin,
-    mixins.UpdateModelMixin,
-    viewsets.GenericViewSet,
-):
-    """
-    Public API for DocumentSources.
-
-    Provides:
-    - List endpoint: GET /api/sources/
-    - Retrieve endpoint: GET /api/sources/{id_or_source_id}/
-    - Create endpoint: POST /api/sources/
-    - Update endpoint: PATCH/PUT /api/sources/{id_or_source_id}/
-
-    The retrieve/update endpoints accept either the database id or the source_id.
-    Sources tied to published or in-review cases are accessible to all callers;
-    the org-wide ReadOnly role additionally reads every non-deleted source.
-    Create requires cases.add_documentsource; update requires
-    cases.change_documentsource (enforced via DjangoModelPermissions).
-    """
-
-    parser_classes = [MultiPartParser, FormParser, JSONParser]
-    lookup_field = "pk"
-
-    def get_permissions(self):
-        # Writes require the matching Django model permission (DjangoModelPermissions
-        # maps POST->add_documentsource, PUT/PATCH->change_documentsource) on top of
-        # authentication. This keeps the org-wide ReadOnly role (view-only perms) and
-        # plain authenticated users without source perms out of the write paths.
-        if self.action in ("create", "partial_update", "update", "destroy"):
-            return [IsAuthenticated(), DjangoModelPermissions()]
-        return super().get_permissions()
-
-    def get_serializer_class(self):
-        if self.action == "create":
-            from .serializers import DocumentSourceCreateSerializer
-
-            return DocumentSourceCreateSerializer
-        if self.action in ("partial_update", "update"):
-            from .serializers import DocumentSourceUpdateSerializer
-
-            return DocumentSourceUpdateSerializer
-        return DocumentSourceSerializer
-
-    def update(self, request, *args, **kwargs):
-        kwargs["partial"] = True  # treat PUT as PATCH (partial updates only)
-        partial = kwargs.pop("partial", True)
-        instance = self.get_object()
-        serializer = self.get_serializer(instance, data=request.data, partial=partial)
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
-        read_serializer = DocumentSourceSerializer(
-            instance, context=self.get_serializer_context()
-        )
-        return Response(read_serializer.data)
-
-    def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        self.perform_create(serializer)
-
-        # Return response using the read serializer
-        read_serializer = DocumentSourceSerializer(
-            serializer.instance, context=self.get_serializer_context()
-        )
-        return Response(read_serializer.data, status=status.HTTP_201_CREATED)
-
-    def destroy(self, request, *args, **kwargs):
-        """
-        DELETE /api/sources/{id_or_source_id}/
-
-        Soft-delete a document source by setting ``is_deleted=True`` (the model
-        already carries this flag + an admin soft-delete action). The row is
-        preserved for audit history and excluded from all reads. Returns 204.
-        Requires the cases.delete_documentsource permission (get_permissions()).
-        """
-        instance = self.get_object()
-        instance.is_deleted = True
-        instance.save(update_fields=["is_deleted", "updated_at"])
-        return Response(status=status.HTTP_204_NO_CONTENT)
-
-    def get_queryset(self):
-        """
-        Return only sources referenced in evidence of published or in-review cases.
-
-        A source is accessible if it's referenced in the evidence field
-        of at least one published or in-review case.
-        """
-        # On create, DjangoModelPermissions calls get_queryset() solely to derive
-        # the model for the permission check. Short-circuit so the expensive
-        # visibility scan (every published/in-review case + JSON evidence parse)
-        # does not run on the POST hot path. .none() still carries .model.
-        # (update/partial_update legitimately need the real queryset via
-        # get_object(), so they fall through.)
-        if self.action == "create":
-            return DocumentSource.objects.none()
-
-        # DELETE addresses any non-deleted source (the delete_documentsource model
-        # permission is the gate); get_object() resolves it by id or source_id.
-        if self.action == "destroy":
-            return DocumentSource.objects.filter(is_deleted=False).distinct()
-
-        # The org-wide ReadOnly role gets a system-wide read: all non-deleted
-        # sources, including those referenced only by DRAFT cases (or by no case
-        # at all). Other callers keep the public contract below.
-        user = self.request.user
-        if user and user.is_authenticated and is_readonly(user):
-            return DocumentSource.objects.filter(is_deleted=False).distinct()
-
-        allowed_states = [CaseState.PUBLISHED, CaseState.IN_REVIEW]
-        visible_cases = Case.objects.filter(state__in=allowed_states)
-
-        # Extract all source_ids from evidence fields
-        source_ids = set()
-        for case in visible_cases:
-            if case.evidence:
-                for evidence_item in case.evidence:
-                    if isinstance(evidence_item, dict) and "source_id" in evidence_item:
-                        source_ids.add(evidence_item["source_id"])
-
-        # Return sources that are referenced and not soft-deleted
-        return DocumentSource.objects.filter(
-            source_id__in=source_ids, is_deleted=False
-        ).distinct()
-
-    def get_object(self):
-        """
-        Override to support lookup by either id or source_id.
-
-        Tries to lookup by id first (if numeric), then falls back to source_id.
-        """
-        queryset = self.filter_queryset(self.get_queryset())
-        lookup_value = self.kwargs.get(self.lookup_field)
-
-        # Try to lookup by id if the value is numeric
-        if lookup_value.isdigit():
-            try:
-                obj = queryset.get(id=int(lookup_value))
-                self.check_object_permissions(self.request, obj)
-                return obj
-            except DocumentSource.DoesNotExist:
-                pass
-
-        # Fall back to lookup by source_id
-        try:
-            obj = queryset.get(source_id=lookup_value)
-            self.check_object_permissions(self.request, obj)
-            return obj
-        except DocumentSource.DoesNotExist:
-            from rest_framework.exceptions import NotFound
-
-            raise NotFound(f"Source with id or source_id '{lookup_value}' not found.")
 
 
 def _pct(part: int, whole: int) -> float:

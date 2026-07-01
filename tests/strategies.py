@@ -181,41 +181,6 @@ def timeline_list(draw, min_size=0, max_size=5):
 
 
 # ============================================================================
-# Evidence Strategies
-# ============================================================================
-
-
-@st.composite
-def evidence_entry(draw, source_ids=None):
-    """Generate a valid evidence entry."""
-    if source_ids:
-        source_id = draw(st.sampled_from(source_ids))
-    else:
-        source_id = f"source:{draw(st.text(min_size=5, max_size=20))}"
-
-    description = draw(
-        st.text(min_size=1, max_size=500)
-        .map(filter_problematic_chars)
-        .filter(lambda x: x and x.strip())
-    )
-
-    return {
-        "source_id": source_id,
-        "description": description,
-    }
-
-
-@st.composite
-def evidence_list(draw, min_size=0, max_size=5):
-    """Generate a list of evidence entries."""
-    # Generate some source IDs first
-    source_ids = [f"source:2024{i:04d}:abc{i}" for i in range(1, 6)]
-    return draw(
-        st.lists(evidence_entry(source_ids), min_size=min_size, max_size=max_size)
-    )
-
-
-# ============================================================================
 # Case Data Strategies
 # ============================================================================
 
@@ -305,100 +270,7 @@ def complete_case_data_with_timeline(draw):
         "description": description,
         "tags": draw(tag_list(min_size=0, max_size=5)),
         "timeline": draw(timeline_list(min_size=0, max_size=3)),
-        "evidence": [],  # Will be populated with valid source references
     }
-
-
-# ============================================================================
-# DocumentSource Data Strategies
-# ============================================================================
-
-
-@st.composite
-def valid_source_data(draw):
-    """
-    Generate valid DocumentSource data with all required fields.
-
-    According to Property 11 and Requirement 4.2, required fields are:
-    - title
-    - description (optional but commonly included)
-    """
-    # Generate valid URL or None
-    url_choice = draw(st.integers(min_value=0, max_value=2))
-    if url_choice == 0:
-        url = None
-    elif url_choice == 1:
-        # Generate a simple valid URL
-        domain = draw(
-            st.text(
-                alphabet="abcdefghijklmnopqrstuvwxyz0123456789", min_size=3, max_size=15
-            )
-        )
-        tld = draw(st.sampled_from(["com", "org", "net", "edu", "gov"]))
-        url = f"https://{domain}.{tld}"
-    else:
-        # Generate URL with path
-        domain = draw(
-            st.text(
-                alphabet="abcdefghijklmnopqrstuvwxyz0123456789", min_size=3, max_size=15
-            )
-        )
-        tld = draw(st.sampled_from(["com", "org", "net", "edu", "gov"]))
-        path = draw(
-            st.text(
-                alphabet="abcdefghijklmnopqrstuvwxyz0123456789-_/",
-                min_size=1,
-                max_size=20,
-            )
-        )
-        url = f"https://{domain}.{tld}/{path}"
-
-    return {
-        "title": draw(
-            st.text(min_size=1, max_size=300)
-            .map(filter_problematic_chars)
-            .filter(lambda x: x and x.strip())
-        ),
-        "description": draw(
-            st.text(min_size=1, max_size=1000)
-            .map(filter_problematic_chars)
-            .filter(lambda x: x and x.strip())
-        ),
-        "related_entity_ids": draw(entity_iri_list(min_size=0, max_size=3)),
-        "url": url,
-    }
-
-
-@st.composite
-def source_data_missing_title(draw):
-    """Generate DocumentSource data missing the title field."""
-    data = draw(valid_source_data())
-    del data["title"]
-    return data
-
-
-@st.composite
-def source_data_missing_description(draw):
-    """Generate DocumentSource data missing the description field."""
-    data = draw(valid_source_data())
-    del data["description"]
-    return data
-
-
-@st.composite
-def source_data_with_empty_title(draw):
-    """Generate DocumentSource data with empty title."""
-    data = draw(valid_source_data())
-    data["title"] = ""
-    return data
-
-
-@st.composite
-def source_data_with_empty_description(draw):
-    """Generate DocumentSource data with empty description."""
-    data = draw(valid_source_data())
-    data["description"] = ""
-    return data
 
 
 # ============================================================================

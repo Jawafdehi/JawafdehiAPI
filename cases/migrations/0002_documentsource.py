@@ -3,7 +3,6 @@
 import django.db.models.deletion
 from django.db import migrations, models
 
-import cases.fields
 
 
 class Migration(migrations.Migration):
@@ -47,7 +46,7 @@ class Migration(migrations.Migration):
                 ),
                 (
                     "related_entity_ids",
-                    cases.fields.EntityListField(
+                    models.JSONField(
                         blank=True,
                         default=list,
                         help_text="List of entity IDs related to this source",

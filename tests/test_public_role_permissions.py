@@ -20,7 +20,6 @@ from cases.models import CaseState, CaseType
 from cases.rules.predicates import (
     can_change_case,
     can_view_case,
-    can_view_source,
     has_role,
     is_caseworker,
     is_public,
@@ -97,16 +96,6 @@ def test_readonly_can_view_draft_but_public_cannot():
     case = _make_draft()
     assert can_view_case(_make_readonly(), case) is True
     assert can_view_case(_make_public(), case) is False
-
-
-@pytest.mark.django_db
-def test_public_cannot_view_source_casework_but_readonly_can():
-    """can_view_source (casework view predicate) admits ReadOnly, not Public."""
-    from cases.models import DocumentSource
-
-    source = DocumentSource.objects.create(title="Draft Source", source_type="MISC")
-    assert can_view_source(_make_readonly(), source) is True
-    assert can_view_source(_make_public(), source) is False
 
 
 # ---------------------------------------------------------------------------

@@ -33,8 +33,7 @@ Examples:
 
 import datetime as _dt
 
-from django.conf import settings
-from django.core.management.base import BaseCommand, CommandError
+from django.core.management.base import BaseCommand
 from django.db import transaction
 
 from jawafdehi_shared.entities.ids import is_valid_entity_iri
@@ -42,7 +41,6 @@ from jawafdehi_shared.entities.ids import is_valid_entity_iri
 from cases.models import (
     Case,
     CaseEntityRelationship,
-    DocumentSource,
     RelationshipType,
 )
 from review import jds_client
@@ -107,49 +105,11 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **opts):
-        # Allow per-invocation overrides of the remote without editing settings.
-        if opts.get("api_base"):
-            settings.JAWAFDEHI_API_BASE = opts["api_base"].rstrip("/")
-        if opts.get("token"):
-            # The JDS API is OIDC-only now; jds_client authenticates with a
-            # Zitadel client-credentials bearer. Keep the setting assignment for
-            # any other reader, but warn that it no longer drives auth.
-            settings.JAWAFDEHI_API_TOKEN = opts["token"]
-            self.stdout.write(
-                self.style.WARNING(
-                    "--token is deprecated and no longer used for JDS auth "
-                    "(OIDC-only); set CASEWORK_OIDC_CLIENT_ID/SECRET instead."
-                )
-            )
-
-        base = getattr(settings, "JAWAFDEHI_API_BASE", "")
-        self.stdout.write(self.style.MIGRATE_HEADING(f"Seeding from {base}"))
-        self.dry = opts["dry_run"]
-        if self.dry:
-            self.stdout.write(self.style.WARNING("DRY RUN — no DB writes."))
-
-        self._counts = {
-            "entities": 0,
-            "sources": 0,
-            "cases": 0,
-            "relationships": 0,
-        }
-
-        try:
-            if opts["sources_only"]:
-                self._seed_sources_catalog()
-            else:
-                self._seed_cases(opts)
-        except jds_client.JdsError as e:
-            raise CommandError(str(e))
-
-        c = self._counts
-        self.stdout.write(
-            self.style.SUCCESS(
-                "Done. Upserted "
-                f"{c['cases']} cases, {c['sources']} sources, "
-                f"{c['entities']} entities, {c['relationships']} relationships."
-            )
+        raise NotImplementedError(
+            "This command creates/reads DocumentSource rows, which have been "
+            "removed (ADR: cases own no documents). It must be rewired to create "
+            "Material + CaseMaterialReference records before use. See "
+            "docs/jawafdehi/sources-to-materials-prod-migration.md."
         )
 
     # ---------------- cases (+ their sources + entities) ----------------
@@ -259,40 +219,6 @@ class Command(BaseCommand):
         # Upsert entities + relationships.
         self._upsert_entities_for_case(obj, case)
 
-    def _upsert_sources_from_evidence(self, case):
-        for ev in case.get("evidence") or []:
-            src = ev.get("source") or {}
-            sid = ev.get("source_id")
-            if not sid:
-                continue
-            if self.dry:
-                self._counts["sources"] += 1
-                continue
-            source_type = src.get("source_type") or None
-            pub_date = _parse_date(src.get("publication_date"))
-            # The DocumentSource model REQUIRES publication_date for MEDIA_NEWS
-            # sources. Some production rows have a null date; fall back to the
-            # case start date (else today) so the seed doesn't blow up.
-            if source_type == "MEDIA_NEWS" and pub_date is None:
-                pub_date = _parse_date(case.get("case_start_date")) or _dt.date.today()
-            try:
-                DocumentSource.objects.update_or_create(
-                    source_id=sid,
-                    defaults={
-                        "title": (src.get("title") or sid)[:300],
-                        "description": src.get("description") or "",
-                        "source_type": source_type,
-                        "url": src.get("url") or [],
-                        "publication_date": pub_date,
-                        "is_deleted": False,
-                    },
-                )
-                self._counts["sources"] += 1
-            except (
-                Exception
-            ) as e:  # noqa: BLE001 - never let one bad source kill the seed
-                self.stdout.write(self.style.WARNING(f"    skip source {sid}: {e}"))
-
     def _note_entities(self, case):
         self._counts["entities"] += len(case.get("entities") or [])
 
@@ -320,26 +246,3 @@ class Command(BaseCommand):
             )
             if created:
                 self._counts["relationships"] += 1
-
-    # ---------------- standalone sources catalog ----------------
-
-    def _seed_sources_catalog(self):
-        for src in jds_client.iter_paginated("sources/"):
-            sid = src.get("source_id")
-            if not sid:
-                continue
-            if self.dry:
-                self._counts["sources"] += 1
-                continue
-            DocumentSource.objects.update_or_create(
-                source_id=sid,
-                defaults={
-                    "title": (src.get("title") or sid)[:300],
-                    "description": src.get("description") or "",
-                    "source_type": src.get("source_type") or None,
-                    "url": src.get("url") or [],
-                    "publication_date": _parse_date(src.get("publication_date")),
-                    "is_deleted": False,
-                },
-            )
-            self._counts["sources"] += 1

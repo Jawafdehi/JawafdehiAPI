@@ -30,7 +30,6 @@ from hypothesis import settings as hypothesis_settings
 from cases.models import (
     Case,
     CaseEntityRelationship,
-    DocumentSource,
     RelationshipType,
 )
 
@@ -127,15 +126,14 @@ def create_entities_from_ids(entity_ids):
     Return a list of canonical NES entity ids, validated.
 
     Entities have no local table anymore (NES owns them); the "entity" stored on
-    a case/source bind IS the canonical id string. This helper just validates and
+    a case bind IS the canonical id string. This helper just validates and
     returns the ids so existing tests that built JawafEntity rows keep working
     against the new id-only bind shape.
 
     Args:
         entity_ids: List of canonical entity @id IRI strings
             (``https://jawafdehi.org/entity/<prefix>/<slug>``) — the same id
-            form held by ``CaseEntityRelationship.nes_id`` and
-            ``DocumentSource.related_entities``.
+            form held by ``CaseEntityRelationship.nes_id``.
 
     Returns:
         List of validated entity id strings in the same order as entity_ids
@@ -188,34 +186,6 @@ def create_case_with_entities(**kwargs):
         )
 
     return case
-
-
-def create_document_source_with_entities(**kwargs):
-    """
-    Helper function to create a DocumentSource with entity relationships.
-
-    Stores a list of canonical NES entity ids on ``related_entities``.
-
-    Args:
-        **kwargs: DocumentSource fields, including:
-            - related_entity_ids: List of entity ID strings (legacy name)
-            - related_entities: List of entity ID strings
-
-    Returns:
-        DocumentSource object
-    """
-    # Extract entity fields (support both old and new names)
-    related_entity_ids = kwargs.pop(
-        "related_entity_ids", kwargs.pop("related_entities", [])
-    )
-
-    # related_entities is a list of canonical NES entity ids on the source.
-    source = DocumentSource.objects.create(**kwargs)
-    if related_entity_ids:
-        source.related_entities = create_entities_from_ids(related_entity_ids)
-        source.save()
-
-    return source
 
 
 def create_user_with_role(username, email, role, password="testpass123"):
@@ -297,12 +267,10 @@ def create_user_with_role(username, email, role, password="testpass123"):
         readonly_view_perms = Permission.objects.filter(
             codename__in=[
                 "view_case",
-                "view_documentsource",
                 "view_caseentityrelationship",
             ],
             content_type__in=[
                 ContentType.objects.get_for_model(Case),
-                ContentType.objects.get_for_model(DocumentSource),
                 ContentType.objects.get_for_model(CaseEntityRelationship),
             ],
         )

@@ -6,12 +6,9 @@ hook), it does the actual work locally and returns the result dict the consumer
 submits back to ``/api/jobs/<id>/result/``.
 
 Handler signature:
-    handler(payload: dict, *, on_stage: Callable[[str], None],
-            attach_markdown: Callable[[list], None]) -> dict
+    handler(payload: dict, *, on_stage: Callable[[str], None]) -> dict
 
-- ``on_stage(stage)``       — best-effort progress ping (extends the job lease).
-- ``attach_markdown(items)``— side channel to attach converted markdown back to
-                              DocumentSources (review-specific maintenance).
+- ``on_stage(stage)`` — best-effort progress ping (extends the job lease).
 
 This keeps ``review_poller`` domain-agnostic: to add a new consumable kind (e.g.
 ``material_convert``), register another handler here (or in the owning app) and
@@ -29,7 +26,6 @@ def _handle_case_review(
     payload: dict,
     *,
     on_stage: Callable[[str], None],
-    attach_markdown: Callable[[list], None],
 ) -> dict:
     """Run a casework review from a claimed ``case_review`` job payload.
 
@@ -42,11 +38,7 @@ def _handle_case_review(
         raise ValueError("case_review payload is missing the resolved 'case' dict.")
     config = payload.get("config")
 
-    out = runner.process_case(case, config, on_stage=on_stage)
-    # Attach any locally-converted markdown back to its sources (best-effort),
-    # then drop it from the result we submit (it isn't part of the scored result).
-    attach_markdown(out.pop("markdown_to_attach", []))
-    return out
+    return runner.process_case(case, config, on_stage=on_stage)
 
 
 #: kind -> worker-side handler. review_poller claims only these kinds by default.

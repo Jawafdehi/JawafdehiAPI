@@ -4,87 +4,27 @@ Models for the Jawafdehi accountability platform.
 See: .kiro/specs/accountability-platform-core/design.md
 """
 
-import enum
 import re
 import uuid
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.core.validators import URLValidator
 from django.db import models
 from django.utils import timezone
 
-from jawafdehi_shared.entities.ids import build_case_iri, is_valid_entity_iri
+from jawafdehi_shared.entities.ids import (
+    build_case_iri,
+    is_valid_entity_iri,
+    is_valid_material_iri,
+)
 
 from .fields import (
-    EntityListField,
-    EvidenceListField,
     TextListField,
     TimelineListField,
 )
 from .validators import validate_court_cases, validate_slug
 
 User = get_user_model()
-
-
-class SourceLinkRole(enum.StrEnum):
-    RAW = "RAW"
-    MARKDOWN = "MARKDOWN"
-    PERMALINK = "PERMALINK"
-    # The web page a document was published on / linked from (e.g. a CIAA
-    # press-release landing page), as opposed to the document file itself.
-    SOURCE_PAGE = "SOURCE_PAGE"
-    # An alternate-format rendering of the RAW document (e.g. the .doc export
-    # of a release whose .pdf is the RAW link).
-    ALTERNATE = "ALTERNATE"
-
-
-def validate_url_list(value):
-    """
-    Validate that the url field contains a list of source-link dicts.
-
-    Each item must be a dict with a non-blank ``link`` string and an explicit
-    ``role`` that is a valid ``SourceLinkRole`` value. Plain URL strings and a
-    missing/``None`` role are no longer accepted — ``DocumentSource.clean()``
-    normalizes legacy string entries and absent roles to ``RAW`` before this
-    validator runs, so a value reaching here without a role is a real error.
-
-    Args:
-        value: The value to validate (should be a list of source-link dicts)
-
-    Raises:
-        ValidationError: If value is not a list or contains invalid items
-    """
-    if value in (None, []):
-        return
-
-    if not isinstance(value, list):
-        raise ValidationError("url must be a list of source-link dicts.")
-
-    valid_roles = [r.value for r in SourceLinkRole]
-    validator = URLValidator()
-    for item in value:
-        if not isinstance(item, dict):
-            raise ValidationError(
-                "Each URL must be a dict with a 'link' and 'role' key; "
-                "plain URL strings are no longer accepted."
-            )
-        link = item.get("link")
-        if not link or not isinstance(link, str) or not link.strip():
-            raise ValidationError(
-                "Each URL dict must contain a non-blank 'link' string."
-            )
-        validator(link.strip())
-
-        role = item.get("role")
-        if role is None:
-            raise ValidationError(
-                f"Each URL dict must contain a 'role'. Must be one of {valid_roles}."
-            )
-        if role not in valid_roles:
-            raise ValidationError(
-                f"Invalid role '{role}'. Must be one of {valid_roles}."
-            )
 
 
 # File upload configuration
@@ -189,6 +129,29 @@ def validate_nes_id(value):
         raise ValidationError(
             f"Invalid NES entity id: {value!r}. Must be a canonical entity "
             "@id IRI of the form 'https://<authority>/entity/<prefix>/<slug>'."
+        )
+
+
+def validate_material_iri(value):
+    """Validate that ``value`` is a canonical NGM material @id IRI.
+
+    NGM is the single source of truth for documents ("materials"); Jawafdehi
+    stores only the material @id IRI
+    (``https://jawafdehi.org/material/<source>/<ident>``) as a join key on the
+    ``CaseMaterialReference`` bind — never document data (title/type/links).
+    Display details resolve from NGM in-process via
+    ``cases.services.material_resolver``.
+
+    STRICT: the scheme+host must be canonical (host is part of the join key), so
+    the stored ``material_iri`` always matches the Material PK.
+
+    Raises:
+        ValidationError: if ``value`` is not a valid canonical material @id IRI.
+    """
+    if not value or not is_valid_material_iri(value):
+        raise ValidationError(
+            f"Invalid NGM material id: {value!r}. Must be a canonical material "
+            "@id IRI of the form 'https://<authority>/material/<source>/<ident>'."
         )
 
 
@@ -303,6 +266,98 @@ class CaseEntityRelationship(models.Model):
         super().save(*args, **kwargs)
 
 
+class CaseMaterialReference(models.Model):
+    """The Case <-> NGM-material BIND (evidence), with an optional per-case note.
+
+    This model IS the evidence link between a case and an NGM ``Material``. NGM
+    is the single source of truth for documents, so the bind holds only the
+    canonical material @id IRI (``material_iri``,
+    ``https://jawafdehi.org/material/<source>/<ident>``) as the join key — it does
+    NOT store document data (title/type/links). There is no cross-DB foreign key
+    (the three databases are routed independently), so the relation to NGM is by
+    id only; display details resolve in-process via
+    ``cases.services.material_resolver.resolve_materials``.
+
+    Replaces the former denormalized ``Case.evidence`` JSON list of
+    ``{source_id, description}`` (ADR: cases own no documents). The per-case
+    evidence note is ``additional_details`` — OPTIONAL, and case-specific (why
+    this document matters to THIS case), distinct from the Material's own global
+    ``description``.
+    """
+
+    case = models.ForeignKey(
+        "Case",
+        on_delete=models.CASCADE,
+        related_name="material_references",
+        help_text="The case this evidence reference belongs to",
+    )
+    material_iri = models.CharField(
+        max_length=300,
+        db_index=True,
+        validators=[validate_material_iri],
+        help_text=(
+            "Canonical NGM material @id IRI "
+            "(https://jawafdehi.org/material/<source>/<ident>) cited as evidence. "
+            "NGM owns the document data; this is the join key only."
+        ),
+    )
+    additional_details = models.TextField(
+        blank=True,
+        default="",
+        help_text=(
+            "Optional case-specific note on why this material matters to this "
+            "case (distinct from the material's own global description)."
+        ),
+    )
+    # Stable display order of evidence within a case (evidence was an ordered
+    # JSON list; preserve that ordering intent explicitly).
+    ordinal = models.PositiveIntegerField(
+        default=0,
+        help_text="Display order of this evidence reference within the case.",
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        help_text="When this evidence reference was created",
+    )
+
+    class Meta:
+        verbose_name = "Case Material Reference"
+        verbose_name_plural = "Case Material References"
+        ordering = ["ordinal", "created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["case", "material_iri"],
+                name="unique_case_material_reference",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["case", "ordinal"], name="case_material_ordinal_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.case.slug} - {self.material_iri}"
+
+    def clean(self):
+        """Validate the bind."""
+        errors = {}
+        if not self.case_id:
+            errors["case"] = "Case is required"
+        if not self.material_iri:
+            errors["material_iri"] = "A NGM material id is required"
+        else:
+            try:
+                validate_material_iri(self.material_iri)
+            except ValidationError as exc:
+                errors["material_iri"] = exc.messages
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        """Override save to validate before saving."""
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+
 class CaseType(models.TextChoices):
     """Enum for case types."""
 
@@ -331,36 +386,6 @@ class CaseState(models.TextChoices):
     IN_REVIEW = "IN_REVIEW", "In Review"
     PUBLISHED = "PUBLISHED", "Published"
     CLOSED = "CLOSED", "Closed"
-
-
-class SourceType(models.TextChoices):
-    """Type of a DocumentSource, derived from the document it represents.
-
-    Issuer-prefixed types name documents from a specific authority (CIAA, the
-    Attorney General's office, the Office of the Auditor General); the rest name
-    a document kind. Values are stable identifiers — changing them requires a
-    data migration. See ``cases.services.source_classifier`` for how a source's
-    (title, description, urls) is mapped to one of these.
-    """
-
-    # Issuer-specific documents
-    CIAA_PRESS_RELEASE = "CIAA_PRESS_RELEASE", "CIAA Press Release"
-    AG_ABHIYOG_PATRA = "AG_ABHIYOG_PATRA", "AG Charge Sheet (Abhiyog Patra)"
-    OAG_AUDIT_REPORT = "OAG_AUDIT_REPORT", "OAG Audit Report"
-
-    # Court documents
-    COURT_ORDER = "COURT_ORDER", "Court Order/Verdict"
-    COURT_FILING_OTHER = "COURT_FILING_OTHER", "Other Court Filing"
-
-    # Legislation
-    LAW_OR_BILL = "LAW_OR_BILL", "Law/Act/Bill"
-
-    # Media & social
-    NEWS = "NEWS", "News/Media"
-    SOCIAL_MEDIA = "SOCIAL_MEDIA", "Social Media"
-
-    # Catch-all
-    MISC = "MISC", "Miscellaneous"
 
 
 class Case(models.Model):
@@ -436,9 +461,9 @@ class Case(models.Model):
 
     # Structured data fields
     timeline = TimelineListField(help_text="List of timeline entries")
-    evidence = EvidenceListField(
-        help_text="List of evidence entries with source references"
-    )
+    # Evidence is no longer a denormalized JSON list on the case. It is now the
+    # CaseMaterialReference join (case.material_references) keyed by material_iri
+    # (ADR: cases own no documents).
 
     # Relationships
     contributors = models.ManyToManyField(
@@ -750,184 +775,6 @@ class Case(models.Model):
         # Return a tuple (num_deleted, dict) to match Django's delete() signature
         # Since we're soft deleting, we report 0 actual deletions
         return (0, {self._meta.label: 0})
-
-
-class DocumentSource(models.Model):
-    """
-    Represents evidence sources that can be referenced by cases.
-
-    Sources are soft-deleted via is_deleted flag to preserve audit history.
-    A source is publicly accessible if referenced in evidence of any published case.
-    """
-
-    # Unique identifier
-    source_id = models.CharField(
-        max_length=100,
-        unique=True,
-        db_index=True,
-        help_text="Unique identifier for the source",
-    )
-
-    # Core fields
-    title = models.CharField(max_length=300, help_text="Source title")
-    description = models.TextField(blank=True, help_text="Source description")
-    source_type = models.CharField(
-        max_length=50,
-        choices=SourceType.choices,
-        default=SourceType.MISC,
-        help_text="Type of source",
-    )
-    url = models.JSONField(
-        default=list,
-        blank=True,
-        validators=[validate_url_list],
-        help_text="List of URLs for this source",
-    )
-
-    # Entity relationships: a list of canonical NES entity @id IRIs
-    # (https://jawafdehi.org/entity/<prefix>/<slug>). NES owns the entity data;
-    # this stores only the join keys. Resolve display details via
-    # ``cases.services.nes_resolver.resolve_entities``.
-    related_entities = EntityListField(
-        blank=True,
-        help_text="Canonical NES entity @id IRIs related to this source",
-    )
-
-    # Contributors (for access control)
-    contributors = models.ManyToManyField(
-        User,
-        blank=True,
-        related_name="assigned_sources",
-        help_text="Contributors assigned to manage this source",
-    )
-
-    # Publication date (for media/news sources)
-    publication_date = models.DateField(
-        null=True,
-        blank=True,
-        help_text="Publication date of the source (required for news/media sources)",
-    )
-
-    # Soft deletion
-    is_deleted = models.BooleanField(
-        default=False, db_index=True, help_text="Soft deletion flag"
-    )
-
-    # Timestamps
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        ordering = ["-created_at"]
-
-    def __str__(self):
-        return f"{self.source_id} - {self.title}"
-
-    @property
-    def url_links(self):
-        """Extract link strings from url field (handles both str and dict entries)."""
-        if not isinstance(self.url, list):
-            return []
-        result = []
-        for item in self.url:
-            if isinstance(item, str):
-                result.append(item)
-            elif isinstance(item, dict):
-                link = item.get("link")
-                if link:
-                    result.append(link)
-        return result
-
-    @staticmethod
-    def normalize_url_list(url):
-        """Coerce a url value to the canonical list of {link, role} dicts.
-
-        role is mandatory; a missing/None role (legacy data, programmatic
-        callers) or a plain string URL (legacy/importer input) is coerced to
-        RAW so internal saves stay valid. Anything still invalid after this
-        (e.g. a blank link, or an unknown role) is left for validate_url_list
-        to reject. A bare string / None becomes a (possibly empty) list.
-        """
-        if isinstance(url, str):
-            stripped = url.strip()
-            url = [stripped] if stripped else []
-        elif url is None:
-            return []
-
-        if not isinstance(url, list):
-            return url
-
-        normalized = []
-        for item in url:
-            if isinstance(item, str):
-                stripped = item.strip()
-                if stripped:
-                    normalized.append(
-                        {"link": stripped, "role": SourceLinkRole.RAW.value}
-                    )
-            elif isinstance(item, dict):
-                link = item.get("link", "")
-                stripped = link.strip() if isinstance(link, str) else ""
-                if stripped:
-                    role = item.get("role")
-                    normalized.append(
-                        {
-                            "link": stripped,
-                            "role": (
-                                role if role is not None else SourceLinkRole.RAW.value
-                            ),
-                        }
-                    )
-            else:
-                normalized.append(item)
-        return normalized
-
-    def clean(self):
-        """
-        Normalize and validate DocumentSource data.
-
-        - Strips whitespace from title
-        - Ensures title is not empty after stripping
-        - Normalizes URL list entries (strips whitespace, defaults role to RAW)
-        """
-        # Normalize title
-        self.title = (self.title or "").strip()
-        if not self.title:
-            raise ValidationError({"title": "Title is required and cannot be empty"})
-
-        # Normalize URL entries to the canonical {link, role} dict form. Note
-        # save() also normalizes BEFORE full_clean() so the field validator
-        # (validate_url_list, run in clean_fields()) sees normalized data; this
-        # call covers direct clean()/full_clean() callers and is idempotent.
-        self.url = self.normalize_url_list(self.url)
-
-        # Enforce publication_date for media/news sources
-        if self.source_type == SourceType.NEWS and not self.publication_date:
-            raise ValidationError(
-                {
-                    "publication_date": "Publication date is required for media/news sources"
-                }
-            )
-
-    def save(self, *args, **kwargs):
-        """Override save to generate source_id and validate all fields."""
-        if not self.source_id:
-            # Generate unique source_id for new sources
-            from datetime import datetime
-
-            timestamp = datetime.now().strftime("%Y%m%d")
-            self.source_id = f"source:{timestamp}:{uuid.uuid4().hex[:8]}"
-
-        # Normalize url to canonical {link, role} dicts BEFORE full_clean().
-        # Django runs field validators (validate_url_list) in clean_fields(),
-        # which executes before clean() — so legacy strings / None roles must
-        # be coerced here, or the field validator would reject them first.
-        self.url = self.normalize_url_list(self.url)
-
-        # Run full model and field validation (includes validate_url_list).
-        self.full_clean()
-
-        super().save(*args, **kwargs)
 
 
 class FeedbackType(models.TextChoices):

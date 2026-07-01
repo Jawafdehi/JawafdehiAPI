@@ -10,13 +10,18 @@ class CasesConfig(AppConfig):
         # Register models with auditlog
         from auditlog.registry import auditlog
 
-        from cases.models import Case, CaseEntityRelationship, DocumentSource
+        from cases.models import (
+            Case,
+            CaseEntityRelationship,
+            CaseMaterialReference,
+        )
 
         auditlog.register(Case)
-        auditlog.register(DocumentSource)
-        # JawafEntity was removed (NES owns entities). Audit the Case<->NES-entity
-        # bind instead so entity-relationship changes stay tracked.
+        # JawafEntity + DocumentSource were removed (NES owns entities, NGM owns
+        # documents). Audit the Case<->NES-entity and Case<->NGM-material binds
+        # instead so evidence/relationship changes stay tracked.
         auditlog.register(CaseEntityRelationship)
+        auditlog.register(CaseMaterialReference)
 
         # Wire live unified-search indexing signals (best-effort, on_commit).
         from . import signals  # noqa: F401

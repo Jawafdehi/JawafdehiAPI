@@ -11,7 +11,7 @@ import rules
 from django.contrib.auth.models import User
 
 if TYPE_CHECKING:
-    from cases.models import Case, CaseState, DocumentSource
+    from cases.models import Case, CaseState
 
 
 # ============================================================================
@@ -140,60 +140,6 @@ def can_transition_case_state(
 
 
 # ============================================================================
-# DocumentSource-specific Predicates
-# ============================================================================
-
-
-@rules.predicate
-def is_source_contributor(user: User, source: Optional["DocumentSource"]) -> bool:
-    """
-    Check if user is assigned as a contributor to the source.
-
-    Note: This is a pure assignment check. Admins/Moderators are NOT automatically
-    considered contributors. Use combined predicates like (is_admin_or_moderator | is_source_contributor)
-    for permission rules where Admins/Moderators should have access to all sources.
-    """
-    if source is None:
-        return False
-    return source.contributors.filter(id=user.id).exists()
-
-
-@rules.predicate
-def is_case_contributor_for_source(
-    user: User, source: Optional["DocumentSource"]
-) -> bool:
-    """
-    Check if user is a contributor to any case that references this source in its evidence.
-
-    Args:
-        user: The user to check
-        source: The DocumentSource to check
-
-    Returns:
-        bool: True if the source appears in evidence of any case the user contributes to
-    """
-    if source is None:
-        return False
-
-    from cases.models import Case
-
-    # Query all cases where user is a contributor
-    cases_to_check = Case.objects.filter(contributors=user)
-
-    # Check if source_id appears in evidence of any of these cases
-    for case in cases_to_check:
-        if case.evidence:
-            for evidence_item in case.evidence:
-                if (
-                    isinstance(evidence_item, dict)
-                    and evidence_item.get("source_id") == source.source_id
-                ):
-                    return True
-
-    return False
-
-
-# ============================================================================
 # User Management Predicates
 # ============================================================================
 
@@ -234,10 +180,8 @@ def can_manage_user(user: User, target_user: Optional[User]) -> bool:
 can_view_case = is_admin_or_moderator | is_caseworker | is_readonly
 can_change_case = is_admin_or_moderator | is_case_contributor
 
-# Source permissions (casework view; Public excluded, same rationale as cases)
-can_view_source = is_admin_or_moderator | is_caseworker | is_readonly
-can_change_source = is_admin_or_moderator | is_source_contributor
-can_delete_source = is_admin_or_moderator
+# Source permissions were removed with DocumentSource (ADR: cases own no
+# documents). Documents are NGM Materials, gated by the NGM write role.
 
 # User management permissions
 can_manage_user_account = is_admin | can_manage_user

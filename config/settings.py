@@ -708,7 +708,7 @@ JAZZMIN_SETTINGS = {
     "site_icon": "corruption-db-logo.png",
     "welcome_sign": "Welcome to Jawafdehi Contributor Portal",
     "copyright": "Jawafdehi",
-    "search_model": ["cases.Case", "cases.DocumentSource"],
+    "search_model": ["cases.Case"],
     "user_avatar": None,
     "topmenu_links": [
         {"name": "Home", "url": "admin:index", "permissions": ["auth.view_user"]},
@@ -724,7 +724,6 @@ JAZZMIN_SETTINGS = {
         "auth.user": "fas fa-user",
         "auth.Group": "fas fa-users",
         "cases.Case": "fas fa-gavel",
-        "cases.DocumentSource": "fas fa-file-alt",
     },
     "custom_css": None,
     "custom_js": None,
@@ -760,9 +759,7 @@ REVIEW_MAX_PARALLEL = int(os.getenv("REVIEW_MAX_PARALLEL", "3"))
 
 CASEWORK_API_BASE = os.getenv("CASEWORK_API_BASE", "http://127.0.0.1:40173/api/casework")
 # Central job-queue API base. The poller (a jobs consumer) claims/finalizes work
-# here; the casework API base above is still used for review-specific side calls
-# (e.g. attaching converted markdown back to a DocumentSource). Defaults to the
-# same host so a single-node dev setup needs no extra config.
+# here. Defaults to the same host so a single-node dev setup needs no extra config.
 JOBS_API_BASE = os.getenv(
     "JOBS_API_BASE", "http://127.0.0.1:40173/api/jobs"
 )

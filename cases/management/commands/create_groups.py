@@ -11,7 +11,6 @@ from django.core.management.base import BaseCommand
 from cases.models import (
     Case,
     CaseEntityRelationship,
-    DocumentSource,
 )
 
 
@@ -26,7 +25,6 @@ class Command(BaseCommand):
 
         # Get content types
         case_ct = ContentType.objects.get_for_model(Case)
-        source_ct = ContentType.objects.get_for_model(DocumentSource)
         relationship_ct = ContentType.objects.get_for_model(CaseEntityRelationship)
 
         # Get or create permissions for Case
@@ -53,29 +51,10 @@ class Command(BaseCommand):
             )[0],
         }
 
-        # Get or create permissions for DocumentSource
-        source_permissions = {
-            "view": Permission.objects.get_or_create(
-                codename="view_documentsource",
-                content_type=source_ct,
-                defaults={"name": "Can view document source"},
-            )[0],
-            "add": Permission.objects.get_or_create(
-                codename="add_documentsource",
-                content_type=source_ct,
-                defaults={"name": "Can add document source"},
-            )[0],
-            "change": Permission.objects.get_or_create(
-                codename="change_documentsource",
-                content_type=source_ct,
-                defaults={"name": "Can change document source"},
-            )[0],
-            "delete": Permission.objects.get_or_create(
-                codename="delete_documentsource",
-                content_type=source_ct,
-                defaults={"name": "Can delete document source"},
-            )[0],
-        }
+        # NOTE: DocumentSource has been removed (ADR: cases own no documents),
+        # so its permissions are no longer created or assigned. Document access
+        # is being rewired to Material + CaseMaterialReference; see
+        # docs/jawafdehi/sources-to-materials-prod-migration.md.
 
         # NOTE: there are no JawafEntity permissions anymore — the model was
         # removed because NES owns entities. Case<->entity binds are managed
@@ -119,10 +98,6 @@ class Command(BaseCommand):
                 case_permissions["add"],
                 case_permissions["change"],
                 case_permissions["delete"],
-                source_permissions["view"],
-                source_permissions["add"],
-                source_permissions["change"],
-                source_permissions["delete"],
                 relationship_permissions["view"],
                 relationship_permissions["add"],
                 relationship_permissions["change"],
@@ -137,17 +112,13 @@ class Command(BaseCommand):
         else:
             self.stdout.write("Moderator group already exists")
 
-        # Moderators get all permissions for cases, sources, and entities
+        # Moderators get all permissions for cases and entities
         moderator_group.permissions.set(
             [
                 case_permissions["view"],
                 case_permissions["add"],
                 case_permissions["change"],
                 case_permissions["delete"],
-                source_permissions["view"],
-                source_permissions["add"],
-                source_permissions["change"],
-                source_permissions["delete"],
                 relationship_permissions["view"],
                 relationship_permissions["add"],
                 relationship_permissions["change"],
@@ -162,16 +133,13 @@ class Command(BaseCommand):
         else:
             self.stdout.write("Caseworker group already exists")
 
-        # Caseworkers get view, add, and change permissions (limited by assignment for cases/sources)
+        # Caseworkers get view, add, and change permissions (limited by assignment for cases)
         # Entities: caseworkers can view and add, but cannot change or delete
         caseworker_group.permissions.set(
             [
                 case_permissions["view"],
                 case_permissions["add"],
                 case_permissions["change"],
-                source_permissions["view"],
-                source_permissions["add"],
-                source_permissions["change"],
                 relationship_permissions["view"],
                 relationship_permissions["add"],
                 relationship_permissions["change"],
@@ -179,10 +147,11 @@ class Command(BaseCommand):
             ]
         )
 
-        # ReviewAssistant: a review-system role that can manage document sources
-        # (e.g. populate the MARKDOWN url during a review) and access reviews.
-        # Review access itself is granted in review/permissions.py by group name;
-        # here we grant the document-source permissions it needs.
+        # ReviewAssistant: a review-system role that can access reviews. Review
+        # access itself is granted in review/permissions.py by group name. It
+        # previously held document-source permissions; DocumentSource was
+        # removed (ADR: cases own no documents), so it now holds no model
+        # permissions here (document access will be rewired to Material).
         review_assistant_group, created = Group.objects.get_or_create(
             name="ReviewAssistant"
         )
@@ -191,12 +160,7 @@ class Command(BaseCommand):
         else:
             self.stdout.write("ReviewAssistant group already exists")
 
-        review_assistant_group.permissions.set(
-            [
-                source_permissions["view"],
-                source_permissions["change"],
-            ]
-        )
+        review_assistant_group.permissions.set([])
 
         # ReadOnly: an org-wide read role that can be assigned to anyone. Grants
         # view_* on every content model INCLUDING casework, so the holder can
@@ -215,7 +179,6 @@ class Command(BaseCommand):
         readonly_group.permissions.set(
             [
                 case_permissions["view"],
-                source_permissions["view"],
                 relationship_permissions["view"],
             ]
         )

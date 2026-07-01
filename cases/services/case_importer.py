@@ -1,8 +1,9 @@
 """
 Service for importing scraped case data into Django models.
 
-Handles entity deduplication, source deduplication, and data transformation
-from scraped JSON format to Django Case model.
+Handles entity deduplication, transformation from scraped JSON to the Django
+Case model, and ingesting each cited source as an NGM Material bound to the case
+as evidence (CaseMaterialReference — ADR: cases own no documents).
 """
 
 import json
@@ -17,7 +18,6 @@ from cases.models import (
     CaseEntityRelationship,
     CaseState,
     CaseType,
-    DocumentSource,
     RelationshipType,
 )
 
@@ -84,130 +84,27 @@ class CaseImporter:
         self.log(f"  Bound entity: {nes_id} ({relationship_type})")
         return nes_id
 
-    def get_or_create_source(self, source_data):
+    def ingest_source(self, case, source_data):
+        """Upsert a source as an NGM Material + bind it to ``case`` as evidence.
+
+        Replaces the old ``get_or_create_source`` (DocumentSource create). Returns
+        the material IRI, or ``None`` when the source has no title. ADR: cases own
+        no documents — the document is a Material, the bind a CaseMaterialReference.
         """
-        Get or create DocumentSource with deduplication by URL.
+        from cases.services.material_ingest import ingest_source_as_evidence
 
-        Uses PostgreSQL JSON containment query for efficient URL lookup when available.
-        Falls back to Python-based filtering for SQLite.
-
-        Args:
-            source_data: Dict with 'title', 'url', 'description' keys
-
-        Returns:
-            DocumentSource instance or None if title is empty
-        """
-        # Guard against None values and handle both string and list URLs
-        url_raw = source_data.get("url", "")
-
-        # Handle URL as string, list, or dict. Normalize every entry to a
-        # canonical {link, role} dict — role defaults to RAW when the input is
-        # a bare string or omits it (only external URLs reach here).
-        from cases.models import SourceLinkRole
-
-        def _make_link(raw):
-            if isinstance(raw, str):
-                stripped = raw.strip()
-                return (
-                    {"link": stripped, "role": SourceLinkRole.RAW.value}
-                    if stripped
-                    else None
-                )
-            if isinstance(raw, dict):
-                link = raw.get("link") or raw.get("url")
-                if isinstance(link, str) and link.strip():
-                    role = raw.get("role") or SourceLinkRole.RAW.value
-                    return {"link": link.strip(), "role": role}
-            return None
-
-        if isinstance(url_raw, list):
-            url_list = [entry for entry in (_make_link(i) for i in url_raw) if entry]
-        elif isinstance(url_raw, (str, dict)):
-            entry = _make_link(url_raw)
-            url_list = [entry] if entry else []
-        else:
-            url_list = []
-
-        title_raw = source_data.get("title", "")
-        title = title_raw.strip() if isinstance(title_raw, str) else ""
-
-        description_raw = source_data.get("description", "")
-        description = (
-            description_raw.strip() if isinstance(description_raw, str) else ""
+        iri = ingest_source_as_evidence(
+            case,
+            title=source_data.get("title", ""),
+            url=source_data.get("url", ""),
+            source_type=source_data.get("source_type"),
+            description=source_data.get("description", ""),
+            additional_details=source_data.get("description", ""),
+            publication_date=self.parse_date(source_data.get("publication_date")),
         )
-
-        if not title:
-            return None
-
-        # Try to find existing source by URL
-        # TODO: Consider adding GIN index on url field for better performance:
-        #   CREATE INDEX idx_documentsource_url_gin ON cases_documentsource USING gin (url);
-        if url_list:
-            # Check if any URL in our list matches existing sources.
-            # Stored URL entries are dicts with 'link' key (post-migration).
-            # Accept both str and dict lookups for backward compat during transition.
-            from django.db import connection
-
-            # Match on the link only (role-agnostic) so a reused source isn't
-            # duplicated just because its stored role differs.
-            candidate_links = [entry["link"] for entry in url_list]
-
-            # Use PostgreSQL JSON containment if available, otherwise fall back to Python filtering
-            if connection.vendor == "postgresql":
-                for link in candidate_links:
-                    source = (
-                        DocumentSource.objects.filter(
-                            is_deleted=False,
-                        )
-                        .filter(
-                            # Match dict entry with matching link
-                            url__contains=[{"link": link}]
-                        )
-                        .only("source_id", "title")
-                        .first()
-                    )
-
-                    if source:
-                        self.stats["sources_reused"] += 1
-                        self.log(f"  Reusing source: {title}")
-                        return source
-            else:
-                # SQLite fallback: fetch all non-deleted sources and check URLs in Python
-                for link in candidate_links:
-                    for source in DocumentSource.objects.filter(is_deleted=False).only(
-                        "source_id", "title", "url"
-                    ):
-                        if isinstance(source.url, list):
-                            for stored in source.url:
-                                stored_link = (
-                                    stored
-                                    if isinstance(stored, str)
-                                    else (
-                                        stored.get("link")
-                                        if isinstance(stored, dict)
-                                        else None
-                                    )
-                                )
-                                if stored_link == link:
-                                    self.stats["sources_reused"] += 1
-                                    self.log(f"  Reusing source: {title}")
-                                    return source
-
-        # Try to find by title (excluding soft-deleted sources)
-        source = DocumentSource.objects.filter(title=title, is_deleted=False).first()
-        if source:
-            self.stats["sources_reused"] += 1
-            self.log(f"  Reusing source: {title}")
-            return source
-
-        # Create new source with URL as list
-        source = DocumentSource.objects.create(
-            title=title, description=description, url=url_list
-        )
-
-        self.stats["sources_created"] += 1
-        self.log(f"  Created source: {title}")
-        return source
+        if iri:
+            self.stats["sources_created"] += 1
+        return iri
 
     def parse_date(self, date_str):
         """
@@ -292,21 +189,11 @@ class CaseImporter:
             for location in data.get("locations", []):
                 self.bind_entity(case, location, RelationshipType.LOCATION)
 
-            # Build evidence list from sources
+            # Ingest sources as NGM Materials + bind them to the case as evidence
+            # (CaseMaterialReference). ADR: cases own no documents.
             self.log("Processing sources...")
-            evidence = []
             for source_data in data.get("sources", []):
-                source = self.get_or_create_source(source_data)
-                if source:
-                    evidence.append(
-                        {
-                            "source_id": source.source_id,
-                            "description": source_data.get("description", ""),
-                        }
-                    )
-
-            case.evidence = evidence
-            case.save()
+                self.ingest_source(case, source_data)
 
             self.log("\nImport statistics:")
             self.log(f"  Entities bound: {self.stats['entities_bound']}")
@@ -315,6 +202,5 @@ class CaseImporter:
                 f"{self.stats['entities_skipped_no_nes_id']}"
             )
             self.log(f"  Sources created: {self.stats['sources_created']}")
-            self.log(f"  Sources reused: {self.stats['sources_reused']}")
 
             return case

@@ -88,14 +88,14 @@ class Migration(migrations.Migration):
                 ),
                 (
                     "alleged_entities",
-                    cases.fields.EntityListField(
+                    models.JSONField(
                         default=list,
                         help_text="List of entity IDs for entities being accused",
                     ),
                 ),
                 (
                     "related_entities",
-                    cases.fields.EntityListField(
+                    models.JSONField(
                         blank=True,
                         default=list,
                         help_text="List of entity IDs for related entities",
@@ -103,7 +103,7 @@ class Migration(migrations.Migration):
                 ),
                 (
                     "locations",
-                    cases.fields.EntityListField(
+                    models.JSONField(
                         blank=True,
                         default=list,
                         help_text="List of location entity IDs",
@@ -139,7 +139,7 @@ class Migration(migrations.Migration):
                 ),
                 (
                     "evidence",
-                    cases.fields.EvidenceListField(
+                    models.JSONField(
                         blank=True,
                         default=list,
                         help_text="List of evidence entries with source references",
