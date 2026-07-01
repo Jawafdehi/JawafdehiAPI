@@ -193,6 +193,68 @@ def test_patch_timeline_rejects_malformed_date_bs():
 
 
 @pytest.mark.django_db
+def test_patch_timeline_rejects_malformed_iso_date():
+    """A3: a non-ISO `date` in a PATCHed timeline item is rejected (422)."""
+    user = _contributor("nabin-2")
+    case = _make_case()
+    case.contributors.add(user)
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[
+            {
+                "op": "replace",
+                "path": "/timeline",
+                "value": [{"date": "09/02/2025", "title": "X"}],
+            }
+        ],
+        format="json",
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.django_db
+def test_patch_rejects_invalid_court_cases():
+    """A3: court_cases entries are validated (unknown court identifier -> 422)."""
+    user = _contributor("nabin-3")
+    case = _make_case()
+    case.contributors.add(user)
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[
+            {
+                "op": "replace",
+                "path": "/court_cases",
+                "value": ["not-a-real-court:123"],
+            }
+        ],
+        format="json",
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.django_db
+def test_patch_bigo_accepts_integer():
+    """A3: bigo (embezzled amount) is a writable integer field."""
+    user = _contributor("nabin-4")
+    case = _make_case()
+    case.contributors.add(user)
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[{"op": "replace", "path": "/bigo", "value": 1250000}],
+        format="json",
+    )
+    assert response.status_code == 200
+    case.refresh_from_db()
+    assert case.bigo == 1250000
+
+
+@pytest.mark.django_db
 def test_patch_add_appends_timeline_item():
     user = _contributor("ram")
     case = _make_case(timeline=[{"date": "2024-01-01", "title": "First"}])

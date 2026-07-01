@@ -139,6 +139,9 @@ def _recompute_material_visibility(material_iris) -> None:
 
         **Filtering:**
         - `case_type`: Filter by case type (CORRUPTION)
+        - `state`: Filter by workflow state (DRAFT / IN_REVIEW / PUBLISHED). Applied
+          after visibility scoping, so callers only ever see states they may view
+          (e.g. `?state=IN_REVIEW` is the moderation queue for casework roles).
         - `tags`: Filter cases containing a specific tag
 
         **Search:**
@@ -155,6 +158,14 @@ def _recompute_material_visibility(material_iris) -> None:
                 location=OpenApiParameter.QUERY,
                 description="Filter by case type",
                 enum=["CORRUPTION"],
+                required=False,
+            ),
+            OpenApiParameter(
+                name="state",
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                description="Filter by workflow state (visibility-scoped)",
+                enum=["DRAFT", "IN_REVIEW", "PUBLISHED"],
                 required=False,
             ),
             OpenApiParameter(
@@ -238,7 +249,11 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = CaseSerializer
     lookup_field = "slug"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    filterset_fields = ["case_type"]
+    # ``state`` powers the moderation queue (GET /api/cases/?state=IN_REVIEW,
+    # plan §G1). Filtering runs AFTER get_queryset()'s visibility scoping, so a
+    # public caller filtering ?state=IN_REVIEW still gets nothing (the base
+    # queryset is PUBLISHED-only) — visibility is preserved.
+    filterset_fields = ["case_type", "state"]
     search_fields = ["title", "description", "key_allegations"]
     # Auth: inherit the OIDC-only DEFAULT_AUTHENTICATION_CLASSES (no per-view
     # pin). Unauthenticated reads still work because the actions use
