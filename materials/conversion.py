@@ -64,7 +64,12 @@ def source_urls(data: dict[str, Any]) -> list[str]:
     """
     by_role: dict[str, list[str]] = {r: [] for r in _SOURCE_ROLES}
     for mo in _media_list(data):
-        url = (mo.get("contentUrl") or "").strip()
+        # contentUrl comes from free-form JSONB; guard against a non-string
+        # (int/list/dict) so a malformed doc can't crash the whole convert.
+        raw_url = mo.get("contentUrl")
+        if not isinstance(raw_url, str):
+            continue
+        url = raw_url.strip()
         if not url:
             continue
         role = mo.get("jawafdehi:linkRole") or "RAW"
@@ -132,6 +137,7 @@ def apply_convert_result(job, result: dict) -> None:
     here leaves the job DONE but the text unset — a re-run (re-upload) recovers.
     """
     from django.core.files.base import ContentFile
+    from django.db import transaction
 
     from jawafdehi_shared.storage import store_file_as_link
 
@@ -143,35 +149,52 @@ def apply_convert_result(job, result: dict) -> None:
 
     from .models import Material
 
-    row = Material.objects.filter(pk=iri, is_deleted=False).first()
-    if row is None:
+    # Cheap pre-check so we don't upload to R2 for a material that's already gone.
+    if not Material.objects.filter(pk=iri, is_deleted=False).exists():
         logger.warning("material_convert %s: material gone before result apply", iri)
         return
 
     # 1) Land the markdown in R2 as a roled MARKDOWN link (hashed filename).
-    # NOTE: store_file_as_link uses FILE_STORAGE_PREFIX (default "case_uploads/"),
-    # so the .md currently lands under that shared prefix. The material-specific
-    # R2 layout (docs/data-plane-design.md §3) is folded in with the provenance
-    # work (§8 item 2); until then the link is correct, just not prefix-isolated.
+    # Done OUTSIDE the DB transaction below — a network round-trip must not hold a
+    # row lock. NOTE: store_file_as_link uses FILE_STORAGE_PREFIX (default
+    # "case_uploads/"), so the .md currently lands under that shared prefix. The
+    # material-specific R2 layout (docs/data-plane-design.md §3) is folded in with
+    # the provenance work (§8 item 2); until then the link is correct, just not
+    # prefix-isolated.
     md_file = ContentFile(text.encode("utf-8"), name="material.md")
     link = store_file_as_link(md_file, role="MARKDOWN")
 
-    data = dict(row.data or {})
-    # 2) Replace-or-append the MARKDOWN MediaObject (idempotent re-run).
-    media = [
-        mo
-        for mo in _media_list(data)
-        if (mo.get("jawafdehi:linkRole") or "RAW") != "MARKDOWN"
-    ]
-    md_mo = jsonld._media_object({"link": link["link"], "role": "MARKDOWN"})
-    if md_mo is not None:
-        media.append(md_mo)
-    data["associatedMedia"] = media
-    # 3) The searchable full text (language-mapped, per MATERIAL_CONTEXT).
-    data["text"] = {_TEXT_LANG: text}
+    # 2) Read-modify-write the JSONB doc under a row lock so a concurrent write
+    # (e.g. a re-upload upserting the same @id) can't clobber our text, or ours
+    # theirs — the whole ``data`` blob is rewritten, so a naive read+save would
+    # lose the other writer's fields (lost-update).
+    with transaction.atomic():
+        row = (
+            Material.objects.select_for_update()
+            .filter(pk=iri, is_deleted=False)
+            .first()
+        )
+        if row is None:  # deleted between the pre-check and the lock
+            logger.warning(
+                "material_convert %s: material gone before result apply", iri
+            )
+            return
+        data = dict(row.data or {})
+        # Replace-or-append the MARKDOWN MediaObject (idempotent re-run).
+        media = [
+            mo
+            for mo in _media_list(data)
+            if (mo.get("jawafdehi:linkRole") or "RAW") != "MARKDOWN"
+        ]
+        md_mo = jsonld._media_object({"link": link["link"], "role": "MARKDOWN"})
+        if md_mo is not None:
+            media.append(md_mo)
+        data["associatedMedia"] = media
+        # The searchable full text (language-mapped, per MATERIAL_CONTEXT).
+        data["text"] = {_TEXT_LANG: text}
 
-    row.data = data
-    row.save(update_fields=["data", "updated_at"])  # post_save → reindex
+        row.data = data
+        row.save(update_fields=["data", "updated_at"])  # post_save → reindex
     logger.info(
         "material_convert %s: stored %d chars markdown + text (from %s)",
         iri,

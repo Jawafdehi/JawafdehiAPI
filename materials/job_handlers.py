@@ -49,6 +49,17 @@ def _convert_with_timeout(convert_source, url: str) -> dict:
             "url": url,
             "note": f"conversion timed out after {timeout}s",
         }
+    except Exception as exc:  # noqa: BLE001
+        # convert_source normally returns an error dict rather than raising, but
+        # if it (or the executor) ever does raise, degrade to an error result so
+        # the caller falls back to the next alternate URL instead of the whole
+        # job dying on the first source.
+        return {
+            "markdown": "",
+            "status": "error",
+            "url": url,
+            "note": f"conversion raised: {exc}",
+        }
     finally:
         ex.shutdown(wait=False)
 

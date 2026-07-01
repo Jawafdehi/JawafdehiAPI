@@ -85,6 +85,21 @@ def test_source_urls_handles_single_dict_and_empty():
     assert source_urls(_doc("x", [_mo("", "RAW")])) == []
 
 
+def test_source_urls_skips_non_string_content_url():
+    # Malformed JSONB: contentUrl is a list/int/dict, not a string. Must be
+    # skipped, not crash with AttributeError on .strip().
+    data = _doc(
+        "x",
+        [
+            {"@type": "MediaObject", "contentUrl": ["not", "a", "str"],
+             "jawafdehi:linkRole": "RAW"},
+            {"@type": "MediaObject", "contentUrl": 123, "jawafdehi:linkRole": "RAW"},
+            _mo("https://a/raw.pdf", "RAW"),
+        ],
+    )
+    assert source_urls(data) == ["https://a/raw.pdf"]
+
+
 # --- build_convert_payload ---------------------------------------------------
 
 
@@ -247,6 +262,25 @@ def test_worker_handler_raises_when_all_sources_empty():
             handle_material_convert(
                 {"source_urls": ["https://a/raw.pdf"]}, on_stage=lambda s: None
             )
+
+
+def test_worker_handler_falls_back_when_convert_source_raises():
+    """If convert_source raises (not just returns error), _convert_with_timeout
+    degrades to an error result so the loop tries the next alternate URL."""
+    from materials.job_handlers import handle_material_convert
+
+    def _convert(source):
+        if source["url"][0] == "https://a/raw.pdf":
+            raise RuntimeError("library crash")
+        return {"markdown": "ok", "status": "converted",
+                "url": source["url"][0], "note": ""}
+
+    with patch("review.converter.convert_source", side_effect=_convert):
+        out = handle_material_convert(
+            {"source_urls": ["https://a/raw.pdf", "https://a/alt.pdf"]},
+            on_stage=lambda s: None,
+        )
+    assert out == {"text": "ok", "source_url": "https://a/alt.pdf"}
 
 
 def test_worker_handler_times_out_a_stalled_conversion(settings):
