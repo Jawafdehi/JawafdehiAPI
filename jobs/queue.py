@@ -85,19 +85,23 @@ def enqueue(
         raise
 
 
-def claim_next(kinds: list[str]) -> Optional[Job]:
+def claim_next(kinds: list[str], *, reap: bool = True) -> Optional[Job]:
     """Atomically claim the highest-priority available job among ``kinds``.
 
     Returns the claimed :class:`Job` (now RUNNING, lease stamped, payload
     enriched by the kind's ``build_payload`` hook) or ``None`` when nothing is
     claimable. Safe to run from many concurrent consumers — ``SKIP LOCKED``
     guarantees no two claim the same row.
+
+    ``reap`` (default True) runs an opportunistic lazy sweep of lapsed leases
+    before claiming, so no separate reaper process is strictly required. High-
+    throughput deployments can pass ``reap=False`` to skip the per-claim sweep
+    and rely entirely on the background ``reap_jobs`` cron/timer.
     """
-    # Opportunistic lazy sweep: a claim also reclaims lapsed leases, so no
-    # separate reaper process is strictly required (a slow safety cron is still
-    # recommended for idle periods). Kept OUTSIDE the claim transaction so a
-    # reap contention never blocks the claim.
-    reap_expired()
+    # Opportunistic lazy sweep: a claim also reclaims lapsed leases. Kept OUTSIDE
+    # the claim transaction so reap contention never blocks the claim.
+    if reap:
+        reap_expired()
 
     now = timezone.now()
     with transaction.atomic():
@@ -162,6 +166,14 @@ def touch(job: Job, *, stage: Optional[str] = None) -> Job:
     return job
 
 
+class JobNotRunning(ValueError):
+    """Raised when finalize is called on a job that is no longer RUNNING.
+
+    This is the stale-guard: a zombie worker whose lease was reaped (and the job
+    re-queued/re-claimed by someone else) must not clobber the newer state.
+    """
+
+
 def finalize(
     job: Job,
     *,
@@ -178,36 +190,54 @@ def finalize(
       backoff on ``available_at``.
     - ``status=failed`` + (not retryable OR attempts exhausted) → FAILED, or DEAD
       when retries are exhausted on a retryable failure.
+
+    The transition is done under ``select_for_update`` and rejects a job that is
+    no longer RUNNING (raises :class:`JobNotRunning`), so a slow/zombie worker
+    cannot overwrite a job another worker has since reaped and re-queued. Domain
+    hooks (on_result / on_failure) run AFTER the transaction commits, so they
+    never hold the row lock.
     """
     now = timezone.now()
-    if status == Job.DONE:
-        job.status = Job.DONE
-        job.result = result
-        job.stage = "complete"
-        job.error = ""
-        job.completed_at = now
-        job.lease_expires_at = None
-    else:
-        if retryable and job.can_retry:
-            job.status = Job.QUEUED
-            job.stage = "retry_scheduled"
-            job.error = error
-            job.available_at = now + _backoff(job.attempts)
-            job.lease_expires_at = None
-            job.started_at = None
+    with transaction.atomic():
+        locked = Job.objects.select_for_update().get(pk=job.pk)
+        if locked.status != Job.RUNNING:
+            raise JobNotRunning(
+                f"Job {job.pk} is not running (status={locked.status})."
+            )
+
+        if status == Job.DONE:
+            locked.status = Job.DONE
+            locked.result = result
+            locked.stage = "complete"
+            locked.error = ""
+            locked.completed_at = now
+            locked.lease_expires_at = None
         else:
-            # Retryable-but-exhausted → DEAD (dead-letter); non-retryable → FAILED.
-            job.status = Job.DEAD if retryable else Job.FAILED
-            job.stage = "failed"
-            job.error = error
-            job.completed_at = now
-            job.lease_expires_at = None
+            if retryable and locked.can_retry:
+                locked.status = Job.QUEUED
+                locked.stage = "retry_scheduled"
+                locked.error = error
+                locked.available_at = now + _backoff(locked.attempts)
+                locked.lease_expires_at = None
+                locked.started_at = None
+            else:
+                # Retryable-but-exhausted → DEAD (dead-letter); non-retryable → FAILED.
+                locked.status = Job.DEAD if retryable else Job.FAILED
+                locked.stage = "failed"
+                locked.error = error
+                locked.completed_at = now
+                locked.lease_expires_at = None
 
-    if duration_seconds is not None:
-        job.duration_seconds = duration_seconds
-    job.save()
+        if duration_seconds is not None:
+            locked.duration_seconds = duration_seconds
+        locked.save()
 
-    # Let the kind apply the outcome to its own domain record.
+    # Refresh the caller's instance from the committed row so callers/tests that
+    # keep using ``job`` see the final state without a manual refresh_from_db().
+    job.refresh_from_db()
+
+    # Let the kind apply the outcome to its own domain record — OUTSIDE the
+    # transaction so a slow hook never holds the job row lock.
     spec = registry.get(job.kind)
     if job.status == Job.DONE and result is not None and spec.on_result is not None:
         try:
@@ -240,6 +270,7 @@ def reap_expired(*, limit: int = 50) -> int:
     """
     now = timezone.now()
     reaped = 0
+    dead_jobs: list[Job] = []
     with transaction.atomic():
         stale = list(
             Job.objects.select_for_update(skip_locked=True)
@@ -253,7 +284,6 @@ def reap_expired(*, limit: int = 50) -> int:
                 job.available_at = now + _backoff(job.attempts)
                 job.lease_expires_at = None
                 job.started_at = None
-                dead = None
             else:
                 job.status = Job.DEAD
                 job.stage = "dead_lease_expired"
@@ -262,11 +292,13 @@ def reap_expired(*, limit: int = 50) -> int:
                 )
                 job.completed_at = now
                 job.lease_expires_at = None
-                dead = job
+                dead_jobs.append(job)
             job.save()
-            if dead is not None:
-                _apply_failure(dead)
             reaped += 1
+    # Run failure hooks AFTER the transaction commits so a slow domain hook never
+    # holds the row locks the select_for_update took.
+    for dead in dead_jobs:
+        _apply_failure(dead)
     if reaped:
         logger.info("reaped %d expired job(s)", reaped)
     return reaped

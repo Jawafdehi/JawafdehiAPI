@@ -92,6 +92,41 @@ def test_dedup_key_frees_after_terminal():
 
 
 @pytest.mark.django_db
+def test_finalize_rejects_non_running_job():
+    """Stale-guard: finalizing a job that isn't RUNNING raises JobNotRunning.
+
+    Simulates a zombie worker whose lease was reaped and the job re-queued: its
+    late result submission must not clobber the newer state.
+    """
+    queue.enqueue("kx")
+    job = queue.claim_next(["kx"])
+    queue.finalize(job, status=Job.DONE, result={"first": True})  # now DONE
+
+    # A second finalize (stale) on the same job is rejected.
+    with pytest.raises(queue.JobNotRunning):
+        queue.finalize(job, status=Job.DONE, result={"second": True})
+    job.refresh_from_db()
+    assert job.result == {"first": True}  # unchanged
+
+
+@pytest.mark.django_db
+def test_claim_without_reap_skips_sweep():
+    """claim_next(reap=False) still claims but does not reclaim lapsed leases."""
+    queue.enqueue("kx", max_attempts=3)
+    running = queue.claim_next(["kx"])
+    Job.objects.filter(pk=running.pk).update(
+        lease_expires_at=timezone.now() - timezone.timedelta(minutes=1)
+    )
+    # A fresh queued job to claim, with reap disabled.
+    queue.enqueue("kx")
+    claimed = queue.claim_next(["kx"], reap=False)
+    assert claimed is not None
+    # The lapsed-lease job was NOT reaped (still RUNNING) because reap=False.
+    running.refresh_from_db()
+    assert running.status == Job.RUNNING
+
+
+@pytest.mark.django_db
 def test_finalize_done_stores_result_and_clears_lease():
     queue.enqueue("kx")
     job = queue.claim_next(["kx"])

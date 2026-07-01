@@ -38,7 +38,15 @@ def jobs_collection(request):
             qs = qs.filter(kind=kind)
         if st:
             qs = qs.filter(status=st)
-        qs = qs[: int(request.query_params.get("limit", 200))]
+        # Safe-parse ?limit=: a non-integer would raise ValueError and a negative
+        # would trip the queryset-slice assertion (both → 500). Fall back to 200.
+        try:
+            limit = int(request.query_params.get("limit", 200))
+        except (TypeError, ValueError):
+            limit = 200
+        if limit < 0:
+            limit = 200
+        qs = qs[:limit]
         return Response(JobSerializer(qs, many=True).data)
 
     # POST enqueue — gate on the mutating permission explicitly (the decorator
@@ -113,20 +121,21 @@ def result(request, pk):
     job, err = _get_job_or_404(pk)
     if err:
         return err
-    if job.status != Job.RUNNING:
-        return Response(
-            {"detail": f"Job {pk} is not running (status={job.status})."},
-            status=status.HTTP_409_CONFLICT,
-        )
     s = JobResultSerializer(data=request.data)
     s.is_valid(raise_exception=True)
     d = s.validated_data
-    job = queue.finalize(
-        job,
-        status=Job.DONE if d["status"] == "done" else Job.FAILED,
-        result=d.get("result"),
-        error=d.get("error", ""),
-        retryable=d.get("retryable", False),
-        duration_seconds=d.get("duration_seconds"),
-    )
+    # finalize() owns the stale-guard: it locks the row and raises JobNotRunning
+    # if the job is no longer RUNNING (reaped/re-queued by another worker), which
+    # we surface as 409 — no separate, race-prone pre-check here.
+    try:
+        job = queue.finalize(
+            job,
+            status=Job.DONE if d["status"] == "done" else Job.FAILED,
+            result=d.get("result"),
+            error=d.get("error", ""),
+            retryable=d.get("retryable", False),
+            duration_seconds=d.get("duration_seconds"),
+        )
+    except queue.JobNotRunning as exc:
+        return Response({"detail": str(exc)}, status=status.HTTP_409_CONFLICT)
     return Response(JobSerializer(job).data)

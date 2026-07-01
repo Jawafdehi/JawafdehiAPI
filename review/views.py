@@ -210,7 +210,9 @@ def regrade_all(request):
     The job's ``dedup_key`` (review id) frees when the prior job is terminal, so
     a regrade always enqueues a new run without duplicating an in-flight one.
     """
-    reviews = list(CaseReview.objects.all())
+    # Only id + slug are needed to reset + enqueue; avoid loading the (large)
+    # result JSON for every review.
+    reviews = list(CaseReview.objects.only("id", "slug"))
     CaseReview.objects.filter(id__in=[r.id for r in reviews]).update(
         status=CaseReview.STATUS_PENDING,
         stage="queued_for_regrade",
