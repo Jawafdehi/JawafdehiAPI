@@ -76,6 +76,8 @@ urlpatterns = [
     path("oembed/", OEmbedView.as_view(), name="oembed"),
     path("api/caseworker/me", MeView.as_view(), name="cw-me"),
     path("api/casework/", include("review.urls")),
+    # ── Central job queue (platform-wide; consumers claim/stage/result here) ──
+    path("api/jobs/", include("jobs.urls")),
 ]
 
 # Local-dev auth (DEV_AUTH, DEBUG/TESTING-only): DRF session login/logout at
