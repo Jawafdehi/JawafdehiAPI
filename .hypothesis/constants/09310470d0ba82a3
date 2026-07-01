@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/migrations/0023_chat_user_identity.py
+# hypothesis_version: 6.155.7
+
+[255, 'Chat User Identities', 'Chat User Identity', 'ChatUserIdentity', 'ID', 'cases', 'chat_identity', 'created_at', 'id', 'owui_user_id', 'user', 'verbose_name', 'verbose_name_plural']

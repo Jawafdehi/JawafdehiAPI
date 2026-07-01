@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/nes/nes_service/entities/urls.py
+# hypothesis_version: 6.155.7
+
+['(?P<ref>[^?]+?)', 'admin-reindex', 'admin/reindex', 'entities', 'entities/tags', 'entity-detail', 'entity-list', 'entity-prefixes', 'entity-tags', 'entity-versions', 'entity_prefixes', 'health', 'nes']

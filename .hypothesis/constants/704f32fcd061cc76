@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/nes/nes_service/entities/migrations/0002_alter_heldentity_created_at_and_more.py
+# hypothesis_version: 6.155.7
+
+['0001_initial', 'created_at', 'entities', 'heldentity', 'storedentity', 'storedversion', 'updated_at', 'version']

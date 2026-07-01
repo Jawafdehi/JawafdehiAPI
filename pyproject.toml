@@ -1,100 +1,118 @@
-# Jawafdehi platform — uv workspace root AND the umbrella (monolith) project.
+# Jawafdehi platform — ONE Django project, ONE installable package.
 #
-# CONSOLIDATION (Option C, locked): the three services (NES, NGM, Jawafdehi) now
-# run as Django *apps* in ONE Django project — ``monolith.config.settings`` —
-# one process, one wsgi, one image. Database-per-service is preserved via DB
-# routers (each app's models route to its own Postgres DB).
+# NES, NGM and Jawafdehi run as Django *apps* in a single project (``config.settings``):
+# one process, one wsgi, one image. Database-per-service is preserved via DB routers
+# (each app's models route to its own Postgres DB — see config/db_router.py).
 #
-# The workspace still has the four members (shared + the three services) so each
-# remains an independently installable package and the editable installs put
-# their app roots on sys.path. But the DEPLOYABLE is this root project
-# (``jawafdehi-monolith``), which depends on ALL THREE service packages + shared,
-# so one install pulls every app and every app's runtime deps:
+# There is no uv workspace and no per-service packages: every app is a plain top-level
+# import package (entities, courts, materials, lakehouse, cases, review, search,
+# discovery, config, jawafdehi_shared) and all runtime deps live here.
 #
-#   uv sync                       # installs the monolith (all apps) + dev tools
-#   uv run python manage.py ...    # one manage.py, one settings, all apps
-#
-# Migrated from Poetry to uv (2026-06-28); consolidated to one project (2026-06-28).
+#   uv sync                        # install the project (all apps) + dev tools
+#   uv run python manage.py ...     # one manage.py, one settings, all apps
 
 [project]
-name = "jawafdehi-monolith"
+name = "jawafdehi"
 version = "0.1.0"
-description = "Consolidated Jawafdehi platform — ONE Django project running NES, NGM and Jawafdehi as apps in one process (database-per-service preserved via DB routers)."
+description = "Jawafdehi platform — ONE Django project running NES, NGM and Jawafdehi as apps in one process (database-per-service preserved via DB routers)."
 requires-python = ">=3.12"
 dependencies = [
-    # [search] pulls opensearch-py + indic-transliteration so the unified-search
-    # substrate (analyzers, client, transliteration) ships in the deployable image.
-    "jawafdehi-shared[search]",
-    "nes-service",
-    "ngm-service",
-    "jawafdehi-service",
+    # --- core web stack ---
+    "django>=5.2,<6",
+    "djangorestframework>=3.16",
+    "django-cors-headers>=4.9",
+    "django-filter>=25.2",
+    "drf-spectacular>=0.29",
     "gunicorn>=23.0",
+    "whitenoise>=6.11",
+    # --- auth (OIDC/Zitadel in prod; the single OIDCAuthentication impl lives in
+    # jawafdehi_shared) ---
+    "pyjwt[crypto]>=2.10",
     "mozilla-django-oidc>=5.0.2",
-    "nepali>=1.2.0",
+    # --- databases (3 Postgres DBs via router; psycopg2 for jawafdehi DB, psycopg3
+    # for nes/ngm) ---
+    "psycopg[binary]>=3.2",
+    "psycopg2-binary>=2.9.11",
+    "dj-database-url>=3.0",
+    # --- entities/materials (NES + NGM) ---
+    "jsonpatch>=1.33",          # RFC-6902 PATCH /api/entities/{ref}
+    # --- ngm lakehouse / object storage ---
+    "duckdb>=1.4.0",
+    "boto3>=1.35",              # R2/S3 (lakehouse data files + document-source storage)
+    "django-storages>=1.14.3",
+    # --- jawafdehi cases/review ---
+    "django-jazzmin==3.0.1",
+    "django-tinymce>=5.0",
+    "rules>=3.5",               # django-rules permission predicates
+    "django-auditlog>=3.3",
+    "pydantic>=2.12",
+    "python-multipart>=0.0.18",
+    "python-dotenv>=1.2",
+    "anthropic>=0.40",
+    "nepali>=1.2.0",            # Bikram Sambat date conversion
+    "structlog>=25.5",
+    "sentry-sdk>=2.0",
+    # LLM clients used by casework enrichers (raw SDKs; LangChain stack dropped):
+    "openai>=2.30,<3",
+    "google-genai>=1.0",
+    # --- unified search substrate (OpenSearch + Devanagari<->Latin transliteration) ---
+    "opensearch-py>=2.4",
+    "indic-transliteration>=2.3.82",
 ]
 
-[tool.uv.workspace]
-members = ["shared", "services/*"]
-# services/* would otherwise match services/__pycache__ (present once
-# services/__init__.py exists for test collection) and try to load it as a
-# workspace member — exclude non-package dirs.
-exclude = ["services/__pycache__"]
+[project.optional-dependencies]
+# Document-conversion enrichment (BIGO / CIAA). Imported lazily inside management
+# commands, so the base image need not carry them.
+bigo-enrichment = [
+    "markitdown[docx,pdf,pptx,xlsx]>=0.1.5",
+    "likhit",
+]
 
 [tool.uv.sources]
-jawafdehi-shared = { workspace = true }
-nes-service = { workspace = true }
-ngm-service = { workspace = true }
-jawafdehi-service = { workspace = true }
+# Git source for the optional bigo-enrichment extra only (likhit is imported lazily
+# inside management commands / the review converter, never at startup).
+likhit = { git = "https://github.com/Jawafdehi/likhit.git", rev = "main" }
 
-# The importable umbrella package is `monolith` (holds the single settings/urls/
-# wsgi/asgi/db_router). Named `monolith` rather than `platform` because
-# `platform` is a Python stdlib module — a top-level package of that name would
-# shadow it and break Django / third-party imports.
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# All app packages ship in the one wheel. `config` holds settings/urls/wsgi/asgi/
+# db_router; `jawafdehi_shared` holds cross-cutting libs (auth/oidc, identity,
+# middleware, logging_config, entities/ids, search, drf).
 [tool.hatch.build.targets.wheel]
-packages = ["monolith"]
+packages = [
+    "config",
+    "jawafdehi_shared",
+    "entities",
+    "courts",
+    "materials",
+    "lakehouse",
+    "cases",
+    "review",
+    "search",
+    "discovery",
+]
 
 [dependency-groups]
-# Dev tooling shared across the workspace (lint/format/test). Not shipped in the image.
+# Dev tooling (lint/format/test). Not shipped in the image.
 dev = [
     "ruff>=0.6",
     "pytest>=8.0",
     "pytest-django>=4.8",
     # Jawafdehi's test suite needs these (its conftest imports hypothesis; some
-    # tests are async). Workspace-wide dev tooling, not shipped in images.
+    # tests are async).
     "hypothesis>=6.0",
     "pytest-asyncio>=0.24",
 ]
 
 [tool.pytest.ini_options]
-DJANGO_SETTINGS_MODULE = "monolith.config.settings"
+DJANGO_SETTINGS_MODULE = "config.settings"
 python_files = ["tests.py", "test_*.py", "*_tests.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 asyncio_mode = "auto"
-# Collect every service's tests in ONE run on the default ``prepend`` import
-# mode. The collision to avoid: NES's ``services/nes/tests/test_api.py`` and
-# NGM's ``services/ngm/tests/test_api.py`` would BOTH import as the bare module
-# ``tests.test_api`` ("ModuleNotFoundError: No module named 'tests.test_api'"),
-# because pytest walks up from each test file only as far as the first dir
-# WITHOUT an ``__init__.py`` to derive the module name.
-#
-# Fix (chosen to keep every test PATH and FILE unchanged AND keep the default
-# import mode, so the Jawafdehi suite's intra-package ``from tests.X import ...``
-# keeps working): add ``__init__.py`` to ``services/`` AND ``services/nes/`` AND
-# ``services/ngm/``. The walk-up now reaches the repo root (which has no
-# ``__init__.py``), so NES tests import as the UNIQUE name
-# ``services.nes.tests.test_api`` and NGM as ``services.ngm.tests.test_api`` — no
-# clash. (A two-segment ``nes.tests`` / ``ngm.tests`` was rejected because the
-# Jawafdehi ``ngm`` proxy app is already installed as the top-level package
-# ``ngm`` — ``import ngm`` must stay that app, so the deeper ``services.*`` names
-# are used.) Jawafdehi's ``services/jawafdehi`` deliberately has NO
-# ``__init__.py``, so its package root stays at ``services/jawafdehi`` and its
-# tests remain the bare top-level ``tests`` package that ``from tests.conftest
-# import ...`` / ``from tests.strategies import ...`` resolve to (the repo-root
-# ``conftest.py`` puts ``services/jawafdehi`` first on ``sys.path`` so that bare
-# ``tests`` wins over a third-party site-packages ``tests`` package shipped by
-# ``indic_transliteration``/``nepali_date_utils``).
+# Each app owns its own ``tests`` package (entities/tests, courts/tests,
+# materials/tests, cases/tests, …) so test module names are unique — no collision,
+# no __init__.py/sys.path juggling needed. The Jawafdehi suite lives at the repo-root
+# ``tests`` package (``from tests.conftest import ...`` still resolves).

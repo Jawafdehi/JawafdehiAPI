@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/ngm/ngm_service/lakehouse/config.py
+# hypothesis_version: 6.155.7
+
+['/', '1', '://', 'AWS_ACCESS_KEY_ID', 'AWS_REGION', 'ICEBERG_CATALOG_URI', 'ICEBERG_CLIENT_ID', 'ICEBERG_OAUTH2_SCOPE', 'ICEBERG_WAREHOUSE', 'NGM_BRONZE_BUCKET', 'NGM_GOLD_BUCKET', 'NGM_SILVER_BUCKET', 'NGM_SILVER_NAMESPACE', 'S3_ENDPOINT_URL', 'S3_URL_STYLE', 'S3_USE_SSL', 'auto', 'ngm_silver', 'on', 'path', 'true', 'yes']

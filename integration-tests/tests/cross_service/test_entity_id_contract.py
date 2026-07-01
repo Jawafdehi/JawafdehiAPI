@@ -73,7 +73,7 @@ def test_live_nes_entity_id_shape(clients):
 @pytest.mark.live
 @pytest.mark.xfail(
     reason="PENDING-DATA: NGM court tables empty -> no party nes_id populated yet. "
-    "Paths/shape are correct against the monolith read plane (/api/ngm/cases/ -> "
+    "Paths/shape are correct against the platform read plane (/api/ngm/cases/ -> "
     "DRF results); flips green when court data + nes_id write-back land.",
     strict=False,
 )

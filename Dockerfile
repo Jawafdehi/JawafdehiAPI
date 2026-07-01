@@ -1,15 +1,12 @@
-# Consolidated Jawafdehi platform — ONE image for the whole monolith.
+# Jawafdehi platform — ONE image, ONE Django project.
 #
-# Replaces the three former per-service Dockerfiles (services/{nes,ngm,jawafdehi}/
-# Dockerfile). NES, NGM and Jawafdehi now run as Django apps in ONE project
-# (monolith.config.settings) served by ONE gunicorn. Build from the repo root:
+# NES, NGM and Jawafdehi run as Django apps in ONE project (config.settings)
+# served by ONE gunicorn. Build from the repo root:
 #
 #   docker build -f Dockerfile -t jawafdehi-platform .
 #
-# It installs the umbrella project `jawafdehi-monolith`, which depends on all
-# three service packages + shared, so a single `uv sync` pulls every app and
-# every app's runtime deps (DuckDB/boto3 from NGM, langchain/anthropic from
-# Jawafdehi, jsonpatch from NES, etc.).
+# It installs the single `jawafdehi` project, so one `uv sync` pulls every app
+# and every runtime dep (DuckDB/boto3, anthropic, jsonpatch, opensearch, etc.).
 FROM python:3.12-slim
 
 # uv: fast, lockfile-driven installs.
@@ -23,37 +20,42 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
-# Cloud SQL server CA certificate for TLS database connections (carried over
-# from the Jawafdehi image; applies to all three databases now).
-COPY services/jawafdehi/cloudsql-ca.pem /etc/ssl/certs/cloudsql-ca.pem
+# Cloud SQL server CA certificate for TLS database connections (applies to all
+# three databases).
+COPY cloudsql-ca.pem /etc/ssl/certs/cloudsql-ca.pem
 ENV DATABASE_SSL_CA_CERT_FILE=/etc/ssl/certs/cloudsql-ca.pem
 ENV DATABASE_SSL_MODE=verify-ca
 
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy PYTHONUNBUFFERED=1
 WORKDIR /app
 
-# Copy the workspace metadata + the umbrella package + ALL members (one image
-# now needs every service's code + the shared package).
-COPY pyproject.toml uv.lock ./
-COPY monolith/ ./monolith/
-COPY manage.py ./manage.py
-COPY shared/ ./shared/
-COPY services/ ./services/
+# Copy project metadata + every app package (flat top-level layout).
+COPY pyproject.toml uv.lock manage.py ./
+COPY config/ ./config/
+COPY jawafdehi_shared/ ./jawafdehi_shared/
+COPY entities/ ./entities/
+COPY courts/ ./courts/
+COPY materials/ ./materials/
+COPY lakehouse/ ./lakehouse/
+COPY cases/ ./cases/
+COPY review/ ./review/
+COPY search/ ./search/
+COPY discovery/ ./discovery/
+COPY static/ ./static/
 
-# Install the umbrella project (jawafdehi-monolith) and its full dependency
-# closure — all three apps + shared — without the dev group.
+# Install the single `jawafdehi` project + full dependency closure, no dev group.
 RUN uv sync --frozen --no-dev
 
-ENV DJANGO_SETTINGS_MODULE=monolith.config.settings
+ENV DJANGO_SETTINGS_MODULE=config.settings
 
-# Collect static at build time (build-time command — skips the prod OIDC/secret
-# guards via the _BUILD_TIME_COMMANDS list in settings). STATIC_ROOT resolves
-# under services/jawafdehi (BASE_DIR) where the admin/jazzmin/static assets live.
+# Collect static at build time (skips the prod OIDC/secret guards via the
+# _BUILD_TIME_COMMANDS list in settings). STATIC_ROOT resolves under BASE_DIR
+# (repo root) where the admin/jazzmin/static assets live.
 RUN DEBUG=False SECRET_KEY=foo-bar ALLOWED_HOSTS=portal.jawafdehi.org \
     uv run python manage.py collectstatic --noinput
 
 EXPOSE 8080
 CMD ["uv", "run", \
-     "gunicorn", "monolith.config.wsgi:application", \
+     "gunicorn", "config.wsgi:application", \
      "--bind", "0.0.0.0:8080", "--workers", "2", "--threads", "4", \
      "--timeout", "60", "--access-logfile", "-", "--error-logfile", "-"]

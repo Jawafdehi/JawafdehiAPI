@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/rules/predicates.py
+# hypothesis_version: 6.155.7
+
+['Admin', 'Case', 'CaseState', 'Caseworker', 'DocumentSource', 'Moderator', 'Public', 'ReadOnly', 'source_id']

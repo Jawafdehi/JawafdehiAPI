@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/review/views.py
+# hypothesis_version: 6.155.7
+
+['Admin', 'GET', 'POST', 'PUT', 'Review not found.', 'Rule not found.', 'case', 'case_state', 'case_title', 'case_type', 'claimed', 'complete', 'completed_at', 'config', 'detail', 'duration_seconds', 'error', 'failed', 'id', 'is_admin', 'llm_samples', 'markdown', 'name', 'ok', 'overwrite', 'pass_threshold', 'queued_for_regrade', 'regrading', 'result', 'review_id', 'review_ids', 'revise_threshold', 'roles', 'slug', 'source_count', 'sources_converted', 'stage', 'started_at', 'status', 'updated_at', 'username']

@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/services/case_importer.py
+# hypothesis_version: 6.155.7
+
+['\nImport statistics:', '%Y-%m-%d', 'CORRUPTION', 'DRAFT', 'alleged_entities', 'case_end_date', 'case_start_date', 'description', 'entities_bound', 'key_allegations', 'link', 'locations', 'nes_id', 'notes', 'postgresql', 'r', 'related_entities', 'role', 'source_id', 'sources', 'sources_created', 'sources_reused', 'tags', 'timeline', 'title', 'url', 'utf-8', 'write']

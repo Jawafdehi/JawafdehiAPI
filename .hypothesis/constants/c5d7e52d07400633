@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/nes/nes_service/services/bulk_ingest/models.py
+# hypothesis_version: 6.155.7
+
+['.', '//', '@id', 'IngestRecord', 'IngestSource', 'authority', 'com', 'created', 'deduped_in_batch', 'dry_run', 'edu', 'entity_data', 'entity_prefix', 'errors', 'failed', 'gov', 'held', 'held_ids', 'index', 'kind', 'message', 'mil', 'net', 'np', 'org', 'publisher', 'role', 'slug', 'sources', 'title', 'total', 'updated', 'url', 'www.']

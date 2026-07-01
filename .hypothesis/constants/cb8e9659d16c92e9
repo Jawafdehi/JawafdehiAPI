@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/migrations/0027_revamp_source_types.py
+# hypothesis_version: 6.155.7
+
+['.md', 'DocumentSource', 'MARKDOWN', 'cases', 'link', 'role']

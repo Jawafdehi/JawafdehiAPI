@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/review/jds_client.py
+# hypothesis_version: 6.155.7
+
+[200, 404, '/', 'Accept', 'Content-Type', 'JAWAFDEHI_API_BASE', 'MARKDOWN', 'User-Agent', 'application/json', 'description', 'evidence', 'evidence_description', 'link', 'markdown', 'markdown_url', 'next', 'results', 'role', 'source', 'source_id', 'source_type', 'title', 'url', 'urls']

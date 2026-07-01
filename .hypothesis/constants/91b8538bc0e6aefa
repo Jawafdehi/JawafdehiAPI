@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/migrations/0013_native_file_uploads.py
+# hypothesis_version: 6.155.7
+
+[100, 255, '-created_at', '/', 'DocumentSource', 'DocumentSourceUpload', 'FINANCIAL_FORENSIC', 'File size in bytes', 'ID', 'INTERNAL_CORPORATE', 'INVESTIGATIVE_REPORT', 'Investigative Report', 'LEGAL_COURT_ORDER', 'LEGAL_PROCEDURAL', 'LEGISLATIVE_DOC', 'MEDIA_NEWS', 'Media/News', 'OFFICIAL_GOVERNMENT', 'OTHER_VISUAL', 'PUBLIC_COMPLAINT', 'SOCIAL_MEDIA', 'Social Media', 'Type of source', 'Uploaded file', 'case', 'case_id', 'cases', 'cases.documentsource', 'content_type', 'created_at', 'documentsource', 'file', 'file_size', 'filename', 'id', 'notes', 'ordering', 'source', 'source_type', 'updated_at', 'uploaded_file', 'uploaded_file_size', 'uploaded_filename', 'uploaded_files']

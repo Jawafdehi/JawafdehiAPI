@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/migrations/0003_alter_case_alleged_entities_and_more.py
+# hypothesis_version: 6.155.7
+
+['0002_documentsource', 'Source description', 'alleged_entities', 'case', 'cases', 'description', 'documentsource']

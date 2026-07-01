@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/services/nes_resolver.py
+# hypothesis_version: 6.155.7
+
+['display_name', 'en', 'entity_type', 'name', 'ne', 'nes_id', 'nes_service.entities']

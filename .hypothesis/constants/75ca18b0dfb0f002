@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/migrations/0032_backfill_source_link_role_raw.py
+# hypothesis_version: 6.155.7
+
+[500, 'DocumentSource', 'RAW', 'cases', 'id', 'link', 'role', 'url']

@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/nes/nes_service/entities/validation.py
+# hypothesis_version: 6.155.7
+
+[',', '/', ':', '@id', '@type', 'AdministrativeArea', 'CivicStructure', 'Contractor', 'Corporation', 'Courthouse', 'CreativeWork', 'DevelopmentProject', 'District', 'GovernmentService', 'Hospital', 'JudicialBody', 'MetropolitanCity', 'Municipality', 'NGO', 'Organization', 'Person', 'Place', 'PoliticalParty', 'Project', 'Province', 'RuralMunicipality', 'Service', 'SubMetropolitanCity', 'Thing', 'Ward', 'http://schema.org/', 'https://schema.org/', 'jawafdehi:', 'name', 'schema:']

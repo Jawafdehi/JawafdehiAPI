@@ -81,7 +81,7 @@ def test_topology_single_host_all_prefixes_live(clients):
     # no longer here (NES-owned), so only cases/sources are guaranteed.
     assert "cases" in root, f"Jawafdehi root missing 'cases': {root}"
 
-    # Same host for every prefix — the defining property of the monolith.
+    # Same host for every prefix — the defining property of the platform.
     assert clients["nes"].base_url == clients["ngm"].base_url == clients["jawafdehi"].base_url
 
 

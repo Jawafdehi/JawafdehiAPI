@@ -20,7 +20,7 @@ pytestmark = [pytest.mark.cross_service, pytest.mark.slow]
 @pytest.mark.xfail(
     reason="PENDING-DATA: NGM court tables empty, so no party nes_id to resolve "
     "yet (nes_id write-back lands with court data). Contract is correct against "
-    "the monolith read plane (/api/ngm/cases/ -> DRF results); flips green when data lands.",
+    "the platform read plane (/api/ngm/cases/ -> DRF results); flips green when data lands.",
     strict=False,
 )
 def test_ngm_court_party_resolves_to_nes_id(clients):

@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/review/migrations/0001_initial.py
+# hypothesis_version: 6.155.7
+
+[1.0, 100, 200, 255, 400, 512, '-created_at', 'CaseReview', 'Deterministic', 'Done', 'Failed', 'General', 'ID', 'In progress', 'LLM judge', 'Pending', 'ReviewConfig', 'Rule', 'applies_to', 'bad_examples', 'case_state', 'case_title', 'case_type', 'category', 'completed_at', 'condition_text', 'created_at', 'description', 'detector', 'deterministic', 'done', 'duration_seconds', 'enabled', 'error', 'failed', 'gate_min', 'good_examples', 'id', 'is_gate', 'key', 'kind', 'llm', 'llm_samples', 'order', 'ordering', 'pass_threshold', 'pending', 'result', 'reviews', 'revise_threshold', 'running', 'slug', 'source_count', 'sources_converted', 'stage', 'started_at', 'status', 'submitted_by', 'title', 'updated_at', 'updated_by', 'weight']

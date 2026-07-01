@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/review/code_rules.py
+# hypothesis_version: 6.155.7
+
+[1.0, 100, 'ALL', 'General', 'applies_to', 'bad_examples', 'category', 'condition_text', 'description', 'detector', 'deterministic', 'enabled', 'gate_min', 'good_examples', 'id', 'is_gate', 'key', 'kind', 'llm', 'order', 'title', 'weight']

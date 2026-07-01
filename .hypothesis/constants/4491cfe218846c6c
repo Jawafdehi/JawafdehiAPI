@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/nes/nes_service/entities/models.py
+# hypothesis_version: 6.155.7
+
+['authors', 'data', 'entities', 'entity_type', 'held_entities', 'ix_entities_data_gin', 'ix_entities_type', 'ix_versions_subject', 'subject_iri', 'version_number', 'versions']

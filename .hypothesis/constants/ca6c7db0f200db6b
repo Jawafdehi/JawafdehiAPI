@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/review/migrations/0002_delete_rule.py
+# hypothesis_version: 6.155.7
+
+['0001_initial', 'Rule', 'review']

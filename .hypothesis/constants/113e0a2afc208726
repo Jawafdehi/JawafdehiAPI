@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/review/oidc_client_credentials.py
+# hypothesis_version: 6.155.7
+
+[0.0, 30.0, 200, 3600, '/', 'Accept', 'Authorization', 'CASEWORK_OIDC_SCOPE', 'Content-Type', 'OIDC_ISSUER', 'access_token', 'application/json', 'audience', 'client_credentials', 'client_id', 'client_secret', 'expires_in', 'grant_type', 'scope']

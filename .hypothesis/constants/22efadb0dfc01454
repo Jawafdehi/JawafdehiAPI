@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/migrations/0018_add_slug_court_cases_missing_details_bigo.py
+# hypothesis_version: 6.155.7
+
+['bigo', 'case', 'cases', 'court_cases', 'missing_details', 'slug']

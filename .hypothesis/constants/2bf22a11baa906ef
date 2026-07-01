@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/ngm/ngm_service/courts/migrations/0002_alter_blacklistedfirm_nes_id_alter_caseentity_nes_id_and_more.py
+# hypothesis_version: 6.155.7
+
+[300, '0001_initial', 'blacklistedfirm', 'caseentity', 'courtcase', 'courts', 'nes_id']

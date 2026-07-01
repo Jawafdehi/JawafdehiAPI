@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/ngm/ngm_service/materials/management/commands/sync_materials_from_index.py
+# hypothesis_version: 6.155.7
+
+[5000, ' AND ', ' WHERE ', '-', '--batch-size', '--dataset', '--dry-run', '--rebuild-index', '--reindex', '--since', ':', '@id', 'COURT_ORDER', 'NAME', '_', 'batch_size', 'court-order', 'data', 'dataset', 'dataset = %s', 'date', 'datePublished', 'document', 'document_id', 'dry_run', 'ident', 'identifier', 'index_src', 'iri', 'links', 'material_type', 'metadata', 'ngm', 'ngm_v1', 'publication_date', 'rebuild_index', 'reindex', 'reindex_materials', 'since', 'source', 'source_type', 'store_true', 'title', 'updated_at', 'updated_at >= %s', 'url']

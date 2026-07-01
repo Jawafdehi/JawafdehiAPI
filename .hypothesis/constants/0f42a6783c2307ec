@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/courts/management/commands/import_courtcases.py
+# hypothesis_version: 6.155.7
+
+[1000, '(dry-run) ', '--all-courts', '--batch-size', '--court', '--dry-run', '--json', '--limit', '--materialize-orders', '--mode', '--reindex', '--since', '--source-dsn', '--strict', '--yes', 'Import every court.', 'all_courts', 'append', 'as_json', 'batch_size', 'copy', 'courts', 'dry_run', 'incremental', 'inplace', 'limit', 'materialize_orders', 'mode', 'none', 'rebuild', 'reindex', 'since', 'source_dsn', 'store_true', 'strict', 'yes']

@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/courts/serializers.py
+# hypothesis_version: 6.155.7
+
+['address', 'bench', 'bench_type', 'blacklist_date_ad', 'blacklist_date_bs', 'case_number', 'case_status', 'case_type', 'court', 'court_id', 'court_identifier', 'court_type', 'courtcase_iri', 'decision_type', 'defendant', 'document_sources', 'duration', 'effective_until_ad', 'effective_until_bs', 'extra_data', 'firm_name', 'full_name_english', 'full_name_nepali', 'hearing_date_ad', 'hearing_date_bs', 'id', 'identifier', 'iri', 'judge_names', 'lawyer_names', 'material_id', 'name', 'nes_id', 'plaintiff', 'proprietor_name', 'reason', 'recommending_office', 'registration_date_ad', 'registration_date_bs', 'remarks', 'scraped_at', 'serial_no', 'side']

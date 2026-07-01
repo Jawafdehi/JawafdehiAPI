@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/ngm/ngm_service/courts/migrations/0003_courtcase_readd_dropped_columns.py
+# hypothesis_version: 6.155.7
+
+[100, 200, 500, 'case_subject', 'courtcase', 'courts', 'hearing_count', 'registration_number', 'status', 'verdict_date_ad', 'verdict_date_bs', 'verdict_judge', 'verdict_type']

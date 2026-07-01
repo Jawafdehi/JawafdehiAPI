@@ -1,4 +1,4 @@
-"""End-to-end tests against the LIVE NES surface of the monolith.
+"""End-to-end tests against the LIVE NES surface of the platform.
 
 NES is mounted at ``/api/nes/`` on the one platform host. These assert the
 *contract* (response shapes, the canonical entity ``@id`` IRI rule) rather than
@@ -10,7 +10,7 @@ canonical ``@id`` IRI ``https://jawafdehi.org/entity/<prefix>/<slug>`` — there
 is NO legacy ``entity:<prefix>/<slug>`` form. The detail route accepts either a
 url-encoded IRI or a bare ``<prefix>/<slug>`` path.
 
-Verified live against the monolith (:48000, 2026-06-28):
+Verified live against the platform (:48000, 2026-06-28):
   * health ``GET /api/nes/health`` (NO trailing slash — slashless route; the
     ``/api/nes/health/`` variant 404s) -> ``{"status":"ok","service":"nes-api"}``;
   * list/search shape ``{"entities": [...], "total", "limit", "offset"}``;

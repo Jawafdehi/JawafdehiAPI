@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/migrations/0004_remove_case_add_contributors_to_documentsource.py
+# hypothesis_version: 6.155.7
+
+['assigned_sources', 'case', 'cases', 'contributors', 'documentsource']

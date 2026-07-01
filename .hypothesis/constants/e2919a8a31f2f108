@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/nes/nes_service/services/bulk_ingest/__init__.py
+# hypothesis_version: 6.155.7
+
+['BulkIngestResult', 'BulkIngestService', 'IngestRecord', 'IngestRecordError', 'IngestSource', 'IngestStatus']

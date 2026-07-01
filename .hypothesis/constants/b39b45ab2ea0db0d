@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/migrations/0033_drop_uploaded_file_machinery.py
+# hypothesis_version: 6.155.7
+
+['DocumentSourceUpload', 'cases', 'documentsource', 'uploaded_file', 'uploaded_file_size', 'uploaded_filename']

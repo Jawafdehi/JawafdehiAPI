@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/migrations/0005_add_jawafentity_model.py
+# hypothesis_version: 6.155.7
+
+[200, 300, '-created_at', 'Case', 'DocumentSource', 'ID', 'Jawaf Entities', 'Jawaf Entity', 'JawafEntity', 'Location entities', 'Related entities', 'alleged_entities', 'alleged_entities_old', 'case', 'cases', 'cases.jawafentity', 'cases_as_alleged', 'cases_as_location', 'cases_as_related', 'constraints', 'created_at', 'display_name', 'display_name__isnull', 'document_sources', 'documentsource', 'id', 'locations', 'locations_old', 'nes_id', 'nes_id__isnull', 'ordering', 'related_entities', 'related_entities_old', 'related_entity_ids', 'updated_at', 'verbose_name', 'verbose_name_plural']

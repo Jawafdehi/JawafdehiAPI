@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/widgets.py
+# hypothesis_version: 6.155.7
+
+[':', 'Add Court Case', 'Add Item', 'Add URL', '[]', 'all', 'button_label', 'case_number', 'cases/js/widgets.js', 'cols', 'court_choices', 'court_choices_json', 'court_id', 'data-easymde', 'data-toastui-editor', 'full_value', 'id', 'link', 'name', 'parsed_values', 'role', 'role_choices', 'role_choices_id', 'rows', 'sources', 'true', 'values', 'values_json', 'widget_id']

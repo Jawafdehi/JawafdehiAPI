@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/entities/migrations/0001_initial.py
+# hypothesis_version: 6.155.7
+
+['HeldEntity', 'StoredAuthor', 'StoredEntity', 'StoredVersion', 'author_id', 'authors', 'created_at', 'data', 'db_table', 'entities', 'entity_data', 'entity_type', 'held_entities', 'id', 'indexes', 'iri', 'ix_entities_data_gin', 'ix_entities_type', 'ix_versions_subject', 'postgresql', 'prefix', 'reason', 'slug', 'sources', 'storedentity', 'subject_iri', 'updated_at', 'version', 'version_number', 'versions']

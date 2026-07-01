@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/services/storage_links.py
+# hypothesis_version: 6.155.7
+
+['/', 'MEDIA_PUBLIC_BASE', 'http://', 'https://']

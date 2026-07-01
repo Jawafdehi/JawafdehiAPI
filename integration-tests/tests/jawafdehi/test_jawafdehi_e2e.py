@@ -1,4 +1,4 @@
-"""Real end-to-end tests against the LIVE Jawafdehi surface of the monolith.
+"""Real end-to-end tests against the LIVE Jawafdehi surface of the platform.
 
 Jawafdehi is mounted at ``/api/`` on the one platform host (:48000). These hit
 the running gunicorn/Postgres stack directly via httpx (not the shared

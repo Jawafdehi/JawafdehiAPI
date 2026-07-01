@@ -1,20 +1,19 @@
-"""Repo-root pytest conftest for the consolidated (monolith) test suite.
+"""Repo-root pytest conftest for the unified platform test suite.
 
 Shields the shared third-party ``tests`` namespace pollution from the Jawafdehi
 suite. A transitive dependency (``indic_transliteration`` / ``nepali_date_utils``,
 pulled in by the search/NES stack) installs its OWN top-level ``tests`` package
-into ``site-packages``. The Jawafdehi suite, by contrast, imports its helpers as
-the top-level package ``tests`` (``from tests.conftest import ...`` /
-``from tests.strategies import ...``), expecting its OWN ``services/jawafdehi/
-tests`` package. If the site-packages ``tests`` is imported first it poisons
-``sys.modules['tests']`` and the Jawafdehi imports fail.
+into ``site-packages``. The Jawafdehi suite imports its helpers as the top-level
+package ``tests`` (``from tests.conftest import ...`` / ``from tests.strategies
+import ...``), which now lives at the repo root (``./tests``). If the site-packages
+``tests`` is imported first it poisons ``sys.modules['tests']`` and those imports
+fail.
 
-Putting ``services/jawafdehi`` at the FRONT of ``sys.path`` here (the repo-root
-conftest is imported before collection) makes the Jawafdehi ``tests`` package win
-for any fresh ``import tests``. Combined with pytest's default ``prepend`` import
-mode this is sufficient: NES/NGM test modules never ``import tests`` (they import
-their own ``nes_service``/``ngm_service`` packages), so the only consumer of the
-bare ``tests`` name is the Jawafdehi suite, and it resolves to the right package.
+Putting the repo root at the FRONT of ``sys.path`` here (this conftest is imported
+before collection) makes the repo-root ``tests`` package win for any fresh
+``import tests``. Combined with pytest's default ``prepend`` import mode this is
+sufficient: each app owns its own ``tests`` package (``entities/tests``,
+``courts/tests``, …) so no other suite consumes the bare ``tests`` name.
 """
 
 import sys
@@ -22,9 +21,9 @@ from pathlib import Path
 
 import pytest
 
-_JAWAFDEHI = Path(__file__).resolve().parent / "services" / "jawafdehi"
-if _JAWAFDEHI.is_dir():
-    p = str(_JAWAFDEHI)
+_REPO_ROOT = Path(__file__).resolve().parent
+if _REPO_ROOT.is_dir():
+    p = str(_REPO_ROOT)
     if p not in sys.path:
         sys.path.insert(0, p)
 
@@ -43,15 +42,15 @@ if _JAWAFDEHI.is_dir():
 # content-test fix that belongs to whoever owns the CIAA enrichment command.
 # ---------------------------------------------------------------------------
 collect_ignore = [
-    "services/jawafdehi/cases/tests/test_enrich_ciaa_timeline.py",
+    "cases/tests/test_enrich_ciaa_timeline.py",
 ]
 
 
 # ---------------------------------------------------------------------------
 # Cross-database test access (Task: TestCase.databases).
 #
-# The monolith routes the ``entities`` app to the ``nes`` alias and
-# ``courts``/``materials`` to ``ngm`` (see ``monolith.config.db_router``).
+# The platform routes the ``entities`` app to the ``nes`` alias and
+# ``courts``/``materials`` to ``ngm`` (see ``config.db_router``).
 # Django's test runner / pytest-django only set up + permit queries to the
 # databases a test DECLARES; a query to an undeclared alias raises
 # ``DatabaseOperationForbidden``. The NES/NGM ``APITestCase``s already declare
@@ -64,7 +63,7 @@ collect_ignore = [
 #
 # Rather than edit ~40 Jawafdehi test modules, we enroll ALL databases on every
 # ``django_db`` marker that did not already pin a ``databases`` set. This mirrors
-# the NES/NGM ``"__all__"`` choice and matches production reality (the monolith
+# the NES/NGM ``"__all__"`` choice and matches production reality (the platform
 # always has the three DBs and any case-detail read can fan out to ``nes``/
 # ``ngm``). Tests that never touch another alias are unaffected (enrolling an
 # unused test DB is harmless); tests that explicitly pin ``databases=[...]`` are

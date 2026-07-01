@@ -1,12 +1,12 @@
-"""End-to-end contract tests against the LIVE NGM surface of the monolith.
+"""End-to-end contract tests against the LIVE NGM surface of the platform.
 
 NGM is mounted at ``/api/ngm/`` on the one platform host. These hit the running
 gunicorn/Postgres stack directly via ``httpx`` (not through the shared
 ``clients`` fixture) so the base URL is self-contained — it comes from
 ``PLATFORM_BASE_URL`` (falling back to the legacy ``NGM_API_BASE_URL``), both
-defaulting to the monolith on :48000.
+defaulting to the platform on :48000.
 
-Contract notes verified live against the monolith (2026-06-28):
+Contract notes verified live against the platform (2026-06-28):
 
 * Every NGM route is under ``/api/ngm/`` and is trailing-slashed: reads use
   ``/api/ngm/courts/`` / ``/api/ngm/cases/`` and the gated POSTs are ALSO slashed

@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/migrations/0025_add_respondent_petitioner_relation_types.py
+# hypothesis_version: 6.155.7
+
+['Accused', 'Alleged', 'Location', 'Opposition', 'Related', 'Victim', 'Witness', 'accused', 'alleged', 'cases', 'location', 'opposition', 'petitioner', 'related', 'relationship_type', 'respondent', 'victim', 'witness']

@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/lakehouse/index_publish.py
+# hypothesis_version: 6.155.7
+
+['$ref', '.jsonld', '/', '@id', '@type', 'CollectionPage', 'addressing_style', 'application/ld+json', 'bucket', 'children', 'files_written', 'hasPart', 'index', 'index_node_jsonld', 'jawafdehi:indexPath', 'manuscript_jsonld', 'manuscripts', 'node_object_key', 'node_tree_to_jsonld', 'publish_index_jsonld', 's3', 'utf-8']

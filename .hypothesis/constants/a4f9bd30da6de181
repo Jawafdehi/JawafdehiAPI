@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/nes/nes_service/entities/write_validation.py
+# hypothesis_version: 6.155.7
+
+['/', '/@context', '/@id', '/@type', '/jawafdehi:version', '@container', '@context', '@id', '@language', '@type', 'add', 'alternateName', 'change_description', 'copy', 'description', 'entity_prefix', 'from', 'https://schema.org', 'jawafdehi', 'move', 'name', 'op', 'path', 'prefix', 'remove', 'replace', 'schema:alternateName', 'schema:description', 'schema:name', 'slug', 'slug is required', 'test', 'type', 'value']

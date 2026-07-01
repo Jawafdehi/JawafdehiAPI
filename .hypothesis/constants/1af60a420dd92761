@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/migrations/0019_add_publication_date_to_documentsource.py
+# hypothesis_version: 6.155.7
+
+['cases', 'documentsource', 'publication_date']
