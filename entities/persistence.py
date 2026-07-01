@@ -170,6 +170,10 @@ class EntityRepository:
         if entity is None:
             return False
         entity.is_deleted = True
+        # StoredEntity.updated_at is default=timezone.now (NOT auto_now — it
+        # preserves publish-time provenance on normal writes), so a plain save()
+        # would re-persist the stale value. Stamp it explicitly on soft-delete.
+        entity.updated_at = datetime.now(timezone.utc)
         entity.save(update_fields=["is_deleted", "updated_at"])
         return True
 

@@ -70,6 +70,17 @@ class EntityDeleteTests(APITestCase):
         row = StoredEntity.objects.get(pk=self.iri)
         self.assertTrue(row.is_deleted)
 
+    def test_delete_advances_updated_at(self):
+        # StoredEntity.updated_at is default=timezone.now (NOT auto_now), so the
+        # soft-delete must stamp it explicitly — otherwise the tombstone carries a
+        # stale timestamp. Assert it moves forward past the pre-delete value.
+        before = StoredEntity.objects.get(pk=self.iri).updated_at
+        self.client.force_authenticate(user=self.contributor)
+        resp = self.client.delete("/api/entities/person/ram-bahadur")
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        after = StoredEntity.objects.get(pk=self.iri).updated_at
+        self.assertGreater(after, before)
+
     def test_deleted_entity_hidden_from_detail(self):
         self.client.force_authenticate(user=self.contributor)
         self.client.delete("/api/entities/person/ram-bahadur")

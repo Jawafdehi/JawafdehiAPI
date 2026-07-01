@@ -46,6 +46,11 @@ LD_JSON = "application/ld+json"
 #: JSON-LD MediaObject mapping understands — jsonld._ROLE_ENCODING_HINTS).
 _UPLOAD_ROLES = frozenset({"RAW", "ALTERNATE", "PERMALINK"})
 
+#: Upper bound on an uploaded material file. Generous (scanned court orders /
+#: charge sheets run large — this is NOT the 10 MB case-evidence limit) but
+#: bounded so an NGM-role client can't stream an unbounded body into storage.
+_MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 100 MB
+
 
 def _require_ngm_role(request):
     """Enforce ``HasNgmRole`` inside an ``AllowAny`` function view.
@@ -275,6 +280,12 @@ def material_file_upload(request, source: str, ident: str):
         return Response(
             {"detail": "A multipart 'file' is required."},
             status=status.HTTP_400_BAD_REQUEST,
+        )
+    if uploaded.size is not None and uploaded.size > _MAX_UPLOAD_BYTES:
+        max_mb = _MAX_UPLOAD_BYTES // (1024 * 1024)
+        return Response(
+            {"detail": f"Uploaded file exceeds the {max_mb} MB limit."},
+            status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
         )
 
     role = (request.data.get("role") or "RAW").strip().upper()

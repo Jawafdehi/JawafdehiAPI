@@ -110,6 +110,25 @@ class MaterialFileUploadTests(_DbAPITestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_upload_oversize_is_413(self):
+        # Guard against an unbounded stream to storage. DRF reconstructs the file
+        # server-side (a client-set .size doesn't survive), so shrink the limit to
+        # make a small file trip it — the code path (uploaded.size > limit) is the
+        # same one a real 100 MB body would hit.
+        from unittest.mock import patch
+
+        self.client.force_authenticate(user=self.user)
+        with patch("materials.views._MAX_UPLOAD_BYTES", 4):
+            resp = self.client.post(
+                self.URL,
+                {"file": self._pdf("huge.pdf"), "material_type": "court_order"},
+                format="multipart",
+            )
+        self.assertEqual(
+            resp.status_code, status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, resp.data
+        )
+        self.assertFalse(Material.objects.filter(pk=self.IRI).exists())
+
     def test_upload_unauth_is_401(self):
         resp = self.client.post(
             self.URL,

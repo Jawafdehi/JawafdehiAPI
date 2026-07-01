@@ -413,10 +413,10 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
         Blocked paths (id, version, contributors, timestamps,
         versionInfo) are rejected before the patch is applied.
         """
-        try:
-            case = self.get_object()
-        except Case.DoesNotExist:
-            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        # get_object() raises DRF's Http404/NotFound (→ 404) when the case is
+        # absent; the ViewSet's queryset already scopes visibility, so no manual
+        # DoesNotExist handling is needed here.
+        case = self.get_object()
 
         if not can_change_case(request.user, case):
             return Response(
@@ -594,10 +594,10 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
         Authorization mirrors PATCH (``can_change_case``) on top of the
         cases.delete_case model permission enforced by get_permissions().
         """
-        try:
-            case = self.get_object()
-        except Case.DoesNotExist:
-            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        # get_object() raises DRF's Http404/NotFound (→ 404) when the case is
+        # absent; the ViewSet's queryset already scopes visibility, so no manual
+        # DoesNotExist handling is needed here.
+        case = self.get_object()
 
         if not can_change_case(request.user, case):
             return Response(

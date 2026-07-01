@@ -24,7 +24,7 @@ from __future__ import annotations
 import time
 
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import connections, router
+from django.db import connections, router, transaction
 from rest_framework import mixins, status, viewsets
 
 from jawafdehi_shared.entities.ids import is_valid_entity_iri
@@ -34,7 +34,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from . import query_guard
+from . import query_guard, search_index
 from .models import BlacklistedFirm, CaseEntity, Court, CourtCase, CourtCaseHearing
 from .normalize import best_effort_normalize
 from .permissions import HasNgmQueryAccess, HasNgmRole
@@ -537,6 +537,18 @@ class IngestionEntitiesResolveView(_IngestionView):
         if (name := raw.get("name")):
             qs = qs.filter(name=name)
         matched = qs.update(nes_id=nes_id)
+        # A bulk .update() bypasses the CaseEntity post_save reindex signal, so
+        # the parent CourtCase search doc (which folds party nes_id IRIs into its
+        # ``identifiers``) would go stale. Re-index the parent on commit, mirroring
+        # signals._reindex_parent_courtcase — once per resolved case, not per row.
+        if matched:
+            case = CourtCase.objects.filter(
+                court_id=court_identifier,
+                case_number=best_effort_normalize(str(case_number)),
+                is_deleted=False,
+            ).first()
+            if case is not None:
+                transaction.on_commit(lambda c=case: search_index.index(c))
         return matched, None
 
 

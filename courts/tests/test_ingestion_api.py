@@ -189,6 +189,27 @@ class IngestionEntitiesResolveTests(_DbAPITestCase):
         self.entity.refresh_from_db()
         self.assertEqual(self.entity.nes_id, IRI)
 
+    def test_resolve_reindexes_parent_courtcase(self):
+        # The write-back is a bulk .update() (bypasses the CaseEntity post_save
+        # reindex signal), so the parent CourtCase — whose search doc folds party
+        # nes_id IRIs into ``identifiers`` — must be re-indexed explicitly on
+        # commit. Assert search_index.index() is called with the parent case.
+        from unittest.mock import patch
+
+        CourtCase.objects.create(court=self.court, case_number="082-OA-0503")
+        self.client.force_authenticate(user=self.user)
+        with patch("courts.views.search_index.index") as mock_index:
+            with self.captureOnCommitCallbacks(execute=True):
+                resp = self.client.post(
+                    self.URL,
+                    {"items": [{"court": "kathmandudc", "case_number": "082-OA-0503", "nes_id": IRI}]},
+                    format="json",
+                )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertTrue(mock_index.called, "parent CourtCase was not re-indexed")
+        reindexed = mock_index.call_args[0][0]
+        self.assertEqual(reindexed.case_number, "082-OA-0503")
+
     def test_resolve_filters_by_side_and_name(self):
         CaseEntity.objects.create(
             case_number="082-OA-0503", court=self.court, side="defendant", name="श्याम"
