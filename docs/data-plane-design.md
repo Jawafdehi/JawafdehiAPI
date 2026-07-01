@@ -1,8 +1,9 @@
 # Data Plane Design — Consolidation (Postgres-SoR, lakehouse-lite)
 
-**Status:** DRAFT for review · **Date:** 2026-07-01 · **Branch:** off `v2`. Foundations all
-merged: control-plane `80e2462`; jobs queue #262 `7458cbd`; **ADR cases-own-no-documents
-merged in PR #263** (`712dc2b`) — Materials is the sole document store on `v2` today.
+**Status:** ACCEPTED & BUILT · **Date:** 2026-07-01 · **Branch:** merged on `v2`. All
+foundations merged: control-plane `80e2462`; jobs queue #262; **ADR cases-own-no-documents
+#263** (`712dc2b`) — Materials is the sole document store; **material_convert FTS feed #264**
+(`fd13c35`). Remaining work is the provenance sidecar + governance tables (§8).
 
 **Goal.** One coherent data plane serving three domains (NES entities, NGM
 courts/governance, Jawafdehi cases) at target scale, read-heavy via the website,
@@ -46,7 +47,7 @@ another's critical path**:
   ┌──────────────────────────────────────────────────────────────┐
   │ ARCHIVE PLANE (R2)  — the object bytes (the bulk of storage)   │
   │   raw capture bytes                       [EXISTS: upload→R2]  │
-  │   OCR/likhit markdown  (linkRole=MARKDOWN) [GAP: extraction]   │
+  │   OCR/likhit markdown  (linkRole=MARKDOWN) [BUILT: #264]       │
   │   provenance sidecar   (source_url, ocr_*, sha256, …) [GAP]    │
   │   → immutable; system of record for RAW EVIDENCE               │
   └───────────────┬───────────────────────────────┬──────────────┘
@@ -56,7 +57,7 @@ another's critical path**:
   │ SERVING PLANE — Postgres   │        │ SEARCH PLANE — OpenSearch       │
   │  SoR. 3 DBs + router:      │───────►│  4 indices, bilingual.          │
   │   nes: entities            │ index  │  materials `body` = full text   │
-  │   ngm: courts, materials   │        │   [MACHINERY EXISTS; needs feed]│
+  │   ngm: courts, materials   │        │   [MACHINERY EXISTS; fed #264] │
   │   default: cases, JOBS     │        │  visibility-gated (draft≠public)│
   │  point + list reads (hot)  │        │  point + faceted + FTS (hot)    │
   └───────────────────────────┘        └───────────────────────────────┘
@@ -64,7 +65,7 @@ another's critical path**:
         website reads hit Postgres + OpenSearch ONLY (never the archive engine)
 
   JOBS QUEUE (default DB) — async plane cutting across ingestion→archive→search:
-    kind=material_convert: bytes → OCR markdown → data["text"] → reindex   [GAP: handler]
+    kind=material_convert: bytes → OCR markdown → data["text"] → reindex   [BUILT: #264]
     kind=case_review (ported), reindex/enrich (opportunistic)         [BUILT]
 ```
 
