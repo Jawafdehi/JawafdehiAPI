@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/nes/nes_service/services/bulk_ingest/ingest.py
-# hypothesis_version: 6.155.7
-
-['(dry-run)', ':', '@id', 'Bulk ingest', 'author', 'authority', 'change_description', 'committed', 'created_at', 'dateCreated', 'entity_data', 'entity_iri', 'entity_prefix', 'id', 'iri', 'jawafdehi:version', 'kind', 'reason', 'slug', 'sources', 'title', 'url', 'version_number']

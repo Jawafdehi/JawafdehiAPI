@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/migrations/0028_alter_source_type_choices.py
-# hypothesis_version: 6.155.7
-
-['AG_ABHIYOG_PATRA', 'CIAA Press Release', 'CIAA_PRESS_RELEASE', 'COURT_FILING_OTHER', 'COURT_ORDER', 'Court Order/Verdict', 'LAW_OR_BILL', 'Law/Act/Bill', 'MISC', 'Miscellaneous', 'NEWS', 'News/Media', 'OAG Audit Report', 'OAG_AUDIT_REPORT', 'Other Court Filing', 'SOCIAL_MEDIA', 'Social Media', 'Type of source', 'cases', 'documentsource', 'source_type']

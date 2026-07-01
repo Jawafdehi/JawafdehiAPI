@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/integration-tests/fixtures/sample_data.py
-# hypothesis_version: 6.155.7
-
-['077-wo-0123', '2021-03-15', '2022-06-10', '@id', '@type', 'ALTERNATE', 'COURT_ORDER', 'IRI_BASE', 'MARKDOWN', 'PERMALINK', 'Person', 'RAW', 'Ram Chandra Poudel', 'SAMPLE_CASE_IRI', 'SAMPLE_CASE_SLUG', 'SAMPLE_ENTITY_ID', 'SAMPLE_ENTITY_IRI', 'SAMPLE_ENTITY_PREFIX', 'SAMPLE_ENTITY_SLUG', 'SAMPLE_NES_ENTITY', 'SAMPLE_NGM_CASE', 'SAMPLE_NGM_PARTY', 'SOURCE_LINK_ROLES', 'SOURCE_PAGE', 'case_number', 'case_type', 'court_identifier', 'decided', 'en', 'entity_prefix', 'link', 'name', 'ne', 'nes_id', 'person', 'petitioner', 'politician', 'publication_date', 'ram-chandra-poudel', 'registration_date', 'related_entities', 'role', 'slug', 'source_type', 'status', 'supreme', 'tags', 'url', 'writ', 'रामचन्द्र पौडेल']

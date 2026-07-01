@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/conftest.py
-# hypothesis_version: 6.155.7
-
-['databases', 'default', 'django_db', 'jawafdehi', 'nes', 'ngm', 'services']

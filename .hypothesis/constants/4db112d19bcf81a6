@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/search_index.py
-# hypothesis_version: 6.155.7
-
-['@id', 'Case', 'PUBLISHED', 'body', 'case_start_date', 'case_type', 'court_cases', 'created_at', 'date', 'delete case', 'description', 'identifiers', 'index case', 'iri', 'isoformat', 'jawafdehi', 'key_allegations', 'keywords', 'public_iri', 'raw', 'short_description', 'slug', 'source_app', 'state', 'tags', 'title', 'title_en', 'title_ne', 'title_translit', 'type', 'updated_at']

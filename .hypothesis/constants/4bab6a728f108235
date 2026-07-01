@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/ngm/ngm_service/materials/management/commands/reindex_materials.py
-# hypothesis_version: 6.155.7
-
-['--rebuild', '--since', 'iri', 'rebuild', 'since', 'store_true']

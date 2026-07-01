@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/monolith/discovery/views.py
-# hypothesis_version: 6.155.7
-
-[3600, '/', 'Allow: /', 'Content-Type', 'TESTING', 'User-agent: *', 'application/xml', 'https', 'render', 'sitemap-index', 'text/plain']

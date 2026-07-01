@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/migrations/0007_feedback.py
-# hypothesis_version: 6.155.7
-
-[200, 300, 5000, '-submitted_at', 'Bug Report', 'Closed', 'Content Feedback', 'Feature Request', 'Feedback', 'General Feedback', 'ID', 'In Review', 'Resolved', 'Submitted', 'Type of feedback', 'Usability Issue', 'User agent string', 'admin_notes', 'bug', 'cases', 'closed', 'contact_info', 'content', 'description', 'feature', 'feedback_type', 'general', 'id', 'in_review', 'indexes', 'ip_address', 'ordering', 'related_page', 'resolved', 'status', 'subject', 'submitted', 'submitted_at', 'updated_at', 'usability', 'user_agent']

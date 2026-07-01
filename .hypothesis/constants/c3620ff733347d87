@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/cases/migrations/0039_ngm_rate_tier_groups.py
-# hypothesis_version: 6.155.7
-
-['Group', 'NGM_GoldTier', 'NGM_PlatinumTier', 'NGM_SilverTier', 'auth', 'cases']

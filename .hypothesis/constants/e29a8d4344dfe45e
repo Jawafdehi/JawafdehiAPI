@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/integration-tests/conftest.py
-# hypothesis_version: 6.155.7
-
-[429, 500, '/', '/api/', '/api/nes/health', '0', '0.3', '1', '2', '?', 'Authorization', 'NES_API_BASE_URL', 'NGM_API_BASE_URL', 'OIDC_CLIENT_ID', 'OIDC_CLIENT_SECRET', 'OIDC_ISSUER', 'PLATFORM_BASE_URL', 'Retry-After', 'SKIP_IF_STACK_DOWN', 'THROTTLE_BACKOFF_S', 'THROTTLE_MAX_RETRIES', 'access_token', 'client_credentials', 'client_id', 'client_secret', 'grant_type', 'jawafdehi', 'live', 'nes', 'ngm', 'openid', 'platform', 'scope', 'session']

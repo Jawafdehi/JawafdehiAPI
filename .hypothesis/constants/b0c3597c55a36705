@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/review/bedrock_judge.py
-# hypothesis_version: 6.155.7
-
-[0.0, 0.5, 120, 300, 900, 2000, 120000, '"', 'BEDROCK_MAX_WORKERS', '[', ']', '_n_samples', '_narrative', '```', 'adaptive', 'anthropic_version', 'bad_examples', 'bedrock-2023-05-31', 'bedrock-runtime', 'body', 'content', 'contributes_to', 'description', 'entities', 'error', 'good_examples', 'issues', 'json', 'key', 'key_allegations', 'low', 'markdown', 'max_attempts', 'max_tokens', 'mean', 'messages', 'mode', 'narrative', 'notes', 'rationale', 'relevance', 'role', 'rule', 'samples', 'score', 'std', 'suggestions', 'summary', 'system', 'text', 'timeline', 'user', 'variance', '{', '}']

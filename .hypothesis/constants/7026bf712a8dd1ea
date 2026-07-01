@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/management/commands/map_press_release_files.py
-# hypothesis_version: 6.155.7
-
-[300, 500, '$ref', '-', '--case-id', '--dry-run', '--limit', '/', '=', '=&', 'CIAA Press Release', 'DRAFT', 'RAW', 'case_id', 'cases_fixed', 'cases_processed', 'cases_skipped', 'children', 'ciaa-press-releases', 'description', 'dry_run', 'errors', 'evidence', 'evidence_updated', 'file_name', 'files', 'limit', 'link', 'manuscripts', 'metadata', 'name', 'next', 'postgresql', 'press_id', 'publication_date', 'role', 'source_id', 'source_url', 'sources_created', 'sources_updated', 'store_true', 'title', 'url']

@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/materials/bulk_ingest.py
-# hypothesis_version: 6.155.7
-
-['(dry-run)', '@id', '@type', 'CreativeWork', 'DigitalDocument', 'Legislation', 'LegislationObject', 'Manuscript', 'Report', 'committed', 'created', 'deduped_in_batch', 'dry_run', 'entity_data', 'errors', 'failed', 'held', 'held_ids', 'index', 'jsonld', 'material', 'material_type', 'message', 'pk', 'sources', 'total', 'updated']

@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/review/rules_engine.py
-# hypothesis_version: 6.155.7
-
-[1.0, 3.0, 4.0, 100, 600, 12000, 'ALL', 'LEGAL', 'OFFICIAL', 'OFFICIAL_GOVERNMENT', 'accused', 'accused_present', 'bigo', 'bigo_amount_present', 'case_type', 'charge sheet', 'charge_sheet', 'chargesheet', 'ciaa', 'ciaa_press_release', 'court order', 'court_case_number', 'court_cases', 'court_record', 'date', 'date_bs', 'description', 'entities', 'entity', 'evidence', 'judgement', 'judgment', 'key_allegations', 'location', 'press release', 'press statement', 'source', 'source_type', 'sourcing', 'tags', 'timeline', 'title', 'type', 'url', 'verdict', 'अख्तियार', 'अभियोग', 'आदेश', 'प्रेश विज्ञप्त', 'प्रेस विज्ञप्त', 'फैसला']

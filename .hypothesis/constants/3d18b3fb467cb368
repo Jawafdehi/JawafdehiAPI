@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/nes/nes_service/entities/permissions.py
-# hypothesis_version: 6.155.7
-
-['NES_Admin', 'NES_Contributor', 'name', 'user']

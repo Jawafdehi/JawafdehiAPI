@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/config/middleware.py
-# hypothesis_version: 6.155.7
-
-['X-Request-Id', 'request_id']

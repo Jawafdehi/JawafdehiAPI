@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/shared/jawafdehi_shared/search/mappings.py
-# hypothesis_version: 6.155.7
-
-['Any-Latin; Lower', '\\u200C=>', '\\u200D=>', '_english_', 'analysis', 'analyzer', 'body', 'case_type', 'char_filter', 'compose', 'created_at', 'custom', 'date', 'date_bs', 'decimal_digit', 'devanagari', 'en', 'en_stemmer', 'en_stop', 'enabled', 'english', 'exact_normalized', 'fields', 'filter', 'icu_folding', 'icu_normalizer', 'icu_tokenizer', 'icu_transform', 'id', 'identifiers', 'indic_normalization', 'iri', 'keyword', 'keywords', 'language', 'lowercase', 'mapping', 'mappings', 'mixed_script', 'mode', 'name', 'ne', 'nfc', 'nfc_normalizer', 'object', 'properties', 'raw', 'roman', 'source_app', 'status', 'stemmer', 'stop', 'stopwords', 'strip_zerowidth', 'text', 'title_en', 'title_ne', 'title_translit', 'to_latin', 'tokenizer', 'translit', 'translit_bridge', 'type', 'updated_at', 'verdict_date', 'verdict_date_bs', 'verdict_type']

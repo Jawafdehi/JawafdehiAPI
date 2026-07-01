@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/jawafdehi_shared/storage.py
-# hypothesis_version: 6.155.7
-
-['/', 'ContentType', 'FILE_HASH_SALT', 'FILE_STORAGE_PREFIX', 'MEDIA_PUBLIC_BASE', 'RAW', 'case_uploads/', 'charset=', 'http://', 'https://', 'jawafdehi-file-salt', 'link', 'role', 'text/', 'utf-8']

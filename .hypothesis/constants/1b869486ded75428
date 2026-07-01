@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/.venv/bin/pytest
-# hypothesis_version: 6.155.7
-
-['-script.pyw', '.exe', '__main__']

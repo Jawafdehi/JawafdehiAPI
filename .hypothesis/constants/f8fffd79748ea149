@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/courts/urls.py
-# hypothesis_version: 6.155.7
-
-['case', 'case-detail', 'case-documents', 'case-entities', 'case-hearings', 'court', 'courtcase-entities', 'courtcases', 'courts', 'entity', 'firm', 'firms', 'get', 'ingestion-cases', 'ingestion-documents', 'ingestion/cases/', 'ingestion/documents/', 'list_documents', 'list_entities', 'list_hearings', 'ngm-courts', 'patch', 'put', 'query', 'query/', 'retrieve_composite', 'update_composite']

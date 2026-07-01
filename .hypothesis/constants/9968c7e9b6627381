@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/review/rule_defaults.py
-# hypothesis_version: 6.155.7
-
-[0.6, 0.9, 1.0, 1.1, 1.2, 1.4, 1.5, 83.5, 83.7, 100, 'ALL', 'Accuracy', 'Always active.', 'Bigo amount is set', 'CIAA_BASIC', 'CIAA_EXTENDED', 'CIAA_HAS_VERDICT', 'Completeness', 'Entities', 'Ethics', 'Gap honesty', 'Integrity', 'Privacy & ethics', 'Sourcing', 'Timeline', 'Tonal neutrality', 'Tone', 'accused_present', 'applies_to', 'bad_examples', 'bigo_amount_present', 'category', 'charge_sheet', 'ciaa_press_release', 'condition_text', 'court_case_number', 'court_record', 'description', 'detector', 'deterministic', 'enabled', 'gap_honesty', 'gate_min', 'good_examples', 'is_gate', 'key', 'kind', 'llm', 'order', 'privacy_ethics', 'sourcing', 'timeline', 'title', 'tonal_neutrality', 'weight']

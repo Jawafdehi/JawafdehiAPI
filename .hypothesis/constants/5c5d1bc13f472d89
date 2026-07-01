@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/ngm/ngm_service/courts/search_index.py
-# hypothesis_version: 6.155.7
-
-[' · ', '@id', 'body', 'case_number', 'case_status', 'case_subject', 'case_type', 'court', 'court_id', 'created_at', 'date', 'date_bs', 'defendant', 'delete courtcase', 'full_name_english', 'identifiers', 'index courtcase', 'iri', 'isoformat', 'jawafdehi:CourtCase', 'keywords', 'name', 'nes_id', 'ngm', 'plaintiff', 'raw', 'registration_date_ad', 'registration_date_bs', 'source_app', 'status', 'title_en', 'title_ne', 'title_translit', 'type', 'updated_at', 'verdict_date', 'verdict_date_ad', 'verdict_date_bs', 'verdict_judge', 'verdict_type']

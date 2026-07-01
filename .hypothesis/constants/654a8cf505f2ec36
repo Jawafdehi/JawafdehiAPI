@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/migrations/0036_alter_caseentityrelationship_nes_id.py
-# hypothesis_version: 6.155.7
-
-[300, 'cases', 'nes_id']

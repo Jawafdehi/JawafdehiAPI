@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/monolith/config/db_router.py
-# hypothesis_version: 6.155.7
-
-['admin', 'auditlog', 'auth', 'contenttypes', 'courts', 'default', 'entities', 'materials', 'messages', 'nes', 'ngm', 'sessions']

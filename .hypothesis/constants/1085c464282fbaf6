@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/review/management/commands/review_poller.py
-# hypothesis_version: 6.155.7
-
-[3.0, 200, 201, 204, '--apply', '--once', '--poll', '/jobs/claim/', 'Authorization', 'Content-Type', 'application/json', 'apply', 'case', 'config', 'created', 'done', 'error', 'failed', 'markdown', 'markdown_to_attach', 'once', 'pending', 'poll', 'results', 'review_id', 'source_id', 'stage', 'status', 'store_true']

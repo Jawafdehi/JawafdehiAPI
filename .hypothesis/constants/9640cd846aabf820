@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/nes/nes_service/entities/persistence.py
-# hypothesis_version: 6.155.7
-
-[0.0, 1.0, 2.0, 3.0, 5.0, 10.0, 100, 1000, 5000, ',', '/', '@id', 'QuerySet', 'alternateName', 'author_id', 'created_at', 'data', 'entity_data', 'entity_iri', 'entity_type', 'iri', 'keywords', 'name', 'postgresql', 'prefix', 'reason', 'slug', 'snapshot', 'sources', 'subject_iri', 'updated_at', 'version', 'version_number']

@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/jawafdehi_shared/auth/oidc.py
-# hypothesis_version: 6.155.7
-
-[300, 'Admin', 'Bearer', 'Caseworker', 'Moderator', 'NES_Admin', 'NES_Contributor', 'NGM_GoldTier', 'NGM_PlatinumTier', 'NGM_SilverTier', 'OIDC_ALGORITHMS', 'OIDC_JWKS_URI', 'OIDC_LEEWAY', 'OIDC_ROLES_CLAIM', 'OIDC_ROLE_TO_GROUP', 'OIDC_SUPERUSER_ROLE', 'Public', 'RS256', 'ReadOnly', 'ReviewAssistant', 'Token has expired.', 'admin', 'aud', 'caseworker', 'email', 'exp', 'iat', 'is_active', 'is_superuser', 'iss', 'moderator', 'name', 'nes_admin', 'nes_contributor', 'ngm_gold', 'ngm_platinum', 'ngm_silver', 'public', 'readonly', 'require', 'review_assistant', 'sub']

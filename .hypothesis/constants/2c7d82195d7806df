@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/migrations/0015_alter_caseentityrelationship_relationship_type.py
-# hypothesis_version: 6.155.7
-
-['Alleged', 'Location', 'Opposition', 'Related', 'Victim', 'Witness', 'alleged', 'cases', 'location', 'opposition', 'related', 'relationship_type', 'victim', 'witness']

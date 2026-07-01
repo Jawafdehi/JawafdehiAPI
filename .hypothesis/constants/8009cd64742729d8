@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/ngm/ngm_service/courts/query_guard.py
-# hypothesis_version: 6.155.7
-
-[30.0, 500, '.', '30', '500', ';', 'NGM_QUERY_MAX_ROWS', 'alter', 'court_case_entities', 'court_case_hearings', 'court_cases', 'courts', 'create', 'delete', 'drop', 'grant', 'insert', 'revoke', 'scraped_dates', 'select', 'truncate', 'update']

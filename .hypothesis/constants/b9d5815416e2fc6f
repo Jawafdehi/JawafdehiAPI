@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/migrations/0013_add_case_entity_relationship.py
-# hypothesis_version: 6.155.7
-
-[100, 500, '-created_at', 'Alleged', 'Case', 'FINANCIAL_FORENSIC', 'ID', 'INTERNAL_CORPORATE', 'INVESTIGATIVE_REPORT', 'Investigative Report', 'LEGAL_COURT_ORDER', 'LEGAL_PROCEDURAL', 'LEGISLATIVE_DOC', 'MEDIA_NEWS', 'Media/News', 'OFFICIAL_GOVERNMENT', 'OTHER_VISUAL', 'Opposition', 'PUBLIC_COMPLAINT', 'Related', 'SOCIAL_MEDIA', 'Social Media', 'Type of source', 'Victim', 'Witness', 'alleged', 'alleged_entities', 'case', 'case_id', 'case_relationships', 'cases', 'cases.case', 'cases.jawafentity', 'cases_case_locations', 'created_at', 'documentsource', 'entity', 'entity_relationships', 'id', 'locations', 'notes', 'opposition', 'ordering', 'related', 'related_entities', 'relationship_type', 'source_type', 'unified_cases', 'unified_entities', 'verbose_name', 'verbose_name_plural', 'victim', 'witness']

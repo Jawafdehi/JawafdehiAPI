@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/review/serializers.py
-# hypothesis_version: 6.155.7
-
-[255, '/', 'case_state', 'case_title', 'case_type', 'completed_at', 'created_at', 'disposition', 'done', 'duration_seconds', 'error', 'failed', 'id', 'llm_samples', 'overall_score', 'pass_threshold', 'result', 'revise_threshold', 'slug', 'source_count', 'sources_converted', 'stage', 'started_at', 'status', 'updated_at']

@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/migrations/0037_alter_documentsource_related_entities.py
-# hypothesis_version: 6.155.7
-
-['cases', 'documentsource', 'related_entities']

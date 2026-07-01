@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/review/runner.py
-# hypothesis_version: 6.155.7
-
-['MARKDOWN', 'analyzing_sources', 'attached', 'case_state', 'case_title', 'case_type', 'conversion_status', 'converted', 'converting_sources', 'duration_seconds', 'label', 'llm_samples', 'markdown', 'markdown_to_attach', 'markdown_url', 'model_id_used', 'pass_threshold', 'result', 'revise_threshold', 'role', 'scoring', 'source_count', 'source_id', 'sources_converted', 'state', 'title', 'type', 'urls']

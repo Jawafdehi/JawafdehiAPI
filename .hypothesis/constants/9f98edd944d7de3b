@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/config/structlog_config.py
-# hypothesis_version: 6.155.7
-
-['1', 'SERVICE_NAME', 'STRUCTLOG_CONSOLE', 'case_id', 'entity_id', 'iso', 'jawafdehi-api', 'request_id', 'revision_id', 'service']

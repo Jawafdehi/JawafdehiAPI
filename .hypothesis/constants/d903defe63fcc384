@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/entities/migrations/0003_storedentity_is_deleted.py
-# hypothesis_version: 6.155.7
-
-['entities', 'is_deleted', 'storedentity']

@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/ngm/ngm_service/courts/permissions.py
-# hypothesis_version: 6.155.7
-
-['Admin', 'Caseworker', 'Moderator', 'NGM_GoldTier', 'NGM_PlatinumTier', 'NGM_SilverTier', 'auth', 'name', 'ngm.query', 'scope', 'scp', 'user']

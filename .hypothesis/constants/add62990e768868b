@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/migrations/0001_initial.py
-# hypothesis_version: 6.155.7
-
-[100, 200, '-created_at', 'Broken Promises', 'CLOSED', 'CORRUPTION', 'Case', 'Case title', 'Closed', 'Corruption', 'DRAFT', 'Draft', 'ID', 'IN_REVIEW', 'In Review', 'PROMISES', 'PUBLISHED', 'Published', 'alleged_entities', 'assigned_cases', 'case_end_date', 'case_id', 'case_start_date', 'case_type', 'contributors', 'created_at', 'description', 'evidence', 'id', 'indexes', 'key_allegations', 'locations', 'ordering', 'related_entities', 'state', 'tags', 'timeline', 'title', 'updated_at', 'version', 'versionInfo']

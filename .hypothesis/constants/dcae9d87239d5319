@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/cases/migrations/0020_remove_promises_case_type.py
-# hypothesis_version: 6.155.7
-
-['CORRUPTION', 'Case', 'Corruption', 'PROMISES', 'Type of case', 'case', 'case_type', 'cases']

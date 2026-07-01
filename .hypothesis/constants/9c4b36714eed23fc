@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/materials/views.py
-# hypothesis_version: 6.155.7
-
-['.', '/material/', '@id', 'DELETE', 'GET', 'Material not found.', 'POST', 'PUT', 'application/ld+json', 'detail', 'iri', 'is_deleted', 'material', 'material_type', 'source', 'updated_at', 'user']

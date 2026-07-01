@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/config/urls.py
-# hypothesis_version: 6.155.7
-
-['/', '/oidc/authenticate/', 'admin-oidc-login', 'api-auth/', 'api/', 'api/casework/', 'api/caseworker/me', 'api/schema/', 'api/search/', 'api/swagger/', 'cases.urls', 'courts.urls', 'cw-me', 'discovery.urls', 'django-admin/', 'django-admin/login/', 'docs', 'docs/', 'entities.urls', 'index', 'materials.urls', 'oembed', 'oembed/', 'oidc/', 'rest_framework', 'rest_framework.urls', 'review.urls', 'schema', 'search.urls', 'swagger-ui']

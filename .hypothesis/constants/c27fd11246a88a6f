@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/jawafdehi_shared/search/opensearch.py
-# hypothesis_version: 6.155.7
-
-['OPENSEARCH_PASSWORD', 'OPENSEARCH_URL', 'OPENSEARCH_USER', 'hosts', 'http_auth', 'jawafdehi-cases', 'mappings', 'nes-entities', 'ngm-courtcases', 'ngm-materials', 'settings']

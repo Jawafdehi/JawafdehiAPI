@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/materials/migrations/0001_initial.py
-# hypothesis_version: 6.155.7
-
-[120, 300, 400, 'Material', 'created_at', 'data', 'db_table', 'ident', 'indexes', 'iri', 'material_type', 'materials', 'source', 'updated_at']

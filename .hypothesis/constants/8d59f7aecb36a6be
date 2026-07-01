@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/entities/views.py
-# hypothesis_version: 6.155.7
-
-[100, ',', '/', 'BATCH_SIZE_EXCEEDED', 'Created via API', 'ENTITY_EXISTS', 'GET', 'INVALID_ENTITY_ID', 'INVALID_PATCH', 'INVALID_REQUEST', 'NOT_FOUND', 'PATCH', 'POST', 'Updated via API', 'VALIDATION_ERROR', 'already exists', 'application/ld+json', 'change_description', 'code', 'detail', 'does not exist', 'entities', 'entity_prefix', 'entity_type', 'error', 'http://', 'https://', 'ids', 'keywords', 'limit', 'message', 'nes-api', 'not found', 'not_found', 'offset', 'ok', 'patch_ops', 'prefixes', 'query', 'requested', 'requested_by', 'service', 'skipped', 'status', 'tags', 'total', 'unknown', 'user', 'username', 'versions']

@@ -1,4 +1,0 @@
-# file: /damodaha-volunteer/think-big/jawafdehi-api/services/jawafdehi/review/urls.py
-# hypothesis_version: 6.155.7
-
-['auth/me/', 'config/', 'jobs/<int:pk>/stage/', 'jobs/claim/', 'reviews/', 'reviews/<int:pk>/', 'reviews/regrade-all/', 'reviews/submit/', 'rules/', 'rules/<int:pk>/']
