@@ -10,7 +10,10 @@ from datetime import datetime
 
 from rest_framework import serializers
 
-from jawafdehi_shared.entities.ids import is_valid_entity_iri
+from jawafdehi_shared.entities.ids import (
+    is_valid_entity_iri,
+    is_valid_material_iri,
+)
 
 from .models import (
     CaseState,
@@ -96,18 +99,30 @@ class TimelineItemSerializer(serializers.Serializer):
 
 
 class EvidenceItemSerializer(serializers.Serializer):
-    source_id = serializers.CharField()
-    description = serializers.CharField()
+    """One evidence entry = a reference to an NGM material (the
+    CaseMaterialReference join). ``material_iri`` is required + strict-validated;
+    ``additional_details`` is an optional case-specific note (ADR: cases own no
+    documents).
+    """
 
-    def validate_source_id(self, value):
-        if not value or not value.strip():
-            raise serializers.ValidationError("source_id must be a non-empty string")
+    material_iri = serializers.CharField()
+    additional_details = serializers.CharField(
+        required=False, allow_blank=True, allow_null=True, default=""
+    )
+
+    def validate_material_iri(self, value):
+        value = (value or "").strip()
+        if not is_valid_material_iri(value):
+            raise serializers.ValidationError(
+                f"Invalid NGM material id: {value!r}. Must be a canonical material "
+                "@id IRI of the form "
+                "'https://<authority>/material/<source>/<ident>'."
+            )
         return value
 
-    def validate_description(self, value):
-        if not value or not value.strip():
-            raise serializers.ValidationError("description must be a non-empty string")
-        return value
+    def validate_additional_details(self, value):
+        # Optional note; normalize null to empty string.
+        return (value or "").strip()
 
 
 class EntityPatchItemSerializer(serializers.Serializer):

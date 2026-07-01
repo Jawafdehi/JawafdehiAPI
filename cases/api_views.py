@@ -53,6 +53,7 @@ from .caseworker_serializers import (
 from .models import (
     Case,
     CaseEntityRelationship,
+    CaseMaterialReference,
     CaseState,
     RelationshipType,
 )
@@ -71,6 +72,36 @@ from .serializers import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _recompute_material_visibility(material_iris) -> None:
+    """Schedule a visibility recompute for the given material IRIs (on commit).
+
+    A material's visibility is the MAX over its referring cases' states (ADR:
+    cases own no documents), so whenever a case's evidence set OR state changes,
+    every affected material — including ones just REMOVED from the case — must be
+    recomputed, else a draft/closed case could leave evidence stale-LISTED (a
+    leak) or a published case's evidence stuck PRIVATE. Best-effort: the materials
+    app is cross-DB, so a failure here must never break the case write.
+    """
+    iris = [iri for iri in dict.fromkeys(material_iris) if iri]
+    if not iris:
+        return
+
+    def _run():
+        try:
+            from materials.visibility import recompute_material_visibility
+
+            for iri in iris:
+                recompute_material_visibility(iri)
+        except Exception:  # noqa: BLE001 - visibility is best-effort, never fatal
+            logger.warning(
+                "material-visibility recompute failed for %d material(s)",
+                len(iris),
+                exc_info=True,
+            )
+
+    transaction.on_commit(_run)
 
 
 # NOTE: the former Jawafdehi-scoped ``UnifiedSearchView`` (an in-process ORM
@@ -368,7 +399,37 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
                     relationship_type=RelationshipType.RELATED,
                 )
 
+            # Create evidence binds (NGM material ids) — the CaseMaterialReference
+            # join. Ordinal preserves the submitted order (ADR: cases own no docs).
+            self._write_material_references(
+                case, serializer.validated_data.get("evidence", [])
+            )
+
+        # Newly-created evidence may reference materials whose visibility now
+        # depends on this case's state — recompute (best-effort, on_commit).
+        _recompute_material_visibility(
+            case.material_references.values_list("material_iri", flat=True)
+        )
+
         return Response(CaseSerializer(case).data, status=status.HTTP_201_CREATED)
+
+    @staticmethod
+    def _write_material_references(case, evidence_items):
+        """Replace a case's CaseMaterialReference rows from validated evidence.
+
+        ``evidence_items`` is a list of ``{material_iri, additional_details}``
+        (order = display order). Existing rows are deleted and recreated so the
+        set + ordering match the submitted evidence exactly (mirrors the
+        entity-relationship rewrite).
+        """
+        case.material_references.all().delete()
+        for ordinal, item in enumerate(evidence_items):
+            CaseMaterialReference.objects.create(
+                case=case,
+                material_iri=item["material_iri"],
+                additional_details=item.get("additional_details") or "",
+                ordinal=ordinal,
+            )
 
     def retrieve(self, request, *args, **kwargs):
         """
@@ -503,6 +564,18 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
             for op in patch_ops
         )
 
+        # Gate the evidence (material-reference) rewrite to actual /evidence ops,
+        # for the same reason as entities: the snapshot always carries "evidence",
+        # so writing unconditionally would wipe references on every scalar PATCH.
+        evidence_touched = any(
+            isinstance(op, dict)
+            and (
+                op.get("path") == "/evidence"
+                or op.get("path", "").startswith("/evidence/")
+            )
+            for op in patch_ops
+        )
+
         # Fields that map directly to Case model columns (updated via bulk UPDATE)
         scalar_fields = frozenset(
             [
@@ -518,8 +591,9 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
                 "timeline",
                 # NOTE: "evidence" is intentionally NOT a scalar field. It is no
                 # longer a Case column (it's the CaseMaterialReference join), so it
-                # must never be written via Case.objects.update(). Evidence writes
-                # move to a dedicated CaseMaterialReference path in a follow-up.
+                # must never be written via Case.objects.update(). It is persisted
+                # separately below via _write_material_references when a /evidence
+                # patch op is present (evidence_touched).
                 "slug",
                 "court_cases",
                 "missing_details",
@@ -549,6 +623,20 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
                         relationship_type=item["relationship_type"],
                         notes=item.get("notes") or "",
                     )
+
+            # Persist evidence (material-reference) changes only when a /evidence
+            # op was explicitly included. Capture the pre-rewrite IRIs so removed
+            # materials are recomputed too (a material dropped from a published
+            # case must be re-evaluated, else it stays LISTED via a stale referrer).
+            affected_material_iris: set[str] = set()
+            if evidence_touched:
+                affected_material_iris.update(
+                    case.material_references.values_list("material_iri", flat=True)
+                )
+                self._write_material_references(case, validated.get("evidence", []))
+                affected_material_iris.update(
+                    case.material_references.values_list("material_iri", flat=True)
+                )
 
             case.refresh_from_db()
 
@@ -580,6 +668,17 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
 
         transaction.on_commit(lambda: _index_case(case))
 
+        # A state transition OR an evidence-set change alters the visibility of
+        # the referenced materials (visibility = MAX over referring case states).
+        # Recompute the union of currently-referenced + just-removed materials so
+        # a demoted case can't leave stale-LISTED evidence behind (ADR draft-leak
+        # guard). Skipped only on pure scalar/entity PATCHes.
+        if evidence_touched or (target_state is not None):
+            affected_material_iris.update(
+                case.material_references.values_list("material_iri", flat=True)
+            )
+            _recompute_material_visibility(affected_material_iris)
+
         return Response(CaseSerializer(case).data, status=status.HTTP_200_OK)
 
     def destroy(self, request, *args, **kwargs):
@@ -605,10 +704,20 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
                 {"detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN
             )
 
+        # Capture the referenced materials BEFORE the soft-delete so their
+        # visibility is recomputed after: a CLOSED (soft-deleted) case must not
+        # keep its evidence publicly LISTED (ADR draft-leak guard).
+        referenced_iris = list(
+            case.material_references.values_list("material_iri", flat=True)
+        )
+
         # Case.delete() is overridden to soft-delete (state -> CLOSED + versionInfo
         # audit entry); it never hard-removes the row. The post-transition CLOSED
         # state is evicted from the search index by the case save signal.
         case.delete()
+
+        _recompute_material_visibility(referenced_iris)
+
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     def _build_snapshot(self, case: Case) -> dict:
