@@ -78,5 +78,13 @@ urlpatterns = [
     path("api/casework/", include("review.urls")),
 ]
 
+# Local-dev auth (DEV_AUTH, DEBUG/TESTING-only): DRF session login/logout at
+# /api-auth/ so a developer can authenticate with a plain username/password
+# instead of standing up Zitadel. Never mounted in production.
+if settings.DEV_AUTH:
+    urlpatterns += [
+        path("api-auth/", include("rest_framework.urls", namespace="rest_framework")),
+    ]
+
 if settings.DEBUG and str(settings.MEDIA_URL).startswith("/"):
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

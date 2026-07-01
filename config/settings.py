@@ -554,9 +554,28 @@ LOGOUT_REDIRECT_URL = "/django-admin/login/"
 # per-view permissions on top, so a global read-public default is compatible
 # with them too). Pagination/throttle/schema carried from Jawafdehi.
 # ---------------------------------------------------------------------------
+# Local development auth: Zitadel/OIDC is the production identity provider, but
+# spinning up Zitadel for local work is heavy. When DEV_AUTH is enabled (only
+# honored under DEBUG or TESTING — never in production), we ALSO accept Django
+# session + HTTP-Basic auth so a developer can log in with a plain
+# username/password (e.g. a `createsuperuser` account, or a seeded Caseworker).
+# Role/group membership is the SAME model as prod (Admin/Moderator/Caseworker/
+# ReadOnly/Public Django Groups + is_superuser) — dev login just skips the JWT.
+# OIDCAuthentication stays FIRST so bearer tokens keep working unchanged; the
+# session/basic classes are additive and gated, so production auth is untouched.
+DEV_AUTH = env_flag("DEV_AUTH", False) and (DEBUG or TESTING)
+
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "jawafdehi_shared.auth.oidc.OIDCAuthentication",
+        *(
+            [
+                "rest_framework.authentication.SessionAuthentication",
+                "rest_framework.authentication.BasicAuthentication",
+            ]
+            if DEV_AUTH
+            else []
+        ),
     ],
     "DEFAULT_PERMISSION_CLASSES": [
         "jawafdehi_shared.drf.base.ReadOnlyOrAuthenticatedWrite",
@@ -565,6 +584,13 @@ REST_FRAMEWORK = {
     "PAGE_SIZE": 20,
     "DEFAULT_RENDERER_CLASSES": [
         "rest_framework.renderers.JSONRenderer",
+        # Browsable API (with its login form) only in local dev, so DEV_AUTH
+        # session login is usable from a browser. JSON-only in production.
+        *(
+            ["rest_framework.renderers.BrowsableAPIRenderer"]
+            if DEV_AUTH
+            else []
+        ),
     ],
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
 }
