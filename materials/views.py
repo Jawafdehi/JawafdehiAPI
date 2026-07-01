@@ -77,6 +77,26 @@ def _require_ngm_role(request):
     return None
 
 
+def _can_see_nonpublic(request) -> bool:
+    """True iff the principal may see PRIVATE (draft-only) materials.
+
+    Case-source materials are demoted to PRIVATE when only draft cases reference
+    them (ADR: cases own no documents). Anon + non-privileged users must NOT see
+    them; an authenticated caseworker/readonly/NGM-role principal may. UNLISTED
+    is public-by-direct-IRI, so it is NOT gated here (see PUBLIC_VISIBILITIES).
+    """
+    user = getattr(request, "user", None)
+    if not (user and user.is_authenticated):
+        return False
+    # Any authenticated staff-ish principal (NGM role, caseworker, readonly, or
+    # a superuser) may inspect drafts. HasNgmRole covers the write role; the
+    # broader "authenticated internal user" check keeps caseworker/readonly able
+    # to review their own draft evidence.
+    if getattr(user, "is_staff", False) or getattr(user, "is_superuser", False):
+        return True
+    return HasNgmRole().has_permission(request, None)
+
+
 def _upsert_material(data, *, material_type: str | None, expected_iri: str | None = None):
     """Validate + upsert a Material from a JSON-LD body. Returns (doc, status, error).
 
@@ -122,12 +142,23 @@ def _upsert_material(data, *, material_type: str | None, expected_iri: str | Non
     return material.data, code, None
 
 
-def _resolve_material(iri: str) -> dict | None:
+def _resolve_material(iri: str, *, include_nonpublic: bool = False) -> dict | None:
     """Return the JSON-LD doc for ``iri``: stored (live) row, else a derived
-    court case. Soft-deleted rows (``is_deleted=True``) are treated as absent."""
+    court case. Soft-deleted rows (``is_deleted=True``) are treated as absent.
+
+    Visibility gate (ADR: cases own no documents): by default only PUBLIC
+    materials (LISTED + UNLISTED) resolve — a PRIVATE (draft-only) material is
+    treated as absent (404) for the public. ``include_nonpublic=True`` (an authed
+    caseworker/readonly/NGM principal) lifts the gate. Derived court-case
+    materials have no stored row and are always public.
+    """
+    from .models import PUBLIC_VISIBILITIES
+
     try:
         row = Material.objects.get(pk=iri, is_deleted=False)
-        return row.data
+        if include_nonpublic or row.visibility in PUBLIC_VISIBILITIES:
+            return row.data
+        return _derive_court_case_jsonld(iri)
     except Material.DoesNotExist:
         pass
     return _derive_court_case_jsonld(iri)
@@ -219,7 +250,7 @@ def material_detail(request, source: str, ident: str):
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-    data = _resolve_material(iri)
+    data = _resolve_material(iri, include_nonpublic=_can_see_nonpublic(request))
     if data is None:
         return Response({"detail": "Material not found."}, status=status.HTTP_404_NOT_FOUND)
     return Response(data, content_type=LD_JSON)
@@ -354,8 +385,16 @@ def _list_materials(request) -> Response:
     platform ``{results, next}`` (matching the courts list plane). Soft-deleted
     rows are excluded. Optional ``source`` / ``material_type`` query filters
     mirror the promoted-column filters used elsewhere.
+
+    Visibility (ADR: cases own no documents): anon/non-privileged callers see
+    only LISTED materials; an authed caseworker/readonly/NGM principal sees all
+    live rows (so the admin table can manage in-review/draft evidence).
     """
+    from .models import Visibility
+
     qs = Material.objects.filter(is_deleted=False)
+    if not _can_see_nonpublic(request):
+        qs = qs.filter(visibility=Visibility.LISTED)
     params = request.query_params
     if (source := params.get("source")):
         qs = qs.filter(source=source)
@@ -428,7 +467,7 @@ def material_by_iri(request):
             {"detail": "Not a valid material @id IRI."},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    data = _resolve_material(iri)
+    data = _resolve_material(iri, include_nonpublic=_can_see_nonpublic(request))
     if data is None:
         return Response({"detail": "Material not found."}, status=status.HTTP_404_NOT_FOUND)
     return Response(data, content_type=LD_JSON)

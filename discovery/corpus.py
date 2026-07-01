@@ -95,10 +95,20 @@ def _iter_entities() -> Iterator[Resource]:
 
 
 def _iter_materials() -> Iterator[Resource]:
-    """Every NGM material (all public). JSON-LD: ``/api/materials/<source>/<ident>``."""
-    from materials.models import Material
+    """Every LISTED, live NGM material. JSON-LD: ``/api/materials/<source>/<ident>``.
 
-    qs = Material.objects.all().values_list("iri", "source", "ident", "updated_at")
+    Only ``visibility=LISTED`` + non-deleted rows are enumerated for public
+    Sitemaps/ResourceSync: UNLISTED (in-review-only) and PRIVATE (draft-only)
+    case-source materials must NOT appear in the public discovery surface (ADR:
+    cases own no documents). NGM-native materials default to LISTED, so their
+    behavior is unchanged.
+    """
+    from materials.models import Material, Visibility
+
+    qs = (
+        Material.objects.filter(is_deleted=False, visibility=Visibility.LISTED)
+        .values_list("iri", "source", "ident", "updated_at")
+    )
     for iri, source, ident, updated_at in qs.iterator():
         yield Resource(
             iri=iri,

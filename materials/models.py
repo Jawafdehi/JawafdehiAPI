@@ -33,6 +33,35 @@ def validate_material_iri(value: str) -> None:
         )
 
 
+class Visibility(models.TextChoices):
+    """Derived publication tier for a Material (ADR: cases own no documents).
+
+    A material's visibility is the MAX over the states of all cases that
+    reference it as evidence (YouTube-unlisted semantics):
+
+    * ``LISTED``   — ≥1 PUBLISHED case references it (or it's an NGM-native
+      material with no case referrers): public, searchable, in sitemaps.
+    * ``UNLISTED`` — only IN_REVIEW referrers: reachable by direct IRI, but NOT
+      searchable and NOT in sitemaps.
+    * ``PRIVATE``  — only DRAFT/CLOSED referrers (or none, for a source-only
+      draft): not public at all; authed caseworker/readonly only. (CLOSED is the
+      case soft-delete tombstone, so a deleted case cannot keep evidence public.)
+
+    Default is ``LISTED`` so NGM-native materials (court cases/orders, bulk
+    ingest) are unaffected — only case-source materials get demoted by the
+    recompute path.
+    """
+
+    LISTED = "LISTED", "Listed"
+    UNLISTED = "UNLISTED", "Unlisted"
+    PRIVATE = "PRIVATE", "Private"
+
+
+#: Visibility tiers a member of the public (anon) may retrieve by direct IRI.
+#: PRIVATE is authed-only. Sitemaps/search expose LISTED only (see consumers).
+PUBLIC_VISIBILITIES = (Visibility.LISTED, Visibility.UNLISTED)
+
+
 class Material(models.Model):
     """A schema.org JSON-LD material document, keyed by its ``@id`` IRI.
 
@@ -60,6 +89,17 @@ class Material(models.Model):
     # Soft-delete flag (accountability platform: rows are never hard-deleted).
     # Reads (list/detail) exclude ``is_deleted=True`` rows; DELETE flips it True.
     is_deleted = models.BooleanField(default=False, db_index=True)
+    # Derived publication tier (see Visibility). Default LISTED so NGM-native
+    # materials are public as before; case-source materials are demoted to
+    # UNLISTED/PRIVATE by the recompute path when only draft/in-review cases
+    # reference them. The anon-facing consumers (sitemaps, unified search,
+    # retrieve endpoint) MUST honor this or a draft case's evidence leaks.
+    visibility = models.CharField(
+        max_length=10,
+        choices=Visibility.choices,
+        default=Visibility.LISTED,
+        db_index=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
