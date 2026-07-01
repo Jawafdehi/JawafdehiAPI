@@ -116,6 +116,61 @@ class ReviewListView(generics.ListAPIView):
         return CaseReview.objects.all()
 
 
+class GroupedReviewListView(generics.ListAPIView):
+    """GET /api/casework/reviews/grouped/
+
+    The flat review list carries one row per execution; the SPA's review list
+    page instead wants ONE entry per case with ALL of that case's executions
+    (so an older run doesn't fall onto a later page of the flat list). This view
+    groups CaseReview rows by case slug and paginates BY CASE.
+
+    Each result: {slug, case_title, latest: <ReviewListItem>,
+    executions: [<ReviewListItem> ...]} — executions newest-first, cases ordered
+    by their most-recent execution (newest case first). ``latest`` is
+    ``executions[0]``. Uses the same CaseReviewListSerializer as the flat list
+    so item shapes match exactly.
+    """
+
+    permission_classes = [CanReadReview]
+    serializer_class = CaseReviewListSerializer
+
+    def _grouped_cases(self):
+        # CaseReview.Meta.ordering is -created_at, so iterating in that order
+        # yields executions newest-first per group and cases in most-recent-first
+        # order (the first slug seen is the one with the newest execution).
+        groups: dict[str, list[CaseReview]] = {}
+        for review in CaseReview.objects.all():
+            groups.setdefault(review.slug, []).append(review)
+        return groups
+
+    def list(self, request, *args, **kwargs):
+        groups = self._grouped_cases()
+        slugs = list(groups.keys())  # already ordered newest-case-first
+
+        page = self.paginate_queryset(slugs)
+        page_slugs = page if page is not None else slugs
+
+        results = []
+        for slug in page_slugs:
+            executions = groups[slug]
+            items = CaseReviewListSerializer(executions, many=True).data
+            latest = executions[0]
+            results.append(
+                {
+                    "slug": slug,
+                    # The case title is snapshotted on every review row; the
+                    # newest execution carries the freshest value.
+                    "case_title": latest.case_title,
+                    "latest": items[0],
+                    "executions": items,
+                }
+            )
+
+        if page is not None:
+            return self.get_paginated_response(results)
+        return Response(results)
+
+
 class ReviewDetailView(generics.RetrieveAPIView):
     serializer_class = CaseReviewDetailSerializer
     permission_classes = [CanReadReview]

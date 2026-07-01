@@ -12,6 +12,7 @@ from . import views
 urlpatterns = [
     path("auth/me/", views.me_view),
     path("reviews/", views.ReviewListView.as_view()),
+    path("reviews/grouped/", views.GroupedReviewListView.as_view()),
     path("reviews/submit/", views.submit_review),
     path("reviews/regrade-all/", views.regrade_all),
     # NOTE: the review-local job API (jobs/claim, jobs/<id>/stage, jobs/<id>/result)
