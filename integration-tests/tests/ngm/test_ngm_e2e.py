@@ -1,25 +1,27 @@
-"""End-to-end contract tests against the LIVE NGM surface of the platform.
+"""End-to-end contract tests against the LIVE court-case surface of the platform.
 
-NGM is mounted at ``/api/ngm/`` on the one platform host. These hit the running
-gunicorn/Postgres stack directly via ``httpx`` (not through the shared
-``clients`` fixture) so the base URL is self-contained — it comes from
-``PLATFORM_BASE_URL`` (falling back to the legacy ``NGM_API_BASE_URL``), both
-defaulting to the platform on :48000.
+Court data lives on the unified ``/api/`` surface (HARD CUT 2026-07-01: the old
+``/api/ngm/`` prefix is GONE). These hit the running gunicorn/Postgres stack
+directly via ``httpx`` (not through the shared ``clients`` fixture) so the base
+URL is self-contained — it comes from ``PLATFORM_BASE_URL`` (falling back to the
+legacy ``NGM_API_BASE_URL``), both defaulting to the platform on :48000.
 
-Contract notes verified live against the platform (2026-06-28):
+Contract notes verified live against the platform:
 
-* Every NGM route is under ``/api/ngm/`` and is trailing-slashed: reads use
-  ``/api/ngm/courts/`` / ``/api/ngm/cases/`` and the gated POSTs are ALSO slashed
-  (``/api/ngm/query/``, ``/api/ngm/ingestion/cases/``). No-slash variants
-  301-redirect (httpx does NOT follow redirects by default).
-* ``GET /api/ngm/courts/`` returns a BARE list ``[...]``.
-* ``GET /api/ngm/cases/`` returns a full DRF page ``{"count","next","previous",
+* Court routes are trailing-slashed: reads use ``/api/courts/`` /
+  ``/api/courtcases/`` and the gated POSTs are ALSO slashed (``/api/query/``,
+  ``/api/ingestion/cases/``). No-slash variants 301-redirect (httpx does NOT
+  follow redirects by default).
+* ``GET /api/courts/`` returns a BARE list ``[...]``.
+* ``GET /api/courtcases/`` returns a full DRF page ``{"count","next","previous",
   "results"}``.
-* ``POST /api/ngm/query/`` + ``POST /api/ngm/ingestion/*/`` are OIDC-gated. A
-  missing bearer -> 401 "Authentication credentials were not provided."; a
-  forged bearer -> 401 "Invalid token..."; a malformed ``Bearer`` header -> 401.
-* The old ``GET /api/ngm/search`` 501 stub was REMOVED — unified search is
-  ``GET /api/search/`` (covered in tests/jawafdehi).
+* ``POST /api/query/`` + ``POST /api/ingestion/*/`` are OIDC-gated. A missing
+  bearer -> 401 "Authentication credentials were not provided."; a forged bearer
+  -> 401 "Invalid token..."; a malformed ``Bearer`` header -> 401.
+* Health is the ONE canonical ``GET /api/health`` (the per-plane NGM health was
+  dropped in the unified cutover).
+* The old ``GET /api/ngm/search`` 501 stub is gone with the ``/api/ngm`` prefix —
+  unified search is ``GET /api/search/`` (covered in tests/jawafdehi).
 """
 
 import os
@@ -50,19 +52,21 @@ def ngm():
 # 1. Health
 # ---------------------------------------------------------------------------
 def test_health_ok(ngm):
-    r = ngm.get("/api/ngm/health/")
+    # ONE canonical platform health (slashless). The per-plane NGM health was
+    # dropped in the unified cutover; the surviving endpoint reports service
+    # "nes-api" (the entities app owns the canonical /api/health route).
+    r = ngm.get("/api/health")
     skip_if_throttled(r)
     assert r.status_code == 200, r.text
     body = r.json()
     assert body.get("status") == "ok", body
-    assert body.get("service") == "ngm-api", body
 
 
 # ---------------------------------------------------------------------------
 # 2. Courts listing — BARE list [...]
 # ---------------------------------------------------------------------------
 def test_courts_listing_shape(ngm):
-    r = ngm.get("/api/ngm/courts/")
+    r = ngm.get("/api/courts/")
     skip_if_throttled(r)
     assert r.status_code == 200, r.text
     body = r.json()
@@ -73,7 +77,7 @@ def test_courts_listing_shape(ngm):
 # 3. Cases listing — DRF page {"count","results","next","previous"}
 # ---------------------------------------------------------------------------
 def test_cases_listing_is_drf_page(ngm):
-    r = ngm.get("/api/ngm/cases/", params={"limit": 1})
+    r = ngm.get("/api/courtcases/", params={"limit": 1})
     skip_if_throttled(r)
     assert r.status_code == 200, r.text
     body = r.json()
@@ -86,7 +90,7 @@ def test_cases_listing_is_drf_page(ngm):
 # 4. Single case, nonexistent -> 404
 # ---------------------------------------------------------------------------
 def test_nonexistent_case_404(ngm):
-    r = ngm.get("/api/ngm/cases/nonexistent-court/no-such-case-9999/")
+    r = ngm.get("/api/courtcases/nonexistent-court/no-such-case-9999/")
     skip_if_throttled(r)
     assert r.status_code == 404, r.text
     assert "detail" in r.json()
@@ -96,7 +100,7 @@ def test_nonexistent_case_404(ngm):
 # 5. Gated query, unauthenticated -> 401 (DRF auth fires before validation)
 # ---------------------------------------------------------------------------
 def test_query_unauthenticated_401(ngm):
-    r = ngm.post("/api/ngm/query/", json={"query": "SELECT 1"})
+    r = ngm.post("/api/query/", json={"query": "SELECT 1"})
     skip_if_throttled(r)
     assert r.status_code == 401, r.text
     assert "authentication credentials" in str(r.json().get("detail", "")).lower()
@@ -111,7 +115,7 @@ def test_query_unauthenticated_401(ngm):
 def test_query_invalid_bearer_rejected(ngm):
     """A non-empty but invalid/forged bearer is REJECTED by token auth (401/403)."""
     r = ngm.post(
-        "/api/ngm/query/",
+        "/api/query/",
         json={"query": "SELECT 1"},
         headers={"Authorization": "Bearer not-a-real-token"},
     )
@@ -125,7 +129,7 @@ def test_query_invalid_bearer_rejected(ngm):
 def test_query_empty_bearer_rejected_401(ngm):
     """A malformed ``Bearer`` (no token value) is rejected by DRF auth (401)."""
     r = ngm.post(
-        "/api/ngm/query/",
+        "/api/query/",
         json={"query": "SELECT 1"},
         headers={"Authorization": "Bearer"},
     )
@@ -151,9 +155,9 @@ def test_legacy_ngm_search_stub_removed(ngm):
 @pytest.mark.parametrize(
     "path",
     [
-        "/api/ngm/ingestion/cases/",
-        "/api/ngm/ingestion/entities/resolve/",
-        "/api/ngm/ingestion/documents/",
+        "/api/ingestion/cases/",
+        "/api/ingestion/entities/resolve/",
+        "/api/ingestion/documents/",
     ],
 )
 def test_ingestion_write_unauthenticated_401(ngm, path):

@@ -125,12 +125,15 @@ before or after R3; sequencing below runs it first so later phases target the fl
 Enumerated consumers (all hardcode old paths):
 | Consumer | Location | Change |
 |---|---|---|
-| Frontend `admin-api.ts` (~19 call sites) | `jawafdehi-frontend` | `/api/nes/*`,`/api/ngm/*` → new paths |
-| Frontend `ngm-api.ts` | `jawafdehi-frontend` | `/api/ngm` base → `/api/courtcases` + `/api/materials` |
-| MCP tools (nes.py, ngm_proxy.py, jawafdehi_cases.py) | `_quarantine/jawafdehi-mcp` | drop `/nes` prefix; `query_judicial`→`query` + `timeout`→`timeout_seconds`; **ADD_NAME → PATCH+jsonpatch** (D3) |
-| Review `ngm_client.py`, `jds_client.py` | in-repo | new base paths (covered in R3.3) |
-| Integration tests | `_quarantine/jawafdehi-integration-tests` | rewrite topology: one host, new paths, `{results,next}` shape |
-**Note:** the 301 aliases mean consumers can migrate *after* R3 ships, not in lockstep.
+| Frontend `admin-api.ts` (~19 call sites) | `jawafdehi-frontend` | `/api/nes/*`,`/api/ngm/*` → new paths — ✅ DONE (frontend `v2`, R4+R5b) |
+| Frontend `ngm-api.ts` | `jawafdehi-frontend` | `/api/ngm` base → `/api/courtcases` + `/api/materials` — ✅ DONE |
+| MCP tools (nes.py, ngm_proxy.py, jawafdehi_cases.py) | `_quarantine/jawafdehi-mcp` | drop `/nes` prefix; `query_judicial`→`query` + `timeout`→`timeout_seconds`; **ADD_NAME → PATCH+jsonpatch** (D3) — ⚠️ TODO |
+| Review `ngm_client.py`, `jds_client.py` | in-repo | new base paths (covered in R3.3) — ✅ DONE with R3 |
+| Integration tests | in-repo `integration-tests/` (the MAINTAINED copy — already one-host) | drop `/api/nes`+`/api/ngm` prefixes, `cases`→`courtcases`, flat `entities`→`courtcase-entities`, unify health to `/api/health`, docs/README — ✅ DONE (2026-07-01) |
+**Note:** the OLD pre-monolith 3-host original at `_quarantine/jawafdehi-integration-tests`
+(still `:8081`/`:8082`, `{items,next_cursor}`) is DEAD — not migrated; the in-repo copy
+supersedes it. **Remaining R4 work: the MCP tools only.**
+**Note:** hard cut — no 301 aliases; consumers migrate in lockstep with R3, not after.
 
 ### Phase R5 — Backend CRUD completion + React admin full CRUD (decided 2026-07-01)
 "React admin supports all CRUD" for the **4 unified resources** (entities, materials,

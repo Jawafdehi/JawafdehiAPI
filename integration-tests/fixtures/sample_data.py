@@ -41,7 +41,7 @@ SAMPLE_NES_ENTITY: dict = {
 }
 
 
-# --- NGM: a court case (shape per GET /api/ngm/cases/ results[*]) -------------
+# --- NGM: a court case (shape per GET /api/courtcases/ results[*]) ------------
 # Path params for the sub-resource routes are (court, case_number). The
 # synthesized court-case @id IRI is .../courtcase/<court>/<case_number>.
 SAMPLE_NGM_COURT_IDENTIFIER = "supreme"
@@ -59,7 +59,7 @@ SAMPLE_NGM_CASE: dict = {
 }
 
 
-# --- NGM: a case party (shape per court_case_entities / .../entities/) --------
+# --- NGM: a case party (shape per court_case_entities / courtcases/.../entities/) --
 # ``nes_id`` is the resolution write-back; it MUST be a canonical entity @id IRI.
 # It is null until the shared resolution service populates it.
 SAMPLE_NGM_PARTY: dict = {

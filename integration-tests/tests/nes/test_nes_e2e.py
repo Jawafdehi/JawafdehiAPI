@@ -1,6 +1,7 @@
-"""End-to-end tests against the LIVE NES surface of the platform.
+"""End-to-end tests against the LIVE entities surface of the platform.
 
-NES is mounted at ``/api/nes/`` on the one platform host. These assert the
+Entities are mounted at ``/api/entities`` on the one platform host — the old
+``/api/nes/`` prefix was removed in the 2026-07-01 hard cut. These assert the
 *contract* (response shapes, the canonical entity ``@id`` IRI rule) rather than
 a fixed entity set, since seeded data may change. Where data is asserted, it is
 gated on ``total > 0``.
@@ -10,13 +11,13 @@ canonical ``@id`` IRI ``https://jawafdehi.org/entity/<prefix>/<slug>`` — there
 is NO legacy ``entity:<prefix>/<slug>`` form. The detail route accepts either a
 url-encoded IRI or a bare ``<prefix>/<slug>`` path.
 
-Verified live against the platform (:48000, 2026-06-28):
-  * health ``GET /api/nes/health`` (NO trailing slash — slashless route; the
-    ``/api/nes/health/`` variant 404s) -> ``{"status":"ok","service":"nes-api"}``;
+Verified live against the platform (:48000):
+  * health ``GET /api/health`` (NO trailing slash — slashless route; the
+    ``/api/health/`` variant 404s) -> ``{"status":"ok","service":"nes-api"}``;
   * list/search shape ``{"entities": [...], "total", "limit", "offset"}``;
   * search param is ``query`` (not ``q``);
-  * ``/api/nes/entity_prefixes`` -> ``{"prefixes": [...]}``;
-  * the NES store is EMPTY today (total 0) — data-dependent assertions are gated.
+  * ``/api/entity_prefixes`` -> ``{"prefixes": [...]}``;
+  * the entities store is EMPTY today (total 0) — data-dependent assertions are gated.
 """
 
 import re
@@ -58,7 +59,7 @@ def _assert_list_shape(body: dict) -> None:
 
 
 def test_health_ok(clients):
-    r = clients["nes"].get("/api/nes/health")
+    r = clients["nes"].get("/api/health")
     assert r.status_code == 200, r.text
     body = r.json()
     assert body.get("status") == "ok", body
@@ -69,7 +70,7 @@ def test_health_ok(clients):
 
 
 def test_entities_list_response_shape(clients):
-    r = clients["nes"].get("/api/nes/entities", params={"limit": 5})
+    r = clients["nes"].get("/api/entities", params={"limit": 5})
     assert r.status_code == 200, r.text
     _assert_list_shape(r.json())
 
@@ -107,7 +108,7 @@ def test_bilingual_search_returns_list(clients, query, needle):
     Shape is asserted unconditionally; the needle check is gated on data being
     present (the corpus is empty today).
     """
-    r = clients["nes"].get("/api/nes/entities", params={"query": query, "limit": 10})
+    r = clients["nes"].get("/api/entities", params={"query": query, "limit": 10})
     assert r.status_code == 200, r.text
     body = r.json()
     _assert_list_shape(body)
@@ -128,7 +129,7 @@ def test_entity_by_id_round_trip(clients):
     PENDING-DATA: the NES store is empty today, so this skips until an entity is
     seeded. The detail route accepts the url-encoded IRI verbatim.
     """
-    listing = clients["nes"].get("/api/nes/entities", params={"limit": 1})
+    listing = clients["nes"].get("/api/entities", params={"limit": 1})
     assert listing.status_code == 200, listing.text
     body = listing.json()
     _assert_list_shape(body)
@@ -142,7 +143,7 @@ def test_entity_by_id_round_trip(clients):
     # The detail route accepts a bare <prefix>/<slug> path (after stripping the
     # IRI base) or the url-encoded IRI; use the bare path form which is robust.
     prefix_slug = iri.split("/entity/", 1)[1]
-    fetched = clients["nes"].get(f"/api/nes/entities/{prefix_slug}")
+    fetched = clients["nes"].get(f"/api/entities/{prefix_slug}")
     assert fetched.status_code == 200, fetched.text
     detail = fetched.json()
     assert _entity_id(detail) == iri, f"round-trip id mismatch: {detail!r} != {iri!r}"
@@ -152,12 +153,12 @@ def test_entity_by_id_round_trip(clients):
 
 
 def test_entity_prefixes_response_shape(clients):
-    """``/api/nes/entity_prefixes`` -> ``{"prefixes": [...]}``.
+    """``/api/entity_prefixes`` -> ``{"prefixes": [...]}``.
 
     PENDING-DATA: the prefix list is derived from seeded entities, so it is empty
     today. Once persons/organizations land it includes those top-level prefixes.
     """
-    r = clients["nes"].get("/api/nes/entity_prefixes")
+    r = clients["nes"].get("/api/entity_prefixes")
     assert r.status_code == 200, r.text
     prefixes = r.json().get("prefixes")
     assert isinstance(prefixes, list), f"prefixes not a list: {r.text}"
@@ -169,7 +170,7 @@ def test_entity_prefixes_response_shape(clients):
 
 
 def test_pagination_limit_respected(clients):
-    r = clients["nes"].get("/api/nes/entities", params={"limit": 1})
+    r = clients["nes"].get("/api/entities", params={"limit": 1})
     assert r.status_code == 200, r.text
     body = r.json()
     _assert_list_shape(body)

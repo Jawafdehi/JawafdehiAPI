@@ -2,9 +2,9 @@
 
 These run against the REAL platform (no mocks): NES, NGM and Jawafdehi all live
 in ONE monolith process behind a single host (``PLATFORM_BASE_URL``, default
-:48000), mounted under distinct path prefixes (``/api/nes/``, ``/api/ngm/``,
-``/api/``). The shared ``clients`` fixture's per-service clients all point at the
-same host and differ only by the path prefix the test passes.
+:48000), on ONE unified ``/api/`` surface (the ``/api/nes`` + ``/api/ngm``
+prefixes were removed in the 2026-07-01 hard cut). The shared ``clients``
+fixture's handles all point at the same host — the key is now cosmetic.
 
 The goal is to prove the **unification contracts** that thread the former
 services together, against live data where it exists and structurally
@@ -15,7 +15,7 @@ services together, against live data where it exists and structurally
 3. The unified search endpoint (``/api/search/``) replaces the old per-service
    search and returns the common envelope.
 4. The auth plane is consistent (anonymous writes rejected on all three).
-5. Liveness / topology: one host, every prefix's health-equivalent reachable.
+5. Liveness / topology: one host, the unified /api/ surface reachable.
 """
 
 import os
@@ -57,21 +57,17 @@ def _anon_client(base_url) -> httpx.Client:
 # =============================================================================
 
 
-def test_topology_single_host_all_prefixes_live(clients):
-    """One monolith host serves NES, NGM and Jawafdehi under distinct prefixes.
+def test_topology_single_host_unified_surface_live(clients):
+    """One monolith host serves NES, NGM and Jawafdehi on ONE unified /api/ surface.
 
-    PROVEN-LIVE: ``/api/nes/health`` 200 (NES health is slashless),
-    ``/api/ngm/health/`` 200, and the Jawafdehi ``/api/`` root 200 — same host.
+    PROVEN-LIVE: the single canonical ``/api/health`` is 200 (slashless) and the
+    Jawafdehi ``/api/`` root is 200 — same host. The per-plane NGM health was
+    dropped in the unified cutover.
     """
-    nes = clients["nes"].get("/api/nes/health")
-    skip_if_throttled(nes)
-    assert nes.status_code == 200, f"NES health: {nes.status_code}"
-    assert nes.json().get("status") == "ok", nes.text
-
-    ngm = clients["ngm"].get("/api/ngm/health/")
-    skip_if_throttled(ngm)
-    assert ngm.status_code == 200, f"NGM health: {ngm.status_code}"
-    assert ngm.json().get("status") == "ok", ngm.text
+    health = clients["nes"].get("/api/health")
+    skip_if_throttled(health)
+    assert health.status_code == 200, f"platform health: {health.status_code}"
+    assert health.json().get("status") == "ok", health.text
 
     jaw = clients["jawafdehi"].get("/api/")
     skip_if_throttled(jaw)
@@ -81,7 +77,7 @@ def test_topology_single_host_all_prefixes_live(clients):
     # no longer here (NES-owned), so only cases/sources are guaranteed.
     assert "cases" in root, f"Jawafdehi root missing 'cases': {root}"
 
-    # Same host for every prefix — the defining property of the platform.
+    # Same host for every handle — the defining property of the platform.
     assert clients["nes"].base_url == clients["ngm"].base_url == clients["jawafdehi"].base_url
 
 
@@ -99,7 +95,7 @@ def test_nes_canonical_entity_id_contract(clients):
     PENDING-DATA: the NES store is empty today (total 0), so the id-shape gate
     holds vacuously.
     """
-    r = clients["nes"].get("/api/nes/entities", params={"limit": 100})
+    r = clients["nes"].get("/api/entities", params={"limit": 100})
     skip_if_throttled(r)
     assert r.status_code == 200, f"NES list: {r.status_code} {r.text[:200]}"
     body = r.json()
@@ -123,7 +119,7 @@ def test_nes_query_endpoint_entity_id_contract(clients):
     PENDING-DATA: store empty, so 'renu' matches nothing today — skip until
     seeded. Any hit returned MUST be a contract-valid join key.
     """
-    r = clients["nes"].get("/api/nes/entities", params={"query": "renu", "limit": 5})
+    r = clients["nes"].get("/api/entities", params={"query": "renu", "limit": 5})
     skip_if_throttled(r)
     assert r.status_code == 200, f"NES query: {r.status_code}"
     entities = r.json().get("entities") or []
@@ -147,15 +143,15 @@ def test_ngm_nes_id_references_obey_entity_contract(clients):
     PENDING-DATA: no court parties exist yet, so the join is not yet exercised
     end-to-end (the tables are empty by design at this phase).
     """
-    cases = clients["ngm"].get("/api/ngm/cases/", params={"limit": 50})
+    cases = clients["ngm"].get("/api/courtcases/", params={"limit": 50})
     skip_if_throttled(cases)
-    assert cases.status_code == 200, f"NGM /api/ngm/cases/: {cases.status_code}"
+    assert cases.status_code == 200, f"NGM /api/courtcases/: {cases.status_code}"
     case_items = cases.json().get("results", [])
 
-    # NGM also exposes a flat /api/ngm/entities/ (court-case entities) — sweep it.
-    ents = clients["ngm"].get("/api/ngm/entities/", params={"limit": 50})
+    # NGM also exposes a flat /api/courtcase-entities/ (court-case parties) — sweep it.
+    ents = clients["ngm"].get("/api/courtcase-entities/", params={"limit": 50})
     skip_if_throttled(ents)
-    assert ents.status_code == 200, f"NGM /api/ngm/entities/: {ents.status_code}"
+    assert ents.status_code == 200, f"NGM /api/courtcase-entities/: {ents.status_code}"
     entity_items = ents.json().get("results", [])
 
     nes_ids: list[str] = []
@@ -164,7 +160,7 @@ def test_ngm_nes_id_references_obey_entity_contract(clients):
         num = case.get("case_number")
         if not (court and num):
             continue
-        parties = clients["ngm"].get(f"/api/ngm/cases/{court}/{num}/entities/")
+        parties = clients["ngm"].get(f"/api/courtcases/{court}/{num}/entities/")
         if parties.status_code == 200:
             for p in parties.json().get("results", []):
                 if p.get("nes_id"):
@@ -244,7 +240,7 @@ def test_old_per_service_search_surfaces_removed(clients):
 def test_ngm_rejects_anonymous_ingestion_write(clients):
     """NGM ingestion is OIDC-gated and rejects an anonymous write (slashed path)."""
     with _anon_client(clients["ngm"].base_url) as anon:
-        r = anon.post("/api/ngm/ingestion/cases/", json={"items": []})
+        r = anon.post("/api/ingestion/cases/", json={"items": []})
     skip_if_throttled(r)
     assert r.status_code in (401, 403), (
         f"NGM ingestion should reject anon write, got {r.status_code}: {r.text[:200]}"
@@ -264,11 +260,11 @@ def test_jawafdehi_rejects_anonymous_case_write(clients):
 def test_nes_rejects_anonymous_entity_write(clients):
     """NES rejects an anonymous write — auth plane consistent across all prefixes.
 
-    NES's write surface is the NO-slash path (``/api/nes/entities``);
-    ``/api/nes/entities/`` (trailing slash) is a 404, so do not add a slash here.
+    The entity write surface is the NO-slash path (``/api/entities``);
+    ``/api/entities/`` (trailing slash) is a 404, so do not add a slash here.
     """
     with _anon_client(clients["nes"].base_url) as anon:
-        r = anon.post("/api/nes/entities", json={})
+        r = anon.post("/api/entities", json={})
     skip_if_throttled(r)
     assert r.status_code in (401, 403), (
         f"expected NES to reject anon write with 401/403, got {r.status_code}"

@@ -61,7 +61,7 @@ def test_sample_ngm_party_nes_id_matches_nes_entity():
 @pytest.mark.live
 def test_live_nes_entity_id_shape(clients):
     """Any entity NES returns must satisfy the @id IRI shape contract."""
-    r = clients["nes"].get("/api/nes/entities", params={"query": "a", "limit": 1})
+    r = clients["nes"].get("/api/entities", params={"query": "a", "limit": 1})
     if r.status_code != 200:
         pytest.skip("NES entities endpoint not ready")
     entities = r.json().get("entities") or []
@@ -73,7 +73,7 @@ def test_live_nes_entity_id_shape(clients):
 @pytest.mark.live
 @pytest.mark.xfail(
     reason="PENDING-DATA: NGM court tables empty -> no party nes_id populated yet. "
-    "Paths/shape are correct against the platform read plane (/api/ngm/cases/ -> "
+    "Paths/shape are correct against the platform read plane (/api/courtcases/ -> "
     "DRF results); flips green when court data + nes_id write-back land.",
     strict=False,
 )
@@ -83,13 +83,13 @@ def test_live_ngm_party_nes_id_resolves_and_matches_shape(clients):
     Asserts the SHAPE on any populated ``nes_id`` today; xfail because the court
     tables are empty, so parties realistically still carry ``nes_id is None``.
     """
-    cases = clients["ngm"].get("/api/ngm/cases/", params={"limit": 1})
+    cases = clients["ngm"].get("/api/courtcases/", params={"limit": 1})
     cases.raise_for_status()
     items = cases.json().get("results", [])
     assert items, "no court cases available"
     case = items[0]
     parties = clients["ngm"].get(
-        f"/api/ngm/cases/{case['court_identifier']}/{case['case_number']}/entities/"
+        f"/api/courtcases/{case['court_identifier']}/{case['case_number']}/entities/"
     )
     parties.raise_for_status()
     resolved = [p for p in parties.json().get("results", []) if p.get("nes_id")]
