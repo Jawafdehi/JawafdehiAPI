@@ -111,6 +111,7 @@ A `>` status banner has been added in-place to the most-misleading STALE docs (m
 | `jawafdehi/ngm-frontend-integration-plan.md` | CURRENT | Plan to fold NGM into the Jawafdehi SPA | Keep. |
 | `jawafdehi/sources-into-ngm-materials-plan.md` | CURRENT (partly superseded) | Plan to land document sources as NGM materials. **Phase 2 thin-row + `contributors` retention + §4 collapse-to-`DOCUMENT` superseded by `adr-cases-own-no-documents.md`**; Phase 0/0b/1/3 + the `visibility` design stand | Keep; read alongside the ADR. |
 | `jawafdehi/adr-cases-own-no-documents.md` | CURRENT | ADR (2026-07-01): `cases` owns no entities/documents; both link out by required IRI. Removes `DocumentSource`/`/api/sources`, adds `CaseMaterialReference` (`material_iri` required), Materials = universal store, one `material_type` vocab, frontend "Document Source" purge. Amends control-plane + refactor + sources plan | Keep (load-bearing). |
+| `jawafdehi/sources-to-materials-prod-migration.md` | CURRENT | Runbook (2026-07-01) for the prod data migration ~799 DocumentSources→Materials + evidence→CaseMaterialReference: preconditions, ordered steps (backfill/evidence-rewrite/visibility-init/reindex), verification incl. the draft-leak check, rollback. Foundation (A/B/C) shipped; migration itself is a future task | Keep; execute later. |
 
 ---
 
