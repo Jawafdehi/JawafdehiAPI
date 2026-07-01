@@ -238,7 +238,10 @@ class IngestionGateTests(_DbAPITestCase):
         resp = self.client.post("/api/ingestion/cases/", {"items": []}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
-    def test_authed_ingestion_is_501(self):
+    def test_authed_ingestion_requires_items_list(self):
+        # The ingestion writers are now REAL: a body with no `items` list is a
+        # 400 (not the former 501 stub). Full behavior is covered by
+        # courts/tests/test_ingestion_api.py.
         self.client.force_authenticate(user=self.user)
         for path in (
             "/api/ingestion/cases/",
@@ -246,9 +249,7 @@ class IngestionGateTests(_DbAPITestCase):
             "/api/ingestion/documents/",
         ):
             resp = self.client.post(path, {}, format="json")
-            self.assertEqual(
-                resp.status_code, status.HTTP_501_NOT_IMPLEMENTED, msg=path
-            )
+            self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, msg=path)
 
     def test_resolve_rejects_non_iri_nes_id(self):
         # Clean-slate: the resolve write plane IRI-validates before write-back.
@@ -260,15 +261,24 @@ class IngestionGateTests(_DbAPITestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_resolve_accepts_iri_nes_id_then_501(self):
+    def test_resolve_accepts_iri_nes_id_unmatched(self):
         self.client.force_authenticate(user=self.user)
         resp = self.client.post(
             "/api/ingestion/entities/resolve/",
-            {"items": [{"nes_id": "https://jawafdehi.org/entity/person/ram"}]},
+            {
+                "items": [
+                    {
+                        "court": "kathmandudc",
+                        "case_number": "no-such-case",
+                        "nes_id": "https://jawafdehi.org/entity/person/ram",
+                    }
+                ]
+            },
             format="json",
         )
-        # Valid IRI passes the gate; the write-back itself is still a stub.
-        self.assertEqual(resp.status_code, status.HTTP_501_NOT_IMPLEMENTED)
+        # Valid IRI passes the gate; no matching party rows -> 200 unmatched.
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data["unmatched"], 1)
 
 
 class LakehouseImportTests(_DbAPITestCase):

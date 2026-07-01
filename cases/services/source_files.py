@@ -1,26 +1,24 @@
-"""Store an uploaded file and return it as an external source link.
+"""Store an uploaded file and return it as an external source link (thin shim).
 
 A DocumentSource's links live solely in its ``url`` JSON list. File upload is an
 ingestion convenience: we persist the bytes to the configured (S3) storage and
 record the resulting permanent public URL as a ``{link, role}`` entry in ``url``.
 There is no separate uploaded-file DB row — the URL is the single source of truth.
 
-This is shared by the create API and the admin so both ingest identically.
+The storage mechanism itself was lifted to :mod:`jawafdehi_shared.storage` so the
+cases app and the NGM materials app ingest identically. This shim re-exports
+``store_file_as_link`` (with the cases-app RAW default) so both the create API and
+the admin keep their existing import path.
 """
 
-from django.core.files.storage import default_storage
-
 from cases.models import SourceLinkRole
-from cases.services.storage_links import absolute_media_url
+from jawafdehi_shared.storage import store_file_as_link as _store_file_as_link
 
 
 def store_file_as_link(uploaded_file, role=SourceLinkRole.RAW.value) -> dict:
     """Persist ``uploaded_file`` to storage and return its ``{link, role}`` dict.
 
-    The default storage backend (HashedFilenameS3Boto3Storage in prod) hashes the
-    file name (neutralizing any path-traversal in the client-supplied name) and
-    prefixes it (``case_uploads/``), yielding the canonical permanent URL.
-    ``role`` defaults to RAW but the caller may pass any SourceLinkRole.
+    Thin wrapper over :func:`jawafdehi_shared.storage.store_file_as_link` that
+    pins the default ``role`` to the cases ``SourceLinkRole.RAW`` enum value.
     """
-    name = default_storage.save(uploaded_file.name, uploaded_file)
-    return {"link": absolute_media_url(default_storage.url(name)), "role": role}
+    return _store_file_as_link(uploaded_file, role=role)

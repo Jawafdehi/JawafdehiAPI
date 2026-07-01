@@ -21,6 +21,15 @@ app_name = "ngm-materials"
 
 urlpatterns = [
     path("materials/", views.material_by_iri, name="material-by-iri"),
+    # File upload on the composite source/ident. Declared BEFORE material-detail
+    # so the trailing ``/file`` subpath is not consumed by the liberal detail
+    # ``ident`` pattern (``[^/]+`` stops at a slash, but declaring the specific
+    # route first keeps the intent explicit and robust).
+    re_path(
+        r"^materials/(?P<source>[a-z0-9_]+(?:/[a-z0-9_]+){0,3})/(?P<ident>[^/]+)/file/?$",
+        views.material_file_upload,
+        name="material-file-upload",
+    ),
     re_path(
         r"^materials/(?P<source>[a-z0-9_]+(?:/[a-z0-9_]+){0,3})/(?P<ident>[^/]+)/?$",
         views.material_detail,

@@ -1,19 +1,9 @@
-"""Shared helpers for turning stored files into source-link URLs."""
+"""Shared helpers for turning stored files into source-link URLs (thin shim).
 
-from urllib.parse import urljoin
+Lifted to :mod:`jawafdehi_shared.storage`; re-exported here so the existing
+``cases.services.storage_links.absolute_media_url`` import path keeps working.
+"""
 
-from django.conf import settings
+from jawafdehi_shared.storage import absolute_media_url
 
-
-def absolute_media_url(url: str) -> str:
-    """Make a possibly-relative media URL absolute (validators require a scheme).
-
-    In production MEDIA_URL is an absolute S3 URL (AWS_S3_CUSTOM_DOMAIN), so file
-    URLs come back absolute and this is a no-op. Locally (FileSystemStorage) URLs
-    are like ``/media/...``; we prefix MEDIA_PUBLIC_BASE so the stored link
-    validates against URLValidator.
-    """
-    if url and url.startswith(("http://", "https://")):
-        return url
-    base = getattr(settings, "MEDIA_PUBLIC_BASE", "") or ""
-    return urljoin(base + "/", url.lstrip("/")) if base else url
+__all__ = ["absolute_media_url"]

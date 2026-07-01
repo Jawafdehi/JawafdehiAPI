@@ -349,59 +349,284 @@ class QueryView(APIView):
         }
 
 
-# --- ingestion plane (internal, write stubs) --------------------------------
+# --- ingestion plane (internal, real bulk writers) --------------------------
+# The FastAPI ingestion routes, ported to real DRF writers. All are OIDC +
+# NGM-role gated (``HasNgmRole``) and operate on a ``{"items": [...]}`` body:
+# each is an idempotent bulk write keyed on a natural key, returning per-item and
+# aggregate counts so a scraper can safely re-run a batch.
 
 
-class _IngestionStub(APIView):
-    """Shared base for the OIDC + NGM-role gated ingestion write stubs."""
+class _IngestionView(APIView):
+    """Shared base for the OIDC + NGM-role gated ingestion writers."""
 
     permission_classes = [HasNgmRole]
-    _detail = "Ingestion plane not yet implemented"
 
-    def post(self, request, *args, **kwargs):
-        # TODO(ingestion): idempotent bulk upsert by natural key / nes_id
-        # write-back / document-source registration via a write-capable layer.
+    @staticmethod
+    def _items(request) -> list | None:
+        """Return the ``items`` list from the body, or ``None`` if malformed."""
+        body = request.data if isinstance(request.data, dict) else None
+        if body is None:
+            return None
+        items = body.get("items")
+        return items if isinstance(items, list) else None
+
+    @staticmethod
+    def _bad_items() -> Response:
         return Response(
-            {"detail": self._detail}, status=status.HTTP_501_NOT_IMPLEMENTED
+            {"detail": "Body must be an object with an 'items' list."},
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
 
-class IngestionCasesView(_IngestionStub):
-    """``POST /ingestion/cases`` — bulk upsert scraped cases (natural key)."""
+class IngestionCasesView(_IngestionView):
+    """``POST /ingestion/cases`` — idempotent bulk upsert of court cases.
 
-
-class IngestionEntitiesResolveView(_IngestionStub):
-    """``POST /ingestion/entities/resolve`` — write-back nes_id from NES.
-
-    Clean-slate contract: every ``nes_id`` written is the canonical entity ``@id``
-    IRI (``https://<base>/entity/<prefix>/<slug>``). The resolution payload is
-    IRI-validated at this boundary BEFORE the (still-stubbed) write-back, so a
-    non-IRI ``nes_id`` is a 400 and never reaches the tables — the same contract
-    the ``CaseEntity.nes_id`` field validator enforces.
+    Body: ``{"items": [{"court"|"court_identifier", "case_number", ...fields}]}``.
+    Each item is upserted by the natural key (court_identifier, case_number)
+    reusing ``CourtCaseWriteSerializer`` + the same create/update logic as the
+    ``courtcases`` viewset (``full_clean`` before save, so a bad ``nes_id`` is a
+    400). Re-running the same batch is a no-op (rows already exist → updated).
+    A soft-deleted case is REVIVED by an upsert (the write is the source of
+    truth). Returns per-item results + ``{created, updated, failed}`` counts.
     """
 
-    _detail = "Entity resolution write-back not yet implemented"
+    def post(self, request, *args, **kwargs):
+        items = self._items(request)
+        if items is None:
+            return self._bad_items()
+
+        results: list[dict] = []
+        created = updated = failed = 0
+        for index, raw in enumerate(items):
+            outcome, err = self._upsert_case(raw)
+            if err is not None:
+                failed += 1
+                results.append({"index": index, "status": "failed", "errors": err})
+                continue
+            if outcome == "created":
+                created += 1
+            else:
+                updated += 1
+            results.append({"index": index, "status": outcome})
+
+        return Response(
+            {"created": created, "updated": updated, "failed": failed, "results": results}
+        )
+
+    @staticmethod
+    def _upsert_case(raw):
+        """Upsert one case item. Returns ("created"|"updated", None) or (None, errors)."""
+        if not isinstance(raw, dict):
+            return None, {"detail": "Each item must be an object."}
+        # Accept either the write serializer's ``court_identifier`` wire field or
+        # a plain ``court`` alias (the FastAPI ingestion / scraper shape).
+        data = dict(raw)
+        if "court_identifier" not in data and "court" in data:
+            data["court_identifier"] = data.pop("court")
+        case_number = data.get("case_number")
+        court_identifier = data.get("court_identifier")
+        if not case_number or not court_identifier:
+            return None, {"detail": "case_number and court (identifier) are required."}
+
+        normalized_number = best_effort_normalize(str(case_number))
+        data["case_number"] = normalized_number
+        existing = CourtCase.objects.filter(
+            court_id=court_identifier, case_number=normalized_number
+        ).first()
+
+        serializer = CourtCaseWriteSerializer(
+            existing, data=data, partial=existing is not None
+        )
+        if not serializer.is_valid():
+            return None, serializer.errors
+
+        is_create = existing is None
+        instance = existing or CourtCase()
+        for attr, value in serializer.validated_data.items():
+            setattr(instance, attr, value)
+        # An upsert is the source of truth: revive a soft-deleted row.
+        instance.is_deleted = False
+        try:
+            instance.full_clean(validate_unique=False)
+        except DjangoValidationError as exc:
+            return None, exc.message_dict
+        instance.save()
+        return ("created" if is_create else "updated"), None
+
+
+class IngestionEntitiesResolveView(_IngestionView):
+    """``POST /ingestion/entities/resolve`` — write-back nes_id onto case parties.
+
+    Clean-slate contract: every ``nes_id`` is the canonical entity ``@id`` IRI
+    (``https://<base>/entity/<prefix>/<slug>``) — IRI-validated at this boundary
+    BEFORE any write, so a non-IRI ``nes_id`` is a 400 and never reaches the
+    tables (same contract as the ``CaseEntity.nes_id`` field validator).
+
+    SAFE SUBSET (documented): this attaches/verifies a resolved ``nes_id`` on the
+    matching ``CaseEntity`` rows. An item targets rows by ``(court, case_number)``
+    plus an optional ``side`` and/or ``name`` filter; every matching party row
+    gets its ``nes_id`` set. It does NOT create parties, fuzzy-match names, or
+    resolve against NES — only writes back an already-resolved IRI onto existing
+    rows (returning the count matched/updated per item, plus ``unmatched`` when a
+    filter hit no rows). Broader auto-resolution is intentionally out of scope.
+    """
 
     def post(self, request, *args, **kwargs):
-        items = request.data.get("items") if isinstance(request.data, dict) else None
-        if isinstance(items, list):
-            for item in items:
-                nes_id = item.get("nes_id") if isinstance(item, dict) else None
-                if nes_id is not None and not is_valid_entity_iri(nes_id):
-                    return Response(
-                        {
-                            "detail": (
-                                f"nes_id must be a canonical entity @id IRI "
-                                f"(https://<base>/entity/<prefix>/<slug>); got {nes_id!r}."
-                            )
-                        },
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-        return super().post(request, *args, **kwargs)
+        items = self._items(request)
+        if items is None:
+            return self._bad_items()
+
+        # Validate every nes_id IRI up front (reject the whole batch on a bad one,
+        # so a partial write never leaves a mix of resolved/unresolved rows).
+        for item in items:
+            nes_id = item.get("nes_id") if isinstance(item, dict) else None
+            if nes_id is not None and not is_valid_entity_iri(nes_id):
+                return Response(
+                    {
+                        "detail": (
+                            f"nes_id must be a canonical entity @id IRI "
+                            f"(https://<base>/entity/<prefix>/<slug>); got {nes_id!r}."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        results: list[dict] = []
+        resolved = unmatched = failed = 0
+        for index, raw in enumerate(items):
+            count, err = self._resolve_item(raw)
+            if err is not None:
+                failed += 1
+                results.append({"index": index, "status": "failed", "errors": err})
+            elif count == 0:
+                unmatched += 1
+                results.append({"index": index, "status": "unmatched", "matched": 0})
+            else:
+                resolved += count
+                results.append({"index": index, "status": "resolved", "matched": count})
+
+        return Response(
+            {
+                "resolved": resolved,
+                "unmatched": unmatched,
+                "failed": failed,
+                "results": results,
+            }
+        )
+
+    @staticmethod
+    def _resolve_item(raw):
+        """Attach nes_id to matching CaseEntity rows. Returns (matched_count, None)
+        or (None, errors)."""
+        if not isinstance(raw, dict):
+            return None, {"detail": "Each item must be an object."}
+        court_identifier = raw.get("court") or raw.get("court_identifier")
+        case_number = raw.get("case_number")
+        nes_id = raw.get("nes_id")
+        if not court_identifier or not case_number:
+            return None, {"detail": "court (identifier) and case_number are required."}
+        if not nes_id:
+            return None, {"detail": "nes_id is required to resolve a party."}
+
+        qs = CaseEntity.objects.filter(
+            court_id=court_identifier,
+            case_number=best_effort_normalize(str(case_number)),
+        )
+        if (side := raw.get("side")):
+            qs = qs.filter(side=side)
+        if (name := raw.get("name")):
+            qs = qs.filter(name=name)
+        matched = qs.update(nes_id=nes_id)
+        return matched, None
 
 
-class IngestionDocumentsView(_IngestionStub):
-    """``POST /ingestion/documents`` — register document_sources (roled links)."""
+class IngestionDocumentsView(_IngestionView):
+    """``POST /ingestion/documents`` — register document sources onto court cases.
+
+    Body: ``{"items": [{"court"|"court_identifier", "case_number",
+    "document_source": {"document_id", "url": [{"link", "role"}], ...}}]}``.
+    Each item appends its ``document_source`` (a roled-link DocumentSource, the
+    shape already stored in the ``document_sources`` JSONB list on ``CourtCase``
+    and projected to schema.org ``associatedMedia`` by
+    ``materials.jsonld.media_objects_from_document_sources``) onto the target
+    case. Idempotent: an entry whose ``document_id`` already exists on the case
+    is REPLACED in place (not duplicated); entries without a ``document_id`` are
+    appended. Returns per-item results + ``{updated, unmatched, failed}``.
+
+    NOTE (documented scope): this registers document sources onto EXISTING court
+    cases (the court-order/document model in this codebase is the case's inline
+    ``document_sources`` list — there is no standalone document row to create).
+    A missing case is reported ``unmatched`` (not created here).
+    """
+
+    def post(self, request, *args, **kwargs):
+        items = self._items(request)
+        if items is None:
+            return self._bad_items()
+
+        results: list[dict] = []
+        updated = unmatched = failed = 0
+        for index, raw in enumerate(items):
+            outcome, err = self._register_document(raw)
+            if err is not None:
+                failed += 1
+                results.append({"index": index, "status": "failed", "errors": err})
+            elif outcome == "unmatched":
+                unmatched += 1
+                results.append({"index": index, "status": "unmatched"})
+            else:
+                updated += 1
+                results.append({"index": index, "status": "updated"})
+
+        return Response(
+            {
+                "updated": updated,
+                "unmatched": unmatched,
+                "failed": failed,
+                "results": results,
+            }
+        )
+
+    @staticmethod
+    def _register_document(raw):
+        """Append/replace a document_source on the target case. Returns
+        ("updated"|"unmatched", None) or (None, errors)."""
+        if not isinstance(raw, dict):
+            return None, {"detail": "Each item must be an object."}
+        court_identifier = raw.get("court") or raw.get("court_identifier")
+        case_number = raw.get("case_number")
+        document_source = raw.get("document_source")
+        if not court_identifier or not case_number:
+            return None, {"detail": "court (identifier) and case_number are required."}
+        if not isinstance(document_source, dict):
+            return None, {"detail": "document_source must be an object."}
+
+        case = CourtCase.objects.filter(
+            court_id=court_identifier,
+            case_number=best_effort_normalize(str(case_number)),
+            is_deleted=False,
+        ).first()
+        if case is None:
+            return "unmatched", None
+
+        sources = [d for d in (case.document_sources or []) if isinstance(d, dict)]
+        document_id = document_source.get("document_id")
+        replaced = False
+        if document_id:
+            for i, existing in enumerate(sources):
+                if existing.get("document_id") == document_id:
+                    sources[i] = document_source
+                    replaced = True
+                    break
+        if not replaced:
+            sources.append(document_source)
+        case.document_sources = sources
+        try:
+            case.full_clean(validate_unique=False)
+        except DjangoValidationError as exc:
+            return None, exc.message_dict
+        case.save(update_fields=["document_sources", "updated_at"])
+        return "updated", None
 
 
 # --- search plane -----------------------------------------------------------

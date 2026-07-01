@@ -28,6 +28,30 @@ if _REPO_ROOT.is_dir():
         sys.path.insert(0, p)
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _disable_staticfiles_manifest():
+    """Use the non-manifest staticfiles backend suite-wide (repo-root scope).
+
+    ``tests/conftest.py`` already overrides ``STORAGES`` to drop the manifest
+    check, but that fixture only covers items under ``tests/``. When an app-level
+    suite (``courts/tests``, ``materials/tests``, …) issues the FIRST request of
+    the session — before any ``tests/``-package test runs — whitenoise
+    instantiates and caches the production ``CompressedManifestStaticFilesStorage``
+    (which raises ``Missing staticfiles manifest entry`` because tests never run
+    ``collectstatic``). Hoisting the override to the repo-root conftest makes it
+    apply regardless of collection order, so the ``/django-admin/`` e2e reads
+    stay green whichever suite runs first.
+    """
+    from django.conf import settings as django_settings
+
+    django_settings.STORAGES = {
+        "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+        "staticfiles": {
+            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Pre-existing STALE test, unrelated to the DB engine. ``test_enrich_ciaa_
 # timeline.py`` references ``SourceType.LEGAL_PROCEDURAL`` /

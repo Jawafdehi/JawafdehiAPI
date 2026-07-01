@@ -14,9 +14,16 @@ no stored row is materialized on the fly from the relational court tables via
 
 from __future__ import annotations
 
+import mimetypes
+
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import (
+    api_view,
+    parser_classes,
+    permission_classes,
+)
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
@@ -26,6 +33,7 @@ from jawafdehi_shared.entities.ids import (
     iri_base,
 )
 from jawafdehi_shared.drf.base import PlatformCursorPagination
+from jawafdehi_shared.storage import store_file_as_link
 from courts.permissions import HasNgmRole
 
 from . import jsonld
@@ -33,6 +41,10 @@ from .bulk_ingest import _infer_material_type
 from .models import Material
 
 LD_JSON = "application/ld+json"
+
+#: Roles a file upload may carry (mirrors the DocumentSource link roles that the
+#: JSON-LD MediaObject mapping understands — jsonld._ROLE_ENCODING_HINTS).
+_UPLOAD_ROLES = frozenset({"RAW", "ALTERNATE", "PERMALINK"})
 
 
 def _require_ngm_role(request):
@@ -202,6 +214,115 @@ def material_detail(request, source: str, ident: str):
     if data is None:
         return Response({"detail": "Material not found."}, status=status.HTTP_404_NOT_FOUND)
     return Response(data, content_type=LD_JSON)
+
+
+def _append_media_object(doc: dict, *, content_url: str, role: str, filename: str) -> dict:
+    """Append a schema.org ``MediaObject`` for an uploaded file to ``associatedMedia``.
+
+    Reuses the ``jsonld._media_object`` shaping (``contentUrl`` /
+    ``jawafdehi:linkRole`` / ``encodingFormat``) so an uploaded file is one more
+    roled link on the material — identical to the DocumentSource modality. The
+    ``encodingFormat`` is guessed from the filename extension (the roled-link
+    hint has no format for RAW/ALTERNATE/PERMALINK). Mutates + returns ``doc``.
+    """
+    mo = jsonld._media_object({"link": content_url, "role": role})
+    if mo is not None:
+        encoding, _ = mimetypes.guess_type(filename)
+        if encoding and "encodingFormat" not in mo:
+            mo["encodingFormat"] = encoding
+        media = doc.get("associatedMedia")
+        if isinstance(media, dict):
+            media = [media]
+        elif not isinstance(media, list):
+            media = []
+        media.append(mo)
+        doc["associatedMedia"] = media
+    return doc
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+@parser_classes([MultiPartParser, FormParser])
+def material_file_upload(request, source: str, ident: str):
+    """``POST /api/materials/<source>/<ident>/file`` (multipart) — attach a file.
+
+    Streams the uploaded ``file`` to object storage (the SAME hashed-filename S3
+    mechanism the cases app uses, via ``jawafdehi_shared.storage``), then upserts
+    the material at ``@id=/material/<source>/<ident>``: the stored file's public
+    URL is appended to ``associatedMedia`` as a schema.org ``MediaObject``
+    (``contentUrl`` + ``jawafdehi:linkRole`` = ``role`` + guessed
+    ``encodingFormat``). If no material exists yet it is CREATED (which requires
+    ``material_type``); an existing material is UPDATED in place.
+
+    Multipart fields: ``file`` (required binary), ``role`` (RAW|ALTERNATE|PERMALINK,
+    default RAW), ``material_type`` (required only when creating a fresh material).
+    NGM-role gated. Returns the material JSON-LD (201 created / 200 updated).
+    """
+    denied = _require_ngm_role(request)
+    if denied is not None:
+        return denied
+
+    try:
+        iri = build_material_iri(source, ident)
+    except ValueError:
+        return Response(
+            {"detail": "Invalid material source/ident."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    uploaded = request.FILES.get("file")
+    if uploaded is None:
+        return Response(
+            {"detail": "A multipart 'file' is required."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    role = (request.data.get("role") or "RAW").strip().upper()
+    if role not in _UPLOAD_ROLES:
+        return Response(
+            {"detail": f"role must be one of {sorted(_UPLOAD_ROLES)}; got {role!r}."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    existing = Material.objects.filter(pk=iri, is_deleted=False).first()
+    if existing is None:
+        material_type = (request.data.get("material_type") or "").strip()
+        if not material_type:
+            return Response(
+                {
+                    "detail": (
+                        "material_type is required to create a new material "
+                        "(no material exists at this @id yet)."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        schema_type, additional_type = jsonld.type_for(material_type)
+        doc = {
+            "@context": jsonld.MATERIAL_CONTEXT,
+            "@type": schema_type,
+            "@id": iri,
+            "name": {"ne": uploaded.name},
+        }
+        if additional_type:
+            doc["additionalType"] = additional_type
+    else:
+        material_type = existing.material_type
+        doc = dict(existing.data)
+
+    # Stream the file to storage (shared hashed-filename S3 mechanism) and append
+    # its permanent URL as a roled MediaObject on the material.
+    link = store_file_as_link(uploaded, role=role)
+    _append_media_object(
+        doc, content_url=link["link"], role=link["role"], filename=uploaded.name
+    )
+
+    result, code, error = _upsert_material(
+        doc, material_type=material_type, expected_iri=iri
+    )
+    if error is not None:
+        return Response(error, status=code)
+    return Response(result, status=code, content_type=LD_JSON)
 
 
 def _normalize_iri_param(iri: str) -> str:
