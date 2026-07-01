@@ -81,6 +81,9 @@ def _entity_row_fields(doc: Dict[str, Any], *, version: int, created_at: datetim
         "version": version,
         "created_at": created_at,
         "updated_at": updated_at,
+        # A (re-)publish revives a soft-deleted row: the write is the source of
+        # truth, so clear the soft-delete flag on every upsert.
+        "is_deleted": False,
     }
 
 
@@ -114,9 +117,15 @@ class EntityRepository:
 
     # --- entities ---------------------------------------------------------
 
+    @staticmethod
+    def _live() -> "QuerySet":
+        """Base queryset excluding soft-deleted rows (the read contract)."""
+        return StoredEntity.objects.filter(is_deleted=False)
+
     def get_entity(self, iri: str) -> Optional[Dict[str, Any]]:
         return (
-            StoredEntity.objects.filter(pk=iri)
+            self._live()
+            .filter(pk=iri)
             .values_list("data", flat=True)
             .first()
         )
@@ -154,20 +163,29 @@ class EntityRepository:
         return len(docs)
 
     def delete_entity(self, iri: str) -> bool:
-        deleted, _ = StoredEntity.objects.filter(pk=iri).delete()
-        return deleted > 0
+        """Soft-delete: flip ``is_deleted=True`` (never hard-delete — this is an
+        accountability/audit platform). Returns True iff a live row was flipped.
+        The ORM ``save()`` fires the search-index signal, which evicts the row."""
+        entity = self._live().filter(pk=iri).first()
+        if entity is None:
+            return False
+        entity.is_deleted = True
+        entity.save(update_fields=["is_deleted", "updated_at"])
+        return True
 
     def entity_version(self, iri: str) -> Optional[int]:
-        """The current promoted version number for an entity (or None)."""
+        """The current promoted version number for a live entity (or None)."""
         return (
-            StoredEntity.objects.filter(pk=iri)
+            self._live()
+            .filter(pk=iri)
             .values_list("version", flat=True)
             .first()
         )
 
     def entity_created_at(self, iri: str) -> Optional[datetime]:
         return (
-            StoredEntity.objects.filter(pk=iri)
+            self._live()
+            .filter(pk=iri)
             .values_list("created_at", flat=True)
             .first()
         )
@@ -179,7 +197,7 @@ class EntityRepository:
         prefix: Optional[str] = None,
     ) -> int:
         qs = _apply_entity_filters(
-            StoredEntity.objects.all(), entity_type=entity_type, prefix=prefix
+            self._live(), entity_type=entity_type, prefix=prefix
         )
         return qs.count()
 
@@ -197,7 +215,7 @@ class EntityRepository:
         pushed via JSONField lookup on Postgres, filtered in Python on sqlite.
         """
         qs = _apply_entity_filters(
-            StoredEntity.objects.all(), entity_type=entity_type, prefix=prefix
+            self._live(), entity_type=entity_type, prefix=prefix
         )
         keywords_pushed_down = False
         if keywords and _supports_jsonb_containment():
@@ -277,7 +295,7 @@ class EntityRepository:
     def all_prefixes(self) -> List[str]:
         """Distinct entity prefixes across all entities (for /api/entity_prefixes)."""
         return sorted(
-            StoredEntity.objects.values_list("prefix", flat=True).distinct()
+            self._live().values_list("prefix", flat=True).distinct()
         )
 
     def all_keywords(self) -> List[str]:
@@ -289,12 +307,13 @@ class EntityRepository:
                     "FROM entities, "
                     "LATERAL jsonb_array_elements_text(data->'keywords') AS kw "
                     "WHERE jsonb_typeof(data->'keywords') = 'array' "
+                    "AND NOT is_deleted "
                     "ORDER BY kw"
                 )
                 return [row[0] for row in cursor.fetchall()]
 
         kws: set = set()
-        for data in StoredEntity.objects.values_list("data", flat=True).iterator():
+        for data in self._live().values_list("data", flat=True).iterator():
             for kw in (data.get("keywords") or []):
                 if isinstance(kw, str):
                     kws.add(kw)

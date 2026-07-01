@@ -54,6 +54,7 @@ composite_case_urls = [
                 "get": "retrieve_composite",
                 "put": "update_composite",
                 "patch": "update_composite",
+                "delete": "destroy_composite",
             }
         ),
         name="case-detail",

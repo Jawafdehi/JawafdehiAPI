@@ -57,6 +57,9 @@ class Material(models.Model):
     ident = models.CharField(max_length=300, db_index=True)
     # The full schema.org JSON-LD document.
     data = models.JSONField()
+    # Soft-delete flag (accountability platform: rows are never hard-deleted).
+    # Reads (list/detail) exclude ``is_deleted=True`` rows; DELETE flips it True.
+    is_deleted = models.BooleanField(default=False, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

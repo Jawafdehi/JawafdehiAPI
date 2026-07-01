@@ -18,7 +18,12 @@ from .models import StoredEntity
 
 @receiver(post_save, sender=StoredEntity, dispatch_uid="nes_entity_search_index")
 def _index_entity(sender, instance, **kwargs):
-    transaction.on_commit(lambda: search_index.index(instance))
+    # A soft-delete is an ORM save (is_deleted=True), so evict from the index
+    # here rather than re-indexing a row that is no longer on the read plane.
+    if getattr(instance, "is_deleted", False):
+        transaction.on_commit(lambda: search_index.delete(instance))
+    else:
+        transaction.on_commit(lambda: search_index.index(instance))
 
 
 @receiver(post_delete, sender=StoredEntity, dispatch_uid="nes_entity_search_delete")

@@ -226,10 +226,15 @@ class EntityListCreateView(APIView):
 
 
 class EntityDetailView(APIView):
-    """GET /api/entities/{ref} (public) + PATCH /api/entities/{ref} (write)."""
+    """GET /api/entities/{ref} (public) + PATCH/DELETE /api/entities/{ref} (write).
+
+    DELETE is a SOFT delete: it flips ``is_deleted=True`` so the entity vanishes
+    from the read plane (list/detail/search) but is never hard-removed — this is
+    an accountability/audit platform.
+    """
 
     def get_permissions(self):
-        if self.request.method == "PATCH":
+        if self.request.method in ("PATCH", "DELETE"):
             return [HasNesContributorRole()]
         return [AllowAny()]
 
@@ -293,6 +298,32 @@ class EntityDetailView(APIView):
         except ValueError as e:
             return _map_service_value_error(e)
         return Response(updated)
+
+    def delete(self, request, ref: str):
+        """Soft-delete the entity (``is_deleted=True``); returns 204.
+
+        A soft-deleted entity disappears from the read plane but its row (and
+        version history) is preserved. Deleting an unknown/already-deleted IRI is
+        a 404 — the entity is not visible to this caller either way.
+        """
+        iri = _resolve_ref(ref)
+        if iri is None:
+            return Response(
+                _err("INVALID_ENTITY_ID", f"Invalid entity reference: {ref}"),
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        service = PublicationService()
+        deleted = service.delete_entity(
+            iri,
+            author_id=_author_id_from_request(request),
+            change_description="Deleted via API",
+        )
+        if not deleted:
+            return Response(
+                _err("NOT_FOUND", f"Entity {iri} not found"),
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class EntityVersionsView(APIView):

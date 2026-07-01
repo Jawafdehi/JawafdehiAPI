@@ -115,7 +115,8 @@ class CourtCaseViewSet(
         return CourtCaseSerializer
 
     def get_queryset(self):
-        qs = CourtCase.objects.all().order_by("-created_at")
+        # Soft-deleted cases are excluded from the read plane.
+        qs = CourtCase.objects.filter(is_deleted=False).order_by("-created_at")
         params = self.request.query_params
         if (court := params.get("court")):
             qs = qs.filter(court_id=court)
@@ -132,8 +133,12 @@ class CourtCaseViewSet(
     def _get_case_or_404(self, court: str, case_number: str) -> CourtCase:
         from django.shortcuts import get_object_or_404
 
+        # Soft-deleted cases are not addressable on the read plane (404).
         return get_object_or_404(
-            CourtCase, court_id=court, case_number=best_effort_normalize(case_number)
+            CourtCase,
+            court_id=court,
+            case_number=best_effort_normalize(case_number),
+            is_deleted=False,
         )
 
     # --- detail + sub-resources, keyed on (court, case_number) ----------------
@@ -179,6 +184,18 @@ class CourtCaseViewSet(
             raise DRFValidationError(exc.message_dict)
         case.save()
         return Response(CourtCaseSerializer(case).data)
+
+    def destroy_composite(self, request, court: str, case_number: str):
+        """``DELETE /courtcases/{court}/{case_number}`` — soft-delete a case.
+
+        Flips ``is_deleted=True`` so the case vanishes from the read plane but is
+        never hard-removed (accountability/audit platform). NGM-role gated (via
+        the per-method permission mixin); returns 204.
+        """
+        case = self._get_case_or_404(court, case_number)
+        case.is_deleted = True
+        case.save(update_fields=["is_deleted", "updated_at"])
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     def retrieve_composite(self, request, court: str, case_number: str):
         case = self._get_case_or_404(court, case_number)

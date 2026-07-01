@@ -319,9 +319,15 @@ class MaterialEndpointTests(_DbAPITestCase):
         resp = self.client.get("/api/materials/nkp/does-not-exist")
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
-    def test_iri_query_required(self):
+    def test_bare_materials_root_lists(self):
+        # GET /api/materials/ (no ?iri=) now returns a paginated list of live
+        # materials in the platform {results, next} shape (was 422 before R5a).
         resp = self.client.get("/api/materials/")
-        self.assertEqual(resp.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn("results", resp.data)
+        self.assertIn("next", resp.data)
+        result_ids = [d.get("@id") for d in resp.data["results"]]
+        self.assertIn(self.material.iri, result_ids)
 
     def test_case_detail_exposes_material_id(self):
         resp = self.client.get("/api/courtcases/kathmandudc/082-OA-0503")

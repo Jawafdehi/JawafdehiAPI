@@ -43,6 +43,9 @@ class StoredEntity(models.Model):
     slug = models.TextField(db_index=True)  # parsed from the IRI (routing)
     data = models.JSONField()  # the schema.org JSON-LD document
     version = models.IntegerField(default=1)
+    # Soft-delete flag (accountability platform: rows are never hard-deleted).
+    # Reads/list/search exclude ``is_deleted=True`` rows; DELETE flips this True.
+    is_deleted = models.BooleanField(default=False, db_index=True)
     # The repository (persistence.EntityRepository) sets these explicitly to carry
     # publish-time provenance (created_at is preserved across re-publishes), so
     # auto_now_add/auto_now would be WRONG — they'd clobber the explicit value.

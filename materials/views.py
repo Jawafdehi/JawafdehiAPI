@@ -25,6 +25,7 @@ from jawafdehi_shared.entities.ids import (
     is_valid_material_iri,
     iri_base,
 )
+from jawafdehi_shared.drf.base import PlatformCursorPagination
 from courts.permissions import HasNgmRole
 
 from . import jsonld
@@ -83,6 +84,9 @@ def _upsert_material(data, *, material_type: str | None, expected_iri: str | Non
             existing.source = built.source
             existing.ident = built.ident
             existing.data = built.data
+            # A (re-)upsert revives a soft-deleted row: the write is the source
+            # of truth, so clear the soft-delete flag.
+            existing.is_deleted = False
             material = existing
         else:
             material = built
@@ -98,9 +102,10 @@ def _upsert_material(data, *, material_type: str | None, expected_iri: str | Non
 
 
 def _resolve_material(iri: str) -> dict | None:
-    """Return the JSON-LD doc for ``iri``: stored row, else a derived court case."""
+    """Return the JSON-LD doc for ``iri``: stored (live) row, else a derived
+    court case. Soft-deleted rows (``is_deleted=True``) are treated as absent."""
     try:
-        row = Material.objects.get(pk=iri)
+        row = Material.objects.get(pk=iri, is_deleted=False)
         return row.data
     except Material.DoesNotExist:
         pass
@@ -128,7 +133,9 @@ def _derive_court_case_jsonld(iri: str) -> dict | None:
     # ident is lowercased in the IRI; the case_number on disk is uppercased.
     case = (
         CourtCase.objects.filter(
-            court_id=court_identifier, case_number__iexact=case_number
+            court_id=court_identifier,
+            case_number__iexact=case_number,
+            is_deleted=False,
         ).first()
     )
     if case is None:
@@ -136,13 +143,28 @@ def _derive_court_case_jsonld(iri: str) -> dict | None:
     return jsonld.court_case_to_jsonld(case)
 
 
-@api_view(["GET", "PUT"])
+def _soft_delete_material(iri: str) -> bool:
+    """Soft-delete a stored material (``is_deleted=True``); never hard-delete.
+
+    Returns True iff a live stored row was flipped. Derived (court-case) materials
+    have no stored row and cannot be deleted here → False (404 for the caller).
+    """
+    row = Material.objects.filter(pk=iri, is_deleted=False).first()
+    if row is None:
+        return False
+    row.is_deleted = True
+    row.save(update_fields=["is_deleted", "updated_at"])
+    return True
+
+
+@api_view(["GET", "PUT", "DELETE"])
 @permission_classes([AllowAny])
 def material_detail(request, source: str, ident: str):
     """``GET /api/materials/<source>/<ident>`` → the material JSON-LD doc.
 
-    ``PUT`` replaces the material's stored JSON-LD (NGM-role gated). The GET path
-    is byte-identical to before (stored row, else on-the-fly court-case fallback).
+    ``PUT`` replaces the material's stored JSON-LD (NGM-role gated). ``DELETE``
+    soft-deletes the stored material (NGM-role gated, 204). The GET path is
+    byte-identical to before (stored row, else on-the-fly court-case fallback).
     """
     try:
         iri = build_material_iri(source, ident)
@@ -166,24 +188,65 @@ def material_detail(request, source: str, ident: str):
             return Response(error, status=code)
         return Response(result, status=code, content_type=LD_JSON)
 
+    if request.method == "DELETE":
+        denied = _require_ngm_role(request)
+        if denied is not None:
+            return denied
+        if not _soft_delete_material(iri):
+            return Response(
+                {"detail": "Material not found."}, status=status.HTTP_404_NOT_FOUND
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
     data = _resolve_material(iri)
     if data is None:
         return Response({"detail": "Material not found."}, status=status.HTTP_404_NOT_FOUND)
     return Response(data, content_type=LD_JSON)
 
 
-@api_view(["GET", "POST"])
+def _normalize_iri_param(iri: str) -> str:
+    """Resolve a bare ``/material/<source>/<ident>`` path against ``iri_base()``."""
+    if iri.startswith("/material/"):
+        return f"{iri_base()}{iri}"
+    return iri
+
+
+def _list_materials(request) -> Response:
+    """``GET /api/materials/`` (no ``iri``) → paginated list of live materials.
+
+    Uses the shared ``PlatformCursorPagination`` so the wire shape is the
+    platform ``{results, next}`` (matching the courts list plane). Soft-deleted
+    rows are excluded. Optional ``source`` / ``material_type`` query filters
+    mirror the promoted-column filters used elsewhere.
+    """
+    qs = Material.objects.filter(is_deleted=False)
+    params = request.query_params
+    if (source := params.get("source")):
+        qs = qs.filter(source=source)
+    if (material_type := params.get("material_type")):
+        qs = qs.filter(material_type=material_type)
+
+    paginator = PlatformCursorPagination()
+    page = paginator.paginate_queryset(qs, request)
+    docs = [row.data for row in page]
+    return paginator.get_paginated_response(docs)
+
+
+@api_view(["GET", "POST", "DELETE"])
 @permission_classes([AllowAny])
 def material_by_iri(request):
-    """``GET /api/materials/?iri=<full-iri>`` → the material JSON-LD doc.
+    """``GET /api/materials/`` → paginated list of materials (``{results, next}``);
+    ``GET /api/materials/?iri=<full-iri>`` → a single material JSON-LD doc.
 
-    Accepts either the canonical full IRI or a bare ``/material/<source>/<ident>``
-    path; the latter is resolved against the platform ``iri_base()``.
+    The ``iri`` form accepts either the canonical full IRI or a bare
+    ``/material/<source>/<ident>`` path (resolved against ``iri_base()``).
 
-    ``POST`` creates/upserts a material from a JSON-LD body (NGM-role gated). The
+    ``POST`` creates/upserts a material from a JSON-LD body (NGM-role gated); the
     body is either a bare JSON-LD doc (``@id`` present) or the
-    ``{"material": {...}, "material_type": "..."}`` envelope; ``material_type`` is
-    inferred from the doc's ``@type`` when absent (mirroring bulk_ingest).
+    ``{"material": {...}, "material_type": "..."}`` envelope (``material_type`` is
+    inferred from the doc's ``@type`` when absent, mirroring bulk_ingest).
+    ``DELETE /api/materials/?iri=<full-iri>`` soft-deletes the material (NGM-role
+    gated, 204).
     """
     if request.method == "POST":
         denied = _require_ngm_role(request)
@@ -198,13 +261,32 @@ def material_by_iri(request):
         return Response(result, status=code, content_type=LD_JSON)
 
     iri = (request.query_params.get("iri") or "").strip()
+
+    if request.method == "DELETE":
+        denied = _require_ngm_role(request)
+        if denied is not None:
+            return denied
+        if not iri:
+            return Response(
+                {"detail": "Query parameter 'iri' is required."},
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        iri = _normalize_iri_param(iri)
+        if not is_valid_material_iri(iri):
+            return Response(
+                {"detail": "Not a valid material @id IRI."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not _soft_delete_material(iri):
+            return Response(
+                {"detail": "Material not found."}, status=status.HTTP_404_NOT_FOUND
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    # GET: no iri → paginated list; iri → single lookup (unchanged behavior).
     if not iri:
-        return Response(
-            {"detail": "Query parameter 'iri' is required."},
-            status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        )
-    if iri.startswith("/material/"):
-        iri = f"{iri_base()}{iri}"
+        return _list_materials(request)
+    iri = _normalize_iri_param(iri)
     if not is_valid_material_iri(iri):
         return Response(
             {"detail": "Not a valid material @id IRI."},

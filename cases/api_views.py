@@ -226,6 +226,11 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
             return [IsAuthenticated(), DjangoModelPermissions()]
         if self.action == "partial_update":
             return [IsAuthenticated()]
+        if self.action == "destroy":
+            # DjangoModelPermissions maps DELETE -> cases.delete_case, keeping the
+            # org-wide ReadOnly role and plain authenticated users (no delete_case)
+            # out of the soft-delete path.
+            return [IsAuthenticated(), DjangoModelPermissions()]
         return super().get_permissions()
 
     def get_serializer_class(self):
@@ -253,8 +258,10 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
             # .model) so the list/tag-filtering path below does not run on POST.
             return Case.objects.none()
 
-        if self.action == "partial_update":
-            # PATCH endpoint: return all cases except CLOSED, authorization check happens in partial_update method
+        if self.action in ("partial_update", "destroy"):
+            # PATCH / DELETE endpoints: address any non-CLOSED case; the
+            # authorization check happens in the action method (partial_update /
+            # destroy). CLOSED cases are already "deleted" and not addressable.
             return Case.objects.exclude(state=CaseState.CLOSED)
 
         if self.action == "retrieve":
@@ -574,6 +581,35 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response(CaseSerializer(case).data, status=status.HTTP_200_OK)
 
+    def destroy(self, request, *args, **kwargs):
+        """
+        DELETE /api/cases/{id}/
+
+        Soft-delete a case. Consistent with the platform's existing pattern
+        (Case has no is_deleted flag; ``Case.delete()`` transitions state to
+        CLOSED and the ViewSet already excludes CLOSED cases from every read),
+        this transitions the case to CLOSED rather than hard-deleting it — the
+        record is preserved for audit. Returns 204.
+
+        Authorization mirrors PATCH (``can_change_case``) on top of the
+        cases.delete_case model permission enforced by get_permissions().
+        """
+        try:
+            case = self.get_object()
+        except Case.DoesNotExist:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if not can_change_case(request.user, case):
+            return Response(
+                {"detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Case.delete() is overridden to soft-delete (state -> CLOSED + versionInfo
+        # audit entry); it never hard-removes the row. The post-transition CLOSED
+        # state is evicted from the search index by the case save signal.
+        case.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
     def _build_snapshot(self, case: Case) -> dict:
         """Return a writable dict representing the patchable surface of a case."""
         return {
@@ -690,7 +726,7 @@ class DocumentSourceViewSet(
         # maps POST->add_documentsource, PUT/PATCH->change_documentsource) on top of
         # authentication. This keeps the org-wide ReadOnly role (view-only perms) and
         # plain authenticated users without source perms out of the write paths.
-        if self.action in ("create", "partial_update", "update"):
+        if self.action in ("create", "partial_update", "update", "destroy"):
             return [IsAuthenticated(), DjangoModelPermissions()]
         return super().get_permissions()
 
@@ -728,6 +764,20 @@ class DocumentSourceViewSet(
         )
         return Response(read_serializer.data, status=status.HTTP_201_CREATED)
 
+    def destroy(self, request, *args, **kwargs):
+        """
+        DELETE /api/sources/{id_or_source_id}/
+
+        Soft-delete a document source by setting ``is_deleted=True`` (the model
+        already carries this flag + an admin soft-delete action). The row is
+        preserved for audit history and excluded from all reads. Returns 204.
+        Requires the cases.delete_documentsource permission (get_permissions()).
+        """
+        instance = self.get_object()
+        instance.is_deleted = True
+        instance.save(update_fields=["is_deleted", "updated_at"])
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
     def get_queryset(self):
         """
         Return only sources referenced in evidence of published or in-review cases.
@@ -743,6 +793,11 @@ class DocumentSourceViewSet(
         # get_object(), so they fall through.)
         if self.action == "create":
             return DocumentSource.objects.none()
+
+        # DELETE addresses any non-deleted source (the delete_documentsource model
+        # permission is the gate); get_object() resolves it by id or source_id.
+        if self.action == "destroy":
+            return DocumentSource.objects.filter(is_deleted=False).distinct()
 
         # The org-wide ReadOnly role gets a system-wide read: all non-deleted
         # sources, including those referenced only by DRAFT cases (or by no case

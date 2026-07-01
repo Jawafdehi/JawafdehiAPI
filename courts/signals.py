@@ -18,7 +18,12 @@ from .models import CaseEntity, CourtCase
 
 @receiver(post_save, sender=CourtCase, dispatch_uid="ngm_courtcase_search_index")
 def _index_courtcase(sender, instance, **kwargs):
-    transaction.on_commit(lambda: search_index.index(instance))
+    # A soft-delete is an ORM save (is_deleted=True); evict from the index rather
+    # than re-indexing a row that is no longer on the read plane.
+    if getattr(instance, "is_deleted", False):
+        transaction.on_commit(lambda: search_index.delete(instance))
+    else:
+        transaction.on_commit(lambda: search_index.index(instance))
 
 
 @receiver(post_delete, sender=CourtCase, dispatch_uid="ngm_courtcase_search_delete")

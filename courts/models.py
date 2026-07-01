@@ -104,6 +104,9 @@ class CourtCase(models.Model):
     )
     extra_data = models.JSONField(null=True, blank=True)
     document_sources = models.JSONField(null=True, blank=True)
+    # Soft-delete flag (accountability platform: rows are never hard-deleted).
+    # List/retrieve exclude ``is_deleted=True`` rows; DELETE flips it True.
+    is_deleted = models.BooleanField(default=False, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

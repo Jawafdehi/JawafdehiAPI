@@ -1,0 +1,4 @@
+# file: /damodaha-volunteer/think-big/jawafdehi-api/courts/views.py
+# hypothesis_version: 6.155.7
+
+[120, 1000, '-blacklist_date_ad', '-created_at', '-id', 'DELETE', 'GET', 'PATCH', 'POST', 'PUT', 'columns', 'court', 'date_from', 'date_to', 'detail', 'id', 'identifier', 'is_deleted', 'items', 'max_rows', 'name', 'nes_id', 'next', 'ngm-api', 'ok', 'postgresql', 'query', 'query_time_ms', 'results', 'row_count', 'rows', 'service', 'status', 'timeout_seconds', 'type', 'updated_at']
