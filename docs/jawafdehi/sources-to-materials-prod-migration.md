@@ -142,10 +142,13 @@ The backend removal already landed on `wt-sources-to-materials`:
   `seed_allegations`, `seed_jawafdehi`, `case_importer`, `ciaa_draft_case_service`)
   raise `NotImplementedError` until rewired to write Materials.
 
+- ✅ Evidence WRITE paths wired: `POST /api/cases` + `PATCH /api/cases/{id}` (`/evidence`
+  ops) create/replace `CaseMaterialReference` rows; visibility recompute fires live on
+  create / evidence-change / state-transition / soft-delete over current+removed material
+  IRIs (the ADR draft-leak guard is now live, not just the `recompute_all` backstop).
+
 **Still pending (separate follow-ups):**
-- Wire `recompute_for_case` into the Case state-transition + evidence-edit path so
-  visibility flips live on publish/review/close/evidence-change (ADR: the recompute
-  TRIGGERS; `recompute_all` is only the backstop, run it post-migration to init).
 - Rewire the stubbed ingesting commands to create `Material` + `CaseMaterialReference`.
-- The actual prod DATA migration (this runbook).
+- The actual prod DATA migration (this runbook). Run `recompute_all()` once post-migration
+  to initialize visibility for all backfilled materials.
 - Frontend + MCP "Document Source" terminology purge (ADR D-E).
