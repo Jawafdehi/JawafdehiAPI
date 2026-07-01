@@ -42,9 +42,13 @@ from .models import Material
 
 LD_JSON = "application/ld+json"
 
-#: Roles a file upload may carry (mirrors the DocumentSource link roles that the
+#: Roles a file upload may carry (the full material link-role vocab that the
 #: JSON-LD MediaObject mapping understands — jsonld._ROLE_ENCODING_HINTS).
-_UPLOAD_ROLES = frozenset({"RAW", "ALTERNATE", "PERMALINK"})
+#: MARKDOWN + SOURCE_PAGE added per ADR (cases-own-no-documents, D-D) so no
+#: legacy source link role is lost when sources fold into materials.
+_UPLOAD_ROLES = frozenset(
+    {"RAW", "ALTERNATE", "PERMALINK", "MARKDOWN", "SOURCE_PAGE"}
+)
 
 #: Upper bound on an uploaded material file. Generous (scanned court orders /
 #: charge sheets run large — this is NOT the 10 MB case-evidence limit) but

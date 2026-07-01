@@ -195,6 +195,31 @@ def canonicalize_material_iri(value: str) -> str:
     return build_material_iri(parsed.source, parsed.ident)
 
 
+#: Material IRI ``source`` segment for a document that originated as a Jawafdehi
+#: case source (``/material/jawafdehi/<ident>``). NGM court materials use
+#: ``court``/``court_order``; issuer collections use ``ciaa``/``ag``/…; a document
+#: that has no NGM-native home (a news link, a social post, a misc upload cited
+#: only by a case) lands under ``jawafdehi``. Kept as a distinct source segment
+#: so provenance ("came in via a case") stays legible.
+JAWAF_SOURCE = "jawafdehi"
+
+
+def build_source_material_iri(source_id: str, base: str | None = None) -> str:
+    """Canonical material ``@id`` IRI for a Jawafdehi case-source document.
+
+    The legacy ``DocumentSource.source_id`` (``source:YYYYMMDD:hex8``) carries
+    colons, which the material ident grammar forbids. Normalize to a stable,
+    reconstructable ident by dropping the ``source:`` prefix and mapping the
+    remaining ``:`` separators to ``.`` (``source:20240115:ab12cd`` →
+    ``jawafdehi/20240115.ab12cd``). Idempotent for an already-normalized id.
+    """
+    ident = source_id.strip()
+    if ident.startswith("source:"):
+        ident = ident[len("source:"):]
+    ident = ident.replace(":", ".").lower()
+    return build_material_iri(JAWAF_SOURCE, ident, base)
+
+
 # ── Case ids (Jawafdehi published cases) ─────────────────────────────────────
 # <base>/case/<slug> — the public, canonical @id IRI for a Jawafdehi case. The
 # slug is the case's external identifier. The grammar MUST match the

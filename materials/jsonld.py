@@ -25,7 +25,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from jawafdehi_shared.entities.ids import build_material_iri, is_valid_material_iri
+from jawafdehi_shared.entities.ids import (
+    build_material_iri,
+    build_source_material_iri,
+    is_valid_material_iri,
+)
 
 # ── namespaces / context ─────────────────────────────────────────────────────
 
@@ -62,6 +66,8 @@ class MaterialType:
     CHARGE_SHEET = "charge_sheet"      # CIAA/AG अभियोगपत्र
     LEGAL_CORPUS = "legal_corpus"      # acts / laws / ordinances / constitution
     OFFICIAL_REPORT = "official_report"  # OAG / annual reports
+    NEWS = "news"                      # news / media article (was Jawafdehi SourceType.NEWS)
+    SOCIAL_MEDIA = "social_media"      # social-media post (was SourceType.SOCIAL_MEDIA)
     DOCUMENT = "document"              # generic court filing / misc document
 
 
@@ -81,6 +87,10 @@ MATERIAL_TYPES: dict[str, tuple[Any, str | None]] = {
     MaterialType.LEGAL_CORPUS: ("Legislation", None),
     # Official report (OAG audit, annual reports) → Report.
     MaterialType.OFFICIAL_REPORT: ("Report", None),
+    # News/media article → schema.org NewsArticle (a CreativeWork subtype).
+    MaterialType.NEWS: ("NewsArticle", None),
+    # Social-media post → SocialMediaPosting.
+    MaterialType.SOCIAL_MEDIA: ("SocialMediaPosting", None),
     MaterialType.DOCUMENT: ("DigitalDocument", None),
 }
 
@@ -95,6 +105,8 @@ KNOWN_MATERIAL_SCHEMA_TYPES: frozenset[str] = frozenset(
         "Legislation",
         "LegislationObject",
         "Report",
+        "NewsArticle",
+        "SocialMediaPosting",
         "MediaObject",
     }
 )
@@ -327,6 +339,87 @@ def court_case_to_jsonld(case: Any) -> dict[str, Any]:
         doc["hasPart"] = order_parts
 
     return doc
+
+
+# ── Jawafdehi case source → Material JSON-LD ─────────────────────────────────
+# A Jawafdehi case "document source" is the same modality as an NGM material:
+# a titled document with roled file links + related entities. When sources fold
+# into materials (ADR: cases-own-no-documents), each source becomes a first-class
+# Material at /material/jawafdehi/<ident>. This shaper is the projection; it is a
+# PURE function (no DB) so it unit-tests like court_case_to_jsonld.
+
+#: Jawafdehi ``SourceType`` value → NGM ``MaterialType`` token. Governance docs
+#: map to their issuer-faithful material types; news/social get first-class
+#: material types (added for this fold) so downstream tiering/badges keep signal;
+#: everything else is a generic ``document``. Keyed by the stable SourceType
+#: *value* strings (``cases.models.SourceType``) to avoid importing the enum here
+#: (keeps this module Django-model-free).
+JAWAF_SOURCE_TYPE_TO_MATERIAL: dict[str, str] = {
+    "CIAA_PRESS_RELEASE": MaterialType.CHARGE_SHEET,
+    "AG_ABHIYOG_PATRA": MaterialType.CHARGE_SHEET,
+    "OAG_AUDIT_REPORT": MaterialType.OFFICIAL_REPORT,
+    "COURT_ORDER": MaterialType.COURT_ORDER,
+    "COURT_FILING_OTHER": MaterialType.DOCUMENT,
+    "LAW_OR_BILL": MaterialType.LEGAL_CORPUS,
+    "NEWS": MaterialType.NEWS,
+    "SOCIAL_MEDIA": MaterialType.SOCIAL_MEDIA,
+    "MISC": MaterialType.DOCUMENT,
+}
+
+
+def material_type_for_source_type(source_type: str | None) -> str:
+    """Map a Jawafdehi ``SourceType`` value to a ``MaterialType`` (default DOCUMENT)."""
+    return JAWAF_SOURCE_TYPE_TO_MATERIAL.get(source_type or "", MaterialType.DOCUMENT)
+
+
+def documentsource_to_jsonld(
+    *,
+    source_id: str,
+    title: str,
+    source_type: str | None,
+    url: list[dict[str, Any]] | None,
+    description: str = "",
+    related_entities: list[str] | None = None,
+    publication_date: Any = None,
+) -> tuple[dict[str, Any], str]:
+    """Shape a Jawafdehi case source into ``(jsonld_doc, material_type)``.
+
+    Returns the material_type alongside the doc because ``Material`` stores it as
+    a promoted column and ``from_jsonld`` requires it explicitly. The ``@id`` is
+    ``/material/jawafdehi/<normalized source_id>``; roled links become
+    ``associatedMedia`` (reusing ``media_objects_from_document_sources``);
+    ``related_entities`` NES IRIs ride as ``about``; ``publication_date`` →
+    ``datePublished``. Accepts primitive fields (not the ORM object) so it stays
+    a pure, DB-free projection.
+    """
+    material_type = material_type_for_source_type(source_type)
+    schema_type, additional_type = type_for(material_type)
+    iri = build_source_material_iri(source_id)
+
+    doc: dict[str, Any] = {
+        "@context": MATERIAL_CONTEXT,
+        "@type": schema_type,
+        "@id": iri,
+        # Source titles are stored as plain (often Devanagari) strings; tag as
+        # Nepali so the bilingual name container stays consistent with materials.
+        "name": {"ne": (title or "").strip() or source_id},
+        "jawafdehi:sourceType": source_type or "MISC",
+    }
+    if additional_type:
+        doc["additionalType"] = additional_type
+    if description and description.strip():
+        doc["description"] = {"ne": description.strip()}
+    media = media_objects_from_document_sources([{"url": url}])
+    if media:
+        doc["associatedMedia"] = media
+    about = [{"@id": iri_} for iri_ in (related_entities or []) if iri_]
+    if about:
+        doc["about"] = about
+    if publication_date is not None:
+        # Accept a date/datetime (isoformat) or an already-ISO string.
+        iso = getattr(publication_date, "isoformat", lambda: str(publication_date))()
+        doc["datePublished"] = iso
+    return doc, material_type
 
 
 def _case_entity_iris(case: Any) -> list[str]:
