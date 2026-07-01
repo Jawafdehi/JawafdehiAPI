@@ -11,17 +11,15 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 from rest_framework.test import APIClient
 
-from cases.models import CaseState, CaseType
+from cases.models import CaseMaterialReference, CaseState, CaseType
 from tests.conftest import (
     create_case_with_entities,
-    create_document_source_with_entities,
 )
 from tests.strategies import (
     complete_case_data_with_timeline as complete_case_data,
 )
-from tests.strategies import (
-    valid_source_data,
-)
+
+VALID_MATERIAL_IRI = "https://jawafdehi.org/material/jawafdehi/20240115.ab12cd"
 
 # ============================================================================
 # Property 8: Public API only shows published cases
@@ -93,35 +91,31 @@ def test_public_api_only_shows_published_cases(case_data, state):
 
 
 # ============================================================================
-# Property 10: Evidence requires valid source references
+# Property 10: Evidence is a material reference (CaseMaterialReference join)
 # ============================================================================
 
 
 @pytest.mark.django_db
 @settings(max_examples=20, deadline=800)
-@given(case_data=complete_case_data(), source_data=valid_source_data())
-def test_evidence_requires_valid_source_references(case_data, source_data):
+@given(case_data=complete_case_data())
+def test_evidence_exposes_material_references(case_data):
     """
-    Feature: accountability-platform-core, Property 10: Evidence requires valid source references
+    Feature: accountability-platform-core, Property 10: Evidence references materials
 
-    For any evidence added to a case, it should include a source_id and description,
-    and the source_id should reference an existing DocumentSource.
+    Evidence is the CaseMaterialReference join. Each API evidence entry exposes a
+    material_iri and additional_details; the detail endpoint additionally enriches
+    it with a resolved nested `material` object.
     Validates: Requirements 4.1
     """
     # Create a case
     case = create_case_with_entities(**case_data)
 
-    # Create a valid DocumentSource
-    source = create_document_source_with_entities(**source_data)
-
-    # Add evidence referencing the source
-    case.evidence = [
-        {
-            "source_id": source.source_id,
-            "description": "This source supports the allegation",
-        }
-    ]
-    case.save()
+    # Add a material reference (evidence)
+    CaseMaterialReference.objects.create(
+        case=case,
+        material_iri=VALID_MATERIAL_IRI,
+        additional_details="This material supports the allegation",
+    )
 
     # Publish the case
     case.state = CaseState.PUBLISHED
@@ -141,60 +135,16 @@ def test_evidence_requires_valid_source_references(case_data, source_data):
 
     # Check evidence has required fields
     for evidence_item in evidence_list:
-        assert "source_id" in evidence_item, "Evidence should include source_id"
-        assert "description" in evidence_item, "Evidence should include description"
+        assert "material_iri" in evidence_item, "Evidence should include material_iri"
         assert (
-            evidence_item["source_id"] == source.source_id
-        ), "Evidence source_id should match created source"
-        # Detail endpoint enriches evidence with nested source details
-        assert "source" in evidence_item, "Detail endpoint should include nested source"
-        assert (
-            evidence_item["source"] is not None
-        ), "Source should not be None when it exists"
-        assert evidence_item["source"]["title"] == source.title
-        assert "source_type" in evidence_item["source"]
-        assert "url" in evidence_item["source"]
-
-
-@pytest.mark.django_db
-def test_evidence_with_invalid_source_reference():
-    """
-    Feature: accountability-platform-core, Property 10: Evidence requires valid source references
-
-    For any evidence with an invalid source_id (non-existent source),
-    the system should handle it appropriately.
-    Validates: Requirements 4.1
-    """
-    # Create a case
-    case = create_case_with_entities(
-        title="Test Case",
-        alleged_entities=["https://jawafdehi.org/entity/person/test"],
-        key_allegations=["Test allegation"],
-        case_type=CaseType.CORRUPTION,
-        description="Test description",
-    )
-
-    # Add evidence with non-existent source_id
-    case.evidence = [
-        {
-            "source_id": "source:nonexistent:12345678",
-            "description": "Invalid source reference",
-        }
-    ]
-
-    # This should either:
-    # 1. Raise ValidationError when saving
-    # 2. Or be handled gracefully by the API
-    # The spec says source_id should reference an existing DocumentSource
-    # So we expect validation to catch this
-
-    # For now, we'll just verify the structure is stored
-    # The actual validation will be implemented in the API layer
-    case.save()
-
-    # Verify evidence structure is preserved
-    assert len(case.evidence) == 1
-    assert case.evidence[0]["source_id"] == "source:nonexistent:12345678"
+            "additional_details" in evidence_item
+        ), "Evidence should include additional_details"
+        assert evidence_item["material_iri"] == VALID_MATERIAL_IRI
+        # Detail endpoint enriches evidence with a nested resolved material object
+        assert "material" in evidence_item, "Detail endpoint should include material"
+        assert "display_name" in evidence_item["material"]
+        assert "material_type" in evidence_item["material"]
+        assert "urls" in evidence_item["material"]
 
 
 # ============================================================================
@@ -337,26 +287,24 @@ def test_filter_by_tags(case_data, tag):
 
 @pytest.mark.django_db
 @settings(max_examples=20, deadline=800)
-@given(case_data=complete_case_data(), source_data=valid_source_data())
-def test_published_cases_display_complete_data(case_data, source_data):
+@given(case_data=complete_case_data())
+def test_published_cases_display_complete_data(case_data):
     """
     Feature: accountability-platform-core, Property 16: Published cases display complete data
 
-    For any published case retrieved via the public API, all associated evidence,
-    sources, and timeline entries should be included.
+    For any published case retrieved via the public API, all associated evidence
+    (material references) and timeline entries should be included.
     Validates: Requirements 6.3
     """
     # Create a case with complete data
     case = create_case_with_entities(**case_data)
 
-    # Create a source
-    source = create_document_source_with_entities(**source_data)
-
-    # Add evidence referencing the source
-    case.evidence = [
-        {"source_id": source.source_id, "description": "Evidence description"}
-    ]
-    case.save()
+    # Add a material reference (evidence)
+    CaseMaterialReference.objects.create(
+        case=case,
+        material_iri=VALID_MATERIAL_IRI,
+        additional_details="Evidence description",
+    )
 
     # Publish the case
     case.state = CaseState.PUBLISHED
@@ -387,19 +335,18 @@ def test_published_cases_display_complete_data(case_data, source_data):
 
     # Verify evidence is included
     assert "evidence" in returned_case, "Response should include evidence"
-    if case.evidence:
-        assert len(returned_case["evidence"]) == len(
-            case.evidence
-        ), "All evidence entries should be included"
+    assert len(returned_case["evidence"]) == case.material_references.count(), (
+        "All evidence entries should be included"
+    )
 
-        # Verify evidence structure
-        for evidence_item in returned_case["evidence"]:
-            assert "source_id" in evidence_item, "Evidence should include source_id"
-            assert "description" in evidence_item, "Evidence should include description"
-            # Detail endpoint includes nested source details
-            assert (
-                "source" in evidence_item
-            ), "Detail endpoint should include nested source"
+    # Verify evidence structure (material references)
+    for evidence_item in returned_case["evidence"]:
+        assert "material_iri" in evidence_item, "Evidence should include material_iri"
+        assert (
+            "additional_details" in evidence_item
+        ), "Evidence should include additional_details"
+        # Detail endpoint includes nested resolved material details
+        assert "material" in evidence_item, "Detail endpoint should include material"
 
     # Verify tags are included
     assert "tags" in returned_case, "Response should include tags"
@@ -588,140 +535,3 @@ def test_public_api_hides_in_review_case_from_retrieve(case_data):
     ), "IN_REVIEW case should NOT appear in list endpoint"
 
 
-@pytest.mark.django_db
-def test_document_source_api_shows_sources_from_published_and_in_review_cases():
-    """
-    Edge case: DocumentSource API should show sources referenced in evidence of published or in-review cases.
-    Validates: Design document - sources visible if referenced by any published or in-review case
-    """
-
-    # Create a source (not linked to any case via ForeignKey)
-    draft_source = create_document_source_with_entities(
-        title="Draft Source", description="Source for draft case"
-    )
-
-    in_review_source = create_document_source_with_entities(
-        title="In Review Source", description="Source for in-review case"
-    )
-
-    published_source = create_document_source_with_entities(
-        title="Published Source", description="Source for published case"
-    )
-
-    unreferenced_source = create_document_source_with_entities(
-        title="Unreferenced Source", description="Source not referenced by any case"
-    )
-
-    # Create a draft case that references draft_source in evidence
-    create_case_with_entities(
-        title="Draft Case",
-        alleged_entities=["https://jawafdehi.org/entity/person/test"],
-        case_type=CaseType.CORRUPTION,
-        state=CaseState.DRAFT,
-        evidence=[
-            {
-                "source_id": draft_source.source_id,
-                "description": "Evidence from draft case",
-            }
-        ],
-    )
-
-    # Create an in-review case that references in_review_source in evidence
-    create_case_with_entities(
-        title="In Review Case",
-        alleged_entities=["https://jawafdehi.org/entity/person/test"],
-        key_allegations=["Test allegation"],
-        case_type=CaseType.CORRUPTION,
-        description="Test description",
-        state=CaseState.IN_REVIEW,
-        evidence=[
-            {
-                "source_id": in_review_source.source_id,
-                "description": "Evidence from in-review case",
-            }
-        ],
-    )
-
-    # Create a published case that references published_source in evidence
-    create_case_with_entities(
-        title="Published Case",
-        alleged_entities=["https://jawafdehi.org/entity/person/test"],
-        key_allegations=["Test allegation"],
-        case_type=CaseType.CORRUPTION,
-        description="Test description",
-        state=CaseState.PUBLISHED,
-        evidence=[
-            {
-                "source_id": published_source.source_id,
-                "description": "Evidence from published case",
-            }
-        ],
-    )
-
-    # Make API request to list sources
-    client = APIClient()
-    response = client.get("/api/sources/")
-
-    assert response.status_code == 200
-
-    # Check which sources should appear
-    source_ids = [s.get("source_id") for s in response.data.get("results", [])]
-
-    assert (
-        published_source.source_id in source_ids
-    ), "Source referenced by published case should appear in API"
-    assert (
-        draft_source.source_id not in source_ids
-    ), "Source referenced only by draft case should NOT appear in API"
-    assert (
-        unreferenced_source.source_id not in source_ids
-    ), "Source not referenced by any case should NOT appear in API"
-
-    # IN_REVIEW sources SHOULD appear (changed behavior)
-    assert (
-        in_review_source.source_id in source_ids
-    ), "Source referenced by in-review case should appear in API"
-
-
-@pytest.mark.django_db
-def test_document_source_api_returns_url_links_deduped():
-    """The API exposes the source's `url` links; the backward-compat `url`
-    string list dedupes a link that appears under more than one role."""
-    source = create_document_source_with_entities(
-        title="Merged Source",
-        description="Source with role-tagged links",
-        url=[
-            {"link": "https://example.com/reference.pdf", "role": "RAW"},
-            {"link": "https://example.com/reference.pdf", "role": "MARKDOWN"},
-            {"link": "https://example.com/article", "role": "RAW"},
-        ],
-    )
-
-    create_case_with_entities(
-        title="Published Case With Links",
-        alleged_entities=["https://jawafdehi.org/entity/person/test"],
-        key_allegations=["Test allegation"],
-        case_type=CaseType.CORRUPTION,
-        description="Test description",
-        state=CaseState.PUBLISHED,
-        evidence=[
-            {
-                "source_id": source.source_id,
-                "description": "Evidence with links",
-            }
-        ],
-    )
-
-    client = APIClient()
-    response = client.get(f"/api/sources/{source.id}/")
-    assert response.status_code == 200
-
-    # Backward-compat url field (list of strings), deduped by link.
-    raw_links = response.data["url"]
-    assert raw_links.count("https://example.com/reference.pdf") == 1
-    assert "https://example.com/article" in raw_links
-
-    # urls field carries the role-tagged dicts.
-    role_by_link = {(u["link"], u["role"]) for u in response.data["urls"]}
-    assert ("https://example.com/reference.pdf", "MARKDOWN") in role_by_link
-    assert ("https://example.com/reference.pdf", "RAW") in role_by_link

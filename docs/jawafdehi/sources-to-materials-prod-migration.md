@@ -1,25 +1,38 @@
 # Prod migration guidance — document sources → NGM materials
 
-_Status: GUIDANCE (2026-07-01). This is a **runbook**, not code — the migration
-itself is a future task. It tells whoever runs it what to do, in what order, and
-what to verify. Companion to the ADR
-[`adr-cases-own-no-documents.md`](./adr-cases-own-no-documents.md) and the plan
-[`sources-into-ngm-materials-plan.md`](./sources-into-ngm-materials-plan.md)._
+_Status: GUIDANCE (rev. 2026-07-01). This is a **runbook**, not code. Companion to
+the ADR [`adr-cases-own-no-documents.md`](./adr-cases-own-no-documents.md) and the
+plan [`sources-into-ngm-materials-plan.md`](./sources-into-ngm-materials-plan.md)._
+
+> **The code removal has LANDED** (branch `wt-sources-to-materials`): `DocumentSource`,
+> `SourceType`, `SourceLinkRole`, `/api/sources`, `Case.evidence`, and the source
+> services are gone from the NEW codebase; evidence is the `CaseMaterialReference`
+> join. So the NEW deployment has no `DocumentSource` model at all — this runbook
+> describes moving the DATA from the OLD deployment into the new material surface.
+
+## Migration strategy (decided): new endpoint, one-by-one
+
+The migration runs against the **OLD deployment** (which still has `DocumentSource`
++ `Case.evidence`). A migration endpoint/script there reads each source and POSTs
+it to the NEW system's material API one at a time, then rewrites each case's
+evidence to `CaseMaterialReference` rows. The NEW codebase never reads a
+`DocumentSource` row directly (full removal, no shim). Source mutations (the
+`DocumentSource` create/update the ingesting commands used to do) happen as part of
+this migration — the ingesting commands in the new codebase raise
+`NotImplementedError` until rewired to write Materials.
 
 ## What this migration does
 
 Fold every Jawafdehi `DocumentSource` (~799 on prod, snapshot 2026-06-12) into an
-NGM `Material`, and rewrite every case's evidence from the denormalized
-`Case.evidence` JSON list of `{source_id, description}` into
-`CaseMaterialReference` rows keyed by `{material_iri, additional_details}`. After
-it completes and is verified, `DocumentSource` + `/api/sources` + `Case.evidence`
-can be removed (the code-removal slice — do NOT remove them before this runs
-green on prod).
+NGM `Material`, and rewrite every case's evidence from the old denormalized
+`Case.evidence` JSON list of `{source_id, description}` into `CaseMaterialReference`
+rows keyed by `{material_iri, additional_details}`.
 
-The additive foundation is already shipped (branch `wt-sources-to-materials`):
+The projection pieces are already shipped + tested in the new codebase:
 - `documentsource_to_jsonld()` + `build_source_material_iri()` (the projection),
 - `CaseMaterialReference` model + `resolve_materials()` seam,
-- `Material.visibility` + recompute + read-side guards.
+- `Material.visibility` + recompute + read-side guards,
+- the material file-upload + upsert API (the write target for the one-by-one move).
 
 So this migration is **data movement using already-tested pieces**, not new logic.
 
@@ -115,17 +128,24 @@ rows, and restore visibility if `recompute_all` altered NGM-native rows (it shou
 not — they have no case referrers). The old read path still works because
 `DocumentSource`/`Case.evidence` are untouched until the separate removal slice.
 
-## After verification — the code-removal slice (separate PR)
+## Code-removal slice — DONE (2026-07-01)
 
-Only once the above is green on prod:
-- Repoint `CaseDetailSerializer.get_evidence` + `review/case_provider` +
-  `review/jds_client` to read `CaseMaterialReference` + `resolve_materials`
-  (source dict carries `material_type` + `linkRole`; update the ~6 review token
-  reads — ADR D-F).
-- Wire `recompute_for_case` into the Case state-transition + evidence-edit path
-  (ADR: the recompute TRIGGERS; `recompute_all` is only the backstop).
-- Remove `DocumentSource`, `SourceType`, `SourceLinkRole`, `DocumentSourceViewSet`
-  + serializers, `/api/sources`, `Case.evidence`, and fold the `cases/services`
-  source_* helpers into the material upload path (ADR D-B / D-G). Drop the columns
-  in a final migration.
-- Frontend + MCP terminology purge (ADR D-E) ship with this.
+The backend removal already landed on `wt-sources-to-materials`:
+- ✅ `CaseDetailSerializer.get_evidence` + `review/case_provider` + `review/jds_client`
+  read `CaseMaterialReference` + `resolve_materials`; the review source dict carries
+  `material_type` (the ~6 token reads updated — ADR D-F).
+- ✅ `DocumentSource`, `SourceType`, `SourceLinkRole`, `DocumentSourceViewSet` +
+  serializers, `/api/sources`, `Case.evidence`, and the `cases/services` source_*
+  helpers are removed; drop migration `cases/0042` drops the model + column
+  (ADR D-B / D-G).
+- ✅ Data-ingesting commands (CIAA enrichers, `map_press_release_files`,
+  `seed_allegations`, `seed_jawafdehi`, `case_importer`, `ciaa_draft_case_service`)
+  raise `NotImplementedError` until rewired to write Materials.
+
+**Still pending (separate follow-ups):**
+- Wire `recompute_for_case` into the Case state-transition + evidence-edit path so
+  visibility flips live on publish/review/close/evidence-change (ADR: the recompute
+  TRIGGERS; `recompute_all` is only the backstop, run it post-migration to init).
+- Rewire the stubbed ingesting commands to create `Material` + `CaseMaterialReference`.
+- The actual prod DATA migration (this runbook).
+- Frontend + MCP "Document Source" terminology purge (ADR D-E).

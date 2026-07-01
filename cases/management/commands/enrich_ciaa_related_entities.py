@@ -19,7 +19,6 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 
-import requests
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
@@ -27,19 +26,13 @@ from cases.management.commands._enrich_utils import (
     call_llm,
     convert_to_markdown,
     parse_extraction_response,
-    resolve_api_key,
 )
 from jawafdehi_shared.entities.ids import is_valid_entity_iri
 
 from cases.models import (
-    Case,
     CaseEntityRelationship,
-    CaseState,
-    DocumentSource,
     RelationshipType,
-    SourceType,
 )
-from cases.services.priority_case_loader import filter_by_priority, load_priority_cases
 
 logger = logging.getLogger(__name__)
 
@@ -250,78 +243,16 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        limit = options["limit"]
-        force = options["force"]
-        is_verbose = options["verbose"]
-
-        if limit is not None and limit < 0:
-            raise CommandError("--limit must be >= 0")
-
-        if is_verbose:
-            logger.setLevel(logging.DEBUG)
-
-        # Always suppress urllib3 connection noise — it's not useful at any verbosity level
-        logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
-
-        api_key = resolve_api_key(options["llm_api_key"])
-        if not api_key:
-            raise CommandError("LLM API key not found in env or args")
-
-        qs = Case.objects.filter(state=CaseState.DRAFT)
-
-        if options["priority"]:
-            priority_list = load_priority_cases()
-            logger.info(
-                "Priority mode: loaded %d case numbers across all fiscal years",
-                len(priority_list),
-            )
-            qs = filter_by_priority(qs, priority_list)
-
-        if not force:
-            already_enriched_ids = CaseEntityRelationship.objects.filter(
-                relationship_type=RelationshipType.RELATED
-            ).values_list("case_id", flat=True)
-            qs = qs.exclude(id__in=already_enriched_ids)
-
-        qs = qs.order_by("slug")
-
-        cases = list(qs)
-        if limit is not None:
-            cases = cases[:limit]
-
-        self.stdout.write(f"Found {len(cases)} cases to process")
-
-        self._fetch_source_cache(cases)
-
-        with requests.Session() as session:
-            for idx, case in enumerate(cases, 1):
-                self.stats["cases_processed"] += 1
-                self.stdout.write(
-                    f"[{idx}/{len(cases)}] Processing case {case.slug}..."
-                )
-                self._process_case(case, options, api_key, session, is_verbose)
-
-        self.stdout.write(self.style.SUCCESS(f"Finished. Stats: {self.stats}"))
+        raise NotImplementedError(
+            "This command creates/reads DocumentSource rows, which have been "
+            "removed (ADR: cases own no documents). It must be rewired to create "
+            "Material + CaseMaterialReference records before use. See "
+            "docs/jawafdehi/sources-to-materials-prod-migration.md."
+        )
 
     # ------------------------------------------------------------------
     # Source lookup
     # ------------------------------------------------------------------
-
-    def _fetch_source_cache(self, cases):
-        """Pre-fetch DocumentSource objects for all evidence references."""
-        source_ids = set()
-        for case in cases:
-            for item in case.evidence or []:
-                if isinstance(item, dict) and isinstance(item.get("source_id"), str):
-                    if item["source_id"].strip():
-                        source_ids.add(item["source_id"])
-        self._source_lookup = {
-            source.source_id: source
-            for source in DocumentSource.objects.filter(
-                source_id__in=source_ids, is_deleted=False
-            )
-        }
-        logger.debug("Cached %d DocumentSource records", len(self._source_lookup))
 
     def _get_evidence_sources(self, case):
         """Return DocumentSource objects referenced in case.evidence."""
@@ -332,110 +263,6 @@ class Command(BaseCommand):
                 if source is not None:
                     sources.append(source)
         return sources
-
-    # ------------------------------------------------------------------
-    # Press release detection (Problem 1)
-    # ------------------------------------------------------------------
-
-    def _is_press_release_source(self, source):
-        """Check if a source should be treated as a CIAA press release.
-
-        Matches when:
-        - source_type is CIAA_PRESS_RELEASE, OR
-        - description contains "CIAA Press Release", OR
-        - any URL contains "ciaa.gov.np/pressrelease"
-        """
-        if source.source_type == SourceType.CIAA_PRESS_RELEASE:
-            return True
-
-        description = (source.description or "").lower()
-        if "ciaa press release" in description:
-            return True
-
-        urls = [url.strip() for url in source.url_links if url.strip()]
-        for url in urls:
-            if "ciaa.gov.np/pressrelease" in url.lower():
-                return True
-
-        return False
-
-    def _score_source_for_press_release(self, source):
-        """Score a source for suitability as a CIAA press release.
-
-        Higher score = better match. Returns 0 for non-press-release sources.
-        """
-        if not self._is_press_release_source(source):
-            return 0
-
-        corpus_parts = [
-            source.title or "",
-            source.description or "",
-        ]
-        # Uploaded-file names are part of their URL paths, which are in url_links.
-        urls = [url.strip() for url in source.url_links if url.strip()]
-        corpus_parts.append(" ".join(urls))
-
-        corpus = " ".join(corpus_parts).lower()
-
-        score = 0
-
-        # Direct source_type match
-        if source.source_type == SourceType.CIAA_PRESS_RELEASE:
-            score += 5
-
-        # Press release keywords
-        press_keywords = [
-            "press release",
-            "pressrelease",
-            "press-release",
-            "प्रेस विज्ञप्ति",
-            "विज्ञप्ति",
-        ]
-        if any(kw in corpus for kw in press_keywords):
-            score += 8
-
-        # CIAA-specific keywords
-        ciaa_keywords = ["ciaa", "अख्तियार"]
-        if any(kw in corpus for kw in ciaa_keywords):
-            score += 3
-
-        # Direct CIAA press release URL
-        if any("ciaa.gov.np/pressrelease" in u.lower() for u in urls):
-            score += 10
-
-        # Has DOC/DOCX URLs (editable formats)
-        if any(u.lower().endswith(".docx") for u in urls):
-            score += 4
-        elif any(u.lower().endswith(".doc") for u in urls):
-            score += 2
-        elif any(u.lower().endswith(".pdf") for u in urls):
-            score += 1
-
-        return score
-
-    def _get_press_release_source(self, case):
-        """Return the best press release source for this case.
-
-        Scores all evidence sources and returns the highest-scoring one.
-        """
-        sources = self._get_evidence_sources(case)
-        if not sources:
-            return None
-
-        ranked = sorted(
-            ((self._score_source_for_press_release(s), s) for s in sources),
-            key=lambda row: row[0],
-            reverse=True,
-        )
-        best_score, best_source = ranked[0]
-        return best_source if best_score > 0 else None
-
-    def _get_court_order_source(self, case):
-        """Return the best court order source for this case."""
-        for source in self._get_evidence_sources(case):
-            if source.source_type == SourceType.COURT_ORDER:
-                return source
-        return None
 
     # ------------------------------------------------------------------
     # URL deduplication and ranking (Problems 2 & 3)

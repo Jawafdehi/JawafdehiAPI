@@ -3,32 +3,25 @@ from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.core.exceptions import ValidationError
-from django.db import models
 from django.forms.models import BaseInlineFormSet
-from django.urls import reverse
 from django.utils.html import format_html
 
 from cases.widgets import ToastUIEditorWidget
 
 from .models import (
-    ALLOWED_UPLOAD_EXTENSIONS,
-    MAX_UPLOAD_FILE_SIZE,
     Case,
     CaseEntityRelationship,
     CaseState,
     ChatUserIdentity,
-    DocumentSource,
     Feedback,
     RelationshipType,
     requires_accused,
 )
 from .rules.predicates import (
     can_change_case,
-    can_change_source,
     can_manage_user,
     can_transition_case_state,
     can_view_case,
-    can_view_source,
     is_admin,
     is_admin_or_moderator,
     is_caseworker,
@@ -37,11 +30,8 @@ from .rules.predicates import (
 from .validators import COURT_CHOICES
 from .widgets import (
     MultiCourtCaseField,
-    MultiEntityIDField,
-    MultiEvidenceField,
     MultiTextField,
     MultiTimelineField,
-    MultiURLField,
 )
 
 User = get_user_model()
@@ -113,11 +103,7 @@ class CaseAdminForm(forms.ModelForm):
         help_text="Timeline of events (add in reverse-chronological order: most recent first)",
     )
 
-    evidence = MultiEvidenceField(
-        required=False,
-        label="Evidence",
-        help_text="Evidence entries with source references",
-    )
+    # evidence is now the CaseMaterialReference join; edit via API/inline in a follow-up
 
     start_date_bs = forms.CharField(
         label="Case start date (BS)",
@@ -167,57 +153,10 @@ class CaseAdminForm(forms.ModelForm):
         self.request = kwargs.pop("request", None)
         super().__init__(*args, **kwargs)
 
-        # Populate evidence field with available sources based on user permissions
-        if self.request:
-            user = self.request.user
-            sources_queryset = DocumentSource.objects.filter(is_deleted=False)
-
-            # Filter sources based on user role
-            if not is_admin_or_moderator(user):
-                # Contributors see sources they're assigned to
-                if is_caseworker(user):
-                    sources_queryset = sources_queryset.filter(contributors=user)
-
-                    # Also include sources already referenced in this case's evidence
-                    if self.instance and self.instance.pk and self.instance.evidence:
-                        existing_source_ids = [
-                            entry.get("source_id")
-                            for entry in self.instance.evidence
-                            if entry.get("source_id")
-                        ]
-                        if existing_source_ids:
-                            # Combine: sources assigned to user OR sources already in evidence
-                            sources_queryset = (
-                                DocumentSource.objects.filter(is_deleted=False)
-                                .filter(
-                                    models.Q(contributors=user)
-                                    | models.Q(source_id__in=existing_source_ids)
-                                )
-                                .distinct()
-                            )
-                else:
-                    # No role - see nothing
-                    sources_queryset = DocumentSource.objects.none()
-
-            # Build sources list with admin URLs for viewing
-            # Format: (source_id, title, admin_url)
-            sources = []
-            for source in sources_queryset:
-                admin_url = reverse(
-                    "admin:cases_documentsource_change", args=[source.pk]
-                )
-                sources.append((source.source_id, source.title, admin_url))
-        else:
-            # Fallback if no request (shouldn't happen in normal admin usage)
-            sources = []
-            for source in DocumentSource.objects.filter(is_deleted=False):
-                admin_url = reverse(
-                    "admin:cases_documentsource_change", args=[source.pk]
-                )
-                sources.append((source.source_id, source.title, admin_url))
-
-        self.fields["evidence"].sources = sources
-        self.fields["evidence"].widget.sources = sources
+        # evidence is now the CaseMaterialReference join (case.material_references);
+        # inline editing of evidence in the admin was removed with the
+        # DocumentSource model and will return via a CaseMaterialReference path in
+        # a follow-up.
 
         # Disable PUBLISHED and CLOSED states for Caseworkers
         if self.request:
@@ -515,7 +454,6 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
                 )
             },
         ),
-        ("Evidence", {"fields": ("evidence",)}),
         ("Assignment", {"fields": ("contributors",)}),
         (
             "Metadata",
@@ -760,372 +698,6 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
 
     close_cases.short_description = "Close selected cases"
 
-
-# ============================================================================
-# DocumentSource Admin
-# ============================================================================
-
-
-class DocumentSourceAdminForm(forms.ModelForm):
-    """
-    Custom form for DocumentSource admin with custom widgets.
-    """
-
-    # Override url field to use MultiURLField widget
-    url = MultiURLField(
-        required=False,
-        button_label="Add URL",
-        label="External URLs",
-        help_text="External URLs to the source (you can add multiple)",
-    )
-
-    # related_entities is a list of canonical NES entity ids (NES owns the
-    # entity records); edit it as a list of validated id strings.
-    related_entities = MultiEntityIDField(
-        required=False,
-        label="Related entities (NES ids)",
-        help_text="Canonical NES entity @id IRIs "
-        "(https://jawafdehi.org/entity/<prefix>/<slug>) related to this source.",
-    )
-
-    # Ingestion-only file upload: stored to S3 and appended to `url` as a link
-    # on save (see DocumentSourceAdmin.save_model). Not a model field — a
-    # source's links live solely in `url`.
-    upload_file = forms.FileField(
-        required=False,
-        label="Upload a file",
-        help_text=(
-            "Optional. Stored to S3 and added to External URLs as a source link. "
-            f"Allowed types: {', '.join(ALLOWED_UPLOAD_EXTENSIONS)}. "
-            f"Max size: {int(MAX_UPLOAD_FILE_SIZE / (1024 * 1024))} MB."
-        ),
-    )
-    upload_role = forms.ChoiceField(
-        required=False,
-        label="Uploaded file role",
-        help_text="Role for the uploaded file's link (default RAW).",
-    )
-
-    class Meta:
-        model = DocumentSource
-        fields = "__all__"
-
-    def __init__(self, *args, **kwargs):
-        from .models import SourceLinkRole
-
-        self.request = kwargs.pop("request", None)
-        super().__init__(*args, **kwargs)
-
-        # Role choices derived from the enum so new roles appear automatically.
-        self.fields["upload_role"].choices = [
-            (r.value, r.value) for r in SourceLinkRole
-        ]
-        self.fields["upload_role"].initial = SourceLinkRole.RAW.value
-
-        # Restrict contributors field visibility based on user role
-        if self.request:
-            user = self.request.user
-
-            # Only Moderators and Admins can edit contributors
-            if not is_admin_or_moderator(user):
-                # Caseworkers cannot edit the contributors field
-                if "contributors" in self.fields:
-                    self.fields["contributors"].disabled = True
-                    self.fields["contributors"].help_text = (
-                        "Only Moderators and Admins can assign contributors"
-                    )
-
-    def clean(self):
-        """
-        Validate the form.
-        """
-        cleaned_data = super().clean()
-
-        # Validate title is not empty
-        title = cleaned_data.get("title")
-        if not title or not title.strip():
-            raise ValidationError({"title": "Title is required and cannot be empty"})
-
-        # Validate an uploaded file against the same rules as model uploads.
-        upload_file = cleaned_data.get("upload_file")
-        if upload_file:
-            from .models import (
-                validate_upload_file_extension,
-                validate_upload_file_mimetype,
-                validate_upload_file_size,
-            )
-
-            for validator in (
-                validate_upload_file_extension,
-                validate_upload_file_size,
-                validate_upload_file_mimetype,
-            ):
-                try:
-                    validator(upload_file)
-                except ValidationError as exc:
-                    # Attach to the upload_file field so the error renders next to
-                    # the input rather than as a form-wide non-field error.
-                    self.add_error("upload_file", exc)
-
-        return cleaned_data
-
-
-@admin.register(DocumentSource)
-class DocumentSourceAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
-    """
-    Django Admin configuration for DocumentSource model.
-
-    Features:
-    - Custom form with entity ID validation
-    - Soft deletion interface
-    - Role-based permissions
-    """
-
-    form = DocumentSourceAdminForm
-    # File upload is handled by the form's `upload_file` control (stored to S3 and
-    # appended to `url`); no separate uploaded-file inline.
-    inlines = []
-
-    # Disable "View on site" button since DocumentSource doesn't have a public detail page
-    view_on_site = False
-
-    list_display = [
-        "source_id",
-        "title",
-        "source_type",
-        "deletion_status",
-        "created_at",
-    ]
-
-    list_filter = [
-        "source_type",
-        "is_deleted",
-        "created_at",
-    ]
-
-    search_fields = [
-        "source_id",
-        "title",
-        "description",
-    ]
-
-    readonly_fields = [
-        "source_id",
-        "created_at",
-        "updated_at",
-    ]
-
-    fieldsets = (
-        (
-            "Basic Information",
-            {
-                "fields": (
-                    "source_id",
-                    "title",
-                    "description",
-                    "source_type",
-                    "publication_date",
-                    "related_entities",
-                    "contributors",
-                )
-            },
-        ),
-        (
-            "Metadata",
-            {
-                "fields": (
-                    "created_at",
-                    "updated_at",
-                ),
-                "classes": ("collapse",),
-            },
-        ),
-        (
-            "External URLs",
-            {"fields": ("url", "upload_file", "upload_role")},
-        ),
-    )
-
-    filter_horizontal = ["contributors"]
-
-    def deletion_status(self, obj):
-        """Display deletion status as a colored badge."""
-        if obj.is_deleted:
-            return format_html(
-                '<span style="background-color: #dc3545; color: white; padding: 3px 10px; border-radius: 3px; font-weight: bold;">{}</span>',
-                "Deleted",
-            )
-        return format_html(
-            '<span style="background-color: #28a745; color: white; padding: 3px 10px; border-radius: 3px; font-weight: bold;">{}</span>',
-            "Active",
-        )
-
-    deletion_status.short_description = "Status"
-
-    def get_queryset(self, request):
-        """
-        Filter queryset based on user role.
-
-        - Admins: See all sources (including deleted)
-        - Moderators: Only see active sources (exclude deleted)
-        - Contributors: See active sources they're assigned to OR sources referenced in their assigned cases
-        """
-        qs = super().get_queryset(request)
-
-        # Admins see everything including deleted
-        if is_admin(request.user):
-            return qs
-
-        # Moderators see all active sources
-        if is_moderator(request.user):
-            return qs.filter(is_deleted=False)
-
-        # Caseworkers see all active sources (global read access)
-        if is_caseworker(request.user):
-            return qs.filter(is_deleted=False)
-
-        # No role - see nothing
-        return qs.none()
-
-    def get_list_filter(self, request):
-        """
-        Customize list filters based on user role.
-
-        - Admins: See source_type, is_deleted and created_at filters
-        - Moderators: See source_type and created_at filters
-        - Caseworkers: See source_type and created_at filters
-        """
-        if is_admin(request.user):
-            return ["source_type", "is_deleted", "created_at"]
-
-        # Moderators and Caseworkers see source_type and created_at
-        return ["source_type", "created_at"]
-
-    def has_view_permission(self, request, obj=None):
-        """
-        Check if user can view a source.
-
-        - Contributors: Can only view sources they're assigned to
-        - Moderators/Admins: Can view all sources
-        """
-        if obj is None:
-            return True
-
-        return can_view_source(request.user, obj)
-
-    def has_change_permission(self, request, obj=None):
-        """
-        Check if user can change a source.
-
-        - Contributors: Can only change sources they're directly assigned to (not case-based access)
-        - Moderators/Admins: Can change all sources
-        """
-        if obj is None:
-            return True
-
-        return can_change_source(request.user, obj)
-
-    def has_delete_permission(self, request, obj=None):
-        """
-        Prevent hard deletion - use soft deletion instead.
-
-        Hard deletion is disabled to preserve audit history.
-        Users should set is_deleted=True instead.
-        """
-        # Disable hard deletion for all users
-        return False
-
-    def get_form(self, request, obj=None, **kwargs):
-        """Pass request to form for filtering case dropdown."""
-        form_class = super().get_form(request, obj, **kwargs)
-
-        class FormWithRequest(form_class):
-            def __new__(cls, *args, **kwargs):
-                kwargs["request"] = request
-                return form_class(*args, **kwargs)
-
-        return FormWithRequest
-
-    def save_model(self, request, obj, form, change):
-        """
-        Save the model with validation.
-
-        If a file was uploaded, store it to S3 and append its URL to `obj.url`
-        as a source link (a source's links live solely in `url`). The file is
-        not persisted as a separate uploaded-file record.
-
-        Note: Model's save() method calls full_clean() which handles all validation.
-        """
-        upload_file = (
-            form.cleaned_data.get("upload_file")
-            if form is not None and hasattr(form, "cleaned_data")
-            else None
-        )
-        if upload_file:
-            from cases.services.source_files import store_file_as_link
-
-            from .models import SourceLinkRole
-
-            role = form.cleaned_data.get("upload_role") or SourceLinkRole.RAW.value
-            link = store_file_as_link(upload_file, role=role)
-            obj.url = list(obj.url or []) + [link]
-
-        super().save_model(request, obj, form, change)
-
-    def save_related(self, request, form, formsets, change):
-        """
-        Save related objects (including many-to-many relationships).
-        Automatically adds the creator to contributors when creating a new source.
-        """
-        # First save the form's many-to-many data
-        super().save_related(request, form, formsets, change)
-
-        # Then add creator to contributors for new sources
-        if not change:
-            form.instance.contributors.add(request.user)
-
-    def get_actions(self, request):
-        """
-        Get available actions based on user role.
-        """
-        actions = super().get_actions(request)
-
-        # Remove default delete action (we use soft delete)
-        if "delete_selected" in actions:
-            del actions["delete_selected"]
-
-        # Add soft delete action
-        if is_admin_or_moderator(request.user):
-            actions["soft_delete_sources"] = (
-                self.__class__.soft_delete_sources,
-                "soft_delete_sources",
-                "Mark selected sources as deleted",
-            )
-            actions["restore_sources"] = (
-                self.__class__.restore_sources,
-                "restore_sources",
-                "Restore selected sources",
-            )
-
-        return actions
-
-    def soft_delete_sources(self, request, queryset):
-        """
-        Bulk action to soft delete sources.
-        """
-        count = queryset.update(is_deleted=True)
-        self.message_user(request, f"{count} source(s) marked as deleted.")
-
-    soft_delete_sources.short_description = "Mark selected sources as deleted"
-
-    def restore_sources(self, request, queryset):
-        """
-        Bulk action to restore soft-deleted sources.
-        """
-        count = queryset.update(is_deleted=False)
-        self.message_user(request, f"{count} source(s) restored.")
-
-    restore_sources.short_description = "Restore selected sources"
 
 
 # ============================================================================

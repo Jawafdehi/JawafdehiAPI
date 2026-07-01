@@ -3,7 +3,6 @@
 These exercise the actual API list endpoints (not bare ORM filters), proving a
 ReadOnly user sees materials that the public contract hides:
   - cases: all non-CLOSED cases, including DRAFT (CaseViewSet.get_queryset)
-  - sources: every non-deleted source, including draft-only / unreferenced ones
 
 The public/anonymous baseline is asserted alongside each, so the tests fail if
 ReadOnly visibility regresses to the public surface.
@@ -17,7 +16,7 @@ import pytest
 from django.core.cache import cache
 from rest_framework.test import APIClient
 
-from cases.models import CaseState, CaseType, DocumentSource
+from cases.models import CaseState, CaseType
 from tests.conftest import create_case_with_entities, create_user_with_role
 
 
@@ -86,25 +85,3 @@ def test_anonymous_does_not_list_draft_cases():
     ids = _ids(response)
     assert draft.id not in ids
     assert published.id in ids
-
-
-# ---------------------------------------------------------------------------
-# Sources — ReadOnly sees draft-only / unreferenced sources
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.django_db
-def test_readonly_lists_unreferenced_source():
-    """A source not referenced by any published/in-review case is hidden from the
-    public list but visible to ReadOnly."""
-    orphan = DocumentSource.objects.create(
-        title="Draft-only Source", source_type="MISC"
-    )
-
-    # Public/anonymous: not visible.
-    assert orphan.id not in _ids(APIClient().get("/api/sources/"))
-
-    # ReadOnly: visible (systemwide read).
-    response = _ro_client().get("/api/sources/")
-    assert response.status_code == 200
-    assert orphan.id in _ids(response)

@@ -9,11 +9,12 @@ Validates: Requirements 6.1, 6.2, 6.3, 8.1, 8.3
 import pytest
 from rest_framework.test import APIClient
 
-from cases.models import CaseState, CaseType
+from cases.models import CaseMaterialReference, CaseState, CaseType
 from tests.conftest import (
     create_case_with_entities,
-    create_document_source_with_entities,
 )
+
+VALID_MATERIAL_IRI = "https://jawafdehi.org/material/jawafdehi/20240115.ab12cd"
 
 
 @pytest.mark.django_db
@@ -57,21 +58,13 @@ class TestPublicAPIWorkflows:
             state=CaseState.PUBLISHED,
         )
 
-        # Create a source for the corruption case
-        self.corruption_source = create_document_source_with_entities(
-            title="Land Registry Document",
-            description="Official land registry showing illegal transfer",
-            related_entity_ids=["https://jawafdehi.org/entity/person/test-official"],
+        # Add evidence (a material reference) to the case
+        self.corruption_material_iri = VALID_MATERIAL_IRI
+        CaseMaterialReference.objects.create(
+            case=self.published_corruption_case,
+            material_iri=self.corruption_material_iri,
+            additional_details="This document proves the illegal land transfer",
         )
-
-        # Add evidence to the case
-        self.published_corruption_case.evidence = [
-            {
-                "source_id": self.corruption_source.source_id,
-                "description": "This document proves the illegal land transfer",
-            }
-        ]
-        self.published_corruption_case.save()
 
         # Create another published case with different type
         self.infrastructure_case = create_case_with_entities(
@@ -174,17 +167,16 @@ class TestPublicAPIWorkflows:
         assert len(case_detail["evidence"]) == 1
         assert len(case_detail["tags"]) == 2
 
-        # Verify evidence includes source information
+        # Verify evidence includes material reference information
         evidence = case_detail["evidence"][0]
-        assert "source_id" in evidence
-        assert "description" in evidence
-        assert evidence["source_id"] == self.corruption_source.source_id
-        # Detail endpoint enriches evidence with nested source details
-        assert "source" in evidence
-        assert evidence["source"] is not None
-        assert evidence["source"]["title"] == self.corruption_source.title
-        assert "source_type" in evidence["source"]
-        assert "url" in evidence["source"]
+        assert "material_iri" in evidence
+        assert "additional_details" in evidence
+        assert evidence["material_iri"] == self.corruption_material_iri
+        # Detail endpoint enriches evidence with a nested resolved material object
+        assert "material" in evidence
+        assert "display_name" in evidence["material"]
+        assert "material_type" in evidence["material"]
+        assert "urls" in evidence["material"]
 
     def test_only_published_cases_accessible(self):
         """
@@ -374,64 +366,6 @@ class TestPublicAPIWorkflows:
             case["title"] == "Corruption Case - Land Encroachment" for case in results
         )
         assert found_corruption_case, "Should find the corruption case"
-
-    def test_document_source_visibility_workflow(self):
-        """
-        E2E Test: Verify document sources are only visible for published cases.
-
-        Workflow:
-        1. List all sources
-        2. Verify only sources from published cases appear
-        3. Retrieve specific source
-        4. Verify source details are complete
-
-        Validates: Requirements 4.1, 6.3
-        """
-
-        # Create a source referenced by the draft case (should not be visible)
-        draft_source = create_document_source_with_entities(
-            title="Draft Source - Should Not Appear",
-            description="Source for draft case",
-        )
-
-        # Add evidence to draft case referencing this source
-        self.draft_case.evidence = [
-            {
-                "source_id": draft_source.source_id,
-                "description": "Evidence from draft case",
-            }
-        ]
-        self.draft_case.save()
-
-        # Step 1: List all sources
-        response = self.client.get("/api/sources/")
-        assert response.status_code == 200
-
-        results = response.data.get("results", [])
-        source_ids = [source["source_id"] for source in results]
-
-        # Step 2: Verify only sources from published cases appear
-        assert (
-            self.corruption_source.source_id in source_ids
-        ), "Source from published case should appear"
-        assert (
-            draft_source.source_id not in source_ids
-        ), "Source from draft case should NOT appear"
-
-        # Step 3: Retrieve specific source
-        response = self.client.get(f"/api/sources/{self.corruption_source.id}/")
-        assert response.status_code == 200
-
-        # Step 4: Verify source details are complete
-        source_detail = response.data
-        assert source_detail["title"] == "Land Registry Document"
-        assert source_detail["description"] is not None
-
-        # Verify draft source is not accessible directly
-        response = self.client.get(f"/api/sources/{draft_source.id}/")
-        assert (
-            response.status_code == 404
-        ), "Source from draft case should not be accessible"
 
     def test_single_row_per_case_in_list(self):
         """

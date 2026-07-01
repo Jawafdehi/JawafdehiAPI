@@ -37,11 +37,13 @@ _SPECIAL_COURT = ["विशेष अदालत", "special court"]
 def _titles_and_types(case):
     out = []
     for ev in case.get("evidence", []) or []:
-        src = ev.get("source") or {}
+        # Evidence entries carry a resolved `material` dict (ADR: cases own no
+        # documents): display_name + material_type replace title + source_type.
+        mat = ev.get("material") or {}
         out.append(
             (
-                (src.get("title") or "").lower(),
-                (src.get("source_type") or "").upper(),
+                (mat.get("display_name") or "").lower(),
+                (mat.get("material_type") or "").upper(),
             )
         )
     return out

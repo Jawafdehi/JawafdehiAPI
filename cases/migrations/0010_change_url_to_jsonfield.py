@@ -4,7 +4,6 @@ import json
 
 from django.db import migrations, models
 
-import cases.models
 
 
 def migrate_urls_to_list(apps, schema_editor):
@@ -123,7 +122,8 @@ class Migration(migrations.Migration):
             field=models.JSONField(
                 blank=True,
                 default=list,
-                validators=[cases.models.validate_url_list],
+                # validate_url_list was removed with DocumentSource (ADR: cases
+                # own no documents); validators are Python-level, not schema.
                 help_text="List of URLs for this source",
             ),
         ),

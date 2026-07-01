@@ -33,7 +33,6 @@ def _make_case(**kwargs):
             {"date": "2024-01-01", "title": "Complaint lodged"},
             {"date": "2024-02-10", "title": "Inquiry opened"},
         ],
-        "evidence": [{"source_id": "src-old", "description": "Old file"}],
     }
     defaults.update(kwargs)
     return Case.objects.create(**defaults)
@@ -63,11 +62,6 @@ def test_patch_multi_operation_end_to_end_persists_all_changes():
     patch_ops = [
         {"op": "replace", "path": "/title", "value": "Updated accountability case"},
         {"op": "replace", "path": "/tags", "value": ["public-fund", "audit"]},
-        {
-            "op": "replace",
-            "path": "/evidence",
-            "value": [{"source_id": "src-2026", "description": "Audit report"}],
-        },
         {
             "op": "add",
             "path": "/timeline/-",
@@ -115,9 +109,6 @@ def test_patch_multi_operation_end_to_end_persists_all_changes():
     assert response.data["title"] == "Updated accountability case"
     assert response.data["tags"] == ["public-fund", "audit"]
     assert response.data["timeline"][-1]["title"] == "Hearing scheduled"
-    assert response.data["evidence"] == [
-        {"source_id": "src-2026", "description": "Audit report"}
-    ]
 
     case.refresh_from_db()
     assert case.title == "Updated accountability case"

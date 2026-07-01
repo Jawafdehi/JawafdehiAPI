@@ -88,7 +88,7 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name="documentsource",
             name="related_entities",
-            field=cases.fields.EntityListField(
+            field=models.JSONField(
                 blank=True,
                 default=list,
                 help_text="Canonical NES entity ids related to this source",

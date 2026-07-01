@@ -2,7 +2,6 @@
 
 from django.db import migrations, models
 
-import cases.fields
 
 
 class Migration(migrations.Migration):
@@ -15,7 +14,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name="case",
             name="alleged_entities",
-            field=cases.fields.EntityListField(
+            field=models.JSONField(
                 blank=True,
                 default=list,
                 help_text="List of entity IDs for entities being accused",

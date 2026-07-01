@@ -79,29 +79,26 @@ def iter_paginated(path, params=None, timeout=60):
 def extract_sources(case):
     """Return the unique source objects referenced by a case's evidence.
 
-    Each evidence item carries a nested `source` dict (title, source_type,
-    url[]) and a `source_id`. We dedupe by source_id.
+    Evidence entries are ``CaseMaterialReference``-shaped (ADR: cases own no
+    documents): ``{material_iri, additional_details, material: {display_name,
+    material_type, urls: [{link, role}]}}``. This adapts each to the internal
+    "source" dict the review engine consumes, so downstream scoring/judging is
+    unchanged EXCEPT that the ``source_type`` slot now carries the NGM
+    ``material_type`` token (D-F). Deduped by ``material_iri``.
     """
     sources = {}
     for ev in case.get("evidence", []) or []:
-        sid = ev.get("source_id")
-        src = ev.get("source") or {}
-        if not sid and not src:
+        iri = ev.get("material_iri")
+        mat = ev.get("material") or {}
+        if not iri:
             continue
-        key = sid or src.get("title")
-        if key in sources:
+        if iri in sources:
             continue
-        # Prefer the new role-tagged `urls` (list of {link, role}); fall back to
-        # the deprecated plain `url` string list. We keep BOTH: `url` (strings)
-        # for conversion/download, and `urls` (with roles) so callers can tell
-        # whether a MARKDOWN link already exists.
-        urls = src.get("urls") or []
-        url_strings = src.get("url", []) or []
-        if not url_strings and urls:
-            url_strings = [
-                u.get("link") for u in urls if isinstance(u, dict) and u.get("link")
-            ]
-        # If a MARKDOWN link is already attached, surface its text as markdown.
+        urls = mat.get("urls") or []
+        url_strings = [
+            u.get("link") for u in urls if isinstance(u, dict) and u.get("link")
+        ]
+        # If a MARKDOWN link is already attached, surface it as markdown.
         existing_md_link = next(
             (
                 u.get("link")
@@ -110,15 +107,16 @@ def extract_sources(case):
             ),
             None,
         )
-        sources[key] = {
-            "source_id": sid,
-            "title": src.get("title", ""),
-            "source_type": src.get("source_type", ""),
+        sources[iri] = {
+            # material_iri is the stable id (replaces source_id).
+            "material_iri": iri,
+            "title": mat.get("display_name") or "",
+            # source_type slot now holds the material_type token (D-F).
+            "source_type": mat.get("material_type") or "",
             "url": url_strings,
             "urls": urls,
-            "evidence_description": ev.get("description", ""),
-            # markdown attached on the source already? (future-proof)
-            "markdown": src.get("markdown") or ev.get("markdown"),
+            "evidence_description": ev.get("additional_details", ""),
+            "markdown": None,
             "markdown_url": existing_md_link,
         }
     return list(sources.values())

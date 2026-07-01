@@ -8,8 +8,7 @@ validator lives in ``.validate()`` (not migration state), so this migration only
 records the help-text change.
 """
 
-import cases.fields
-from django.db import migrations
+from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
@@ -22,7 +21,7 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name="documentsource",
             name="related_entities",
-            field=cases.fields.EntityListField(
+            field=models.JSONField(
                 blank=True,
                 default=list,
                 help_text="Canonical NES entity @id IRIs related to this source",

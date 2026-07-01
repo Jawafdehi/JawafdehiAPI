@@ -33,7 +33,6 @@ def _make_case(**kwargs) -> Case:
         description="Some description",
         short_description="Short",
         timeline=[{"date": "2024-01-01", "title": "Event one"}],
-        evidence=[],
     )
     defaults.update(kwargs)
     return Case.objects.create(**defaults)
@@ -293,25 +292,6 @@ def test_patch_add_location_entity():
     rel = CaseEntityRelationship.objects.get(case=case, nes_id=entity)
     assert rel.relationship_type == RelationshipType.LOCATION
     assert rel.notes == "Primary location"
-
-
-@pytest.mark.django_db
-def test_patch_replace_evidence_list():
-    user = _contributor("bikash")
-    case = _make_case()
-    case.contributors.add(user)
-    new_evidence = [{"source_id": "src-001", "description": "Key document"}]
-
-    client = _authed_client(user)
-    response = client.patch(
-        URL.format(case.slug),
-        data=[{"op": "replace", "path": "/evidence", "value": new_evidence}],
-        format="json",
-    )
-    assert response.status_code == 200
-    assert response.data["evidence"] == new_evidence
-    case.refresh_from_db()
-    assert case.evidence == new_evidence
 
 
 # ---------------------------------------------------------------------------

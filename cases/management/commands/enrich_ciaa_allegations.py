@@ -17,6 +17,8 @@ Environment variables::
     OPENCODE_API_KEY         — API key for OpenCode Go
 """
 
+from __future__ import annotations
+
 import hashlib
 import ipaddress
 import json
@@ -24,7 +26,6 @@ import logging
 import os
 import re
 import socket
-import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -34,7 +35,7 @@ from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError
 
-from cases.models import Case, CaseState, DocumentSource, SourceType
+from cases.models import Case, CaseState
 from cases.services.priority_case_loader import filter_by_priority, load_priority_cases
 
 logger = logging.getLogger(__name__)
@@ -497,70 +498,12 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        dry_run = options["dry_run"]
-        limit = options["limit"]
-        model = options["llm_model"]
-        base_url = options["llm_base_url"] or options.get("base_url")
-        llm_api_key = options.get("llm_api_key")
-        llm_timeout = options.get("llm_timeout")
-        verbose = options["verbose"]
-        force = options["force"]
-        case_id = options.get("case_id")
-        priority = options["priority"]
-        all_cases_flag = options.get("all_cases")
-
-        if priority and case_id:
-            raise CommandError("--priority and --case-id are mutually exclusive")
-
-        if not priority and not all_cases_flag:
-            self.stdout.write(
-                self.style.NOTICE(
-                    "Processing all DRAFT CIAA cases (default). "
-                    "Use --all to make this explicit or --priority to filter."
-                )
-            )
-
-        if verbose:
-            logger.setLevel(logging.DEBUG)
-
-        model = normalize_model(model)
-        base_url = normalize_base_url(base_url)
-        is_opencode = "anthropic.com" not in base_url
-        api_key = resolve_api_key(llm_api_key, is_anthropic=not is_opencode)
-        timeout = _llm_timeout(llm_timeout)
-
-        self.stdout.write(
-            self.style.WARNING(
-                f"{'[DRY RUN] ' if dry_run else ''}Starting CIAA allegation enrichment..."
-            )
+        raise NotImplementedError(
+            "This command creates/reads DocumentSource rows, which have been "
+            "removed (ADR: cases own no documents). It must be rewired to create "
+            "Material + CaseMaterialReference records before use. See "
+            "docs/jawafdehi/sources-to-materials-prod-migration.md."
         )
-
-        start_time = time.time()
-
-        cases = self._get_eligible_cases(limit, force, case_id, priority)
-        self.stdout.write(f"Found {len(cases)} eligible CIAA DRAFT case(s) to process")
-
-        self._fetch_source_cache(cases)
-
-        is_opencode = "anthropic.com" not in base_url
-
-        for idx, case in enumerate(cases, 1):
-            try:
-                self.stdout.write(
-                    f"\n[{idx}/{len(cases)}] {case.slug} - {case.title[:80]}..."
-                )
-                self._process_case(
-                    case, model, base_url, api_key, timeout, is_opencode, dry_run
-                )
-            except Exception as e:
-                self.stats["cases_failed"] += 1
-                logger.exception(f"Error processing {case.slug}: {e}")
-                self.stdout.write(self.style.ERROR(f"FAILED: {case.slug} - {e}"))
-
-        elapsed = time.time() - start_time
-        mins, secs = divmod(int(elapsed), 60)
-        elapsed_str = f"{mins}m {secs}s" if mins else f"{secs}s"
-        self._print_summary(dry_run, elapsed_str)
 
     def _init_client(self, api_key, base_url):
         if "anthropic.com" in (base_url or ""):
@@ -699,25 +642,6 @@ class Command(BaseCommand):
             else:
                 result.append(case)
         return result
-
-    def _fetch_source_cache(self, cases):
-        source_ids = set()
-        for case in cases:
-            if not case.evidence or not isinstance(case.evidence, (list, tuple)):
-                continue
-            for entry in case.evidence:
-                if not isinstance(entry, dict):
-                    continue
-                if isinstance((sid := entry.get("source_id")), str) and sid.strip():
-                    source_ids.add(sid)
-
-        self._source_lookup = {
-            source.source_id: source
-            for source in DocumentSource.objects.filter(
-                source_id__in=source_ids, is_deleted=False
-            )
-        }
-        logger.debug(f"Cached {len(self._source_lookup)} DocumentSource records")
 
     def _process_case(
         self, case, model, base_url, api_key, timeout, is_opencode, dry_run
@@ -890,124 +814,6 @@ class Command(BaseCommand):
         for a in allegations:
             self.stdout.write(f"    - {a}")
 
-    def _select_press_release_source(self, case: Case) -> DocumentSource | None:
-        source_ids = [
-            item["source_id"]
-            for item in (case.evidence or [])
-            if isinstance(item, dict) and isinstance(item.get("source_id"), str)
-        ]
-        if not source_ids:
-            return None
-
-        sources = [
-            s
-            for s in (self._source_lookup.get(sid) for sid in source_ids)
-            if s is not None
-        ]
-        if not sources:
-            return None
-
-        ranked = sorted(
-            ((self._score_source_for_press_release(s), s) for s in sources),
-            key=lambda row: row[0],
-            reverse=True,
-        )
-        best_score, best_source = ranked[0]
-        return best_source if best_score > 0 else None
-
-    def _describe_source(self, source: DocumentSource) -> str:
-        urls = self._ranked_source_urls(source)
-        if urls:
-            parsed = urllib.parse.urlsplit(urls[0])
-            redacted = urllib.parse.urlunsplit(
-                (parsed.scheme, parsed.netloc, parsed.path, "", "")
-            )
-            return f"URL: {redacted} ({source.source_id})"
-        if source.description and len(source.description.strip()) >= 500:
-            title = (source.title or "<untitled>").strip()[:120]
-            return f"description fallback ({source.source_id} — {title})"
-        return f"{source.source_id} (no content)"
-
-    def _score_source_for_press_release(self, source: DocumentSource) -> int:
-        # Uploaded-file names are part of their URL paths (in url_links).
-        url_text = " ".join(source.url_links)
-        corpus = " ".join(
-            [
-                source.title or "",
-                source.description or "",
-                url_text,
-            ]
-        ).lower()
-
-        score = 0
-        press_keywords = [
-            "press release",
-            "pressrelease",
-            "press-release",
-            "प्रेस विज्ञप्ति",
-            "विज्ञप्ति",
-        ]
-        ciaa_keywords = ["ciaa", "अख्तियार"]
-
-        if any(keyword in corpus for keyword in press_keywords):
-            score += 5
-        if any(keyword in corpus for keyword in ciaa_keywords):
-            score += 3
-        if source.source_type == SourceType.CIAA_PRESS_RELEASE:
-            score += 1
-        return score
-
-    def _convert_source_to_markdown(self, source: DocumentSource) -> str:
-        try:
-            from markitdown import MarkItDown
-        except ImportError as exc:
-            raise CommandError(
-                "markitdown is required for allegation enrichment conversion. "
-                "Install conversion dependencies (markitdown + likhit plugin)."
-            ) from exc
-
-        converter = MarkItDown(enable_plugins=True)
-        with tempfile.TemporaryDirectory(prefix="allegation-enrichment-") as tmp_dir:
-            # A source's links (including uploaded file links) all live in `url`,
-            # so conversion downloads each ranked URL.
-            ranked_urls = self._ranked_source_urls(source)
-
-            last_error = None
-            for url in ranked_urls:
-                try:
-                    logger.debug(
-                        "Converting source URL for %s: %s", source.source_id, url
-                    )
-                    temp_path = self._download_url_to_path(
-                        url, source.source_id, Path(tmp_dir)
-                    )
-                    if not temp_path:
-                        last_error = f"download failed for {url}"
-                        continue
-                    result = converter.convert_uri(temp_path.resolve().as_uri())
-                    if result.text_content and len(result.text_content.strip()) >= 50:
-                        return result.text_content
-                    last_error = f"insufficient content from {url}"
-                except (OSError, ValueError) as e:
-                    last_error = f"{url}: {e}"
-                    continue
-
-            if source.description and len(source.description.strip()) >= 500:
-                logger.debug(
-                    "Using long source.description fallback for %s",
-                    source.source_id,
-                )
-                return source.description
-
-            if not ranked_urls:
-                raise CommandError(
-                    f"No downloadable URLs found for source {source.source_id}"
-                )
-
-            raise CommandError(
-                f"Unable to convert source {source.source_id}: {last_error}"
-            )
-
     def _download_url_to_path(
         self, url: str, source_id: str, output_dir: Path
     ) -> Path | None:
@@ -1032,21 +838,6 @@ class Command(BaseCommand):
         except CommandError:
             out_path.unlink(missing_ok=True)
             raise
-
-    def _pick_source_url(self, source: DocumentSource) -> str | None:
-        urls = self._ranked_source_urls(source)
-        return urls[0] if urls else None
-
-    def _ranked_source_urls(self, source: DocumentSource) -> list[str]:
-        urls = [url.strip() for url in source.url_links if url.strip()]
-        if not urls:
-            return []
-
-        direct_urls = [url for url in urls if self._is_direct_document_url(url)]
-        non_direct_urls = [url for url in urls if url not in direct_urls]
-
-        direct_urls.sort(key=self._source_url_priority, reverse=True)
-        return direct_urls + non_direct_urls
 
     def _is_direct_document_url(self, url: str) -> bool:
         parsed = urllib.parse.urlparse(url)

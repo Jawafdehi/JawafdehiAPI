@@ -70,13 +70,6 @@ class SubmitSerializer(serializers.Serializer):
         return value.strip().strip("/")
 
 
-class SourceMarkdownSerializer(serializers.Serializer):
-    """Markdown the poller attaches to a DocumentSource (MARKDOWN-role url)."""
-
-    markdown = serializers.CharField(trim_whitespace=False)
-    overwrite = serializers.BooleanField(required=False, default=False)
-
-
 class JobResultSerializer(serializers.Serializer):
     """Payload the poller posts back after processing a claimed job.
 

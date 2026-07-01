@@ -1,7 +1,7 @@
 """
 Integration tests for API documentation with real data.
 
-Validates that the OpenAPI documentation works correctly with actual cases and sources.
+Validates that the OpenAPI documentation works correctly with actual cases.
 """
 
 import pytest
@@ -11,7 +11,6 @@ from django.urls import reverse
 from cases.models import CaseState, CaseType
 from tests.conftest import (
     create_case_with_entities,
-    create_document_source_with_entities,
 )
 
 
@@ -40,7 +39,6 @@ class TestAPIDocumentationIntegration:
                     "description": "Event description",
                 }
             ],
-            evidence=[{"source_id": "source:test:123", "description": "Test evidence"}],
             versionInfo={
                 "action": "published",
                 "datetime": "2024-01-15T10:00:00Z",
@@ -48,24 +46,7 @@ class TestAPIDocumentationIntegration:
         )
         return case
 
-    @pytest.fixture
-    def document_source(self, published_case):
-        """Create a document source referenced by a published case."""
-        source = create_document_source_with_entities(
-            source_id="source:test:123",
-            title="Test Source",
-            description="Test source description",
-            url="https://example.com/test.pdf",
-            related_entity_ids=["https://jawafdehi.org/entity/person/test-person"],
-        )
-        # Add evidence to the published case that references this source
-        published_case.evidence = [
-            {"source_id": source.source_id, "description": "Test evidence"}
-        ]
-        published_case.save()
-        return source
-
-    def test_swagger_ui_loads_with_real_data(self, published_case, document_source):
+    def test_swagger_ui_loads_with_real_data(self, published_case):
         """Test that Swagger UI loads successfully with real data."""
         client = Client()
         response = client.get(reverse("swagger-ui"))
@@ -108,31 +89,7 @@ class TestAPIDocumentationIntegration:
                 field in case_schema["properties"]
             ), f"Field {field} missing from schema"
 
-    def test_schema_reflects_actual_source_structure(self, document_source):
-        """Test that the schema accurately reflects the source model structure."""
-        client = Client()
-        response = client.get(reverse("schema"))
-
-        import yaml
-
-        schema = yaml.safe_load(response.content)
-
-        # Verify DocumentSource schema includes all expected fields
-        source_schema = schema["components"]["schemas"]["DocumentSource"]
-        expected_fields = [
-            "id",
-            "source_id",
-            "title",
-            "description",
-            "url",
-        ]
-
-        for field in expected_fields:
-            assert (
-                field in source_schema["properties"]
-            ), f"Field {field} missing from schema"
-
-    def test_api_endpoints_match_schema(self, published_case, document_source):
+    def test_api_endpoints_match_schema(self, published_case):
         """Test that actual API responses match the schema structure."""
         client = Client()
 

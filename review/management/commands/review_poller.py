@@ -162,27 +162,6 @@ class Command(BaseCommand):
                 f"result submit failed for {job_id}: HTTP {r.status_code} {r.text[:200]}"
             )
 
-    def _attach_markdown(self, items):
-        """Maintenance fix: attach locally-converted markdown back to sources."""
-        for item in items or []:
-            sid = item.get("source_id")
-            try:
-                r = self._post_casework(
-                    f"/sources/{sid}/markdown/",
-                    {"markdown": item.get("markdown", "")},
-                    timeout=60,
-                )
-                if r.status_code == 200:
-                    body = r.json()
-                    if body.get("created"):
-                        self.stdout.write(f"    attached MARKDOWN url to source {sid}")
-                else:
-                    self.stderr.write(
-                        f"    markdown attach failed for {sid}: HTTP {r.status_code} {r.text[:150]}"
-                    )
-            except Exception as e:  # noqa: BLE001 - maintenance is best-effort
-                self.stderr.write(f"    markdown attach error for {sid}: {e}")
-
     def _process_job(self, job):
         job_id = job["id"]
         kind = job.get("kind")
@@ -203,7 +182,6 @@ class Command(BaseCommand):
             out = handler(
                 payload,
                 on_stage=lambda s: self._report_stage(job_id, s),
-                attach_markdown=self._attach_markdown,
             )
             out["status"] = "done"
             self._submit(job_id, out)

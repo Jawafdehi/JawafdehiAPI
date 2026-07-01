@@ -11,48 +11,6 @@ from django.core.exceptions import ValidationError
 from django.db import models
 
 
-class EntityListField(models.JSONField):
-    """
-    Stores and validates a list of canonical NES entity @id IRIs.
-
-    Entity ids are the schema.org @id IRI
-    (``https://jawafdehi.org/entity/<prefix>/<slug>``) — the same canonical id
-    held by ``CaseEntityRelationship.nes_id`` — validated via the shared
-    ``jawafdehi_shared.entities.ids.is_valid_entity_iri`` contract.
-    """
-
-    def __init__(self, *args, **kwargs):
-        kwargs["default"] = list
-        super().__init__(*args, **kwargs)
-
-    def validate(self, value, model_instance):
-        """Validate that value is a list of valid entity @id IRIs."""
-        from jawafdehi_shared.entities.ids import is_valid_entity_iri
-
-        super().validate(value, model_instance)
-
-        if not isinstance(value, list):
-            raise ValidationError("Value must be a list")
-
-        # Allow empty lists for optional fields (blank=True)
-        # The Case model's validate() method will check if alleged_entities is empty
-        if len(value) == 0:
-            # Only raise error if this is a required field (not blank)
-            if not self.blank:
-                raise ValidationError("At least one entity ID is required")
-            return
-
-        for entity_id in value:
-            if not isinstance(entity_id, str):
-                raise ValidationError(f"Entity ID must be a string: {entity_id}")
-
-            if not is_valid_entity_iri(entity_id):
-                raise ValidationError(
-                    f"Invalid entity @id IRI: {entity_id!r}. Must be of the "
-                    "form 'https://<authority>/entity/<prefix>/<slug>'."
-                )
-
-
 class TextListField(models.JSONField):
     """
     Stores a list of text strings.
@@ -179,47 +137,3 @@ class TimelineListField(models.JSONField):
                     )
 
 
-class EvidenceListField(models.JSONField):
-    """
-    Stores a list of evidence entry objects.
-
-    Each entry must have: source_id, description
-    """
-
-    def __init__(self, *args, **kwargs):
-        kwargs["default"] = list
-        kwargs["blank"] = True
-        super().__init__(*args, **kwargs)
-
-    def validate(self, value, model_instance):
-        """Validate that value is a list of valid evidence entries."""
-        super().validate(value, model_instance)
-
-        if not isinstance(value, list):
-            raise ValidationError("Value must be a list")
-
-        for entry in value:
-            if not isinstance(entry, dict):
-                raise ValidationError(f"Evidence entry must be a dictionary: {entry}")
-
-            # Check required fields
-            required_fields = ["source_id", "description"]
-            for field in required_fields:
-                if field not in entry:
-                    raise ValidationError(
-                        f"Evidence entry missing required field '{field}': {entry}"
-                    )
-
-            # Validate source_id is non-empty string
-            source_id = entry["source_id"]
-            if not isinstance(source_id, str) or not source_id.strip():
-                raise ValidationError(
-                    f"Evidence source_id must be a non-empty string: {entry}"
-                )
-
-            # Validate description is non-empty string
-            description = entry["description"]
-            if not isinstance(description, str) or not description.strip():
-                raise ValidationError(
-                    f"Evidence description must be a non-empty string: {entry}"
-                )

@@ -1,5 +1,5 @@
-"""Integration tests: the org-wide ReadOnly role cannot write via the case /
-source API endpoints.
+"""Integration tests: the org-wide ReadOnly role cannot write via the case API
+endpoints.
 
 These endpoints gate writes on ``DjangoModelPermissions`` (POST -> add_*,
 PATCH/PUT -> change_*) on top of authentication. A ReadOnly user is
@@ -19,9 +19,7 @@ from rest_framework.test import APIClient
 
 from cases.models import (
     Case,
-    CaseState,
     CaseType,
-    DocumentSource,
 )
 from tests.conftest import create_user_with_role
 
@@ -54,79 +52,6 @@ def _grant(user, codename):
     DjangoModelPermissions gate ALLOWS when the perm is present.
     """
     user.user_permissions.add(Permission.objects.get(codename=codename))
-
-
-# ---------------------------------------------------------------------------
-# DocumentSource writes
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.django_db
-def test_readonly_cannot_create_source():
-    readonly = create_user_with_role("ro_src", "ro_src@example.com", "ReadOnly")
-    response = _authed_client(readonly).post(
-        "/api/sources/",
-        data={"title": "RO Should Fail", "source_type": "MISC"},
-        format="json",
-    )
-    assert response.status_code == 403
-    assert not DocumentSource.objects.filter(title="RO Should Fail").exists()
-
-
-@pytest.mark.django_db
-def test_readonly_cannot_update_source():
-    readonly = create_user_with_role("ro_src2", "ro_src2@example.com", "ReadOnly")
-    source = DocumentSource.objects.create(
-        title="RO Existing Source", source_type="MISC"
-    )
-    response = _authed_client(readonly).patch(
-        f"/api/sources/{source.id}/",
-        data={"source_type": "COURT_ORDER"},
-        format="json",
-    )
-    assert response.status_code == 403
-
-
-@pytest.mark.django_db
-def test_writer_with_perm_can_create_source():
-    """A user holding add_documentsource passes the DjangoModelPermissions gate."""
-    contributor = create_user_with_role(
-        "contrib_src", "contrib_src@example.com", "Caseworker"
-    )
-    _grant(contributor, "add_documentsource")
-    response = _authed_client(contributor).post(
-        "/api/sources/",
-        data={"title": "Contributor Source", "source_type": "MISC"},
-        format="json",
-    )
-    assert response.status_code == 201
-    assert DocumentSource.objects.filter(title="Contributor Source").exists()
-
-
-@pytest.mark.django_db
-def test_writer_with_perm_can_update_source():
-    """A user holding change_documentsource passes the PATCH gate (allow-path)."""
-    writer = create_user_with_role(
-        "writer_src", "writer_src@example.com", "Caseworker"
-    )
-    _grant(writer, "change_documentsource")
-    source = DocumentSource.objects.create(title="Editable Source", source_type="MISC")
-    # The non-ReadOnly source queryset only exposes sources referenced by a
-    # published/in-review case, so attach it to one via evidence.
-    Case.objects.create(
-        title="Pub Case",
-        case_type=CaseType.CORRUPTION,
-        state=CaseState.PUBLISHED,
-        evidence=[{"source_id": source.source_id, "description": "ref"}],
-    )
-    response = _authed_client(writer).patch(
-        f"/api/sources/{source.id}/",
-        data={"title": "Renamed Source"},
-        format="json",
-    )
-    assert response.status_code == 200
-    source.refresh_from_db()
-    assert source.title == "Renamed Source"
 
 
 # ---------------------------------------------------------------------------

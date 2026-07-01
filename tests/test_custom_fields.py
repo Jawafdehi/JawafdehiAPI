@@ -10,8 +10,8 @@ import pytest
 from django.core.exceptions import ValidationError
 from hypothesis import given, settings
 
-from cases.fields import EvidenceListField, TextListField, TimelineListField
-from tests.strategies import evidence_list, text_list, timeline_list
+from cases.fields import TextListField, TimelineListField
+from tests.strategies import text_list, timeline_list
 
 # ============================================================================
 # TextListField Tests
@@ -266,54 +266,3 @@ def test_timeline_list_field_rejects_malformed_end_date():
             [{"date": "2020-07-15", "end_date": "not-a-date", "title": "Event"}],
             None,
         )
-
-
-# ============================================================================
-# EvidenceListField Tests
-# ============================================================================
-
-
-@settings(max_examples=100)
-@given(evidence=evidence_list(min_size=0, max_size=10))
-def test_evidence_list_field_accepts_valid_evidence(evidence):
-    """
-    Feature: accountability-platform-core, Property 2: Draft validation is lenient, In Review validation is strict
-
-    For any list of valid evidence entries, EvidenceListField should accept them without raising ValidationError.
-    """
-    field = EvidenceListField()
-
-    # Should not raise ValidationError
-    try:
-        field.validate(evidence, None)
-    except ValidationError:
-        pytest.fail(f"EvidenceListField rejected valid evidence: {evidence}")
-
-
-def test_evidence_list_field_rejects_missing_required_fields():
-    """
-    Feature: accountability-platform-core, Property 2: Draft validation is lenient, In Review validation is strict
-
-    EvidenceListField should reject entries missing required fields (source_id, description).
-    """
-    field = EvidenceListField()
-
-    # Missing 'source_id'
-    with pytest.raises(ValidationError):
-        field.validate([{"description": "Evidence description"}], None)
-
-    # Missing 'description'
-    with pytest.raises(ValidationError):
-        field.validate([{"source_id": "source:20240115:abc123"}], None)
-
-
-def test_evidence_list_field_rejects_empty_source_id():
-    """
-    Feature: accountability-platform-core, Property 2: Draft validation is lenient, In Review validation is strict
-
-    EvidenceListField should reject entries with empty source_id.
-    """
-    field = EvidenceListField()
-
-    with pytest.raises(ValidationError):
-        field.validate([{"source_id": "", "description": "Evidence description"}], None)

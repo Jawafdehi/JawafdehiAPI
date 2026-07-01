@@ -17,7 +17,6 @@ urlpatterns = [
     # NOTE: the review-local job API (jobs/claim, jobs/<id>/stage, jobs/<id>/result)
     # was RETIRED. Reviews are now enqueued on the central queue and the poller
     # claims them at /api/jobs/* as kind=case_review. See jobs/ + docs/jobs-queue-design.md.
-    path("sources/<str:source_id>/markdown/", views.attach_source_markdown),
     path("reviews/<int:pk>/", views.ReviewDetailView.as_view()),
     path("rules/", views.rules_list),
     path("rules/<int:pk>/", views.rule_detail),

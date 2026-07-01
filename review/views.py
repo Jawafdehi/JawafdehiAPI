@@ -24,7 +24,6 @@ from rest_framework.response import Response
 from . import code_rules
 from .models import CaseReview, ReviewConfig
 from .permissions import (
-    CanManageDocumentSources,
     CanReadReview,
     HasContributorRole,
     IsAdminOrModerator,
@@ -33,7 +32,6 @@ from .serializers import (
     CaseReviewDetailSerializer,
     CaseReviewListSerializer,
     ReviewConfigSerializer,
-    SourceMarkdownSerializer,
     SubmitSerializer,
 )
 
@@ -108,38 +106,6 @@ def _enqueue_review_job(review, *, submitted_by=None):
 #   - on_failure     -> marks the CaseReview failed on terminal job failure.
 # The queue itself owns the atomic claim (select_for_update skip_locked), the
 # stale-result 409 guard, leases, retries, and dedup. See docs/jobs-queue-design.md.
-
-
-@api_view(["POST"])
-@permission_classes([CanManageDocumentSources])
-def attach_source_markdown(request, source_id):
-    """Attach likhit-converted Markdown to a DocumentSource as a MARKDOWN url.
-
-    The poller posts the markdown text it produced locally; the server stores it
-    as an upload on the source and records a MARKDOWN-role link. Idempotent: a
-    source that already has a MARKDOWN url is left as-is unless overwrite=true.
-    Requires the change_documentsource permission (ReviewAssistant+).
-    """
-    from cases.models import DocumentSource
-    from cases.services.source_markdown import attach_markdown
-
-    s = SourceMarkdownSerializer(data=request.data)
-    s.is_valid(raise_exception=True)
-
-    try:
-        source = DocumentSource.objects.get(source_id=source_id)
-    except DocumentSource.DoesNotExist:
-        return Response(
-            {"detail": f"DocumentSource '{source_id}' not found."},
-            status=status.HTTP_404_NOT_FOUND,
-        )
-
-    out = attach_markdown(
-        source,
-        s.validated_data["markdown"],
-        overwrite=s.validated_data.get("overwrite", False),
-    )
-    return Response(out, status=status.HTTP_200_OK)
 
 
 class ReviewListView(generics.ListAPIView):

@@ -1,7 +1,8 @@
 """Service for creating draft cases from CIAA JSON data with deduplication."""
 
+from __future__ import annotations
+
 import logging
-import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
@@ -16,12 +17,17 @@ from cases.models import (
     CaseEntityRelationship,
     CaseState,
     CaseType,
-    DocumentSource,
     RelationshipType,
-    SourceType,
 )
 
 logger = logging.getLogger(__name__)
+
+_DOCUMENTSOURCE_REMOVED_MSG = (
+    "This method creates/reads DocumentSource rows, which have been removed "
+    "(ADR: cases own no documents). It must be rewired to create Material + "
+    "CaseMaterialReference records before use. See "
+    "docs/jawafdehi/sources-to-materials-prod-migration.md."
+)
 
 
 @dataclass
@@ -276,145 +282,18 @@ class CIAADraftCaseService:
             bound.append(nes_id)
         return bound
 
-    def create_document_sources(
-        self, ciaa_json: dict, case: Case
-    ) -> list[DocumentSource]:
-        """Create DocumentSource records from press releases, charge sheets, and court orders. Returns list of sources."""
-        sources = []
-        evidence = []
+    def create_document_sources(self, ciaa_json: dict, case: Case) -> list:
+        """Removed: this created DocumentSource records.
 
-        # Process press releases
-        for pr in ciaa_json.get("ciaa", {}).get("press_releases", []):
-            source_data = {
-                "title": pr.get("title", "CIAA Press Release")[:300],
-                "url": pr.get("url", ""),
-                "source_type": SourceType.CIAA_PRESS_RELEASE,
-                "publication_date": self.convert_bs_to_ad(pr.get("date", "")),
-            }
-            if source := self.get_or_create_source(source_data):
-                sources.append(source)
-                evidence.append(
-                    {
-                        "source_id": source.source_id,
-                        "description": f"CIAA Press Release (ID: {pr.get('release_id', 'N/A')})",
-                    }
-                )
+        See ``_DOCUMENTSOURCE_REMOVED_MSG``; must be rewired to Material +
+        CaseMaterialReference before use.
+        """
+        raise NotImplementedError(_DOCUMENTSOURCE_REMOVED_MSG)
 
-        # Process abhiyogPatras (AG charge sheets)
-        for ap in ciaa_json.get("ciaa", {}).get("abhiyogPatras", []):
-            pdf_url = ap.get("pdf_url", "")
-            encoded_url = pdf_url
-            if pdf_url and isinstance(pdf_url, str) and pdf_url.strip():
-                parsed = urllib.parse.urlsplit(pdf_url.strip())
-                encoded_url = urllib.parse.urlunsplit(
-                    (
-                        parsed.scheme,
-                        parsed.netloc,
-                        urllib.parse.quote(parsed.path, safe="/"),
-                        urllib.parse.quote(parsed.query, safe="=&"),
-                        urllib.parse.quote(parsed.fragment, safe=""),
-                    )
-                )
-            source_data = {
-                "title": ap.get("title", "AG Charge Sheet")[:300],
-                "url": [encoded_url] if encoded_url else [],
-                "source_type": SourceType.AG_ABHIYOG_PATRA,
-                "publication_date": self.convert_bs_to_ad(ap.get("filing_date", "")),
-            }
-            if source := self.get_or_create_source(source_data):
-                sources.append(source)
-                case_no = ap.get("case_number", "N/A")
-                evidence.append(
-                    {
-                        "source_id": source.source_id,
-                        "description": f"AG Charge Sheet - {case_no}",
-                    }
-                )
+    def get_or_create_source(self, source_data: dict) -> Optional[object]:
+        """Removed: this created DocumentSource rows.
 
-        # Process faisala links
-        for idx, faisala_url in enumerate(
-            ciaa_json.get("court_case", {}).get("faisala_link", []), 1
-        ):
-            if faisala_url:
-                source_data = {
-                    "title": f"Court Order - {ciaa_json.get('case_no', 'Unknown')}",
-                    "url": faisala_url,
-                    "source_type": SourceType.COURT_ORDER,
-                }
-                if source := self.get_or_create_source(source_data):
-                    sources.append(source)
-                    evidence.append(
-                        {
-                            "source_id": source.source_id,
-                            "description": f"Court Order/Verdict (Document {idx})",
-                        }
-                    )
-
-        case.evidence = evidence
-        case.save()
-        return sources
-
-    def get_or_create_source(self, source_data: dict) -> Optional[DocumentSource]:
-        """Get or create DocumentSource with deduplication by URL. Returns source or None."""
-        url_raw = source_data.get("url", "")
-        url_list = (
-            [u.strip() for u in url_raw if isinstance(u, str) and u.strip()]
-            if isinstance(url_raw, list)
-            else (
-                [url_raw.strip()]
-                if isinstance(url_raw, str) and url_raw.strip()
-                else []
-            )
-        )
-
-        title = source_data.get("title", "").strip()
-        if not title:
-            return None
-
-        source_type = source_data.get("source_type", "")
-
-        # Try to find existing source by URL
-        if url_list:
-            if connection.vendor == "postgresql":
-                for url in url_list:
-                    if (
-                        source := DocumentSource.objects.filter(
-                            is_deleted=False, url__contains=[{"link": url}]
-                        )
-                        .only("source_id", "title")
-                        .first()
-                    ):
-                        self.stats["sources_reused"] += 1
-                        logger.debug(f"Reusing source: {title}")
-                        return source
-            else:
-                for url in url_list:
-                    for source in DocumentSource.objects.filter(is_deleted=False).only(
-                        "source_id", "title", "url"
-                    ):
-                        if url in source.url_links:
-                            self.stats["sources_reused"] += 1
-                            logger.debug(f"Reusing source: {title}")
-                            return source
-
-        # Try to find by title (only if no URL provided)
-        if not url_list:
-            if source := DocumentSource.objects.filter(
-                title=title, is_deleted=False
-            ).first():
-                self.stats["sources_reused"] += 1
-                logger.debug(f"Reusing source: {title}")
-                return source
-
-        # Create new source. url_list holds bare link strings (used for the
-        # dedup lookups above); store them as canonical RAW source-link dicts.
-        publication_date = source_data.get("publication_date")
-        source = DocumentSource.objects.create(
-            title=title,
-            url=[{"link": link, "role": "RAW"} for link in url_list],
-            source_type=source_type,
-            publication_date=publication_date,
-        )
-        self.stats["sources_created"] += 1
-        logger.debug(f"Created source: {title}")
-        return source
+        See ``_DOCUMENTSOURCE_REMOVED_MSG``; must be rewired to Material +
+        CaseMaterialReference before use.
+        """
+        raise NotImplementedError(_DOCUMENTSOURCE_REMOVED_MSG)

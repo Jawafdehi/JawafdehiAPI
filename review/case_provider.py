@@ -5,7 +5,8 @@ shape, namely the one produced by ``cases.serializers.CaseDetailSerializer``:
 
     {title, state, slug, description, key_allegations, timeline, entities,
      court_cases, missing_details,
-     evidence: [{source_id, description, source: {title, source_type, url[]}}]}
+     evidence: [{material_iri, additional_details,
+                 material: {display_name, material_type, urls: [{link, role}]}}]}
 
 This module produces that shape from one of two backends, selected by
 ``settings.REVIEW_CASE_SOURCE``:

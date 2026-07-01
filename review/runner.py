@@ -56,29 +56,15 @@ def process_case(case, config=None, on_stage=None):
     sources = jds_client.extract_sources(case)
     source_count = len(sources)
 
-    # 2. likhit conversion — LOCAL to the poller; markdown is not uploaded as
-    #    part of the result. Instead, for sources we actually converted (ran
-    #    likhit) that do not already carry a MARKDOWN link, we collect the
-    #    markdown so the poller can attach it back to the DocumentSource via the
-    #    maintenance endpoint (populating its MARKDOWN url).
+    # 2. likhit conversion — LOCAL to the poller, used only to feed the
+    #    per-source Bedrock analysis below. The markdown is NOT persisted: NGM
+    #    Materials own their own links, written through the material upload API,
+    #    so the old "attach markdown back to the DocumentSource" maintenance path
+    #    is retired (ADR: cases own no documents).
     converted = converter.convert_all(sources)
     sources_converted = sum(
         1 for s in converted if s.get("conversion_status") in ("converted", "attached")
     )
-
-    markdown_to_attach = []
-    for s in converted:
-        sid = s.get("source_id")
-        md = s.get("markdown") or ""
-        # Only attach when WE produced the markdown (status "converted") for a
-        # real source id that has no MARKDOWN link yet.
-        if (
-            sid
-            and s.get("conversion_status") == "converted"
-            and md.strip()
-            and not _source_has_markdown_link(s)
-        ):
-            markdown_to_attach.append({"source_id": sid, "markdown": md})
 
     # 3. Per-source analysis (Bedrock).
     stage("analyzing_sources")
@@ -103,16 +89,4 @@ def process_case(case, config=None, on_stage=None):
         "sources_converted": sources_converted,
         "result": result,
         "duration_seconds": round(time.monotonic() - t0, 1),
-        # Maintenance fix: markdown the poller should attach back to sources.
-        "markdown_to_attach": markdown_to_attach,
     }
-
-
-def _source_has_markdown_link(source):
-    """True if a (converted) source dict already carries a MARKDOWN-role url."""
-    if source.get("markdown_url"):
-        return True
-    for item in source.get("urls") or []:
-        if isinstance(item, dict) and item.get("role") == "MARKDOWN":
-            return True
-    return False

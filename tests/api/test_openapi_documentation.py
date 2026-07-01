@@ -75,19 +75,6 @@ class TestOpenAPIDocumentation:
         assert "search" in param_names
         assert "page" in param_names
 
-    def test_schema_contains_source_endpoints(self):
-        """Test that the schema documents source endpoints."""
-        client = Client()
-        response = client.get(reverse("schema"))
-
-        import yaml
-
-        schema = yaml.safe_load(response.content)
-
-        # Verify source endpoints are documented
-        assert "/api/sources/" in schema["paths"]
-        assert "/api/sources/{id}/" in schema["paths"]
-
     def test_schema_contains_unified_search_endpoint(self):
         """Test that the schema documents the unified platform search.
 
@@ -136,7 +123,6 @@ class TestOpenAPIDocumentation:
         assert "schemas" in schema["components"]
         assert "Case" in schema["components"]["schemas"]
         assert "CaseDetail" in schema["components"]["schemas"]
-        assert "DocumentSource" in schema["components"]["schemas"]
 
         # Verify Case schema has proper fields
         case_schema = schema["components"]["schemas"]["Case"]
@@ -169,10 +155,6 @@ class TestOpenAPIDocumentation:
         cases_list = schema["paths"]["/api/cases/"]["get"]
         assert "tags" in cases_list
         assert "cases" in cases_list["tags"]
-
-        sources_list = schema["paths"]["/api/sources/"]["get"]
-        assert "tags" in sources_list
-        assert "sources" in sources_list["tags"]
 
     def test_schema_documents_case_type_enum(self):
         """Test that the CaseType enum is properly documented."""
