@@ -18,7 +18,11 @@ gate the UI by role.
 
 from django.utils import timezone
 from rest_framework import generics, status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import (
+    api_view,
+    authentication_classes,
+    permission_classes,
+)
 from rest_framework.response import Response
 
 from . import code_rules
@@ -36,21 +40,76 @@ from .serializers import (
 )
 
 
+def _user_roles_payload(user):
+    """Shared shape for me/dev-login: username + flattened group roles + is_admin."""
+    roles = list(user.groups.values_list("name", flat=True))
+    if user.is_superuser and "Admin" not in roles:
+        roles = ["Admin"] + roles
+    return {
+        "username": user.username,
+        "roles": roles,
+        "is_admin": user.is_superuser or "Admin" in roles,
+    }
+
+
 @api_view(["GET"])
 @permission_classes([CanReadReview])
 def me_view(request):
     """Return the signed-in user + their roles (for the SPA header / gating)."""
-    user = request.user
-    roles = list(user.groups.values_list("name", flat=True))
-    if user.is_superuser and "Admin" not in roles:
-        roles = ["Admin"] + roles
-    return Response(
-        {
-            "username": user.username,
-            "roles": roles,
-            "is_admin": user.is_superuser or "Admin" in roles,
-        }
-    )
+    return Response(_user_roles_payload(request.user))
+
+
+# ---------------------------------------------------------------------------
+# DEV-ONLY username/password login for the SPA (mirrors DEV_AUTH on the backend).
+#
+# Production is OIDC/Zitadel only. When settings.DEV_AUTH is enabled (DEBUG or
+# TESTING only — never in prod), we expose a session login the React /admin can
+# POST to with the SAME credentials as the Django admin, so a developer can work
+# without standing up Zitadel. These routes are ONLY mounted when DEV_AUTH is on
+# (see review/urls.py); with the flag off they don't exist → SSO-only.
+# ---------------------------------------------------------------------------
+from django.conf import settings  # noqa: E402
+from django.contrib.auth import authenticate, login, logout  # noqa: E402
+from django.middleware.csrf import get_token  # noqa: E402
+from rest_framework.authentication import SessionAuthentication  # noqa: E402
+from rest_framework.permissions import AllowAny  # noqa: E402
+
+
+@api_view(["POST"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([AllowAny])
+def dev_login_view(request):
+    """DEV-ONLY: authenticate with username/password, open a Django session.
+
+    Returns the same {username, roles, is_admin} shape as ``me`` plus a CSRF
+    token the SPA must echo as X-CSRFToken on subsequent session-authenticated
+    writes. Hard 404 when DEV_AUTH is off so it can never exist in production.
+    """
+    if not settings.DEV_AUTH:
+        return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+    username = (request.data.get("username") or "").strip()
+    password = request.data.get("password") or ""
+    user = authenticate(request, username=username, password=password)
+    if user is None:
+        return Response(
+            {"detail": "Invalid username or password."},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+    login(request, user)
+    payload = _user_roles_payload(user)
+    payload["csrftoken"] = get_token(request)
+    return Response(payload)
+
+
+@api_view(["POST"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([AllowAny])
+def dev_logout_view(request):
+    """DEV-ONLY: end the Django session opened by dev_login_view."""
+    if not settings.DEV_AUTH:
+        return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+    logout(request)
+    return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 @api_view(["POST"])
