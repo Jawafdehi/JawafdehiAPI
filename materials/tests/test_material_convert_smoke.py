@@ -134,6 +134,11 @@ class MaterialConvertSmokeTests(APITestCase):
             if m["jawafdehi:linkRole"] == "MARKDOWN"
         )
         self.assertEqual(md["contentUrl"], "https://cdn/extracted.md")
+        # The MARKDOWN link carries OCR provenance (archive-plane record).
+        md_prov = md["jawafdehi:provenance"]
+        self.assertEqual(md_prov["fetch_method"], "ocr")
+        self.assertEqual(md_prov["ocr_engine"], "likhit")
+        self.assertEqual(len(md_prov["sha256"]), 64)
 
         # 6) The reindex actually fired with the extracted body (the search feed).
         self.assertIn("अदालतको आदेश — पूर्ण पाठ", indexed)
