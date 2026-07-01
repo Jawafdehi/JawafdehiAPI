@@ -1,9 +1,10 @@
 """Seed a minimal local-dev dataset + role users for the admin panel.
 
 DEV ONLY. Creates the standard groups, three login users (admin / moderator /
-caseworker, password == username), and a handful of cases (one per state), a
-court, a court case, and a blocklisted firm — enough to exercise every admin
-screen. Idempotent: safe to re-run.
+caseworker, password == username), NES entities, NGM materials, courts, court
+cases, cases (one per state), and a blocklisted firm — enough to exercise every
+admin screen (incl. the case-edit entity linker + evidence/material picker).
+Idempotent: safe to re-run.
 
 Usage (with DEV_AUTH env, DEBUG=True):
     uv run python manage.py seed_dev
@@ -22,8 +23,28 @@ from cases.models import (
     RelationshipType,
 )
 from courts.models import BlacklistedFirm, Court, CourtCase
+from jawafdehi_shared.entities.ids import build_entity_iri, build_material_iri
+from materials.jsonld import MATERIAL_CONTEXT, type_for
+from materials.models import Material
 
 User = get_user_model()
+
+# NES entities to publish: (prefix, slug, @type, English name, Nepali name).
+ENTITIES = [
+    ("person", "ram-bahadur", "Person", "Ram Bahadur", "राम बहादुर"),
+    ("person", "sita-sharma", "Person", "Sita Sharma", "सीता शर्मा"),
+    ("organization", "ministry-of-works", "Organization", "Ministry of Works", "निर्माण मन्त्रालय"),
+    ("organization", "board-y", "Organization", "Board Y", "बोर्ड वाई"),
+    ("place", "kathmandu", "Place", "Kathmandu", "काठमाडौँ"),
+]
+
+# NGM materials: (source, ident, material_type, English name).
+MATERIALS = [
+    ("ciaa", "report-1", "official_report", "CIAA Investigation Report 2080"),
+    ("ciaa", "chargesheet-1", "charge_sheet", "Charge Sheet — Ministry of Works"),
+    ("oag", "audit-2079", "official_report", "OAG Audit Report FY2079/80"),
+    ("court", "verdict-075-cr-0123", "court_order", "Verdict 075-CR-0123"),
+]
 
 USERS = [
     ("admin", [], True),
@@ -60,12 +81,57 @@ class Command(BaseCommand):
                     u.groups.add(grp)
             self.stdout.write(f"user {name}: pw={name} superuser={su} groups={groups}")
 
+        # ── NES entities (published, via the PublicationService write path) ──
+        from entities.services.publication.service import PublicationService
+
+        svc = PublicationService()
+        for prefix, slug, etype, name_en, name_ne in ENTITIES:
+            iri = build_entity_iri(prefix, slug)
+            if svc.repo.get_entity(iri) is not None:
+                self.stdout.write(f"entity {iri}: exists")
+                continue
+            doc = {
+                "@context": "https://schema.org",
+                "@id": iri,
+                "@type": etype,
+                "name": {"en": name_en, "ne": name_ne},
+            }
+            svc.create_entity(doc, author_id="seed_dev", change_description="seed")
+            self.stdout.write(f"entity {iri}: created")
+
+        # ── NGM materials (schema.org JSON-LD, via Material.from_jsonld) ──
+        for source, ident, mtype, name_en in MATERIALS:
+            iri = build_material_iri(source, ident)
+            if Material.objects.filter(iri=iri).exists():
+                self.stdout.write(f"material {iri}: exists")
+                continue
+            at_type, additional = type_for(mtype)
+            doc = {
+                "@context": MATERIAL_CONTEXT,
+                "@id": iri,
+                "@type": at_type,
+                "name": {"en": name_en},
+            }
+            if additional:
+                doc["additionalType"] = additional
+            m = Material.from_jsonld(doc, material_type=mtype)
+            m.save()
+            self.stdout.write(f"material {iri}: created")
+
         court, _ = Court.objects.get_or_create(
             identifier="supreme-court",
             defaults=dict(
                 court_type="SUPREME",
                 full_name_nepali="सर्वोच्च अदालत",
                 full_name_english="Supreme Court",
+            ),
+        )
+        Court.objects.get_or_create(
+            identifier="kathmandu-district-court",
+            defaults=dict(
+                court_type="DISTRICT",
+                full_name_nepali="काठमाडौँ जिल्ला अदालत",
+                full_name_english="Kathmandu District Court",
             ),
         )
         CourtCase.objects.get_or_create(
