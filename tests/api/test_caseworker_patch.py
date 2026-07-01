@@ -376,7 +376,7 @@ def test_patch_200_for_draft_to_in_review_transition():
 
 
 @pytest.mark.django_db
-def test_patch_400_for_draft_to_in_review_missing_required_fields():
+def test_patch_422_for_draft_to_in_review_missing_required_fields():
     user = _contributor("deepak-3")
     case = _make_case(key_allegations=[])
     case.contributors.add(user)
@@ -388,7 +388,9 @@ def test_patch_400_for_draft_to_in_review_missing_required_fields():
         format="json",
     )
 
-    assert response.status_code == 400
+    # A2: model ValidationError on a state transition -> 422 with field-keyed
+    # messages (was 400 before the transitions were unified).
+    assert response.status_code == 422
     assert "entities" in response.data
     assert "key_allegations" in response.data
     case.refresh_from_db()
