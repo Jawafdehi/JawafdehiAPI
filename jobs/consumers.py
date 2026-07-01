@@ -108,3 +108,37 @@ register(
         on_failure=_case_review_on_failure,
     )
 )
+
+
+# --- material_convert: OCR a Material's source document → data["text"] -------
+#
+# The data-plane FTS feed (docs/data-plane-design.md §5). build_payload resolves
+# the source document URL(s) from the Material's associatedMedia (server-side, so
+# the consumer stays DB-free); on_result stores the OCR markdown as a MARKDOWN
+# MediaObject and sets data["text"] (the field the search indexer reads). The
+# worker-side OCR handler lives in materials.job_handlers (heavy deps off the API).
+
+
+def _material_convert_build_payload(job) -> dict:
+    from materials.conversion import build_convert_payload
+
+    return build_convert_payload(job)
+
+
+def _material_convert_on_result(job, result: dict) -> None:
+    from materials.conversion import apply_convert_result
+
+    apply_convert_result(job, result)
+
+
+register(
+    KindSpec(
+        kind="material_convert",
+        lease_seconds=1800,  # 300-page OCR is minutes; heartbeat extends per page.
+        max_attempts=2,  # network/OCR flakes retry once; then dead-letter.
+        build_payload=_material_convert_build_payload,
+        on_result=_material_convert_on_result,
+        # No on_failure: a failed convert just leaves data["text"] unset; the
+        # Material is still served (metadata-searchable), and a re-upload re-runs.
+    )
+)

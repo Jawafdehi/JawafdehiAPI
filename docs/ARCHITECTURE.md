@@ -78,13 +78,30 @@ per-type Pydantic models were deleted in NES.
   idea was dropped.
 - Draft/in-review cases are **not indexed** and not publicly retrievable.
 
-## 5. Storage / lakehouse
+## 5. Storage / data plane (Postgres-SoR, lakehouse-lite)
 
-- Object store: **Cloudflare R2** (S3-compatible); local dev uses MinIO.
-- Lakehouse: **Apache Iceberg + DuckDB**, Lakekeeper (Iceberg REST catalog) — all
-  free/OSS (hard constraint: no paid tiers; see `shared/research/COST-AUDIT.md`).
-- NGM `ngm_service/lakehouse/` is the medallion (bronze/silver/gold) module
-  (in-process, not a separate service). The R2 JSON-LD index publish is implemented.
+The full design + decisions are in [`data-plane-design.md`](./data-plane-design.md);
+the shape today:
+
+- **Three planes, none on another's hot path.** **Serving** = the 3 Postgres DBs
+  (SoR for everything served) + **Search** = unified OpenSearch (§3) + **Archive** =
+  **Cloudflare R2** object store (raw bytes + OCR/likhit markdown + provenance;
+  immutable SoR for raw evidence — this is where the storage bulk lives; local dev
+  uses MinIO). Heavy async work runs on the central `jobs` queue (§ below).
+- **Postgres is the system of record**, NOT a lake. The served structured corpus is
+  only tens of GB (entity JSONB, court cases); the large storage figure is R2 object
+  bytes, referenced by URL (one copy).
+- **No Iceberg / DuckDB / Lakekeeper lake right now ("lakehouse-lite").** The
+  `lakehouse/` module (Apache Iceberg + DuckDB + Lakekeeper, all free/OSS — see
+  `shared/research/COST-AUDIT.md`) is a **DORMANT, tested seam**, kept Iceberg-ready
+  but not the shipped storage layer. Its medallion framing ("silver is the source /
+  Postgres derived from silver") is **superseded**: any future silver is derived
+  *from* Postgres + the R2 archive, never the reverse. Revisit only when a real
+  recurring cross-domain analytical query (or serving-Postgres latency from analyst
+  SQL) earns it (`data-plane-design.md` §6).
+- **Full-text search over materials** is fed by the async `material_convert` job kind:
+  OCR/likhit → markdown in R2 (`linkRole=MARKDOWN`) → `Material.data["text"]` → unified
+  search reindex (`data-plane-design.md` §5).
 
 ## 6. Data sourcing (the live program)
 
