@@ -69,6 +69,24 @@ class TestBindAndIngest:
         assert refs.count() == 1
         assert refs[0].additional_details == "second"
 
+    def test_rebind_preserves_ordinal_unless_explicit(self):
+        # Re-binding an existing material without an explicit ordinal must NOT
+        # reshuffle it to the current count (Gemini finding). Two refs at 0,1;
+        # re-binding the first (no ordinal) keeps its ordinal 0, not 2.
+        case = _case()
+        first = "https://jawafdehi.org/material/jawafdehi/20240115.aaaa01"
+        second = "https://jawafdehi.org/material/jawafdehi/20240115.bbbb02"
+        bind_material_to_case(case, first)   # ordinal 0
+        bind_material_to_case(case, second)  # ordinal 1
+        bind_material_to_case(case, first, additional_details="updated")
+        ref = case.material_references.get(material_iri=first)
+        assert ref.ordinal == 0
+        assert ref.additional_details == "updated"
+        # explicit ordinal still applies
+        bind_material_to_case(case, first, ordinal=5)
+        ref.refresh_from_db()
+        assert ref.ordinal == 5
+
     def test_ingest_source_as_evidence_end_to_end(self):
         case = _case()
         iri = ingest_source_as_evidence(

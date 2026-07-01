@@ -108,16 +108,61 @@ def recompute_for_case(case) -> None:
 def recompute_all() -> int:
     """Reconciler backstop: recompute every Material that any case references.
 
-    Returns the number of materials recomputed. Safe to run periodically (mirrors
-    the casework reaper) to heal any visibility drift from a missed trigger.
+    Returns the number of materials whose visibility CHANGED. Safe to run
+    periodically (mirrors the casework reaper) to heal any visibility drift from
+    a missed trigger.
+
+    Bulk, not per-material: the naive loop over ``recompute_material_visibility``
+    is O(N) round-trips (~2400 queries for ~800 prod materials). The DBs are
+    routed independently (no cross-DB JOIN), so instead: (1) one query for all
+    ``(material_iri, case_state)`` pairs, (2) one query for the referenced
+    Materials, (3) compute in memory + ``bulk_update`` the changed rows. Because
+    ``bulk_update`` does NOT fire ``post_save``, the search-index eviction/index
+    that the signal normally performs is done explicitly here for changed rows —
+    else a material demoted to non-LISTED by the reconciler would linger in public
+    search (a leak).
     """
+    from collections import defaultdict
+
+    from django.utils import timezone
+
     from cases.models import CaseMaterialReference
 
-    iris = (
-        CaseMaterialReference.objects.values_list("material_iri", flat=True).distinct()
+    # 1. All referring case states per material IRI (single query, cases DB).
+    iri_to_states: dict[str, list[str]] = defaultdict(list)
+    for iri, state in CaseMaterialReference.objects.values_list(
+        "material_iri", "case__state"
+    ):
+        if iri:
+            iri_to_states[iri].append(state)
+    if not iri_to_states:
+        return 0
+
+    # 2. The referenced, live Materials (single query, ngm DB).
+    materials = list(
+        Material.objects.filter(iri__in=iri_to_states.keys(), is_deleted=False)
     )
-    count = 0
-    for iri in iris:
-        if recompute_material_visibility(iri) is not None:
-            count += 1
-    return count
+
+    # 3. Compute in memory; bulk_update only the changed rows.
+    changed: list[Material] = []
+    now = timezone.now()
+    for mat in materials:
+        new_visibility = visibility_for_states(iri_to_states.get(mat.iri, []))
+        if mat.visibility != new_visibility:
+            mat.visibility = new_visibility
+            mat.updated_at = now
+            changed.append(mat)
+
+    if changed:
+        Material.objects.bulk_update(changed, ["visibility", "updated_at"])
+        # bulk_update bypasses post_save, so reconcile the search index by hand:
+        # LISTED → (re)index, everything else → evict. Mirrors materials/signals.
+        from . import search_index
+
+        for mat in changed:
+            if mat.visibility == Visibility.LISTED:
+                search_index.index(mat)
+            else:
+                search_index.delete(mat)
+
+    return len(changed)

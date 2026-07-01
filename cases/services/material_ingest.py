@@ -116,21 +116,30 @@ def bind_material_to_case(
 ) -> None:
     """Create/update the ``CaseMaterialReference`` bind for a material on a case.
 
-    Idempotent by ``(case, material_iri)``. ``ordinal`` defaults to the count of
-    existing references (append order).
+    Idempotent by ``(case, material_iri)``. On CREATE, ``ordinal`` defaults to the
+    count of existing references (append order). On UPDATE, the existing
+    ``ordinal`` is PRESERVED unless an explicit ``ordinal`` is passed — re-binding
+    a material must not silently reshuffle the evidence display order.
     """
     from cases.models import CaseMaterialReference
 
-    if ordinal is None:
-        ordinal = case.material_references.count()
-    CaseMaterialReference.objects.update_or_create(
+    obj, created = CaseMaterialReference.objects.get_or_create(
         case=case,
         material_iri=material_iri,
         defaults={
             "additional_details": additional_details or "",
-            "ordinal": ordinal,
+            "ordinal": (
+                ordinal if ordinal is not None else case.material_references.count()
+            ),
         },
     )
+    if not created:
+        obj.additional_details = additional_details or ""
+        update_fields = ["additional_details"]
+        if ordinal is not None:
+            obj.ordinal = ordinal
+            update_fields.append("ordinal")
+        obj.save(update_fields=update_fields)
 
 
 def ingest_source_as_evidence(

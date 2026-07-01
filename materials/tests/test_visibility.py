@@ -125,6 +125,33 @@ class TestRecompute:
         CaseMaterialReference.objects.create(case=case, material_iri=mat.iri)
         assert recompute_material_visibility(mat.iri) is None
 
+    def test_recompute_all_bulk_over_many(self):
+        # Bulk path: several materials, only the changed ones counted + updated.
+        pub = _case("c-pub", CaseState.PUBLISHED)
+        draft = _case("c-draft", CaseState.DRAFT)
+        m_listed = _store("source:20240101:list01", visibility=Visibility.LISTED)
+        m_demote = _store("source:20240101:demo01", visibility=Visibility.LISTED)
+        CaseMaterialReference.objects.create(case=pub, material_iri=m_listed.iri)
+        CaseMaterialReference.objects.create(case=draft, material_iri=m_demote.iri)
+        # m_listed stays LISTED (published ref), m_demote → PRIVATE (draft only).
+        assert recompute_all() == 1
+        m_listed.refresh_from_db()
+        m_demote.refresh_from_db()
+        assert m_listed.visibility == Visibility.LISTED
+        assert m_demote.visibility == Visibility.PRIVATE
+
+    def test_recompute_all_reconciles_search_index(self):
+        # bulk_update bypasses post_save, so recompute_all must evict a demoted
+        # material from search by hand (else a non-LISTED doc lingers publicly).
+        draft = _case("c-draft", CaseState.DRAFT)
+        mat = _store("source:20240101:demo01", visibility=Visibility.LISTED)
+        CaseMaterialReference.objects.create(case=draft, material_iri=mat.iri)
+        with patch("materials.search_index.delete") as dele, patch(
+            "materials.search_index.index"
+        ):
+            recompute_all()
+        assert dele.called
+
 
 @pytest.mark.django_db
 class TestReadSideGates:
