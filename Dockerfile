@@ -39,6 +39,7 @@ COPY materials/ ./materials/
 COPY lakehouse/ ./lakehouse/
 COPY cases/ ./cases/
 COPY review/ ./review/
+COPY jobs/ ./jobs/
 COPY search/ ./search/
 COPY discovery/ ./discovery/
 COPY static/ ./static/

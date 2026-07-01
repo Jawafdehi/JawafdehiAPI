@@ -260,6 +260,8 @@ INSTALLED_APPS = [
     # ── Jawafdehi apps (route to the `default` DB) ───────────────────────────
     "cases",
     "review",
+    # ── Central job queue (platform-wide; Postgres-backed, no broker) ─────────
+    "jobs",
     # ── Unified search (platform-wide; queries all three domains' indices) ────
     "search",
     # ── Public discovery (Sitemaps + ResourceSync, IRI-driven; no models) ─────
@@ -757,6 +759,13 @@ CONVERT_SOURCE_TIMEOUT = int(os.getenv("CONVERT_SOURCE_TIMEOUT", "180"))
 REVIEW_MAX_PARALLEL = int(os.getenv("REVIEW_MAX_PARALLEL", "3"))
 
 CASEWORK_API_BASE = os.getenv("CASEWORK_API_BASE", "http://127.0.0.1:40173/api/casework")
+# Central job-queue API base. The poller (a jobs consumer) claims/finalizes work
+# here; the casework API base above is still used for review-specific side calls
+# (e.g. attaching converted markdown back to a DocumentSource). Defaults to the
+# same host so a single-node dev setup needs no extra config.
+JOBS_API_BASE = os.getenv(
+    "JOBS_API_BASE", "http://127.0.0.1:40173/api/jobs"
+)
 CASEWORK_OIDC_CLIENT_ID = os.getenv("CASEWORK_OIDC_CLIENT_ID", "")
 CASEWORK_OIDC_CLIENT_SECRET = os.getenv("CASEWORK_OIDC_CLIENT_SECRET", "")
 CASEWORK_OIDC_SCOPE = os.getenv("CASEWORK_OIDC_SCOPE", "")

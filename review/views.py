@@ -16,13 +16,12 @@ endpoint. We expose a small `me` view so the SPA can show who is signed in and
 gate the UI by role.
 """
 
-from django.db import transaction
 from django.utils import timezone
 from rest_framework import generics, status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 
-from . import case_provider, code_rules
+from . import code_rules
 from .models import CaseReview, ReviewConfig
 from .permissions import (
     CanManageDocumentSources,
@@ -33,7 +32,6 @@ from .permissions import (
 from .serializers import (
     CaseReviewDetailSerializer,
     CaseReviewListSerializer,
-    JobResultSerializer,
     ReviewConfigSerializer,
     SourceMarkdownSerializer,
     SubmitSerializer,
@@ -62,154 +60,54 @@ def me_view(request):
 def submit_review(request):
     """Submit a new case slug for review.
 
-    Creates the review as `pending`; the out-of-process poller claims it via
-    the job API and runs it. Nothing executes in-process here.
+    Creates the review as `pending` and enqueues a ``case_review`` job on the
+    central queue (``jobs`` app). The out-of-process poller — now a generic jobs
+    consumer — claims it via ``/api/jobs/claim`` and runs it. Nothing executes
+    in-process here. The queue owns claim/lease/retry; this view only enqueues.
     """
     s = SubmitSerializer(data=request.data)
     s.is_valid(raise_exception=True)
     slug = s.validated_data["slug"]
     review = CaseReview.objects.create(slug=slug, submitted_by=request.user)
+    _enqueue_review_job(review, submitted_by=request.user)
     return Response(
         CaseReviewDetailSerializer(review).data, status=status.HTTP_201_CREATED
     )
 
 
-# ---------------- Job API (for the DB-free poller) ----------------
-# The poller no longer reads/writes the DB directly. It claims a pending review
-# here (getting the case dict + config it needs), processes it locally
-# (including likhit conversion), and posts the result back. The API is the only
-# component that touches the CaseReview / ReviewConfig tables.
+def _enqueue_review_job(review, *, submitted_by=None):
+    """Enqueue (or re-enqueue) the ``case_review`` job backing one review row.
 
-
-@api_view(["POST"])
-@permission_classes([HasContributorRole])
-def claim_job(request):
-    """Atomically claim the oldest pending review and return its work payload.
-
-    Returns 204 when the queue is empty. On success returns everything the
-    poller needs to run the review without any DB access: the review id, slug,
-    the resolved case dict, and the active review config.
+    ``dedup_key`` is the review id, so a review that is already queued/running
+    is never double-enqueued; once its prior job is terminal the key frees and a
+    regrade can enqueue afresh. The case dict is resolved SERVER-SIDE at claim
+    time by the kind's ``build_payload`` hook, so the poller stays DB-free.
     """
-    with transaction.atomic():
-        review = (
-            CaseReview.objects.select_for_update(skip_locked=True)
-            .filter(status=CaseReview.STATUS_PENDING)
-            .order_by("id")
-            .first()
-        )
-        if review is None:
-            return Response(status=status.HTTP_204_NO_CONTENT)
-        review.status = CaseReview.STATUS_RUNNING
-        review.stage = "claimed"
-        review.started_at = timezone.now()
-        review.duration_seconds = None
-        review.error = ""
-        review.save(
-            update_fields=[
-                "status",
-                "stage",
-                "started_at",
-                "duration_seconds",
-                "error",
-                "updated_at",
-            ]
-        )
+    from jobs import queue as job_queue
 
-    # Resolve the case dict server-side so the poller needs no case DB access.
-    try:
-        case = case_provider.get_case(review.slug)
-        case.setdefault("slug", review.slug)
-    except Exception as e:  # noqa: BLE001 - case lookup failure -> fail the job
-        review.status = CaseReview.STATUS_FAILED
-        review.stage = "failed"
-        review.error = f"Could not load case '{review.slug}': {e}"
-        review.completed_at = timezone.now()
-        review.save(
-            update_fields=[
-                "status",
-                "stage",
-                "error",
-                "completed_at",
-                "updated_at",
-            ]
-        )
-        return Response({"detail": review.error}, status=status.HTTP_409_CONFLICT)
-
-    cfg = ReviewConfig.get_active()
-    return Response(
-        {
-            "review_id": review.id,
-            "slug": review.slug,
-            "case": case,
-            "config": {
-                "pass_threshold": cfg.pass_threshold,
-                "revise_threshold": cfg.revise_threshold,
-                "llm_samples": cfg.llm_samples,
-            },
-        }
+    return job_queue.enqueue(
+        "case_review",
+        payload={"slug": review.slug, "review_id": review.id},
+        dedup_key=f"case_review:{review.id}",
+        submitted_by=submitted_by,
     )
 
 
-@api_view(["POST"])
-@permission_classes([HasContributorRole])
-def job_stage(request, pk):
-    """Optional progress ping from the poller (best-effort; updates `stage`)."""
-    try:
-        review = CaseReview.objects.get(pk=pk)
-    except CaseReview.DoesNotExist:
-        return Response(
-            {"detail": "Review not found."}, status=status.HTTP_404_NOT_FOUND
-        )
-    stage = (request.data.get("stage") or "").strip()
-    if stage:
-        review.stage = stage[:64]
-        review.save(update_fields=["stage", "updated_at"])
-    return Response({"ok": True})
-
-
-@api_view(["POST"])
-@permission_classes([HasContributorRole])
-def submit_job_result(request, pk):
-    """Receive the poller's computed result and finalize the review row."""
-    try:
-        review = CaseReview.objects.get(pk=pk)
-    except CaseReview.DoesNotExist:
-        return Response(
-            {"detail": "Review not found."}, status=status.HTTP_404_NOT_FOUND
-        )
-
-    # Only a RUNNING review may be finalized. This rejects a stale/duplicate
-    # result (e.g. a retried request, or a poller submitting after the review
-    # was re-queued by regrade-all) clobbering a done or pending row.
-    if review.status != CaseReview.STATUS_RUNNING:
-        return Response(
-            {"detail": f"Review {pk} is not running (status={review.status})."},
-            status=status.HTTP_409_CONFLICT,
-        )
-
-    s = JobResultSerializer(data=request.data)
-    s.is_valid(raise_exception=True)
-    d = s.validated_data
-
-    if d["status"] == "failed":
-        review.status = CaseReview.STATUS_FAILED
-        review.stage = "failed"
-        review.error = d["error"]
-    else:
-        review.status = CaseReview.STATUS_DONE
-        review.stage = "complete"
-        review.error = ""
-        review.case_title = d["case_title"]
-        review.case_state = d["case_state"]
-        review.case_type = d["case_type"]
-        review.source_count = d["source_count"]
-        review.sources_converted = d["sources_converted"]
-        review.result = d["result"]
-    review.completed_at = timezone.now()
-    if d.get("duration_seconds") is not None:
-        review.duration_seconds = d["duration_seconds"]
-    review.save()
-    return Response(CaseReviewDetailSerializer(review).data)
+# ---------------- Job API — RETIRED (moved to the central `jobs` app) --------
+# The review app is no longer its own queue. The DB-free poller is now a generic
+# jobs consumer that speaks the central protocol at:
+#     POST /api/jobs/claim/          (kinds=["case_review"])
+#     POST /api/jobs/<id>/stage/
+#     POST /api/jobs/<id>/result/
+# The pieces that used to live here as claim_job / job_stage / submit_job_result
+# now live as the ``case_review`` KindSpec hooks in ``jobs/consumers.py``:
+#   - build_payload  -> resolves the case dict + config server-side at claim time
+#                       (the poller stays DB-free), replacing claim_job's body.
+#   - on_result      -> finalizes the CaseReview row from the scored result,
+#                       replacing submit_job_result's success branch.
+#   - on_failure     -> marks the CaseReview failed on terminal job failure.
+# The queue itself owns the atomic claim (select_for_update skip_locked), the
+# stale-result 409 guard, leases, retries, and dedup. See docs/jobs-queue-design.md.
 
 
 @api_view(["POST"])
@@ -307,15 +205,22 @@ def config_view(request):
 def regrade_all(request):
     """Re-queue every existing review for regrading against the current rules.
 
-    Each review is reset to pending in a single bulk UPDATE; the out-of-process
-    poller then claims and runs them (each review fans its LLM rules out in
-    parallel).
+    Each review is reset to pending and a fresh ``case_review`` job is enqueued
+    on the central queue; the out-of-process consumer then claims and runs them.
+    The job's ``dedup_key`` (review id) frees when the prior job is terminal, so
+    a regrade always enqueues a new run without duplicating an in-flight one.
     """
-    ids = list(CaseReview.objects.values_list("id", flat=True))
-    CaseReview.objects.filter(id__in=ids).update(
+    # Only id + slug are needed to reset + enqueue; avoid loading the (large)
+    # result JSON for every review.
+    reviews = list(CaseReview.objects.only("id", "slug"))
+    CaseReview.objects.filter(id__in=[r.id for r in reviews]).update(
         status=CaseReview.STATUS_PENDING,
         stage="queued_for_regrade",
         error="",
         updated_at=timezone.now(),
     )
-    return Response({"regrading": len(ids), "review_ids": ids})
+    for review in reviews:
+        _enqueue_review_job(review, submitted_by=request.user)
+    return Response(
+        {"regrading": len(reviews), "review_ids": [r.id for r in reviews]}
+    )

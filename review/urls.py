@@ -14,10 +14,9 @@ urlpatterns = [
     path("reviews/", views.ReviewListView.as_view()),
     path("reviews/submit/", views.submit_review),
     path("reviews/regrade-all/", views.regrade_all),
-    # Job API for the DB-free poller: claim -> (stage) -> result.
-    path("jobs/claim/", views.claim_job),
-    path("jobs/<int:pk>/stage/", views.job_stage),
-    path("jobs/<int:pk>/result/", views.submit_job_result),
+    # NOTE: the review-local job API (jobs/claim, jobs/<id>/stage, jobs/<id>/result)
+    # was RETIRED. Reviews are now enqueued on the central queue and the poller
+    # claims them at /api/jobs/* as kind=case_review. See jobs/ + docs/jobs-queue-design.md.
     path("sources/<str:source_id>/markdown/", views.attach_source_markdown),
     path("reviews/<int:pk>/", views.ReviewDetailView.as_view()),
     path("rules/", views.rules_list),
