@@ -14,7 +14,11 @@ from django.core.validators import URLValidator
 from django.db import models
 from django.utils import timezone
 
-from jawafdehi_shared.entities.ids import build_case_iri, is_valid_entity_iri
+from jawafdehi_shared.entities.ids import (
+    build_case_iri,
+    is_valid_entity_iri,
+    is_valid_material_iri,
+)
 
 from .fields import (
     EntityListField,
@@ -192,6 +196,29 @@ def validate_nes_id(value):
         )
 
 
+def validate_material_iri(value):
+    """Validate that ``value`` is a canonical NGM material @id IRI.
+
+    NGM is the single source of truth for documents ("materials"); Jawafdehi
+    stores only the material @id IRI
+    (``https://jawafdehi.org/material/<source>/<ident>``) as a join key on the
+    ``CaseMaterialReference`` bind — never document data (title/type/links).
+    Display details resolve from NGM in-process via
+    ``cases.services.material_resolver``.
+
+    STRICT: the scheme+host must be canonical (host is part of the join key), so
+    the stored ``material_iri`` always matches the Material PK.
+
+    Raises:
+        ValidationError: if ``value`` is not a valid canonical material @id IRI.
+    """
+    if not value or not is_valid_material_iri(value):
+        raise ValidationError(
+            f"Invalid NGM material id: {value!r}. Must be a canonical material "
+            "@id IRI of the form 'https://<authority>/material/<source>/<ident>'."
+        )
+
+
 class RelationshipType(models.TextChoices):
     """Enum for entity-case relationship types."""
 
@@ -294,6 +321,98 @@ class CaseEntityRelationship(models.Model):
             except ValidationError as exc:
                 errors["nes_id"] = exc.messages
 
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        """Override save to validate before saving."""
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+
+class CaseMaterialReference(models.Model):
+    """The Case <-> NGM-material BIND (evidence), with an optional per-case note.
+
+    This model IS the evidence link between a case and an NGM ``Material``. NGM
+    is the single source of truth for documents, so the bind holds only the
+    canonical material @id IRI (``material_iri``,
+    ``https://jawafdehi.org/material/<source>/<ident>``) as the join key — it does
+    NOT store document data (title/type/links). There is no cross-DB foreign key
+    (the three databases are routed independently), so the relation to NGM is by
+    id only; display details resolve in-process via
+    ``cases.services.material_resolver.resolve_materials``.
+
+    Replaces the former denormalized ``Case.evidence`` JSON list of
+    ``{source_id, description}`` (ADR: cases own no documents). The per-case
+    evidence note is ``additional_details`` — OPTIONAL, and case-specific (why
+    this document matters to THIS case), distinct from the Material's own global
+    ``description``.
+    """
+
+    case = models.ForeignKey(
+        "Case",
+        on_delete=models.CASCADE,
+        related_name="material_references",
+        help_text="The case this evidence reference belongs to",
+    )
+    material_iri = models.CharField(
+        max_length=300,
+        db_index=True,
+        validators=[validate_material_iri],
+        help_text=(
+            "Canonical NGM material @id IRI "
+            "(https://jawafdehi.org/material/<source>/<ident>) cited as evidence. "
+            "NGM owns the document data; this is the join key only."
+        ),
+    )
+    additional_details = models.TextField(
+        blank=True,
+        default="",
+        help_text=(
+            "Optional case-specific note on why this material matters to this "
+            "case (distinct from the material's own global description)."
+        ),
+    )
+    # Stable display order of evidence within a case (evidence was an ordered
+    # JSON list; preserve that ordering intent explicitly).
+    ordinal = models.PositiveIntegerField(
+        default=0,
+        help_text="Display order of this evidence reference within the case.",
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        help_text="When this evidence reference was created",
+    )
+
+    class Meta:
+        verbose_name = "Case Material Reference"
+        verbose_name_plural = "Case Material References"
+        ordering = ["ordinal", "created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["case", "material_iri"],
+                name="unique_case_material_reference",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["case", "ordinal"], name="case_material_ordinal_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.case.slug} - {self.material_iri}"
+
+    def clean(self):
+        """Validate the bind."""
+        errors = {}
+        if not self.case_id:
+            errors["case"] = "Case is required"
+        if not self.material_iri:
+            errors["material_iri"] = "A NGM material id is required"
+        else:
+            try:
+                validate_material_iri(self.material_iri)
+            except ValidationError as exc:
+                errors["material_iri"] = exc.messages
         if errors:
             raise ValidationError(errors)
 
