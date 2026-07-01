@@ -33,14 +33,14 @@ materials/  (label=materials→ ngm DB)      was services/ngm/ngm_service/materi
 cases/      (label=cases    → default)     was services/jawafdehi/cases
 review/     (label=review   → default)     was services/jawafdehi/review
 ngm/                                       was services/jawafdehi/ngm (proxy app)
-platform_support/ (auth/middleware/…)      was services/jawafdehi/config — RENAMED to avoid
-                                           colliding with the project `config/` above
 ```
-> ⚠️ **Name collision to resolve in R1:** the project package (`monolith/config`) and the
-> Jawafdehi app-support package (`services/jawafdehi/config` → `config.auth`,
-> `config.middleware`, `config.structlog_config`) BOTH want top-level `config`. Rename one —
-> proposal: project → `config/`, app-support → `platform_support/` (or similar). Touches the
-> `config.auth`/`config.middleware` import sites — count + fix in R1.
+> **`config` collision — resolved (2026-07-01):** the Jawafdehi app-support package
+> (`services/jawafdehi/config` = `auth.py` / `middleware.py` / `structlog_config.py`) is FOLDED
+> INTO `jawafdehi_shared` — it's cross-cutting Django plumbing, which is exactly what shared is
+> for. So project package keeps `config/`; app-support goes to `jawafdehi_shared.auth`,
+> `jawafdehi_shared.middleware`, `jawafdehi_shared.logging` (was `.structlog_config`). No new
+> top-level package. Fix the 7 `from config.…` import sites (`cases/api_views.py:35`,
+> `monolith/config/settings.py:48`, etc.) → `from jawafdehi_shared.…`.
 
 **Public API (R3):**
 | Path | Resource | Backing app | Auth |
@@ -78,21 +78,29 @@ one `uv sync`, one gunicorn `monolith.config.wsgi`). So the split buys nothing.
    `services/*/pyproject.toml` + `shared/pyproject.toml`.
 2. **Flatten dirs** so each is a top-level import package, `apps.py` `label=` UNCHANGED (router
    keys on label, not path → no migration): `entities` (was nes_service.entities), `courts`,
-   `materials` (was ngm_service.*), `cases`, `review`, `ngm` (Jawafdehi proxy), `config`
-   (app-support), `jawafdehi_shared`.
-3. **Rewrite imports** — `nes_service.entities`→`entities`, `ngm_service.courts`→`courts`, etc.
-   across the 43 files (scripted sed + full test run). Fix INSTALLED_APPS (5) + `include()`s (7).
-4. **The test-collision hack DISSOLVES** — once apps are flat, `services/nes/tests` vs
+   `materials` (was ngm_service.*), `cases`, `review`, `ngm` (Jawafdehi proxy), `jawafdehi_shared`.
+3. **Fold Jawafdehi `config/` app-support INTO `jawafdehi_shared`** (resolves the `config` name
+   collision — decided): `config/auth.py` (`resolve_or_create_identity`, a Jawafdehi identity
+   helper layered on the existing shared OIDC — keep DISTINCT from `jawafdehi_shared/auth/`) →
+   **`jawafdehi_shared/identity.py`**; `config/structlog_config.py` (`configure_structlog`) →
+   **`jawafdehi_shared/logging_config.py`** (NOT `logging` — avoid stdlib shadow); `config/middleware.py`
+   → **`jawafdehi_shared/middleware.py`**. The project package (`monolith/config`) then safely
+   becomes top-level `config/`.
+4. **Rewrite imports** — `nes_service.entities`→`entities`, `ngm_service.courts`→`courts`, etc.
+   across the 43 files; plus the 7 `from config.…` sites (`cases/api_views.py:35` `config.auth`→
+   `jawafdehi_shared.identity`; `settings.py:48` `config.structlog_config`→`jawafdehi_shared.logging_config`;
+   `MIDDLEWARE` string paths `config.middleware.*`→`jawafdehi_shared.middleware.*`). Fix INSTALLED_APPS
+   (5) + `include()`s (7). (scripted sed + full test run).
+5. **The test-collision hack DISSOLVES** — once apps are flat, `services/nes/tests` vs
    `services/ngm/tests` become `entities/tests` vs `courts/tests` (unique names), so the
    `services/{,nes/,ngm/}__init__.py` + root-conftest `sys.path` juggling (pyproject.toml:82–110)
    can be deleted. Verify pytest still collects cleanly WITHOUT it.
-5. **hatch packaging** — one `[tool.hatch.build.targets.wheel] packages = [...]` listing the flat
+6. **hatch packaging** — one `[tool.hatch.build.targets.wheel] packages = [...]` listing the flat
    app packages + `config` + `jawafdehi_shared`. Update Dockerfile COPY lines to the flat layout.
 
-**Also folds in the `monolith/` rename** (see §5 Q2 for target name — `config`/`platform`(stdlib
-shadow, avoid)/other). ~8 imports + 9 Django string bindings + 2 entry points
-(`manage.py:20`, settings ROOT_URLCONF/WSGI/DATABASE_ROUTERS/INSTALLED_APPS, urls, pyproject,
-settings_test).
+**Also folds in the `monolith/` → `config/` rename.** ~8 imports + 9 Django string bindings + 2
+entry points (`manage.py:20`, settings ROOT_URLCONF/WSGI/DATABASE_ROUTERS/INSTALLED_APPS, urls,
+pyproject, settings_test).
 **Scope:** 43 files w/ cross-app imports + ~135 import stmts + 4 pyproject deletions + Dockerfile
 + workspace/hatch config + test-scheme removal. **Risk:** MEDIUM — touches packaging + boot +
 test collection, on the productionized branch. Do as its OWN checkpoint, verified end-to-end.
@@ -188,8 +196,8 @@ hard cut, no alias grace period.
 ---
 
 ## 5. Open questions for review
-1. R1 import root: expose apps at top level (`entities`, `courts`, `materials`, `cases`, …) — recommended, matches how `cases`/`review`/`ngm` already resolve. Confirm no residual need for the `nes_service`/`ngm_service` namespaces.
-2. R1 name for the current `monolith/` package (holds settings/urls/wsgi/db_router): `config`? (NOT `platform` — stdlib shadow.) Or fold `search`/`discovery` in somewhere specific?
+1. ✅ RESOLVED — R1 import root: apps at top level (`entities`, `courts`, `materials`, `cases`, …), dropping `nes_service`/`ngm_service`.
+2. ✅ RESOLVED — `monolith/` → `config/`; Jawafdehi `config/` app-support folded into `jawafdehi_shared` (`identity`, `logging_config`, `middleware`). No new top-level package.
 3. R3: keep `/api/query` and `/api/ingestion` unprefixed, or namespace them (`/api/courtcases/query`)? They're court-table operations.
 4. Sequencing: upload last (clean surface) vs. upload first (earlier delivery)?
 5. Do we rename `label=entities` etc. at all, or leave labels permanently as the router contract? (Leaving them is zero-risk; renaming would force migration-state churn for no gain.)
