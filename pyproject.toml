@@ -90,6 +90,7 @@ packages = [
     "lakehouse",
     "cases",
     "review",
+    "jobs",
     "search",
     "discovery",
 ]
