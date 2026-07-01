@@ -44,7 +44,6 @@ from entities.models import StoredEntity
 from courts.models import Court, CourtCase
 from materials.models import Material
 
-from .admin import CaseAdminForm
 from .caseworker_serializers import (
     BLOCKED_PATH_PREFIXES,
     CaseCreateSerializer,
@@ -115,7 +114,7 @@ def _recompute_material_visibility(material_iris) -> None:
     create=extend_schema(
         summary="Create a draft case",
         description="""
-        Create a new case through the same validation rules used by the Django admin form.
+        Create a new case through the model-layer validation rules (`Case.validate()` / `Case.save()`).
 
         Authenticated users create cases in `DRAFT` state only. The request user is
         automatically added as a contributor on the new case.
@@ -349,12 +348,39 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
             "entity_relationships",
         ).order_by("-created_at")
 
+    # Case model fields that CaseCreateSerializer may set directly on the row.
+    # Non-model serializer keys (alleged_entities / related_entities / evidence)
+    # are handled separately as binds/joins below.
+    _CREATE_MODEL_FIELDS = frozenset(
+        [
+            "case_type",
+            "state",
+            "title",
+            "short_description",
+            "description",
+            "thumbnail_url",
+            "banner_url",
+            "case_start_date",
+            "case_end_date",
+            "tags",
+            "key_allegations",
+            "timeline",
+            "notes",
+            "slug",
+            "court_cases",
+            "missing_details",
+            "bigo",
+        ]
+    )
+
     def create(self, request, *args, **kwargs):
         """
         POST /api/cases/
 
-        Create a new case by delegating validation to the existing Django admin form
-        so API and admin creation semantics stay aligned.
+        Create a new case through the model-layer validation rules
+        (``Case.validate()`` / ``Case.save()``), which are the single source of
+        truth. Enforces DRAFT-on-create and the required-field rules that were
+        previously re-invoked via ``CaseAdminForm``.
         """
         # Validate that request body is a JSON object (dict), not array or scalar
         if not isinstance(request.data, dict):
@@ -377,33 +403,65 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
                 serializer.errors, status=status.HTTP_422_UNPROCESSABLE_ENTITY
             )
 
-        form = CaseAdminForm(data=serializer.validated_data, request=request)
-        if not form.is_valid():
-            return Response(form.errors, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+        validated = serializer.validated_data
 
-        with transaction.atomic():
-            case = form.save()
-            case.contributors.add(request.user)
-
-            # Create entity binds (NES ids) for alleged/related entities
-            for nes_id in serializer.validated_data.get("alleged_entities", []):
-                CaseEntityRelationship.objects.get_or_create(
-                    case=case,
-                    nes_id=nes_id,
-                    relationship_type=RelationshipType.ACCUSED,
-                )
-            for nes_id in serializer.validated_data.get("related_entities", []):
-                CaseEntityRelationship.objects.get_or_create(
-                    case=case,
-                    nes_id=nes_id,
-                    relationship_type=RelationshipType.RELATED,
-                )
-
-            # Create evidence binds (NGM material ids) — the CaseMaterialReference
-            # join. Ordinal preserves the submitted order (ADR: cases own no docs).
-            self._write_material_references(
-                case, serializer.validated_data.get("evidence", [])
+        # New cases must be DRAFT. This rule lived only in CaseAdminForm.clean()
+        # (admin.py:271) — not at the model layer — so it is ported here to keep
+        # create() lenient (DRAFT skips the allegation/description/entity gates)
+        # while still refusing a client-supplied non-DRAFT create.
+        if validated.get("state", CaseState.DRAFT) != CaseState.DRAFT:
+            return Response(
+                {
+                    "state": [
+                        "New cases must be created in DRAFT state. "
+                        f"Cannot create a new case with state {validated.get('state')}."
+                    ]
+                },
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
+
+        # Build the Case from the validated scalar fields; force DRAFT.
+        model_kwargs = {
+            field: validated[field]
+            for field in self._CREATE_MODEL_FIELDS
+            if field in validated
+        }
+        model_kwargs["state"] = CaseState.DRAFT
+        case = Case(**model_kwargs)
+
+        # Model-layer validation is the single source of truth (title-required,
+        # slug format, state-based required fields). ``validate()`` runs the
+        # state rules and auto-generates the slug; ``save()`` re-checks the title
+        # and slug immutability. Both raise ValidationError -> 422 field errors.
+        # (Slug FORMAT was already enforced by the serializer's validate_slug
+        # validator; blank slug is auto-generated, matching admin/save semantics.)
+        try:
+            case.validate()
+            with transaction.atomic():
+                case.save()
+                case.contributors.add(request.user)
+
+                # Create entity binds (NES ids) for alleged/related entities
+                for nes_id in validated.get("alleged_entities", []):
+                    CaseEntityRelationship.objects.get_or_create(
+                        case=case,
+                        nes_id=nes_id,
+                        relationship_type=RelationshipType.ACCUSED,
+                    )
+                for nes_id in validated.get("related_entities", []):
+                    CaseEntityRelationship.objects.get_or_create(
+                        case=case,
+                        nes_id=nes_id,
+                        relationship_type=RelationshipType.RELATED,
+                    )
+
+                # Create evidence binds (NGM material ids) — the
+                # CaseMaterialReference join. Ordinal preserves submitted order
+                # (ADR: cases own no docs).
+                self._write_material_references(case, validated.get("evidence", []))
+        except ValidationError as exc:
+            detail = getattr(exc, "message_dict", None) or {"detail": exc.messages}
+            return Response(detail, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
         # Newly-created evidence may reference materials whose visibility now
         # depends on this case's state — recompute (best-effort, on_commit).
