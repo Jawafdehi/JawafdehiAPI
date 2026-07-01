@@ -1,8 +1,9 @@
 """
 Service for importing scraped case data into Django models.
 
-Handles entity deduplication, source deduplication, and data transformation
-from scraped JSON format to Django Case model.
+Handles entity deduplication, transformation from scraped JSON to the Django
+Case model, and ingesting each cited source as an NGM Material bound to the case
+as evidence (CaseMaterialReference — ADR: cases own no documents).
 """
 
 import json
@@ -18,13 +19,6 @@ from cases.models import (
     CaseState,
     CaseType,
     RelationshipType,
-)
-
-_DOCUMENTSOURCE_REMOVED_MSG = (
-    "This method creates/reads DocumentSource rows, which have been removed "
-    "(ADR: cases own no documents). It must be rewired to create Material + "
-    "CaseMaterialReference records before use. See "
-    "docs/jawafdehi/sources-to-materials-prod-migration.md."
 )
 
 
@@ -90,13 +84,27 @@ class CaseImporter:
         self.log(f"  Bound entity: {nes_id} ({relationship_type})")
         return nes_id
 
-    def get_or_create_source(self, source_data):
-        """Removed: this created DocumentSource rows.
+    def ingest_source(self, case, source_data):
+        """Upsert a source as an NGM Material + bind it to ``case`` as evidence.
 
-        See ``_DOCUMENTSOURCE_REMOVED_MSG``; must be rewired to Material +
-        CaseMaterialReference before use.
+        Replaces the old ``get_or_create_source`` (DocumentSource create). Returns
+        the material IRI, or ``None`` when the source has no title. ADR: cases own
+        no documents — the document is a Material, the bind a CaseMaterialReference.
         """
-        raise NotImplementedError(_DOCUMENTSOURCE_REMOVED_MSG)
+        from cases.services.material_ingest import ingest_source_as_evidence
+
+        iri = ingest_source_as_evidence(
+            case,
+            title=source_data.get("title", ""),
+            url=source_data.get("url", ""),
+            source_type=source_data.get("source_type"),
+            description=source_data.get("description", ""),
+            additional_details=source_data.get("description", ""),
+            publication_date=self.parse_date(source_data.get("publication_date")),
+        )
+        if iri:
+            self.stats["sources_created"] += 1
+        return iri
 
     def parse_date(self, date_str):
         """
@@ -131,7 +139,6 @@ class CaseImporter:
             ValueError: If JSON is invalid or required fields are missing
             ValidationError: If case data fails validation
         """
-        raise NotImplementedError(_DOCUMENTSOURCE_REMOVED_MSG)
         # Read and parse JSON
         with open(json_file, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -182,21 +189,11 @@ class CaseImporter:
             for location in data.get("locations", []):
                 self.bind_entity(case, location, RelationshipType.LOCATION)
 
-            # Build evidence list from sources
+            # Ingest sources as NGM Materials + bind them to the case as evidence
+            # (CaseMaterialReference). ADR: cases own no documents.
             self.log("Processing sources...")
-            evidence = []
             for source_data in data.get("sources", []):
-                source = self.get_or_create_source(source_data)
-                if source:
-                    evidence.append(
-                        {
-                            "source_id": source.source_id,
-                            "description": source_data.get("description", ""),
-                        }
-                    )
-
-            case.evidence = evidence
-            case.save()
+                self.ingest_source(case, source_data)
 
             self.log("\nImport statistics:")
             self.log(f"  Entities bound: {self.stats['entities_bound']}")
@@ -205,6 +202,5 @@ class CaseImporter:
                 f"{self.stats['entities_skipped_no_nes_id']}"
             )
             self.log(f"  Sources created: {self.stats['sources_created']}")
-            self.log(f"  Sources reused: {self.stats['sources_reused']}")
 
             return case

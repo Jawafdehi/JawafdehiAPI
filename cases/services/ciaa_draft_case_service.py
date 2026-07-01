@@ -98,7 +98,7 @@ class CIAADraftCaseService:
                 self.create_defendants(
                     ciaa_json.get("court_case", {}).get("defendants", []), case
                 )
-                self.create_document_sources(ciaa_json, case)
+                self.create_material_evidence(ciaa_json, case)
 
             return ImportResult(
                 status="created",
@@ -282,18 +282,81 @@ class CIAADraftCaseService:
             bound.append(nes_id)
         return bound
 
-    def create_document_sources(self, ciaa_json: dict, case: Case) -> list:
-        """Removed: this created DocumentSource records.
+    def create_material_evidence(self, ciaa_json: dict, case: Case) -> list[str]:
+        """Ingest CIAA press releases, charge sheets, and court orders as evidence.
 
-        See ``_DOCUMENTSOURCE_REMOVED_MSG``; must be rewired to Material +
-        CaseMaterialReference before use.
+        Each becomes an NGM Material (single-source upsert, gate bypassed) bound to
+        the case via a ``CaseMaterialReference`` (ADR: cases own no documents).
+        Returns the list of material IRIs bound. Replaces the old
+        ``create_document_sources`` (which created DocumentSource rows + a
+        ``Case.evidence`` JSON list).
         """
-        raise NotImplementedError(_DOCUMENTSOURCE_REMOVED_MSG)
+        from cases.services.material_ingest import ingest_source_as_evidence
 
-    def get_or_create_source(self, source_data: dict) -> Optional[object]:
-        """Removed: this created DocumentSource rows.
+        iris: list[str] = []
 
-        See ``_DOCUMENTSOURCE_REMOVED_MSG``; must be rewired to Material +
-        CaseMaterialReference before use.
-        """
-        raise NotImplementedError(_DOCUMENTSOURCE_REMOVED_MSG)
+        def _bind(*, title, url, source_type, additional_details, publication_date=None):
+            iri = ingest_source_as_evidence(
+                case,
+                title=(title or "")[:300],
+                url=url,
+                source_type=source_type,
+                additional_details=additional_details,
+                publication_date=publication_date,
+            )
+            if iri and iri not in iris:
+                iris.append(iri)
+
+        # Press releases
+        for pr in ciaa_json.get("ciaa", {}).get("press_releases", []):
+            _bind(
+                title=pr.get("title", "CIAA Press Release"),
+                url=pr.get("url", ""),
+                source_type="CIAA_PRESS_RELEASE",
+                additional_details=(
+                    f"CIAA Press Release (ID: {pr.get('release_id', 'N/A')})"
+                ),
+                publication_date=self.convert_bs_to_ad(pr.get("date", "")),
+            )
+
+        # AG charge sheets (abhiyogPatras)
+        for ap in ciaa_json.get("ciaa", {}).get("abhiyogPatras", []):
+            pdf_url = (ap.get("pdf_url") or "").strip()
+            encoded_url = self._encode_url(pdf_url) if pdf_url else ""
+            _bind(
+                title=ap.get("title", "AG Charge Sheet"),
+                url=[encoded_url] if encoded_url else [],
+                source_type="AG_ABHIYOG_PATRA",
+                additional_details=f"AG Charge Sheet - {ap.get('case_number', 'N/A')}",
+                publication_date=self.convert_bs_to_ad(ap.get("filing_date", "")),
+            )
+
+        # Court orders (faisala links)
+        for idx, faisala_url in enumerate(
+            ciaa_json.get("court_case", {}).get("faisala_link", []), 1
+        ):
+            if faisala_url:
+                _bind(
+                    title=f"Court Order - {ciaa_json.get('case_no', 'Unknown')}",
+                    url=faisala_url,
+                    source_type="COURT_ORDER",
+                    additional_details=f"Court Order/Verdict (Document {idx})",
+                )
+
+        return iris
+
+    @staticmethod
+    def _encode_url(pdf_url: str) -> str:
+        """Percent-encode a raw PDF URL's path/query (mirrors the old ingester)."""
+        import urllib.parse
+
+        parsed = urllib.parse.urlsplit(pdf_url.strip())
+        return urllib.parse.urlunsplit(
+            (
+                parsed.scheme,
+                parsed.netloc,
+                urllib.parse.quote(parsed.path, safe="/"),
+                urllib.parse.quote(parsed.query, safe="=&"),
+                urllib.parse.quote(parsed.fragment, safe=""),
+            )
+        )
