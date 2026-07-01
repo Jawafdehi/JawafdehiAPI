@@ -14,6 +14,7 @@ no stored row is materialized on the fly from the relational court tables via
 
 from __future__ import annotations
 
+import logging
 import mimetypes
 
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -49,6 +50,12 @@ LD_JSON = "application/ld+json"
 _UPLOAD_ROLES = frozenset(
     {"RAW", "ALTERNATE", "PERMALINK", "MARKDOWN", "SOURCE_PAGE"}
 )
+
+#: Upload roles that carry an original document worth OCR-ing into full text.
+#: Excludes MARKDOWN (our own extraction output) + SOURCE_PAGE (HTML, not a scan).
+_CONVERTIBLE_ROLES = frozenset({"RAW", "ALTERNATE", "PERMALINK"})
+
+logger = logging.getLogger("materials.views")
 
 #: Upper bound on an uploaded material file. Generous (scanned court orders /
 #: charge sheets run large — this is NOT the 10 MB case-evidence limit) but
@@ -368,6 +375,20 @@ def material_file_upload(request, source: str, ident: str):
     )
     if error is not None:
         return Response(error, status=code)
+
+    # Feed full-text search: enqueue async OCR→text for a newly-attached source
+    # document (data-plane FTS feed, docs/data-plane-design.md §5). Only for
+    # OCR-able source roles — never for our own MARKDOWN output or SOURCE_PAGE
+    # HTML. Idempotent (dedup on the IRI); best-effort so a queue hiccup never
+    # fails the upload.
+    if role in _CONVERTIBLE_ROLES:
+        try:
+            from .conversion import enqueue_material_convert
+
+            enqueue_material_convert(iri)
+        except Exception:  # noqa: BLE001 — the file is stored; convert can re-run.
+            logger.exception("material_convert enqueue failed for %s", iri)
+
     return Response(result, status=code, content_type=LD_JSON)
 
 
