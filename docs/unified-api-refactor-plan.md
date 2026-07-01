@@ -1,5 +1,11 @@
 # Unified API Surface — Refactor Plan
 
+> **AMENDED 2026-07-01 by [`jawafdehi/adr-cases-own-no-documents.md`](./jawafdehi/adr-cases-own-no-documents.md).**
+> `/api/sources` is removed and `DocumentSource` retires: R5a's "DocumentSource CRUD"
+> and R6's separate source-upload path **invert** into *retiring sources into
+> `/api/materials`*. Case evidence becomes a `CaseMaterialReference` join keyed by a
+> required `material_iri`. See the ADR for the target model; rows below are annotated.
+
 **Status:** DRAFT for review · **Date:** 2026-07-01 · **Branch:** `feat/control-plane-design`
 **Companion:** `docs/control-plane-api-design.md` (the target API contract). This doc is the *how* — what to refactor, in what order, with measured blast radius.
 
@@ -49,7 +55,7 @@ ngm/                                       was services/jawafdehi/ngm (proxy app
 | `/api/materials` | documents (file-bearing CreativeWork) | materials | NGM role write |
 | `/api/courtcases` | court-case records (composite key) + hearings/parties | courts | NGM role write |
 | `/api/cases` | Jawafdehi **corruption** cases (unchanged) | cases | caseworker |
-| `/api/sources` | corruption-case document sources (unchanged) | cases | caseworker |
+| ~~`/api/sources`~~ | **REMOVED (ADR 2026-07-01)** — sources collapse into `/api/materials`; evidence links by `material_iri` | — | — |
 | `/api/query` | gated SELECT over court tables | courts | `HasNgmQueryAccess` |
 | `/api/ingestion/*` | batch write (make the 501s real) | courts/materials | NGM role |
 | `/api/search`, `/api/casework/*`, discovery | unchanged | search/review/discovery | mixed |
@@ -153,7 +159,7 @@ resource has a DELETE today, and materials has no LIST. Two decisions locked:
 | materials | **LIST** `GET /api/materials` (admin table) + soft `DELETE` + optional PATCH |
 | courtcases | soft `DELETE` (add DestroyModelMixin → soft) |
 | corruption-cases | expose soft `DELETE` (is_deleted exists; wire the verb) |
-| sources | expose soft `DELETE` (is_deleted exists) |
+| ~~sources~~ | **SUPERSEDED (ADR 2026-07-01)** — instead of adding source CRUD, `DocumentSource` is removed; evidence becomes a `CaseMaterialReference` join (`material_iri` required) and the material-upload path (R6) is the one source-authoring surface |
 NES PATCH stays the JSON-LD update path (no PUT needed). Verify each with tests.
 
 **R5b — React admin (frontend `jawafdehi-frontend`, bespoke React + react-hook-form + shadcn, NOT react-admin):**
@@ -161,7 +167,12 @@ Per resource reach full L/G/C/U/D. Gaps today (from fan-out):
 - entities: has L/G/C/U — add **delete** (confirm dialog).
 - materials: has G/C/U — add **list page** (needs R5a list endpoint) + **delete**.
 - courtcases: has L/G/C/U — add **delete**.
-- corruption-cases + sources: **build create/edit forms** (currently read-only lists) + delete.
+- corruption-cases: **build create/edit forms** (currently read-only lists) + delete.
+- ~~sources~~: **SUPERSEDED (ADR 2026-07-01)** — do NOT build source forms. Retire the
+  "Document Source" concept from the frontend entirely (types, components, i18n): source
+  admin folds into the NGM material admin (port its friendlier fields onto the material
+  form); public `CaseDetail` resolves evidence via `getMaterial(material_iri)` and re-tiers
+  on the unified `material_type` vocab; evidence editing uses `{material_iri, additional_details}`.
 Follow the existing add-a-resource pattern: `src/services/admin-api.ts` client fns →
 `src/pages/admin/{section}/{List,Create,Edit}.tsx` → routes in `App.tsx` → nav in
 `AdminLayout.tsx`. Delete = button + confirm dialog calling `client.delete(...)`.
@@ -169,6 +180,9 @@ Follow the existing add-a-resource pattern: `src/services/admin-api.ts` client f
 ### Phase R6 — Feature: material file upload + real `/ingestion/*`
 Net-new, isolated (see design doc §3). `POST /api/materials/{source}/{ident}/file` (multipart→R2→MediaObject), reusing `cases/storage.py` `HashedFilenameS3Boto3Storage` lifted into `shared/`. Then make `/api/ingestion/{cases,documents,entities/resolve}` real (replace Scrapy direct-DB writes).
 **LAST** so it lands on the already-unified surface (no rework).
+> **ADR 2026-07-01:** this upload path **is** the source-authoring surface — the old
+> `DocumentSourceCreateSerializer.uploaded_file` path converges here (one upload path,
+> not two). linkRole vocab includes `MARKDOWN` + `SOURCE_PAGE` (ADR D-D).
 
 ---
 

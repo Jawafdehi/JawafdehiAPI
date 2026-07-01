@@ -1,5 +1,12 @@
 # NES + NGM Control-Plane API Design
 
+> **AMENDED 2026-07-01 by [`jawafdehi/adr-cases-own-no-documents.md`](./jawafdehi/adr-cases-own-no-documents.md).**
+> Jawafdehi `cases` will own **no** document resource: `DocumentSource` and
+> `/api/sources` are removed, case evidence becomes a `CaseMaterialReference` join
+> keyed by a **required** `material_iri`, and Materials become the universal document
+> store. Where this doc still describes `/api/sources` or a distinct Jawafdehi source
+> resource, defer to the ADR.
+
 **Status:** DRAFT for review · **Date:** 2026-06-30 · **Branch:** `feat/control-plane-design` (off monolith `v2` @ `734b401`)
 
 **Goal:** a fully-RESTful control plane for NES and NGM on the monolith, including **material file uploads** (the one genuinely-missing capability). Everything else — MCP, casework, integration tests, frontend — rewires into these endpoints.
@@ -142,7 +149,8 @@ and `/api/ngm` as **301 aliases** for one release while consumers migrate, then 
 POST /api/materials/{source}/{ident}/file            # auth: HasNgmRole
 Content-Type: multipart/form-data
   file:      <binary>                  (required)
-  role:      RAW|ALTERNATE|PERMALINK   (default RAW)
+  role:      RAW|ALTERNATE|PERMALINK|MARKDOWN|SOURCE_PAGE   (default RAW)
+             # MARKDOWN + SOURCE_PAGE added per ADR D-D so no SourceLinkRole value is lost
   material_type: court_order|...       (optional; else inferred/required if material is new)
 
 Behavior:
