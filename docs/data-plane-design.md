@@ -3,7 +3,8 @@
 **Status:** ACCEPTED & BUILT · **Date:** 2026-07-01 · **Branch:** merged on `v2`. All
 foundations merged: control-plane `80e2462`; jobs queue #262; **ADR cases-own-no-documents
 #263** (`712dc2b`) — Materials is the sole document store; **material_convert FTS feed #264**
-(`fd13c35`). Remaining work is the provenance sidecar + governance tables (§8).
+(`fd13c35`); **provenance on file-bearing MediaObjects #266**. Remaining work is the
+material-specific R2 prefix + governance tables (§8).
 
 **Goal.** One coherent data plane serving three domains (NES entities, NGM
 courts/governance, Jawafdehi cases) at target scale, read-heavy via the website,
@@ -48,7 +49,7 @@ another's critical path**:
   │ ARCHIVE PLANE (R2)  — the object bytes (the bulk of storage)   │
   │   raw capture bytes                       [EXISTS: upload→R2]  │
   │   OCR/likhit markdown  (linkRole=MARKDOWN) [BUILT: #264]       │
-  │   provenance sidecar   (source_url, ocr_*, sha256, …) [GAP]    │
+  │   provenance on MediaObject (sha256, fetch_method, …) [BUILT]  │
   │   → immutable; system of record for RAW EVIDENCE               │
   └───────────────┬───────────────────────────────┬──────────────┘
      text → Material.data["text"]        bytes referenced by URL (one copy)
@@ -118,21 +119,29 @@ batch writers (`courts/views.py:352+`).
    `materials/jsonld.py:120`) *and* folds the text into `Material.data["text"]` (the field
    the search indexer already reads — §4). Standard recipe: `shared/ocr_bedrock.py`
    (PyMuPDF render + multimodal Claude on Bedrock).
-2. **Provenance sidecar + content-hash idempotency.** Each capture lands a
-   `provenance` record (`source_url`, `fetch_method`, `tls_status`, `ocr_engine`,
-   `ocr_confidence`, `scraped_at`, `sha256`). Re-landing the same bytes is idempotent on
-   the content hash. This formalizes what is ad-hoc in `material_uploads/` today. (The
-   dormant `lakehouse/medallion.BronzeObject` already sketches this struct — reuse the
-   shape, land it as Material provenance, not an Iceberg bronze row.)
+2. **Provenance + content-hash idempotency — BUILT (`materials/provenance.py`).** Each
+   file-bearing MediaObject carries a `jawafdehi:provenance` struct (`sha256`,
+   `captured_at`, `fetch_method` [`upload`|`ocr`|`scrape`], `source_url`, `content_length`,
+   `tls_status`, `ocr_engine`, `ocr_confidence` — `None`s dropped). Provenance is
+   **embedded on the MediaObject in the JSON-LD**, NOT a separate `.prov.json` R2 object:
+   the Postgres material row IS the record, it's queryable via the JSONB GIN index, and it
+   travels with the material (the design's own guidance — "land it as Material provenance,
+   not an Iceberg bronze row"; the dormant `lakehouse/medallion.BronzeObject` sketched the
+   field shape). `attach_media_object` dedups on **`(role, sha256)`** — re-uploading the
+   same bytes replaces that MediaObject instead of appending a duplicate. The upload
+   endpoint sets `fetch_method=upload`; `material_convert`'s `on_result` sets
+   `fetch_method=ocr`, `ocr_engine=likhit` on the MARKDOWN link.
 
-**R2 layout (prefix-partitioned, one account):**
+**R2 object layout (bytes only — provenance rides in the JSON-LD, not on disk):**
 ```
-material/<source>/<ident>/<sha256>.<ext>     raw capture (immutable)
-material/<source>/<ident>/<sha256>.md        OCR/likhit markdown  (linkRole=MARKDOWN)
-material/<source>/<ident>/<sha256>.prov.json provenance sidecar
+<FILE_STORAGE_PREFIX><sha256-of-filename>.<ext>   raw capture + the .md markdown blob
 ```
 Bytes are referenced by URL from the Material JSON-LD — **one copy**, no duplication of
-the storage bulk into the DB or the index.
+the storage bulk into the DB or the index. NOTE: `HashedFilenameS3Boto3Storage` hashes the
+*filename* (salted), and everything currently shares one `FILE_STORAGE_PREFIX`
+(default `case_uploads/`); the material-specific `material/<source>/<ident>/…` prefix
+layout is a remaining follow-up (it needs a storage-backend prefix override, orthogonal to
+the provenance record which is done).
 
 ### 3.1 How a Material links to its files (the field-level contract)
 
@@ -283,8 +292,8 @@ dashboard; `case_review` ported). No new async mechanism — we register handler
     and re-runnable, rather than relying on atomic enqueue. A true exactly-once enqueue
     would need an outbox on the `ngm` DB — deliberately not built (the re-run path covers it).
 - **Follow-up:** wire the same `enqueue_material_convert` call into the `/api/ingestion/*`
-  batch document path (the interactive upload is done); and land the provenance sidecar
-  (§8 item 2) so a convert can also be driven from a re-scrape.
+  batch document path (the interactive upload is done). Provenance on file-bearing
+  Materials is now recorded (§3 item 2 / §8 item 2).
 
 ---
 
@@ -351,8 +360,13 @@ Ordered by value/risk. None is a rewrite.
    (`linkRole=MARKDOWN`) → `Material.data["text"]` → reindex. 14 unit tests + suite green;
    `manage.py check` clean; ruff clean. *Delivers full-text search over materials end to
    end.* Remaining thread: also enqueue from `/api/ingestion/documents` (§5 follow-up).
-2. **Formalize archive provenance.** Add the `provenance` sidecar + content-hash
-   idempotency to the existing upload/ingest path; adopt the R2 layout (§3).
+2. ✅ **DONE — Formalize archive provenance.** `materials/provenance.py` — a
+   `jawafdehi:provenance` struct embedded on each file-bearing MediaObject +
+   content-hash idempotency (`attach_media_object` dedups on `(role, sha256)`).
+   Wired into the upload endpoint (`fetch_method=upload`) and `material_convert`
+   `on_result` (`fetch_method=ocr`, `ocr_engine=likhit`). *Remaining thread:*
+   material-specific R2 prefix (needs a storage-backend prefix override) + provenance
+   on the `/api/ingestion/documents` court `document_sources` path (scraper-supplied).
 3. ✅ **DONE — Reconcile the docs (§7).** `ARCHITECTURE.md §5` rewritten to Postgres-SoR /
    lakehouse-lite; `lakehouse/__init__.py` bannered DORMANT + blueprint (supersedes the
    "silver is SoR" framing in `medallion.py`/`schema.py`).

@@ -26,10 +26,12 @@ the queue (``jobs.consumers``); OCR itself is the worker's job.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any, Optional
 
 from . import jsonld
+from . import provenance
 
 logger = logging.getLogger("materials.conversion")
 
@@ -180,7 +182,9 @@ def apply_convert_result(job, result: dict) -> None:
             )
             return
         data = dict(row.data or {})
-        # Replace-or-append the MARKDOWN MediaObject (idempotent re-run).
+        # Replace-or-append the MARKDOWN MediaObject (idempotent re-run). MARKDOWN
+        # is our own singular derived output, so dedup is by role (drop any prior
+        # MARKDOWN, add the fresh one) — not by content hash.
         media = [
             mo
             for mo in _media_list(data)
@@ -188,6 +192,16 @@ def apply_convert_result(job, result: dict) -> None:
         ]
         md_mo = jsonld._media_object({"link": link["link"], "role": "MARKDOWN"})
         if md_mo is not None:
+            # Provenance: this markdown was produced by OCR/likhit conversion from
+            # the source doc (data-plane §3 — provenance rides on the MediaObject).
+            md_mo["encodingFormat"] = "text/markdown"
+            md_mo[provenance.PROVENANCE_KEY] = provenance.build_provenance(
+                sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                fetch_method="ocr",
+                source_url=(result or {}).get("source_url"),
+                content_length=len(text.encode("utf-8")),
+                ocr_engine="likhit",
+            )
             media.append(md_mo)
         data["associatedMedia"] = media
         # The searchable full text (language-mapped, per MATERIAL_CONTEXT).

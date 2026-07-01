@@ -69,6 +69,41 @@ class MaterialFileUploadTests(_DbAPITestCase):
         row = Material.objects.get(pk=self.IRI)
         self.assertEqual(row.material_type, "court_order")
 
+    def test_upload_records_provenance_on_media_object(self):
+        self.client.force_authenticate(user=self.user)
+        resp = self.client.post(
+            self.URL,
+            {"file": self._pdf(), "material_type": "court_order",
+             "source_url": "https://supremecourt.gov.np/x.pdf"},
+            format="multipart",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        prov = resp.data["associatedMedia"][0]["jawafdehi:provenance"]
+        self.assertEqual(prov["fetch_method"], "upload")
+        self.assertEqual(prov["source_url"], "https://supremecourt.gov.np/x.pdf")
+        self.assertEqual(len(prov["sha256"]), 64)  # sha256 hex
+        self.assertIn("captured_at", prov)
+        self.assertEqual(prov["content_length"], len(b"%PDF-1.4 data"))
+
+    def test_reupload_identical_bytes_same_role_dedups(self):
+        self.client.force_authenticate(user=self.user)
+        self.client.post(
+            self.URL,
+            {"file": self._pdf(), "material_type": "court_order"},
+            format="multipart",
+        )
+        # Re-upload the SAME bytes at the SAME role → content-hash idempotency:
+        # the MediaObject is replaced, not duplicated.
+        resp = self.client.post(
+            self.URL, {"file": self._pdf()}, format="multipart"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        raw_media = [
+            m for m in resp.data["associatedMedia"]
+            if m["jawafdehi:linkRole"] == "RAW"
+        ]
+        self.assertEqual(len(raw_media), 1)
+
     def test_upload_updates_existing_material_appends_media(self):
         self.client.force_authenticate(user=self.user)
         # First upload creates the material.

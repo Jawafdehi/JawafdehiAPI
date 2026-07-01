@@ -38,6 +38,7 @@ from jawafdehi_shared.storage import store_file_as_link
 from courts.permissions import HasNgmRole
 
 from . import jsonld
+from . import provenance
 from .bulk_ingest import _infer_material_type
 from .models import Material
 
@@ -263,30 +264,6 @@ def material_detail(request, source: str, ident: str):
     return Response(data, content_type=LD_JSON)
 
 
-def _append_media_object(doc: dict, *, content_url: str, role: str, filename: str) -> dict:
-    """Append a schema.org ``MediaObject`` for an uploaded file to ``associatedMedia``.
-
-    Reuses the ``jsonld._media_object`` shaping (``contentUrl`` /
-    ``jawafdehi:linkRole`` / ``encodingFormat``) so an uploaded file is one more
-    roled link on the material — identical to the DocumentSource modality. The
-    ``encodingFormat`` is guessed from the filename extension (the roled-link
-    hint has no format for RAW/ALTERNATE/PERMALINK). Mutates + returns ``doc``.
-    """
-    mo = jsonld._media_object({"link": content_url, "role": role})
-    if mo is not None:
-        encoding, _ = mimetypes.guess_type(filename)
-        if encoding and "encodingFormat" not in mo:
-            mo["encodingFormat"] = encoding
-        media = doc.get("associatedMedia")
-        if isinstance(media, dict):
-            media = [media]
-        elif not isinstance(media, list):
-            media = []
-        media.append(mo)
-        doc["associatedMedia"] = media
-    return doc
-
-
 @api_view(["POST"])
 @permission_classes([AllowAny])
 @parser_classes([MultiPartParser, FormParser])
@@ -363,11 +340,25 @@ def material_file_upload(request, source: str, ident: str):
         material_type = existing.material_type
         doc = dict(existing.data)
 
-    # Stream the file to storage (shared hashed-filename S3 mechanism) and append
-    # its permanent URL as a roled MediaObject on the material.
+    # Capture provenance BEFORE storing (hashing rewinds the file pointer), then
+    # stream to storage and attach a roled MediaObject carrying that provenance.
+    # attach_media_object dedups on (role, sha256) so re-uploading the same bytes
+    # replaces the link instead of appending a duplicate (content-hash idempotency).
+    sha256 = provenance.content_sha256(uploaded)
+    prov = provenance.build_provenance(
+        sha256=sha256,
+        fetch_method="upload",
+        content_length=uploaded.size,
+        source_url=(request.data.get("source_url") or None),
+    )
     link = store_file_as_link(uploaded, role=role)
-    _append_media_object(
-        doc, content_url=link["link"], role=link["role"], filename=uploaded.name
+    encoding, _ = mimetypes.guess_type(uploaded.name)
+    provenance.attach_media_object(
+        doc,
+        content_url=link["link"],
+        role=link["role"],
+        encoding_format=encoding or None,
+        provenance=prov,
     )
 
     result, code, error = _upsert_material(
