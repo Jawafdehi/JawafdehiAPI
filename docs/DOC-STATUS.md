@@ -1,6 +1,6 @@
 # DOC-STATUS — Documentation Audit & Orientation Index
 
-_Last audited: 2026-06-30._
+_Last audited: 2026-07-01 (data-plane consolidation: #262 jobs queue, #263 cases-own-no-documents, #264 material_convert FTS feed all merged to `v2`)._
 
 **Read this first.** This file is the orientation index for the `docs/` tree: it says,
 doc by doc, what to trust and what to treat with caution. For *what the platform is now*
@@ -60,9 +60,10 @@ A `>` status banner has been added in-place to the most-misleading STALE docs (m
 | Doc | Class | Notes | Disposition |
 |---|---|---|---|
 | `README.md` | CURRENT | Docs front door; points at ARCHITECTURE.md + here | Keep. |
-| `ARCHITECTURE.md` | CURRENT | **Single source of truth** for the current platform (monolith, 3 DBs/router, schema.org/IRI, unified OpenSearch, OIDC) | Keep. |
+| `ARCHITECTURE.md` | CURRENT | **Single source of truth** for the current platform (monolith, 3 DBs/router, schema.org/IRI, unified OpenSearch, OIDC); §5 = data plane (Postgres-SoR, lakehouse-lite) | Keep. |
 | `DOC-STATUS.md` (this file) | CURRENT | The orientation index / per-doc audit | Keep. |
-| `unified-search-plan.md` | CURRENT (BUILT & LIVE) | §0 = pre-build starting point (marked as such); §1-§8 reconciled to the live build (hard-fail no-fallback, four index constants, case_id done, no "internal" role, no `visibility` field) | Keep. |
+| `data-plane-design.md` | CURRENT (BUILT) | Data-plane consolidation: Postgres-SoR + R2 archive + OpenSearch; **no live Iceberg** (`lakehouse/` dormant seam); `material_convert` FTS feed shipped (#264). Reconciles ARCHITECTURE §5; incorporates the jobs queue + cases-own-no-documents ADR | Keep (load-bearing). |
+| `unified-search-plan.md` | CURRENT (BUILT & LIVE) | §0 = pre-build starting point (marked as such); §1-§8 reconciled to the live build (hard-fail no-fallback, four index constants, case_id done, no "internal" role). NOTE: `Material.visibility` now EXISTS (added by #263) and gates material indexing — supersedes the old "no `visibility` field" caveat | Keep. |
 | `case-workflows-retirement-plan.md` | CURRENT | Live/actionable plan to retire `case_workflows` + drop the langchain/langgraph/deepagents stack; uses live monolith + uv-workspace paths | Keep; execute. |
 
 ### `shared/`
@@ -77,8 +78,8 @@ A `>` status banner has been added in-place to the most-misleading STALE docs (m
 | Doc | Class | Notes | Disposition |
 |---|---|---|---|
 | `shared/research/COST-AUDIT.md` | CURRENT | Free-OSS-only audit binding; FastAPI/"database-per-service" rows footnoted as pre-monolith framing (only license verdicts load-bearing) | Keep. |
-| `shared/research/iceberg-catalog-options.md` | CURRENT | Lakekeeper + R2 + DuckDB recommendation, topology-agnostic | Keep. |
-| `shared/research/duckdb-iceberg-r2-wiring.md` | CURRENT | DuckDB↔Iceberg↔R2 wiring; load-bearing for the lakehouse module | Keep. |
+| `shared/research/iceberg-catalog-options.md` | CURRENT (DEFERRED) | Lakekeeper + R2 + DuckDB recommendation, topology-agnostic. Applies to the **dormant** `lakehouse/` seam only — there is no live Iceberg lake now (`data-plane-design.md` §6) | Keep for if/when a lake is stood up. |
+| `shared/research/duckdb-iceberg-r2-wiring.md` | CURRENT (DEFERRED) | DuckDB↔Iceberg↔R2 wiring; blueprint for the **dormant** `lakehouse/` module (not a live serving path — `data-plane-design.md` §6) | Keep for if/when a lake is stood up. |
 | `shared/research/entity-resolution-tech.md` | CURRENT | Splink + Fellegi-Sunter + DuckDB + bilingual normalization; topology-agnostic | Keep. |
 | `shared/research/nes-sourcing-feasibility.md` | CURRENT | 1M-not-reachable, ~250k-450k realistic ceiling | Keep. |
 | `shared/research/opensearch-bilingual-nepali.md` | CURRENT | analysis-icu + icu_transform + indic-transliteration — the adopted unified-search approach | Keep (load-bearing). |
