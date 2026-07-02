@@ -153,6 +153,7 @@ class Command(BaseCommand):
             canon_doc = dict(data_by_iri[canon])
             roles, seen = [], set()
             sameas = set()
+            idents, seen_idents = [], set()
             for i in iris:
                 for r in _as_roles(data_by_iri[i].get("hasOccupation")):
                     k = _role_key(r)
@@ -161,7 +162,17 @@ class Command(BaseCommand):
                         roles.append(r)
                 for s in (data_by_iri[i].get("sameAs") or []):
                     sameas.add(s if isinstance(s, str) else json.dumps(s))
+                # Merge identifiers from EVERY record in the cluster, not just the
+                # canonical one — the merged-away records are deleted below, so any
+                # unique external id they carry would otherwise be lost.
+                for ident in (data_by_iri[i].get("identifier") or []):
+                    k = json.dumps(ident, sort_keys=True) if isinstance(ident, dict) else str(ident)
+                    if k not in seen_idents:
+                        seen_idents.add(k)
+                        idents.append(ident)
             canon_doc["hasOccupation"] = roles
+            if idents:
+                canon_doc["identifier"] = idents
             # record the merged-away ids as sameAs for provenance
             for o in others:
                 sameas.add(o)
