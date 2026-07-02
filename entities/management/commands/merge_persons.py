@@ -153,12 +153,12 @@ class Command(BaseCommand):
             canon_doc = dict(data_by_iri[canon])
             roles, seen = [], set()
             sameas = set()
-            idents = canon_doc.get("identifier") or []
             for i in iris:
                 for r in _as_roles(data_by_iri[i].get("hasOccupation")):
                     k = _role_key(r)
                     if k not in seen:
-                        seen.add(k); roles.append(r)
+                        seen.add(k)
+                        roles.append(r)
                 for s in (data_by_iri[i].get("sameAs") or []):
                     sameas.add(s if isinstance(s, str) else json.dumps(s))
             canon_doc["hasOccupation"] = roles

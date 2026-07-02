@@ -37,7 +37,6 @@ from jawafdehi_shared.entities.ids import (
     build_entity_iri,
     canonicalize_entity_iri,
     is_valid_entity_iri,
-    parse_entity_iri,
 )
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes

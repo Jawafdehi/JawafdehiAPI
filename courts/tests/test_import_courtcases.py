@@ -26,8 +26,6 @@ from courts.importer import (
     ImportMode,
 )
 from courts.models import CaseEntity, Court, CourtCase, CourtCaseHearing
-from materials.jsonld import court_case_material_iri
-from materials.models import Material
 
 _SCRAPED = datetime(2024, 5, 15, tzinfo=timezone.utc)
 
