@@ -18,7 +18,6 @@ from .models import (
     requires_accused,
 )
 from .rules.predicates import (
-    can_change_case,
     can_manage_user,
     can_transition_case_state,
     can_view_case,

@@ -44,7 +44,6 @@ from django.db import transaction
 from entities.services.bulk_ingest.models import IngestSource
 
 from .jsonld import (
-    KNOWN_MATERIAL_SCHEMA_TYPES,
     MaterialType,
     validate_material_jsonld,
 )

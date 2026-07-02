@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: Hippocratic-3.0
+
+# Test + lint gate for the platform monolith (restored uv-native after the wholesale port dropped the
+# legacy Poetry workflows). The WHOLE test suite runs on sqlite with ZERO external services —
+# config/settings_test.py gives each router alias (default/nes/ngm) its own in-memory sqlite — so no
+# postgres/OpenSearch service containers are needed. Lints with `ruff check`; formatting is NOT gated
+# (the tree predates `ruff format`, which would reflag ~150 files).
+#
+# Runs on both main and v2 during the v2->mainline transition; drop 'v2' once the platform deploy is
+# cut over to :main (matches docker-publish-platform.yml).
+name: CI
+on:
+  push:
+    branches: ['main', 'v2']
+  pull_request:
+    branches: ['main', 'v2']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-lint:
+    runs-on: ubuntu-latest
+    env:
+      DJANGO_SETTINGS_MODULE: config.settings_test
+      TESTING: "true"
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (incl. dev group)
+        run: uv sync --frozen
+
+      - name: Lint (ruff check)
+        run: uv run ruff check .
+
+      # ``integration-tests/`` is a separate live-stack E2E suite (own pyproject + Makefile) that
+      # hits a running monolith at PLATFORM_BASE_URL — it belongs in its own stack-up job, not this
+      # unit gate, so it is excluded here (it errors, not skips, when the stack is down).
+      - name: Tests (sqlite, no external services)
+        run: uv run pytest -q --tb=short --ignore=integration-tests

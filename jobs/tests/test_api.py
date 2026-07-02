@@ -10,7 +10,6 @@ from django.contrib.auth.models import Group, User
 from rest_framework.test import APIClient
 
 from jobs import registry
-from jobs.models import Job
 
 
 @pytest.fixture

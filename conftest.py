@@ -113,14 +113,18 @@ collect_ignore = [
 # ``TestCase`` subclasses.
 #
 # Rather than edit ~40 Jawafdehi test modules, we enroll ALL databases on every
-# ``django_db`` marker that did not already pin a ``databases`` set. This mirrors
-# the NES/NGM ``"__all__"`` choice and matches production reality (the platform
-# always has the three DBs and any case-detail read can fan out to ``nes``/
-# ``ngm``). Tests that never touch another alias are unaffected (enrolling an
-# unused test DB is harmless); tests that explicitly pin ``databases=[...]`` are
-# left as-is.
+# ``django_db`` marker that did not already pin a ``databases`` set, using the
+# ``"__all__"`` sentinel (mirroring the NES/NGM ``APITestCase``s) and matching
+# production reality (the platform always has the three DBs and any case-detail
+# read can fan out to ``nes``/``ngm``).
+#
+# NOTE: this MUST be the ``"__all__"`` sentinel, not an explicit frozenset of the
+# three aliases. An explicit set enrolls the aliases for READS but does not
+# reliably grant WRITE access to the secondary (``ngm``/``nes``) connections, so
+# tests that write Materials to ``ngm`` hit ``DatabaseOperationForbidden``;
+# ``"__all__"`` enrolls them fully. Tests that never touch another alias are
+# unaffected; tests that explicitly pin ``databases=[...]`` are left as-is.
 # ---------------------------------------------------------------------------
-_ALL_DB_ALIASES = frozenset({"default", "nes", "ngm"})
 
 
 def pytest_collection_modifyitems(config, items):
@@ -134,7 +138,7 @@ def pytest_collection_modifyitems(config, items):
         # Re-apply the marker with all aliases enrolled, preserving any other
         # kwargs the test passed (e.g. ``transaction=True``, ``reset_sequences``).
         new_kwargs = dict(marker.kwargs)
-        new_kwargs["databases"] = _ALL_DB_ALIASES
+        new_kwargs["databases"] = "__all__"
         # add_marker(..., append=False) PREPENDS, so this becomes the "closest"
         # marker that pytest-django reads for the ``databases`` set.
         item.add_marker(

@@ -117,9 +117,11 @@ class Command(BaseCommand):
         now = timezone.now()
         where, params = [], []
         if opts["dataset"]:
-            where.append("dataset = %s"); params.append(opts["dataset"])
+            where.append("dataset = %s")
+            params.append(opts["dataset"])
         if opts["since"]:
-            where.append("updated_at >= %s"); params.append(opts["since"])
+            where.append("updated_at >= %s")
+            params.append(opts["since"])
         sql = (
             "SELECT document_id, source_type, title, publication_date_bs, "
             "primary_url, html_url, links, doc_metadata FROM document_sources"
@@ -167,7 +169,8 @@ class Command(BaseCommand):
                             if bs:
                                 ad = bs_to_ad_iso(bs)
                                 if ad:
-                                    doc["datePublished"] = ad; bs_ok += 1
+                                    doc["datePublished"] = ad
+                                    bs_ok += 1
                                 else:
                                     bs_fail += 1
                                 doc["jawafdehi:datePublishedBS"] = str(bs)

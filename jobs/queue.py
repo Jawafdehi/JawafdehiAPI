@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
-from typing import Any, Optional
+from typing import Optional
 
 from django.db import IntegrityError, transaction
 from django.utils import timezone
