@@ -775,6 +775,13 @@ if not CSRF_TRUSTED_ORIGINS:
 SECURE_CONTENT_TYPE_NOSNIFF = True
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 X_FRAME_OPTIONS = "DENY"
+# Exempt /metrics from the HTTPS redirect: vmagent scrapes the pod IP over plain
+# HTTP (no Traefik, so no X-Forwarded-Proto=https), which SECURE_SSL_REDIRECT would
+# otherwise 301 to an https:// URL the pod doesn't serve. Defined unconditionally —
+# harmless when the redirect is off (DEBUG/tests) — so it always applies when the
+# redirect is on, and is testable without being overridden. Trailing slash optional.
+# The ingress still blocks /metrics from the public internet (metrics-deny-public).
+SECURE_REDIRECT_EXEMPT = [r"^metrics/?$"]
 
 if not DEBUG:
     SECURE_HSTS_SECONDS = int(os.getenv("SECURE_HSTS_SECONDS", "300"))
