@@ -1,0 +1,11 @@
+{% load static %}
+{% comment %}
+Overrides Wagtail's default bird logo across the admin (login, sidebar, 404,
+notifications). `wordmark` is True on the login screen (light background) and
+falsy in the dark sidebar, so we pick a legible variant per context.
+{% endcomment %}
+{% if wordmark %}
+    <img src="{% static 'newsroom/logo.svg' %}" alt="Jawafdehi Newsroom" style="max-width: 200px; height: auto;" />
+{% else %}
+    <img src="{% static 'newsroom/logo-dark.svg' %}" alt="Jawafdehi Newsroom" style="max-height: 32px; width: auto;" />
+{% endif %}

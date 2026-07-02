@@ -28,7 +28,7 @@ if _REPO_ROOT.is_dir():
         sys.path.insert(0, p)
 
 
-@pytest.fixture(autouse=True, scope="session")
+@pytest.fixture(autouse=True)
 def _disable_staticfiles_manifest():
     """Use the non-manifest staticfiles backend suite-wide (repo-root scope).
 
@@ -41,8 +41,22 @@ def _disable_staticfiles_manifest():
     ``collectstatic``). Hoisting the override to the repo-root conftest makes it
     apply regardless of collection order, so the ``/django-admin/`` e2e reads
     stay green whichever suite runs first.
+
+    Adding the Wagtail CMS made this override necessary but not sufficient: with
+    ``wagtail.admin`` installed, the ``{% static %}`` machinery resolves the
+    module-level ``django.contrib.staticfiles.storage.staticfiles_storage`` lazy
+    proxy (and the ``storages`` registry) to the *production*
+    ``CompressedManifestStaticFilesStorage`` before this fixture reassigns
+    ``settings.STORAGES`` — and both memoize their backend on first access, so the
+    reassignment alone doesn't take. Resetting them forces a rebuild from the
+    overridden STORAGES on next access, so template ``{% static %}`` calls (e.g.
+    the Jazzmin admin index pulling ``bootstrap.min.css``) use the non-manifest
+    backend.
     """
     from django.conf import settings as django_settings
+    from django.contrib.staticfiles import storage as _sf_storage
+    from django.core.files.storage import storages as _storages_registry
+    from django.utils.functional import empty as _empty
 
     django_settings.STORAGES = {
         "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
@@ -50,6 +64,19 @@ def _disable_staticfiles_manifest():
             "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
         },
     }
+
+    # Drop memoized backends so both the ``storages["staticfiles"]`` registry and
+    # the ``staticfiles_storage`` lazy proxy rebuild from the STORAGES set above
+    # (either may already have resolved to the manifest backend during app load —
+    # Wagtail's admin registration touches static handling early). The
+    # ``StorageHandler`` caches the parsed config on the ``backends``
+    # cached_property (backed by ``_backends``) and each instantiated backend in
+    # ``_storages`` — reset all of them so the next ``storages["staticfiles"]``
+    # (and the ``static`` templatetag that goes through it) re-reads STORAGES.
+    _storages_registry._backends = None
+    _storages_registry._storages = {}
+    _storages_registry.__dict__.pop("backends", None)
+    _sf_storage.staticfiles_storage._wrapped = _empty
 
 
 # ---------------------------------------------------------------------------
