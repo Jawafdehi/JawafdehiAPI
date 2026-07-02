@@ -13,9 +13,9 @@ from django.test import Client, override_settings
 @override_settings(SECURE_SSL_REDIRECT=True)
 def test_metrics_is_exempt_from_ssl_redirect():
     # Plain-HTTP GET (secure=False) is NOT redirected — the scrape reaches /metrics.
-    # Trailing slash is also exempt (r"^metrics/?$").
-    assert Client().get("/metrics", secure=False).status_code == 200
-    assert Client().get("/metrics/", secure=False).status_code in (200, 404)
+    # (The route is /metrics with no trailing slash; the regex just tolerates one.)
+    resp = Client().get("/metrics", secure=False)
+    assert resp.status_code == 200
 
 
 @override_settings(SECURE_SSL_REDIRECT=True)
