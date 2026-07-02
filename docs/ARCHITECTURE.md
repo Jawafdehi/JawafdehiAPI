@@ -1,6 +1,6 @@
 # Platform Architecture (current state)
 
-_Last updated: 2026-06-28. This is the single source of truth for **what the
+_Last updated: 2026-07-02. This is the single source of truth for **what the
 platform is now**. For per-doc status (what's current vs superseded) see
 [`DOC-STATUS.md`](./DOC-STATUS.md)._
 
@@ -11,18 +11,27 @@ a monolith**; this doc describes the shipped result, not the journey.
 
 ## 1. Shape: one Django monolith, three databases
 
-- **One Django project** at `/damodaha-volunteer/jawafdehi-platform/` (trunk `main`),
-  one WSGI, one image, runs at **`:48000`**.
-- **Apps:** `nes_service` (entities), `ngm_service` (courts + materials), the
-  Jawafdehi apps (`cases`, `case_workflows`, `review`), and the monolith-level
-  `search` + `discovery` apps. Project glue in `monolith/config/` (settings, urls,
-  wsgi, `db_router.py`).
-- **Database-per-service preserved** via a DB **router**: `entities` → `nes` DB,
-  `courts`/`materials` → `ngm` DB, everything else → `default`. **No cross-DB FKs/
-  joins** — query each DB, join in app. **Inter-app calls are in-process** (NOT REST;
-  the microservices-over-REST design was reversed).
-- **uv workspace** (not poetry). `shared/jawafdehi_shared/` holds the cross-app
-  libs: `auth.oidc`, `entities.ids`, `search.opensearch` + `search.mappings` +
+- **One Django project** in the `jawafdehi-api` repo (trunk `v2`), one WSGI, one
+  image, runs at **`:48000`**. (The R1 collapse flattened the earlier
+  `monolith/` + `services/{nes,ngm,jawafdehi}/` layout into top-level apps.)
+- **Apps** (all top-level dirs, in `INSTALLED_APPS`): `entities` (NES), `courts`
+  + `materials` (NGM), the Jawafdehi apps `cases` + `review`, plus the
+  platform-level `search`, `discovery`, and `jobs` apps. Project glue lives in the
+  top-level `config/` package (`settings.py`, `urls.py`, `wsgi.py`, `asgi.py`,
+  `db_router.py`). _(The `case_workflows` app was dropped — migration
+  `cases/migrations/0040_drop_case_workflows_tables.py`.)_
+- **Database-per-service preserved** via a DB **router** (`config.db_router.
+  ServiceDatabaseRouter`, wired at `config/settings.py:433`): `entities` → `nes`
+  DB, `courts`/`materials` → `ngm` DB, everything else → `default`. **No cross-DB
+  FKs/joins** — query each DB, join in app. **Inter-app calls are in-process**
+  (NOT REST; the microservices-over-REST design was reversed). _Caveat:_ the async
+  **review/jobs poller** is a separate process that talks HTTP (OIDC bearer) to
+  `/api/…` by design — it can target a **remote** portal (see
+  `review/ngm_client.py`, `review/jds_client.py`, `jobs-queue-design.md`); that is
+  a poller, not a revived internal REST proxy.
+- **uv workspace** (not poetry): one top-level `pyproject.toml` + `uv.lock`. The
+  cross-app libs live in the top-level **`jawafdehi_shared/`** package:
+  `auth.oidc`, `entities.ids`, `search.opensearch` + `search.mappings` +
   `search.transliterate`, `drf.base`.
 - **Testing:** engine-agnostic; SQLite fallback per DB alias for the full suite
   (~1057 unit tests pass). Integration tests target the one host `:48000`.
@@ -41,10 +50,10 @@ per-type Pydantic models were deleted in NES.
 | Jawafdehi case | `https://jawafdehi.org/case/<slug>` (minted at PUBLISH) |
 | Court case | `https://jawafdehi.org/courtcase/<court>/<case_number>` |
 
-- IRI contract + validators live in `shared/jawafdehi_shared/entities/ids.py`
+- IRI contract + validators live in `jawafdehi_shared/entities/ids.py`
   (canonicalize-on-store, strict-validate, `MAX_IRI_LENGTH=300`).
 - Validation is **minimal** (known `@type`, valid `@id`, `name` present) — see
-  `nes_service/entities/validation.py` and `ngm_service/materials/jsonld.py`.
+  `entities/validation.py` and `materials/jsonld.py`.
 - Bilingual text is a **language map** `{"ne": …, "en": …}`. Nepal-specific types
   use the `jawafdehi:` extension namespace (`jawafdehi:Province`, `:District`,
   `:PoliticalParty`, `:CourtCase`, `:ChargeSheet`, …).
@@ -60,13 +69,30 @@ per-type Pydantic models were deleted in NES.
 - **Bilingual EN + Nepali**: `analysis-icu` (icu_normalizer/tokenizer/transform/
   folding) + `indic_normalization` + an ICU transliteration bridge, so a Latin
   query matches a Devanagari doc and vice-versa. Config in
-  `shared/jawafdehi_shared/search/mappings.py`; research in
+  `jawafdehi_shared/search/mappings.py`; research in
   `shared/research/opensearch-bilingual-nepali.md`.
 - **Hard dependency**: cluster down → **503**, no in-process fallback.
 - Relevance tuning (field boosts + exact-phrase boost + `lang` re-rank + per-type
   `indices_boost`) and **`search_after` cursor deep-paging** are built.
 - `analysis-icu` is **baked into a custom image** (`infra/opensearch/Dockerfile`).
-- The `@id` envelope also drives **ResourceSync + Sitemaps** (`monolith/discovery/`).
+- The `@id` envelope also drives **ResourceSync + Sitemaps** (the `discovery/` app).
+
+## 3.5 Editorial CMS: headless Wagtail (updates/newsroom)
+
+- Public **updates/news articles** are served by a **headless Wagtail CMS** (the
+  `content/` app — "Jawafdehi Newsroom"), consumed by the SPA at
+  **`GET /api/cms/v2/pages/`** (published pages) and `/api/cms/v2/page_preview/…`
+  (signed draft preview). Editorial admin mounts at `/newsroom/`, documents at
+  `/documents/`; the headless API router registers `pages`, `images`,
+  `documents`, `page_preview` (`content/api.py`). Wagtail's built-in password
+  login is retired in favour of OIDC SSO.
+- **Status (2026-07-02): the `content/` app lives on `origin/main` but was dropped
+  from `v2` during the R1 collapse** (`4c39d8c`). The frontend still targets the
+  Wagtail contract (`src/services/cms-api.ts`, `/updates` routes), so **on `v2`
+  those calls currently 404**. The CMS is being **ported forward into `v2`** (port
+  `content/` + Wagtail deps + the `/api/cms/v2/` mount) — the frontend contract is
+  the target and stays as-is. Until that lands, the Updates surface is non-functional
+  on `v2`.
 
 ## 4. Auth: OIDC/Zitadel only
 
@@ -138,12 +164,22 @@ held and which can be promoted, see
 
 ## 7. Working model
 
-Two repos under the `damodaha` account, **both with `main` as the single trunk** (the old
-`v2` lines were retired 2026-06-29): **`damodaha/jawafdehi-platform`** (the Django monolith
-backend, greenfield) and **`damodaha/jawafdehi-frontend`** (the Jawafdehi SPA — forked from
-the upstream `jawafdehi/jawafdehi` org so we can unify the frontend too; `origin` = our
-fork, `upstream` = the org for pull/sync). All work happens on `main` — new work on a
-feature branch → PR → `main`. **Do local changes in git worktrees** (`git worktree add
-<path> main`), not by checking out branches in the primary tree (a `git checkout` over
-unmerged/conflicted paths silently fails and tangles stashes). Commits authored
-`oopsy <oopsy@claudy.com>`. Planning/sourcing artifacts live in this repo's `docs/` tree.
+Two repos, **both with `v2` as the working trunk**:
+
+- **`jawafdehi-api`** (this repo — the Django backend). Local clone at
+  `/damodaha-volunteer/think-big/jawafdehi-api`. `origin` = the org
+  (`Jawafdehi/JawafdehiAPI`), `fork` = the `damodaha` personal fork. PRs are filed
+  on the org from the fork.
+- **`jawafdehi-frontend`** (the Jawafdehi SPA — forked from the upstream
+  `jawafdehi/jawafdehi` org so we can unify the frontend too). `origin` = our fork,
+  `upstream` = the org for pull/sync.
+
+New work goes on a feature branch → PR → `v2`. **Do local changes in git worktrees**
+(`git worktree add <path> v2`), not by checking out branches in the primary tree (a
+`git checkout` over unmerged/conflicted paths silently fails and tangles stashes).
+Commits authored `oopsy <oopsy@claudy.com>`. Planning/sourcing artifacts live in this
+repo's `docs/` tree.
+
+_Note: an older `main` line still exists on the org remotes (it still carries the
+Wagtail `content/` app — see §3.5). `v2` is the active trunk; `main` is not retired
+and is the source for the CMS forward-port._
