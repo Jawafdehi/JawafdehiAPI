@@ -18,7 +18,11 @@ gate the UI by role.
 
 from django.utils import timezone
 from rest_framework import generics, status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import (
+    api_view,
+    authentication_classes,
+    permission_classes,
+)
 from rest_framework.response import Response
 
 from . import code_rules
@@ -36,21 +40,108 @@ from .serializers import (
 )
 
 
-@api_view(["GET"])
-@permission_classes([CanReadReview])
-def me_view(request):
-    """Return the signed-in user + their roles (for the SPA header / gating)."""
-    user = request.user
+def _user_roles_payload(user):
+    """Shared shape for me/dev-login: username + flattened group roles + is_admin."""
     roles = list(user.groups.values_list("name", flat=True))
     if user.is_superuser and "Admin" not in roles:
         roles = ["Admin"] + roles
-    return Response(
-        {
-            "username": user.username,
-            "roles": roles,
-            "is_admin": user.is_superuser or "Admin" in roles,
-        }
-    )
+    return {
+        "username": user.username,
+        "roles": roles,
+        "is_admin": user.is_superuser or "Admin" in roles,
+    }
+
+
+# me_view is defined below, after DEV_OR_OIDC_AUTH — it must accept the dev
+# session as well as an OIDC bearer, so its authenticators are pinned explicitly.
+
+
+# ---------------------------------------------------------------------------
+# DEV-ONLY username/password login for the SPA (mirrors DEV_AUTH on the backend).
+#
+# Production is OIDC/Zitadel only. When settings.DEV_AUTH is enabled (DEBUG or
+# TESTING only — never in prod), we expose a session login the React /admin can
+# POST to with the SAME credentials as the Django admin, so a developer can work
+# without standing up Zitadel. These routes are ONLY mounted when DEV_AUTH is on
+# (see review/urls.py); with the flag off they don't exist → SSO-only.
+# ---------------------------------------------------------------------------
+from django.conf import settings  # noqa: E402
+from django.contrib.auth import authenticate, login, logout  # noqa: E402
+from django.middleware.csrf import get_token  # noqa: E402
+from jawafdehi_shared.auth.oidc import OIDCAuthentication  # noqa: E402
+from rest_framework.authentication import SessionAuthentication  # noqa: E402
+from rest_framework.permissions import AllowAny  # noqa: E402
+
+
+class DevAwareSessionAuthentication(SessionAuthentication):
+    """SessionAuthentication that is INERT unless DEV_AUTH is on, evaluated per
+    request. DRF freezes a view's authenticators from DEFAULT_AUTHENTICATION_CLASSES
+    at import time (APIView.authentication_classes is a class attr set once), so a
+    view that must accept the DEV_AUTH session — like ``me`` and the dev-login
+    endpoints — can't rely on the global list, which only includes Session when
+    DEV_AUTH was truthy at settings-load. Pinning this class on those views makes
+    the session path work whenever DEV_AUTH is on, regardless of load order, and
+    stay OIDC-only in production (where DEV_AUTH is always False)."""
+
+    def authenticate(self, request):
+        if not settings.DEV_AUTH:
+            return None
+        return super().authenticate(request)
+
+
+# The authenticators for endpoints the SPA reaches with EITHER an OIDC bearer or
+# (in dev) a Django session: OIDC first, session second (inert unless DEV_AUTH).
+DEV_OR_OIDC_AUTH = [OIDCAuthentication, DevAwareSessionAuthentication]
+
+
+@api_view(["GET"])
+@authentication_classes(DEV_OR_OIDC_AUTH)
+@permission_classes([CanReadReview])
+def me_view(request):
+    """Return the signed-in user + their roles (for the SPA header / gating).
+
+    Accepts an OIDC bearer or (in dev) the session opened by dev_login_view —
+    authenticators are pinned so the dev session works regardless of DRF's
+    import-time freezing of the global default auth classes.
+    """
+    return Response(_user_roles_payload(request.user))
+
+
+@api_view(["POST"])
+@authentication_classes([DevAwareSessionAuthentication])
+@permission_classes([AllowAny])
+def dev_login_view(request):
+    """DEV-ONLY: authenticate with username/password, open a Django session.
+
+    Returns the same {username, roles, is_admin} shape as ``me`` plus a CSRF
+    token the SPA must echo as X-CSRFToken on subsequent session-authenticated
+    writes. Hard 404 when DEV_AUTH is off so it can never exist in production.
+    """
+    if not settings.DEV_AUTH:
+        return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+    username = (request.data.get("username") or "").strip()
+    password = request.data.get("password") or ""
+    user = authenticate(request, username=username, password=password)
+    if user is None:
+        return Response(
+            {"detail": "Invalid username or password."},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+    login(request, user)
+    payload = _user_roles_payload(user)
+    payload["csrftoken"] = get_token(request)
+    return Response(payload)
+
+
+@api_view(["POST"])
+@authentication_classes([DevAwareSessionAuthentication])
+@permission_classes([AllowAny])
+def dev_logout_view(request):
+    """DEV-ONLY: end the Django session opened by dev_login_view."""
+    if not settings.DEV_AUTH:
+        return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+    logout(request)
+    return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 @api_view(["POST"])
@@ -114,6 +205,61 @@ class ReviewListView(generics.ListAPIView):
 
     def get_queryset(self):
         return CaseReview.objects.all()
+
+
+class GroupedReviewListView(generics.ListAPIView):
+    """GET /api/casework/reviews/grouped/
+
+    The flat review list carries one row per execution; the SPA's review list
+    page instead wants ONE entry per case with ALL of that case's executions
+    (so an older run doesn't fall onto a later page of the flat list). This view
+    groups CaseReview rows by case slug and paginates BY CASE.
+
+    Each result: {slug, case_title, latest: <ReviewListItem>,
+    executions: [<ReviewListItem> ...]} — executions newest-first, cases ordered
+    by their most-recent execution (newest case first). ``latest`` is
+    ``executions[0]``. Uses the same CaseReviewListSerializer as the flat list
+    so item shapes match exactly.
+    """
+
+    permission_classes = [CanReadReview]
+    serializer_class = CaseReviewListSerializer
+
+    def _grouped_cases(self):
+        # CaseReview.Meta.ordering is -created_at, so iterating in that order
+        # yields executions newest-first per group and cases in most-recent-first
+        # order (the first slug seen is the one with the newest execution).
+        groups: dict[str, list[CaseReview]] = {}
+        for review in CaseReview.objects.all():
+            groups.setdefault(review.slug, []).append(review)
+        return groups
+
+    def list(self, request, *args, **kwargs):
+        groups = self._grouped_cases()
+        slugs = list(groups.keys())  # already ordered newest-case-first
+
+        page = self.paginate_queryset(slugs)
+        page_slugs = page if page is not None else slugs
+
+        results = []
+        for slug in page_slugs:
+            executions = groups[slug]
+            items = CaseReviewListSerializer(executions, many=True).data
+            latest = executions[0]
+            results.append(
+                {
+                    "slug": slug,
+                    # The case title is snapshotted on every review row; the
+                    # newest execution carries the freshest value.
+                    "case_title": latest.case_title,
+                    "latest": items[0],
+                    "executions": items,
+                }
+            )
+
+        if page is not None:
+            return self.get_paginated_response(results)
+        return Response(results)
 
 
 class ReviewDetailView(generics.RetrieveAPIView):

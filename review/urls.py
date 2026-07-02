@@ -12,6 +12,7 @@ from . import views
 urlpatterns = [
     path("auth/me/", views.me_view),
     path("reviews/", views.ReviewListView.as_view()),
+    path("reviews/grouped/", views.GroupedReviewListView.as_view()),
     path("reviews/submit/", views.submit_review),
     path("reviews/regrade-all/", views.regrade_all),
     # NOTE: the review-local job API (jobs/claim, jobs/<id>/stage, jobs/<id>/result)
@@ -21,4 +22,15 @@ urlpatterns = [
     path("rules/", views.rules_list),
     path("rules/<int:pk>/", views.rule_detail),
     path("config/", views.config_view),
+]
+
+# DEV-ONLY username/password session login for the SPA (same credentials as the
+# Django admin). The routes are always registered, but each view hard-404s at
+# runtime unless DEV_AUTH is enabled (DEBUG/TESTING) — so with the flag off the
+# platform is effectively OIDC/SSO-only. Runtime gating (not import-time) keeps
+# the boundary from depending on when this module is imported relative to when
+# DEV_AUTH is set, which otherwise leaves the flag untestable and route-flaky.
+urlpatterns += [
+    path("auth/dev-login/", views.dev_login_view),
+    path("auth/dev-logout/", views.dev_logout_view),
 ]

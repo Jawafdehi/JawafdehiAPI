@@ -44,7 +44,6 @@ from entities.models import StoredEntity
 from courts.models import Court, CourtCase
 from materials.models import Material
 
-from .admin import CaseAdminForm
 from .caseworker_serializers import (
     BLOCKED_PATH_PREFIXES,
     CaseCreateSerializer,
@@ -115,7 +114,7 @@ def _recompute_material_visibility(material_iris) -> None:
     create=extend_schema(
         summary="Create a draft case",
         description="""
-        Create a new case through the same validation rules used by the Django admin form.
+        Create a new case through the model-layer validation rules (`Case.validate()` / `Case.save()`).
 
         Authenticated users create cases in `DRAFT` state only. The request user is
         automatically added as a contributor on the new case.
@@ -140,6 +139,9 @@ def _recompute_material_visibility(material_iris) -> None:
 
         **Filtering:**
         - `case_type`: Filter by case type (CORRUPTION)
+        - `state`: Filter by workflow state (DRAFT / IN_REVIEW / PUBLISHED). Applied
+          after visibility scoping, so callers only ever see states they may view
+          (e.g. `?state=IN_REVIEW` is the moderation queue for casework roles).
         - `tags`: Filter cases containing a specific tag
 
         **Search:**
@@ -156,6 +158,14 @@ def _recompute_material_visibility(material_iris) -> None:
                 location=OpenApiParameter.QUERY,
                 description="Filter by case type",
                 enum=["CORRUPTION"],
+                required=False,
+            ),
+            OpenApiParameter(
+                name="state",
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                description="Filter by workflow state (visibility-scoped)",
+                enum=["DRAFT", "IN_REVIEW", "PUBLISHED"],
                 required=False,
             ),
             OpenApiParameter(
@@ -239,7 +249,11 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = CaseSerializer
     lookup_field = "slug"
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    filterset_fields = ["case_type"]
+    # ``state`` powers the moderation queue (GET /api/cases/?state=IN_REVIEW,
+    # plan §G1). Filtering runs AFTER get_queryset()'s visibility scoping, so a
+    # public caller filtering ?state=IN_REVIEW still gets nothing (the base
+    # queryset is PUBLISHED-only) — visibility is preserved.
+    filterset_fields = ["case_type", "state"]
     search_fields = ["title", "description", "key_allegations"]
     # Auth: inherit the OIDC-only DEFAULT_AUTHENTICATION_CLASSES (no per-view
     # pin). Unauthenticated reads still work because the actions use
@@ -349,12 +363,39 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
             "entity_relationships",
         ).order_by("-created_at")
 
+    # Case model fields that CaseCreateSerializer may set directly on the row.
+    # Non-model serializer keys (alleged_entities / related_entities / evidence)
+    # are handled separately as binds/joins below.
+    _CREATE_MODEL_FIELDS = frozenset(
+        [
+            "case_type",
+            "state",
+            "title",
+            "short_description",
+            "description",
+            "thumbnail_url",
+            "banner_url",
+            "case_start_date",
+            "case_end_date",
+            "tags",
+            "key_allegations",
+            "timeline",
+            "notes",
+            "slug",
+            "court_cases",
+            "missing_details",
+            "bigo",
+        ]
+    )
+
     def create(self, request, *args, **kwargs):
         """
         POST /api/cases/
 
-        Create a new case by delegating validation to the existing Django admin form
-        so API and admin creation semantics stay aligned.
+        Create a new case through the model-layer validation rules
+        (``Case.validate()`` / ``Case.save()``), which are the single source of
+        truth. Enforces DRAFT-on-create and the required-field rules that were
+        previously re-invoked via ``CaseAdminForm``.
         """
         # Validate that request body is a JSON object (dict), not array or scalar
         if not isinstance(request.data, dict):
@@ -377,33 +418,65 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
                 serializer.errors, status=status.HTTP_422_UNPROCESSABLE_ENTITY
             )
 
-        form = CaseAdminForm(data=serializer.validated_data, request=request)
-        if not form.is_valid():
-            return Response(form.errors, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+        validated = serializer.validated_data
 
-        with transaction.atomic():
-            case = form.save()
-            case.contributors.add(request.user)
-
-            # Create entity binds (NES ids) for alleged/related entities
-            for nes_id in serializer.validated_data.get("alleged_entities", []):
-                CaseEntityRelationship.objects.get_or_create(
-                    case=case,
-                    nes_id=nes_id,
-                    relationship_type=RelationshipType.ACCUSED,
-                )
-            for nes_id in serializer.validated_data.get("related_entities", []):
-                CaseEntityRelationship.objects.get_or_create(
-                    case=case,
-                    nes_id=nes_id,
-                    relationship_type=RelationshipType.RELATED,
-                )
-
-            # Create evidence binds (NGM material ids) — the CaseMaterialReference
-            # join. Ordinal preserves the submitted order (ADR: cases own no docs).
-            self._write_material_references(
-                case, serializer.validated_data.get("evidence", [])
+        # New cases must be DRAFT. This rule lived only in CaseAdminForm.clean()
+        # (admin.py:271) — not at the model layer — so it is ported here to keep
+        # create() lenient (DRAFT skips the allegation/description/entity gates)
+        # while still refusing a client-supplied non-DRAFT create.
+        if validated.get("state", CaseState.DRAFT) != CaseState.DRAFT:
+            return Response(
+                {
+                    "state": [
+                        "New cases must be created in DRAFT state. "
+                        f"Cannot create a new case with state {validated.get('state')}."
+                    ]
+                },
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
+
+        # Build the Case from the validated scalar fields; force DRAFT.
+        model_kwargs = {
+            field: validated[field]
+            for field in self._CREATE_MODEL_FIELDS
+            if field in validated
+        }
+        model_kwargs["state"] = CaseState.DRAFT
+        case = Case(**model_kwargs)
+
+        # Model-layer validation is the single source of truth (title-required,
+        # slug format, state-based required fields). ``validate()`` runs the
+        # state rules and auto-generates the slug; ``save()`` re-checks the title
+        # and slug immutability. Both raise ValidationError -> 422 field errors.
+        # (Slug FORMAT was already enforced by the serializer's validate_slug
+        # validator; blank slug is auto-generated, matching admin/save semantics.)
+        try:
+            case.validate()
+            with transaction.atomic():
+                case.save()
+                case.contributors.add(request.user)
+
+                # Create entity binds (NES ids) for alleged/related entities
+                for nes_id in validated.get("alleged_entities", []):
+                    CaseEntityRelationship.objects.get_or_create(
+                        case=case,
+                        nes_id=nes_id,
+                        relationship_type=RelationshipType.ACCUSED,
+                    )
+                for nes_id in validated.get("related_entities", []):
+                    CaseEntityRelationship.objects.get_or_create(
+                        case=case,
+                        nes_id=nes_id,
+                        relationship_type=RelationshipType.RELATED,
+                    )
+
+                # Create evidence binds (NGM material ids) — the
+                # CaseMaterialReference join. Ordinal preserves submitted order
+                # (ADR: cases own no docs).
+                self._write_material_references(case, validated.get("evidence", []))
+        except ValidationError as exc:
+            detail = getattr(exc, "message_dict", None) or {"detail": exc.messages}
+            return Response(detail, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
         # Newly-created evidence may reference materials whose visibility now
         # depends on this case's state — recompute (best-effort, on_commit).
@@ -546,10 +619,11 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
                 {"detail": "Permission denied for requested state transition."},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        # Note: only IN_REVIEW transitions are supported by this endpoint today.
-        # Admins/moderators may be allowed other transitions in future PRs.
-        # Non-IN_REVIEW targets will be rejected with 422 below even if the
-        # permission check above passes.
+        # All target states (IN_REVIEW / PUBLISHED / CLOSED / DRAFT) are
+        # supported; each dispatches to the corresponding model method below.
+        # can_transition_case_state gates the roles: Caseworkers are confined to
+        # DRAFT<->IN_REVIEW by the predicate, so PUBLISHED/CLOSED/revert-to-DRAFT
+        # are effectively Admin/Moderator only.
 
         # Gate entity rewrite to actual /entities patch ops.
         # _build_snapshot always includes "entities" in the snapshot, so
@@ -641,23 +715,47 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
             case.refresh_from_db()
 
             if target_state is not None and target_state != case.state:
-                if target_state == CaseState.IN_REVIEW:
-                    try:
+                # Every target dispatches to the model method that already
+                # implements + validates the transition (Case.validate() enforces
+                # BR-1..BR-4 on IN_REVIEW/PUBLISHED). No transition rule is
+                # re-implemented here; the permission gate was applied above via
+                # can_transition_case_state. A model ValidationError -> 422 with
+                # field-keyed messages (mirroring the original submit() handling).
+                try:
+                    if target_state == CaseState.IN_REVIEW:
                         case.submit()
-                    except ValidationError as exc:
-                        detail = getattr(exc, "message_dict", None) or {
-                            "detail": exc.messages
+                    elif target_state == CaseState.PUBLISHED:
+                        case.publish()
+                    elif target_state == CaseState.CLOSED:
+                        # Soft-delete (state -> CLOSED + versionInfo audit entry).
+                        case.delete()
+                    elif target_state == CaseState.DRAFT:
+                        # Un-submit / un-publish. No dedicated model method exists;
+                        # set DRAFT (lenient validation — only title), record the
+                        # audit entry, and save (mirrors submit()/publish()).
+                        case.state = CaseState.DRAFT
+                        case.validate()
+                        case.versionInfo = {
+                            "action": "reverted_to_draft",
+                            "datetime": timezone.now().isoformat(),
                         }
+                        case.save()
+                    else:
                         transaction.set_rollback(True)
-                        return Response(detail, status=status.HTTP_400_BAD_REQUEST)
-                else:
+                        return Response(
+                            {
+                                "detail": (
+                                    f"Unsupported state transition target: {target_state}."
+                                )
+                            },
+                            status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        )
+                except ValidationError as exc:
+                    detail = getattr(exc, "message_dict", None) or {
+                        "detail": exc.messages
+                    }
                     transaction.set_rollback(True)
-                    return Response(
-                        {
-                            "detail": "Only transitions to IN_REVIEW are supported via this endpoint."
-                        },
-                        status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    )
+                    return Response(detail, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
         # Scalar edits go through queryset .update() and entity-relationship
         # edits through bulk delete/create — neither fires post_save, so the

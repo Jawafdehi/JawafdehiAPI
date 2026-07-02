@@ -135,6 +135,74 @@ def test_post_rejects_client_supplied_contributors_field():
 
 
 @pytest.mark.django_db
+def test_post_rejects_missing_title():
+    """Title-required rule is enforced on the API create path (model-layer rule,
+    formerly re-invoked by CaseAdminForm.clean())."""
+    user = create_user_with_role("farid", "farid@example.com", "Caseworker")
+
+    response = _authed_client(user).post(
+        URL,
+        data={"case_type": CaseType.CORRUPTION},
+        format="json",
+    )
+
+    assert response.status_code == 422
+    assert "title" in response.data
+    assert Case.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_post_rejects_blank_title():
+    user = create_user_with_role("gita", "gita@example.com", "Caseworker")
+
+    response = _authed_client(user).post(
+        URL,
+        data={"title": "   ", "case_type": CaseType.CORRUPTION},
+        format="json",
+    )
+
+    assert response.status_code == 422
+    assert Case.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_post_rejects_invalid_slug_format():
+    """Slug FORMAT is enforced via the serializer's validate_slug validator (no
+    admin form needed)."""
+    user = create_user_with_role("hari", "hari@example.com", "Caseworker")
+
+    response = _authed_client(user).post(
+        URL,
+        data={
+            "title": "Bad slug case",
+            "case_type": CaseType.CORRUPTION,
+            "slug": "1-cannot-start-with-digit",
+        },
+        format="json",
+    )
+
+    assert response.status_code == 422
+    assert "slug" in response.data
+    assert Case.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_post_draft_stays_lenient_without_allegations_or_description():
+    """DRAFT create does NOT trigger the IN_REVIEW/PUBLISHED allegation and
+    description gates — parity with the old admin-form create semantics."""
+    user = create_user_with_role("indira", "indira@example.com", "Caseworker")
+
+    response = _authed_client(user).post(
+        URL,
+        data={"title": "Bare draft", "case_type": CaseType.CORRUPTION},
+        format="json",
+    )
+
+    assert response.status_code == 201
+    assert response.data["state"] == CaseState.DRAFT
+
+
+@pytest.mark.django_db
 def test_post_rejects_array_payload():
     """Test that POST with array payload returns 422 with clear error message."""
     user = create_user_with_role("eshwar", "eshwar@example.com", "Caseworker")
