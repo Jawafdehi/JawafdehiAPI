@@ -76,13 +76,16 @@ PHRASE_BOOST = 5.0
 # recall via the translit bridge is preserved — this is a re-rank, not a filter).
 _LANG_TITLE_MULTIPLIER = 2.0
 
-# Per-type (per-index) weighting: published editorial records (cases) and curated
-# entities are the primary answers; raw archive materials and court-case stubs
-# rank slightly lower at equal textual score. Applied via OpenSearch
-# ``indices_boost``. Tuned conservatively (within ~1.5x) so text relevance still
-# dominates — this only breaks near-ties.
+# Per-type (per-index) weighting: published editorial records (cases) are the
+# flagship, human-curated answers and are boosted hardest so a matching case
+# floats above the far larger pool of entities/court-case stubs/archive materials
+# at comparable textual score; curated entities come next. Applied via OpenSearch
+# ``indices_boost``. Text relevance still dominates within an index — this
+# re-ranks ACROSS indices, and (unlike a filter) a case must still MATCH the query
+# to benefit, so the colloquial ``title_translit`` recall fix is what lets a
+# Devanagari-titled case match a Latin query in the first place.
 TYPE_BOOSTS: dict[str, float] = {
-    "case": 1.3,
+    "case": 2.0,
     "entity": 1.2,
     "courtcase": 1.0,
     "material": 0.9,
