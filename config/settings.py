@@ -172,6 +172,11 @@ if not ALLOWED_HOSTS:
             "Set it to a comma-separated list of allowed hostnames "
             "(e.g. ALLOWED_HOSTS=portal.jawafdehi.org)."
         )
+# The pod's own IP (injected via the downward API), so Prometheus scraping of
+# /metrics by pod IP isn't rejected as a DisallowedHost. No-op when unset (dev).
+_pod_ip = os.getenv("POD_IP")
+if _pod_ip and _pod_ip not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(_pod_ip)
 
 CSRF_TRUSTED_ORIGINS = get_env_list("CSRF_TRUSTED_ORIGINS")
 
@@ -224,6 +229,8 @@ LOGGING = {
 # INSTALLED_APPS — the UNION of all three former projects' apps.
 # ---------------------------------------------------------------------------
 INSTALLED_APPS = [
+    # Prometheus /metrics (HTTP request metrics via the Before/After middleware).
+    "django_prometheus",
     # Jazzmin must precede django.contrib.admin (admin theme).
     "jazzmin",
     "django.contrib.admin",
@@ -292,6 +299,9 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # django-prometheus: Before must be FIRST and After LAST so the request timer
+    # spans the whole middleware chain.
+    "django_prometheus.middleware.PrometheusBeforeMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "jawafdehi_shared.middleware.RequestIdMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
@@ -306,6 +316,8 @@ MIDDLEWARE = [
     # Wagtail's editor-managed redirects (wagtail.contrib.redirects). Last so it
     # only runs on responses no earlier middleware/view produced (e.g. 404s).
     "wagtail.contrib.redirects.middleware.RedirectMiddleware",
+    # django-prometheus After must be the LAST middleware (see the Before entry).
+    "django_prometheus.middleware.PrometheusAfterMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"

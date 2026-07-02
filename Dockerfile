@@ -60,5 +60,6 @@ RUN DEBUG=False SECRET_KEY=foo-bar ALLOWED_HOSTS=portal.jawafdehi.org \
 EXPOSE 8080
 CMD ["uv", "run", \
      "gunicorn", "config.wsgi:application", \
+     "--config", "config/gunicorn.py", \
      "--bind", "0.0.0.0:8080", "--workers", "2", "--threads", "4", \
      "--timeout", "60", "--access-logfile", "-", "--error-logfile", "-"]
