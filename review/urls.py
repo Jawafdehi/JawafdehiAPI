@@ -5,7 +5,6 @@ jawafdehi-api JWT (clients get a token from /api/caseworker/auth/token/), and
 every endpoint requires at least the Caseworker role (see permissions.py).
 """
 
-from django.conf import settings
 from django.urls import path
 
 from . import views
@@ -25,11 +24,13 @@ urlpatterns = [
     path("config/", views.config_view),
 ]
 
-# DEV-ONLY username/password session login for the SPA. Mounted only when
-# DEV_AUTH is enabled (DEBUG/TESTING) — with the flag off these routes do not
-# exist, so the platform is OIDC/SSO-only. Same credentials as the Django admin.
-if settings.DEV_AUTH:
-    urlpatterns += [
-        path("auth/dev-login/", views.dev_login_view),
-        path("auth/dev-logout/", views.dev_logout_view),
-    ]
+# DEV-ONLY username/password session login for the SPA (same credentials as the
+# Django admin). The routes are always registered, but each view hard-404s at
+# runtime unless DEV_AUTH is enabled (DEBUG/TESTING) — so with the flag off the
+# platform is effectively OIDC/SSO-only. Runtime gating (not import-time) keeps
+# the boundary from depending on when this module is imported relative to when
+# DEV_AUTH is set, which otherwise leaves the flag untestable and route-flaky.
+urlpatterns += [
+    path("auth/dev-login/", views.dev_login_view),
+    path("auth/dev-logout/", views.dev_logout_view),
+]

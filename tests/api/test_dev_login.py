@@ -1,4 +1,11 @@
-"""DEV-ONLY session login for the SPA (gated by DEV_AUTH)."""
+"""DEV-ONLY session login for the SPA (gated by DEV_AUTH).
+
+The routes are always registered; each view hard-404s at runtime unless
+DEV_AUTH is on. me/dev-login/dev-logout pin their authenticators explicitly
+(DevAwareSessionAuthentication), so the session path works whenever DEV_AUTH is
+on regardless of DRF's import-time freezing of the global auth classes — the
+test only needs to flip the flag.
+"""
 import pytest
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
@@ -6,9 +13,14 @@ from rest_framework.test import APIClient
 User = get_user_model()
 
 
-@pytest.mark.django_db
-def test_dev_login_success_and_me_roundtrip(settings):
+@pytest.fixture
+def enable_dev_auth(settings):
     settings.DEV_AUTH = True
+    return settings
+
+
+@pytest.mark.django_db
+def test_dev_login_success_and_me_roundtrip(enable_dev_auth):
     User.objects.create_user(username="admin", password="admin", is_superuser=True, is_staff=True)
     c = APIClient()
     r = c.post("/api/casework/auth/dev-login/", {"username": "admin", "password": "admin"}, format="json")
@@ -24,8 +36,7 @@ def test_dev_login_success_and_me_roundtrip(settings):
 
 
 @pytest.mark.django_db
-def test_dev_login_bad_password(settings):
-    settings.DEV_AUTH = True
+def test_dev_login_bad_password(enable_dev_auth):
     User.objects.create_user(username="u", password="right")
     c = APIClient()
     r = c.post("/api/casework/auth/dev-login/", {"username": "u", "password": "wrong"}, format="json")
@@ -34,8 +45,8 @@ def test_dev_login_bad_password(settings):
 
 @pytest.mark.django_db
 def test_dev_login_hard_404_when_flag_off(settings):
-    # The route itself is only mounted when DEV_AUTH is on at import time, but the
-    # view ALSO guards at runtime; simulate the flag being off.
+    # Routes are always mounted, but the view hard-404s at runtime when the flag
+    # is off — the boundary that keeps the platform SSO-only in production.
     settings.DEV_AUTH = False
     User.objects.create_user(username="admin2", password="admin2")
     c = APIClient()

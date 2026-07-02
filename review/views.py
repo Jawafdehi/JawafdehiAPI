@@ -52,11 +52,8 @@ def _user_roles_payload(user):
     }
 
 
-@api_view(["GET"])
-@permission_classes([CanReadReview])
-def me_view(request):
-    """Return the signed-in user + their roles (for the SPA header / gating)."""
-    return Response(_user_roles_payload(request.user))
+# me_view is defined below, after DEV_OR_OIDC_AUTH — it must accept the dev
+# session as well as an OIDC bearer, so its authenticators are pinned explicitly.
 
 
 # ---------------------------------------------------------------------------
@@ -71,12 +68,47 @@ def me_view(request):
 from django.conf import settings  # noqa: E402
 from django.contrib.auth import authenticate, login, logout  # noqa: E402
 from django.middleware.csrf import get_token  # noqa: E402
+from jawafdehi_shared.auth.oidc import OIDCAuthentication  # noqa: E402
 from rest_framework.authentication import SessionAuthentication  # noqa: E402
 from rest_framework.permissions import AllowAny  # noqa: E402
 
 
+class DevAwareSessionAuthentication(SessionAuthentication):
+    """SessionAuthentication that is INERT unless DEV_AUTH is on, evaluated per
+    request. DRF freezes a view's authenticators from DEFAULT_AUTHENTICATION_CLASSES
+    at import time (APIView.authentication_classes is a class attr set once), so a
+    view that must accept the DEV_AUTH session — like ``me`` and the dev-login
+    endpoints — can't rely on the global list, which only includes Session when
+    DEV_AUTH was truthy at settings-load. Pinning this class on those views makes
+    the session path work whenever DEV_AUTH is on, regardless of load order, and
+    stay OIDC-only in production (where DEV_AUTH is always False)."""
+
+    def authenticate(self, request):
+        if not settings.DEV_AUTH:
+            return None
+        return super().authenticate(request)
+
+
+# The authenticators for endpoints the SPA reaches with EITHER an OIDC bearer or
+# (in dev) a Django session: OIDC first, session second (inert unless DEV_AUTH).
+DEV_OR_OIDC_AUTH = [OIDCAuthentication, DevAwareSessionAuthentication]
+
+
+@api_view(["GET"])
+@authentication_classes(DEV_OR_OIDC_AUTH)
+@permission_classes([CanReadReview])
+def me_view(request):
+    """Return the signed-in user + their roles (for the SPA header / gating).
+
+    Accepts an OIDC bearer or (in dev) the session opened by dev_login_view —
+    authenticators are pinned so the dev session works regardless of DRF's
+    import-time freezing of the global default auth classes.
+    """
+    return Response(_user_roles_payload(request.user))
+
+
 @api_view(["POST"])
-@authentication_classes([SessionAuthentication])
+@authentication_classes([DevAwareSessionAuthentication])
 @permission_classes([AllowAny])
 def dev_login_view(request):
     """DEV-ONLY: authenticate with username/password, open a Django session.
@@ -102,7 +134,7 @@ def dev_login_view(request):
 
 
 @api_view(["POST"])
-@authentication_classes([SessionAuthentication])
+@authentication_classes([DevAwareSessionAuthentication])
 @permission_classes([AllowAny])
 def dev_logout_view(request):
     """DEV-ONLY: end the Django session opened by dev_login_view."""
