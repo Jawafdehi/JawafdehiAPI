@@ -58,3 +58,8 @@ DATABASES = {
         "TEST": {"NAME": "file:test_ngm?mode=memory&cache=shared"},
     },
 }
+
+# No read replicas under tests: this DATABASES override drops any "_ro" alias the
+# base settings may have built from a stray *_READ_URL env, so clear the mapping
+# too or the router could route a read to an alias that no longer exists.
+REPLICA_ALIASES = {}

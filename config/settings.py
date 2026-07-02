@@ -310,6 +310,9 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    # After auth so session/user reads use the primary; steers the VIEW's
+    # anonymous public reads to the DB read replica (config.db_router).
+    "config.middleware.ReadReplicaRoutingMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "auditlog.middleware.AuditlogMiddleware",
@@ -462,6 +465,27 @@ if db_password:
         if db_url and "${DATABASE_PASSWORD}" in db_url:
             new_url = db_url.replace("${DATABASE_PASSWORD}", db_password)
             DATABASES[db_key] = dj_database_url.parse(new_url)
+
+# Read replicas (optional). When a "*_READ_URL" is set, register a "<alias>_ro"
+# connection to the read-only replica endpoint. The DB router (config.db_router)
+# sends anonymous public reads there, while writes + admin/casework traffic stay
+# on the primary (read-your-write). REPLICA_ALIASES maps primary alias -> replica
+# alias; it is EMPTY when no replica is configured (dev/tests), so the router
+# transparently falls back to the primary and behaviour is unchanged.
+REPLICA_ALIASES: dict[str, str] = {}
+_replica_url_env = {
+    "default": "DATABASE_READ_URL",
+    "nes": "NES_DB_READ_URL",
+    "ngm": "NGM_DATABASE_READ_URL",
+}
+for _primary_alias, _read_env in _replica_url_env.items():
+    _read_url = os.getenv(_read_env)
+    if _read_url:
+        if db_password and "${DATABASE_PASSWORD}" in _read_url:
+            _read_url = _read_url.replace("${DATABASE_PASSWORD}", db_password)
+        _ro_alias = f"{_primary_alias}_ro"
+        DATABASES[_ro_alias] = dj_database_url.parse(_read_url)
+        REPLICA_ALIASES[_primary_alias] = _ro_alias
 
 # Apply SSL options + connection pooling to every Postgres database.
 for db_key in DATABASES:
