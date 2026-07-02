@@ -25,10 +25,14 @@ _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 # Paths that must always read from the primary (they either write, or are editor
 # surfaces where stale replica reads would be confusing).
+# Every prefix ends with "/" so it matches a whole path segment and can't
+# accidentally catch a sibling (e.g. "/api/casework/" won't match some future
+# "/api/caseworkers"). Both /api/casework/ (review) and /api/caseworker/ (the
+# caseworker "me" endpoint) are listed explicitly.
 _PRIMARY_ONLY_PREFIXES = (
     "/django-admin/",
-    "/api/casework",
-    "/api/caseworker",
+    "/api/casework/",
+    "/api/caseworker/",
     "/api/jobs/",
     "/api/ingestion/",
     "/newsroom/",
@@ -41,7 +45,9 @@ class ReadReplicaRoutingMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
-        use_replica = request.method in _SAFE_METHODS and not request.path.startswith(
+        # Use path_info (path relative to the app), not path, so prefix matching is
+        # correct even if the app is ever mounted under a SCRIPT_NAME subpath.
+        use_replica = request.method in _SAFE_METHODS and not request.path_info.startswith(
             _PRIMARY_ONLY_PREFIXES
         )
         route_reads_to_replica(use_replica)

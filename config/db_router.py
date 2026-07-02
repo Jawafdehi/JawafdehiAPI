@@ -30,24 +30,29 @@ dotted ``name``).
 
 from __future__ import annotations
 
-import threading
+import contextvars
 
-# Per-thread read-routing flag, set by config.middleware.ReadReplicaRoutingMiddleware
-# for the duration of a request: True → this request's reads may use the read
-# replica; False (default, and outside any request — mgmt commands, shell, tasks)
-# → reads use the primary. Kept here (next to the router that consumes it) so the
+# Read-routing flag, set by config.middleware.ReadReplicaRoutingMiddleware for the
+# duration of a request: True → this request's reads may use the read replica;
+# False (default, and outside any request — mgmt commands, shell, tasks) → reads
+# use the primary. A ContextVar (not threading.local) so it is correct under BOTH
+# sync gunicorn worker threads AND async views/tasks: each thread has its own
+# top-level context and each async task copies it, so the flag never leaks across
+# concurrent requests. Kept here (next to the router that consumes it) so the
 # router has no import-time dependency on the middleware.
-_routing_state = threading.local()
+_use_replica_var: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "use_replica_for_reads", default=False
+)
 
 
 def route_reads_to_replica(enabled: bool) -> None:
-    """Mark the current thread's reads as replica-eligible (True) or primary-only
+    """Mark the current context's reads as replica-eligible (True) or primary-only
     (False). The middleware sets it per request and always resets it afterwards."""
-    _routing_state.use_replica = enabled
+    _use_replica_var.set(enabled)
 
 
 def _reads_use_replica() -> bool:
-    return getattr(_routing_state, "use_replica", False)
+    return _use_replica_var.get()
 
 
 # App labels owned by each service database. Anything not listed routes to

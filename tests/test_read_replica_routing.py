@@ -76,7 +76,8 @@ def _flag_during(method, path):
         captured["flag"] = _reads_use_replica()
         return "response"
 
-    request = type("R", (), {"method": method, "path": path})()
+    # The middleware matches on path_info (not path).
+    request = type("R", (), {"method": method, "path_info": path})()
     ReadReplicaRoutingMiddleware(get_response)(request)
     return captured["flag"]
 
