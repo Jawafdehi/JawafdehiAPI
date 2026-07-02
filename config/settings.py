@@ -266,6 +266,29 @@ INSTALLED_APPS = [
     "search",
     # ── Public discovery (Sitemaps + ResourceSync, IRI-driven; no models) ─────
     "discovery",
+    # ── Wagtail CMS (headless) — public /updates news section ────────────────
+    # The SPA consumes the "Jawafdehi Newsroom" CMS via the API v2 endpoints at
+    # /api/cms/v2/. All Wagtail tables live on the `default` DB (the config
+    # db_router routes any app_label not in NES/NGM to `default`, and the User /
+    # auth tables it FKs to live there too). Editorial admin at /newsroom/.
+    "wagtail.contrib.forms",
+    "wagtail.contrib.redirects",
+    "wagtail.embeds",
+    "wagtail.sites",
+    "wagtail.users",
+    "wagtail.snippets",
+    "wagtail.documents",
+    "wagtail.images",
+    "wagtail.search",
+    "wagtail.admin",
+    "wagtail.api.v2",
+    "wagtail",
+    # Redirects the page-preview iframe to the SPA so editors preview the real
+    # headless article instead of a (non-existent) server-rendered template.
+    "wagtail_headless_preview",
+    "modelcluster",
+    "taggit",
+    "content",
 ]
 
 MIDDLEWARE = [
@@ -280,6 +303,9 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "auditlog.middleware.AuditlogMiddleware",
+    # Wagtail's editor-managed redirects (wagtail.contrib.redirects). Last so it
+    # only runs on responses no earlier middleware/view produced (e.g. 404s).
+    "wagtail.contrib.redirects.middleware.RedirectMiddleware",
 ]
 
 ROOT_URLCONF = "config.urls"
@@ -288,7 +314,9 @@ WSGI_APPLICATION = "config.wsgi.application"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [],
+        # Repo-root templates/ holds the Wagtail admin logo override
+        # (templates/wagtailadmin/logo.html — Jawafdehi Newsroom branding).
+        "DIRS": [BASE_DIR / "templates"],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -548,6 +576,55 @@ OIDC_OP_USER_ENDPOINT = f"{ensure_trailing_slash(OIDC_ISSUER)}oidc/v1/userinfo"
 OIDC_OP_JWKS_ENDPOINT = OIDC_JWKS_URI
 LOGIN_URL = "/oidc/authenticate/"
 LOGOUT_REDIRECT_URL = "/django-admin/login/"
+
+# ---------------------------------------------------------------------------
+# Wagtail CMS (headless — serves the public /updates news section via API v2).
+# Ported from the pre-unification Jawafdehi monolith ("Jawafdehi Newsroom").
+# Wagtail images/documents share the platform default storage
+# (HashedFilenameS3Boto3Storage when S3 creds are set, else FileSystemStorage);
+# it leaves their namespaced upload paths untouched (see cases/storage.py).
+# ---------------------------------------------------------------------------
+WAGTAIL_SITE_NAME = "Jawafdehi Newsroom"
+# Base URL used for absolute links in the admin (notification emails, previews).
+# Not used for public delivery — the SPA consumes the API v2 endpoints.
+WAGTAILADMIN_BASE_URL = os.getenv(
+    "WAGTAILADMIN_BASE_URL", "https://portal.jawafdehi.org"
+)
+# Headless preview: the edit-screen preview iframe 302-redirects to the public
+# SPA's article preview route (which fetches the unsaved draft from the
+# page_preview API by token), so editors see the real styled article instead of
+# a server-rendered template that doesn't exist.
+WAGTAIL_HEADLESS_PREVIEW = {
+    "CLIENT_URLS": {
+        # rstrip so a stray trailing slash in the env value can't break the
+        # redirect URL or the worker's frame-allow path match.
+        "default": os.getenv(
+            "WAGTAIL_HEADLESS_PREVIEW_CLIENT_URL",
+            "https://jawafdehi.org/updates/preview",
+        ).rstrip("/"),
+    },
+    "REDIRECT_ON_PREVIEW": True,
+    # Keep the redirect URL slash-free so it matches the SPA's `/updates/preview`
+    # route and the worker's frame-allow check exactly.
+    "ENFORCE_TRAILING_SLASH": False,
+}
+WAGTAILSEARCH_BACKENDS = {
+    "default": {
+        "BACKEND": "wagtail.search.backends.database",
+    }
+}
+WAGTAILDOCS_EXTENSIONS = ["csv", "docx", "pdf", "pptx", "rtf", "txt", "xlsx", "zip"]
+WAGTAILDOCS_MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10 MB, matches case upload limit
+WAGTAILIMAGES_MAX_UPLOAD_SIZE = 10 * 1024 * 1024
+# Headless: pages are delivered via the API, not Wagtail's own routing.
+WAGTAIL_APPEND_SLASH = False
+# Complex StreamField pages can exceed Django's default form field cap.
+DATA_UPLOAD_MAX_NUMBER_FIELDS = 10_000
+# Route the Wagtail admin (/newsroom) through the same OIDC SSO flow instead of
+# Wagtail's built-in username/password form. require_admin_access redirects
+# unauthenticated users here (with ?next=), so the OIDC callback returns them to
+# the newsroom. The /newsroom/login/ form is also redirected (see config/urls).
+WAGTAILADMIN_LOGIN_URL = LOGIN_URL
 
 # ---------------------------------------------------------------------------
 # REST Framework — single config. OIDC is the sole API authenticator. The

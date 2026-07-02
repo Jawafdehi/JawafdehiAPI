@@ -31,9 +31,12 @@ from django.contrib import admin
 from django.urls import include, path
 from django.views.generic.base import RedirectView
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
+from wagtail.admin import urls as wagtailadmin_urls
+from wagtail.documents import urls as wagtaildocs_urls
 
 from cases.api_views import MeView, OEmbedView
 from cases.views import docs, index
+from content.api import api_router as wagtail_api_router
 
 urlpatterns = [
     # ── Jawafdehi (default DB) — keeps the original /api/ paths ─────────────
@@ -78,6 +81,22 @@ urlpatterns = [
     path("api/casework/", include("review.urls")),
     # ── Central job queue (platform-wide; consumers claim/stage/result here) ──
     path("api/jobs/", include("jobs.urls")),
+    # ── Wagtail CMS ("Jawafdehi Newsroom"): editorial admin, document serving,
+    #    and the headless API v2 the SPA's /updates section consumes. The API
+    #    contract is FROZEN — the frontend calls /api/cms/v2/pages/ (with
+    #    ?type=content.ArticlePage, fields, order) and /api/cms/v2/page_preview/.
+    #    Retire Wagtail's built-in password form: send /newsroom/login/ to the
+    #    same Zitadel OIDC SSO the rest of the platform uses. Must precede the
+    #    wagtailadmin include so it wins URL resolution.
+    path(
+        "newsroom/login/",
+        RedirectView.as_view(
+            url="/oidc/authenticate/?next=/newsroom/", query_string=False
+        ),
+    ),
+    path("newsroom/", include(wagtailadmin_urls)),
+    path("documents/", include(wagtaildocs_urls)),
+    path("api/cms/v2/", wagtail_api_router.urls),
 ]
 
 # Local-dev auth (DEV_AUTH, DEBUG/TESTING-only): DRF session login/logout at

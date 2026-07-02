@@ -58,6 +58,14 @@ dependencies = [
     # --- unified search substrate (OpenSearch + Devanagari<->Latin transliteration) ---
     "opensearch-py>=2.4",
     "indic-transliteration>=2.3.82",
+    # --- headless CMS (Wagtail "Jawafdehi Newsroom" — public /updates section) ---
+    # 7.4 is the current LTS; supports Django 5.2 + Python 3.12. Pulls in its own
+    # deps (taggit, modelcluster, willow, etc.). wagtail-headless-preview 0.9
+    # redirects the editor preview iframe to the SPA. markdown backs the one-time
+    # seed_updates management command.
+    "wagtail>=7.4,<7.5",
+    "wagtail-headless-preview>=0.9,<0.10",
+    "markdown>=3.5",
 ]
 
 [project.optional-dependencies]
@@ -93,6 +101,7 @@ packages = [
     "jobs",
     "search",
     "discovery",
+    "content",
 ]
 
 [dependency-groups]
