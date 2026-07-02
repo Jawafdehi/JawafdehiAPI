@@ -762,6 +762,11 @@ if not DEBUG:
     # runner without being redirected to https. TESTING is only true under the
     # test runner (settings.py: pytest / TESTING=true), so prod is unaffected.
     SECURE_SSL_REDIRECT = env_flag("SECURE_SSL_REDIRECT", True) and not TESTING
+    # Exempt /metrics from the HTTPS redirect: vmagent scrapes the pod IP over
+    # plain HTTP (no Traefik, so no X-Forwarded-Proto=https), which SECURE_SSL_
+    # REDIRECT would otherwise 301 to an https:// URL the pod doesn't serve. The
+    # ingress still blocks /metrics from the public internet (metrics-deny-public).
+    SECURE_REDIRECT_EXEMPT = [r"^metrics$"]
     CSRF_COOKIE_SECURE = True
     SESSION_COOKIE_SECURE = True
     SESSION_COOKIE_HTTPONLY = True
