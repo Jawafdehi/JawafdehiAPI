@@ -24,18 +24,22 @@ from .validators import validate_court_cases, validate_slug
 
 
 class CaseInsensitiveChoiceField(serializers.ChoiceField):
-    """ChoiceField that lowercases string input before validation.
+    """ChoiceField that matches string input against its choices case-insensitively.
 
     The frontend sends UPPERCASE relationship_type values (e.g. ``"ACCUSED"``)
-    while ``RelationshipType`` stores/returns lowercase (``"accused"``). We
-    accept the incoming value case-insensitively and normalize to lowercase so
-    it matches the stored/returned casing (the read path already emits
-    lowercase and the FE normalizes with ``toUpperCase``).
+    while ``RelationshipType`` stores/returns lowercase (``"accused"``). We match
+    the incoming value against the defined choice keys ignoring case and
+    normalize to the exact choice casing before validation, so the stored value
+    always matches the canonical choice (and the field is safe to reuse for
+    choices with uppercase or mixed-case keys).
     """
 
     def to_internal_value(self, data):
         if isinstance(data, str):
-            data = data.lower()
+            for choice_key in self.choice_strings_to_values:
+                if choice_key.lower() == data.lower():
+                    data = choice_key
+                    break
         return super().to_internal_value(data)
 
 # Paths that callers are not permitted to target in a patch operation.
