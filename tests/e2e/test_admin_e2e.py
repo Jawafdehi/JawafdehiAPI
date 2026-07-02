@@ -61,18 +61,17 @@ class TestDjangoAdminWorkflows:
 
     def test_create_draft_edit_submit_review_publish_workflow(self):
         """
-        E2E Test: Complete case lifecycle from creation to publication.
+        E2E Test: Django admin is read-only; validates that no role can add or
+        change cases through this surface.
 
-        Workflow:
-        1. Contributor creates a draft case
-        2. Contributor edits the draft
-        3. Contributor submits for review (DRAFT → IN_REVIEW)
-        4. Moderator reviews the case
-        5. Moderator publishes the case (IN_REVIEW → PUBLISHED)
+        The SPA `/admin` panel is the sole write surface for case lifecycle
+        (create/edit/submit/publish). This test verifies the Django admin
+        read-only contract: has_add_permission and has_change_permission both
+        return False for all roles, while has_view_permission remains functional.
 
         Validates: Requirements 1.1, 1.2, 1.3, 2.1, 2.2
         """
-        # Step 1: Contributor creates a draft case
+        # Create a case in various states to verify view access
         case = create_case_with_entities(
             title="New Corruption Case",
             alleged_entities=["https://jawafdehi.org/entity/person/test-official"],
@@ -81,88 +80,70 @@ class TestDjangoAdminWorkflows:
             description="Initial draft description",
             state=CaseState.DRAFT,
         )
-
-        # Assign contributor to the case
         case.contributors.add(self.contributor1)
         case.save()
 
-        # Verify initial state
-        assert (
-            case.state == CaseState.DRAFT
-        ), "New case should start in DRAFT state (Requirement 1.1)"
-
-        # Step 2: Contributor edits the draft
-        case.title = "Updated Corruption Case"
-        case.key_allegations = ["Initial allegation", "Additional allegation"]
-        case.description = "Updated draft description with more details"
-        case.save()
-
-        # Verify changes were saved
-        case.refresh_from_db()
-        assert case.title == "Updated Corruption Case"
-        assert len(case.key_allegations) == 2
-        assert (
-            case.state == CaseState.DRAFT
-        ), "Case should remain in DRAFT state after editing"
-
-        # Step 3: Contributor submits for review
-        case.submit()
-
-        # Verify state transition
-        case.refresh_from_db()
-        assert (
-            case.state == CaseState.IN_REVIEW
-        ), "Case should transition to IN_REVIEW after submission (Requirement 1.3)"
-        assert (
-            case.versionInfo is not None
-        ), "versionInfo should be updated after submission"
-        assert (
-            case.versionInfo.get("action") == "submitted"
-        ), "versionInfo should record the submission action"
-
-        # Step 4: Moderator reviews the case
-        # Verify moderator can access the case
         admin_instance = CaseAdmin(Case, None)
         from django.test import RequestFactory
 
         factory = RequestFactory()
-        request = factory.get("/")
-        request.user = self.moderator
 
-        queryset = admin_instance.get_queryset(request)
-        assert (
-            case in queryset
-        ), "Moderator should be able to access all cases (Requirement 2.3)"
+        # Verify contributor CANNOT add or change via Django admin
+        request_contrib = factory.get("/")
+        request_contrib.user = self.contributor1
 
-        has_permission = admin_instance.has_change_permission(request, case)
-        assert has_permission, "Moderator should have permission to change the case"
+        assert not admin_instance.has_add_permission(
+            request_contrib
+        ), "Django admin is read-only; contributor cannot add cases"
+        assert not admin_instance.has_change_permission(
+            request_contrib, case
+        ), "Django admin is read-only; contributor cannot change cases"
+        assert admin_instance.has_view_permission(
+            request_contrib, case
+        ), "Contributor should have view permission for assigned case"
 
-        # Step 5: Moderator publishes the case
-        case.publish()
+        # Verify moderator CANNOT change via Django admin either
+        request_mod = factory.get("/")
+        request_mod.user = self.moderator
 
-        # Verify publication
-        case.refresh_from_db()
-        assert (
-            case.state == CaseState.PUBLISHED
-        ), "Case should transition to PUBLISHED after moderator approval (Requirement 2.1, 2.2)"
-        assert (
-            case.versionInfo.get("action") == "published"
-        ), "versionInfo should record the publication action (Requirement 2.4)"
+        assert not admin_instance.has_add_permission(
+            request_mod
+        ), "Django admin is read-only; moderator cannot add cases"
+        assert not admin_instance.has_change_permission(
+            request_mod, case
+        ), "Django admin is read-only; moderator cannot change cases"
+        assert admin_instance.has_view_permission(
+            request_mod, case
+        ), "Moderator should have view permission for all cases"
+
+        # Verify admin CANNOT change via Django admin either
+        request_admin = factory.get("/")
+        request_admin.user = self.admin
+
+        assert not admin_instance.has_add_permission(
+            request_admin
+        ), "Django admin is read-only; admin cannot add cases"
+        assert not admin_instance.has_change_permission(
+            request_admin, case
+        ), "Django admin is read-only; admin cannot change cases"
+        assert admin_instance.has_view_permission(
+            request_admin, case
+        ), "Admin should have view permission for all cases"
 
     def test_contributor_assignment_and_access_restrictions(self):
         """
-        E2E Test: Verify contributor assignment restricts access correctly.
+        E2E Test: Django admin is read-only; validates that contributor
+        assignment controls VIEW access but no role can CHANGE cases here.
 
         Workflow:
-        1. Admin creates a case and assigns contributor1
-        2. Contributor1 can access and edit the case
-        3. Contributor2 cannot access the case
-        4. Admin assigns contributor2 to the case
-        5. Contributor2 can now access the case
+        1. Create a case and assign contributor1
+        2. Contributor1 can VIEW the case (queryset + view permission)
+        3. Contributor2 can VIEW (global read) but NOT change
+        4. Neither contributor can CHANGE via Django admin (read-only)
 
         Validates: Requirements 3.1, 3.2, 5.2
         """
-        # Step 1: Admin creates a case and assigns contributor1
+        # Step 1: Create a case and assign contributor1
         case = create_case_with_entities(
             title="Assigned Case",
             alleged_entities=["https://jawafdehi.org/entity/person/test"],
@@ -174,12 +155,12 @@ class TestDjangoAdminWorkflows:
         case.contributors.add(self.contributor1)
         case.save()
 
-        # Step 2: Verify contributor1 can access the case
         admin_instance = CaseAdmin(Case, None)
         from django.test import RequestFactory
 
         factory = RequestFactory()
 
+        # Step 2: Verify contributor1 can VIEW the case
         request1 = factory.get("/")
         request1.user = self.contributor1
 
@@ -188,18 +169,16 @@ class TestDjangoAdminWorkflows:
             case in queryset1
         ), "Contributor1 should see assigned case in queryset (Requirement 3.1)"
 
-        has_permission1 = admin_instance.has_change_permission(request1, case)
+        has_view1 = admin_instance.has_view_permission(request1, case)
+        assert has_view1, "Contributor1 should have view permission for assigned case"
+
+        # Django admin is read-only: contributor1 CANNOT change
+        has_change1 = admin_instance.has_change_permission(request1, case)
         assert (
-            has_permission1
-        ), "Contributor1 should have permission to change assigned case"
+            not has_change1
+        ), "Django admin is read-only; contributor1 cannot change cases"
 
-        # Contributor1 can edit the case
-        case.title = "Updated by Contributor1"
-        case.save()
-        case.refresh_from_db()
-        assert case.title == "Updated by Contributor1"
-
-        # Step 3: Verify contributor2 has read but not write access to the case
+        # Step 3: Verify contributor2 can VIEW (global read access) but not change
         request2 = factory.get("/")
         request2.user = self.contributor2
 
@@ -208,40 +187,39 @@ class TestDjangoAdminWorkflows:
             case in queryset2
         ), "Contributor2 should see unassigned case in queryset (global read access)"
 
-        has_permission2 = admin_instance.has_change_permission(request2, case)
+        has_view2 = admin_instance.has_view_permission(request2, case)
         assert (
-            not has_permission2
-        ), "Contributor2 should NOT have permission to change unassigned case"
+            has_view2
+        ), "Contributor2 should have view permission (global read access)"
 
-        # Step 4: Admin assigns contributor2 to the case
+        has_change2 = admin_instance.has_change_permission(request2, case)
+        assert (
+            not has_change2
+        ), "Django admin is read-only; contributor2 cannot change cases"
+
+        # Step 4: After assigning contributor2, queryset still includes the case
         case.contributors.add(self.contributor2)
         case.save()
 
-        # Step 5: Verify contributor2 can now access the case
         queryset2_after = admin_instance.get_queryset(request2)
         assert (
             case in queryset2_after
-        ), "Contributor2 should now see the case after assignment"
+        ), "Contributor2 should still see the case after assignment"
 
-        has_permission2_after = admin_instance.has_change_permission(request2, case)
+        # Still read-only even after assignment
+        has_change2_after = admin_instance.has_change_permission(request2, case)
         assert (
-            has_permission2_after
-        ), "Contributor2 should now have permission to change the case"
+            not has_change2_after
+        ), "Django admin is read-only; contributor2 still cannot change after assignment"
 
     def test_contributor_can_see_own_created_case_in_list(self):
         """
-        E2E Test: Verify contributor can see their own created case in list view.
-
-        Workflow:
-        1. Contributor creates a new draft case via admin
-        2. Verify creator is automatically added to contributors
-        3. Contributor performs list query
-        4. Verify the created case appears in their list
-        5. Verify another contributor cannot see the case
+        E2E Test: Django admin is read-only; validates that a contributor can
+        VIEW their assigned case in the list and detail views, and that other
+        contributors have global read access but no change permission.
 
         Validates: Requirements 3.1, 3.2
         """
-        # Step 1: Contributor creates a new draft case via admin
         admin_instance = CaseAdmin(Case, None)
         from django.test import RequestFactory
 
@@ -250,6 +228,7 @@ class TestDjangoAdminWorkflows:
         request_contrib1 = factory.get("/")
         request_contrib1.user = self.contributor1
 
+        # Create a case assigned to contributor1
         case = create_case_with_entities(
             title="Contributor's New Case",
             alleged_entities=["https://jawafdehi.org/entity/person/test-official"],
@@ -258,46 +237,34 @@ class TestDjangoAdminWorkflows:
             description="Case created by contributor1",
             state=CaseState.DRAFT,
         )
+        case.contributors.add(self.contributor1)
 
-        # Simulate admin save (which should auto-add creator to contributors)
-        admin_instance.save_model(request_contrib1, case, None, change=False)
-
-        # Simulate save_related (which adds creator to contributors)
-        class DummyForm:
-            instance = case
-
-            def save_m2m(self):
-                pass
-
-        admin_instance.save_related(request_contrib1, DummyForm(), [], change=False)
-
-        # Step 2: Verify creator is automatically added to contributors
-        assert (
-            self.contributor1 in case.contributors.all()
-        ), "Creator should be automatically added to contributors when creating a case"
-
-        # Step 3: Contributor performs list query
+        # Contributor performs list query: case appears in queryset
         queryset = admin_instance.get_queryset(request_contrib1)
-
-        # Step 4: Verify the created case appears in their list
         assert (
             case in queryset
-        ), "Contributor should see their own created case in list view (Requirement 3.1)"
+        ), "Contributor should see their own case in list view (Requirement 3.1)"
 
-        # Verify contributor has access to view and edit
+        # Contributor has VIEW permission
         has_view_permission = admin_instance.has_view_permission(request_contrib1, case)
         assert (
             has_view_permission
         ), "Contributor should have view permission for their own case"
 
+        # Django admin is read-only: NO change permission
         has_change_permission = admin_instance.has_change_permission(
             request_contrib1, case
         )
         assert (
-            has_change_permission
-        ), "Contributor should have change permission for their own case"
+            not has_change_permission
+        ), "Django admin is read-only; contributor cannot change cases"
 
-        # Step 5: Verify another contributor can view but not change the case
+        # has_add_permission is also False
+        assert not admin_instance.has_add_permission(
+            request_contrib1
+        ), "Django admin is read-only; contributor cannot add cases"
+
+        # Another contributor can view but not change the case
         request_contrib2 = factory.get("/")
         request_contrib2.user = self.contributor2
 
@@ -312,6 +279,13 @@ class TestDjangoAdminWorkflows:
         assert (
             has_view_permission2
         ), "Other contributors should have view permission for unassigned cases"
+
+        has_change_permission2 = admin_instance.has_change_permission(
+            request_contrib2, case
+        )
+        assert (
+            not has_change_permission2
+        ), "Django admin is read-only; other contributor cannot change cases"
 
     def test_state_transitions_with_validation(self):
         """
@@ -523,17 +497,13 @@ class TestDjangoAdminWorkflows:
 
     def test_admin_full_access_workflow(self):
         """
-        E2E Test: Verify Admin has full access to all cases and users.
-
-        Workflow:
-        1. Create cases assigned to different contributors
-        2. Verify Admin can access all cases
-        3. Verify Admin can transition cases to any state
-        4. Verify Admin can manage moderators
+        E2E Test: Django admin is read-only; validates that Admin can VIEW all
+        cases across all states and contributors, but cannot CHANGE cases
+        through this surface. Admin retains user management capability.
 
         Validates: Requirements 5.1
         """
-        # Step 1: Create cases assigned to different contributors
+        # Create cases assigned to different contributors in various states
         case1 = create_case_with_entities(
             title="Case for Contributor 1",
             alleged_entities=["https://jawafdehi.org/entity/person/test1"],
@@ -554,7 +524,6 @@ class TestDjangoAdminWorkflows:
         )
         case2.contributors.add(self.contributor2)
 
-        # Step 2: Verify Admin can access all cases
         admin_instance = CaseAdmin(Case, None)
         from django.test import RequestFactory
 
@@ -563,36 +532,36 @@ class TestDjangoAdminWorkflows:
         request_admin = factory.get("/")
         request_admin.user = self.admin
 
+        # Admin can SEE all cases in queryset
         queryset = admin_instance.get_queryset(request_admin)
         assert case1 in queryset, "Admin should see case assigned to contributor1"
         assert case2 in queryset, "Admin should see case assigned to contributor2"
 
-        # Verify Admin has change permission for all cases
-        assert admin_instance.has_change_permission(
+        # Admin has VIEW permission for all cases
+        assert admin_instance.has_view_permission(
             request_admin, case1
-        ), "Admin should have permission to change any case (Requirement 5.1)"
-        assert admin_instance.has_change_permission(
+        ), "Admin should have view permission for any case"
+        assert admin_instance.has_view_permission(
             request_admin, case2
-        ), "Admin should have permission to change any case"
+        ), "Admin should have view permission for any case"
 
-        # Step 3: Verify Admin can transition cases to any state
-        case1.state = CaseState.PUBLISHED
-        admin_instance.save_model(request_admin, case1, None, change=True)
-        case1.refresh_from_db()
-        assert (
-            case1.state == CaseState.PUBLISHED
-        ), "Admin should be able to publish cases"
+        # Django admin is read-only: Admin CANNOT change cases
+        assert not admin_instance.has_change_permission(
+            request_admin, case1
+        ), "Django admin is read-only; admin cannot change cases"
+        assert not admin_instance.has_change_permission(
+            request_admin, case2
+        ), "Django admin is read-only; admin cannot change cases"
+        assert not admin_instance.has_add_permission(
+            request_admin
+        ), "Django admin is read-only; admin cannot add cases"
+        assert not admin_instance.has_delete_permission(
+            request_admin, case1
+        ), "Django admin is read-only; admin cannot delete cases"
 
-        case2.state = CaseState.CLOSED
-        admin_instance.save_model(request_admin, case2, None, change=True)
-        case2.refresh_from_db()
-        assert case2.state == CaseState.CLOSED, "Admin should be able to close cases"
-
-        # Step 4: Verify Admin can manage moderators
-        # Admin is a superuser, so they can manage all users including moderators
+        # Admin is a superuser and can still manage users
         assert self.admin.is_superuser, "Admin should be a superuser"
 
-        # Verify admin can access moderator user
         from cases.admin import CustomUserAdmin
 
         user_admin = CustomUserAdmin(User, None)
@@ -828,16 +797,9 @@ class TestDjangoAdminWorkflows:
 
     def test_contributor_login_create_minimal_case_and_view_workflow(self):
         """
-        E2E Test: Contributor logs in, creates a minimal case, and sees it in their list.
-
-        Workflow:
-        1. Contributor logs into Django Admin
-        2. Contributor creates a new case with only title and case type
-        3. Verify case is created successfully in DRAFT state
-        4. Verify creator is automatically assigned as contributor
-        5. Contributor views their case list
-        6. Verify the new case appears in their list
-        7. Contributor can access and view the case details
+        E2E Test: Django admin is read-only; validates that a contributor can
+        log in to Django admin and VIEW their assigned cases, but cannot add
+        new cases through this interface. Case creation happens via the SPA.
 
         Validates: Requirements 1.1, 3.1, 3.2
         """
@@ -853,99 +815,70 @@ class TestDjangoAdminWorkflows:
             response.status_code == 200
         ), "Contributor should be able to access admin interface"
 
-        # Step 2: Contributor creates a new case with minimal data (title + case type)
+        # Step 2: Verify has_add_permission is False (cannot create via Django admin)
         admin_instance = CaseAdmin(Case, None)
         from django.test import RequestFactory
 
         factory = RequestFactory()
 
-        request_contrib = factory.post("/django-admin/cases/case/add/")
+        request_contrib = factory.get("/django-admin/cases/case/")
         request_contrib.user = self.contributor1
 
-        # Create minimal case - only title and case type required
-        minimal_case = create_case_with_entities(
+        assert not admin_instance.has_add_permission(
+            request_contrib
+        ), "Django admin is read-only; contributor cannot add cases"
+
+        # Step 3: Create a case (as if via SPA) and assign contributor
+        case = create_case_with_entities(
             title="Minimal Case - Quick Start",
             case_type=CaseType.CORRUPTION,
-            alleged_entities=["https://jawafdehi.org/entity/person/placeholder"],  # Required field
+            alleged_entities=["https://jawafdehi.org/entity/person/placeholder"],
+            state=CaseState.DRAFT,
         )
+        case.contributors.add(self.contributor1)
 
-        # Step 3: Save via admin (simulating form submission)
-        admin_instance.save_model(request_contrib, minimal_case, None, change=False)
-
-        # Simulate save_related (which adds creator to contributors)
-        class DummyForm:
-            instance = minimal_case
-
-            def save_m2m(self):
-                pass
-
-        admin_instance.save_related(request_contrib, DummyForm(), [], change=False)
-
-        # Verify case is created successfully
-        assert minimal_case.id is not None, "Case should be saved to database"
+        # Step 4: Contributor can VIEW the case in their queryset
+        queryset = admin_instance.get_queryset(request_contrib)
         assert (
-            minimal_case.state == CaseState.DRAFT
-        ), "New case should start in DRAFT state (Requirement 1.1)"
+            case in queryset
+        ), "Contributor should see their case in list (Requirement 3.1)"
 
-        # Step 4: Verify creator is automatically assigned as contributor
-        minimal_case.refresh_from_db()
-        assert (
-            self.contributor1 in minimal_case.contributors.all()
-        ), "Creator should be automatically assigned as contributor"
-
-        # Step 5: Contributor views their case list
-        request_list = factory.get("/django-admin/cases/case/")
-        request_list.user = self.contributor1
-
-        queryset = admin_instance.get_queryset(request_list)
-
-        # Step 6: Verify the new case appears in their list
-        assert (
-            minimal_case in queryset
-        ), "Contributor should see their newly created case in list (Requirement 3.1)"
-
-        # Verify case count
-        contributor_cases = queryset.filter(contributors=self.contributor1)
-        assert (
-            contributor_cases.count() >= 1
-        ), "Contributor should have at least one case assigned"
-
-        # Step 7: Contributor can access and view the case details
-        has_view_permission = admin_instance.has_view_permission(
-            request_list, minimal_case
-        )
+        # Verify view permission
+        has_view_permission = admin_instance.has_view_permission(request_contrib, case)
         assert (
             has_view_permission
         ), "Contributor should have view permission for their own case"
 
+        # Django admin is read-only: NO change permission
         has_change_permission = admin_instance.has_change_permission(
-            request_list, minimal_case
+            request_contrib, case
         )
         assert (
-            has_change_permission
-        ), "Contributor should have change permission for their own case"
+            not has_change_permission
+        ), "Django admin is read-only; contributor cannot change cases"
 
-        # Verify case details are accessible
-        response = self.client.get(f"/django-admin/cases/case/{minimal_case.id}/change/")
-        assert (
-            response.status_code == 200
-        ), "Contributor should be able to access case detail page"
-
-        # Verify other contributor can view but not change this case
+        # Step 5: Other contributor can view but not change this case
         request_other = factory.get("/django-admin/cases/case/")
         request_other.user = self.contributor2
 
         queryset_other = admin_instance.get_queryset(request_other)
         assert (
-            minimal_case in queryset_other
+            case in queryset_other
         ), "Other contributors should see unassigned cases (global read access)"
 
         has_view_permission_other = admin_instance.has_view_permission(
-            request_other, minimal_case
+            request_other, case
         )
         assert (
             has_view_permission_other
         ), "Other contributors should have view permission for unassigned cases"
+
+        has_change_permission_other = admin_instance.has_change_permission(
+            request_other, case
+        )
+        assert (
+            not has_change_permission_other
+        ), "Django admin is read-only; other contributor cannot change cases"
 
     def test_new_case_must_be_draft_state(self):
         """

@@ -86,13 +86,12 @@ per-type Pydantic models were deleted in NES.
   `/documents/`; the headless API router registers `pages`, `images`,
   `documents`, `page_preview` (`content/api.py`). Wagtail's built-in password
   login is retired in favour of OIDC SSO.
-- **Status (2026-07-02): the `content/` app lives on `origin/main` but was dropped
-  from `v2` during the R1 collapse** (`4c39d8c`). The frontend still targets the
-  Wagtail contract (`src/services/cms-api.ts`, `/updates` routes), so **on `v2`
-  those calls currently 404**. The CMS is being **ported forward into `v2`** (port
-  `content/` + Wagtail deps + the `/api/cms/v2/` mount) — the frontend contract is
-  the target and stays as-is. Until that lands, the Updates surface is non-functional
-  on `v2`.
+- Image renditions and document links are serialized as **absolute URLs** (built
+  from the request) so the cross-origin headless SPA can load them.
+- **History:** the `content/` app was dropped from `v2` during the R1 collapse
+  (`4c39d8c`), which briefly 404'd the SPA's `/updates` calls; it was
+  **forward-ported back into `v2`** (Wagtail 7.4, PR #270, adapted from
+  `origin/main` which has no shared history) with the frontend contract preserved.
 
 ## 4. Auth: OIDC/Zitadel only
 

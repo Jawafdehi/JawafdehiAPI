@@ -144,26 +144,24 @@ the live ground truth. Kept here as a record of what was reconciled.
 
 ---
 
-## Frontend ↔ backend drift on `v2` (open; audited 2026-07-02)
+## Frontend ↔ backend drift on `v2` — RESOLVED (audited + fixed 2026-07-02)
 
-The backend completed the R1 collapse + the cases-own-no-documents ADR; the **frontend
-(`jawafdehi-frontend@v2`) and some backend surface have not caught up**. These are live
-contract mismatches, not doc problems — recorded here so the "read this first" index
-reflects reality. Fixes are planned as separate PRs (see the plan handed off with this
-audit); do not treat any as shipped.
+A cross-repo audit found the backend had completed the R1 collapse + cases-own-no-documents
+ADR while the frontend and some docs/backend surface had not caught up. **All items below
+are now fixed and merged to `v2`** — kept as a record of what was reconciled.
 
-| # | Sev | Mismatch | Backend | Frontend | Resolution |
-|---|---|---|---|---|---|
-| H1 | High | FE calls `/api/sources/` (removed by the ADR) → 404 | no `sources` route (`cases/urls.py`) | `services/{jds-api,admin-api}.ts`, `CaseDetail.tsx`, `DocumentSourceCard.tsx` | FE port to `/api/materials/` + `material_iri`; delete `DocumentSource*` |
-| H2 | High | FE calls `/api/cms/v2/*` (Wagtail) → 404 on `v2` | `content/` app on `main`, **not on `v2`** | `services/cms-api.ts`, `/updates` routes | **Forward-port `content/` (Wagtail) into `v2`** — FE contract is correct, stays as-is |
-| H3 | High | `relationship_type` casing: FE sends UPPERCASE, backend `ChoiceField` accepts lowercase → 400 on save | `cases/models.py:161-169`, `caseworker_serializers.py:132` | `lib/jawafdehi-forms.ts:73-83,167-172` | lowercase on write (or accept case-insensitively) |
-| H4 | High | `CaseType` enum: FE offers 9, backend accepts 2 (`CORRUPTION`, `TAX_EVASION`) → 400 | `cases/models.py:361-365` | `types/jds.ts:14-23` | **Decided: FE set is authoritative — expand backend `CaseType` to all 9** (BRIBERY, FORGERY, EMBEZZLEMENT, ABUSE_OF_OFFICE, MONEY_LAUNDERING, ILLEGAL_PROPERTY, EXAM_RIGGING + the 2) via a migration |
-| H5 | High | FE types read removed fields `Case.case_id`, `EvidenceEntry.source_id`; `JawafEntity.id` never returned | `cases/serializers.py`, model (0038 dropped `case_id`) | `types/jds.ts`, `api.ts`, `jds-api.ts:212` | redefine evidence to `{material_iri, additional_details}`; key on `nes_id` |
-| M | Med | FE admin panel shows write UI (Entities/Data Lake) to roles the backend 403s; stale `"contributor"` role name; env-var docs disagree; both READMEs describe pre-collapse setup | `entities/permissions.py`, `oidc.py` | `lib/roles.ts`, `.env.example`, `vite-env.d.ts`, `README.md` | teach `roles.ts` domain roles; align env docs; rewrite READMEs |
+| # | Sev | Was | Fix (merged) |
+|---|---|---|---|
+| H1 | High | FE called removed `/api/sources/` → 404 | FE migrated to `/api/materials/` + embedded `material` on each evidence entry; `DocumentSource*` deleted (FE #165) |
+| H2 | High | FE called `/api/cms/v2/*` (Wagtail) → 404 on `v2` | Wagtail `content/` app forward-ported into `v2`, FE contract preserved (API #270). See §3.5 |
+| H3 | High | `relationship_type` UPPERCASE (FE) vs lowercase `ChoiceField` → 400 | `CaseInsensitiveChoiceField` matches choice keys case-insensitively (API #269) |
+| H4 | High | `CaseType` FE offered 9, backend accepted 2 → 400 | Backend `CaseType` expanded to all 9 (migration `cases/0043`) — FE set authoritative (API #269) |
+| H5 | High | FE read removed `Case.case_id`/`EvidenceEntry.source_id`; `JawafEntity.id` never returned | Evidence retyped to `{material_iri, additional_details, material?}`; entity links keyed on `nes_id` (FE #165) |
+| M | Med | Admin panel showed write UI to roles the backend 403s; stale `"contributor"`; env-var docs disagreed; READMEs pre-collapse | `roles.ts` taught NES/NGM domain roles + gated nav (FE #166); env docs + `services/README.md` aligned (FE #165); API README rewritten (this branch) |
 
-**Note on the CMS decision (H2):** the CMS is being **kept**. The frontend Wagtail
-integration is the target contract; the fix is to bring `content/` forward from `main`
-into `v2`, not to remove the FE surface.
+Follow-up still open: FE route-level guards for the admin sections (nav-only gating today);
+optionally drive gating off `/api/casework/auth/me/`. Django `CaseAdmin` made read-only in
+this branch (the SPA `/admin` is the sole write surface — see §7).
 
 ---
 
