@@ -111,10 +111,24 @@ def _get_jwks_client() -> PyJWKClient:
                     raise exceptions.AuthenticationFailed(
                         "OIDC authentication is not configured (OIDC_JWKS_URI)."
                     )
+                # Send a browser-like User-Agent. The OIDC provider
+                # (auth.jawafdehi.org) sits behind Cloudflare, whose bot
+                # protection 403s the default `Python-urllib/x.y` UA — which
+                # fails JWKS retrieval and surfaces as "Invalid token: Fail to
+                # fetch data from the url, err: HTTP Error 403: Forbidden" on
+                # every authenticated request. Overridable via settings.
                 _jwks_client = PyJWKClient(
                     jwks_uri,
                     cache_keys=True,
                     lifespan=getattr(settings, "OIDC_JWKS_CACHE_SECONDS", 300),
+                    headers={
+                        "User-Agent": getattr(
+                            settings,
+                            "OIDC_JWKS_USER_AGENT",
+                            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        ),
+                    },
                 )
     return _jwks_client
 
