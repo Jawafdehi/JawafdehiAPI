@@ -44,6 +44,14 @@ def test_dev_login_bad_password(enable_dev_auth):
 
 
 @pytest.mark.django_db
+def test_dev_login_non_object_body_is_400_not_500(enable_dev_auth):
+    # A non-object JSON body (list/scalar) must not blow up request.data.get().
+    c = APIClient()
+    r = c.post("/api/casework/auth/dev-login/", ["not", "an", "object"], format="json")
+    assert r.status_code == 400
+
+
+@pytest.mark.django_db
 def test_dev_login_hard_404_when_flag_off(settings):
     # Routes are always mounted, but the view hard-404s at runtime when the flag
     # is off — the boundary that keeps the platform SSO-only in production.
