@@ -39,5 +39,8 @@ jobs:
       - name: Lint (ruff check)
         run: uv run ruff check .
 
+      # ``integration-tests/`` is a separate live-stack E2E suite (own pyproject + Makefile) that
+      # hits a running monolith at PLATFORM_BASE_URL — it belongs in its own stack-up job, not this
+      # unit gate, so it is excluded here (it errors, not skips, when the stack is down).
       - name: Tests (sqlite, no external services)
-        run: uv run pytest -q --tb=short
+        run: uv run pytest -q --tb=short --ignore=integration-tests
