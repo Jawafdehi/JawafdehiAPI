@@ -326,6 +326,38 @@ def test_patch_add_entity_with_relationship_type():
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("wire_value", ["ACCUSED", "Accused", "aCcUsEd"])
+def test_patch_add_entity_accepts_uppercase_relationship_type(wire_value):
+    # The frontend sends UPPERCASE relationship_type values; the backend must
+    # accept them case-insensitively and STORE/RETURN them lowercase.
+    user = _contributor("kiran")
+    case = _make_case()
+    case.contributors.add(user)
+    entity = "https://jawafdehi.org/entity/person/prachanda"
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[
+            {
+                "op": "add",
+                "path": "/entities/-",
+                "value": {
+                    "nes_id": entity,
+                    "relationship_type": wire_value,
+                },
+            }
+        ],
+        format="json",
+    )
+    assert response.status_code == 200, response.data
+    # Stored + returned as canonical lowercase ("accused").
+    rel = CaseEntityRelationship.objects.get(case=case, nes_id=entity)
+    assert rel.relationship_type == RelationshipType.ACCUSED == "accused"
+    assert RelationshipType.ACCUSED in [e["type"] for e in response.data["entities"]]
+
+
+@pytest.mark.django_db
 def test_patch_add_location_entity():
     user = _contributor("kiran-loc")
     case = _make_case()

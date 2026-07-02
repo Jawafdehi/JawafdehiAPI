@@ -22,6 +22,26 @@ from .models import (
 )
 from .validators import validate_court_cases, validate_slug
 
+
+class CaseInsensitiveChoiceField(serializers.ChoiceField):
+    """ChoiceField that matches string input against its choices case-insensitively.
+
+    The frontend sends UPPERCASE relationship_type values (e.g. ``"ACCUSED"``)
+    while ``RelationshipType`` stores/returns lowercase (``"accused"``). We match
+    the incoming value against the defined choice keys ignoring case and
+    normalize to the exact choice casing before validation, so the stored value
+    always matches the canonical choice (and the field is safe to reuse for
+    choices with uppercase or mixed-case keys).
+    """
+
+    def to_internal_value(self, data):
+        if isinstance(data, str):
+            for choice_key in self.choice_strings_to_values:
+                if choice_key.lower() == data.lower():
+                    data = choice_key
+                    break
+        return super().to_internal_value(data)
+
 # Paths that callers are not permitted to target in a patch operation.
 # The view rejects any op whose `path` equals or is prefixed by one of these.
 # Note: /slug is conditionally blocked based on case state (see api_views.py)
@@ -129,7 +149,7 @@ class EntityPatchItemSerializer(serializers.Serializer):
     # The bind holds the canonical NES entity id directly; entities are owned by
     # NES and must already exist there (no display-name fallback).
     nes_id = serializers.CharField()
-    relationship_type = serializers.ChoiceField(choices=RelationshipType.choices)
+    relationship_type = CaseInsensitiveChoiceField(choices=RelationshipType.choices)
     notes = serializers.CharField(
         required=False, allow_blank=True, allow_null=True, default=""
     )

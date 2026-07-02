@@ -362,6 +362,13 @@ class CaseType(models.TextChoices):
     """Enum for case types."""
 
     CORRUPTION = "CORRUPTION", "Corruption"
+    BRIBERY = "BRIBERY", "Bribery"
+    FORGERY = "FORGERY", "Forgery"
+    EMBEZZLEMENT = "EMBEZZLEMENT", "Embezzlement"
+    ABUSE_OF_OFFICE = "ABUSE_OF_OFFICE", "Abuse of Office"
+    MONEY_LAUNDERING = "MONEY_LAUNDERING", "Money Laundering"
+    ILLEGAL_PROPERTY = "ILLEGAL_PROPERTY", "Illegal Property"
+    EXAM_RIGGING = "EXAM_RIGGING", "Exam Rigging"
     TAX_EVASION = "TAX_EVASION", "Tax Evasion"
 
 

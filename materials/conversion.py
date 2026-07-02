@@ -11,8 +11,9 @@ conversion handler lives in ``materials.job_handlers``, which reuses the in-repo
 ``review.converter`` — likhit/MarkItDown — so its heavy deps never import into the
 API process):
 
-- :func:`enqueue_material_convert` — transactional enqueue (dedup on the IRI) from
-  a file-bearing write path (the upload endpoint, ingestion).
+- :func:`enqueue_material_convert` — best-effort enqueue after the material write
+  (cross-DB; idempotent via dedup key) from a file-bearing write path (the upload
+  endpoint, ingestion).
 - :func:`build_convert_payload` — resolve the source file URL(s) from the
   Material's ``associatedMedia`` at claim time, so the DB-free consumer gets its
   input without touching the DB. Registered as the kind's ``build_payload`` hook.

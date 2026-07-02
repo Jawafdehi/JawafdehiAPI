@@ -61,6 +61,41 @@ def test_post_creates_draft_and_assigns_creator():
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    "case_type",
+    [
+        "CORRUPTION",
+        "BRIBERY",
+        "FORGERY",
+        "EMBEZZLEMENT",
+        "ABUSE_OF_OFFICE",
+        "MONEY_LAUNDERING",
+        "ILLEGAL_PROPERTY",
+        "EXAM_RIGGING",
+        "TAX_EVASION",
+    ],
+)
+def test_post_creates_case_for_every_frontend_case_type(case_type):
+    # The frontend's 9-member CaseType set (src/types/jds.ts) is authoritative;
+    # each of its wire values must be accepted by POST /api/cases/.
+    user = create_user_with_role("bipin", "bipin@example.com", "Caseworker")
+
+    response = _authed_client(user).post(
+        URL,
+        data={
+            "title": f"Case of type {case_type}",
+            "case_type": case_type,
+            "short_description": "draft",
+        },
+        format="json",
+    )
+
+    assert response.status_code == 201, response.data
+    assert response.data["case_type"] == case_type
+    assert Case.objects.get(pk=response.data["id"]).case_type == case_type
+
+
+@pytest.mark.django_db
 def test_post_creates_case_with_entity_relationships():
     user = create_user_with_role("bina", "bina@example.com", "Caseworker")
     # Entities are owned by NES; binds hold the canonical NES id directly.
