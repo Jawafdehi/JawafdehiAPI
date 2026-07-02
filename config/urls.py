@@ -7,7 +7,6 @@ maps to the schema.org ``@id`` IRI shape), NOT by which former service owns them
     /api/materials       -> materials.urls  (documents; file-bearing)
     /api/courtcases      -> courts.urls     (NGM court-case records + query + ingestion)
     /api/cases           -> cases.urls      (Jawafdehi CORRUPTION cases — DISTINCT)
-    /api/sources         -> cases.urls      (corruption-case document sources)
     /api/search          -> search.urls
     /api/casework/       -> review.urls
 
