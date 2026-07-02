@@ -6,6 +6,14 @@ from wagtail.images.blocks import ImageChooserBlock
 from .chooser import case_chooser_viewset
 
 
+def _absolute(url, context):
+    """Absolutize a media URL against the request so the cross-domain SPA can
+    load it. The headless SPA runs on a different origin than the API, so a
+    relative ``/media/...`` / ``/documents/...`` URL would 404 there."""
+    request = (context or {}).get("request")
+    return request.build_absolute_uri(url) if request else url
+
+
 class APIImageChooserBlock(ImageChooserBlock):
     """Image chooser that serializes a rendition URL for the headless client.
 
@@ -21,7 +29,11 @@ class APIImageChooserBlock(ImageChooserBlock):
         except Exception:
             return data
         data.update(
-            {"url": rendition.url, "width": rendition.width, "height": rendition.height}
+            {
+                "url": _absolute(rendition.url, context),
+                "width": rendition.width,
+                "height": rendition.height,
+            }
         )
         return data
 
@@ -35,7 +47,7 @@ class APIDocumentChooserBlock(DocumentChooserBlock):
         return {
             "id": value.pk,
             "title": value.title,
-            "url": value.url,
+            "url": _absolute(value.url, context),
             "filename": value.filename,
         }
 

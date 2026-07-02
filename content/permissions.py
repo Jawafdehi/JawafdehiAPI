@@ -61,20 +61,20 @@ GROUP_COLLECTION_PERMS = {
 _ACCESS_ADMIN_GROUPS = ("Admin", "Moderator", "Caseworker")
 
 
-def ensure_article_index():
+def ensure_article_index(using="default"):
     """Create the single ArticleIndexPage under the default site root if absent."""
     from wagtail.models import Page, Site
 
     from content.models import ArticleIndexPage
 
-    existing = ArticleIndexPage.objects.first()
+    existing = ArticleIndexPage.objects.using(using).first()
     if existing is not None:
         return existing
 
-    site = Site.objects.filter(is_default_site=True).first()
-    root = site.root_page if site else Page.objects.filter(depth=2).first()
+    site = Site.objects.using(using).filter(is_default_site=True).first()
+    root = site.root_page if site else Page.objects.using(using).filter(depth=2).first()
     if root is None:
-        root = Page.objects.filter(depth=1).first()
+        root = Page.objects.using(using).filter(depth=1).first()
     if root is None:
         return None
 
@@ -89,39 +89,43 @@ def ensure_article_index():
     return index
 
 
-def _perm(dotted):
+def _perm(dotted, using="default"):
     from django.contrib.auth.models import Permission
 
     app_label, codename = dotted.split(".", 1)
-    return Permission.objects.filter(
+    return Permission.objects.using(using).filter(
         content_type__app_label=app_label, codename=codename
     ).first()
 
 
-def _collection_perm(codename):
+def _collection_perm(codename, using="default"):
     from django.contrib.auth.models import Permission
 
     is_image = codename.endswith("_image")
-    return Permission.objects.filter(
+    return Permission.objects.using(using).filter(
         content_type__app_label="wagtailimages" if is_image else "wagtaildocs",
         content_type__model="image" if is_image else "document",
         codename=codename,
     ).first()
 
 
-def _reconcile_collection_scoped(model, group, scope_kwargs, want_codenames, resolve):
+def _reconcile_collection_scoped(
+    model, group, scope_kwargs, want_codenames, resolve, using="default"
+):
     """Reconcile a (group, scope) set of permission rows to exactly want."""
     existing = {
         row.permission.codename: row
-        for row in model.objects.filter(group=group, **scope_kwargs).select_related(
-            "permission"
-        )
+        for row in model.objects.using(using)
+        .filter(group=group, **scope_kwargs)
+        .select_related("permission")
     }
     for codename in want_codenames:
         if codename not in existing:
             perm = resolve(codename)
             if perm:
-                model.objects.create(group=group, permission=perm, **scope_kwargs)
+                model.objects.using(using).create(
+                    group=group, permission=perm, **scope_kwargs
+                )
     for codename, row in existing.items():
         if codename not in want_codenames:
             row.delete()
@@ -147,8 +151,10 @@ def sync_cms_group_permissions(sender=None, **kwargs):
 
     # No-op unless the CMS tables exist on this connection. post_migrate fires
     # for every migrate, including partial/historical states in tests, where
-    # querying these tables would raise.
-    connection = connections[kwargs.get("using") or "default"]
+    # querying these tables would raise. All DB work below targets this same
+    # ``using`` alias so the handler is correct on non-default connections.
+    using = kwargs.get("using") or "default"
+    connection = connections[using]
     required = {"content_articleindexpage", "wagtailcore_page", "wagtailcore_site"}
     if not required.issubset(set(connection.introspection.table_names())):
         return
@@ -163,19 +169,23 @@ def sync_cms_group_permissions(sender=None, **kwargs):
         "wagtaildocs",
     ):
         try:
-            create_permissions(global_apps.get_app_config(label), verbosity=0)
+            create_permissions(
+                global_apps.get_app_config(label), using=using, verbosity=0
+            )
         except LookupError:
             pass
 
-    index = ensure_article_index()
-    root_collection = Collection.objects.filter(depth=1).order_by("path").first()
-    access_admin = _perm("wagtailadmin.access_admin")
+    index = ensure_article_index(using=using)
+    root_collection = (
+        Collection.objects.using(using).filter(depth=1).order_by("path").first()
+    )
+    access_admin = _perm("wagtailadmin.access_admin", using=using)
 
     managed = set(GROUP_PAGE_PERMS) | set(GROUP_COLLECTION_PERMS) | set(
         _ACCESS_ADMIN_GROUPS
     )
     for name in managed:
-        group, _ = Group.objects.get_or_create(name=name)
+        group, _ = Group.objects.using(using).get_or_create(name=name)
 
         # Wagtail admin access (additive: we only add it, never strip other
         # model perms owned by cases.create_groups).
@@ -189,7 +199,8 @@ def sync_cms_group_permissions(sender=None, **kwargs):
                 group,
                 {"page": index},
                 set(GROUP_PAGE_PERMS.get(name, [])),
-                lambda c: _perm(f"wagtailcore.{c}"),
+                lambda c: _perm(f"wagtailcore.{c}", using=using),
+                using=using,
             )
 
         # Wagtail collection permissions on the root collection.
@@ -199,5 +210,6 @@ def sync_cms_group_permissions(sender=None, **kwargs):
                 group,
                 {"collection": root_collection},
                 set(GROUP_COLLECTION_PERMS.get(name, [])),
-                _collection_perm,
+                lambda c: _collection_perm(c, using=using),
+                using=using,
             )
