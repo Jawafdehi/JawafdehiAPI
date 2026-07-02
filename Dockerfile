@@ -42,7 +42,9 @@ COPY review/ ./review/
 COPY jobs/ ./jobs/
 COPY search/ ./search/
 COPY discovery/ ./discovery/
+COPY content/ ./content/
 COPY static/ ./static/
+COPY templates/ ./templates/
 
 # Install the single `jawafdehi` project + full dependency closure, no dev group.
 RUN uv sync --frozen --no-dev
