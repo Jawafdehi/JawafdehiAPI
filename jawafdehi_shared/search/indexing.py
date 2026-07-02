@@ -22,7 +22,11 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Iterable
 
-from jawafdehi_shared.search.transliterate import to_devanagari, to_roman
+from jawafdehi_shared.search.transliterate import (
+    to_devanagari,
+    to_roman,
+    to_roman_colloquial,
+)
 
 logger = logging.getLogger("jawafdehi.search.index")
 
@@ -85,12 +89,19 @@ def title_translit(title_ne: str | None, title_en: str | None) -> str | None:
     Devanagari-ization of the Roman title, joined, so a query in either script
     has an ingest-side bridge in addition to the in-engine ICU one. Returns
     ``None`` when both sides are empty.
+
+    The Devanagari side contributes BOTH the scholarly IAST form ("bharata") and a
+    colloquial, schwa-deleted, ASCII form ("bharat") so that both a diacritic-exact
+    query and the way people actually type Nepali names in Latin ("Bharat") match.
     """
     parts: list[str] = []
     if title_ne:
         roman = to_roman(title_ne)
         if roman:
             parts.append(roman)
+        colloquial = to_roman_colloquial(title_ne)
+        if colloquial:
+            parts.append(colloquial)
     if title_en:
         deva = to_devanagari(title_en)
         if deva:
