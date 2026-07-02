@@ -100,6 +100,31 @@ def test_grouped_paginates_by_case():
 
 
 @pytest.mark.django_db
+def test_grouped_pagination_ranks_cases_across_pages():
+    """DB-level slug pagination keeps the newest-case-first ranking across pages.
+
+    Cases are created oldest-first (case-00 … case-24), so the newest execution
+    belongs to case-24. Page 1 must start at case-24 and page 2 must continue the
+    descending ranking without gaps or repeats.
+    """
+    for i in range(25):
+        CaseReview.objects.create(slug=f"case-{i:02d}", case_title=f"Case {i}")
+
+    client = _reader_client()
+    page1 = client.get(URL)
+    page2 = client.get(URL, {"page": 2})
+
+    slugs1 = [g["slug"] for g in page1.data["results"]]
+    slugs2 = [g["slug"] for g in page2.data["results"]]
+
+    assert slugs1[0] == "case-24"  # newest execution first
+    assert len(slugs1) == 20 and len(slugs2) == 5
+    # Full descending sequence, no overlap between pages.
+    assert slugs1 + slugs2 == [f"case-{i:02d}" for i in range(24, -1, -1)]
+    assert set(slugs1).isdisjoint(slugs2)
+
+
+@pytest.mark.django_db
 def test_grouped_item_shape_matches_flat_list():
     """Each execution item carries the same fields the flat /reviews/ list emits."""
     CaseReview.objects.create(slug="case-shape", case_title="Shape")

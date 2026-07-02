@@ -16,6 +16,7 @@ endpoint. We expose a small `me` view so the SPA can show who is signed in and
 gate the UI by role.
 """
 
+from django.db.models import Max
 from django.utils import timezone
 from rest_framework import generics, status
 from rest_framework.decorators import (
@@ -119,6 +120,13 @@ def dev_login_view(request):
     """
     if not settings.DEV_AUTH:
         return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+    # request.data is a list/scalar for a non-object body — guard so .get() can't
+    # raise AttributeError → 500.
+    if not isinstance(request.data, dict):
+        return Response(
+            {"detail": "Request body must be a JSON object."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     username = (request.data.get("username") or "").strip()
     password = request.data.get("password") or ""
     user = authenticate(request, username=username, password=password)
@@ -225,25 +233,32 @@ class GroupedReviewListView(generics.ListAPIView):
     permission_classes = [CanReadReview]
     serializer_class = CaseReviewListSerializer
 
-    def _grouped_cases(self):
-        # CaseReview.Meta.ordering is -created_at, so iterating in that order
-        # yields executions newest-first per group and cases in most-recent-first
-        # order (the first slug seen is the one with the newest execution).
-        groups: dict[str, list[CaseReview]] = {}
-        for review in CaseReview.objects.all():
-            groups.setdefault(review.slug, []).append(review)
-        return groups
-
     def list(self, request, *args, **kwargs):
-        groups = self._grouped_cases()
-        slugs = list(groups.keys())  # already ordered newest-case-first
+        # Paginate BY CASE at the DB level: rank slugs by their most-recent
+        # execution, then fetch only the current page's rows — instead of
+        # loading the whole CaseReview table into memory to group in Python.
+        slug_qs = (
+            CaseReview.objects.values("slug")
+            .annotate(latest_created_at=Max("created_at"))
+            .order_by("-latest_created_at")
+            .values_list("slug", flat=True)
+        )
 
-        page = self.paginate_queryset(slugs)
-        page_slugs = page if page is not None else slugs
+        page = self.paginate_queryset(slug_qs)
+        page_slugs = list(page) if page is not None else list(slug_qs)
+
+        # Fetch executions only for this page's slugs. Meta.ordering (-created_at)
+        # gives newest-first, so grouping in iteration order keeps each case's
+        # executions newest-first.
+        groups: dict[str, list[CaseReview]] = {}
+        for review in CaseReview.objects.filter(slug__in=page_slugs):
+            groups.setdefault(review.slug, []).append(review)
 
         results = []
-        for slug in page_slugs:
-            executions = groups[slug]
+        for slug in page_slugs:  # preserves the DB-ranked newest-case-first order
+            executions = groups.get(slug)
+            if not executions:  # defensive: a slug vanished between the two queries
+                continue
             items = CaseReviewListSerializer(executions, many=True).data
             latest = executions[0]
             results.append(
