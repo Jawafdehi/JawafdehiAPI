@@ -172,6 +172,11 @@ if not ALLOWED_HOSTS:
             "Set it to a comma-separated list of allowed hostnames "
             "(e.g. ALLOWED_HOSTS=portal.jawafdehi.org)."
         )
+# The pod's own IP (injected via the downward API), so Prometheus scraping of
+# /metrics by pod IP isn't rejected as a DisallowedHost. No-op when unset (dev).
+_pod_ip = os.getenv("POD_IP")
+if _pod_ip and _pod_ip not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(_pod_ip)
 
 CSRF_TRUSTED_ORIGINS = get_env_list("CSRF_TRUSTED_ORIGINS")
 
