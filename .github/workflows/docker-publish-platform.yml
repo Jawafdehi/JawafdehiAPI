@@ -1,16 +1,19 @@
 # SPDX-License-Identifier: Hippocratic-3.0
 
-# Builds the v2 platform image docker.io/jawafdehi/jawafdehi-platform from this branch (the repo IS
-# the platform after the wholesale port). Keel watches the mutable :v2 tag and rolls it onto the
-# jawafdehi-platform Deployment (api.jawafdehi.org). Mirrors the legacy docker-publish.yml's pinned
-# actions + DockerHub secrets.
+# Builds the platform image docker.io/jawafdehi/jawafdehi-platform (the repo IS the platform after
+# the wholesale monolith port). Produces :<branch>, :<short-sha>, and :vX.Y semver tags. Keel rolls
+# the mutable branch tag onto the jawafdehi-platform Deployment (api.jawafdehi.org).
+#
+# Builds on BOTH main and v2 during the v2->mainline transition: v2 is fast-forward-merged into main,
+# after which main is the monolith and produces :main. v2 stays here so the current deploy (tracking
+# :v2) keeps building until it's cut over to :main; drop 'v2' once that cutover is done.
 name: Docker Publish (platform)
 on:
   push:
-    branches: ['v2']
+    branches: ['main', 'v2']
     tags: ['v*']
   pull_request:
-    branches: ['v2']
+    branches: ['main', 'v2']
   workflow_dispatch: {}
 env:
   REGISTRY: docker.io
