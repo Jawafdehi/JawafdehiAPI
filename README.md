@@ -1,61 +1,65 @@
-# Jawafdehi Platform (monorepo)
+# Jawafdehi API (backend)
 
-All three services on **Django/DRF**, in one **uv workspace**, sharing a common
-library — the framework-consolidation end-state (migrated from FastAPI/Poetry).
+One **Django/DRF** project that unifies three former systems — **NES** (entities),
+**NGM** (courts + materials / governance data lake), and **Jawafdehi** (anti-corruption
+case platform) — into a single app, in one **uv workspace**. It went through a
+microservices design and then reversed to this monolith (the "R1 collapse"), so the
+old `monolith/` + `services/{nes,ngm,jawafdehi}/` layout is gone.
+
+**For the authoritative current-state description read
+[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md); for per-doc trust status read
+[`docs/DOC-STATUS.md`](./docs/DOC-STATUS.md).** This README is just a quickstart.
+
+## Layout
 
 ```
-jawafdehi-platform/
-  pyproject.toml          uv workspace root (no runtime deps; declares members)
-  uv.lock                 single lockfile for the whole workspace
-  shared/                 jawafdehi-shared: OIDC auth, entity-id contract, OpenSearch, DRF bases
-  services/
-    ngm/                  Django project (courts/cases/hearings, gated query, lakehouse svc)
-    nes/                  Django project (entities, bulk-ingest, write API, search)   [pending]
-    jawafdehi/            Django project (cases/sources/entities, casework, review)    [pending]
+jawafdehi-api/
+  pyproject.toml          uv workspace root + deps
+  uv.lock                 single lockfile
+  config/                 project glue: settings.py, urls.py, wsgi/asgi, db_router.py
+  jawafdehi_shared/       cross-app libs: auth.oidc, entities.ids, search.*, drf.base
+  entities/               NES — entities, bulk-ingest, write API      (→ nes DB)
+  courts/                 NGM — court cases, firms, ingestion          (→ ngm DB)
+  materials/              NGM — universal material store, conversion   (→ ngm DB)
+  cases/                  Jawafdehi — cases (owns no docs; links by IRI) (→ default)
+  review/                 Jawafdehi — casework review + poller          (→ default)
+  jobs/                   central Postgres job queue                    (→ default)
+  search/                 unified OpenSearch query plane (all 4 types)
+  discovery/              ResourceSync + Sitemaps off the @id envelope
+  lakehouse/              DORMANT Iceberg/DuckDB seam (not a live path)
+  content/                headless Wagtail CMS (Newsroom) — NOTE: on `main`,
+                          being forward-ported to `v2`; see ARCHITECTURE §3.5
+  docs/                   design docs + sourcing artifacts
 ```
 
 ## Principles (locked decisions)
-- **One framework**: Django/DRF everywhere → one auth (`jawafdehi_shared.auth.oidc`),
-  one admin/migrations/test pattern. No duplicate FastAPI OIDC code.
-- **Per-service dependency isolation**: each `services/<x>/pyproject.toml` declares
-  ONLY that service's deps + `jawafdehi-shared`. A service image installs just its
-  own deps — e.g. DuckDB/boto3 live on NGM only.
-- **Database-per-service**: each service has its own settings + `DATABASES` pointing
-  at its own DB; no shared Django models; cross-service access is REST-only.
-- **Independent deploy**: each service its own `Dockerfile` + wsgi + image.
-- **uv** (not poetry) for dependency management.
+- **One Django project**, one image, in-process inter-app calls (NOT REST between
+  apps). Exception: the async review/jobs poller is a separate OIDC HTTP client by
+  design and can target a remote portal.
+- **Database-per-service preserved** via `config.db_router.ServiceDatabaseRouter`:
+  `entities`→`nes`, `courts`/`materials`→`ngm`, everything else→`default`. No
+  cross-DB FKs/joins — join in app.
+- **OIDC/Zitadel only** for auth (DRF token auth dropped); local JWKS via PyJWT.
+- **uv** (not poetry) — one top-level `pyproject.toml` + `uv.lock`.
+- **schema.org JSON-LD keyed by `@id` IRIs** is the canonical stored form.
 
 ## Common commands
 ```bash
-uv sync                                     # install the monolith (all apps) + dev tools
-uv run python manage.py check               # one manage.py / one settings (monolith.config.settings)
-docker build -t jawafdehi .                 # single image, context = repo root
+uv sync                                      # install app + dev tools
+uv run python manage.py check                # one manage.py / one settings (config.settings)
+uv run python manage.py runserver 0.0.0.0:48000
+docker build -t jawafdehi .                  # single image, context = repo root
 ```
 
-## Status
-- [x] Workspace skeleton + `shared/` (OIDC auth, entity-id contract, OpenSearch, DRF bases).
-- [x] **NGM** — Django: courts/cases/hearings/entities/firms read plane, gated `/api/query`
-      (SELECT-only guard + OIDC role), ingestion stubs, search 501, lakehouse svc ported. 19 tests.
-- [x] **NES** — Django: Pydantic core + publication + bulk-ingest (≥2-source HOLD) reused;
-      JSONB persistence via Django ORM; read + OIDC-gated write API. **Data-migration runner DROPPED**
-      (see `services/nes/MIGRATION-DROPPED.md`). 19 tests.
-- [x] **Jawafdehi** — moved into the monorepo; local `oidc_auth.py` DELETED → uses shared.
-      Poetry→uv. 747 tests collect; OIDC/permission tests pass.
-- [x] **docker-compose** (per-service Dockerfiles, uv builds, migrate sidecars) + infra.
-      All 3 `manage.py check` clean; NGM image builds via uv + boots live (health 200,
-      /api/courts/ 200, /api/query unauth 401 via shared OIDC).
-- [ ] Build NES + Jawafdehi images + full `compose up` e2e re-prove (NGM proven)
-- [x] Integration-test suite carried over; repo pushed to `origin`.
-
-> **Note:** sections above describe the *pre-monolith-collapse* shape (separate
-> per-service images, REST-between-services). The services have since been collapsed
-> into one Django project / one image / in-process calls — see `../think-big/ARCHITECTURE.md`
-> for the current state.
+For the local dev stack (Postgres ×3, OpenSearch, MinIO) see `docker-compose.yml`.
 
 ## Working model
-Trunk is **`main`** (pushed to `origin`; the old `v2` line was retired 2026-06-29). New
-work goes on a feature branch → PR → `main`. **Do local changes in git worktrees**
-(`git worktree add <path> main` or a feature branch), not by checking out branches in the
-primary tree. Commits authored `oopsy <oopsy@claudy.com>`.
+Trunk is **`v2`**. `origin` = the org (`Jawafdehi/JawafdehiAPI`), `fork` = the
+`damodaha` personal fork; PRs are filed on the org from the fork. New work goes on a
+feature branch → PR → `v2`. **Do local changes in git worktrees**
+(`git worktree add <path> v2`), not by checking out branches in the primary tree.
+Commits authored `oopsy <oopsy@claudy.com>`.
 
-See `../think-big/django-consolidation-plan.md`.
+_An older `main` line still exists on the org remotes and still carries the Wagtail
+`content/` app; `v2` is the active trunk and the CMS is being ported forward from
+`main` — see `docs/ARCHITECTURE.md` §3.5._

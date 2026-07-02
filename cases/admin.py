@@ -355,6 +355,17 @@ class CaseEntityRelationshipInline(admin.TabularInline):
             return 0  # Don't show extra forms if relationships already exist
         return 1  # Show 1 extra form for new cases or cases without relationships
 
+    # Read-only inline: entity binds are edited through the SPA `/admin` panel,
+    # not Django admin. No add/change/delete rows here (view-only).
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
 
 # ============================================================================
 # Case Admin
@@ -610,17 +621,22 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
 
         return can_view_case(request.user, obj)
 
+    # ------------------------------------------------------------------
+    # Read-only in Django admin. The SPA `/admin` panel is the sole case
+    # *write* surface; Django admin here is view-only (browse/inspect). All
+    # three mutation permissions return False, so Django renders every field
+    # read-only, hides Save, and drops the "Add case" button. Viewing +
+    # role-scoped queryset filtering (see get_queryset / has_view_permission)
+    # are unaffected.
+    # ------------------------------------------------------------------
+    def has_add_permission(self, request):
+        return False
+
     def has_change_permission(self, request, obj=None):
-        """
-        Check if user can change a case.
+        return False
 
-        - Contributors: Can only change assigned cases
-        - Moderators/Admins: Can change all cases
-        """
-        if obj is None:
-            return True
-
-        return can_change_case(request.user, obj)
+    def has_delete_permission(self, request, obj=None):
+        return False
 
     def get_form(self, request, obj=None, **kwargs):
         """Pass request to form for role-based field customization."""
@@ -651,52 +667,9 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
             form.instance.contributors.add(request.user)
 
     def get_actions(self, request):
-        """
-        Get available actions based on user role.
-        """
-        actions = super().get_actions(request)
-
-        # Add custom actions for state transitions
-        if is_admin_or_moderator(request.user):
-            # Moderators and Admins can publish and close
-            actions["publish_cases"] = (
-                self.__class__.publish_cases,
-                "publish_cases",
-                "Publish selected cases",
-            )
-            actions["close_cases"] = (
-                self.__class__.close_cases,
-                "close_cases",
-                "Close selected cases",
-            )
-
-        return actions
-
-    def publish_cases(self, request, queryset):
-        """
-        Bulk action to publish cases.
-        """
-        count = 0
-        for case in queryset:
-            try:
-                if case.state in [CaseState.IN_REVIEW, CaseState.DRAFT]:
-                    case.publish()
-                    count += 1
-            except ValidationError:
-                pass
-
-        self.message_user(request, f"{count} case(s) published successfully.")
-
-    publish_cases.short_description = "Publish selected cases"
-
-    def close_cases(self, request, queryset):
-        """
-        Bulk action to close cases.
-        """
-        count = queryset.update(state=CaseState.CLOSED)
-        self.message_user(request, f"{count} case(s) closed successfully.")
-
-    close_cases.short_description = "Close selected cases"
+        """No write actions — case state transitions happen through the SPA
+        `/admin` panel (the sole write surface), not Django admin."""
+        return {}
 
 
 

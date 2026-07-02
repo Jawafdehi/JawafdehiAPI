@@ -36,47 +36,19 @@ def case_admin():
 
 
 @pytest.mark.django_db
-def test_creator_automatically_added_to_contributors(contributor_user, case_admin):
+def test_admin_cannot_add_cases(contributor_user, case_admin):
     """
-    Test that when a contributor creates a case, they are automatically added to contributors.
+    Django admin is read-only: the SPA `/admin` panel is the sole case write
+    surface. No role can add a case through Django admin.
 
-    Validates: Requirements 1.5, 3.1
+    Validates: SPA-is-sole-write-surface (Django-admin case decommission).
     """
-    # Create a mock request
     request = create_mock_request(
         contributor_user, method="post", path="/django-admin/cases/case/add/"
     )
-
-    # Create a new case
-    case = create_case_with_entities(
-        title="Test Case",
-        case_type=CaseType.CORRUPTION,
-        alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
-        state=CaseState.DRAFT,
-    )
-
-    # Create a mock form
-    class MockForm:
-        instance = case
-
-        def save_m2m(self):
-            pass  # No-op for mock
-
-    form = MockForm()
-
-    # Simulate form submission (change=False means new object)
-    # Django admin calls both save_model and save_related
-    case_admin.save_model(request, case, form, change=False)
-    case_admin.save_related(request, form, [], change=False)
-
-    # Verify the creator is in contributors
-    assert case.contributors.filter(
-        id=contributor_user.id
-    ).exists(), "Creator should be automatically added to contributors"
-
-    assert (
-        contributor_user in case.contributors.all()
-    ), "Creator should be in the contributors list"
+    assert not case_admin.has_add_permission(
+        request
+    ), "Django admin must not allow adding cases (SPA is the sole write surface)"
 
 
 @pytest.mark.django_db
@@ -108,33 +80,31 @@ def test_creator_has_view_permission(contributor_user, case_admin):
 
 
 @pytest.mark.django_db
-def test_creator_has_change_permission(contributor_user, case_admin):
+def test_admin_is_read_only_even_for_creator(contributor_user, case_admin):
     """
-    Test that the creator has change permission for their created case.
+    Django admin is uniformly read-only: even the creator cannot change a case
+    through this surface. Write access is the SPA `/admin` panel's domain.
 
-    Validates: Requirements 1.5, 3.1
+    Validates: SPA-is-sole-write-surface (Django-admin case decommission).
     """
 
-    # Create a case
+    # Create a case and add contributor
     case = create_case_with_entities(
         title="Test Case",
         case_type=CaseType.CORRUPTION,
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
         state=CaseState.DRAFT,
     )
-
-    # Simulate the creator being added (as would happen in save_model)
     case.contributors.add(contributor_user)
 
-    # Create a mock request
     request = create_mock_request(contributor_user)
 
-    # Check change permission
-    has_permission = case_admin.has_change_permission(request, case)
-
-    assert (
-        has_permission
-    ), "Creator should have change permission for their created case"
+    assert not case_admin.has_change_permission(
+        request, case
+    ), "Django admin must not allow editing cases (SPA is the sole write surface)"
+    assert not case_admin.has_delete_permission(
+        request, case
+    ), "Django admin must not allow deleting cases"
 
 
 @pytest.mark.django_db

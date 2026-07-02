@@ -1,6 +1,6 @@
 # DOC-STATUS — Documentation Audit & Orientation Index
 
-_Last audited: 2026-07-01 (data-plane consolidation: #262 jobs queue, #263 cases-own-no-documents, #264 material_convert FTS feed all merged to `v2`)._
+_Last audited: 2026-07-02 (docs reconciled to the R1-collapsed `v2` tree: flat top-level apps, `config/` glue, trunk `v2`; CMS forward-port + frontend `/v2`-drift items recorded)._
 
 **Read this first.** This file is the orientation index for the `docs/` tree: it says,
 doc by doc, what to trust and what to treat with caution. For *what the platform is now*
@@ -14,11 +14,20 @@ read [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 ## What the platform ACTUALLY is now (the ground truth)
 
-- **Single Django MONOLITH** — one project (trunk `main`; `v2` retired 2026-06-29). Apps:
-  `nes_service`, `ngm_service`, `cases`/`case_workflows`/`review`, plus monolith `search`
-  + `discovery` apps. **3 Postgres DBs via a DB router** (`monolith/config/db_router.py`);
-  **in-process inter-app calls — NO REST between services**. One image. **uv workspace**
-  (NOT poetry). Runs at `:48000`.
+- **Single Django MONOLITH** — one project, **trunk `v2`** (the R1 collapse flattened the
+  old `monolith/` + `services/{nes,ngm,jawafdehi}/` layout into top-level apps). Apps (all
+  top-level dirs): `entities` (NES), `courts` + `materials` (NGM), `cases` + `review`
+  (Jawafdehi), plus platform `search`, `discovery`, `jobs`. _(`case_workflows` was dropped —
+  migration `cases/migrations/0040`.)_ **3 Postgres DBs via a DB router**
+  (`config/db_router.py`, wired at `config/settings.py:433`); **in-process inter-app calls —
+  NO REST between services** _(exception: the async review/jobs poller is a separate OIDC
+  HTTP client by design — `review/ngm_client.py`, `review/jds_client.py`)_. One image.
+  **uv workspace** (NOT poetry — one top-level `pyproject.toml` + `uv.lock`). Cross-app libs
+  in top-level `jawafdehi_shared/`. Runs at `:48000`.
+- **Headless Wagtail CMS** (`content/` app, "Newsroom") serves public updates/news at
+  `/api/cms/v2/…`; consumed by the SPA `/updates` routes. **It lives on `origin/main` but
+  is NOT yet on `v2`** (dropped in the collapse commit `4c39d8c`) — being forward-ported.
+  See ARCHITECTURE §3.5.
 - **schema.org JSON-LD is the canonical stored form** for NES entities AND NGM materials,
   keyed by **`@id` IRIs**: `https://jawafdehi.org/entity/<prefix>/<slug>`,
   `/material/<source>/<ident>`, `/case/<slug>`, `/courtcase/<court>/<case_number>`. **Clean
@@ -64,7 +73,7 @@ A `>` status banner has been added in-place to the most-misleading STALE docs (m
 | `DOC-STATUS.md` (this file) | CURRENT | The orientation index / per-doc audit | Keep. |
 | `data-plane-design.md` | CURRENT (BUILT) | Data-plane consolidation: Postgres-SoR + R2 archive + OpenSearch; **no live Iceberg** (`lakehouse/` dormant seam); `material_convert` FTS feed shipped (#264). Reconciles ARCHITECTURE §5; incorporates the jobs queue + cases-own-no-documents ADR | Keep (load-bearing). |
 | `unified-search-plan.md` | CURRENT (BUILT & LIVE) | §0 = pre-build starting point (marked as such); §1-§8 reconciled to the live build (hard-fail no-fallback, four index constants, case_id done, no "internal" role). NOTE: `Material.visibility` now EXISTS (added by #263) and gates material indexing — supersedes the old "no `visibility` field" caveat | Keep. |
-| `case-workflows-retirement-plan.md` | CURRENT | Live/actionable plan to retire `case_workflows` + drop the langchain/langgraph/deepagents stack; uses live monolith + uv-workspace paths | Keep; execute. |
+| `case-workflows-retirement-plan.md` | HISTORICAL (DONE) | Plan to retire `case_workflows` + drop the langchain/langgraph/deepagents stack. **Executed:** app removed, tables dropped by migration `cases/migrations/0040`, no langchain/langgraph/deepagents deps remain in `pyproject.toml`. Its cited `monolith/config` + `services/jawafdehi/pyproject.toml` paths predate the R1 collapse (single top-level `pyproject.toml` now) | Keep as record; mark done. |
 
 ### `shared/`
 
@@ -102,7 +111,7 @@ A `>` status banner has been added in-place to the most-misleading STALE docs (m
 
 | Doc | Class | Notes | Disposition |
 |---|---|---|---|
-| `ngm/ngm-source-inventory.md` | CURRENT | Authoritative source inventory + silver-table-family mapping; authoritative silver-family → schema.org `@type` crosswalk lives in `ngm_service/materials/jsonld.py` (`MATERIAL_TYPES`) | Keep (blueprint). |
+| `ngm/ngm-source-inventory.md` | CURRENT | Authoritative source inventory + silver-table-family mapping; authoritative silver-family → schema.org `@type` crosswalk lives in `materials/jsonld.py` (`MATERIAL_TYPES`) | Keep (blueprint). |
 | `ngm/r2-site-retirement-plan.md` | CURRENT | Plan to retire the standalone R2 site | Keep. |
 
 ### `jawafdehi/`
@@ -111,7 +120,7 @@ A `>` status banner has been added in-place to the most-misleading STALE docs (m
 |---|---|---|---|
 | `jawafdehi/ngm-frontend-integration-plan.md` | CURRENT | Plan to fold NGM into the Jawafdehi SPA | Keep. |
 | `jawafdehi/sources-into-ngm-materials-plan.md` | CURRENT (partly superseded) | Plan to land document sources as NGM materials. **Phase 2 thin-row + `contributors` retention + §4 collapse-to-`DOCUMENT` superseded by `adr-cases-own-no-documents.md`**; Phase 0/0b/1/3 + the `visibility` design stand | Keep; read alongside the ADR. |
-| `jawafdehi/adr-cases-own-no-documents.md` | CURRENT | ADR (2026-07-01): `cases` owns no entities/documents; both link out by required IRI. Removes `DocumentSource`/`/api/sources`, adds `CaseMaterialReference` (`material_iri` required), Materials = universal store, one `material_type` vocab, frontend "Document Source" purge. Amends control-plane + refactor + sources plan | Keep (load-bearing). |
+| `jawafdehi/adr-cases-own-no-documents.md` | CURRENT (backend done; FE not) | ADR (2026-07-01): `cases` owns no entities/documents; both link out by required IRI. Removes `DocumentSource`/`/api/sources`, adds `CaseMaterialReference` (`material_iri` required), Materials = universal store, one `material_type` vocab, frontend "Document Source" purge. Amends control-plane + refactor + sources plan. **Caveat: the backend removal shipped on `v2`, but the frontend "Document Source" purge is NOT done — the SPA still calls the removed `/api/sources` (`src/services/{jds-api,admin-api}.ts`, `CaseDetail.tsx`), so those calls 404 on `v2`.** Tracked in the drift table below | Keep (load-bearing); FE purge pending. |
 | `jawafdehi/sources-to-materials-prod-migration.md` | CURRENT | Runbook (2026-07-01) for the prod data migration ~799 DocumentSources→Materials + evidence→CaseMaterialReference: preconditions, ordered steps (backfill/evidence-rewrite/visibility-init/reindex), verification incl. the draft-leak check, rollback. Foundation (A/B/C) shipped; migration itself is a future task | Keep; execute later. |
 
 ---
@@ -132,6 +141,27 @@ the live ground truth. Kept here as a record of what was reconciled.
 9. **`JawafEntity` vs. collapsed** → Collapsed into `CaseEntityRelationship`.
 10. **Migration runner vs. bulk-ingest** → Bulk-ingest wins.
 11. **schema.org serialization-layer vs. full remodel** → Full remodel shipped (canonical stored JSON-LD keyed by `@id`).
+
+---
+
+## Frontend ↔ backend drift on `v2` — RESOLVED (audited + fixed 2026-07-02)
+
+A cross-repo audit found the backend had completed the R1 collapse + cases-own-no-documents
+ADR while the frontend and some docs/backend surface had not caught up. **All items below
+are now fixed and merged to `v2`** — kept as a record of what was reconciled.
+
+| # | Sev | Was | Fix (merged) |
+|---|---|---|---|
+| H1 | High | FE called removed `/api/sources/` → 404 | FE migrated to `/api/materials/` + embedded `material` on each evidence entry; `DocumentSource*` deleted (FE #165) |
+| H2 | High | FE called `/api/cms/v2/*` (Wagtail) → 404 on `v2` | Wagtail `content/` app forward-ported into `v2`, FE contract preserved (API #270). See §3.5 |
+| H3 | High | `relationship_type` UPPERCASE (FE) vs lowercase `ChoiceField` → 400 | `CaseInsensitiveChoiceField` matches choice keys case-insensitively (API #269) |
+| H4 | High | `CaseType` FE offered 9, backend accepted 2 → 400 | Backend `CaseType` expanded to all 9 (migration `cases/0043`) — FE set authoritative (API #269) |
+| H5 | High | FE read removed `Case.case_id`/`EvidenceEntry.source_id`; `JawafEntity.id` never returned | Evidence retyped to `{material_iri, additional_details, material?}`; entity links keyed on `nes_id` (FE #165) |
+| M | Med | Admin panel showed write UI to roles the backend 403s; stale `"contributor"`; env-var docs disagreed; READMEs pre-collapse | `roles.ts` taught NES/NGM domain roles + gated nav (FE #166); env docs + `services/README.md` aligned (FE #165); API README rewritten (this branch) |
+
+Follow-up still open: FE route-level guards for the admin sections (nav-only gating today);
+optionally drive gating off `/api/casework/auth/me/`. Django `CaseAdmin` made read-only in
+this branch (the SPA `/admin` is the sole write surface — see §7).
 
 ---
 

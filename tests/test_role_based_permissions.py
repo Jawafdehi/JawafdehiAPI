@@ -41,14 +41,15 @@ User = get_user_model()
     contributor_data=user_with_role("Caseworker"),
     target_state=st.sampled_from([CaseState.DRAFT, CaseState.IN_REVIEW]),
 )
-def test_contributors_can_transition_between_draft_and_in_review(
+def test_contributors_cannot_change_cases_via_django_admin(
     case_data, contributor_data, target_state
 ):
     """
-    Feature: accountability-platform-core, Property 5: Contributors can only transition between Draft and In Review
+    Feature: accountability-platform-core, Property 5: Django admin is read-only.
 
-    For any case assigned to a Contributor, that Contributor should be able to
-    change state between Draft and In Review.
+    Django admin is read-only; validates that contributors cannot change cases
+    (including state transitions) through this surface. State transitions happen
+    via the SPA `/admin` panel.
     Validates: Requirements 1.5
     """
     # Create contributor user
@@ -76,24 +77,19 @@ def test_contributors_can_transition_between_draft_and_in_review(
     # Create admin instance
     admin = CaseAdmin(Case, None)
 
-    # Check that contributor has change permission
-    has_permission = admin.has_change_permission(request, case)
-    assert has_permission, "Contributor should have change permission for assigned case"
-
-    # Attempt to transition to target state
-    case.state = target_state
-
-    # This should succeed without raising ValidationError
-    try:
-        admin.save_model(request, case, None, change=True)
-        # If we get here, the transition was allowed
-        success = True
-    except ValidationError:
-        success = False
-
+    # Django admin is read-only: has_change_permission always returns False
+    has_change = admin.has_change_permission(request, case)
     assert (
-        success
-    ), f"Contributor should be able to transition from {case.state} to {target_state}"
+        not has_change
+    ), "Django admin is read-only; contributor should NOT have change permission"
+
+    # Contributor can still VIEW the case
+    has_view = admin.has_view_permission(request, case)
+    assert has_view, "Contributor should have view permission for assigned case"
+
+    # has_add_permission is also False
+    has_add = admin.has_add_permission(request)
+    assert not has_add, "Django admin does not allow adding cases"
 
 
 @pytest.mark.django_db
@@ -168,8 +164,9 @@ def test_admin_has_full_access_to_all_cases(case_data, admin_data):
     """
     Feature: accountability-platform-core, Property 12: Admin role-based permissions in Django Admin
 
-    For any user with Admin role in Django Admin, they should have full access
-    to all cases regardless of assignment.
+    Django admin is read-only; validates that Admins can VIEW all cases
+    regardless of assignment (queryset is unfiltered), but cannot change or add
+    cases through this surface.
     Validates: Requirements 5.1
     """
     # Create admin user
@@ -186,9 +183,15 @@ def test_admin_has_full_access_to_all_cases(case_data, admin_data):
     # Create admin instance
     admin = CaseAdmin(Case, None)
 
-    # Check that admin has change permission even without assignment
-    has_permission = admin.has_change_permission(request, case)
-    assert has_permission, "Admin should have change permission for all cases"
+    # Django admin is read-only: has_change_permission always returns False
+    has_change = admin.has_change_permission(request, case)
+    assert (
+        not has_change
+    ), "Django admin is read-only; even Admin should NOT have change permission"
+
+    # Admin can VIEW all cases
+    has_view = admin.has_view_permission(request, case)
+    assert has_view, "Admin should have view permission for all cases"
 
     # Check that admin can see the case in queryset
     queryset = admin.get_queryset(request)
@@ -253,8 +256,9 @@ def test_contributor_can_only_access_assigned_cases(case_data, contributor_data)
     """
     Feature: accountability-platform-core, Property 13: Contributor assignment restricts access in Django Admin
 
-    For any user with Contributor role in Django Admin, they should only access
-    cases they are assigned to.
+    Django admin is read-only; validates that contributors can VIEW all
+    non-CLOSED cases (global read access) but cannot CHANGE any case through
+    this surface.
     Validates: Requirements 5.2, 3.1, 3.2
     """
     # Create contributor user
@@ -279,17 +283,25 @@ def test_contributor_can_only_access_assigned_cases(case_data, contributor_data)
     # Create admin instance
     admin = CaseAdmin(Case, None)
 
-    # Check that contributor has permission for assigned case
-    has_permission_assigned = admin.has_change_permission(request, assigned_case)
+    # Django admin is read-only: has_change_permission always returns False
+    has_change_assigned = admin.has_change_permission(request, assigned_case)
     assert (
-        has_permission_assigned
-    ), "Contributor should have change permission for assigned case"
+        not has_change_assigned
+    ), "Django admin is read-only; contributor should NOT have change permission even for assigned case"
 
-    # Check that contributor does NOT have permission for unassigned case
-    has_permission_unassigned = admin.has_change_permission(request, unassigned_case)
+    has_change_unassigned = admin.has_change_permission(request, unassigned_case)
     assert (
-        not has_permission_unassigned
-    ), "Contributor should NOT have change permission for unassigned case"
+        not has_change_unassigned
+    ), "Django admin is read-only; contributor should NOT have change permission for unassigned case"
+
+    # View permission is role-scoped: contributor can view assigned cases
+    has_view_assigned = admin.has_view_permission(request, assigned_case)
+    assert has_view_assigned, "Contributor should have view permission for assigned case"
+
+    has_view_unassigned = admin.has_view_permission(request, unassigned_case)
+    assert (
+        has_view_unassigned
+    ), "Contributor should have view permission for unassigned cases (global read access)"
 
     # Check queryset includes all non-CLOSED cases (global read access)
     queryset = admin.get_queryset(request)
@@ -391,8 +403,8 @@ def test_moderators_can_access_all_cases(case_data, moderator_data):
     """
     Feature: accountability-platform-core, Property 14: Moderators cannot manage other Moderators in Django Admin
 
-    For any Moderator user, they should have access to all cases (but not to
-    manage other moderators).
+    Django admin is read-only; validates that Moderators can VIEW all cases
+    (queryset is unfiltered) but cannot CHANGE cases through this surface.
     Validates: Requirements 3.3
     """
     # Create moderator user
@@ -409,9 +421,15 @@ def test_moderators_can_access_all_cases(case_data, moderator_data):
     # Create admin instance
     admin = CaseAdmin(Case, None)
 
-    # Check that moderator has change permission even without assignment
-    has_permission = admin.has_change_permission(request, case)
-    assert has_permission, "Moderator should have change permission for all cases"
+    # Django admin is read-only: has_change_permission always returns False
+    has_change = admin.has_change_permission(request, case)
+    assert (
+        not has_change
+    ), "Django admin is read-only; moderator should NOT have change permission"
+
+    # Moderator CAN view all cases
+    has_view = admin.has_view_permission(request, case)
+    assert has_view, "Moderator should have view permission for all cases"
 
     # Check that moderator can see the case in queryset
     queryset = admin.get_queryset(request)
