@@ -30,6 +30,31 @@ dotted ``name``).
 
 from __future__ import annotations
 
+import contextvars
+
+# Read-routing flag, set by config.middleware.ReadReplicaRoutingMiddleware for the
+# duration of a request: True → this request's reads may use the read replica;
+# False (default, and outside any request — mgmt commands, shell, tasks) → reads
+# use the primary. A ContextVar (not threading.local) so it is correct under BOTH
+# sync gunicorn worker threads AND async views/tasks: each thread has its own
+# top-level context and each async task copies it, so the flag never leaks across
+# concurrent requests. Kept here (next to the router that consumes it) so the
+# router has no import-time dependency on the middleware.
+_use_replica_var: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "use_replica_for_reads", default=False
+)
+
+
+def route_reads_to_replica(enabled: bool) -> None:
+    """Mark the current context's reads as replica-eligible (True) or primary-only
+    (False). The middleware sets it per request and always resets it afterwards."""
+    _use_replica_var.set(enabled)
+
+
+def _reads_use_replica() -> bool:
+    return _use_replica_var.get()
+
+
 # App labels owned by each service database. Anything not listed routes to
 # "default" (the Jawafdehi database, which also owns django.contrib.* — auth,
 # admin, sessions, contenttypes — since that is the only app that uses Users).
@@ -80,7 +105,17 @@ class ServiceDatabaseRouter:
     """Route each service-app's models to that service's database."""
 
     def db_for_read(self, model, **hints):
-        return _db_for_label(model._meta.app_label)
+        primary = _db_for_label(model._meta.app_label)
+        # Anonymous public reads (flagged by the middleware) may use the read
+        # replica if one is configured for this service; everything else — writes,
+        # admin/casework, mgmt commands (no flag) — reads from the primary so it
+        # always sees its own writes. Import settings lazily to avoid an
+        # import-time cycle (settings imports this module as DATABASE_ROUTERS).
+        if _reads_use_replica():
+            from django.conf import settings
+
+            return settings.REPLICA_ALIASES.get(primary, primary)
+        return primary
 
     def db_for_write(self, model, **hints):
         return _db_for_label(model._meta.app_label)
