@@ -38,6 +38,10 @@ from cases.views import docs, index
 from content.api import api_router as wagtail_api_router
 
 urlpatterns = [
+    # Prometheus /metrics (django-prometheus). Not public — the ingress denies
+    # external access to /metrics (metrics-deny-public middleware); scraped
+    # in-cluster only.
+    path("", include("django_prometheus.urls")),
     # ── Jawafdehi (default DB) — keeps the original /api/ paths ─────────────
     path("", index, name="index"),
     path("docs/", docs, name="docs"),

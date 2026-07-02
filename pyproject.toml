@@ -25,6 +25,8 @@ dependencies = [
     "drf-spectacular>=0.29",
     "gunicorn>=23.0",
     "whitenoise>=6.11",
+    # Prometheus /metrics (multiprocess-aware for the gunicorn workers).
+    "django-prometheus>=2.3",
     # --- auth (OIDC/Zitadel in prod; the single OIDCAuthentication impl lives in
     # jawafdehi_shared) ---
     "pyjwt[crypto]>=2.10",
