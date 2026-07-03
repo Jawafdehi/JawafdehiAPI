@@ -19,8 +19,8 @@ request-blocking recompute or an error.
 
 from __future__ import annotations
 
-from django.db import connection
-from django.db.models import Count
+from django.db import connections
+from django.db.models import Count, Q
 from django.utils import timezone
 
 # NES + NGM models live in sibling apps; the DB router (config.db_router) sends
@@ -48,13 +48,92 @@ def _pct(part: int, whole: int) -> float:
 
 def compute_statistics() -> dict:
     """Aggregate the full statistics payload. SLOW on prod — never call from a
-    request path except the one-time bootstrap in ``refresh_statistics``."""
+    request path except the one-time bootstrap in ``StatisticsView``."""
     return {
-        "published_cases": Case.objects.filter(state=CaseState.PUBLISHED).count(),
-        "cases_under_investigation": Case.objects.filter(
-            state__in=[CaseState.DRAFT, CaseState.IN_REVIEW]
-        ).count(),
-        "cases_closed": Case.objects.filter(state=CaseState.CLOSED).count(),
+        **_case_counts(),
+        # Cross-source coverage for the Data Quality dashboard. The DB router
+        # sends each model below to its own database (nes / ngm).
+        "nes": _nes_metrics(),
+        "ngm": _ngm_metrics(),
+        "materials": _materials_metrics(),
+        "last_updated": timezone.now().isoformat(),
+    }
+
+
+def bootstrap_placeholder() -> dict:
+    """Cheap payload in the exact response shape, for the bootstrap window only.
+
+    Served to requests that lose the ``StatisticsView`` bootstrap claim race
+    while the winning request computes the real payload. The Jawafdehi-DB case
+    counts are real (they are a handful of fast queries on a small table); the
+    heavy NES/NGM/materials blocks are zero-valued stand-ins in the same shape
+    (``test_bootstrap_placeholder_matches_payload_shape`` pins them to the real
+    payload's structure).
+    """
+    return {
+        **_case_counts(),
+        "nes": {
+            "total": 0,
+            "by_prefix": [],
+            "by_type": [],
+            "counts": {
+                "with_identifier": 0,
+                "with_provenance": 0,
+                "with_bilingual_name": 0,
+            },
+            "completeness": {
+                "with_identifier": 0.0,
+                "with_provenance": 0.0,
+                "with_bilingual_name": 0.0,
+            },
+        },
+        "ngm": {
+            "court_cases_total": 0,
+            "courts_total": 0,
+            "by_court_type": [],
+            "counts": {
+                "nes_resolved": 0,
+                "with_registration_date": 0,
+                "with_document_sources": 0,
+            },
+            "completeness": {
+                "nes_resolved": 0.0,
+                "with_registration_date": 0.0,
+                "with_document_sources": 0.0,
+            },
+        },
+        "materials": {
+            "total": 0,
+            "by_type": [],
+            "by_source": [],
+            "counts": {
+                "with_description": 0,
+                "with_url": 0,
+                "with_date": 0,
+            },
+            "completeness": {
+                "with_description": 0.0,
+                "with_url": 0.0,
+                "with_date": 0.0,
+            },
+        },
+        "last_updated": timezone.now().isoformat(),
+    }
+
+
+def _case_counts() -> dict:
+    """Jawafdehi-DB case metrics — cheap (small tables on the default DB)."""
+    by_state = Case.objects.aggregate(
+        published=Count("pk", filter=Q(state=CaseState.PUBLISHED)),
+        under_investigation=Count(
+            "pk", filter=Q(state__in=[CaseState.DRAFT, CaseState.IN_REVIEW])
+        ),
+        closed=Count("pk", filter=Q(state=CaseState.CLOSED)),
+    )
+    return {
+        "published_cases": by_state["published"],
+        "cases_under_investigation": by_state["under_investigation"],
+        "cases_closed": by_state["closed"],
         # Unique NES entities tracked across published cases (binds hold the
         # nes_id directly; NES owns the entity records).
         "entities_tracked": (
@@ -63,12 +142,6 @@ def compute_statistics() -> dict:
             .distinct()
             .count()
         ),
-        # Cross-source coverage for the Data Quality dashboard. The DB router
-        # sends each model below to its own database (nes / ngm).
-        "nes": _nes_metrics(),
-        "ngm": _ngm_metrics(),
-        "materials": _materials_metrics(),
-        "last_updated": timezone.now().isoformat(),
     }
 
 
@@ -125,7 +198,9 @@ def _nes_metrics():
     # ``jawafdehi:version`` (the authored version/provenance block). ``name``
     # bilingualism is measured directly. (An earlier draft keyed on
     # ``jawafdehi:sources`` / ``description``, which no entity carries → always 0.)
-    if connection.vendor == "postgresql":
+    # Vendor check is against the DB the model actually routes to (nes), not
+    # ``default`` — the aliases can run different engines (sqlite local stores).
+    if connections[StoredEntity.objects.db].vendor == "postgresql":
         with_identifier = StoredEntity.objects.filter(
             data__has_key="identifier"
         ).count()
@@ -175,7 +250,7 @@ def _ngm_metrics():
     with_registration_date = CourtCase.objects.exclude(
         registration_date_ad__isnull=True
     ).count()
-    if connection.vendor == "postgresql":
+    if connections[CourtCase.objects.db].vendor == "postgresql":
         with_document_sources = (
             CourtCase.objects.filter(document_sources__isnull=False)
             .exclude(document_sources=[])
@@ -228,7 +303,7 @@ def _materials_metrics():
     # Completeness signals over the stored schema.org JSON-LD doc. On Postgres
     # answered with JSON-key existence lookups; sqlite (empty local / test DB)
     # degrades to 0 without a full scan.
-    if connection.vendor == "postgresql":
+    if connections[Material.objects.db].vendor == "postgresql":
         with_description = Material.objects.filter(
             data__has_key="description"
         ).count()

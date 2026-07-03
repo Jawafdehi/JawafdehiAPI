@@ -11,7 +11,7 @@ from xml.etree.ElementTree import Element, SubElement, tostring
 import jsonpatch
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.db import connection, transaction
+from django.db import IntegrityError, connection, transaction
 from django.db.models import Q
 from django.http import HttpResponse
 from django.utils import timezone
@@ -62,7 +62,11 @@ from .serializers import (
     CaseSerializer,
     FeedbackSerializer,
 )
-from .services.statistics import STATISTICS_SNAPSHOT_KEY, refresh_statistics
+from .services.statistics import (
+    STATISTICS_SNAPSHOT_KEY,
+    bootstrap_placeholder,
+    refresh_statistics,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -919,12 +923,26 @@ class StatisticsView(APIView):
         snapshot = StatisticsSnapshot.objects.filter(
             pk=STATISTICS_SNAPSHOT_KEY
         ).first()
-        if snapshot is None:
-            # Bootstrap: no snapshot row yet (fresh database, before the first
-            # scheduled refresh has run). Compute inline once and persist so
-            # only this first request ever pays the aggregation cost.
-            return Response(refresh_statistics())
-        return Response(snapshot.data)
+        if snapshot is not None:
+            return Response(snapshot.data)
+        # Bootstrap: no snapshot row yet (fresh database, before the first
+        # scheduled refresh has run). Claim the row with an atomic INSERT so
+        # exactly ONE request pays the aggregation; concurrent requests that
+        # lose the claim serve a cheap placeholder instead of stacking
+        # multi-second recomputes (thundering-herd guard). If the winner dies
+        # mid-compute, the placeholder row persists until the next scheduled
+        # refresh overwrites it.
+        placeholder = bootstrap_placeholder()
+        try:
+            with transaction.atomic():
+                StatisticsSnapshot.objects.create(
+                    key=STATISTICS_SNAPSHOT_KEY,
+                    data=placeholder,
+                    computed_at=timezone.now(),
+                )
+        except IntegrityError:
+            return Response(placeholder)
+        return Response(refresh_statistics())
 
 
 class FeedbackRateThrottle(AnonRateThrottle):

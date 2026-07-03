@@ -20,7 +20,11 @@ from cases.models import (
     RelationshipType,
     StatisticsSnapshot,
 )
-from cases.services.statistics import STATISTICS_SNAPSHOT_KEY
+from cases.services.statistics import (
+    STATISTICS_SNAPSHOT_KEY,
+    bootstrap_placeholder,
+    compute_statistics,
+)
 from entities.models import StoredEntity
 from courts.models import Court, CourtCase
 from materials.models import Material
@@ -258,6 +262,21 @@ class TestStatisticsSnapshot:
 
         snapshot = StatisticsSnapshot.objects.get(pk=STATISTICS_SNAPSHOT_KEY)
         assert snapshot.data == data
+
+    def test_bootstrap_placeholder_matches_payload_shape(self):
+        """The claim-race placeholder mirrors the real payload exactly.
+
+        Requests that lose the bootstrap claim race are served
+        ``bootstrap_placeholder()`` — on an empty database it must equal the
+        real computed payload (same keys, same zero values) so consumers never
+        see a shape they can't handle. Pins the hand-written zero blocks
+        against drift when metrics are added to the real computation.
+        """
+        placeholder = bootstrap_placeholder()
+        real = compute_statistics()
+        placeholder.pop("last_updated")
+        real.pop("last_updated")
+        assert placeholder == real
 
     def test_snapshot_is_served_until_refreshed(self, api_client):
         """Data changes do NOT show up until the snapshot is refreshed."""
