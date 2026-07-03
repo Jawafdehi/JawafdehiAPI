@@ -116,6 +116,7 @@ dev = [
     # tests are async).
     "hypothesis>=6.0",
     "pytest-asyncio>=0.24",
+    "pre-commit>=4.6.0",
 ]
 
 [tool.pytest.ini_options]
