@@ -148,7 +148,7 @@ services:
       # the API clients. The /api surface is FLAT — no /nes or /ngm prefix
       # (config/urls.py HARD-CUT the prefixes 2026-07-01, no redirects). NES
       # entities are at /api/entities, NGM materials at /api/materials/ and court
-      # cases at /api/courtcases; Jawafdehi cases + unified search also under /api.
+      # cases at /api/courtcases/; Jawafdehi cases + unified search also under /api.
       VITE_JDS_API_BASE_URL: "/api"
       VITE_NES_API_BASE_URL: "/api"
       VITE_API_BASE_URL: "/api"
