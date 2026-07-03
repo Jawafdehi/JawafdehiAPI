@@ -32,6 +32,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
 
+from jawafdehi_shared.drf.auditlog import AuditlogActorMixin, log_bulk_update
 from jawafdehi_shared.identity import (
     JAWAFDEHI_USER_ID_HEADER,
     resolve_or_create_identity,
@@ -223,7 +224,7 @@ def _recompute_material_visibility(material_iris) -> None:
         tags=["cases"],
     ),
 )
-class CaseViewSet(viewsets.ReadOnlyModelViewSet):
+class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
     """
     Public read-only API for Cases (with PATCH support for authenticated users).
 
@@ -683,6 +684,18 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
             if scalar_updates:
                 case = self.get_object()
                 Case.objects.filter(pk=case.pk).update(**scalar_updates)
+                # ``QuerySet.update()`` bypasses ``post_save``, so auditlog's UPDATE
+                # receiver never fires for scalar content edits — the same bypass the
+                # explicit search re-index below compensates for. Record the diff
+                # explicitly so content changes (description, timeline, allegations, …)
+                # are attributable, not just workflow/state saves. ``case`` still holds
+                # the pre-update values here (``update()`` doesn't touch the in-memory
+                # instance); it is refreshed to the new values on the next line.
+                log_bulk_update(
+                    case,
+                    Case.objects.get(pk=case.pk),
+                    fields=list(scalar_updates.keys()),
+                )
 
             # Persist entity relationship changes only when a /entities op
             # was explicitly included — avoids unnecessary delete/recreate on

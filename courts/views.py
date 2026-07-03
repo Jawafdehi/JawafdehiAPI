@@ -27,6 +27,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import connections, router, transaction
 from rest_framework import mixins, status, viewsets
 
+from jawafdehi_shared.drf.auditlog import AuditlogActorMixin
 from jawafdehi_shared.entities.ids import is_valid_entity_iri
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.exceptions import ValidationError as DRFValidationError
@@ -60,11 +61,16 @@ def health(request):
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
-class _PublicReadNgmWriteMixin:
+class _PublicReadNgmWriteMixin(AuditlogActorMixin):
     """Per-method permissions: public reads, NGM-role-gated writes.
 
     Mirrors ``entities.views.EntityListCreateView.get_permissions``:
     write methods require ``HasNgmRole``, everything else is ``AllowAny``.
+
+    Also mixes in ``AuditlogActorMixin`` so any audit entry produced by a courts
+    write is attributed to the authenticated user. (Courts models aren't
+    auditlog-registered today, so this is inert until they are — it's here so the
+    actor-capture seam is uniform across the platform's write viewsets.)
     """
 
     def get_permissions(self):
@@ -356,8 +362,12 @@ class QueryView(APIView):
 # aggregate counts so a scraper can safely re-run a batch.
 
 
-class _IngestionView(APIView):
-    """Shared base for the OIDC + NGM-role gated ingestion writers."""
+class _IngestionView(AuditlogActorMixin, APIView):
+    """Shared base for the OIDC + NGM-role gated ingestion writers.
+
+    ``AuditlogActorMixin`` attributes any audit entry to the authenticated user
+    (inert until courts models are auditlog-registered; see
+    ``_PublicReadNgmWriteMixin``)."""
 
     permission_classes = [HasNgmRole]
 
