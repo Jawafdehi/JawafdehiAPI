@@ -45,6 +45,18 @@ class TestStatisticsEndpoint:
         response = api_client.get("/api/statistics/")
         assert response.status_code == 200
 
+    def test_statistics_publicly_cacheable_on_bootstrap(self, api_client):
+        """The bootstrap-winner response (real data) is publicly cacheable."""
+        response = api_client.get("/api/statistics/")
+        assert response["Cache-Control"] == "public, max-age=60, s-maxage=300"
+
+    def test_statistics_publicly_cacheable_from_snapshot(self, api_client):
+        """The served-snapshot response is publicly cacheable (edge TTL 5 min)."""
+        api_client.get("/api/statistics/")  # bootstrap the snapshot row
+
+        response = api_client.get("/api/statistics/")
+        assert response["Cache-Control"] == "public, max-age=60, s-maxage=300"
+
     def test_statistics_response_structure(self, api_client):
         """Test that the response contains all required fields."""
         response = api_client.get("/api/statistics/")
@@ -262,6 +274,43 @@ class TestStatisticsSnapshot:
 
         snapshot = StatisticsSnapshot.objects.get(pk=STATISTICS_SNAPSHOT_KEY)
         assert snapshot.data == data
+
+    def test_claim_race_loser_serves_placeholder_uncached(
+        self, api_client, monkeypatch
+    ):
+        """A request that loses the bootstrap claim race serves the placeholder
+        with ``no-store``, so the zeroed blocks are never edge-cached.
+
+        The race is simulated by having the placeholder build (which happens
+        between the missing-snapshot check and the claiming INSERT) create the
+        row first, forcing the view's INSERT into the IntegrityError path.
+        """
+        from django.utils import timezone
+
+        from cases import api_views
+
+        real_placeholder = api_views.bootstrap_placeholder
+
+        def racing_placeholder():
+            payload = real_placeholder()
+            StatisticsSnapshot.objects.create(
+                key=STATISTICS_SNAPSHOT_KEY,
+                data={"published_cases": 999},
+                computed_at=timezone.now(),
+            )
+            return payload
+
+        monkeypatch.setattr(api_views, "bootstrap_placeholder", racing_placeholder)
+
+        response = api_client.get("/api/statistics/")
+
+        assert response.status_code == 200
+        assert response["Cache-Control"] == "no-store"
+        # The loser serves its own placeholder, not the winner's row.
+        assert response.json()["published_cases"] == 0
+        # The winner's row was left untouched by the losing request.
+        snapshot = StatisticsSnapshot.objects.get(pk=STATISTICS_SNAPSHOT_KEY)
+        assert snapshot.data == {"published_cases": 999}
 
     def test_bootstrap_placeholder_matches_payload_shape(self):
         """The claim-race placeholder mirrors the real payload exactly.

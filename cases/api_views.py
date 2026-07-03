@@ -898,6 +898,9 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
     **Caching:**
     - Statistics are precomputed asynchronously on a schedule (every 5 minutes)
       and served from a shared snapshot, so values may be a few minutes stale
+    - Responses are publicly cacheable (`Cache-Control: public, max-age=60,
+      s-maxage=300`) and served from the CDN edge, so end-to-end staleness can
+      reach ~10 minutes worst case
     - `last_updated` is the time the served snapshot was computed
     """,
     tags=["statistics"],
@@ -929,7 +932,18 @@ class StatisticsView(APIView):
     lookup per request. The heavy NES/NGM aggregation runs out-of-band in the
     ``refresh_statistics`` management command on a schedule; see
     ``cases.services.statistics`` for the computation and the rationale.
+
+    The payload is anonymous-public and identical for everyone, so real
+    (non-placeholder) responses are marked publicly cacheable: ``s-maxage``
+    lets the CDN edge (a Cloudflare cache rule marks this path eligible)
+    absorb the fan-out for 5 minutes, ``max-age`` gives browsers a short
+    hold. Combined with the 5-minute snapshot refresh, worst-case staleness
+    is ~10 minutes — acceptable for aggregate statistics.
     """
+
+    # Kept in lockstep with the refresh cadence: edge TTL == the CronJob's
+    # 5-minute schedule, so edge staleness never exceeds one refresh interval.
+    CACHE_CONTROL = "public, max-age=60, s-maxage=300"
 
     def get(self, request):
         """Serve the shared precomputed statistics snapshot (O(1) PK lookup)."""
@@ -937,7 +951,9 @@ class StatisticsView(APIView):
             pk=STATISTICS_SNAPSHOT_KEY
         ).first()
         if snapshot is not None:
-            return Response(snapshot.data)
+            return Response(
+                snapshot.data, headers={"Cache-Control": self.CACHE_CONTROL}
+            )
         # Bootstrap: no snapshot row yet (fresh database, before the first
         # scheduled refresh has run). Claim the row with an atomic INSERT so
         # exactly ONE request pays the aggregation; concurrent requests that
@@ -954,8 +970,12 @@ class StatisticsView(APIView):
                     computed_at=timezone.now(),
                 )
         except IntegrityError:
-            return Response(placeholder)
-        return Response(refresh_statistics())
+            # The placeholder's zeroed blocks must never be pinned at the
+            # edge for a full TTL — this response is for THIS request only.
+            return Response(placeholder, headers={"Cache-Control": "no-store"})
+        return Response(
+            refresh_statistics(), headers={"Cache-Control": self.CACHE_CONTROL}
+        )
 
 
 class FeedbackRateThrottle(AnonRateThrottle):
