@@ -1,11 +1,15 @@
 """
 Tests for the statistics API endpoint.
 
-Tests the /api/statistics/ endpoint for case statistics aggregation and caching.
+Tests the /api/statistics/ endpoint for case statistics aggregation and the
+shared snapshot it is served from. The endpoint reads the precomputed
+``StatisticsSnapshot`` row (refreshed out-of-band by the ``refresh_statistics``
+management command) and only computes inline as a one-time bootstrap when no
+snapshot exists yet — which is the state every test here starts from.
 """
 
 import pytest
-from django.core.cache import cache
+from django.core.management import call_command
 from rest_framework.test import APIClient
 
 from cases.models import (
@@ -14,7 +18,9 @@ from cases.models import (
     CaseState,
     CaseType,
     RelationshipType,
+    StatisticsSnapshot,
 )
+from cases.services.statistics import STATISTICS_SNAPSHOT_KEY
 from entities.models import StoredEntity
 from courts.models import Court, CourtCase
 from materials.models import Material
@@ -24,14 +30,6 @@ from materials.models import Material
 def api_client():
     """Create an API client for testing."""
     return APIClient()
-
-
-@pytest.fixture(autouse=True)
-def clear_cache():
-    """Clear cache before each test."""
-    cache.clear()
-    yield
-    cache.clear()
 
 
 @pytest.mark.django_db
@@ -249,11 +247,20 @@ class TestStatisticsCounting:
 
 
 @pytest.mark.django_db
-class TestStatisticsCaching:
-    """Test suite for statistics caching behavior."""
+class TestStatisticsSnapshot:
+    """The endpoint serves the shared precomputed snapshot, not live counts."""
 
-    def test_statistics_are_cached(self, api_client):
-        """Test that statistics are cached and reused."""
+    def test_first_request_bootstraps_snapshot(self, api_client):
+        """With no snapshot row, the first request computes and persists one."""
+        assert not StatisticsSnapshot.objects.exists()
+
+        data = api_client.get("/api/statistics/").json()
+
+        snapshot = StatisticsSnapshot.objects.get(pk=STATISTICS_SNAPSHOT_KEY)
+        assert snapshot.data == data
+
+    def test_snapshot_is_served_until_refreshed(self, api_client):
+        """Data changes do NOT show up until the snapshot is refreshed."""
         # Create initial case
         Case.objects.create(
             case_type=CaseType.CORRUPTION,
@@ -261,7 +268,7 @@ class TestStatisticsCaching:
             title="Initial Case",
         )
 
-        # First request - should calculate and cache
+        # First request - bootstraps the snapshot
         response1 = api_client.get("/api/statistics/")
         data1 = response1.json()
         assert data1["published_cases"] == 1
@@ -271,16 +278,16 @@ class TestStatisticsCaching:
             case_type=CaseType.CORRUPTION, state=CaseState.PUBLISHED, title="New Case"
         )
 
-        # Second request - should return cached data (still 1)
+        # Second request - still the stored snapshot (still 1)
         response2 = api_client.get("/api/statistics/")
         data2 = response2.json()
-        assert data2["published_cases"] == 1  # Cached value
+        assert data2["published_cases"] == 1
 
-        # Verify last_updated is the same (cached)
+        # Verify last_updated is the same (same snapshot)
         assert data1["last_updated"] == data2["last_updated"]
 
-    def test_cache_refresh_after_clear(self, api_client):
-        """Test that statistics are recalculated after cache is cleared."""
+    def test_refresh_command_updates_snapshot(self, api_client):
+        """The refresh_statistics management command recomputes the snapshot."""
         # Create initial case
         Case.objects.create(
             case_type=CaseType.CORRUPTION,
@@ -288,7 +295,7 @@ class TestStatisticsCaching:
             title="Initial Case",
         )
 
-        # First request
+        # First request - bootstraps the snapshot
         response1 = api_client.get("/api/statistics/")
         data1 = response1.json()
         assert data1["published_cases"] == 1
@@ -298,16 +305,17 @@ class TestStatisticsCaching:
             case_type=CaseType.CORRUPTION, state=CaseState.PUBLISHED, title="New Case"
         )
 
-        # Clear cache
-        cache.clear()
+        # Refresh out-of-band, the way the scheduled job does
+        call_command("refresh_statistics")
 
-        # Request after cache clear - should reflect new case
+        # Request after refresh - reflects the new case
         response2 = api_client.get("/api/statistics/")
         data2 = response2.json()
         assert data2["published_cases"] == 2
+        assert data2["last_updated"] > data1["last_updated"]
 
-    def test_cache_key_is_consistent(self, api_client):
-        """Test that the same cache key is used across requests."""
+    def test_snapshot_is_consistent_across_requests(self, api_client):
+        """Repeated requests serve the identical snapshot payload."""
         # First request
         response1 = api_client.get("/api/statistics/")
         data1 = response1.json()
@@ -316,11 +324,11 @@ class TestStatisticsCaching:
         response2 = api_client.get("/api/statistics/")
         data2 = response2.json()
 
-        # Should return identical data (from cache)
+        # Should return identical data (same snapshot row)
         assert data1 == data2
 
-    def test_cache_stores_complete_response(self, api_client):
-        """Test that all fields are cached correctly."""
+    def test_snapshot_stores_complete_response(self, api_client):
+        """Test that all fields survive the snapshot round-trip."""
         case = Case.objects.create(
             case_type=CaseType.CORRUPTION, state=CaseState.PUBLISHED, title="Test Case"
         )
@@ -330,11 +338,11 @@ class TestStatisticsCaching:
             relationship_type=RelationshipType.ACCUSED,
         )
 
-        # First request - caches data
+        # First request - persists the snapshot
         response1 = api_client.get("/api/statistics/")
         data1 = response1.json()
 
-        # Second request - from cache
+        # Second request - from the stored snapshot
         response2 = api_client.get("/api/statistics/")
         data2 = response2.json()
 

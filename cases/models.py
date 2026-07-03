@@ -917,3 +917,30 @@ class ChatUserIdentity(models.Model):
     def __str__(self):
         user_display = self.user.get_username() if self.user else "(unmapped)"
         return f"{self.owui_user_id} -> {user_display}"
+
+
+class StatisticsSnapshot(models.Model):
+    """Precomputed /api/statistics/ payload (one row, key ``statistics``).
+
+    Written out-of-band by ``cases.services.statistics.refresh_statistics``
+    (the ``refresh_statistics`` management command, run on a schedule) and read
+    by ``StatisticsView`` as a single primary-key lookup, so the public endpoint
+    never pays the multi-second NES/NGM aggregation. Deliberately a keyed row
+    rather than a TTL cache entry: a missed refresh serves stale-but-valid data
+    instead of a request-blocking recompute or nothing.
+    """
+
+    key = models.CharField(max_length=64, primary_key=True)
+    data = models.JSONField(
+        help_text="The exact JSON payload served by /api/statistics/"
+    )
+    computed_at = models.DateTimeField(
+        help_text="When this payload was computed (also carried as last_updated inside data)"
+    )
+
+    class Meta:
+        verbose_name = "Statistics Snapshot"
+        verbose_name_plural = "Statistics Snapshots"
+
+    def __str__(self):
+        return f"{self.key} @ {self.computed_at.isoformat()}"
