@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from django.db import connection
+from django.db import connections, router
 from django.db.models import Q, QuerySet
 from jawafdehi_shared.entities.ids import canonicalize_entity_iri, parse_entity_iri
 
@@ -48,9 +48,19 @@ def _clamp_offset(offset: int) -> int:
     return max(0, offset)
 
 
+def _entities_connection():
+    """The connection the router pins entities models to (``nes`` in prod).
+
+    Raw SQL against the ``entities`` table must use this connection, NOT the
+    ``default`` one — after the platform collapse ``default`` is the Jawafdehi
+    DB, which owns no entities tables (``relation "entities" does not exist``).
+    """
+    return connections[router.db_for_read(StoredEntity)]
+
+
 def _supports_jsonb_containment() -> bool:
     """Postgres supports ``@>`` containment lookups; sqlite (tests) does not."""
-    return connection.vendor == "postgresql"
+    return _entities_connection().vendor == "postgresql"
 
 
 def _canonicalize_doc_id(doc: Dict[str, Any]) -> str:
@@ -304,6 +314,7 @@ class EntityRepository:
 
     def all_keywords(self) -> List[str]:
         """Distinct schema.org ``keywords`` across all entities (for /api/entities/tags)."""
+        connection = _entities_connection()
         if connection.vendor == "postgresql":
             with connection.cursor() as cursor:
                 cursor.execute(
