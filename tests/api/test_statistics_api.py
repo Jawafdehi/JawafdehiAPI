@@ -312,6 +312,45 @@ class TestStatisticsSnapshot:
         snapshot = StatisticsSnapshot.objects.get(pk=STATISTICS_SNAPSHOT_KEY)
         assert snapshot.data == {"published_cases": 999}
 
+    def test_committed_placeholder_row_is_served_uncached(self, api_client):
+        """A placeholder row found in the database is served with ``no-store``.
+
+        While the bootstrap winner spends multi-second computing the real
+        payload, its committed claim row is what every other request serves —
+        it must never be edge-cached, or zeroed statistics would be pinned at
+        the CDN for a full TTL.
+        """
+        from django.utils import timezone
+
+        StatisticsSnapshot.objects.create(
+            key=STATISTICS_SNAPSHOT_KEY,
+            data=bootstrap_placeholder(),
+            computed_at=timezone.now(),
+            is_placeholder=True,
+        )
+
+        response = api_client.get("/api/statistics/")
+        assert response.status_code == 200
+        assert response["Cache-Control"] == "no-store"
+
+    def test_refresh_clears_placeholder_flag(self, api_client):
+        """The refresh upsert converts a placeholder row into a cacheable one."""
+        from django.utils import timezone
+
+        StatisticsSnapshot.objects.create(
+            key=STATISTICS_SNAPSHOT_KEY,
+            data=bootstrap_placeholder(),
+            computed_at=timezone.now(),
+            is_placeholder=True,
+        )
+
+        call_command("refresh_statistics")
+
+        snapshot = StatisticsSnapshot.objects.get(pk=STATISTICS_SNAPSHOT_KEY)
+        assert snapshot.is_placeholder is False
+        response = api_client.get("/api/statistics/")
+        assert response["Cache-Control"] == "public, max-age=60, s-maxage=300"
+
     def test_bootstrap_placeholder_matches_payload_shape(self):
         """The claim-race placeholder mirrors the real payload exactly.
 

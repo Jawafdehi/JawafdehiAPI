@@ -160,11 +160,13 @@ def refresh_statistics() -> dict:
                 key=STATISTICS_SNAPSHOT_KEY,
                 data=stats,
                 computed_at=timezone.now(),
+                # A real payload always clears any bootstrap-placeholder flag.
+                is_placeholder=False,
             )
         ],
         update_conflicts=True,
         unique_fields=["key"],
-        update_fields=["data", "computed_at"],
+        update_fields=["data", "computed_at", "is_placeholder"],
     )
     return stats
 

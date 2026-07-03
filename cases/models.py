@@ -937,6 +937,12 @@ class StatisticsSnapshot(models.Model):
     computed_at = models.DateTimeField(
         help_text="When this payload was computed (also carried as last_updated inside data)"
     )
+    # True only for the bootstrap claim row (zeroed placeholder committed while
+    # the winning request computes the real payload). Placeholder responses are
+    # served with Cache-Control: no-store so the zeros are never edge-cached;
+    # the refresh upsert clears the flag. db_default keeps inserts from
+    # not-yet-rolled code valid during deploys.
+    is_placeholder = models.BooleanField(default=False, db_default=False)
 
     class Meta:
         verbose_name = "Statistics Snapshot"

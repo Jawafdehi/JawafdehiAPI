@@ -951,8 +951,15 @@ class StatisticsView(APIView):
             pk=STATISTICS_SNAPSHOT_KEY
         ).first()
         if snapshot is not None:
+            # A bootstrap-placeholder row (committed by the claim below while
+            # the winning request is still computing) must never be pinned at
+            # the edge — its zeroed blocks would be served worldwide for a
+            # full TTL. Real snapshots are publicly cacheable.
+            cache_control = (
+                "no-store" if snapshot.is_placeholder else self.CACHE_CONTROL
+            )
             return Response(
-                snapshot.data, headers={"Cache-Control": self.CACHE_CONTROL}
+                snapshot.data, headers={"Cache-Control": cache_control}
             )
         # Bootstrap: no snapshot row yet (fresh database, before the first
         # scheduled refresh has run). Claim the row with an atomic INSERT so
@@ -968,6 +975,7 @@ class StatisticsView(APIView):
                     key=STATISTICS_SNAPSHOT_KEY,
                     data=placeholder,
                     computed_at=timezone.now(),
+                    is_placeholder=True,
                 )
         except IntegrityError:
             # The placeholder's zeroed blocks must never be pinned at the
