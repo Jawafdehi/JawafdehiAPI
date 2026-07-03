@@ -360,11 +360,14 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
 
         return queryset.prefetch_related(
             "entity_relationships",
+            "courtcase_references",
         ).order_by("-created_at")
 
     # Case model fields that CaseCreateSerializer may set directly on the row.
-    # Non-model serializer keys (alleged_entities / related_entities / evidence)
-    # are handled separately as binds/joins below.
+    # ``court_cases`` is a settable property (canonical IRIs synced to the
+    # CaseCourtCaseReference join on save), so it stays in this set. Non-model
+    # serializer keys (alleged_entities / related_entities / evidence) are
+    # handled separately as binds/joins below.
     _CREATE_MODEL_FIELDS = frozenset(
         [
             "case_type",
@@ -503,6 +506,7 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 ordinal=ordinal,
             )
 
+
     def retrieve(self, request, *args, **kwargs):
         """
         GET /api/cases/{id}/
@@ -637,17 +641,21 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             for op in patch_ops
         )
 
-        # Gate the evidence (material-reference) rewrite to actual /evidence ops,
-        # for the same reason as entities: the snapshot always carries "evidence",
-        # so writing unconditionally would wipe references on every scalar PATCH.
-        evidence_touched = any(
-            isinstance(op, dict)
-            and (
-                op.get("path") == "/evidence"
-                or op.get("path", "").startswith("/evidence/")
+        # Gate each join rewrite to ops that actually target its path, for the
+        # same reason as entities: the snapshot always carries these keys, so
+        # writing unconditionally would wipe the join on every scalar PATCH.
+        def _touches(path):
+            return any(
+                isinstance(op, dict)
+                and (
+                    op.get("path") == path
+                    or op.get("path", "").startswith(path + "/")
+                )
+                for op in patch_ops
             )
-            for op in patch_ops
-        )
+
+        evidence_touched = _touches("/evidence")
+        court_cases_touched = _touches("/court_cases")
 
         # Fields that map directly to Case model columns (updated via bulk UPDATE)
         scalar_fields = frozenset(
@@ -662,13 +670,14 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 "tags",
                 "key_allegations",
                 "timeline",
-                # NOTE: "evidence" is intentionally NOT a scalar field. It is no
-                # longer a Case column (it's the CaseMaterialReference join), so it
-                # must never be written via Case.objects.update(). It is persisted
-                # separately below via _write_material_references when a /evidence
-                # patch op is present (evidence_touched).
+                # NOTE: "evidence" and "court_cases" are intentionally NOT
+                # scalar fields. Neither is a Case column (they are the
+                # CaseMaterialReference / CaseCourtCaseReference joins), so they
+                # must never be written via Case.objects.update(). They are
+                # persisted separately below via _write_material_references /
+                # _write_courtcase_references when a /evidence or /court_cases
+                # patch op is present.
                 "slug",
-                "court_cases",
                 "missing_details",
                 "bigo",
             ]
@@ -722,6 +731,12 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 affected_material_iris.update(
                     case.material_references.values_list("material_iri", flat=True)
                 )
+
+            # Persist court-case reference changes only when a /court_cases op
+            # was explicitly included (same gating rationale as evidence). The
+            # model's sync is THE single join writer (no-op when unchanged).
+            if court_cases_touched:
+                case._sync_courtcase_references(validated.get("court_cases") or [])
 
             case.refresh_from_db()
 
@@ -869,7 +884,9 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 for rel in case.entity_relationships.all()
             ],
             "slug": case.slug,
-            "court_cases": list(case.court_cases) if case.court_cases else [],
+            # Single property read: each access queries the reference join
+            # unless prefetched.
+            "court_cases": case.court_cases,
             "missing_details": case.missing_details,
             "bigo": case.bigo,
         }

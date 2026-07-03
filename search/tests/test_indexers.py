@@ -174,7 +174,7 @@ def _published_case():
         key_allegations=["Misappropriation of funds", "Forgery"],
         tags=["corruption", "budget"],
         case_type="CORRUPTION",
-        court_cases=["supreme:081-CR-0081"],
+        court_cases=["https://jawafdehi.org/courtcase/supreme/081-cr-0081"],
         case_start_date=None,
         created_at=None,
         updated_at=None,
@@ -197,9 +197,12 @@ def test_case_build_doc_shape_published():
     assert "CORRUPTION" in doc["keywords"]
     # case_type also promoted to a top-level keyword for filtering/faceting.
     assert doc["case_type"] == "CORRUPTION"
-    # slug + court_cases refs into identifiers.
+    # slug + court_cases refs into identifiers: the stored IRI plus the bare
+    # case number for recall (no legacy "<court>:<number>" form).
     assert "budget-scam-2080" in doc["identifiers"]
-    assert "supreme:081-CR-0081" in doc["identifiers"]
+    assert "https://jawafdehi.org/courtcase/supreme/081-cr-0081" in doc["identifiers"]
+    assert "081-cr-0081" in doc["identifiers"]
+    assert "supreme:081-cr-0081" not in doc["identifiers"]
 
 
 def test_case_should_index_only_published():

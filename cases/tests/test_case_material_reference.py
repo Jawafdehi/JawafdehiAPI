@@ -29,7 +29,7 @@ class TestCaseMaterialReferenceModel:
             "state": CaseState.DRAFT,
             "title": "Test Case",
             "slug": "cmr-case-001",
-            "court_cases": ["special:test-001"],
+            "court_cases": ["https://jawafdehi.org/courtcase/special/test-001"],
         }
         defaults.update(overrides)
         return Case.objects.create(**defaults)

@@ -15,9 +15,11 @@ portal (``JAWAFDEHI_API_BASE`` may point at portal.jawafdehi.org while the
 review worker runs elsewhere). ``get_court_case`` reassembles the case +
 hearings + entities into one dict so its callers keep the previous contract.
 
-The case number is taken as the ``court:case_number`` ref verbatim (the exact
-form stored in a Jawafdehi case's ``court_cases`` field, e.g.
-``"special:081-CR-0079"``); the read plane best-effort normalizes it server-side.
+Case dicts carry court refs as canonical court-case @id IRIs
+(``https://<base>/courtcase/special/081-cr-0079``); internally this module
+also round-trips its own compact ``"special:081-CR-0079"`` spelling (used for
+read-plane lookups, judge prompts, and error messages). The read plane
+best-effort normalizes case numbers server-side.
 
 Intentionally generic so it can back several review rules and future checks
 (e.g. verifying a case's start/end dates against ``registration_date_ad`` /
@@ -30,6 +32,7 @@ from urllib.parse import quote
 import requests
 from django.conf import settings
 
+from jawafdehi_shared.entities.ids import parse_courtcase_iri
 from review.oidc_client_credentials import OIDCTokenError, bearer_header
 
 # Cap how many pages of a paginated sub-resource (entities/hearings) we follow,
@@ -63,21 +66,36 @@ def _ngm_base():
 
 # Court refs come from case data (operator-entered), so validate strictly before
 # they ever reach a URL: identifier is lowercase alphanumerics; case number is
-# the NNN-XX-NNNN court-case form (alphanumerics + hyphens). This rejects path
-# traversal / query-injection chars (/, .., ?, #, whitespace) up front.
+# the case-insensitive mirror of the shared court-case IRI grammar
+# (jawafdehi_shared.entities.ids._CASE_NUMBER: letter/digit-led, then
+# letters/digits/._-), so every storable reference stays queryable here. The
+# leading alphanumeric rejects path traversal ("..", leading dots) and the
+# charset excludes /, ?, #, and whitespace up front.
 _COURT_ID_RE = re.compile(r"^[a-z0-9]+$")
-_CASE_NUMBER_RE = re.compile(r"^[A-Za-z0-9-]+$")
+_CASE_NUMBER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def parse_court_ref(ref):
-    """Parse a ``"<court_identifier>:<case_number>"`` ref into a (court, number) tuple.
+    """Parse a court-case ref into a (court, number) tuple.
 
-    Returns None if the ref is not in that shape or contains unsafe characters.
+    Accepts the canonical court-case @id IRI
+    (``https://<base>/courtcase/<court>/<case_number>`` — the form stored on
+    cases) as well as this module's own compact
+    ``"<court_identifier>:<case_number>"`` spelling (what
+    ``court_refs_for_case`` emits and callers hand back for lookups). Returns
+    None if the ref is neither, or contains unsafe characters.
     """
-    if not ref or ":" not in str(ref):
+    if not ref:
         return None
-    court, _, number = str(ref).partition(":")
-    court, number = court.strip(), number.strip()
+    ref = str(ref).strip()
+    try:
+        parsed = parse_courtcase_iri(ref)
+        court, number = parsed.court, parsed.case_number
+    except ValueError:
+        if "://" in ref or ":" not in ref:
+            return None
+        court, _, number = ref.partition(":")
+        court, number = court.strip(), number.strip()
     if not court or not number:
         return None
     if not _COURT_ID_RE.match(court) or not _CASE_NUMBER_RE.match(number):
@@ -86,11 +104,17 @@ def parse_court_ref(ref):
 
 
 def court_refs_for_case(case):
-    """All ``"<court>:<case_number>"`` refs from a case's court_cases field."""
+    """All court refs from a case's court_cases field, as ``"<court>:<case_number>"``.
+
+    The stored form is the canonical @id IRI; refs are re-emitted in the short
+    form (case number uppercased) — the compact spelling used for read-plane
+    lookups, judge prompts, and error messages.
+    """
     refs = []
     for ref in case.get("court_cases") or []:
-        if parse_court_ref(ref):
-            refs.append(str(ref).strip())
+        parsed = parse_court_ref(ref)
+        if parsed:
+            refs.append(f"{parsed[0]}:{parsed[1].upper()}")
     return refs
 
 
@@ -154,7 +178,8 @@ def get_court_case(case_ref, timeout=30):
     parsed = parse_court_ref(case_ref)
     if not parsed:
         raise NgmError(
-            f"Invalid court ref '{case_ref}'; expected '<court>:<case_number>'."
+            f"Invalid court ref '{case_ref}'; expected a court-case @id IRI or "
+            "'<court>:<case_number>'."
         )
     court, number = parsed
 

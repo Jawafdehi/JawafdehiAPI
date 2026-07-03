@@ -37,6 +37,7 @@ from django.core.management.base import BaseCommand, CommandError
 
 from cases.models import Case, CaseState
 from cases.services.priority_case_loader import filter_by_priority, load_priority_cases
+from cases.validators import parse_courtcase_ref
 
 logger = logging.getLogger(__name__)
 
@@ -633,10 +634,11 @@ class Command(BaseCommand):
         for case in cases:
             if not force and case.key_allegations:
                 continue
-            if case.court_cases and isinstance(case.court_cases, list):
+            court_refs = case.court_cases
+            if court_refs:
                 if any(
-                    isinstance(ref, str) and ref.startswith("special:")
-                    for ref in case.court_cases
+                    (parsed := parse_courtcase_ref(ref)) and parsed[0] == "special"
+                    for ref in court_refs
                 ):
                     result.append(case)
             else:

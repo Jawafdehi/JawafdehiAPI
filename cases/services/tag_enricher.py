@@ -7,6 +7,7 @@ import logging
 import re
 
 from cases.models import Case
+from cases.validators import parse_courtcase_ref, short_courtcase_ref
 
 logger = logging.getLogger(__name__)
 
@@ -863,14 +864,26 @@ def _detect_court_context(case: Case) -> list[str]:
     tags = []
     tags.append("CIAA")
     tags.append("Corruption")
-    if case.court_cases:
-        for cc in case.court_cases:
-            if isinstance(cc, str):
-                if cc.startswith("special:"):
-                    tags.append("Special Court")
-                elif cc.startswith("supreme:"):
-                    tags.append("Supreme Court")
+    for cc in case.court_cases:
+        parsed = parse_courtcase_ref(cc)
+        if not parsed:
+            continue
+        if parsed[0] == "special":
+            tags.append("Special Court")
+        elif parsed[0] == "supreme":
+            tags.append("Supreme Court")
     return tags
+
+
+def _short_court_refs(case: Case) -> list[str]:
+    """The case's court refs as compact ``<court>:<CASE-NUMBER>`` strings.
+
+    Stored refs are canonical @id IRIs; the short form keeps LLM prompts
+    compact and matches how case numbers are written in the source documents.
+    """
+    return [
+        short for short in map(short_courtcase_ref, case.court_cases) if short
+    ]
 
 
 def _append_amount_tag(tags: list[str], bigo) -> list[str]:
@@ -944,11 +957,9 @@ def build_llm_classification_prompt(case: Case) -> str:
         lines.append("Key Allegations:")
         for a in case.key_allegations:
             lines.append(f"  - {a}")
-    if case.court_cases:
-        lines.append(
-            "Court Cases: "
-            + ", ".join(c for c in case.court_cases if isinstance(c, str))
-        )
+    court_refs = _short_court_refs(case)
+    if court_refs:
+        lines.append("Court Cases: " + ", ".join(court_refs))
     if case.bigo is not None:
         lines.append(f"Bigo (Disputed Amount): NPR {case.bigo:,}")
     lines.append("")
@@ -976,11 +987,9 @@ def build_llm_classification_prompt_from_sources(case: Case, evidence_text: str)
         truncated += " [truncated]"
     lines.append(truncated)
     lines.append("")
-    if case.court_cases:
-        lines.append(
-            "Court Cases: "
-            + ", ".join(c for c in case.court_cases if isinstance(c, str))
-        )
+    court_refs = _short_court_refs(case)
+    if court_refs:
+        lines.append("Court Cases: " + ", ".join(court_refs))
     if case.bigo is not None:
         lines.append(f"Bigo (Disputed Amount): NPR {case.bigo:,}")
     lines.append("")
@@ -1051,13 +1060,13 @@ class TagEnricher:
         self, case: Case, force: bool = False, case_num: int = 0, total_cases: int = 0
     ) -> dict:  # noqa
         """Enrich a single case with tags. Returns dict with status, tags, and tier."""
-        # Extract case number from court_cases field (format: "special:080-CR-0007")
+        # Extract the case number from the court-case references (@id IRIs)
         case_number = None
-        if case.court_cases:
-            for entry in case.court_cases:
-                if isinstance(entry, str) and ":" in entry:
-                    case_number = entry.split(":", 1)[1]
-                    break
+        for entry in case.court_cases:
+            parsed = parse_courtcase_ref(entry)
+            if parsed:
+                case_number = parsed[1].upper()
+                break
 
         if case_num and total_cases:
             case_num_str = f" (#{case_number})" if case_number else ""

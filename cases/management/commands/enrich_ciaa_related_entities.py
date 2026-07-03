@@ -33,6 +33,7 @@ from cases.models import (
     CaseEntityRelationship,
     RelationshipType,
 )
+from cases.validators import parse_courtcase_ref
 
 logger = logging.getLogger(__name__)
 
@@ -525,12 +526,11 @@ class Command(BaseCommand):
 
     @staticmethod
     def _format_case_number(case):
-        """Extract case number from court_cases JSON field."""
-        court_cases = getattr(case, "court_cases", None)
-        if isinstance(court_cases, list) and court_cases:
-            first = court_cases[0]
-            if isinstance(first, str) and ":" in first:
-                return first.split(":", 1)[1]
+        """Extract the case number from the case's first court-case reference."""
+        for ref in getattr(case, "court_cases", None) or []:
+            parsed = parse_courtcase_ref(ref)
+            if parsed:
+                return parsed[1].upper()
         return ""
 
     def _process_case(self, case, options, api_key, session, is_verbose):

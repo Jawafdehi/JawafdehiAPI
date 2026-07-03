@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-from django.db import connection, transaction
+from django.core.exceptions import ValidationError
+from django.db import transaction
 from nepali.datetime import nepalidate
 
 from jawafdehi_shared.entities.ids import is_valid_entity_iri
@@ -19,6 +20,7 @@ from cases.models import (
     CaseType,
     RelationshipType,
 )
+from cases.validators import courtcase_input_to_iri, parse_courtcase_ref
 
 logger = logging.getLogger(__name__)
 
@@ -142,35 +144,35 @@ class CIAADraftCaseService:
         return errors
 
     def _primary_ciaa_court_case(self, court_cases: list[str]) -> Optional[str]:
-        """Extract the primary CIAA court case reference (special:*) for idempotency checks.
+        """Extract the primary CIAA court case reference (Special Court) for idempotency checks.
 
-        CIAA cases are expected to have exactly one special:* entry in court_cases.
-        This is the unique idempotency key and should be used for duplicate detection.
+        CIAA cases are expected to have exactly one Special Court entry in
+        court_cases (IRI or legacy short form). This is the unique idempotency
+        key and should be used for duplicate detection.
 
         Args:
             court_cases: List of court case references
 
         Returns:
-            The special:* reference if found, otherwise None
+            The Special Court reference if found, otherwise None
         """
         for cc in court_cases:
-            if cc.startswith("special:"):
+            parsed = parse_courtcase_ref(cc)
+            if parsed and parsed[0] == "special":
                 return cc
         return None
 
     def check_case_exists(self, court_cases: list[str]) -> Optional[Case]:
-        """Check if case already exists by court_cases field. Returns existing Case or None."""
+        """Check if a case already references the same primary court case.
+
+        Matches on the CaseCourtCaseReference join by the canonical @id IRI
+        (``court_cases`` entries are IRIs by the time they reach here — built
+        in ``map_json_to_case``). Returns the existing Case or None.
+        """
         primary = self._primary_ciaa_court_case(court_cases)
         if not primary:
             return None
-
-        if connection.vendor == "postgresql":
-            return Case.objects.filter(court_cases__contains=[primary]).first()
-        else:
-            for case in Case.objects.exclude(court_cases__isnull=True):
-                if isinstance(case.court_cases, list) and primary in case.court_cases:
-                    return case
-        return None
+        return Case.objects.filter(courtcase_references__courtcase_iri=primary).first()
 
     def map_json_to_case(self, ciaa_json: dict) -> dict:
         """Map CIAA JSON fields to Case model fields. Returns dict with case data."""
@@ -212,18 +214,31 @@ class CIAADraftCaseService:
                 court_case.get("faisala_date_bs")
             )
 
-        # Build court_cases list
+        # Build court_cases list — canonical @id IRIs (the only stored form),
+        # from the CIAA JSON's (court, case_no) pairs. A malformed PRIMARY ref
+        # raises ValidationError -> the importer records the case as failed
+        # (the Special Court number is the dedup anchor). The APPEALED ref is
+        # best-effort: scraped appeal fields are noisier (Devanagari digits,
+        # free-text), and losing the whole import — primary court data,
+        # defendants, evidence — over a secondary ref is the wrong trade.
         court_cases = []
         if (
             court_case
             and (court := court_case.get("court"))
             and (cn := court_case.get("case_no"))
         ):
-            court_cases.append(f"{court}:{cn}")
+            court_cases.append(courtcase_input_to_iri(f"{court}:{cn}"))
 
         if appealed := ciaa_json.get("appealed_case"):
             if (ac := appealed.get("court")) and (acn := appealed.get("case_no")):
-                court_cases.append(f"{ac}:{acn}")
+                try:
+                    court_cases.append(courtcase_input_to_iri(f"{ac}:{acn}"))
+                except ValidationError:
+                    logger.warning(
+                        "Skipping uncanonicalizable appealed-case ref %r:%r",
+                        ac,
+                        acn,
+                    )
 
         case_data["court_cases"] = court_cases
         case_data["missing_details"] = (

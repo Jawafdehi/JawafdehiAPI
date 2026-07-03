@@ -61,6 +61,58 @@ def test_post_creates_draft_and_assigns_creator():
 
 
 @pytest.mark.django_db
+def test_post_court_cases_stores_iris():
+    """court_cases takes canonical @id IRIs; stored on the reference join."""
+    user = create_user_with_role("ashok-court", "ashok-court@example.com", "Caseworker")
+
+    response = _authed_client(user).post(
+        URL,
+        data={
+            "title": "Court ref creation",
+            "case_type": CaseType.CORRUPTION,
+            "court_cases": ["https://jawafdehi.org/courtcase/special/080-cr-0111"],
+        },
+        format="json",
+    )
+
+    assert response.status_code == 201
+    assert response.data["court_cases"] == [
+        "https://jawafdehi.org/courtcase/special/080-cr-0111"
+    ]
+    case = Case.objects.get(pk=response.data["id"])
+    assert list(
+        case.courtcase_references.values_list("courtcase_iri", flat=True)
+    ) == ["https://jawafdehi.org/courtcase/special/080-cr-0111"]
+    # The slug derives from the court case number ("case-" prefix: slugs must
+    # start with a letter).
+    assert response.data["slug"].startswith("case-080-cr-0111-")
+
+
+@pytest.mark.django_db
+def test_post_rejects_non_iri_court_refs():
+    """Short-form refs and unknown courts are rejected — IRIs only."""
+    user = create_user_with_role("ashok-court2", "ashok-court2@example.com", "Caseworker")
+    client = _authed_client(user)
+
+    for bad_refs in (
+        ["special:080-CR-0111"],  # legacy short form
+        ["not-a-real-court:123"],
+        ["https://jawafdehi.org/courtcase/not-a-real-court/123"],
+    ):
+        response = client.post(
+            URL,
+            data={
+                "title": "Bad court ref",
+                "case_type": CaseType.CORRUPTION,
+                "court_cases": bad_refs,
+            },
+            format="json",
+        )
+        assert response.status_code == 422, bad_refs
+    assert Case.objects.filter(title="Bad court ref").count() == 0
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize(
     "case_type",
     [

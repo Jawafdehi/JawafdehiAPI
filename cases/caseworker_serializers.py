@@ -8,6 +8,7 @@ itself) before the changes are persisted.
 import re
 from datetime import datetime
 
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
 from jawafdehi_shared.entities.ids import (
@@ -20,7 +21,7 @@ from .models import (
     CaseType,
     RelationshipType,
 )
-from .validators import validate_court_cases, validate_slug
+from .validators import validate_courtcase_iri, validate_slug
 
 
 class CaseInsensitiveChoiceField(serializers.ChoiceField):
@@ -165,6 +166,32 @@ class EntityPatchItemSerializer(serializers.Serializer):
         return value
 
 
+class CourtCaseRefsValidationMixin:
+    def validate_court_cases(self, value):
+        """Validate court-case references: canonical @id IRIs ONLY.
+
+        Each ref must be the canonical court-case IRI
+        (https://<base>/courtcase/<court>/<case_number>, lowercase grammar,
+        known court) — no other reference form is accepted, mirroring
+        ``nes_id``/``material_iri``. Deduplicated with order preserved.
+        """
+        if value is None:
+            return None
+        refs = []
+        errors = []
+        for ref in value:
+            try:
+                validate_courtcase_iri(ref)
+            except DjangoValidationError as exc:
+                errors.extend(exc.messages)
+                continue
+            if ref not in refs:
+                refs.append(ref)
+        if errors:
+            raise serializers.ValidationError(errors)
+        return refs
+
+
 class CaseEntityValidationMixin:
     def validate_alleged_entities(self, value):
         return self._validate_entity_ids(value)
@@ -190,7 +217,9 @@ class CaseEntityValidationMixin:
         return cleaned
 
 
-class CaseCreateSerializer(CaseEntityValidationMixin, serializers.Serializer):
+class CaseCreateSerializer(
+    CourtCaseRefsValidationMixin, CaseEntityValidationMixin, serializers.Serializer
+):
     case_type = serializers.ChoiceField(choices=CaseType.choices)
     state = serializers.ChoiceField(
         choices=CaseState.choices,
@@ -229,7 +258,10 @@ class CaseCreateSerializer(CaseEntityValidationMixin, serializers.Serializer):
         child=serializers.CharField(),
         required=False,
         allow_null=True,
-        validators=[validate_court_cases],
+        help_text=(
+            "Court-case references: canonical @id IRIs "
+            "(https://jawafdehi.org/courtcase/<court>/<case_number>) only"
+        ),
     )
     missing_details = serializers.CharField(
         required=False,
@@ -256,7 +288,7 @@ class CaseCreateSerializer(CaseEntityValidationMixin, serializers.Serializer):
         return value
 
 
-class CasePatchSerializer(serializers.Serializer):
+class CasePatchSerializer(CourtCaseRefsValidationMixin, serializers.Serializer):
     state = serializers.ChoiceField(choices=CaseState.choices, required=False)
     title = serializers.CharField(max_length=200)
     short_description = serializers.CharField(required=False, allow_blank=True)
@@ -285,7 +317,10 @@ class CasePatchSerializer(serializers.Serializer):
         child=serializers.CharField(),
         required=False,
         allow_null=True,
-        validators=[validate_court_cases],
+        help_text=(
+            "Court-case references: canonical @id IRIs "
+            "(https://jawafdehi.org/courtcase/<court>/<case_number>) only"
+        ),
     )
     missing_details = serializers.CharField(
         required=False,

@@ -145,7 +145,11 @@ class CaseSerializer(serializers.ModelSerializer):
         child=serializers.CharField(),
         allow_null=True,
         required=False,
-        help_text="List of court case references in format <court_identifier>:<case_number>",
+        help_text=(
+            "List of canonical court-case @id IRIs "
+            "(https://jawafdehi.org/courtcase/<court>/<case_number>), from the "
+            "CaseCourtCaseReference join"
+        ),
     )
     tags = serializers.ListField(
         child=serializers.CharField(),

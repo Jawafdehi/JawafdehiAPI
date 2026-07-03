@@ -48,7 +48,7 @@ def _case(slug, state):
         state=state,
         title="T",
         slug=slug,
-        court_cases=["special:t-1"],
+        court_cases=["https://jawafdehi.org/courtcase/special/t-1"],
     )
 
 

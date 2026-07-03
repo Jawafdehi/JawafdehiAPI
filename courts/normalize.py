@@ -22,7 +22,14 @@ DEVANAGARI_TO_ASCII = {
     "९": "9",
 }
 
-_CASE_RE = re.compile(r"^(\d+)-([A-Z]+)-(\d+)$")
+# Middle segment: letter-led alphanumeric, NOT pure letters — district-court
+# numbers like 079-C4-3431 make up ~20% of the lake, and a letters-only
+# pattern left them un-normalizable, so a lowercase lookup (e.g. from a
+# lowercased court-case @id IRI) passed through unchanged and missed the
+# stored uppercase row. Letter-led (not [A-Z0-9]+) so all-numeric middles
+# (odd legacy ids like 93-068-0194) still pass through verbatim instead of
+# being zero-padded away from their stored form.
+_CASE_RE = re.compile(r"^(\d+)-([A-Z][A-Z0-9]*)-(\d+)$")
 
 
 def normalize_case_number(case_number: str) -> str:
