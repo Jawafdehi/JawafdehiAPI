@@ -12,7 +12,9 @@ repos:
       - id: ruff-check
         name: ruff check (uv, mirrors CI)
         entry: uv run ruff check --force-exclude
-        language: system
+        # `unsupported` is pre-commit 4.4+'s canonical name for the old `system` language
+        # (runs the entry as-is on PATH; pre-commit does not manage the env).
+        language: unsupported
         types_or: [python, pyi]
         require_serial: true
 
@@ -23,3 +25,4 @@ repos:
       - id: check-added-large-files
       - id: check-case-conflict
       - id: check-toml
+      - id: check-yaml
