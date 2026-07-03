@@ -7,6 +7,13 @@
 > store. Where this doc still describes `/api/sources` or a distinct Jawafdehi source
 > resource, defer to the ADR.
 
+> **HISTORICAL for current-state purposes (as of the 2026-07-01 hard cut).** The public
+> API surface is now FLAT `/api/*`: the `/nes` and `/ngm` prefixes were **removed with NO
+> 301 aliases** (`config/urls.py`), superseding §2's audited "as-shipped" surface and
+> §2.3's alias/redirect plan. The `services/{nes,ngm,jawafdehi}` + `monolith/` layout was
+> collapsed to flat Django apps + `config/`, and the trunk is now `main` (not `v2`). Read
+> §2 and §2.3 as a pre-cut record, not current state.
+
 **Status:** DRAFT for review · **Date:** 2026-06-30 · **Branch:** `feat/control-plane-design` (off monolith `v2` @ `734b401`)
 
 **Goal:** a fully-RESTful control plane for NES and NGM on the monolith, including **material file uploads** (the one genuinely-missing capability). Everything else — MCP, casework, integration tests, frontend — rewires into these endpoints.

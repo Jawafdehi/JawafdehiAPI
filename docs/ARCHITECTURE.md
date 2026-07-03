@@ -11,7 +11,7 @@ a monolith**; this doc describes the shipped result, not the journey.
 
 ## 1. Shape: one Django monolith, three databases
 
-- **One Django project** in the `jawafdehi-api` repo (trunk `v2`), one WSGI, one
+- **One Django project** in the `jawafdehi-api` repo (trunk `main`), one WSGI, one
   image, runs at **`:48000`**. (The R1 collapse flattened the earlier
   `monolith/` + `services/{nes,ngm,jawafdehi}/` layout into top-level apps.)
 - **Apps** (all top-level dirs, in `INSTALLED_APPS`): `entities` (NES), `courts`
@@ -163,7 +163,7 @@ held and which can be promoted, see
 
 ## 7. Working model
 
-Two repos, **both with `v2` as the working trunk**:
+Two repos, **both with `main` as the working trunk**:
 
 - **`jawafdehi-api`** (this repo — the Django backend). Local clone at
   `/damodaha-volunteer/think-big/jawafdehi-api`. `origin` = the org
@@ -173,12 +173,12 @@ Two repos, **both with `v2` as the working trunk**:
   `jawafdehi/jawafdehi` org so we can unify the frontend too). `origin` = our fork,
   `upstream` = the org for pull/sync.
 
-New work goes on a feature branch → PR → `v2`. **Do local changes in git worktrees**
-(`git worktree add <path> v2`), not by checking out branches in the primary tree (a
+New work goes on a feature branch → PR → `main`. **Do local changes in git worktrees**
+(`git worktree add <path> main`), not by checking out branches in the primary tree (a
 `git checkout` over unmerged/conflicted paths silently fails and tangles stashes).
 Commits authored `oopsy <oopsy@claudy.com>`. Planning/sourcing artifacts live in this
 repo's `docs/` tree.
 
-_Note: an older `main` line still exists on the org remotes (it still carries the
-Wagtail `content/` app — see §3.5). `v2` is the active trunk; `main` is not retired
-and is the source for the CMS forward-port._
+_Note: the deprecated `v2` branch still exists on the org remotes but is no longer the
+trunk (do not push to it). `main` is the active trunk and already carries the
+forward-ported Wagtail `content/` app (see §3.5)._
