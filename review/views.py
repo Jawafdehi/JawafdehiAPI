@@ -179,15 +179,24 @@ def _enqueue_review_job(review, *, submitted_by=None):
     is never double-enqueued; once its prior job is terminal the key frees and a
     regrade can enqueue afresh. The case dict is resolved SERVER-SIDE at claim
     time by the kind's ``build_payload`` hook, so the poller stays DB-free.
+
+    Enqueuing also SUPERSEDES any older still-queued job for the same slug
+    (dead-lettered; its review is finalized as failed/"superseded"): the case is
+    resolved live at claim time, so a second queued job for the same slug would
+    just re-grade identical content at full LLM cost.
     """
     from jobs import queue as job_queue
 
-    return job_queue.enqueue(
+    from .supersede import supersede_older_queued_jobs
+
+    job = job_queue.enqueue(
         "case_review",
         payload={"slug": review.slug, "review_id": review.id},
         dedup_key=f"case_review:{review.id}",
         submitted_by=submitted_by,
     )
+    supersede_older_queued_jobs(review.slug, keep_job_id=job.pk)
+    return job
 
 
 # ---------------- Job API — RETIRED (moved to the central `jobs` app) --------
@@ -330,16 +339,24 @@ def config_view(request):
 @api_view(["POST"])
 @permission_classes([HasContributorRole])
 def regrade_all(request):
-    """Re-queue every existing review for regrading against the current rules.
+    """Re-queue every distinct CASE for regrading against the current rules.
 
-    Each review is reset to pending and a fresh ``case_review`` job is enqueued
-    on the central queue; the out-of-process consumer then claims and runs them.
-    The job's ``dedup_key`` (review id) frees when the prior job is terminal, so
-    a regrade always enqueues a new run without duplicating an in-flight one.
+    One regrade per slug — the LATEST review row of each slug is reset to
+    pending and a fresh ``case_review`` job is enqueued on the central queue;
+    the out-of-process consumer then claims and runs them. Older review rows of
+    the same slug are history and stay untouched: a review grades the LIVE case
+    (resolved at claim time), so re-running every historical row would grade the
+    same content N times at full LLM cost — that is exactly how the queue once
+    accumulated hundreds of duplicate jobs over a few dozen cases.
     """
     # Only id + slug are needed to reset + enqueue; avoid loading the (large)
     # result JSON for every review.
-    reviews = list(CaseReview.objects.only("id", "slug"))
+    latest_ids = (
+        CaseReview.objects.values("slug")
+        .annotate(latest_id=Max("id"))
+        .values_list("latest_id", flat=True)
+    )
+    reviews = list(CaseReview.objects.only("id", "slug").filter(id__in=latest_ids))
     CaseReview.objects.filter(id__in=[r.id for r in reviews]).update(
         status=CaseReview.STATUS_PENDING,
         stage="queued_for_regrade",

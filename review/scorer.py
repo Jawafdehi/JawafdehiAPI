@@ -12,7 +12,7 @@ The system is a set of code-defined Rules (review.code_rules). For a given case 
 This replaces the old fixed 8-dimension rubric.
 """
 
-from . import bedrock_judge, casetype, ngm_client, rules_engine
+from . import casetype, judge, ngm_client, rules_engine
 
 
 def _clamp(n):
@@ -102,15 +102,19 @@ def _source_analysis_block(source, analysis):
     return "\n".join(parts)
 
 
-def score_case(case, converted_sources, rules, config, source_analyses=None):
+def score_case(
+    case, converted_sources, rules, config, source_analyses=None, usage=None
+):
     """Score a case against a list of Rule model instances.
 
     `rules` is an iterable of active (enabled) code rules, in display order.
     `config` is a ReviewConfig (thresholds + llm_samples).
     `source_analyses` is an optional list (aligned with converted_sources) of
-    per-source summary+contribution dicts from bedrock_judge.analyze_sources;
+    per-source summary+contribution dicts from judge.analyze_sources;
     when omitted it is computed here. Every review summarises each source and
     analyses its contribution before rule scoring.
+    `usage` is an optional llm.usage.UsageAccumulator that LLM calls record
+    their token usage into for cost tracking.
     Returns a structured, rule-centered result dict.
     """
     ctype = casetype.detect(case)
@@ -119,8 +123,8 @@ def score_case(case, converted_sources, rules, config, source_analyses=None):
     # 0. Per-source analysis: summarise each converted source and determine how
     #    it contributes to the case (description / timeline / allegations).
     if source_analyses is None:
-        source_analyses = bedrock_judge.analyze_sources(
-            build_case_summary(case), converted_sources, ctype["label"]
+        source_analyses = judge.analyze_sources(
+            build_case_summary(case), converted_sources, ctype["label"], usage=usage
         )
     analysis_by_idx = {i: a for i, a in enumerate(source_analyses or [])}
 
@@ -180,16 +184,19 @@ def score_case(case, converted_sources, rules, config, source_analyses=None):
                 "description": r.description,
                 "good_examples": r.good_examples,
                 "bad_examples": r.bad_examples,
+                # Routes the judge model tier: gate rules -> premium model.
+                "is_gate": r.is_gate,
             }
             for r in llm_rules
         ]
         try:
-            judged = bedrock_judge.judge_rules(
+            judged = judge.judge_rules(
                 judge_summary,
                 excerpts,
                 ctype["label"],
                 rule_specs,
                 n_samples=config.llm_samples,
+                usage=usage,
             )
         except Exception as e:  # noqa: BLE001
             judge_err = str(e)
@@ -216,7 +223,10 @@ def score_case(case, converted_sources, rules, config, source_analyses=None):
                 suggestions = jd.get("suggestions", [])
                 rationale = jd.get("rationale", "")
                 samples = jd.get("samples", [])
-                confidence = _confidence_label(std, n_samples)
+                # Confidence from THIS rule's actual sample count, not the global
+                # llm_samples: batched CLI grading is single-pass (1 sample) and
+                # must not be labelled high-confidence off a zero std.
+                confidence = _confidence_label(std, len(samples))
             else:
                 # judge failed -> neutral default, explicitly low confidence
                 score, variance, std, samples = 50, 0.0, 0.0, []

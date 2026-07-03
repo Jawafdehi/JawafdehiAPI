@@ -50,3 +50,35 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Jobs-consumer image (platform + Node + claude CLI, Dockerfile.consumer).
+      # Layers on the platform image pushed above, referenced by its immutable
+      # short-sha tag so the pair is always built from the same commit. Skipped on
+      # PRs (the base tag is only pushed on branch builds). amd64-only — see
+      # Dockerfile.consumer.
+      - name: Short SHA for the consumer base tag
+        if: github.event_name != 'pull_request'
+        run: echo "SHORT_SHA=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+      - uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9
+        if: github.event_name != 'pull_request'
+        id: meta-consumer
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-consumer
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=,format=short
+      - uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf
+        if: github.event_name != 'pull_request'
+        with:
+          context: .
+          file: Dockerfile.consumer
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            BASE_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.SHORT_SHA }}
+          tags: ${{ steps.meta-consumer.outputs.tags }}
+          labels: ${{ steps.meta-consumer.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

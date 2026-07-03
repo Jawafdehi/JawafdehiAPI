@@ -40,6 +40,7 @@ COPY lakehouse/ ./lakehouse/
 COPY cases/ ./cases/
 COPY review/ ./review/
 COPY jobs/ ./jobs/
+COPY llm/ ./llm/
 COPY search/ ./search/
 COPY discovery/ ./discovery/
 COPY content/ ./content/
