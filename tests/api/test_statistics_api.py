@@ -333,6 +333,31 @@ class TestStatisticsSnapshot:
         assert response.status_code == 200
         assert response["Cache-Control"] == "no-store"
 
+    def test_bootstrap_winner_crash_leaves_uncached_placeholder(
+        self, api_client, monkeypatch
+    ):
+        """If the bootstrap winner crashes mid-compute, its committed claim row
+        keeps serving ``no-store`` (never the public header) until a scheduled
+        refresh replaces it."""
+        from cases import api_views
+
+        def crashing_refresh():
+            raise RuntimeError("refresh crashed after the placeholder commit")
+
+        monkeypatch.setattr(api_views, "refresh_statistics", crashing_refresh)
+        with pytest.raises(RuntimeError):
+            api_client.get("/api/statistics/")
+
+        # The claim row survived the crash, flagged as a placeholder.
+        snapshot = StatisticsSnapshot.objects.get(pk=STATISTICS_SNAPSHOT_KEY)
+        assert snapshot.is_placeholder is True
+
+        # Follow-up requests serve it — but never as publicly cacheable.
+        monkeypatch.undo()
+        response = api_client.get("/api/statistics/")
+        assert response.status_code == 200
+        assert response["Cache-Control"] == "no-store"
+
     def test_refresh_clears_placeholder_flag(self, api_client):
         """The refresh upsert converts a placeholder row into a cacheable one."""
         from django.utils import timezone
