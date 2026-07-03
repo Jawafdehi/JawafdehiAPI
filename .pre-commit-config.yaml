@@ -1,0 +1,28 @@
+# Pre-commit hooks for the jawafdehi-api monolith (uv project).
+# Install once per clone:  uv run pre-commit install
+#
+# The ruff hook is a `local`/system hook that shells out to `uv run ruff check`, so it
+# uses the SAME ruff as CI (the `dev` dependency-group) — no separately-pinned mirror
+# version to drift. This mirrors the CI gate exactly: `ruff check` only. Formatting is
+# intentionally NOT gated (see .github/workflows/ci.yml; `ruff format` would reflag ~150
+# legacy files). The base hooks below are non-mutating checks only.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check (uv, mirrors CI)
+        entry: uv run ruff check --force-exclude
+        # `unsupported` is pre-commit 4.4+'s canonical name for the old `system` language
+        # (runs the entry as-is on PATH; pre-commit does not manage the env).
+        language: unsupported
+        types_or: [python, pyi]
+        require_serial: true
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: check-case-conflict
+      - id: check-toml
+      - id: check-yaml
