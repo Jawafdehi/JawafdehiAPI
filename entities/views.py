@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import unquote
 
 import jsonpatch
+from jawafdehi_shared.drf.auditlog import AuditlogActorMixin
 from jawafdehi_shared.entities.ids import (
     build_entity_iri,
     canonicalize_entity_iri,
@@ -108,8 +109,12 @@ def health(request):
 # ---------------------------------------------------------------------------
 
 
-class EntityListCreateView(APIView):
-    """GET /api/entities (public list/search/batch) + POST /api/entities (create)."""
+class EntityListCreateView(AuditlogActorMixin, APIView):
+    """GET /api/entities (public list/search/batch) + POST /api/entities (create).
+
+    ``AuditlogActorMixin`` attributes any audit entry to the authenticated user
+    (inert until entities models are auditlog-registered; the seam is kept
+    uniform across the platform's write views)."""
 
     def get_permissions(self):
         if self.request.method == "POST":
@@ -224,7 +229,7 @@ class EntityListCreateView(APIView):
         return Response(created, status=status.HTTP_201_CREATED)
 
 
-class EntityDetailView(APIView):
+class EntityDetailView(AuditlogActorMixin, APIView):
     """GET /api/entities/{ref} (public) + PATCH/DELETE /api/entities/{ref} (write).
 
     DELETE is a SOFT delete: it flips ``is_deleted=True`` so the entity vanishes
