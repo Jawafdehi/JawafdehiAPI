@@ -145,14 +145,14 @@ services:
       VITE_API_PROXY_TARGET: "http://platform:8080"
       # SAME-ORIGIN relative API base URLs so requests go through the Vite proxy
       # above (to the local platform) instead of the production defaults baked into
-      # the API clients. Jawafdehi cases + unified search live under /api; NES
-      # entities under /api/nes (see config/urls.py).
+      # the API clients. The /api surface is FLAT — no /nes or /ngm prefix
+      # (config/urls.py HARD-CUT the prefixes 2026-07-01, no redirects). NES
+      # entities are at /api/entities, NGM materials at /api/materials/ and court
+      # cases at /api/courtcases/; Jawafdehi cases + unified search also under /api.
       VITE_JDS_API_BASE_URL: "/api"
-      VITE_NES_API_BASE_URL: "/api/nes"
-      VITE_API_BASE_URL: "/api/nes"
-      # NGM materials + court cases live under /api/ngm on the same platform; a
-      # same-origin relative base keeps NGM detail-page fetches on the Vite proxy.
-      VITE_NGM_API_BASE_URL: "/api/ngm"
+      VITE_NES_API_BASE_URL: "/api"
+      VITE_API_BASE_URL: "/api"
+      VITE_NGM_API_BASE_URL: "/api"
     volumes:
       # Live source for hot reload; anonymous volume keeps the image's installed
       # node_modules from being shadowed by the host mount.

@@ -1,6 +1,6 @@
 # DOC-STATUS — Documentation Audit & Orientation Index
 
-_Last audited: 2026-07-02 (docs reconciled to the R1-collapsed `v2` tree: flat top-level apps, `config/` glue, trunk `v2`; CMS forward-port + frontend `/v2`-drift items recorded)._
+_Last audited: 2026-07-02 (docs reconciled to the R1-collapsed `v2` tree: flat top-level apps, `config/` glue, trunk `main`; CMS forward-port + frontend `/v2`-drift items recorded)._
 
 **Read this first.** This file is the orientation index for the `docs/` tree: it says,
 doc by doc, what to trust and what to treat with caution. For *what the platform is now*
@@ -14,7 +14,7 @@ read [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 ## What the platform ACTUALLY is now (the ground truth)
 
-- **Single Django MONOLITH** — one project, **trunk `v2`** (the R1 collapse flattened the
+- **Single Django MONOLITH** — one project, **trunk `main`** (the `v2` branch is deprecated; the R1 collapse flattened the
   old `monolith/` + `services/{nes,ngm,jawafdehi}/` layout into top-level apps). Apps (all
   top-level dirs): `entities` (NES), `courts` + `materials` (NGM), `cases` + `review`
   (Jawafdehi), plus platform `search`, `discovery`, `jobs`. _(`case_workflows` was dropped —
@@ -24,10 +24,7 @@ read [`ARCHITECTURE.md`](./ARCHITECTURE.md).
   HTTP client by design — `review/ngm_client.py`, `review/jds_client.py`)_. One image.
   **uv workspace** (NOT poetry — one top-level `pyproject.toml` + `uv.lock`). Cross-app libs
   in top-level `jawafdehi_shared/`. Runs at `:48000`.
-- **Headless Wagtail CMS** (`content/` app, "Newsroom") serves public updates/news at
-  `/api/cms/v2/…`; consumed by the SPA `/updates` routes. **It lives on `origin/main` but
-  is NOT yet on `v2`** (dropped in the collapse commit `4c39d8c`) — being forward-ported.
-  See ARCHITECTURE §3.5.
+- **Headless Wagtail CMS** (`content/` app, "Newsroom") serves public updates/news at `/api/cms/v2/…`; consumed by the SPA `/updates` routes. It was dropped from `v2` in the R1 collapse commit `4c39d8c`, then **forward-ported back into `v2`** (PR #270, adapted from `origin/main`) with the frontend contract preserved — so it now ships on trunk `main`. See ARCHITECTURE §3.5.
 - **schema.org JSON-LD is the canonical stored form** for NES entities AND NGM materials,
   keyed by **`@id` IRIs**: `https://jawafdehi.org/entity/<prefix>/<slug>`,
   `/material/<source>/<ident>`, `/case/<slug>`, `/courtcase/<court>/<case_number>`. **Clean
@@ -74,6 +71,7 @@ A `>` status banner has been added in-place to the most-misleading STALE docs (m
 | `data-plane-design.md` | CURRENT (BUILT) | Data-plane consolidation: Postgres-SoR + R2 archive + OpenSearch; **no live Iceberg** (`lakehouse/` dormant seam); `material_convert` FTS feed shipped (#264). Reconciles ARCHITECTURE §5; incorporates the jobs queue + cases-own-no-documents ADR | Keep (load-bearing). |
 | `unified-search-plan.md` | CURRENT (BUILT & LIVE) | §0 = pre-build starting point (marked as such); §1-§8 reconciled to the live build (hard-fail no-fallback, four index constants, case_id done, no "internal" role). NOTE: `Material.visibility` now EXISTS (added by #263) and gates material indexing — supersedes the old "no `visibility` field" caveat | Keep. |
 | `case-workflows-retirement-plan.md` | HISTORICAL (DONE) | Plan to retire `case_workflows` + drop the langchain/langgraph/deepagents stack. **Executed:** app removed, tables dropped by migration `cases/migrations/0040`, no langchain/langgraph/deepagents deps remain in `pyproject.toml`. Its cited `monolith/config` + `services/jawafdehi/pyproject.toml` paths predate the R1 collapse (single top-level `pyproject.toml` now) | Keep as record; mark done. |
+| `control-plane-api-design.md` **[bannered]** | HISTORICAL (superseded) | Dated 2026-06-30 control-plane design/audit. §1 "target" largely shipped, but §2 "current surface (audited)" + §2.3 describe the PRE-hard-cut world (`/nes`+`/ngm` prefixes, `services/{nes,ngm,jawafdehi}`+`monolith/` layout) and propose "301 aliases". **Superseded by the 2026-07-01 hard cut: FLAT `/api/*` surface, prefixes removed with NO aliases, flat apps + `config/`, trunk `main`.** Banner added at top scoping §2/§2.3 as pre-cut record | Keep as pre-cut record. |
 
 ### `shared/`
 

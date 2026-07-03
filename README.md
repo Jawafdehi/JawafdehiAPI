@@ -27,8 +27,8 @@ jawafdehi-api/
   search/                 unified OpenSearch query plane (all 4 types)
   discovery/              ResourceSync + Sitemaps off the @id envelope
   lakehouse/              DORMANT Iceberg/DuckDB seam (not a live path)
-  content/                headless Wagtail CMS (Newsroom) — NOTE: on `main`,
-                          being forward-ported to `v2`; see ARCHITECTURE §3.5
+  content/                headless Wagtail CMS (Newsroom) — Newsroom updates/news;
+                          served at /api/cms/v2/; see ARCHITECTURE §3.5
   docs/                   design docs + sourcing artifacts
 ```
 
@@ -54,12 +54,12 @@ docker build -t jawafdehi .                  # single image, context = repo root
 For the local dev stack (Postgres ×3, OpenSearch, MinIO) see `docker-compose.yml`.
 
 ## Working model
-Trunk is **`v2`**. `origin` = the org (`Jawafdehi/JawafdehiAPI`), `fork` = the
+Trunk is **`main`**. `origin` = the org (`Jawafdehi/JawafdehiAPI`), `fork` = the
 `damodaha` personal fork; PRs are filed on the org from the fork. New work goes on a
-feature branch → PR → `v2`. **Do local changes in git worktrees**
-(`git worktree add <path> v2`), not by checking out branches in the primary tree.
+feature branch → PR → `main`. **Do local changes in git worktrees**
+(`git worktree add <path> main`), not by checking out branches in the primary tree.
 Commits authored `oopsy <oopsy@claudy.com>`.
 
-_An older `main` line still exists on the org remotes and still carries the Wagtail
-`content/` app; `v2` is the active trunk and the CMS is being ported forward from
-`main` — see `docs/ARCHITECTURE.md` §3.5._
+_The deprecated `v2` branch still exists on the org remotes but is no longer the
+trunk; do not push to it. The Wagtail `content/` app was forward-ported onto the
+mainline (PR #270) and is now present on `main` — see `docs/ARCHITECTURE.md` §3.5._
