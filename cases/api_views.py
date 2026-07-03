@@ -10,10 +10,9 @@ from xml.etree.ElementTree import Element, SubElement, tostring
 
 import jsonpatch
 from django.conf import settings
-from django.core.cache import cache
 from django.core.exceptions import ValidationError
-from django.db import connection, transaction
-from django.db.models import Count, Q
+from django.db import IntegrityError, connection, transaction
+from django.db.models import Q
 from django.http import HttpResponse
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
@@ -37,13 +36,6 @@ from jawafdehi_shared.identity import (
     resolve_or_create_identity,
 )
 
-# NES + NGM models live in sibling apps; the DB router (config.db_router)
-# sends each to its own database on read, so the cases app can query them directly
-# for the cross-source data-quality metrics surfaced by StatisticsView.
-from entities.models import StoredEntity
-from courts.models import Court, CourtCase
-from materials.models import Material
-
 from .caseworker_serializers import (
     BLOCKED_PATH_PREFIXES,
     CaseCreateSerializer,
@@ -55,6 +47,7 @@ from .models import (
     CaseMaterialReference,
     CaseState,
     RelationshipType,
+    StatisticsSnapshot,
 )
 from .rules.predicates import (
     can_change_case,
@@ -68,6 +61,11 @@ from .serializers import (
     CaseDetailSerializer,
     CaseSerializer,
     FeedbackSerializer,
+)
+from .services.statistics import (
+    STATISTICS_SNAPSHOT_KEY,
+    bootstrap_placeholder,
+    refresh_statistics,
 )
 
 logger = logging.getLogger(__name__)
@@ -864,11 +862,6 @@ class CaseViewSet(viewsets.ReadOnlyModelViewSet):
         }
 
 
-def _pct(part: int, whole: int) -> float:
-    """Percentage of ``part`` over ``whole``, 1 dp; 0.0 when ``whole`` is 0."""
-    return round((part / whole) * 100, 1) if whole else 0.0
-
-
 @extend_schema(
     summary="Get case statistics",
     description="""
@@ -890,8 +883,9 @@ def _pct(part: int, whole: int) -> float:
     - `last_updated`: Timestamp when statistics were last calculated
 
     **Caching:**
-    - Statistics are cached for 5 minutes to optimize performance
-    - The cache is automatically refreshed after expiration
+    - Statistics are precomputed asynchronously on a schedule (every 5 minutes)
+      and served from a shared snapshot, so values may be a few minutes stale
+    - `last_updated` is the time the served snapshot was computed
     """,
     tags=["statistics"],
     responses={
@@ -918,212 +912,37 @@ class StatisticsView(APIView):
     """
     Public API endpoint for case statistics.
 
-    Provides aggregate counts of cases by state and unique entities tracked.
-    Results are cached for 5 minutes using LocMemCache.
+    Serves the precomputed ``StatisticsSnapshot`` row — a single primary-key
+    lookup per request. The heavy NES/NGM aggregation runs out-of-band in the
+    ``refresh_statistics`` management command on a schedule; see
+    ``cases.services.statistics`` for the computation and the rationale.
     """
 
     def get(self, request):
-        """
-        Get cached or calculate fresh statistics.
-        """
-        cache_key = "stats-cache"
-
-        # Try to get from cache
-        cached_data = cache.get(cache_key)
-        if cached_data:
-            return Response(cached_data)
-
-        # Calculate statistics
-        stats = {
-            "published_cases": Case.objects.filter(state=CaseState.PUBLISHED).count(),
-            "cases_under_investigation": Case.objects.filter(
-                state__in=[CaseState.DRAFT, CaseState.IN_REVIEW]
-            ).count(),
-            "cases_closed": Case.objects.filter(state=CaseState.CLOSED).count(),
-            # Unique NES entities tracked across published cases (binds hold the
-            # nes_id directly; NES owns the entity records).
-            "entities_tracked": (
-                CaseEntityRelationship.objects.filter(
-                    case__state=CaseState.PUBLISHED
+        """Serve the shared precomputed statistics snapshot (O(1) PK lookup)."""
+        snapshot = StatisticsSnapshot.objects.filter(
+            pk=STATISTICS_SNAPSHOT_KEY
+        ).first()
+        if snapshot is not None:
+            return Response(snapshot.data)
+        # Bootstrap: no snapshot row yet (fresh database, before the first
+        # scheduled refresh has run). Claim the row with an atomic INSERT so
+        # exactly ONE request pays the aggregation; concurrent requests that
+        # lose the claim serve a cheap placeholder instead of stacking
+        # multi-second recomputes (thundering-herd guard). If the winner dies
+        # mid-compute, the placeholder row persists until the next scheduled
+        # refresh overwrites it.
+        placeholder = bootstrap_placeholder()
+        try:
+            with transaction.atomic():
+                StatisticsSnapshot.objects.create(
+                    key=STATISTICS_SNAPSHOT_KEY,
+                    data=placeholder,
+                    computed_at=timezone.now(),
                 )
-                .values("nes_id")
-                .distinct()
-                .count()
-            ),
-            # Cross-source coverage for the Data Quality dashboard. The DB router
-            # sends each model below to its own database (nes / ngm).
-            "nes": self._nes_metrics(),
-            "ngm": self._ngm_metrics(),
-            "materials": self._materials_metrics(),
-            "last_updated": timezone.now().isoformat(),
-        }
-
-        # Cache for 5 minutes
-        cache.set(cache_key, stats, timeout=300)
-
-        return Response(stats)
-
-    @staticmethod
-    def _nes_metrics():
-        """NES (entities) coverage — totals, breakdowns, completeness.
-
-        Counts are server-side aggregates over indexed promoted columns. The
-        completeness signals live inside the ``data`` JSON-LD column; on Postgres
-        they are answered with JSON-key existence lookups, on sqlite (the empty
-        local stores / test DB) they degrade to 0 without a full-table scan.
-        """
-        total = StoredEntity.objects.count()
-
-        by_prefix = list(
-            StoredEntity.objects.values("prefix")
-            .annotate(count=Count("iri"))
-            .order_by("-count")
-        )
-        by_type = list(
-            StoredEntity.objects.values("entity_type")
-            .annotate(count=Count("iri"))
-            .order_by("-count")
-        )
-
-        # Completeness signals reflect what is ACTUALLY stored on the entity JSON-LD
-        # doc. NOTE: source attributions are NOT carried on the published doc (they
-        # live in the bulk-ingest envelope + the version provenance), so we measure
-        # the real stored provenance instead: ``identifier`` (the stable external id
-        # — ECN candidate-id / pcode / reg-no, present on ~all sourced entities) and
-        # ``jawafdehi:version`` (the authored version/provenance block). ``name``
-        # bilingualism is measured directly. (An earlier draft keyed on
-        # ``jawafdehi:sources`` / ``description``, which no entity carries → always 0.)
-        if connection.vendor == "postgresql":
-            with_identifier = StoredEntity.objects.filter(
-                data__has_key="identifier"
-            ).count()
-            with_provenance = StoredEntity.objects.filter(
-                data__has_key="jawafdehi:version"
-            ).count()
-            with_bilingual_name = (
-                StoredEntity.objects.filter(data__name__has_key="en")
-                .filter(data__name__has_key="ne")
-                .count()
-            )
-        else:
-            with_identifier = with_provenance = with_bilingual_name = 0
-
-        return {
-            "total": total,
-            "by_prefix": by_prefix,
-            "by_type": by_type,
-            "counts": {
-                "with_identifier": with_identifier,
-                "with_provenance": with_provenance,
-                "with_bilingual_name": with_bilingual_name,
-            },
-            "completeness": {
-                "with_identifier": _pct(with_identifier, total),
-                "with_provenance": _pct(with_provenance, total),
-                "with_bilingual_name": _pct(with_bilingual_name, total),
-            },
-        }
-
-    @staticmethod
-    def _ngm_metrics():
-        """NGM (judicial) coverage — court-case / court totals, breakdowns, and
-        completeness over court cases (all indexed columns). Materials are a
-        distinct dataset with their own block — see ``_materials_metrics``."""
-        court_cases_total = CourtCase.objects.count()
-
-        by_court_type = list(
-            CourtCase.objects.values("court__court_type")
-            .annotate(count=Count("case_number"))
-            .order_by("-count")
-        )
-
-        nes_resolved = (
-            CourtCase.objects.exclude(nes_id__isnull=True)
-            .exclude(nes_id="")
-            .count()
-        )
-        with_registration_date = CourtCase.objects.exclude(
-            registration_date_ad__isnull=True
-        ).count()
-        if connection.vendor == "postgresql":
-            with_document_sources = (
-                CourtCase.objects.filter(document_sources__isnull=False)
-                .exclude(document_sources=[])
-                .count()
-            )
-        else:
-            with_document_sources = CourtCase.objects.exclude(
-                document_sources__isnull=True
-            ).count()
-
-        return {
-            "court_cases_total": court_cases_total,
-            "courts_total": Court.objects.count(),
-            "by_court_type": by_court_type,
-            "counts": {
-                "nes_resolved": nes_resolved,
-                "with_registration_date": with_registration_date,
-                "with_document_sources": with_document_sources,
-            },
-            "completeness": {
-                "nes_resolved": _pct(nes_resolved, court_cases_total),
-                "with_registration_date": _pct(
-                    with_registration_date, court_cases_total
-                ),
-                "with_document_sources": _pct(
-                    with_document_sources, court_cases_total
-                ),
-            },
-        }
-
-    @staticmethod
-    def _materials_metrics():
-        """Materials (NGM development-project / document dataset) coverage —
-        total, by-type / by-source breakdowns, and completeness measured over
-        the material ``data`` JSON-LD doc. Materials are NOT judicial records;
-        they get their own block separate from ``_ngm_metrics``."""
-        total = Material.objects.count()
-
-        by_type = list(
-            Material.objects.values("material_type")
-            .annotate(count=Count("iri"))
-            .order_by("-count")
-        )
-        by_source = list(
-            Material.objects.values("source")
-            .annotate(count=Count("iri"))
-            .order_by("-count")
-        )
-
-        # Completeness signals over the stored schema.org JSON-LD doc. On Postgres
-        # answered with JSON-key existence lookups; sqlite (empty local / test DB)
-        # degrades to 0 without a full scan.
-        if connection.vendor == "postgresql":
-            with_description = Material.objects.filter(
-                data__has_key="description"
-            ).count()
-            with_url = Material.objects.filter(data__has_key="url").count()
-            with_date = Material.objects.filter(
-                data__has_key="dateCreated"
-            ).count()
-        else:
-            with_description = with_url = with_date = 0
-
-        return {
-            "total": total,
-            "by_type": by_type,
-            "by_source": by_source,
-            "counts": {
-                "with_description": with_description,
-                "with_url": with_url,
-                "with_date": with_date,
-            },
-            "completeness": {
-                "with_description": _pct(with_description, total),
-                "with_url": _pct(with_url, total),
-                "with_date": _pct(with_date, total),
-            },
-        }
+        except IntegrityError:
+            return Response(placeholder)
+        return Response(refresh_statistics())
 
 
 class FeedbackRateThrottle(AnonRateThrottle):
