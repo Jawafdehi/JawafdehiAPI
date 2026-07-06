@@ -37,6 +37,7 @@ Migration note (DRF token auth removal / chat service account):
 
 from __future__ import annotations
 
+import re
 import threading
 
 import jwt
@@ -55,11 +56,18 @@ User = get_user_model()
 DEFAULT_SUPERUSER_ROLE = "admin"
 
 # Zitadel emits granted project roles in this claim (singular "project").
-# It is a map: roleKey -> {orgId: orgPrimaryDomain}. Prefer the per-project
-# variant urn:zitadel:iam:org:project:{projectId}:roles if you enable it; this
-# module reads whichever generic/per-project key is configured via
-# settings.OIDC_ROLES_CLAIM.
+# It is a map: roleKey -> {orgId: orgPrimaryDomain}. The claim read by default
+# is configurable via settings.OIDC_ROLES_CLAIM.
 DEFAULT_ROLES_CLAIM = "urn:zitadel:iam:org:project:roles"
+
+# Machine users (client-credentials grant — e.g. the jobs consumer service
+# account) never receive the generic claim above: with the
+# ``urn:zitadel:iam:org:projects:roles`` scope Zitadel emits ONLY the
+# per-project variant ``urn:zitadel:iam:org:project:{projectId}:roles``, even
+# with projectRoleAssertion enabled on the project. Human (auth-code) tokens
+# carry the generic claim. Roles are therefore merged from the configured claim
+# AND every per-project variant present.
+_PER_PROJECT_ROLES_CLAIM_RE = re.compile(r"^urn:zitadel:iam:org:project:\d+:roles$")
 
 # Default Zitadel project-role key -> existing Django Group name. Overridable via
 # settings.OIDC_ROLE_TO_GROUP. The Group names mirror those the predicates and
@@ -147,18 +155,27 @@ def reset_jwks_client() -> None:
 def extract_role_keys(claims: dict) -> set[str]:
     """Return the set of Zitadel project-role keys present in ``claims``.
 
-    Normalizes both the plain-map shape returned by real tokens and the
-    array-wrapped shape Zitadel's docs sometimes render.
+    Merges the configured generic claim (settings.OIDC_ROLES_CLAIM) with every
+    per-project ``urn:zitadel:iam:org:project:{id}:roles`` variant — machine
+    users' client-credentials tokens carry ONLY the latter. Normalizes both the
+    plain-map shape returned by real tokens and the array-wrapped shape
+    Zitadel's docs sometimes render. Only signature- and audience-validated
+    tokens reach this point, and unknown role keys map to no Group.
     """
     claim_name = getattr(settings, "OIDC_ROLES_CLAIM", DEFAULT_ROLES_CLAIM)
-    raw = claims.get(claim_name) or {}
-    if isinstance(raw, list):  # normalize docs' array-wrapped form
-        merged: dict = {}
-        for item in raw:
-            if isinstance(item, dict):
-                merged.update(item)
-        raw = merged
-    return set(raw.keys()) if isinstance(raw, dict) else set()
+    keys: set[str] = set()
+    for name, raw in (claims or {}).items():
+        if name != claim_name and not _PER_PROJECT_ROLES_CLAIM_RE.match(name):
+            continue
+        if isinstance(raw, list):  # normalize docs' array-wrapped form
+            merged: dict = {}
+            for item in raw:
+                if isinstance(item, dict):
+                    merged.update(item)
+            raw = merged
+        if isinstance(raw, dict):
+            keys |= set(raw.keys())
+    return keys
 
 
 class OIDCAuthentication(authentication.BaseAuthentication):

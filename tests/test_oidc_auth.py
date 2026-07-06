@@ -312,6 +312,27 @@ def test_extract_role_keys_normalizes_shapes(settings):
     assert oidc_auth.extract_role_keys({ROLES_CLAIM: None}) == set()
 
 
+def test_extract_role_keys_reads_per_project_claim(settings):
+    settings.OIDC_ROLES_CLAIM = ROLES_CLAIM
+    # A machine user's client-credentials token (e.g. the jobs-processor SA):
+    # the urn:zitadel:iam:org:projects:roles scope yields ONLY the per-project
+    # claim — the generic claim is absent even with projectRoleAssertion on.
+    machine_claims = {
+        "urn:zitadel:iam:org:project:377760393168159088:roles": {
+            "review_assistant": {"377588697018728812": "zitadel.auth.jawafdehi.org"}
+        }
+    }
+    assert oidc_auth.extract_role_keys(machine_claims) == {"review_assistant"}
+    # Generic + per-project merge; unrelated urn claims are ignored.
+    assert oidc_auth.extract_role_keys(
+        {
+            ROLES_CLAIM: {"caseworker": {}},
+            "urn:zitadel:iam:org:project:123:roles": {"review_assistant": {}},
+            "urn:zitadel:iam:user:metadata": {"ignored": "x"},
+        }
+    ) == {"caseworker", "review_assistant"}
+
+
 @pytest.mark.django_db
 def test_synced_groups_satisfy_existing_predicates(groups):
     """Roles flowing from OIDC make the existing django-rules predicates pass."""
