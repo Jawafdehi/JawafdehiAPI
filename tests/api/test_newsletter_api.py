@@ -110,8 +110,8 @@ class TestNewsletterSubscription:
             format="json",
         )
 
-        assert response.status_code == 201
-        assert response.json()["status"] == NewsletterSubscriptionStatus.UNSUBSCRIBED
+        assert response.status_code == 409
+        assert response.json()["code"] == "newsletter_unsubscribed"
         subscription.refresh_from_db()
         assert subscription.first_name == "Old"
         assert subscription.last_name == "Name"

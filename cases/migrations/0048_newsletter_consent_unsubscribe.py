@@ -8,10 +8,26 @@ from django.db import migrations, models
 
 def populate_unsubscribe_tokens(apps, schema_editor):
     NewsletterSubscription = apps.get_model("cases", "NewsletterSubscription")
-    for subscription in NewsletterSubscription.objects.all().iterator():
-        subscription.email = subscription.email.strip().lower()
+    by_email = {}
+    for subscription in NewsletterSubscription.objects.order_by("id").iterator():
+        normalized_email = subscription.email.strip().lower()
+        keeper = by_email.get(normalized_email)
+        if keeper is not None:
+            if (
+                keeper.status != "subscribed"
+                and subscription.status == "subscribed"
+            ):
+                keeper.first_name = subscription.first_name
+                keeper.last_name = subscription.last_name
+                keeper.status = subscription.status
+                keeper.save(update_fields=["first_name", "last_name", "status"])
+            subscription.delete()
+            continue
+
+        subscription.email = normalized_email
         subscription.unsubscribe_token = uuid.uuid4()
         subscription.save(update_fields=["email", "unsubscribe_token"])
+        by_email[normalized_email] = subscription
 
 
 class Migration(migrations.Migration):

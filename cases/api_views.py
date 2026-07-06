@@ -1025,6 +1025,7 @@ class NewsletterUnsubscribeRateThrottle(NewsletterSubscriptionRateThrottle):
     responses={
         201: NewsletterSubscriptionSerializer,
         400: OpenApiTypes.OBJECT,
+        409: OpenApiTypes.OBJECT,
         429: OpenApiTypes.OBJECT,
     },
     examples=[
@@ -1058,6 +1059,14 @@ class NewsletterSubscriptionView(APIView):
                 ip_address=self.get_client_ip(request),
                 user_agent=request.META.get("HTTP_USER_AGENT", ""),
             )
+            if subscription.status == NewsletterSubscriptionStatus.UNSUBSCRIBED:
+                return Response(
+                    {
+                        "error": "This address was previously unsubscribed.",
+                        "code": "newsletter_unsubscribed",
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
             return Response(
                 serializer.to_representation(subscription),
                 status=status.HTTP_201_CREATED,

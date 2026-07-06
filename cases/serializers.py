@@ -6,6 +6,8 @@ See: .kiro/specs/accountability-platform-core/design.md
 
 import logging
 
+from django.db import IntegrityError, transaction
+from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema_field, inline_serializer
 from rest_framework import serializers
@@ -328,29 +330,35 @@ class NewsletterSubscriptionSerializer(serializers.ModelSerializer):
         return value
 
     def create(self, validated_data):
-        from django.utils import timezone
-
         email = validated_data["email"]
         validated_data.setdefault("last_name", "")
-        now = timezone.now()
-        existing = NewsletterSubscription.objects.filter(email__iexact=email).first()
-
-        if existing and existing.status == NewsletterSubscriptionStatus.UNSUBSCRIBED:
-            return existing
-
         defaults = {
             **validated_data,
-            "consented_at": now,
+            "consented_at": timezone.now(),
             "status": NewsletterSubscriptionStatus.SUBSCRIBED,
             "unsubscribed_at": None,
         }
-        if existing:
-            for field, value in defaults.items():
-                setattr(existing, field, value)
-            existing.save()
-            return existing
 
-        return NewsletterSubscription.objects.create(**defaults)
+        try:
+            return self._create_or_update(email, defaults)
+        except IntegrityError:
+            return self._create_or_update(email, defaults)
+
+    def _create_or_update(self, email, defaults):
+        with transaction.atomic():
+            subscription = (
+                NewsletterSubscription.objects.select_for_update()
+                .filter(email__iexact=email)
+                .first()
+            )
+            if subscription and subscription.status == NewsletterSubscriptionStatus.UNSUBSCRIBED:
+                return subscription
+            if subscription:
+                for field, value in defaults.items():
+                    setattr(subscription, field, value)
+                subscription.save()
+                return subscription
+            return NewsletterSubscription.objects.create(**defaults)
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
