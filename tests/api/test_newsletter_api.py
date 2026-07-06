@@ -2,6 +2,7 @@
 
 import pytest
 from django.core.cache import cache
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from cases.models import NewsletterSubscription, NewsletterSubscriptionStatus
@@ -162,6 +163,54 @@ class TestNewsletterSubscription:
         assert "email" in data["details"]
         assert "firstName" in data["details"]
         assert "consentAccepted" in data["details"]
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"consentSource": "", "privacyVersion": ""},
+            {"consentSource": None, "privacyVersion": None},
+        ],
+    )
+    def test_consent_metadata_is_required(self, api_client, overrides):
+        payload = newsletter_payload()
+        for key, value in overrides.items():
+            if value is None:
+                payload.pop(key)
+            else:
+                payload[key] = value
+
+        response = api_client.post(
+            "/api/newsletter/subscriptions/",
+            payload,
+            format="json",
+        )
+
+        assert response.status_code == 400
+        data = response.json()
+        assert data["error"] == "Validation error"
+        assert "consentSource" in data["details"]
+        assert "privacyVersion" in data["details"]
+
+    def test_repeated_unsubscribe_preserves_original_timestamp(self, api_client):
+        original_unsubscribed_at = timezone.now()
+        subscription = NewsletterSubscription.objects.create(
+            email="ram@example.com",
+            first_name="Ram",
+            status=NewsletterSubscriptionStatus.UNSUBSCRIBED,
+            consent_accepted=True,
+            unsubscribed_at=original_unsubscribed_at,
+        )
+
+        response = api_client.post(
+            f"/api/newsletter/unsubscribe/{subscription.unsubscribe_token}/",
+            {},
+            format="json",
+        )
+
+        assert response.status_code == 200
+        subscription.refresh_from_db()
+        assert subscription.status == NewsletterSubscriptionStatus.UNSUBSCRIBED
+        assert subscription.unsubscribed_at == original_unsubscribed_at
 
     def test_rate_limit_blocks_eleventh_submission(self, api_client):
         for i in range(10):

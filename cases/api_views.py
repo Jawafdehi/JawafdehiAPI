@@ -1108,9 +1108,10 @@ class NewsletterUnsubscribeView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        subscription.status = NewsletterSubscriptionStatus.UNSUBSCRIBED
-        subscription.unsubscribed_at = timezone.now()
-        subscription.save(update_fields=["status", "unsubscribed_at", "updated_at"])
+        if subscription.status != NewsletterSubscriptionStatus.UNSUBSCRIBED:
+            subscription.status = NewsletterSubscriptionStatus.UNSUBSCRIBED
+            subscription.unsubscribed_at = timezone.now()
+            subscription.save(update_fields=["status", "unsubscribed_at", "updated_at"])
         serializer = NewsletterUnsubscribeSerializer(subscription)
         return Response(serializer.data, status=status.HTTP_200_OK)
 

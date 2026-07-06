@@ -286,15 +286,15 @@ class NewsletterSubscriptionSerializer(serializers.ModelSerializer):
     consentSource = serializers.CharField(
         source="consent_source",
         max_length=80,
-        required=False,
-        allow_blank=True,
+        required=True,
+        allow_blank=False,
         trim_whitespace=True,
     )
     privacyVersion = serializers.CharField(
         source="privacy_version",
         max_length=40,
-        required=False,
-        allow_blank=True,
+        required=True,
+        allow_blank=False,
         trim_whitespace=True,
     )
     locale = serializers.CharField(
@@ -508,5 +508,4 @@ class FeedbackSerializer(serializers.ModelSerializer):
             "submittedAt": data["submittedAt"],
             "message": "Thank you for your feedback! We will review it and get back to you if needed.",
         }
-
 
