@@ -64,14 +64,13 @@ def _ngm_base():
     return base
 
 
-# Court refs come from case data (operator-entered), so validate strictly before
-# they ever reach a URL: identifier is lowercase alphanumerics; case number is
-# the case-insensitive mirror of the shared court-case IRI grammar
-# (jawafdehi_shared.entities.ids._CASE_NUMBER: letter/digit-led, then
-# letters/digits/._-), so every storable reference stays queryable here. The
+# Court refs come from case data (operator-entered), so validate strictly
+# before they ever reach a URL. Both patterns mirror the shared court-case IRI
+# grammar (jawafdehi_shared.entities.ids._COURT / _CASE_NUMBER, the number
+# case-insensitively), so every storable reference stays queryable here. The
 # leading alphanumeric rejects path traversal ("..", leading dots) and the
-# charset excludes /, ?, #, and whitespace up front.
-_COURT_ID_RE = re.compile(r"^[a-z0-9]+$")
+# charsets exclude /, ?, #, and whitespace up front.
+_COURT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _CASE_NUMBER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 

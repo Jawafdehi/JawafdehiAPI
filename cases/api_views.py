@@ -628,32 +628,21 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         # DRAFT<->IN_REVIEW by the predicate, so PUBLISHED/CLOSED/revert-to-DRAFT
         # are effectively Admin/Moderator only.
 
-        # Gate entity rewrite to actual /entities patch ops.
-        # _build_snapshot always includes "entities" in the snapshot, so
-        # "entities" will always be present in validated after apply_patch.
-        # Checking validated alone would wipe relationships on every PATCH.
-        entities_touched = any(
-            isinstance(op, dict)
-            and (
-                op.get("path") == "/entities"
-                or op.get("path", "").startswith("/entities/")
-            )
-            for op in patch_ops
-        )
-
-        # Gate each join rewrite to ops that actually target its path, for the
-        # same reason as entities: the snapshot always carries these keys, so
+        # Gate each join rewrite (entities / evidence / court-case refs) to ops
+        # that actually target its path: _build_snapshot always carries these
+        # keys, so they are always present in validated after apply_patch, and
         # writing unconditionally would wipe the join on every scalar PATCH.
+        # isinstance guard on path: a non-string (malformed client op) must
+        # not AttributeError into a 500.
         def _touches(path):
             return any(
                 isinstance(op, dict)
-                and (
-                    op.get("path") == path
-                    or op.get("path", "").startswith(path + "/")
-                )
+                and isinstance(op.get("path"), str)
+                and (op["path"] == path or op["path"].startswith(path + "/"))
                 for op in patch_ops
             )
 
+        entities_touched = _touches("/entities")
         evidence_touched = _touches("/evidence")
         court_cases_touched = _touches("/court_cases")
 

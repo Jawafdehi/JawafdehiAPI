@@ -675,6 +675,9 @@ class Case(models.Model):
         """
         if desired is None:
             desired = self._pending_court_cases
+        if desired is None:
+            # Nothing assigned and nothing passed — no write intent.
+            return
         self._pending_court_cases = None
         current = [ref.courtcase_iri for ref in self.courtcase_references.all()]
         if list(desired) == current:
