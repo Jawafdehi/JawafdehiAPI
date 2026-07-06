@@ -26,9 +26,8 @@ from .rules.predicates import (
     is_caseworker,
     is_moderator,
 )
-from .validators import COURT_CHOICES, courtcase_input_to_iri, short_courtcase_ref
+from .validators import validate_courtcase_iri
 from .widgets import (
-    MultiCourtCaseField,
     MultiTextField,
     MultiTimelineField,
 )
@@ -88,12 +87,14 @@ class CaseAdminForm(forms.ModelForm):
         help_text="Tags for categorization",
     )
 
-    court_cases = MultiCourtCaseField(
+    court_cases = MultiTextField(
         required=False,
-        button_label="Add Court Case",
-        label="Court Cases",
-        help_text="Court case references in format {court_identifier}:{case_number}",
-        court_choices=COURT_CHOICES,
+        button_label="Add Court Case IRI",
+        label="Court-case references",
+        help_text=(
+            "Canonical court-case @id IRIs "
+            "(https://jawafdehi.org/courtcase/<court>/<case_number>)"
+        ),
     )
 
     timeline = MultiTimelineField(
@@ -158,16 +159,10 @@ class CaseAdminForm(forms.ModelForm):
         # a follow-up.
 
         # court_cases is the CaseCourtCaseReference join, surfaced through the
-        # Case.court_cases property as canonical @id IRIs. The admin widget
-        # works in the "<court>:<case_number>" short form (a court dropdown +
-        # number input), so present the stored IRIs that way; the property
-        # setter canonicalizes them back to IRIs on save.
+        # Case.court_cases property as canonical @id IRIs — the ONLY reference
+        # format, in the form as everywhere else.
         if self.instance.pk and "court_cases" not in self.initial:
-            self.initial["court_cases"] = [
-                short
-                for short in map(short_courtcase_ref, self.instance.court_cases)
-                if short
-            ]
+            self.initial["court_cases"] = self.instance.court_cases
 
         # Disable PUBLISHED and CLOSED states for Caseworkers
         if self.request:
@@ -189,6 +184,21 @@ class CaseAdminForm(forms.ModelForm):
             "https://nepalidatepicker.sajanmaharjan.com.np/v5/nepali.datepicker/js/nepali.datepicker.v5.0.6.min.js",
             "cases/js/date_converter.js",
         )
+
+    def clean_court_cases(self):
+        """Each row must be a canonical court-case @id IRI (surface per-row
+        errors here — the model property would raise the same ValidationError
+        too late, inside save)."""
+        rows = self.cleaned_data.get("court_cases") or []
+        errors = []
+        for row in rows:
+            try:
+                validate_courtcase_iri(row)
+            except ValidationError as exc:
+                errors.extend(exc.messages)
+        if errors:
+            raise ValidationError(errors)
+        return rows
 
     def clean_missing_details(self):
         """
@@ -273,18 +283,14 @@ class CaseAdminForm(forms.ModelForm):
         """Persist the court-case references alongside the model fields.
 
         ``court_cases`` is a form-declared field (not a model column), so
-        ``construct_instance`` skips it. The widget rows are its
-        ``<court>:<case_number>`` INPUT format; convert them to canonical @id
-        IRIs here (the model property accepts IRIs only) and assign — then
+        ``construct_instance`` skips it. Rows are canonical @id IRIs
+        (validated in ``clean_court_cases``); assign through the property —
         ``Case.save()`` syncs the CaseCourtCaseReference join (also on the
         admin's ``commit=False`` + later ``obj.save()`` path).
         """
         instance = super().save(commit=False)
         if "court_cases" in self.cleaned_data:
-            iris = [
-                courtcase_input_to_iri(row)
-                for row in self.cleaned_data.get("court_cases") or []
-            ]
+            iris = list(self.cleaned_data.get("court_cases") or [])
             # Assign only on an actual change: cleaned_data always carries the
             # field, and an unconditional assignment would rewrite the join
             # (churning row identity + audit entries) on every unrelated save.

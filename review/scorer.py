@@ -70,9 +70,8 @@ def build_case_summary(case):
             {"name": e.get("display_name"), "type": e.get("type")}
             for e in (case.get("entities") or [])
         ],
-        # Stored refs are canonical @id IRIs; hand the judge the compact
-        # "<court>:<case_number>" spelling (matches how numbers appear in
-        # titles and source documents).
+        # Canonical @id IRIs (parseable refs only — the judge and the NGM
+        # cross-check both key off these).
         "court_cases": ngm_client.court_refs_for_case(case),
         "missing_details": case.get("missing_details"),
         "notes": case.get("notes"),

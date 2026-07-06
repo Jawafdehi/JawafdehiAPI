@@ -20,7 +20,7 @@ from cases.models import (
     CaseType,
     RelationshipType,
 )
-from cases.validators import courtcase_input_to_iri, parse_courtcase_ref
+from cases.validators import courtcase_iri_from_parts, parse_courtcase_ref
 
 logger = logging.getLogger(__name__)
 
@@ -130,16 +130,15 @@ class CIAADraftCaseService:
         elif meta["match_status"] not in ["confirmed", "needs_review", "unmatched"]:
             errors.append(f"Invalid match_status '{meta['match_status']}'")
 
-        # Validate that CIAA cases have a special:* court case reference
+        # Validate that CIAA cases reference the Special Court (the dedup anchor)
         court_case = json_dict.get("court_case", {})
         court = court_case.get("court")
         case_no = court_case.get("case_no")
-        if court and case_no:
-            court_case_ref = f"{court}:{case_no}"
-            if not court_case_ref.startswith("special:"):
-                errors.append(
-                    f"Missing required CIAA idempotency key: court_case must be a special:* reference, got '{court_case_ref}'"
-                )
+        if court and case_no and court != "special":
+            errors.append(
+                "Missing required CIAA idempotency key: court_case must be a "
+                f"Special Court reference, got court '{court}'"
+            )
 
         return errors
 
@@ -147,7 +146,7 @@ class CIAADraftCaseService:
         """Extract the primary CIAA court case reference (Special Court) for idempotency checks.
 
         CIAA cases are expected to have exactly one Special Court entry in
-        court_cases (IRI or legacy short form). This is the unique idempotency
+        court_cases (@id IRIs). This is the unique idempotency
         key and should be used for duplicate detection.
 
         Args:
@@ -227,12 +226,12 @@ class CIAADraftCaseService:
             and (court := court_case.get("court"))
             and (cn := court_case.get("case_no"))
         ):
-            court_cases.append(courtcase_input_to_iri(f"{court}:{cn}"))
+            court_cases.append(courtcase_iri_from_parts(court, cn))
 
         if appealed := ciaa_json.get("appealed_case"):
             if (ac := appealed.get("court")) and (acn := appealed.get("case_no")):
                 try:
-                    court_cases.append(courtcase_input_to_iri(f"{ac}:{acn}"))
+                    court_cases.append(courtcase_iri_from_parts(ac, acn))
                 except ValidationError:
                     logger.warning(
                         "Skipping uncanonicalizable appealed-case ref %r:%r",

@@ -4,9 +4,9 @@ Court-case references are stored as canonical court-case @id IRIs
 (``https://<base>/courtcase/<court>/<case_number>``, lowercased) on the
 CaseCourtCaseReference join, and the IRI is the ONLY accepted reference form
 (mirroring ``nes_id``/``material_iri``). ``Case.court_cases`` is a settable
-property over that join. The legacy ``<court>:<case_number>`` spelling
-survives only as the admin widget's INPUT format, converted at the form edge
-via ``courtcase_input_to_iri``.
+property over that join. There is NO other reference format anywhere —
+admin rows and API payloads are IRIs; importers build IRIs from their source
+(court, number) parts via ``courtcase_iri_from_parts``.
 """
 
 import pytest
@@ -15,7 +15,7 @@ from django.core.exceptions import ValidationError
 from cases.models import Case, CaseCourtCaseReference, CaseState, CaseType
 from cases.services.priority_case_loader import filter_by_priority
 from cases.validators import (
-    courtcase_input_to_iri,
+    courtcase_iri_from_parts,
     parse_courtcase_ref,
     validate_court_cases,
     validate_courtcase_iri,
@@ -66,19 +66,19 @@ def test_validate_courtcase_iri_strict():
         validate_courtcase_iri("https://jawafdehi.org/courtcase/special/080-CR-0111")
 
 
-def test_courtcase_input_to_iri_converts_widget_rows():
-    assert courtcase_input_to_iri("special:080-CR-0111") == SPECIAL_0111
-    assert courtcase_input_to_iri("supreme:078-wc-0123") == (
+def test_courtcase_iri_from_parts_builds_canonical_iris():
+    # For producers whose source data arrives as separate (court, number)
+    # fields, e.g. the CIAA importer. There is no string input format.
+    assert courtcase_iri_from_parts("special", "080-CR-0111") == SPECIAL_0111
+    assert courtcase_iri_from_parts("Supreme", "078-wc-0123") == (
         "https://jawafdehi.org/courtcase/supreme/078-wc-0123"
     )
     with pytest.raises(ValidationError):
-        courtcase_input_to_iri("not-a-real-court:123")
+        courtcase_iri_from_parts("not-a-real-court", "123")
     with pytest.raises(ValidationError):
-        courtcase_input_to_iri("special:")
+        courtcase_iri_from_parts("special", "")
     with pytest.raises(ValidationError):
-        courtcase_input_to_iri(SPECIAL_0111)  # IRIs are not widget input rows
-    with pytest.raises(ValidationError):
-        courtcase_input_to_iri("special:no spaces allowed")
+        courtcase_iri_from_parts("special", "no spaces allowed")
 
 
 def test_validate_court_cases_iri_list_only():
@@ -198,18 +198,14 @@ def test_filter_by_priority_distinct_on_multiple_matching_refs():
 # ---------------------------------------------------------------------------
 
 
-def test_ngm_client_parse_court_ref_accepts_iri_and_compact_form():
+def test_ngm_client_parse_court_ref_is_iri_only():
     assert ngm_client.parse_court_ref(SPECIAL_0111) == ("special", "080-cr-0111")
-    # The compact spelling is ngm_client's own round-trip format
-    # (court_refs_for_case emits it; get_court_case accepts it back).
-    assert ngm_client.parse_court_ref("special:080-CR-0111") == (
-        "special",
-        "080-CR-0111",
-    )
+    # The colon spelling is fully retired — nothing accepts it.
+    assert ngm_client.parse_court_ref("special:080-CR-0111") is None
     assert ngm_client.parse_court_ref("https://x/entity/person/foo") is None
     assert ngm_client.parse_court_ref("special:../../etc") is None
 
 
-def test_ngm_client_court_refs_for_case_emits_compact_form():
-    case = {"court_cases": [SPECIAL_0111, "garbage"]}
-    assert ngm_client.court_refs_for_case(case) == ["special:080-CR-0111"]
+def test_ngm_client_court_refs_for_case_passes_iris_through():
+    case = {"court_cases": [SPECIAL_0111, "special:080-CR-0111", "garbage"]}
+    assert ngm_client.court_refs_for_case(case) == [SPECIAL_0111]

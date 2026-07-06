@@ -377,8 +377,7 @@ class CaseCourtCaseReference(models.Model):
     Replaces the former denormalized ``Case.court_cases`` JSON list of
     ``"<court>:<case_number>"`` strings. ``Case.court_cases`` remains as a
     property over this join (returning the IRIs in ordinal order); the IRI is
-    the ONLY accepted reference form (the admin widget's ``court:number``
-    input rows are converted at the form edge via ``courtcase_input_to_iri``).
+    the ONLY reference form, everywhere — API, admin, and importers.
     """
 
     case = models.ForeignKey(
