@@ -5,6 +5,5 @@ class RelatedCaseSerializer(serializers.Serializer):
     """Minimal case payload embedded in the article API for cross-linking."""
 
     id = serializers.IntegerField(source="pk")
-    case_id = serializers.CharField()
     title = serializers.CharField()
     slug = serializers.CharField()

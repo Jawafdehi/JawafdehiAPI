@@ -66,7 +66,6 @@ class CaseChooserBlock(BaseCaseChooserBlock):
             return None
         return {
             "id": value.pk,
-            "case_id": value.case_id,
             "title": value.title,
             "slug": value.slug,
         }
