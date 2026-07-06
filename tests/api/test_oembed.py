@@ -1,9 +1,14 @@
 """Tests for the oEmbed endpoint (GET /api/oembed/)."""
 
+import datetime
+
 import pytest
 from rest_framework.test import APIClient
 
 from cases.models import Case, CaseState, CaseType
+from content.models import ArticleCategory, ArticleIndexPage, ArticlePage
+from entities.services.publication import PublicationService
+from entities.write_validation import normalize_authoring_payload
 
 
 @pytest.fixture
@@ -39,6 +44,41 @@ def in_review_case(db):
 @pytest.fixture
 def client():
     return APIClient()
+
+
+@pytest.fixture
+def published_update(db):
+    index = ArticleIndexPage.objects.first()
+    assert index is not None, "ArticleIndexPage missing — content.0002 not applied"
+
+    article = ArticlePage(
+        title="Public Accountability Update",
+        slug="public-accountability-update",
+        category=ArticleCategory.UPDATE,
+        date=datetime.date(2026, 7, 6),
+        excerpt="A public update for oEmbed.",
+        body=[("paragraph", "<p>Update context</p>")],
+    )
+    index.add_child(instance=article)
+    article.save_revision().publish()
+    return article
+
+
+@pytest.fixture
+def published_entity():
+    return PublicationService().create_entity(
+        doc=normalize_authoring_payload(
+            {
+                "prefix": "person",
+                "slug": "ram-bahadur-oembed",
+                "type": "Person",
+                "name": {"en": "Ram Bahadur oEmbed"},
+                "change_description": "seed oembed entity",
+            }
+        ),
+        author_id="oidc:seed",
+        change_description="seed oembed entity",
+    )
 
 
 class TestOEmbedHappyPath:
@@ -147,6 +187,29 @@ class TestOEmbedHappyPath:
         )
         assert resp.status_code == 200
         assert resp.json()["title"] == "Test Published Case"
+
+    def test_update_url(self, client, published_update):
+        resp = client.get(
+            "/api/oembed/",
+            {"url": "https://jawafdehi.org/updates/public-accountability-update"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["title"] == "Public Accountability Update"
+        assert "/embed/updates/public-accountability-update" in data["html"]
+
+    @pytest.mark.django_db(databases="__all__")
+    def test_entity_url(self, client, published_entity):
+        resp = client.get(
+            "/api/oembed/",
+            {"url": "https://jawafdehi.org/entity/person/ram-bahadur-oembed"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["title"] == "Ram Bahadur oEmbed"
+        assert "/embed/entity/person/ram-bahadur-oembed" in data["html"]
 
 
 class TestOEmbedRenderableAttributes:
