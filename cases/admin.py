@@ -14,6 +14,7 @@ from .models import (
     CaseState,
     ChatUserIdentity,
     Feedback,
+    NewsletterSubscription,
     RelationshipType,
     requires_accused,
 )
@@ -788,6 +789,33 @@ class CustomUserAdmin(BaseUserAdmin):
 # Unregister the default User admin and register our custom one
 admin.site.unregister(User)
 admin.site.register(User, CustomUserAdmin)
+
+
+@admin.register(NewsletterSubscription)
+class NewsletterSubscriptionAdmin(admin.ModelAdmin):
+    """Admin interface for newsletter subscriptions."""
+
+    list_display = [
+        "id",
+        "email",
+        "first_name",
+        "last_name",
+        "status",
+        "subscribed_at",
+    ]
+    list_filter = ["status", "subscribed_at"]
+    search_fields = ["email", "first_name", "last_name"]
+    readonly_fields = ["subscribed_at", "updated_at", "ip_address", "user_agent"]
+    fieldsets = (
+        ("Subscriber", {"fields": ("email", "first_name", "last_name", "status")}),
+        (
+            "Metadata",
+            {
+                "fields": ("ip_address", "user_agent", "subscribed_at", "updated_at"),
+                "classes": ("collapse",),
+            },
+        ),
+    )
 
 
 # ============================================================================

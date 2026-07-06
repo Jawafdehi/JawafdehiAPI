@@ -944,6 +944,40 @@ class Case(models.Model):
         return (0, {self._meta.label: 0})
 
 
+class NewsletterSubscriptionStatus(models.TextChoices):
+    """Enum for newsletter subscription lifecycle state."""
+
+    SUBSCRIBED = "subscribed", "Subscribed"
+    UNSUBSCRIBED = "unsubscribed", "Unsubscribed"
+
+
+class NewsletterSubscription(models.Model):
+    """Email subscription for Jawafdehi newsletter updates."""
+
+    email = models.EmailField(unique=True, db_index=True)
+    first_name = models.CharField(max_length=150)
+    last_name = models.CharField(max_length=150, blank=True)
+    status = models.CharField(
+        max_length=20,
+        choices=NewsletterSubscriptionStatus.choices,
+        default=NewsletterSubscriptionStatus.SUBSCRIBED,
+        db_index=True,
+    )
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.TextField(blank=True)
+    subscribed_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-subscribed_at"]
+        indexes = [
+            models.Index(fields=["status", "subscribed_at"]),
+        ]
+
+    def __str__(self):
+        return self.email
+
+
 class FeedbackType(models.TextChoices):
     """Enum for feedback types."""
 

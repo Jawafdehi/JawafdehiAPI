@@ -62,6 +62,7 @@ from .serializers import (
     CaseDetailSerializer,
     CaseSerializer,
     FeedbackSerializer,
+    NewsletterSubscriptionSerializer,
 )
 from .services.statistics import (
     STATISTICS_SNAPSHOT_KEY,
@@ -990,6 +991,72 @@ class StatisticsView(APIView):
         return Response(
             refresh_statistics(), headers={"Cache-Control": self.CACHE_CONTROL}
         )
+
+
+class NewsletterSubscriptionRateThrottle(AnonRateThrottle):
+    """Rate throttle for newsletter signups: 10 per hour."""
+
+    rate = "10/hour"
+
+
+@extend_schema(
+    summary="Subscribe to the Jawafdehi newsletter",
+    description="""
+    Subscribe an email address to Jawafdehi newsletter updates.
+
+    Rate limited to 10 submissions per IP address per hour. Re-submitting an
+    existing email updates the subscriber name and restores subscribed status.
+    """,
+    request=NewsletterSubscriptionSerializer,
+    responses={
+        201: NewsletterSubscriptionSerializer,
+        400: OpenApiTypes.OBJECT,
+        429: OpenApiTypes.OBJECT,
+    },
+    examples=[
+        OpenApiExample(
+            "Newsletter Signup",
+            value={
+                "firstName": "Ram",
+                "lastName": "Bahadur",
+                "email": "ram@example.com",
+            },
+            request_only=True,
+        ),
+    ],
+)
+class NewsletterSubscriptionView(APIView):
+    """API view for public newsletter subscriptions."""
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = [NewsletterSubscriptionRateThrottle]
+    parser_classes = [JSONParser, FormParser]
+
+    def post(self, request):
+        serializer = NewsletterSubscriptionSerializer(data=request.data)
+
+        if serializer.is_valid():
+            subscription = serializer.save(
+                ip_address=self.get_client_ip(request),
+                user_agent=request.META.get("HTTP_USER_AGENT", ""),
+            )
+            return Response(
+                serializer.to_representation(subscription),
+                status=status.HTTP_201_CREATED,
+            )
+
+        return Response(
+            {"error": "Validation error", "details": serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    def get_client_ip(self, request):
+        """Extract client IP address from request."""
+        x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
+        if x_forwarded_for:
+            return x_forwarded_for.split(",")[0].strip()
+        return request.META.get("REMOTE_ADDR")
 
 
 class FeedbackRateThrottle(AnonRateThrottle):

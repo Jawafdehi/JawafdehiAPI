@@ -14,6 +14,8 @@ from .models import (
     Case,
     CaseEntityRelationship,
     Feedback,
+    NewsletterSubscription,
+    NewsletterSubscriptionStatus,
 )
 
 logger = logging.getLogger(__name__)
@@ -262,6 +264,56 @@ class CaseDetailSerializer(CaseSerializer):
 
     class Meta(CaseSerializer.Meta):
         pass
+
+
+class NewsletterSubscriptionSerializer(serializers.ModelSerializer):
+    """Serializer for public newsletter signups."""
+
+    email = serializers.EmailField(validators=[])
+    firstName = serializers.CharField(
+        source="first_name", max_length=150, trim_whitespace=True
+    )
+    lastName = serializers.CharField(
+        source="last_name",
+        max_length=150,
+        required=False,
+        allow_blank=True,
+        trim_whitespace=True,
+    )
+
+    class Meta:
+        model = NewsletterSubscription
+        fields = ["id", "email", "firstName", "lastName", "status"]
+        read_only_fields = ["id", "status"]
+
+    def validate_email(self, value):
+        return value.strip().lower()
+
+    def validate_firstName(self, value):
+        if not value.strip():
+            raise serializers.ValidationError("First name is required.")
+        return value
+
+    def create(self, validated_data):
+        email = validated_data["email"]
+        validated_data.setdefault("last_name", "")
+        defaults = {
+            **validated_data,
+            "status": NewsletterSubscriptionStatus.SUBSCRIBED,
+        }
+        subscription, _created = NewsletterSubscription.objects.update_or_create(
+            email=email, defaults=defaults
+        )
+        return subscription
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        return {
+            "id": data["id"],
+            "email": data["email"],
+            "status": data["status"],
+            "message": "Thank you for subscribing to the Jawafdehi newsletter.",
+        }
 
 
 class ContactMethodSerializer(serializers.Serializer):

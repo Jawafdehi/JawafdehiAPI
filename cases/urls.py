@@ -10,6 +10,7 @@ from rest_framework.routers import DefaultRouter
 from .api_views import (
     CaseViewSet,
     FeedbackView,
+    NewsletterSubscriptionView,
     OEmbedView,
     StatisticsView,
 )
@@ -30,6 +31,11 @@ urlpatterns = [
     # in-process search in the OpenSearch cutover (plan decision #5).
     path("statistics/", StatisticsView.as_view(), name="statistics"),
     path("feedback/", FeedbackView.as_view(), name="feedback"),
+    path(
+        "newsletter/subscriptions/",
+        NewsletterSubscriptionView.as_view(),
+        name="newsletter-subscriptions",
+    ),
     path("oembed/", OEmbedView.as_view(), name="oembed"),
     path("", include(router.urls)),
 ]
