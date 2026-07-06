@@ -314,23 +314,44 @@ def test_extract_role_keys_normalizes_shapes(settings):
 
 def test_extract_role_keys_reads_per_project_claim(settings):
     settings.OIDC_ROLES_CLAIM = ROLES_CLAIM
+    settings.OIDC_AUDIENCE = AUDIENCE
     # A machine user's client-credentials token (e.g. the jobs-processor SA):
     # the urn:zitadel:iam:org:projects:roles scope yields ONLY the per-project
     # claim — the generic claim is absent even with projectRoleAssertion on.
     machine_claims = {
-        "urn:zitadel:iam:org:project:377760393168159088:roles": {
+        f"urn:zitadel:iam:org:project:{AUDIENCE}:roles": {
             "review_assistant": {"377588697018728812": "zitadel.auth.jawafdehi.org"}
         }
     }
     assert oidc_auth.extract_role_keys(machine_claims) == {"review_assistant"}
-    # Generic + per-project merge; unrelated urn claims are ignored.
+    # Generic + own-project merge; unrelated urn claims are ignored.
     assert oidc_auth.extract_role_keys(
         {
             ROLES_CLAIM: {"caseworker": {}},
-            "urn:zitadel:iam:org:project:123:roles": {"review_assistant": {}},
+            f"urn:zitadel:iam:org:project:{AUDIENCE}:roles": {"review_assistant": {}},
             "urn:zitadel:iam:user:metadata": {"ignored": "x"},
         }
     ) == {"caseworker", "review_assistant"}
+
+
+def test_extract_role_keys_ignores_sibling_project_claims(settings):
+    settings.OIDC_ROLES_CLAIM = ROLES_CLAIM
+    settings.OIDC_AUDIENCE = AUDIENCE
+    # A token can pass the audience check while carrying role claims from
+    # OTHER projects in the same org (extra audiences are accepted). Those
+    # must never grant privileges here — 'admin' elsewhere is not admin here.
+    claims = {
+        f"urn:zitadel:iam:org:project:{AUDIENCE}:roles": {"review_assistant": {}},
+        "urn:zitadel:iam:org:project:999999:roles": {"admin": {}, "caseworker": {}},
+    }
+    assert oidc_auth.extract_role_keys(claims) == {"review_assistant"}
+    # A list-typed OIDC_AUDIENCE trusts each listed project id.
+    settings.OIDC_AUDIENCE = [AUDIENCE, "999999"]
+    assert oidc_auth.extract_role_keys(claims) == {
+        "review_assistant",
+        "admin",
+        "caseworker",
+    }
 
 
 @pytest.mark.django_db

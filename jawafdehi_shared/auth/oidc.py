@@ -66,8 +66,26 @@ DEFAULT_ROLES_CLAIM = "urn:zitadel:iam:org:project:roles"
 # per-project variant ``urn:zitadel:iam:org:project:{projectId}:roles``, even
 # with projectRoleAssertion enabled on the project. Human (auth-code) tokens
 # carry the generic claim. Roles are therefore merged from the configured claim
-# AND every per-project variant present.
-_PER_PROJECT_ROLES_CLAIM_RE = re.compile(r"^urn:zitadel:iam:org:project:\d+:roles$")
+# AND the per-project variant — but ONLY for project ids this API already
+# trusts as itself (settings.OIDC_AUDIENCE). A token can pass the audience
+# check while ALSO carrying role claims from sibling Zitadel projects in the
+# same org (PyJWT accepts extra audiences, and the projects:roles scope asserts
+# every project the principal holds grants in); honoring those would let a
+# colliding roleKey like ``admin`` granted in an unrelated project escalate to
+# superuser here.
+_PER_PROJECT_ROLES_CLAIM_RE = re.compile(
+    r"^urn:zitadel:iam:org:project:(\d+):roles$"
+)
+
+
+def _trusted_project_ids() -> set[str]:
+    """Project ids whose per-project role claims this API honors (from aud)."""
+    aud = getattr(settings, "OIDC_AUDIENCE", None)
+    if not aud:
+        return set()
+    if isinstance(aud, str):
+        aud = [aud]
+    return {str(a) for a in aud}
 
 # Default Zitadel project-role key -> existing Django Group name. Overridable via
 # settings.OIDC_ROLE_TO_GROUP. The Group names mirror those the predicates and
@@ -155,18 +173,23 @@ def reset_jwks_client() -> None:
 def extract_role_keys(claims: dict) -> set[str]:
     """Return the set of Zitadel project-role keys present in ``claims``.
 
-    Merges the configured generic claim (settings.OIDC_ROLES_CLAIM) with every
+    Merges the configured generic claim (settings.OIDC_ROLES_CLAIM) with the
     per-project ``urn:zitadel:iam:org:project:{id}:roles`` variant — machine
-    users' client-credentials tokens carry ONLY the latter. Normalizes both the
-    plain-map shape returned by real tokens and the array-wrapped shape
-    Zitadel's docs sometimes render. Only signature- and audience-validated
-    tokens reach this point, and unknown role keys map to no Group.
+    users' client-credentials tokens carry ONLY the latter. Per-project claims
+    are honored ONLY for this API's own project ids (OIDC_AUDIENCE): role keys
+    asserted by sibling projects in the same org are ignored, so a colliding
+    key (e.g. ``admin``) granted elsewhere cannot map to privileges here.
+    Normalizes both the plain-map shape returned by real tokens and the
+    array-wrapped shape Zitadel's docs sometimes render.
     """
     claim_name = getattr(settings, "OIDC_ROLES_CLAIM", DEFAULT_ROLES_CLAIM)
+    trusted_projects = _trusted_project_ids()
     keys: set[str] = set()
     for name, raw in (claims or {}).items():
-        if name != claim_name and not _PER_PROJECT_ROLES_CLAIM_RE.match(name):
-            continue
+        if name != claim_name:
+            m = _PER_PROJECT_ROLES_CLAIM_RE.match(name)
+            if m is None or m.group(1) not in trusted_projects:
+                continue
         if isinstance(raw, list):  # normalize docs' array-wrapped form
             merged: dict = {}
             for item in raw:
