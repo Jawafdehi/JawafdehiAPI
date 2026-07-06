@@ -190,8 +190,21 @@ class Command(BaseCommand):
                 payload,
                 on_stage=lambda s: self._report_stage(job_id, s),
             )
-            out["status"] = "done"
-            self._submit(job_id, out)
+            # The handler's ENTIRE return value is the job result — nest it
+            # under "result" (the JobResultSerializer field the server stores
+            # verbatim as job.result and hands to the kind's on_result hook).
+            # Submitted flat, the serializer keeps only the body's inner
+            # "result" key, and the case_review hook then reads
+            # case_title/case_type off the wrong (scored) dict — where
+            # case_type is a dict that overflows the varchar column.
+            self._submit(
+                job_id,
+                {
+                    "status": "done",
+                    "result": out,
+                    "duration_seconds": out.get("duration_seconds"),
+                },
+            )
             self.stdout.write(self.style.SUCCESS(f"  finished job {job_id}"))
         except Exception as e:  # noqa: BLE001 - report failure to the queue
             import traceback

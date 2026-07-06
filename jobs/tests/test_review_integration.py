@@ -108,3 +108,55 @@ def test_regrade_reenqueues_after_prior_job_terminal():
     j2 = _enqueue_review_job(review)
     assert j2.id != j1.id
     assert j2.status == Job.QUEUED
+
+
+@pytest.mark.django_db
+def test_consumer_result_body_through_the_view_finalizes_the_review():
+    """The seam that broke in prod: the consumer's HTTP body -> view ->
+    JobResultSerializer -> finalize -> on_result. The handler's whole return
+    value must arrive nested under "result" (the serializer stores that field
+    verbatim as job.result); submitted flat, the hook read wrapper fields off
+    the inner scored dict and died on case_type (a dict) overflowing varchar.
+    """
+    from django.contrib.auth.models import Group, User
+    from rest_framework.test import APIClient
+
+    from review.views import _enqueue_review_job
+
+    Group.objects.get_or_create(name="Caseworker")
+    user = User.objects.create_user("seamworker", password="x")
+    user.groups.add(Group.objects.get(name="Caseworker"))
+    api = APIClient()
+    api.force_authenticate(user=user)
+
+    review = CaseReview.objects.create(slug="case-seam")
+    _enqueue_review_job(review)
+    with mock.patch("review.case_provider.get_case", return_value={"title": "Seam"}):
+        job = queue.claim_next(["case_review"])
+
+    # Exactly what review_poller._process_job submits: the handler wrapper
+    # nested under "result".
+    wrapper = {
+        "case_title": "Seam",
+        "case_state": "IN_REVIEW",
+        "case_type": "CIAA_BASIC",
+        "source_count": 3,
+        "sources_converted": 2,
+        "result": {"disposition": "PASS", "case_type": {"type": "CIAA_BASIC"}},
+        "duration_seconds": 12.5,
+    }
+    r = api.post(
+        f"/api/jobs/{job.pk}/result/",
+        {"status": "done", "result": wrapper, "duration_seconds": 12.5},
+        format="json",
+    )
+    assert r.status_code == 200
+
+    review.refresh_from_db()
+    assert review.status == CaseReview.STATUS_DONE
+    assert review.stage == "complete"
+    assert review.case_type == "CIAA_BASIC"  # the STRING, not the scored dict
+    assert review.case_title == "Seam"
+    assert review.source_count == 3
+    assert review.result == {"disposition": "PASS", "case_type": {"type": "CIAA_BASIC"}}
+    assert review.duration_seconds == 12.5
