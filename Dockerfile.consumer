@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: Hippocratic-3.0
+# Jawafdehi jobs-consumer image: the platform image plus Node.js and the claude
+# CLI. The queue consumer (`manage.py review_poller`) runs the case_review /
+# material_convert handlers locally; with REVIEW_LLM_PROVIDER=claude_cli the
+# judge shells out to the `claude` binary authenticated by the operator's
+# subscription (CLAUDE_CODE_OAUTH_TOKEN) — so the CLI must ship in the image.
+#
+# Built amd64-only: likhit's legacy-.doc fallback (antiword) bundles an
+# x86_64-only binary (on arm64 those sources convert to 0 chars and reviews
+# grade on partial material), and npm-installing the CLI under arm64 QEMU
+# emulation is unreliable. Schedule on an amd64 node.
+ARG BASE_IMAGE=jawafdehi/jawafdehi-platform:main
+FROM ${BASE_IMAGE}
+
+# Node.js 22 LTS via NodeSource (claude-code needs a recent Node). The slim base
+# lacks curl/gnupg needed to add the apt repo.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# The claude_cli judge provider invokes this binary (settings.CLAUDE_CLI_BIN).
+RUN npm install -g --no-fund --no-audit @anthropic-ai/claude-code
+
+# Document conversion (likhit + markitdown) ships as the bigo-enrichment extra —
+# deliberately absent from the base API image (imported lazily, never at
+# startup). The consumer converts evidence sources locally, so it needs them.
+RUN uv sync --frozen --no-dev --extra bigo-enrichment
+
+# Read-only by default (lists queued jobs and exits); the k8s CronJob overrides
+# this with `--apply --once` to actually drain the queue.
+CMD ["/app/.venv/bin/python", "manage.py", "review_poller"]

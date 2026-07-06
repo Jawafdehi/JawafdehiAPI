@@ -37,6 +37,7 @@ Migration note (DRF token auth removal / chat service account):
 
 from __future__ import annotations
 
+import re
 import threading
 
 import jwt
@@ -55,11 +56,36 @@ User = get_user_model()
 DEFAULT_SUPERUSER_ROLE = "admin"
 
 # Zitadel emits granted project roles in this claim (singular "project").
-# It is a map: roleKey -> {orgId: orgPrimaryDomain}. Prefer the per-project
-# variant urn:zitadel:iam:org:project:{projectId}:roles if you enable it; this
-# module reads whichever generic/per-project key is configured via
-# settings.OIDC_ROLES_CLAIM.
+# It is a map: roleKey -> {orgId: orgPrimaryDomain}. The claim read by default
+# is configurable via settings.OIDC_ROLES_CLAIM.
 DEFAULT_ROLES_CLAIM = "urn:zitadel:iam:org:project:roles"
+
+# Machine users (client-credentials grant — e.g. the jobs consumer service
+# account) never receive the generic claim above: with the
+# ``urn:zitadel:iam:org:projects:roles`` scope Zitadel emits ONLY the
+# per-project variant ``urn:zitadel:iam:org:project:{projectId}:roles``, even
+# with projectRoleAssertion enabled on the project. Human (auth-code) tokens
+# carry the generic claim. Roles are therefore merged from the configured claim
+# AND the per-project variant — but ONLY for project ids this API already
+# trusts as itself (settings.OIDC_AUDIENCE). A token can pass the audience
+# check while ALSO carrying role claims from sibling Zitadel projects in the
+# same org (PyJWT accepts extra audiences, and the projects:roles scope asserts
+# every project the principal holds grants in); honoring those would let a
+# colliding roleKey like ``admin`` granted in an unrelated project escalate to
+# superuser here.
+_PER_PROJECT_ROLES_CLAIM_RE = re.compile(
+    r"^urn:zitadel:iam:org:project:(\d+):roles$"
+)
+
+
+def _trusted_project_ids() -> set[str]:
+    """Project ids whose per-project role claims this API honors (from aud)."""
+    aud = getattr(settings, "OIDC_AUDIENCE", None)
+    if not aud:
+        return set()
+    if isinstance(aud, str):
+        aud = [aud]
+    return {str(a) for a in aud}
 
 # Default Zitadel project-role key -> existing Django Group name. Overridable via
 # settings.OIDC_ROLE_TO_GROUP. The Group names mirror those the predicates and
@@ -147,18 +173,32 @@ def reset_jwks_client() -> None:
 def extract_role_keys(claims: dict) -> set[str]:
     """Return the set of Zitadel project-role keys present in ``claims``.
 
+    Merges the configured generic claim (settings.OIDC_ROLES_CLAIM) with the
+    per-project ``urn:zitadel:iam:org:project:{id}:roles`` variant — machine
+    users' client-credentials tokens carry ONLY the latter. Per-project claims
+    are honored ONLY for this API's own project ids (OIDC_AUDIENCE): role keys
+    asserted by sibling projects in the same org are ignored, so a colliding
+    key (e.g. ``admin``) granted elsewhere cannot map to privileges here.
     Normalizes both the plain-map shape returned by real tokens and the
     array-wrapped shape Zitadel's docs sometimes render.
     """
     claim_name = getattr(settings, "OIDC_ROLES_CLAIM", DEFAULT_ROLES_CLAIM)
-    raw = claims.get(claim_name) or {}
-    if isinstance(raw, list):  # normalize docs' array-wrapped form
-        merged: dict = {}
-        for item in raw:
-            if isinstance(item, dict):
-                merged.update(item)
-        raw = merged
-    return set(raw.keys()) if isinstance(raw, dict) else set()
+    trusted_projects = _trusted_project_ids()
+    keys: set[str] = set()
+    for name, raw in (claims or {}).items():
+        if name != claim_name:
+            m = _PER_PROJECT_ROLES_CLAIM_RE.match(name)
+            if m is None or m.group(1) not in trusted_projects:
+                continue
+        if isinstance(raw, list):  # normalize docs' array-wrapped form
+            merged: dict = {}
+            for item in raw:
+                if isinstance(item, dict):
+                    merged.update(item)
+            raw = merged
+        if isinstance(raw, dict):
+            keys |= set(raw.keys())
+    return keys
 
 
 class OIDCAuthentication(authentication.BaseAuthentication):

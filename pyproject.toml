@@ -101,6 +101,7 @@ packages = [
     "cases",
     "review",
     "jobs",
+    "llm",
     "search",
     "discovery",
     "content",

@@ -13,9 +13,10 @@ uploaded — only the final scored result is submitted.
 
 import time
 
-from django.conf import settings
+from llm.routing import active_premium_model
+from llm.usage import UsageAccumulator
 
-from . import bedrock_judge, casetype, code_rules, converter, jds_client, scorer
+from . import casetype, code_rules, converter, jds_client, judge, scorer
 
 
 class _Config:
@@ -51,6 +52,10 @@ def process_case(case, config=None, on_stage=None):
 
     t0 = time.monotonic()
 
+    # Shared across the source-analysis and rule-scoring LLM calls so the result
+    # carries this review's total token usage + cost.
+    usage = UsageAccumulator()
+
     # 1. Sources from the case (pure; no DB).
     stage("converting_sources")
     sources = jds_client.extract_sources(case)
@@ -66,20 +71,27 @@ def process_case(case, config=None, on_stage=None):
         1 for s in converted if s.get("conversion_status") in ("converted", "attached")
     )
 
-    # 3. Per-source analysis (Bedrock).
+    # 3. Per-source analysis (via the active LLM provider).
     stage("analyzing_sources")
     ctype = casetype.detect(case)
-    source_analyses = bedrock_judge.analyze_sources(
-        scorer.build_case_summary(case), converted, ctype["label"]
+    source_analyses = judge.analyze_sources(
+        scorer.build_case_summary(case), converted, ctype["label"], usage=usage
     )
 
-    # 4. Rule-centered scoring (Bedrock). Rules are code-enforced (no DB).
+    # 4. Rule-centered scoring (LLM judge). Rules are code-enforced (no DB).
     stage("scoring")
     rules = code_rules.get_enabled_rules()
     result = scorer.score_case(
-        case, converted, rules, cfg, source_analyses=source_analyses
+        case, converted, rules, cfg, source_analyses=source_analyses, usage=usage
     )
-    result["model_id_used"] = settings.BEDROCK_MODEL_ID
+    # Reports the active provider's premium/gate-tier model. Under tiered routing,
+    # non-gate rules and the narrative may instead use the cheap tier (see
+    # judge); the proxy provider resolves its own model ids.
+    try:
+        result["model_id_used"] = active_premium_model()
+    except Exception:  # noqa: BLE001 - reporting must not fail a finished review
+        result["model_id_used"] = ""
+    result["token_usage"] = usage.as_dict()
 
     return {
         "case_title": case.get("title", "") or "",

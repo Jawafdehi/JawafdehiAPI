@@ -12,7 +12,7 @@ The system is a set of code-defined Rules (review.code_rules). For a given case 
 This replaces the old fixed 8-dimension rubric.
 """
 
-from . import bedrock_judge, casetype, ngm_client, rules_engine
+from . import casetype, judge, ngm_client, rules_engine
 
 
 def _clamp(n):
@@ -104,15 +104,19 @@ def _source_analysis_block(source, analysis):
     return "\n".join(parts)
 
 
-def score_case(case, converted_sources, rules, config, source_analyses=None):
+def score_case(
+    case, converted_sources, rules, config, source_analyses=None, usage=None
+):
     """Score a case against a list of Rule model instances.
 
     `rules` is an iterable of active (enabled) code rules, in display order.
     `config` is a ReviewConfig (thresholds + llm_samples).
     `source_analyses` is an optional list (aligned with converted_sources) of
-    per-source summary+contribution dicts from bedrock_judge.analyze_sources;
+    per-source summary+contribution dicts from judge.analyze_sources;
     when omitted it is computed here. Every review summarises each source and
     analyses its contribution before rule scoring.
+    `usage` is an optional llm.usage.UsageAccumulator that LLM calls record
+    their token usage into for cost tracking.
     Returns a structured, rule-centered result dict.
     """
     ctype = casetype.detect(case)
@@ -121,8 +125,8 @@ def score_case(case, converted_sources, rules, config, source_analyses=None):
     # 0. Per-source analysis: summarise each converted source and determine how
     #    it contributes to the case (description / timeline / allegations).
     if source_analyses is None:
-        source_analyses = bedrock_judge.analyze_sources(
-            build_case_summary(case), converted_sources, ctype["label"]
+        source_analyses = judge.analyze_sources(
+            build_case_summary(case), converted_sources, ctype["label"], usage=usage
         )
     analysis_by_idx = {i: a for i, a in enumerate(source_analyses or [])}
 
@@ -182,16 +186,19 @@ def score_case(case, converted_sources, rules, config, source_analyses=None):
                 "description": r.description,
                 "good_examples": r.good_examples,
                 "bad_examples": r.bad_examples,
+                # Routes the judge model tier: gate rules -> premium model.
+                "is_gate": r.is_gate,
             }
             for r in llm_rules
         ]
         try:
-            judged = bedrock_judge.judge_rules(
+            judged = judge.judge_rules(
                 judge_summary,
                 excerpts,
                 ctype["label"],
                 rule_specs,
                 n_samples=config.llm_samples,
+                usage=usage,
             )
         except Exception as e:  # noqa: BLE001
             judge_err = str(e)
@@ -207,7 +214,9 @@ def score_case(case, converted_sources, rules, config, source_analyses=None):
     # 3. Evaluate every applicable rule into a uniform shape.
     rule_results = []
     gate_failures = []
+    ungraded_llm_keys = []
     for r in applicable:
+        graded = True
         if r.kind == r.KIND_LLM:
             jd = judged.get(r.key)
             if jd:
@@ -218,9 +227,24 @@ def score_case(case, converted_sources, rules, config, source_analyses=None):
                 suggestions = jd.get("suggestions", [])
                 rationale = jd.get("rationale", "")
                 samples = jd.get("samples", [])
-                confidence = _confidence_label(std, n_samples)
+                # Confidence from THIS rule's actual sample count, not the global
+                # llm_samples: batched CLI grading is single-pass (1 sample) and
+                # must not be labelled high-confidence off a zero std.
+                confidence = _confidence_label(std, len(samples))
+                if not samples:
+                    # The judge ran but never returned a grade for this rule
+                    # (batch reply omitted its key even after the per-rule
+                    # retry). The 50 is a placeholder, not a verdict.
+                    graded = False
+                    ungraded_llm_keys.append(r.key)
+                    confidence = "low"
+                    rationale = rationale or (
+                        "The judge did not return a grade for this rule "
+                        "(incomplete reply); score is a neutral default."
+                    )
             else:
                 # judge failed -> neutral default, explicitly low confidence
+                graded = False
                 score, variance, std, samples = 50, 0.0, 0.0, []
                 issues = []
                 suggestions = []
@@ -238,7 +262,13 @@ def score_case(case, converted_sources, rules, config, source_analyses=None):
             rationale = ""
             confidence = "high"  # deterministic = exact
 
-        gate_failed = bool(r.is_gate and score < r.gate_min)
+        # A gate can only fail on a REAL grade. An ungraded rule's neutral 50
+        # placeholder must not REJECT the case — except on total judge failure
+        # (judge_err), where rejecting-with-explanation is the long-standing
+        # loud behavior (gates are unverified, and the narrative says so).
+        gate_failed = bool(
+            r.is_gate and score < r.gate_min and (graded or judge_err)
+        )
         if gate_failed:
             gate_failures.append(
                 {"key": r.key, "title": r.title, "score": score, "gate_min": r.gate_min}
@@ -269,6 +299,15 @@ def score_case(case, converted_sources, rules, config, source_analyses=None):
                 "bad_examples": r.bad_examples,
             }
         )
+
+    # Ungraded rules must never be silent: surface them in the narrative so a
+    # reviewer can see which scores are placeholders, not verdicts.
+    if ungraded_llm_keys and not judge_err:
+        narrative = (
+            f"{narrative} NOTE: {len(ungraded_llm_keys)} rule(s) received no "
+            f"grade from the judge ({', '.join(ungraded_llm_keys)}); their "
+            "scores are neutral defaults and did not gate the case."
+        ).strip()
 
     # 4. Weighted overall over applicable rules.
     total_w = sum(rr["weight"] for rr in rule_results) or 1.0
