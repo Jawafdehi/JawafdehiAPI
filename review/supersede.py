@@ -36,9 +36,15 @@ def supersede_older_queued_jobs(slug, keep_job_id):
         now = timezone.now()
         for job in stale_jobs:
             job.status = Job.DEAD
+            # stage is set like every other terminal transition (finalize sets
+            # "failed", the reaper "dead_lease_expired") so superseded jobs are
+            # distinguishable in the dashboard, not stage-less anomalies.
+            job.stage = "superseded"
             job.error = f"Superseded by a newer queued review of the same case (job {keep_job_id})."
             job.completed_at = now
-            job.save(update_fields=["status", "error", "completed_at", "updated_at"])
+            job.save(
+                update_fields=["status", "stage", "error", "completed_at", "updated_at"]
+            )
             superseded += 1
 
             review_id = (job.payload or {}).get("review_id")
@@ -53,6 +59,10 @@ def supersede_older_queued_jobs(slug, keep_job_id):
                         "Superseded by a newer queued review of the same case "
                         "before this one was claimed."
                     ),
+                    # Terminal reviews always carry completed_at (the normal
+                    # failure path sets it via the on_failure hook); superseded
+                    # ones must not look perpetually un-completed.
+                    completed_at=now,
                     updated_at=now,
                 )
     return superseded

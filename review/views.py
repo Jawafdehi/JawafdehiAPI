@@ -185,17 +185,23 @@ def _enqueue_review_job(review, *, submitted_by=None):
     resolved live at claim time, so a second queued job for the same slug would
     just re-grade identical content at full LLM cost.
     """
+    from django.db import transaction
+
     from jobs import queue as job_queue
 
     from .supersede import supersede_older_queued_jobs
 
-    job = job_queue.enqueue(
-        "case_review",
-        payload={"slug": review.slug, "review_id": review.id},
-        dedup_key=f"case_review:{review.id}",
-        submitted_by=submitted_by,
-    )
-    supersede_older_queued_jobs(review.slug, keep_job_id=job.pk)
+    # One transaction for enqueue + supersede: without it the new job commits
+    # first and a consumer polling in the gap can claim the older duplicate
+    # (claim orders by id, so it picks the older one) before it is dead-lettered.
+    with transaction.atomic():
+        job = job_queue.enqueue(
+            "case_review",
+            payload={"slug": review.slug, "review_id": review.id},
+            dedup_key=f"case_review:{review.id}",
+            submitted_by=submitted_by,
+        )
+        supersede_older_queued_jobs(review.slug, keep_job_id=job.pk)
     return job
 
 

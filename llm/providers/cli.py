@@ -121,12 +121,20 @@ class ClaudeCliProvider(_CliProvider):
         eff = getattr(settings, "CLAUDE_CLI_EFFORT", "")
         return ["--effort", eff] if eff else []
 
-    def _claude_env(self):
-        """Env for the claude subprocess: subscription auth (no API key)."""
+    def _claude_env(self, max_tokens=None):
+        """Env for the claude subprocess: subscription auth (no API key).
+
+        The claude CLI has no output-cap flag; it honors the
+        CLAUDE_CODE_MAX_OUTPUT_TOKENS env var, so the caller's ``max_tokens``
+        budget is enforced through it — otherwise the judge's token budgeting
+        would be silently ignored on this provider.
+        """
         env = dict(os.environ)
         cli_home = getattr(settings, "CLAUDE_CLI_HOME", "")
         if cli_home:
             env["HOME"] = cli_home
+        if max_tokens:
+            env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(int(max_tokens))
         env.pop("ANTHROPIC_API_KEY", None)
         return env
 
@@ -208,7 +216,7 @@ class ClaudeCliProvider(_CliProvider):
             argv.extend(["--model", effective_model])
         argv.extend(self._effort_args())
 
-        out = self._run(argv, _flatten(content), self._claude_env())
+        out = self._run(argv, _flatten(content), self._claude_env(max_tokens))
         return self._finalize(out, model_id, effective_model, tier, usage)
 
     def invoke_with_tools(
@@ -287,7 +295,7 @@ class ClaudeCliProvider(_CliProvider):
             if effective_model:
                 argv[1:1] = ["--model", effective_model]
 
-            out = self._run(argv, _flatten(content), self._claude_env())
+            out = self._run(argv, _flatten(content), self._claude_env(max_tokens))
             return self._finalize(out, model_id, effective_model, tier, usage)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -397,9 +405,11 @@ class CodexCliProvider(_CliProvider):
                 f"codex_cli: no agent message found in output\nLast 500 chars: {out[-500:]}"
             )
 
-        # Record usage (turn_usage may be {} if codex omitted counts -> still
-        # records the call with 0 tokens rather than dropping it).
-        if usage is not None and turn_usage is not None:
+        # Record usage even when codex emitted no turn.completed event (or
+        # omitted counts): a zero-token record keeps the CALL count accurate
+        # instead of silently dropping the invocation from the accounting.
+        if usage is not None:
+            turn_usage = turn_usage or {}
             input_tokens = turn_usage.get("input_tokens", 0)
             output_tokens = turn_usage.get("output_tokens", 0)
             reasoning_output_tokens = turn_usage.get("reasoning_output_tokens", 0)

@@ -19,7 +19,10 @@ from llm.invoke import invoke_json
 
 # Bounded parallelism for LLM calls. Bedrock throttles aggressively, so we
 # keep this modest; with hundreds of rules this is the wall-clock divisor.
-MAX_WORKERS = int(getattr(settings, "BEDROCK_MAX_WORKERS", 8))
+def _api_max_workers():
+    """Bounded parallelism for API-provider calls (read at call time so
+    override_settings / env changes after import take effect)."""
+    return int(getattr(settings, "BEDROCK_MAX_WORKERS", 8))
 
 
 def _effective_max_workers():
@@ -33,7 +36,7 @@ def _effective_max_workers():
     for tier in ("premium", "cheap"):
         if provider_for_tier(tier).name in ("codex_cli", "claude_cli"):
             return int(getattr(settings, "REVIEW_CLI_MAX_WORKERS", 2))
-    return MAX_WORKERS
+    return _api_max_workers()
 
 
 # Cap on the combined source-excerpt block handed to the judge per rule. The old
@@ -41,14 +44,16 @@ def _effective_max_workers():
 # press release carrying the bigo amount) was cut off, making the judge wrongly
 # report it as "truncated / unverifiable". Opus 4.8's context handles a generous
 # budget; raise it so figures deep in a source are actually visible.
-_SOURCE_EXCERPTS_CAP = int(getattr(settings, "JUDGE_SOURCE_EXCERPTS_CAP", 120000))
+def _source_excerpts_cap():
+    return int(getattr(settings, "JUDGE_SOURCE_EXCERPTS_CAP", 120000))
 
 # Whether to prompt-cache the shared rule-grading prefix. The same case data +
 # source-excerpt block is re-sent for every (rule x sample) call; with hundreds
 # of rules that block dominates input cost. Marking it with `cache_control` makes
 # Bedrock bill it once per case (cache write) and ~free on every later call
 # (cache read) for the cache TTL, which the back-to-back fan-out keeps warm.
-PROMPT_CACHE = bool(getattr(settings, "BEDROCK_PROMPT_CACHE", True))
+def _prompt_cache_enabled():
+    return bool(getattr(settings, "BEDROCK_PROMPT_CACHE", True))
 
 # Provider names whose calls are separate subprocesses with NO cross-call prompt
 # cache — each call re-bills (and re-cache-writes) the whole context. For these we
@@ -56,7 +61,8 @@ PROMPT_CACHE = bool(getattr(settings, "BEDROCK_PROMPT_CACHE", True))
 # batch instead of once per rule. bedrock/proxy keep the per-rule + cache path.
 CLI_PROVIDERS = ("codex_cli", "claude_cli")
 # Rules per batched CLI call. 1 disables batching (per-rule path; for A/B).
-RULE_BATCH_SIZE = int(getattr(settings, "REVIEW_RULE_BATCH_SIZE", 8))
+def _rule_batch_size():
+    return int(getattr(settings, "REVIEW_RULE_BATCH_SIZE", 8))
 
 REVIEW_SYSTEM = (
     "You are a meticulous editorial reviewer for Jawafdehi.org, an open civic "
@@ -78,7 +84,7 @@ CASE DATA:
 {json.dumps(case_summary, ensure_ascii=False, indent=2)[:30000]}
 
 SOURCE DOCUMENT EXCERPTS (converted to markdown):
-{source_excerpts[:_SOURCE_EXCERPTS_CAP]}"""
+{source_excerpts[:_source_excerpts_cap()]}"""
 
 
 def _rule_instruction_block(rule):
@@ -112,7 +118,7 @@ def _build_single_rule_content(context_block, rule):
     concatenated string (identical text, no cache markers).
     """
     instruction = _rule_instruction_block(rule)
-    if PROMPT_CACHE:
+    if _prompt_cache_enabled():
         return [
             {
                 "type": "text",
@@ -151,7 +157,7 @@ rule. Return exactly one entry per rule key. Reply EXACTLY in this JSON shape:
 def _build_batch_content(context_block, rules):
     """User-message content grading several rules against the shared context."""
     instruction = _build_batch_instruction(rules)
-    if PROMPT_CACHE:
+    if _prompt_cache_enabled():
         return [
             {
                 "type": "text",
@@ -322,12 +328,15 @@ def judge_rules(
         tier_rules[_tier_for_rule(r)].append(r)
 
     tasks = []  # each task leads with a kind discriminator
+    batched_rules = []  # rules graded via a batch call (retried per-rule if omitted)
     for tier, rules in tier_rules.items():
         if not rules:
             continue
-        batched = RULE_BATCH_SIZE > 1 and provider_for_tier(tier).name in CLI_PROVIDERS
+        batch_size = _rule_batch_size()
+        batched = batch_size > 1 and provider_for_tier(tier).name in CLI_PROVIDERS
         if batched:
-            for chunk in _chunk(rules, RULE_BATCH_SIZE):
+            batched_rules.extend(rules)
+            for chunk in _chunk(rules, batch_size):
                 tasks.append(("batch", tier, chunk))
         else:
             for r in rules:
@@ -387,23 +396,36 @@ def judge_rules(
         parsed = invoke_json(REVIEW_SYSTEM, content, tier=tier, usage=usage)
         return ("rule", rule["key"], parsed)
 
-    with ThreadPoolExecutor(max_workers=_effective_max_workers()) as pool:
-        futures = {pool.submit(_run, t): t for t in tasks}
-        for fut in as_completed(futures):
-            try:
-                res = fut.result()
-            except Exception as e:  # noqa: BLE001 - collect, decide later
-                errors.append(str(e))
-                continue
-            kind = res[0]
-            if kind == "narrative":
-                narrative = res[1].get("narrative", narrative) or narrative
-            elif kind == "batch":
-                rules_map = (res[1] or {}).get("rules") or {}
-                for k, rr in rules_map.items():
-                    _apply(k, rr)
-            else:  # per-rule
-                _apply(res[1], res[2])
+    def _drain(pool_tasks):
+        nonlocal narrative
+        with ThreadPoolExecutor(max_workers=_effective_max_workers()) as pool:
+            futures = {pool.submit(_run, t): t for t in pool_tasks}
+            for fut in as_completed(futures):
+                try:
+                    res = fut.result()
+                except Exception as e:  # noqa: BLE001 - collect, decide later
+                    errors.append(str(e))
+                    continue
+                kind = res[0]
+                if kind == "narrative":
+                    narrative = res[1].get("narrative", narrative) or narrative
+                elif kind == "batch":
+                    rules_map = (res[1] or {}).get("rules") or {}
+                    for k, rr in rules_map.items():
+                        _apply(k, rr)
+                else:  # per-rule
+                    _apply(res[1], res[2])
+
+    _drain(tasks)
+
+    # A batch reply is not guaranteed to cover every requested rule: the model
+    # can omit keys, and a truncated reply salvages to only the leading rules.
+    # Without this retry an omitted rule silently scores a neutral default —
+    # for a GATE rule that spuriously REJECTS the case. Re-grade the gaps with
+    # isolated per-rule calls (one sample each) before giving up on them.
+    omitted = [r for r in batched_rules if not samples[r["key"]]]
+    if omitted:
+        _drain([("rule", _tier_for_rule(r), r) for r in omitted])
 
     # If nothing at all came back, surface the failure to the caller.
     if not any(samples[k] for k in keys) and not narrative:
@@ -413,8 +435,11 @@ def judge_rules(
 
     out = {"_narrative": narrative, "_n_samples": n}
     for k in keys:
-        vals = samples[k] or [50]
-        mean = statistics.fmean(vals)
+        # No fabricated sample for ungraded rules: mean stays a neutral 50 for
+        # display, but samples=[] lets the scorer tell "the judge said 50" from
+        # "the judge never answered" (which must not fail a gate).
+        vals = samples[k]
+        mean = statistics.fmean(vals) if vals else 50.0
         var = statistics.pvariance(vals) if len(vals) > 1 else 0.0
         out[k] = {
             "mean": round(mean, 1),

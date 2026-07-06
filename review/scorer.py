@@ -212,7 +212,9 @@ def score_case(
     # 3. Evaluate every applicable rule into a uniform shape.
     rule_results = []
     gate_failures = []
+    ungraded_llm_keys = []
     for r in applicable:
+        graded = True
         if r.kind == r.KIND_LLM:
             jd = judged.get(r.key)
             if jd:
@@ -227,8 +229,20 @@ def score_case(
                 # llm_samples: batched CLI grading is single-pass (1 sample) and
                 # must not be labelled high-confidence off a zero std.
                 confidence = _confidence_label(std, len(samples))
+                if not samples:
+                    # The judge ran but never returned a grade for this rule
+                    # (batch reply omitted its key even after the per-rule
+                    # retry). The 50 is a placeholder, not a verdict.
+                    graded = False
+                    ungraded_llm_keys.append(r.key)
+                    confidence = "low"
+                    rationale = rationale or (
+                        "The judge did not return a grade for this rule "
+                        "(incomplete reply); score is a neutral default."
+                    )
             else:
                 # judge failed -> neutral default, explicitly low confidence
+                graded = False
                 score, variance, std, samples = 50, 0.0, 0.0, []
                 issues = []
                 suggestions = []
@@ -246,7 +260,13 @@ def score_case(
             rationale = ""
             confidence = "high"  # deterministic = exact
 
-        gate_failed = bool(r.is_gate and score < r.gate_min)
+        # A gate can only fail on a REAL grade. An ungraded rule's neutral 50
+        # placeholder must not REJECT the case — except on total judge failure
+        # (judge_err), where rejecting-with-explanation is the long-standing
+        # loud behavior (gates are unverified, and the narrative says so).
+        gate_failed = bool(
+            r.is_gate and score < r.gate_min and (graded or judge_err)
+        )
         if gate_failed:
             gate_failures.append(
                 {"key": r.key, "title": r.title, "score": score, "gate_min": r.gate_min}
@@ -277,6 +297,15 @@ def score_case(
                 "bad_examples": r.bad_examples,
             }
         )
+
+    # Ungraded rules must never be silent: surface them in the narrative so a
+    # reviewer can see which scores are placeholders, not verdicts.
+    if ungraded_llm_keys and not judge_err:
+        narrative = (
+            f"{narrative} NOTE: {len(ungraded_llm_keys)} rule(s) received no "
+            f"grade from the judge ({', '.join(ungraded_llm_keys)}); their "
+            "scores are neutral defaults and did not gate the case."
+        ).strip()
 
     # 4. Weighted overall over applicable rules.
     total_w = sum(rr["weight"] for rr in rule_results) or 1.0

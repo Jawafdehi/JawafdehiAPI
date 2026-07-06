@@ -48,8 +48,11 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Distinct scope per image: two unscoped mode=max exports in one job
+          # share the default gha scope, so the (small) consumer export would
+          # clobber the expensive multi-arch platform cache.
+          cache-from: type=gha,scope=platform
+          cache-to: type=gha,mode=max,scope=platform
 
       # Jobs-consumer image (platform + Node + claude CLI, Dockerfile.consumer).
       # Layers on the platform image pushed above, referenced by its immutable
@@ -80,5 +83,5 @@ jobs:
             BASE_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.SHORT_SHA }}
           tags: ${{ steps.meta-consumer.outputs.tags }}
           labels: ${{ steps.meta-consumer.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=consumer
+          cache-to: type=gha,mode=max,scope=consumer
