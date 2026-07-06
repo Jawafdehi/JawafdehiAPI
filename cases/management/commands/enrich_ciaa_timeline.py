@@ -40,6 +40,7 @@ from cases.management.commands._enrich_utils import (
 from cases.models import Case
 from cases.services.ngm_court_records import get_court_case_details
 from cases.services.priority_case_loader import filter_by_priority, load_priority_cases
+from cases.validators import parse_courtcase_ref
 
 logger = logging.getLogger(__name__)
 
@@ -252,21 +253,19 @@ class Command(BaseCommand):
     @staticmethod
     def _is_ciaa_special_court_case(case: Case) -> bool:
         """Return True if the case references Special Court in court_cases."""
-        if case.court_cases and isinstance(case.court_cases, list):
-            return any(
-                isinstance(ref, str) and ref.startswith("special:")
-                for ref in case.court_cases
-            )
-        return False
+        return any(
+            (parsed := parse_courtcase_ref(ref)) and parsed[0] == "special"
+            for ref in case.court_cases
+        )
 
     def _matches_fiscal_year(self, case: Case, fiscal_year: str) -> bool:
         """Check if a case's court_cases reference matches the given fiscal year."""
         fy_normalized = fiscal_year.lstrip("0") or "0"
-        if case.court_cases and isinstance(case.court_cases, list):
+        if case.court_cases:
             for entry in case.court_cases:
-                if isinstance(entry, str):
-                    parts = entry.split(":")
-                    case_number = parts[-1] if ":" in entry else entry
+                parsed = parse_courtcase_ref(entry)
+                if parsed:
+                    case_number = parsed[1].upper()
                     if "-CR-" in case_number:
                         prefix = case_number.split("-CR-")[0].lstrip("0") or "0"
                         if prefix == fy_normalized:
@@ -405,14 +404,11 @@ class Command(BaseCommand):
         and fetches ground-truth dates, hearing records, and verdict info.
         Returns None if no special court reference or NGM query fails.
         """
-        if not case.court_cases:
-            return None
-
         special_ref = next(
             (
-                ref.split(":", 1)[1]
+                parsed[1].upper()
                 for ref in case.court_cases
-                if isinstance(ref, str) and ref.startswith("special:")
+                if (parsed := parse_courtcase_ref(ref)) and parsed[0] == "special"
             ),
             None,
         )

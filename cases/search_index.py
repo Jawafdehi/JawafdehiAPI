@@ -34,6 +34,8 @@ from jawafdehi_shared.search.indexing import (
 )
 from jawafdehi_shared.search.opensearch import CASE_INDEX, make_client
 
+from .validators import parse_courtcase_ref
+
 SOURCE_APP = "jawafdehi"
 TYPE_TOKEN = "Case"
 
@@ -79,9 +81,22 @@ def build_doc(case: Any) -> dict[str, Any]:
 
     slug = getattr(case, "slug", None)
     identifiers: list[str] = [i for i in (iri, slug) if i]
+    # Court-case refs are canonical @id IRIs; also carry the bare case number
+    # in both casings. NB: ``identifiers`` is a plain keyword field that the
+    # unified free-text query does NOT search — it exists for exact-match
+    # consumers, so mirror the NGM courtcase docs' verbatim-UPPERCASE number
+    # alongside the IRI's lowercase one to keep cross-doc lookups consistent.
     for ref in getattr(case, "court_cases", None) or []:
-        if isinstance(ref, str) and ref and ref not in identifiers:
-            identifiers.append(ref)
+        if not isinstance(ref, str) or not ref:
+            continue
+        candidates = [ref]
+        parsed = parse_courtcase_ref(ref)
+        if parsed:
+            candidates.append(parsed[1])
+            candidates.append(parsed[1].upper())
+        for candidate in candidates:
+            if candidate not in identifiers:
+                identifiers.append(candidate)
 
     doc: dict[str, Any] = {
         "iri": iri,

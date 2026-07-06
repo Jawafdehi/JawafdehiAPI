@@ -9,7 +9,7 @@ import uuid
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.db import models
+from django.db import models, transaction
 from django.utils import timezone
 
 from jawafdehi_shared.entities.ids import (
@@ -22,7 +22,11 @@ from .fields import (
     TextListField,
     TimelineListField,
 )
-from .validators import validate_court_cases, validate_slug
+from .validators import (
+    parse_courtcase_ref,
+    validate_courtcase_iri,
+    validate_slug,
+)
 
 User = get_user_model()
 
@@ -358,6 +362,90 @@ class CaseMaterialReference(models.Model):
         super().save(*args, **kwargs)
 
 
+class CaseCourtCaseReference(models.Model):
+    """The Case <-> NGM-court-case BIND (court record references).
+
+    This model IS the link between a case and an NGM court case. NGM is the
+    single source of truth for court records, so the bind holds only the
+    canonical court-case @id IRI (``courtcase_iri``,
+    ``https://jawafdehi.org/courtcase/<court>/<case_number>``) as the join key —
+    it does NOT store court-record data. There is no cross-DB foreign key (the
+    three databases are routed independently), so the relation to NGM is by id
+    only; the IRI mirrors the read-plane route
+    ``/api/courtcases/<court>/<case_number>``.
+
+    Replaces the former denormalized ``Case.court_cases`` JSON list of
+    ``"<court>:<case_number>"`` strings. ``Case.court_cases`` remains as a
+    property over this join (returning the IRIs in ordinal order); the IRI is
+    the ONLY accepted reference form (the admin widget's ``court:number``
+    input rows are converted at the form edge via ``courtcase_input_to_iri``).
+    """
+
+    case = models.ForeignKey(
+        "Case",
+        on_delete=models.CASCADE,
+        related_name="courtcase_references",
+        help_text="The case this court-case reference belongs to",
+    )
+    courtcase_iri = models.CharField(
+        max_length=300,
+        db_index=True,
+        validators=[validate_courtcase_iri],
+        help_text=(
+            "Canonical court-case @id IRI "
+            "(https://jawafdehi.org/courtcase/<court>/<case_number>) this case "
+            "references. NGM owns the court record; this is the join key only."
+        ),
+    )
+    # Stable display order of references within a case (court_cases was an
+    # ordered JSON list — the primary/first-instance reference comes first).
+    ordinal = models.PositiveIntegerField(
+        default=0,
+        help_text="Display order of this court-case reference within the case.",
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        help_text="When this court-case reference was created",
+    )
+
+    class Meta:
+        verbose_name = "Case Court Case Reference"
+        verbose_name_plural = "Case Court Case References"
+        ordering = ["ordinal", "created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["case", "courtcase_iri"],
+                name="unique_case_courtcase_reference",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["case", "ordinal"], name="case_courtcase_ordinal_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.case.slug} - {self.courtcase_iri}"
+
+    def clean(self):
+        """Validate the bind."""
+        errors = {}
+        if not self.case_id:
+            errors["case"] = "Case is required"
+        if not self.courtcase_iri:
+            errors["courtcase_iri"] = "A court-case @id IRI is required"
+        else:
+            try:
+                validate_courtcase_iri(self.courtcase_iri)
+            except ValidationError as exc:
+                errors["courtcase_iri"] = exc.messages
+        if errors:
+            raise ValidationError(errors)
+
+    def save(self, *args, **kwargs):
+        """Override save to validate before saving."""
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+
 class CaseType(models.TextChoices):
     """Enum for case types."""
 
@@ -408,8 +496,10 @@ class Case(models.Model):
       (or the DB ``pk`` for purely in-process joins).
     * External / public identifier: the ``slug`` is the public handle, surfaced
       as the canonical case ``@id`` IRI ``https://jawafdehi.org/case/<slug>``.
-    * Court case NUMBERS (the ``court_cases`` JSONField) are a DIFFERENT thing —
-      external references to court records, NOT this case's identifier.
+    * Court case REFERENCES (the ``courtcase_references`` join, surfaced as the
+      ``court_cases`` property of canonical court-case @id IRIs) are a
+      DIFFERENT thing — external references to court records, NOT this case's
+      identifier.
 
     The canonical case ``@id`` IRI is MINTED AT PUBLISH: ``public_iri`` returns
     the IRI only once ``state == PUBLISHED`` (else ``None``). The IRI is derived
@@ -506,12 +596,10 @@ class Case(models.Model):
         validators=[validate_slug],
         help_text="A slug will go in the URL (e.g., jawafdehi.org/case/YOUR-SLUG). For CIAA corruption cases, you can prepend the special court case number (e.g., case-078-WC-0123-sunil-poudel). Must start with a letter and contain only letters, numbers, and hyphens (max 50 characters). Immutable once set, auto-generated on save if not provided.",
     )
-    court_cases = models.JSONField(
-        blank=True,
-        null=True,
-        validators=[validate_court_cases],
-        help_text="List of court case references in format {court_identifier}:{case_number}, e.g. ['supreme:078-WC-0123', 'special:076-CR-0456']",
-    )
+    # Court-case references live on the CaseCourtCaseReference join (the
+    # ``courtcase_references`` reverse relation), which holds the canonical
+    # court-case @id IRI directly. Surfaced here as the ``court_cases``
+    # property (list of IRIs, strict — no other reference form is accepted).
     missing_details = models.TextField(
         blank=True,
         null=True,
@@ -526,6 +614,15 @@ class Case(models.Model):
     class Meta:
         ordering = ["-created_at"]
 
+    # Pending (assigned but not yet saved) court-case reference list. Class
+    # default None = "not assigned"; the ``court_cases`` setter replaces it on
+    # the instance with the canonicalized IRI list, and ``save()`` syncs it to
+    # the CaseCourtCaseReference join. A class attribute (not set in
+    # ``__init__``) because Django's ``Model.__init__`` applies property
+    # kwargs (``Case(court_cases=[...])``) via the setter DURING
+    # ``super().__init__``, which an ``__init__`` assignment would clobber.
+    _pending_court_cases = None
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Track original slug value to detect changes without extra query
@@ -533,6 +630,67 @@ class Case(models.Model):
 
     def __str__(self):
         return f"{self.slug or '(no slug)'} - {self.title} ({self.state})"
+
+    @property
+    def court_cases(self):
+        """The case's court-case references as canonical @id IRIs.
+
+        Reads the ``CaseCourtCaseReference`` join (in ordinal order), or the
+        pending not-yet-saved assignment. Assignment accepts canonical IRIs
+        ONLY (strict-validated, deduplicated, order preserved) and persists on
+        the next ``save()``.
+        """
+        if self._pending_court_cases is not None:
+            return list(self._pending_court_cases)
+        if self.pk is None:
+            return []
+        return [ref.courtcase_iri for ref in self.courtcase_references.all()]
+
+    @court_cases.setter
+    def court_cases(self, value):
+        if value is None:
+            value = []
+        if not isinstance(value, (list, tuple)):
+            raise ValidationError("court_cases must be a list")
+        refs = []
+        for ref in value:
+            if not isinstance(ref, str):
+                raise ValidationError("Each court case reference must be a string")
+            validate_courtcase_iri(ref)
+            if ref not in refs:
+                refs.append(ref)
+        self._pending_court_cases = refs
+
+    def _sync_courtcase_references(self, desired=None):
+        """Persist court-case references (canonical IRIs) to the join table.
+
+        THE single write path for the join (the PATCH endpoint calls it with
+        the validated list; ``save()`` calls it with the pending property
+        assignment). Replace semantics: rows are rewritten so the set +
+        ordering match ``desired`` exactly (mirrors the material-reference
+        rewrite) — but an unchanged list is a no-op, so row identity,
+        ``created_at`` provenance, and the audit trail don't churn on saves
+        that didn't touch the references. Atomic: a failure mid-rewrite rolls
+        back rather than leaving the case with a partial reference set.
+        """
+        if desired is None:
+            desired = self._pending_court_cases
+        if desired is None:
+            # Nothing assigned and nothing passed — no write intent.
+            return
+        self._pending_court_cases = None
+        current = [ref.courtcase_iri for ref in self.courtcase_references.all()]
+        if list(desired) == current:
+            return
+        with transaction.atomic():
+            self.courtcase_references.all().delete()
+            for ordinal, iri in enumerate(desired):
+                CaseCourtCaseReference.objects.create(
+                    case=self, courtcase_iri=iri, ordinal=ordinal
+                )
+        # A stale prefetch would otherwise keep serving the pre-sync rows.
+        if hasattr(self, "_prefetched_objects_cache"):
+            self._prefetched_objects_cache.pop("courtcase_references", None)
 
     @property
     def public_iri(self):
@@ -578,15 +736,13 @@ class Case(models.Model):
         parts = []
         from django.utils.text import slugify
 
-        # 1. Try to extract CR number from court_cases
-        if self.court_cases and isinstance(self.court_cases, list):
-            for cc in self.court_cases:
-                if ":" in cc:
-                    # Expecting format "CIAA:081-CR-0127" or similar
-                    _, case_no = cc.split(":", 1)
-                    if case_no:
-                        parts.append(slugify(case_no))
-                        break
+        # 1. Try to extract the case number from the court-case references
+        #    (canonical IRIs; the pending assignment at create time)
+        for cc in self.court_cases:
+            parsed = parse_courtcase_ref(cc)
+            if parsed and parsed[1]:
+                parts.append(slugify(parsed[1]))
+                break
 
         # 2. If no court_cases CR number, try to extract case number from title
         #    (e.g. "CIAA Special Court Case 080-CR-0127" → "080-cr-0127")
@@ -658,6 +814,11 @@ class Case(models.Model):
 
         # Update cached original slug after successful save
         self._original_slug = self.slug
+
+        # Persist any pending court_cases assignment to the join table now
+        # that the row (and pk) exist.
+        if self._pending_court_cases is not None:
+            self._sync_courtcase_references()
 
     def validate(self):
         """

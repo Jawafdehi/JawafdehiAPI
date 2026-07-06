@@ -394,11 +394,11 @@ DEFAULT_RULES = [
         "applies_to": CIAA,
         "description": (
             "Every CIAA case — at any stage (press-release-only, charge sheet, "
-            "or verdict) — **must** carry a court case number in the "
-            "`court_cases` field, formatted as `<court_identifier>:<case_number>` "
-            "(e.g. `special:081-CR-0079`). This is the anchor used to pull the "
-            "official court record from the NGM database, so a missing court "
-            "number **fails the review**."
+            "or verdict) — **must** carry a court case reference in the "
+            "`court_cases` field, stored as the canonical court-case @id IRI "
+            "(e.g. `https://jawafdehi.org/courtcase/special/081-cr-0079`). "
+            "This is the anchor used to pull the official court record from "
+            "the NGM database, so a missing court number **fails the review**."
         ),
         "weight": 1.4,
         "is_gate": True,

@@ -324,9 +324,9 @@ class MultiCourtCaseField(Field):
     def validate(self, value):
         super().validate(value)
         # Import here to avoid circular dependency
-        from .validators import validate_court_cases
+        from .validators import courtcase_input_to_iri
 
-        try:
-            validate_court_cases(value)
-        except ValidationError:
-            raise
+        # Rows are the widget's `<court>:<case_number>` input format; each must
+        # convert to a canonical court-case @id IRI (the only stored form).
+        for item in value or []:
+            courtcase_input_to_iri(item)

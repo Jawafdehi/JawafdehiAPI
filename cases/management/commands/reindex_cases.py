@@ -30,9 +30,14 @@ class Command(BaseCommand):
         # Only PUBLISHED cases are indexed. (build_doc also yields no iri for a
         # non-published case, so the reindex driver would skip it anyway — the
         # filter just avoids streaming the whole table.)
+        # build_doc reads the court_cases property (the reference join), so
+        # prefetch it; chunk_size is REQUIRED for prefetch to apply under
+        # .iterator() (ValueError without it on Django 5.x).
         result = reindex(
             index=CASE_INDEX,
-            records=Case.objects.filter(state=CaseState.PUBLISHED).iterator(),
+            records=Case.objects.filter(state=CaseState.PUBLISHED)
+            .prefetch_related("courtcase_references")
+            .iterator(chunk_size=200),
             build_doc=search_index.build_doc,
             rebuild=options["rebuild"],
         )

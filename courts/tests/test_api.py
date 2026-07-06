@@ -18,6 +18,7 @@ from datetime import date, datetime, timezone
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
+from django.test import SimpleTestCase
 from rest_framework import status
 from rest_framework.test import APITestCase
 
@@ -28,6 +29,7 @@ from courts.models import (
     CourtCase,
     CourtCaseHearing,
 )
+from courts.normalize import best_effort_normalize, normalize_case_number
 
 User = get_user_model()
 
@@ -298,3 +300,21 @@ class LakehouseImportTests(_DbAPITestCase):
             medallion.refresh_gold()
         # build_attach_sql is a pure renderer; engine.connect ATTACH is stubbed.
         self.assertTrue(hasattr(engine, "build_attach_sql"))
+
+
+class NormalizeCaseNumberTests(SimpleTestCase):
+    """Pure normalization rules (no DB) — the read plane's lookup contract."""
+
+    def test_standard_shape_uppercases_and_pads(self):
+        self.assertEqual(normalize_case_number("81-cr-81"), "081-CR-0081")
+
+    def test_digit_in_middle_district_shape_normalizes(self):
+        # ~20% of the lake is the district-court letter+digit middle (C4, C1,
+        # ...). A lowercase lookup — e.g. derived from the lowercased
+        # court-case @id IRI — must still normalize to the stored uppercase.
+        self.assertEqual(normalize_case_number("079-c4-3431"), "079-C4-3431")
+
+    def test_all_numeric_middle_passes_through_unchanged(self):
+        # Odd legacy ids with a numeric middle are stored verbatim; best-effort
+        # must NOT zero-pad them away from their stored form.
+        self.assertEqual(best_effort_normalize("93-068-0194"), "93-068-0194")

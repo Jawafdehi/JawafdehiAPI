@@ -26,7 +26,7 @@ from .rules.predicates import (
     is_caseworker,
     is_moderator,
 )
-from .validators import COURT_CHOICES
+from .validators import COURT_CHOICES, courtcase_input_to_iri, short_courtcase_ref
 from .widgets import (
     MultiCourtCaseField,
     MultiTextField,
@@ -157,6 +157,18 @@ class CaseAdminForm(forms.ModelForm):
         # DocumentSource model and will return via a CaseMaterialReference path in
         # a follow-up.
 
+        # court_cases is the CaseCourtCaseReference join, surfaced through the
+        # Case.court_cases property as canonical @id IRIs. The admin widget
+        # works in the "<court>:<case_number>" short form (a court dropdown +
+        # number input), so present the stored IRIs that way; the property
+        # setter canonicalizes them back to IRIs on save.
+        if self.instance.pk and "court_cases" not in self.initial:
+            self.initial["court_cases"] = [
+                short
+                for short in map(short_courtcase_ref, self.instance.court_cases)
+                if short
+            ]
+
         # Disable PUBLISHED and CLOSED states for Caseworkers
         if self.request:
             user = self.request.user
@@ -256,6 +268,32 @@ class CaseAdminForm(forms.ModelForm):
             raise ValidationError(errors)
 
         return cleaned_data
+
+    def save(self, commit=True):
+        """Persist the court-case references alongside the model fields.
+
+        ``court_cases`` is a form-declared field (not a model column), so
+        ``construct_instance`` skips it. The widget rows are its
+        ``<court>:<case_number>`` INPUT format; convert them to canonical @id
+        IRIs here (the model property accepts IRIs only) and assign — then
+        ``Case.save()`` syncs the CaseCourtCaseReference join (also on the
+        admin's ``commit=False`` + later ``obj.save()`` path).
+        """
+        instance = super().save(commit=False)
+        if "court_cases" in self.cleaned_data:
+            iris = [
+                courtcase_input_to_iri(row)
+                for row in self.cleaned_data.get("court_cases") or []
+            ]
+            # Assign only on an actual change: cleaned_data always carries the
+            # field, and an unconditional assignment would rewrite the join
+            # (churning row identity + audit entries) on every unrelated save.
+            if instance.pk is None or iris != instance.court_cases:
+                instance.court_cases = iris
+        if commit:
+            instance.save()
+            self.save_m2m()
+        return instance
 
 
 # ============================================================================

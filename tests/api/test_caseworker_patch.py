@@ -237,6 +237,86 @@ def test_patch_rejects_invalid_court_cases():
 
 
 @pytest.mark.django_db
+def test_patch_court_cases_stores_iris():
+    """court_cases takes canonical @id IRIs; stored on the reference join."""
+    user = _contributor("nabin-court-1")
+    case = _make_case()
+    case.contributors.add(user)
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[
+            {
+                "op": "replace",
+                "path": "/court_cases",
+                "value": [
+                    "https://jawafdehi.org/courtcase/special/080-cr-0111",
+                    "https://jawafdehi.org/courtcase/supreme/078-wc-0123",
+                ],
+            }
+        ],
+        format="json",
+    )
+    assert response.status_code == 200
+    assert response.data["court_cases"] == [
+        "https://jawafdehi.org/courtcase/special/080-cr-0111",
+        "https://jawafdehi.org/courtcase/supreme/078-wc-0123",
+    ]
+    case.refresh_from_db()
+    assert list(
+        case.courtcase_references.values_list("courtcase_iri", flat=True)
+    ) == [
+        "https://jawafdehi.org/courtcase/special/080-cr-0111",
+        "https://jawafdehi.org/courtcase/supreme/078-wc-0123",
+    ]
+
+
+@pytest.mark.django_db
+def test_patch_rejects_short_form_court_cases():
+    """The legacy <court>:<number> short form is not accepted — IRIs only."""
+    user = _contributor("nabin-court-3")
+    case = _make_case()
+    case.contributors.add(user)
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[
+            {
+                "op": "replace",
+                "path": "/court_cases",
+                "value": ["special:080-CR-0111"],
+            }
+        ],
+        format="json",
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.django_db
+def test_patch_scalar_field_does_not_wipe_court_cases():
+    """A scalar-only PATCH must not rewrite the court-case reference join."""
+    user = _contributor("nabin-court-2")
+    case = _make_case(
+        court_cases=["https://jawafdehi.org/courtcase/special/080-cr-0111"]
+    )
+    case.contributors.add(user)
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[{"op": "replace", "path": "/title", "value": "New title"}],
+        format="json",
+    )
+    assert response.status_code == 200
+    assert response.data["court_cases"] == [
+        "https://jawafdehi.org/courtcase/special/080-cr-0111"
+    ]
+    assert case.courtcase_references.count() == 1
+
+
+@pytest.mark.django_db
 def test_patch_bigo_accepts_integer():
     """A3: bigo (embezzled amount) is a writable integer field."""
     user = _contributor("nabin-4")

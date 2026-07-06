@@ -9,6 +9,12 @@ import re
 
 from django.core.exceptions import ValidationError
 
+from jawafdehi_shared.entities.ids import (
+    build_courtcase_iri,
+    is_valid_courtcase_iri,
+    parse_courtcase_iri,
+)
+
 COURT_CHOICES = [
     ("supreme", "Supreme Court"),
     ("special", "Special Court"),
@@ -144,15 +150,111 @@ def validate_slug(value):
         )
 
 
+# Known court identifiers (the COURT_CHOICES keys) — court-case references may
+# only name these courts.
+VALID_COURT_IDENTIFIERS = frozenset(c[0] for c in COURT_CHOICES)
+
+
+def parse_courtcase_ref(ref):
+    """Parse a canonical court-case ``@id`` IRI into ``(court, case_number)``.
+
+    Stored references are ALWAYS the canonical IRI
+    (``https://<base>/courtcase/<court>/<case_number>``); this is the
+    read-side convenience parser (shape check only — host not anchored).
+    Returns ``None`` if the value is not a court-case IRI.
+    """
+    if not isinstance(ref, str) or not ref.strip():
+        return None
+    try:
+        parsed = parse_courtcase_iri(ref.strip())
+    except ValueError:
+        return None
+    return parsed.court, parsed.case_number
+
+
+def short_courtcase_ref(ref):
+    """The compact ``<court>:<CASE-NUMBER>`` spelling of a court-case @id IRI.
+
+    IRIs are lowercase; the case number reads naturally uppercased. This is
+    the ONE formatter for the compact spelling (admin display, LLM prompts,
+    logs) — the reference stays the IRI everywhere it is stored or sent.
+    Returns ``None`` when ``ref`` is not a court-case IRI.
+    """
+    parts = parse_courtcase_ref(ref)
+    if parts is None:
+        return None
+    return f"{parts[0]}:{parts[1].upper()}"
+
+
+def courtcase_input_to_iri(value):
+    """Convert a ``<court_identifier>:<case_number>`` INPUT row to the @id IRI.
+
+    This is the admin widget's input format (a court dropdown + case-number
+    field serialized as ``court:number``) — an input convenience only. The
+    API and the model accept canonical IRIs exclusively; the conversion
+    happens at the form edge.
+
+    Raises:
+        ValidationError: If the row is malformed, names an unknown court, or
+            the case number falls outside the IRI grammar.
+    """
+    if not isinstance(value, str) or "://" in value or value.count(":") != 1:
+        raise ValidationError(
+            f"Invalid court case input {value!r}. Expected "
+            "<court_identifier>:<case_number> (e.g. special:080-CR-0111)."
+        )
+    court, _, case_number = value.partition(":")
+    court, case_number = court.strip().lower(), case_number.strip()
+    if not court or not case_number:
+        raise ValidationError(
+            f"Invalid court case input {value!r}. Expected "
+            "<court_identifier>:<case_number> (e.g. special:080-CR-0111)."
+        )
+    if court not in VALID_COURT_IDENTIFIERS:
+        valid_list = ", ".join(sorted(VALID_COURT_IDENTIFIERS))
+        raise ValidationError(
+            f"Invalid court identifier '{court}'. Valid identifiers are: {valid_list}"
+        )
+    try:
+        return build_courtcase_iri(court, case_number)
+    except ValueError:
+        raise ValidationError(
+            f"Invalid case number {case_number!r} in court case input "
+            f"{value!r}. Case numbers must be letters/digits with '.', '_' "
+            "or '-' separators (e.g. 080-CR-0111)."
+        )
+
+
+def validate_courtcase_iri(value):
+    """Validator: a court-case reference must be the canonical ``@id`` IRI.
+
+    ``https://<base>/courtcase/<court>/<case_number>`` — lowercase grammar,
+    scheme + host anchored to the platform ``iri_base()``, and the court must
+    be a known identifier (``COURT_CHOICES``). No other reference form is
+    accepted (clean-slate contract, mirroring ``nes_id``/``material_iri``).
+    """
+    if not is_valid_courtcase_iri(value):
+        raise ValidationError(
+            f"{value!r} is not a valid court-case @id IRI "
+            "(expected https://<base>/courtcase/<court>/<case_number>)."
+        )
+    court = parse_courtcase_iri(value).court
+    if court not in VALID_COURT_IDENTIFIERS:
+        valid_list = ", ".join(sorted(VALID_COURT_IDENTIFIERS))
+        raise ValidationError(
+            f"Invalid court identifier '{court}'. Valid identifiers are: {valid_list}"
+        )
+
+
 def validate_court_cases(value):
     """
-    Validate court_cases list structure and content.
+    Validate a court_cases list of court-case references.
 
     Rules:
     - Must be a list
     - Each element must be a string
-    - Each string must match format: <court_identifier>:<case_number>
-    - Court identifier must be in VALID_COURT_IDENTIFIERS list
+    - Each string must be the canonical court-case @id IRI
+      (https://<base>/courtcase/<court>/<case_number>) naming a known court
 
     Args:
         value: The court_cases list to validate
@@ -161,14 +263,13 @@ def validate_court_cases(value):
         ValidationError: If the court_cases list is invalid
 
     Examples:
-        Valid: ["supreme:2078-CR-0123"],
-               ["special:2076-CR-0456"],
+        Valid: ["https://jawafdehi.org/courtcase/special/080-cr-0111"],
                []
-        Invalid: "supreme:2078-CR-0123" (string instead of list),
-                 ["invalid-court:123"] (unknown court identifier),
-                 ["supreme-2078-CR-0123"] (missing colon),
-                 ["supreme:2078:CR:0123"] (multiple colons),
-                 ["supreme:"] (empty case number)
+        Invalid: "https://jawafdehi.org/courtcase/special/080-cr-0111"
+                 (string instead of list),
+                 ["supreme:2078-CR-0123"] (short form — IRIs only),
+                 ["https://jawafdehi.org/courtcase/invalid-court/123"]
+                 (unknown court identifier)
     """
     # Check if value is a list
     if not isinstance(value, list):
@@ -180,23 +281,4 @@ def validate_court_cases(value):
         if not isinstance(item, str):
             raise ValidationError("Each court case reference must be a string")
 
-        # Check format: must contain exactly one colon
-        if item.count(":") != 1:
-            raise ValidationError(
-                "Court case reference must be in format <court_identifier>:<case_number>"
-            )
-
-        # Split and validate court identifier
-        court_identifier, case_number = item.split(":", 1)
-
-        # Validate case_number is not empty
-        if not case_number or not case_number.strip():
-            raise ValidationError("Case number cannot be empty in court case reference")
-
-        valid_identifiers = [c[0] for c in COURT_CHOICES]
-        if court_identifier not in valid_identifiers:
-            valid_list = ", ".join(valid_identifiers)
-            raise ValidationError(
-                f"Invalid court identifier '{court_identifier}'. "
-                f"Valid identifiers are: {valid_list}"
-            )
+        validate_courtcase_iri(item)
