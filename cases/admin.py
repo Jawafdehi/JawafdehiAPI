@@ -802,16 +802,48 @@ class NewsletterSubscriptionAdmin(admin.ModelAdmin):
         "last_name",
         "status",
         "subscribed_at",
+        "unsubscribed_at",
     ]
-    list_filter = ["status", "subscribed_at"]
+    list_filter = ["status", "consent_source", "privacy_version", "subscribed_at"]
     search_fields = ["email", "first_name", "last_name"]
-    readonly_fields = ["subscribed_at", "updated_at", "ip_address", "user_agent"]
+    readonly_fields = [
+        "unsubscribe_token",
+        "consented_at",
+        "subscribed_at",
+        "unsubscribed_at",
+        "updated_at",
+        "ip_address",
+        "user_agent",
+    ]
     fieldsets = (
-        ("Subscriber", {"fields": ("email", "first_name", "last_name", "status")}),
+        (
+            "Subscriber",
+            {
+                "fields": (
+                    "email",
+                    "first_name",
+                    "last_name",
+                    "status",
+                    "unsubscribe_token",
+                )
+            },
+        ),
+        (
+            "Consent",
+            {
+                "fields": (
+                    "consent_accepted",
+                    "consented_at",
+                    "consent_source",
+                    "privacy_version",
+                    "locale",
+                )
+            },
+        ),
         (
             "Metadata",
             {
-                "fields": ("ip_address", "user_agent", "subscribed_at", "updated_at"),
+                "fields": ("ip_address", "user_agent", "subscribed_at", "unsubscribed_at", "updated_at"),
                 "classes": ("collapse",),
             },
         ),

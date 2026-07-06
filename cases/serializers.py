@@ -280,10 +280,38 @@ class NewsletterSubscriptionSerializer(serializers.ModelSerializer):
         allow_blank=True,
         trim_whitespace=True,
     )
+    consentAccepted = serializers.BooleanField(source="consent_accepted", write_only=True)
+    consentSource = serializers.CharField(
+        source="consent_source",
+        max_length=80,
+        required=False,
+        allow_blank=True,
+        trim_whitespace=True,
+    )
+    privacyVersion = serializers.CharField(
+        source="privacy_version",
+        max_length=40,
+        required=False,
+        allow_blank=True,
+        trim_whitespace=True,
+    )
+    locale = serializers.CharField(
+        max_length=16, required=False, allow_blank=True, trim_whitespace=True
+    )
 
     class Meta:
         model = NewsletterSubscription
-        fields = ["id", "email", "firstName", "lastName", "status"]
+        fields = [
+            "id",
+            "email",
+            "firstName",
+            "lastName",
+            "status",
+            "consentAccepted",
+            "consentSource",
+            "privacyVersion",
+            "locale",
+        ]
         read_only_fields = ["id", "status"]
 
     def validate_email(self, value):
@@ -294,17 +322,35 @@ class NewsletterSubscriptionSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("First name is required.")
         return value
 
+    def validate_consentAccepted(self, value):
+        if value is not True:
+            raise serializers.ValidationError("Consent is required.")
+        return value
+
     def create(self, validated_data):
+        from django.utils import timezone
+
         email = validated_data["email"]
         validated_data.setdefault("last_name", "")
+        now = timezone.now()
+        existing = NewsletterSubscription.objects.filter(email__iexact=email).first()
+
+        if existing and existing.status == NewsletterSubscriptionStatus.UNSUBSCRIBED:
+            return existing
+
         defaults = {
             **validated_data,
+            "consented_at": now,
             "status": NewsletterSubscriptionStatus.SUBSCRIBED,
+            "unsubscribed_at": None,
         }
-        subscription, _created = NewsletterSubscription.objects.update_or_create(
-            email=email, defaults=defaults
-        )
-        return subscription
+        if existing:
+            for field, value in defaults.items():
+                setattr(existing, field, value)
+            existing.save()
+            return existing
+
+        return NewsletterSubscription.objects.create(**defaults)
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -312,7 +358,22 @@ class NewsletterSubscriptionSerializer(serializers.ModelSerializer):
             "id": data["id"],
             "email": data["email"],
             "status": data["status"],
-            "message": "Thank you for subscribing to the Jawafdehi newsletter.",
+            "message": "Thank you. If this address can receive Jawafdehi updates, we will keep it posted.",
+        }
+
+
+class NewsletterUnsubscribeSerializer(serializers.ModelSerializer):
+    """Serializer for token-based newsletter unsubscribe responses."""
+
+    class Meta:
+        model = NewsletterSubscription
+        fields = ["status"]
+        read_only_fields = ["status"]
+
+    def to_representation(self, instance):
+        return {
+            "status": instance.status,
+            "message": "This address has been unsubscribed from Jawafdehi emails.",
         }
 
 

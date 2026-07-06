@@ -48,6 +48,8 @@ from .models import (
     CaseMaterialReference,
     CaseState,
     RelationshipType,
+    NewsletterSubscription,
+    NewsletterSubscriptionStatus,
     StatisticsSnapshot,
 )
 from .rules.predicates import (
@@ -63,6 +65,7 @@ from .serializers import (
     CaseSerializer,
     FeedbackSerializer,
     NewsletterSubscriptionSerializer,
+    NewsletterUnsubscribeSerializer,
 )
 from .services.statistics import (
     STATISTICS_SNAPSHOT_KEY,
@@ -998,6 +1001,16 @@ class NewsletterSubscriptionRateThrottle(AnonRateThrottle):
 
     rate = "10/hour"
 
+    def get_ident(self, request):
+        """Use the socket peer address; do not trust client-supplied XFF here."""
+        return request.META.get("REMOTE_ADDR", "")
+
+
+class NewsletterUnsubscribeRateThrottle(NewsletterSubscriptionRateThrottle):
+    """Rate throttle for unsubscribe token submissions: 30 per hour."""
+
+    rate = "30/hour"
+
 
 @extend_schema(
     summary="Subscribe to the Jawafdehi newsletter",
@@ -1005,7 +1018,8 @@ class NewsletterSubscriptionRateThrottle(AnonRateThrottle):
     Subscribe an email address to Jawafdehi newsletter updates.
 
     Rate limited to 10 submissions per IP address per hour. Re-submitting an
-    existing email updates the subscriber name and restores subscribed status.
+    already-unsubscribed email does not restore subscribed status; unsubscribe
+    reversal requires a future email-confirmed flow.
     """,
     request=NewsletterSubscriptionSerializer,
     responses={
@@ -1020,6 +1034,9 @@ class NewsletterSubscriptionRateThrottle(AnonRateThrottle):
                 "firstName": "Ram",
                 "lastName": "Bahadur",
                 "email": "ram@example.com",
+                "consentAccepted": True,
+                "consentSource": "share_our_vision",
+                "privacyVersion": "2026-07-06",
             },
             request_only=True,
         ),
@@ -1052,11 +1069,41 @@ class NewsletterSubscriptionView(APIView):
         )
 
     def get_client_ip(self, request):
-        """Extract client IP address from request."""
-        x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
-        if x_forwarded_for:
-            return x_forwarded_for.split(",")[0].strip()
+        """Extract the socket peer IP address without trusting X-Forwarded-For."""
         return request.META.get("REMOTE_ADDR")
+
+
+@extend_schema(
+    summary="Unsubscribe from the Jawafdehi newsletter",
+    description="Unsubscribe a recipient using the opaque token from a newsletter email.",
+    responses={
+        200: NewsletterUnsubscribeSerializer,
+        404: OpenApiTypes.OBJECT,
+        429: OpenApiTypes.OBJECT,
+    },
+)
+class NewsletterUnsubscribeView(APIView):
+    """API view for token-based newsletter unsubscribes."""
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = [NewsletterUnsubscribeRateThrottle]
+    parser_classes = [JSONParser, FormParser]
+
+    def post(self, request, token):
+        try:
+            subscription = NewsletterSubscription.objects.get(unsubscribe_token=token)
+        except NewsletterSubscription.DoesNotExist:
+            return Response(
+                {"error": "Invalid unsubscribe token"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        subscription.status = NewsletterSubscriptionStatus.UNSUBSCRIBED
+        subscription.unsubscribed_at = timezone.now()
+        subscription.save(update_fields=["status", "unsubscribed_at", "updated_at"])
+        serializer = NewsletterUnsubscribeSerializer(subscription)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class FeedbackRateThrottle(AnonRateThrottle):

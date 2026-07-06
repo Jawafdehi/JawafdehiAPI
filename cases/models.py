@@ -10,6 +10,7 @@ import uuid
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.db import models, transaction
+from django.db.models.functions import Lower
 from django.utils import timezone
 
 from jawafdehi_shared.entities.ids import (
@@ -954,7 +955,7 @@ class NewsletterSubscriptionStatus(models.TextChoices):
 class NewsletterSubscription(models.Model):
     """Email subscription for Jawafdehi newsletter updates."""
 
-    email = models.EmailField(unique=True, db_index=True)
+    email = models.EmailField(db_index=True)
     first_name = models.CharField(max_length=150)
     last_name = models.CharField(max_length=150, blank=True)
     status = models.CharField(
@@ -963,19 +964,37 @@ class NewsletterSubscription(models.Model):
         default=NewsletterSubscriptionStatus.SUBSCRIBED,
         db_index=True,
     )
+    unsubscribe_token = models.UUIDField(
+        default=uuid.uuid4, unique=True, db_index=True, editable=False
+    )
+    consent_accepted = models.BooleanField(default=False)
+    consented_at = models.DateTimeField(null=True, blank=True)
+    consent_source = models.CharField(max_length=80, blank=True)
+    privacy_version = models.CharField(max_length=40, blank=True)
+    locale = models.CharField(max_length=16, blank=True)
     ip_address = models.GenericIPAddressField(null=True, blank=True)
     user_agent = models.TextField(blank=True)
     subscribed_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    unsubscribed_at = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["-subscribed_at"]
+        constraints = [
+            models.UniqueConstraint(
+                Lower("email"), name="cases_newsletter_email_ci_uniq"
+            ),
+        ]
         indexes = [
             models.Index(fields=["status", "subscribed_at"]),
         ]
 
     def __str__(self):
         return self.email
+
+    def save(self, *args, **kwargs):
+        self.email = self.email.strip().lower()
+        super().save(*args, **kwargs)
 
 
 class FeedbackType(models.TextChoices):

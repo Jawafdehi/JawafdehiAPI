@@ -11,6 +11,7 @@ from .api_views import (
     CaseViewSet,
     FeedbackView,
     NewsletterSubscriptionView,
+    NewsletterUnsubscribeView,
     OEmbedView,
     StatisticsView,
 )
@@ -35,6 +36,11 @@ urlpatterns = [
         "newsletter/subscriptions/",
         NewsletterSubscriptionView.as_view(),
         name="newsletter-subscriptions",
+    ),
+    path(
+        "newsletter/unsubscribe/<uuid:token>/",
+        NewsletterUnsubscribeView.as_view(),
+        name="newsletter-unsubscribe",
     ),
     path("oembed/", OEmbedView.as_view(), name="oembed"),
     path("", include(router.urls)),
