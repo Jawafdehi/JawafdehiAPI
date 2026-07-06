@@ -130,14 +130,18 @@ class CIAADraftCaseService:
         elif meta["match_status"] not in ["confirmed", "needs_review", "unmatched"]:
             errors.append(f"Invalid match_status '{meta['match_status']}'")
 
-        # Validate that CIAA cases reference the Special Court (the dedup anchor)
-        court_case = json_dict.get("court_case", {})
-        court = court_case.get("court")
-        case_no = court_case.get("case_no")
+        # Validate that CIAA cases reference the Special Court (the dedup
+        # anchor). Normalized the same way courtcase_iri_from_parts builds the
+        # IRI (strip + lower), so validation and construction can't disagree.
+        # An absent court/case_no stays allowed — press-release-stage cases
+        # legitimately import without a court reference yet.
+        court_case = json_dict.get("court_case") or {}
+        court = (court_case.get("court") or "").strip().lower()
+        case_no = (court_case.get("case_no") or "").strip()
         if court and case_no and court != "special":
             errors.append(
                 "Missing required CIAA idempotency key: court_case must be a "
-                f"Special Court reference, got court '{court}'"
+                f"Special Court reference, got court '{court_case.get('court')}'"
             )
 
         return errors

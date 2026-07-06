@@ -189,7 +189,14 @@ class CaseAdminForm(forms.ModelForm):
         """Each row must be a canonical court-case @id IRI (surface per-row
         errors here — the model property would raise the same ValidationError
         too late, inside save)."""
-        rows = self.cleaned_data.get("court_cases") or []
+        # Drop empty/whitespace-only rows and strip the rest — stray blank
+        # rows are routine in the multi-text widget and shouldn't surface as
+        # "'' is not a valid court-case @id IRI".
+        rows = [
+            r.strip()
+            for r in self.cleaned_data.get("court_cases") or []
+            if r and r.strip()
+        ]
         errors = []
         for row in rows:
             try:
