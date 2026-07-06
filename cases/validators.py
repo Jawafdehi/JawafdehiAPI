@@ -172,44 +172,19 @@ def parse_courtcase_ref(ref):
     return parsed.court, parsed.case_number
 
 
-def short_courtcase_ref(ref):
-    """The compact ``<court>:<CASE-NUMBER>`` spelling of a court-case @id IRI.
+def courtcase_iri_from_parts(court, case_number):
+    """Build the canonical court-case @id IRI from a (court, case_number) pair.
 
-    IRIs are lowercase; the case number reads naturally uppercased. This is
-    the ONE formatter for the compact spelling (admin display, LLM prompts,
-    logs) — the reference stays the IRI everywhere it is stored or sent.
-    Returns ``None`` when ``ref`` is not a court-case IRI.
-    """
-    parts = parse_courtcase_ref(ref)
-    if parts is None:
-        return None
-    return f"{parts[0]}:{parts[1].upper()}"
-
-
-def courtcase_input_to_iri(value):
-    """Convert a ``<court_identifier>:<case_number>`` INPUT row to the @id IRI.
-
-    This is the admin widget's input format (a court dropdown + case-number
-    field serialized as ``court:number``) — an input convenience only. The
-    API and the model accept canonical IRIs exclusively; the conversion
-    happens at the form edge.
+    For producers whose SOURCE data arrives as separate fields (e.g. the CIAA
+    importer's scraped ``court`` + ``case_no``). This is construction from
+    parts — there is no string reference format other than the IRI.
 
     Raises:
-        ValidationError: If the row is malformed, names an unknown court, or
-            the case number falls outside the IRI grammar.
+        ValidationError: If the court is unknown or the case number falls
+            outside the IRI grammar.
     """
-    if not isinstance(value, str) or "://" in value or value.count(":") != 1:
-        raise ValidationError(
-            f"Invalid court case input {value!r}. Expected "
-            "<court_identifier>:<case_number> (e.g. special:080-CR-0111)."
-        )
-    court, _, case_number = value.partition(":")
-    court, case_number = court.strip().lower(), case_number.strip()
-    if not court or not case_number:
-        raise ValidationError(
-            f"Invalid court case input {value!r}. Expected "
-            "<court_identifier>:<case_number> (e.g. special:080-CR-0111)."
-        )
+    court = (court or "").strip().lower()
+    case_number = (case_number or "").strip()
     if court not in VALID_COURT_IDENTIFIERS:
         valid_list = ", ".join(sorted(VALID_COURT_IDENTIFIERS))
         raise ValidationError(
@@ -219,9 +194,9 @@ def courtcase_input_to_iri(value):
         return build_courtcase_iri(court, case_number)
     except ValueError:
         raise ValidationError(
-            f"Invalid case number {case_number!r} in court case input "
-            f"{value!r}. Case numbers must be letters/digits with '.', '_' "
-            "or '-' separators (e.g. 080-CR-0111)."
+            f"Invalid case number {case_number!r} for a court-case IRI. Case "
+            "numbers must be letters/digits with '.', '_' or '-' separators "
+            "(e.g. 080-CR-0111)."
         )
 
 

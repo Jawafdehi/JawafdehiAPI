@@ -7,7 +7,7 @@ import logging
 import re
 
 from cases.models import Case
-from cases.validators import parse_courtcase_ref, short_courtcase_ref
+from cases.validators import parse_courtcase_ref
 
 logger = logging.getLogger(__name__)
 
@@ -875,17 +875,6 @@ def _detect_court_context(case: Case) -> list[str]:
     return tags
 
 
-def _short_court_refs(case: Case) -> list[str]:
-    """The case's court refs as compact ``<court>:<CASE-NUMBER>`` strings.
-
-    Stored refs are canonical @id IRIs; the short form keeps LLM prompts
-    compact and matches how case numbers are written in the source documents.
-    """
-    return [
-        short for short in map(short_courtcase_ref, case.court_cases) if short
-    ]
-
-
 def _append_amount_tag(tags: list[str], bigo) -> list[str]:
     """Append bigo amount tag to tags list if available and not already present."""
     amount_tag = _detect_amount_tier(bigo)
@@ -957,9 +946,8 @@ def build_llm_classification_prompt(case: Case) -> str:
         lines.append("Key Allegations:")
         for a in case.key_allegations:
             lines.append(f"  - {a}")
-    court_refs = _short_court_refs(case)
-    if court_refs:
-        lines.append("Court Cases: " + ", ".join(court_refs))
+    if case.court_cases:
+        lines.append("Court Cases: " + ", ".join(case.court_cases))
     if case.bigo is not None:
         lines.append(f"Bigo (Disputed Amount): NPR {case.bigo:,}")
     lines.append("")
@@ -987,9 +975,8 @@ def build_llm_classification_prompt_from_sources(case: Case, evidence_text: str)
         truncated += " [truncated]"
     lines.append(truncated)
     lines.append("")
-    court_refs = _short_court_refs(case)
-    if court_refs:
-        lines.append("Court Cases: " + ", ".join(court_refs))
+    if case.court_cases:
+        lines.append("Court Cases: " + ", ".join(case.court_cases))
     if case.bigo is not None:
         lines.append(f"Bigo (Disputed Amount): NPR {case.bigo:,}")
     lines.append("")

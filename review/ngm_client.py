@@ -16,10 +16,8 @@ review worker runs elsewhere). ``get_court_case`` reassembles the case +
 hearings + entities into one dict so its callers keep the previous contract.
 
 Case dicts carry court refs as canonical court-case @id IRIs
-(``https://<base>/courtcase/special/081-cr-0079``); internally this module
-also round-trips its own compact ``"special:081-CR-0079"`` spelling (used for
-read-plane lookups, judge prompts, and error messages). The read plane
-best-effort normalizes case numbers server-side.
+(``https://<base>/courtcase/special/081-cr-0079``) — the only reference
+format. The read plane best-effort normalizes case numbers server-side.
 
 Intentionally generic so it can back several review rules and future checks
 (e.g. verifying a case's start/end dates against ``registration_date_ad`` /
@@ -75,45 +73,30 @@ _CASE_NUMBER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def parse_court_ref(ref):
-    """Parse a court-case ref into a (court, number) tuple.
+    """Parse a canonical court-case @id IRI into a (court, number) tuple.
 
-    Accepts the canonical court-case @id IRI
-    (``https://<base>/courtcase/<court>/<case_number>`` — the form stored on
-    cases) as well as this module's own compact
-    ``"<court_identifier>:<case_number>"`` spelling (what
-    ``court_refs_for_case`` emits and callers hand back for lookups). Returns
-    None if the ref is neither, or contains unsafe characters.
+    ``https://<base>/courtcase/<court>/<case_number>`` is the ONLY reference
+    format. Returns None if the ref is not a court-case IRI or contains
+    unsafe characters.
     """
     if not ref:
         return None
-    ref = str(ref).strip()
     try:
-        parsed = parse_courtcase_iri(ref)
-        court, number = parsed.court, parsed.case_number
+        parsed = parse_courtcase_iri(str(ref).strip())
     except ValueError:
-        if "://" in ref or ":" not in ref:
-            return None
-        court, _, number = ref.partition(":")
-        court, number = court.strip(), number.strip()
-    if not court or not number:
         return None
+    court, number = parsed.court, parsed.case_number
     if not _COURT_ID_RE.match(court) or not _CASE_NUMBER_RE.match(number):
         return None
     return court, number
 
 
 def court_refs_for_case(case):
-    """All court refs from a case's court_cases field, as ``"<court>:<case_number>"``.
-
-    The stored form is the canonical @id IRI; refs are re-emitted in the short
-    form (case number uppercased) — the compact spelling used for read-plane
-    lookups, judge prompts, and error messages.
-    """
+    """All parseable court-case @id IRIs from a case's court_cases field."""
     refs = []
     for ref in case.get("court_cases") or []:
-        parsed = parse_court_ref(ref)
-        if parsed:
-            refs.append(f"{parsed[0]}:{parsed[1].upper()}")
+        if parse_court_ref(ref):
+            refs.append(str(ref).strip())
     return refs
 
 
@@ -167,7 +150,7 @@ def _collect_paginated(url, timeout):
 
 
 def get_court_case(case_ref, timeout=30):
-    """Fetch one NGM court case (with hearings + entities) by ``court:number``.
+    """Fetch one NGM court case (with hearings + entities) by its @id IRI.
 
     Returns the case record dict augmented with ``hearings`` and ``entities``
     lists (the read plane serves these as separate sub-resources; this client
@@ -177,8 +160,7 @@ def get_court_case(case_ref, timeout=30):
     parsed = parse_court_ref(case_ref)
     if not parsed:
         raise NgmError(
-            f"Invalid court ref '{case_ref}'; expected a court-case @id IRI or "
-            "'<court>:<case_number>'."
+            f"Invalid court ref '{case_ref}'; expected a court-case @id IRI."
         )
     court, number = parsed
 

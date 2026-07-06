@@ -103,7 +103,7 @@ def test_ngm_get_court_case_sends_bearer(oidc_configured, monkeypatch):
         return FakeResponse(json_body={"entities": []})
 
     monkeypatch.setattr(requests, "get", fake_get)
-    ngm_client.get_court_case("special:081-CR-0079")
+    ngm_client.get_court_case("https://jawafdehi.org/courtcase/special/081-cr-0079")
 
     assert captured["headers"]["Authorization"] == "Bearer access-xyz"
     assert "Token " not in captured["headers"]["Authorization"]
@@ -122,7 +122,7 @@ def test_ngm_no_auth_header_when_unconfigured(settings, monkeypatch):
         return FakeResponse(json_body={"entities": []})
 
     monkeypatch.setattr(requests, "get", fake_get)
-    ngm_client.get_court_case("special:081-CR-0079")
+    ngm_client.get_court_case("https://jawafdehi.org/courtcase/special/081-cr-0079")
     assert "Authorization" not in captured["headers"]
     cc.reset_provider()
 
