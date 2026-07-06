@@ -48,7 +48,7 @@ class ProxyProvider(Provider):
         if isinstance(content, str):
             user_content = content
         else:
-            user_content = [{"type": "text", "text": b["text"]} for b in content]
+            user_content = [{"type": "text", "text": b.get("text", "")} for b in content]
 
         headroom = int(getattr(settings, "LLM_PROXY_REASONING_HEADROOM", 0))
         resp = self._client().chat.completions.create(

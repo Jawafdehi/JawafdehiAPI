@@ -86,7 +86,10 @@ class UsageAccumulator:
             out_tok = self.output_tokens
             calls = self.calls
             cost = self.cost_usd
-            by_buckets = dict(self._by)
+            # Snapshot the per-provider buckets INSIDE the lock: the inner
+            # bucket dicts are mutated by concurrent add() calls, so a shallow
+            # copy of the outer dict is not enough.
+            by_buckets = {k: dict(v) for k, v in self._by.items()}
 
         # Build per-provider list
         by_provider = []

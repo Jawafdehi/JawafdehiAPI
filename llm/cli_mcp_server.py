@@ -56,6 +56,8 @@ def main():
             req = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if not isinstance(req, dict):
+            continue
         method = req.get("method")
         req_id = req.get("id")
         if req_id is None:  # notification (e.g. notifications/initialized)

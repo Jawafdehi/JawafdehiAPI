@@ -351,9 +351,14 @@ def regrade_all(request):
     """
     # Only id + slug are needed to reset + enqueue; avoid loading the (large)
     # result JSON for every review.
+    # .order_by() clears CaseReview's Meta.ordering for explicitness. Django
+    # >= 3.0 ignores Meta.ordering when grouping, so this is belt-and-braces —
+    # the grouping-by-slug is covered by test_regrade_all_targets_only_the_
+    # latest_review_per_slug either way.
     latest_ids = (
         CaseReview.objects.values("slug")
         .annotate(latest_id=Max("id"))
+        .order_by()
         .values_list("latest_id", flat=True)
     )
     reviews = list(CaseReview.objects.only("id", "slug").filter(id__in=latest_ids))
