@@ -268,10 +268,6 @@ class CaseEntityRelationship(models.Model):
                 fields=["nes_id", "relationship_type"],
                 name="entity_relationship_type_idx",
             ),
-            models.Index(
-                fields=["case", "outcome"],
-                name="case_outcome_idx",
-            ),
         ]
 
     def __str__(self):

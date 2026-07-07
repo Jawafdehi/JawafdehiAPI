@@ -761,3 +761,41 @@ def test_patch_entities_preserves_untouched_outcome():
         CaseEntityRelationship.objects.get(case=case, nes_id=new_entity).outcome
         == "charged"
     )
+
+
+@pytest.mark.django_db
+def test_patch_replace_entities_preserves_outcome_when_client_omits_it():
+    """A whole-list /entities replace from an outcome-unaware client (one that
+    doesn't echo outcome) must NOT reset an existing bind's outcome to 'charged'
+    — the server preserves it by (nes_id, relationship_type)."""
+    user = _contributor("outcome-preserve")
+    case = _make_case()
+    case.contributors.add(user)
+    entity = "https://jawafdehi.org/entity/person/test-preserve"
+    CaseEntityRelationship.objects.create(
+        case=case,
+        nes_id=entity,
+        relationship_type=RelationshipType.ACCUSED,
+        outcome="convicted",
+    )
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[
+            {
+                "op": "replace",
+                "path": "/entities",
+                "value": [
+                    # Re-sends the same bind but OMITS outcome.
+                    {"nes_id": entity, "relationship_type": "ACCUSED", "notes": ""}
+                ],
+            }
+        ],
+        format="json",
+    )
+    assert response.status_code == 200, response.data
+    assert (
+        CaseEntityRelationship.objects.get(case=case, nes_id=entity).outcome
+        == "convicted"
+    )

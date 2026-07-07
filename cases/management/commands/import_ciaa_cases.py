@@ -58,7 +58,9 @@ class Command(BaseCommand):
                 "Fail the run if the fraction of created cases flagged as "
                 "roster-truncated exceeds this (default 0.10). A healthy corpus "
                 "flags a fraction of a percent; a spike means the समेत detector "
-                "is over-matching and the run should be investigated, not trusted."
+                "is over-matching and the run should be investigated, not trusted. "
+                "Note: --dry-run creates no cases, so the flag rate is always 0 "
+                "and this ceiling cannot fire in a dry run."
             ),
         )
 
@@ -178,8 +180,8 @@ class Command(BaseCommand):
 
     def _import_fiscal_year(
         self, base_path: AnyPath, fiscal_year: str, dry_run: bool
-    ) -> tuple[int, int, int]:
-        """Import cases for a single fiscal year. Returns (created, skipped, failed)."""
+    ) -> tuple[int, int, int, int]:
+        """Import cases for a fiscal year. Returns (created, skipped, failed, flagged)."""
         source_dir = base_path / fiscal_year
 
         # Validate fiscal year directory exists
@@ -194,7 +196,7 @@ class Command(BaseCommand):
 
         if not json_files:
             logger.warning(f"No JSON files found in {fiscal_year}")
-            return 0, 0, 0
+            return 0, 0, 0, 0
 
         logger.info(f"Found {len(json_files)} JSON files")
 
