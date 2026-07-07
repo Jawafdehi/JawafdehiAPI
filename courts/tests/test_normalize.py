@@ -15,6 +15,12 @@ def test_parse_stated_count_bare_samet_is_unknown():
     assert parse_stated_defendant_count("प्रमुख प्रतिवादी समेत") == (None, True)
 
 
+def test_parse_stated_count_bare_samet_with_trailing_punctuation():
+    # Scraped cells may carry a trailing danda / full stop after "समेत".
+    assert parse_stated_defendant_count("प्रमुख प्रतिवादी समेत।") == (None, True)
+    assert parse_stated_defendant_count("प्रमुख प्रतिवादी समेत ॥") == (None, True)
+
+
 def test_parse_stated_count_double_samet_takes_the_number():
     # Some cells repeat "समेत"; the stated number is still recovered.
     assert parse_stated_defendant_count("प्रमुख प्रतिवादी समेत ६४ समेत") == (64, False)

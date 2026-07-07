@@ -95,7 +95,9 @@ def parse_stated_defendant_count(defendant_cell: object) -> tuple[int | None, bo
     match = _SAMET_COUNT_RE.search(text)
     if match:
         return int(match.group(1)), False
-    return None, text.rstrip().endswith("समेत")
+    # Scraped cells often carry trailing punctuation (Devanagari danda ।/॥,
+    # full stop, spaces) after the closing "समेत"; strip it before the check.
+    return None, text.rstrip(" \t\r\n।॥.,;:-").endswith("समेत")
 
 
 def is_verdict_sentinel(value: object) -> bool:

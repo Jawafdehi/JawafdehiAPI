@@ -101,11 +101,12 @@ class CIAADraftCaseService:
                 )
                 logger.debug(f"Created case: {case.slug} - {case.title}")
 
-                court_case = ciaa_json.get("court_case", {})
-                bound = self.create_defendants(
-                    court_case.get("defendants", []), case
+                court_case = ciaa_json.get("court_case") or {}
+                defendants = court_case.get("defendants", [])
+                bound = self.create_defendants(defendants, case)
+                self._flag_truncated_roster(
+                    court_case, case, parsed_count=len(defendants), bound_count=len(bound)
                 )
-                self._flag_truncated_roster(court_case, case, len(bound))
                 self.create_material_evidence(ciaa_json, case)
 
             return ImportResult(
@@ -307,18 +308,23 @@ class CIAADraftCaseService:
         return bound
 
     def _flag_truncated_roster(
-        self, court_case: dict, case: Case, bound_count: int
+        self, court_case: dict, case: Case, parsed_count: int, bound_count: int
     ) -> None:
         """Flag the case when NGM's parsed defendant list is truncated.
 
         NGM's Special-Court defendant parse is frequently incomplete (capped, or
         only the lead defendant), while the court's own summary cell states the
         true total as ``"<lead> समेत N"`` or ends in a bare ``"समेत"``. When the
-        stated total exceeds what we bound — or the cell is a bare ``"समेत"`` —
-        the accused list is incomplete and the case must be rebuilt from the
-        court order before it is published, so we record that in
-        ``missing_details`` (the review flow surfaces it). Advisory only: if the
-        NGM read plane is unreachable, the check is skipped, not fatal.
+        stated total exceeds the number NGM parsed — or the cell is a bare
+        ``"समेत"`` — the accused list is incomplete and the case must be rebuilt
+        from the court order before it is published, so we record that in
+        ``missing_details`` (the review flow surfaces it).
+
+        The truncation decision compares against ``parsed_count`` (what NGM
+        actually parsed), NOT ``bound_count`` (which further drops defendants
+        lacking a NES id) — otherwise a complete roster with a few unresolved
+        ids would be mislabelled as source-truncated. Advisory only: if the NGM
+        read/parse fails, the check is skipped, never fatal to the import.
         """
         court = court_case.get("court")
         case_no = court_case.get("case_no")
@@ -329,22 +335,24 @@ class CIAADraftCaseService:
 
         try:
             details = get_court_case_details(court, case_no)
+            cell = (details or {}).get("case", {}).get("defendant")
+            stated, bare = parse_stated_defendant_count(cell)
         except Exception:
-            logger.debug(
+            logger.warning(
                 "Truncation guard skipped: NGM details unavailable for %s/%s",
                 court,
                 case_no,
+                exc_info=True,
             )
             return
-        cell = (details or {}).get("case", {}).get("defendant")
-        stated, bare = parse_stated_defendant_count(cell)
-        if not ((stated is not None and stated > bound_count) or bare):
+        if not ((stated is not None and stated > parsed_count) or bare):
             return
         expected = f"≈{stated}" if stated is not None else "समेत (unknown total)"
         note = (
-            f"ACCUSED LIST INCOMPLETE: imported {bound_count} defendant(s); "
-            f"court record states {expected}. NGM roster truncated at source — "
-            "rebuild the accused list from the court order before publishing."
+            f"ACCUSED LIST INCOMPLETE: {bound_count} defendant(s) imported "
+            f"(NGM parsed {parsed_count}); court record states {expected}. "
+            "Roster truncated at source — rebuild from the court order before "
+            "publishing."
         )
         existing = (case.missing_details or "").strip()
         case.missing_details = f"{existing}\n{note}".strip() if existing else note
