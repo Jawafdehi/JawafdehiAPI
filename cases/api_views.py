@@ -47,6 +47,7 @@ from .models import (
     CaseEntityRelationship,
     CaseMaterialReference,
     CaseState,
+    RelationshipOutcome,
     RelationshipType,
     StatisticsSnapshot,
 )
@@ -704,6 +705,7 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                         case=case,
                         nes_id=item["nes_id"],
                         relationship_type=item["relationship_type"],
+                        outcome=item.get("outcome", RelationshipOutcome.CHARGED),
                         notes=item.get("notes") or "",
                     )
 
@@ -868,6 +870,7 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 {
                     "nes_id": rel.nes_id,
                     "relationship_type": rel.relationship_type,
+                    "outcome": rel.outcome,
                     "notes": rel.notes or "",
                 }
                 for rel in case.entity_relationships.all()

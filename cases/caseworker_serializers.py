@@ -19,6 +19,7 @@ from jawafdehi_shared.entities.ids import (
 from .models import (
     CaseState,
     CaseType,
+    RelationshipOutcome,
     RelationshipType,
 )
 from .validators import validate_courtcase_iri, validate_slug
@@ -151,6 +152,11 @@ class EntityPatchItemSerializer(serializers.Serializer):
     # NES and must already exist there (no display-name fallback).
     nes_id = serializers.CharField()
     relationship_type = CaseInsensitiveChoiceField(choices=RelationshipType.choices)
+    outcome = CaseInsensitiveChoiceField(
+        choices=RelationshipOutcome.choices,
+        required=False,
+        default=RelationshipOutcome.CHARGED,
+    )
     notes = serializers.CharField(
         required=False, allow_blank=True, allow_null=True, default=""
     )

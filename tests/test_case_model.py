@@ -15,6 +15,7 @@ from cases.models import (
     CaseEntityRelationship,
     CaseState,
     CaseType,
+    RelationshipOutcome,
     RelationshipType,
 )
 from tests.conftest import create_case_with_entities
@@ -175,6 +176,30 @@ def test_relationship_type_includes_accused_choice():
     """Relationship types should expose ACCUSED as an available choice."""
     assert RelationshipType.ACCUSED == "accused"
     assert RelationshipType.ACCUSED in RelationshipType.values
+
+
+def test_relationship_outcome_choices():
+    """Outcome exposes the four verdict states (role-orthogonal)."""
+    assert set(RelationshipOutcome.values) == {
+        "charged",
+        "convicted",
+        "acquitted",
+        "abated",
+    }
+    assert RelationshipOutcome.ACQUITTED == "acquitted"
+
+
+@pytest.mark.django_db
+def test_new_relationship_defaults_to_charged():
+    """A new entity bind defaults to the 'charged' (undecided) outcome, so the
+    acquitted are never implicitly rendered as accused before a verdict is set."""
+    case = create_case_with_entities(
+        title="Outcome Default Case",
+        alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
+        case_type=CaseType.CORRUPTION,
+    )
+    rel = case.entity_relationships.first()
+    assert rel.outcome == RelationshipOutcome.CHARGED == "charged"
 
 
 @pytest.mark.django_db
