@@ -750,7 +750,9 @@ SPECTACULAR_SETTINGS = {
 CORS_ALLOW_ALL_ORIGINS = False
 CORS_ALLOWED_ORIGINS = get_env_list(
     "CORS_ALLOWED_ORIGINS",
-    "http://localhost:8080,http://127.0.0.1:8080,https://jawafdehi.org,https://beta.jawafdehi.org",
+    "http://localhost:40114,http://127.0.0.1:40114,"
+    "http://localhost:8080,http://127.0.0.1:8080,"
+    "https://jawafdehi.org,https://beta.jawafdehi.org",
 )
 CORS_ALLOWED_ORIGIN_REGEXES = get_env_list(
     "CORS_ALLOWED_ORIGIN_REGEXES",
