@@ -801,10 +801,17 @@ class NewsletterSubscriptionAdmin(admin.ModelAdmin):
         "first_name",
         "last_name",
         "status",
+        "sendpulse_sync_status",
         "subscribed_at",
         "unsubscribed_at",
     ]
-    list_filter = ["status", "consent_source", "privacy_version", "subscribed_at"]
+    list_filter = [
+        "status",
+        "sendpulse_sync_status",
+        "consent_source",
+        "privacy_version",
+        "subscribed_at",
+    ]
     search_fields = ["email", "first_name", "last_name"]
     readonly_fields = [
         "unsubscribe_token",
@@ -812,6 +819,10 @@ class NewsletterSubscriptionAdmin(admin.ModelAdmin):
         "subscribed_at",
         "unsubscribed_at",
         "updated_at",
+        "sendpulse_synced_at",
+        "sendpulse_last_attempt_at",
+        "sendpulse_sync_status",
+        "sendpulse_sync_error",
         "ip_address",
         "user_agent",
     ]
@@ -843,7 +854,25 @@ class NewsletterSubscriptionAdmin(admin.ModelAdmin):
         (
             "Metadata",
             {
-                "fields": ("ip_address", "user_agent", "subscribed_at", "unsubscribed_at", "updated_at"),
+                "fields": (
+                    "ip_address",
+                    "user_agent",
+                    "subscribed_at",
+                    "unsubscribed_at",
+                    "updated_at",
+                ),
+                "classes": ("collapse",),
+            },
+        ),
+        (
+            "SendPulse sync",
+            {
+                "fields": (
+                    "sendpulse_sync_status",
+                    "sendpulse_synced_at",
+                    "sendpulse_last_attempt_at",
+                    "sendpulse_sync_error",
+                ),
                 "classes": ("collapse",),
             },
         ),
