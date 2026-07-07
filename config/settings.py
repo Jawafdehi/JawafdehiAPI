@@ -964,6 +964,16 @@ CASEWORK_POLLER_TOKEN = os.getenv("CASEWORK_POLLER_TOKEN", "")
 
 MEDIA_PUBLIC_BASE = os.getenv("MEDIA_PUBLIC_BASE", "http://127.0.0.1:40173")
 
+# Newsletter provider sync. When disabled or missing credentials, local signup
+# still persists in Jawafdehi and provider sync is skipped.
+SENDPULSE_ENABLED = env_flag("SENDPULSE_ENABLED", False)
+SENDPULSE_BASE_URL = os.getenv("SENDPULSE_BASE_URL", "https://api.sendpulse.com").rstrip("/")
+SENDPULSE_ADDRESSBOOK_ID = os.getenv("SENDPULSE_ADDRESSBOOK_ID", "")
+SENDPULSE_API_KEY = os.getenv("SENDPULSE_API_KEY", "")
+SENDPULSE_CLIENT_ID = os.getenv("SENDPULSE_CLIENT_ID", "")
+SENDPULSE_CLIENT_SECRET = os.getenv("SENDPULSE_CLIENT_SECRET", "")
+SENDPULSE_TIMEOUT_SECONDS = float(os.getenv("SENDPULSE_TIMEOUT_SECONDS", "10"))
+
 # ============================================================================
 # Unified search — OpenSearch (bilingual EN + Nepali)
 # ============================================================================
