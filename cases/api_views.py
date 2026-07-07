@@ -72,6 +72,7 @@ from .services.statistics import (
     bootstrap_placeholder,
     refresh_statistics,
 )
+from .services.sendpulse import sync_subscription_to_sendpulse
 
 logger = logging.getLogger(__name__)
 
@@ -1067,6 +1068,11 @@ class NewsletterSubscriptionView(APIView):
                     },
                     status=status.HTTP_409_CONFLICT,
                 )
+            transaction.on_commit(
+                lambda pk=subscription.pk: sync_subscription_to_sendpulse(
+                    NewsletterSubscription.objects.get(pk=pk)
+                )
+            )
             return Response(
                 serializer.to_representation(subscription),
                 status=status.HTTP_201_CREATED,
@@ -1112,6 +1118,11 @@ class NewsletterUnsubscribeView(APIView):
             subscription.status = NewsletterSubscriptionStatus.UNSUBSCRIBED
             subscription.unsubscribed_at = timezone.now()
             subscription.save(update_fields=["status", "unsubscribed_at", "updated_at"])
+        transaction.on_commit(
+            lambda pk=subscription.pk: sync_subscription_to_sendpulse(
+                NewsletterSubscription.objects.get(pk=pk)
+            )
+        )
         serializer = NewsletterUnsubscribeSerializer(subscription)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
