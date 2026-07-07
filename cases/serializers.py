@@ -35,6 +35,7 @@ class CaseEntityRelationshipSerializer(serializers.ModelSerializer):
             "id",
             "nes_id",
             "relationship_type",
+            "outcome",
             "notes",
             "created_at",
         ]
@@ -82,6 +83,7 @@ class CaseSerializer(serializers.ModelSerializer):
                 "display_name": serializers.CharField(allow_null=True),
                 "entity_type": serializers.CharField(allow_null=True),
                 "type": serializers.CharField(),
+                "outcome": serializers.CharField(),
                 "notes": serializers.CharField(allow_blank=True),
             },
         )
@@ -104,6 +106,7 @@ class CaseSerializer(serializers.ModelSerializer):
                     "display_name": resolved[rel.nes_id]["display_name"],
                     "entity_type": resolved[rel.nes_id]["entity_type"],
                     "type": rel.relationship_type,
+                    "outcome": rel.outcome,
                     "notes": rel.notes,
                 }
                 for rel in relationships

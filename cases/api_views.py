@@ -47,6 +47,7 @@ from .models import (
     CaseEntityRelationship,
     CaseMaterialReference,
     CaseState,
+    RelationshipOutcome,
     RelationshipType,
     StatisticsSnapshot,
 )
@@ -698,12 +699,27 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             # scalar-only PATCHes.
             case.refresh_from_db()
             if entities_touched:
+                # Preserve an entity's outcome across the whole-list
+                # delete/recreate when the client didn't send one, so an
+                # outcome-unaware client/script can't silently reset verdicts
+                # to 'charged'. Keyed by (nes_id, relationship_type) — the bind
+                # identity — so a re-sent bind keeps its outcome; a new bind (or
+                # one whose role changed) falls back to 'charged'.
+                prior_outcomes = {
+                    (rel.nes_id, rel.relationship_type): rel.outcome
+                    for rel in case.entity_relationships.all()
+                }
                 case.entity_relationships.all().delete()
                 for item in validated["entities"]:
+                    key = (item["nes_id"], item["relationship_type"])
+                    outcome = item.get("outcome") or prior_outcomes.get(
+                        key, RelationshipOutcome.CHARGED
+                    )
                     CaseEntityRelationship.objects.create(
                         case=case,
                         nes_id=item["nes_id"],
                         relationship_type=item["relationship_type"],
+                        outcome=outcome,
                         notes=item.get("notes") or "",
                     )
 
@@ -868,6 +884,7 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 {
                     "nes_id": rel.nes_id,
                     "relationship_type": rel.relationship_type,
+                    "outcome": rel.outcome,
                     "notes": rel.notes or "",
                 }
                 for rel in case.entity_relationships.all()

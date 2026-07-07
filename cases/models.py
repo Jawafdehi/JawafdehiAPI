@@ -173,6 +173,21 @@ class RelationshipType(models.TextChoices):
     PETITIONER = "petitioner", "रिट निवेदक (petitioner)"
 
 
+class RelationshipOutcome(models.TextChoices):
+    """Verdict outcome of an entity's involvement in a case.
+
+    Orthogonal to ``RelationshipType`` (the role). ``CHARGED`` is the neutral
+    default = "no verdict yet / undecided", so pre-verdict binds and
+    non-defendant roles need no value. Set the terminal outcomes only from a
+    primary court order — an acquitted defendant must never render as accused.
+    """
+
+    CHARGED = "charged", "Charged / undecided"
+    CONVICTED = "convicted", "Convicted"
+    ACQUITTED = "acquitted", "Acquitted"
+    ABATED = "abated", "Abated / discontinued"
+
+
 class CaseEntityRelationship(models.Model):
     """
     The Case <-> NES-entity BIND, with relationship type and notes.
@@ -210,6 +225,18 @@ class CaseEntityRelationship(models.Model):
         max_length=20,
         choices=RelationshipType.choices,
         help_text="Type of relationship between case and entity",
+    )
+    outcome = models.CharField(
+        max_length=20,
+        choices=RelationshipOutcome.choices,
+        default=RelationshipOutcome.CHARGED,
+        db_default=RelationshipOutcome.CHARGED,
+        db_index=True,
+        help_text=(
+            "Verdict outcome for this entity in this case (default 'charged' = "
+            "undecided). Distinct from relationship_type (the role); set only "
+            "from a primary court order."
+        ),
     )
     notes = models.TextField(
         blank=True,

@@ -69,6 +69,37 @@ def best_effort_normalize(case_number: str) -> str:
         return case_number
 
 
+_SAMET_COUNT_RE = re.compile(r"समेत\s*([0-9]+)")
+
+
+def parse_stated_defendant_count(defendant_cell: object) -> tuple[int | None, bool]:
+    """Parse the court's stated defendant total from an NGM ``defendant`` cell.
+
+    NGM's Special-Court defendant parse is frequently truncated (capped, or only
+    the lead defendant), but the court's own summary cell usually states the true
+    total as ``"<lead> समेत N"`` ("and N others"), or ends in a bare ``"समेत"``
+    when the total is unstated. Returns ``(stated_total, is_bare_samet)``:
+
+    * ``stated_total`` — the ``N`` in ``समेत N`` (Devanagari digits normalized),
+      else ``None``.
+    * ``is_bare_samet`` — ``True`` when the cell ends in ``समेत`` with no trailing
+      number (truncated, magnitude unknown).
+
+    A cell with neither signal returns ``(None, False)`` (no truncation).
+    """
+    if not defendant_cell:
+        return None, False
+    text = str(defendant_cell)
+    for devanagari, ascii_digit in DEVANAGARI_TO_ASCII.items():
+        text = text.replace(devanagari, ascii_digit)
+    match = _SAMET_COUNT_RE.search(text)
+    if match:
+        return int(match.group(1)), False
+    # Scraped cells often carry trailing punctuation (Devanagari danda ।/॥,
+    # full stop, spaces) after the closing "समेत"; strip it before the check.
+    return None, text.rstrip(" \t\r\n।॥.,;:-").endswith("समेत")
+
+
 def is_verdict_sentinel(value: object) -> bool:
     """True iff ``value`` is the legacy "no verdict date" sentinel.
 

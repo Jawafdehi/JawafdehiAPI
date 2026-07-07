@@ -19,6 +19,7 @@ from jawafdehi_shared.entities.ids import (
 from .models import (
     CaseState,
     CaseType,
+    RelationshipOutcome,
     RelationshipType,
 )
 from .validators import validate_courtcase_iri, validate_slug
@@ -151,6 +152,14 @@ class EntityPatchItemSerializer(serializers.Serializer):
     # NES and must already exist there (no display-name fallback).
     nes_id = serializers.CharField()
     relationship_type = CaseInsensitiveChoiceField(choices=RelationshipType.choices)
+    # No default: an omitted outcome stays absent from validated data so the
+    # persist step can PRESERVE the entity's existing outcome across the
+    # whole-list replace, rather than resetting it to 'charged'. A new entity
+    # with no prior outcome falls back to 'charged' server-side.
+    outcome = CaseInsensitiveChoiceField(
+        choices=RelationshipOutcome.choices,
+        required=False,
+    )
     notes = serializers.CharField(
         required=False, allow_blank=True, allow_null=True, default=""
     )
