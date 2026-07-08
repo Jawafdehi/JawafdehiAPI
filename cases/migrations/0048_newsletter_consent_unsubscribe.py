@@ -9,7 +9,12 @@ from django.db import migrations, models
 def populate_unsubscribe_tokens(apps, schema_editor):
     NewsletterSubscription = apps.get_model("cases", "NewsletterSubscription")
     by_email = {}
-    for subscription in NewsletterSubscription.objects.order_by("id").iterator():
+    to_update = []
+    to_delete_ids = []
+    # Read the full set once, then apply bulk writes after the loop: mutating the
+    # table while iterating a server-side cursor can skip rows on PostgreSQL, and
+    # per-row save()/delete() is O(N) roundtrips.
+    for subscription in NewsletterSubscription.objects.order_by("id"):
         normalized_email = subscription.email.strip().lower()
         keeper = by_email.get(normalized_email)
         if keeper is not None:
@@ -20,14 +25,21 @@ def populate_unsubscribe_tokens(apps, schema_editor):
                 keeper.first_name = subscription.first_name
                 keeper.last_name = subscription.last_name
                 keeper.status = subscription.status
-                keeper.save(update_fields=["first_name", "last_name", "status"])
-            subscription.delete()
+            to_delete_ids.append(subscription.id)
             continue
 
         subscription.email = normalized_email
         subscription.unsubscribe_token = uuid.uuid4()
-        subscription.save(update_fields=["email", "unsubscribe_token"])
         by_email[normalized_email] = subscription
+        to_update.append(subscription)
+
+    if to_update:
+        NewsletterSubscription.objects.bulk_update(
+            to_update,
+            ["email", "unsubscribe_token", "first_name", "last_name", "status"],
+        )
+    if to_delete_ids:
+        NewsletterSubscription.objects.filter(id__in=to_delete_ids).delete()
 
 
 class Migration(migrations.Migration):

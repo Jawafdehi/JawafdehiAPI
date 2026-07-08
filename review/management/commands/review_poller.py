@@ -46,12 +46,13 @@ from django.core.management.base import BaseCommand
 from review.oidc_client_credentials import OIDCTokenError, get_provider
 from review.job_handlers import HANDLERS as _REVIEW_HANDLERS
 from materials.job_handlers import HANDLERS as _MATERIAL_HANDLERS
+from cases.job_handlers import HANDLERS as _CASES_HANDLERS
 
 #: Worker-side handlers this consumer can run, aggregated from the owning apps
-#: (review, materials). Each app keeps its own heavy deps in its handler module;
-#: the poller just dispatches by kind. Add a new app's HANDLERS here to make the
-#: consumer able to claim that kind.
-HANDLERS = {**_REVIEW_HANDLERS, **_MATERIAL_HANDLERS}
+#: (review, materials, cases). Each app keeps its own heavy deps in its handler
+#: module; the poller just dispatches by kind. Add a new app's HANDLERS here to
+#: make the consumer able to claim that kind.
+HANDLERS = {**_REVIEW_HANDLERS, **_MATERIAL_HANDLERS, **_CASES_HANDLERS}
 
 
 class PollerError(Exception):

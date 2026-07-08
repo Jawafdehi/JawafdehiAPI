@@ -72,7 +72,10 @@ from .services.statistics import (
     bootstrap_placeholder,
     refresh_statistics,
 )
-from .services.sendpulse import sync_subscription_to_sendpulse
+from .services.sendpulse import (
+    SYNC_STATUS_DISABLED,
+    mark_sync_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -997,14 +1000,50 @@ class StatisticsView(APIView):
         )
 
 
+def _client_ip(request):
+    """Extract the client IP, preferring X-Forwarded-For behind a reverse proxy.
+
+    The app runs behind a proxy (``SECURE_PROXY_SSL_HEADER`` is set), so
+    ``REMOTE_ADDR`` is the proxy's address — using it alone would put every
+    client in one rate-limit bucket and store the proxy IP as the consent IP.
+    Mirrors ``FeedbackView.get_client_ip``.
+    """
+    x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
+    if x_forwarded_for:
+        return x_forwarded_for.split(",")[0].strip()
+    return request.META.get("REMOTE_ADDR")
+
+
+def _enqueue_sendpulse_sync(subscription):
+    """Offload the subscription's SendPulse sync onto the central job queue.
+
+    The provider HTTP call can block for the configured timeout, so it must not
+    run on the public request thread. A ``newsletter_sendpulse`` job carries the
+    subscription id; the queue consumer resolves the current state and pushes it
+    (see ``jobs.consumers`` / ``cases.job_handlers``). When SendPulse is disabled
+    there is nothing to offload, so the disabled state is recorded inline rather
+    than queuing a no-op job that would sit unclaimed.
+    """
+    if not settings.SENDPULSE_ENABLED:
+        mark_sync_status(subscription.pk, SYNC_STATUS_DISABLED)
+        return
+
+    from jobs import queue as job_queue
+
+    transaction.on_commit(
+        lambda pk=subscription.pk: job_queue.enqueue(
+            "newsletter_sendpulse", payload={"subscription_id": pk}
+        )
+    )
+
+
 class NewsletterSubscriptionRateThrottle(AnonRateThrottle):
     """Rate throttle for newsletter signups: 10 per hour."""
 
     rate = "10/hour"
 
     def get_ident(self, request):
-        """Use the socket peer address; do not trust client-supplied XFF here."""
-        return request.META.get("REMOTE_ADDR", "")
+        return _client_ip(request) or ""
 
 
 class NewsletterUnsubscribeRateThrottle(NewsletterSubscriptionRateThrottle):
@@ -1068,11 +1107,7 @@ class NewsletterSubscriptionView(APIView):
                     },
                     status=status.HTTP_409_CONFLICT,
                 )
-            transaction.on_commit(
-                lambda pk=subscription.pk: sync_subscription_to_sendpulse(
-                    NewsletterSubscription.objects.get(pk=pk)
-                )
-            )
+            _enqueue_sendpulse_sync(subscription)
             return Response(
                 serializer.to_representation(subscription),
                 status=status.HTTP_201_CREATED,
@@ -1084,8 +1119,7 @@ class NewsletterSubscriptionView(APIView):
         )
 
     def get_client_ip(self, request):
-        """Extract the socket peer IP address without trusting X-Forwarded-For."""
-        return request.META.get("REMOTE_ADDR")
+        return _client_ip(request)
 
 
 @extend_schema(
@@ -1118,11 +1152,7 @@ class NewsletterUnsubscribeView(APIView):
             subscription.status = NewsletterSubscriptionStatus.UNSUBSCRIBED
             subscription.unsubscribed_at = timezone.now()
             subscription.save(update_fields=["status", "unsubscribed_at", "updated_at"])
-        transaction.on_commit(
-            lambda pk=subscription.pk: sync_subscription_to_sendpulse(
-                NewsletterSubscription.objects.get(pk=pk)
-            )
-        )
+        _enqueue_sendpulse_sync(subscription)
         serializer = NewsletterUnsubscribeSerializer(subscription)
         return Response(serializer.data, status=status.HTTP_200_OK)
 

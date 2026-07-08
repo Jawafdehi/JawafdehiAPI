@@ -14,12 +14,13 @@ class Command(BaseCommand):
     help = "Sync newsletter subscriptions from Jawafdehi to SendPulse."
 
     def add_arguments(self, parser):
-        parser.add_argument(
+        scope = parser.add_mutually_exclusive_group()
+        scope.add_argument(
             "--all",
             action="store_true",
             help="Sync every newsletter record, including already-synced records.",
         )
-        parser.add_argument(
+        scope.add_argument(
             "--failed",
             action="store_true",
             help="Sync only records whose last SendPulse attempt failed.",

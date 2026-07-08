@@ -125,3 +125,63 @@ def test_sync_failure_is_recorded(monkeypatch, sendpulse_settings):
     assert subscription.sendpulse_sync_status == SYNC_STATUS_FAILED
     assert "network down" in subscription.sendpulse_sync_error
     assert subscription.sendpulse_last_attempt_at is not None
+
+
+@pytest.mark.django_db
+def test_queue_offload_round_trip_marks_subscription(monkeypatch, sendpulse_settings):
+    """enqueue -> claim (build_payload) -> handler -> finalize (on_result)."""
+    from cases.job_handlers import handle_newsletter_sendpulse
+    from jobs import queue as job_queue
+    from jobs.models import Job
+
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        requests.append(request)
+        return FakeResponse({"result": True})
+
+    monkeypatch.setattr(sendpulse.urllib.request, "urlopen", fake_urlopen)
+    subscription = NewsletterSubscription.objects.create(
+        email="queued@example.com",
+        first_name="Queued",
+        consent_accepted=True,
+        consent_source="share_our_vision",
+        privacy_version="2026-07-06",
+    )
+
+    job_queue.enqueue("newsletter_sendpulse", payload={"subscription_id": subscription.pk})
+    job = job_queue.claim_next(["newsletter_sendpulse"])
+    assert job is not None
+    # build_payload resolved the current state into the payload; worker stays DB-free.
+    assert job.payload["subscription"]["email"] == "queued@example.com"
+
+    result = handle_newsletter_sendpulse(job.payload, on_stage=lambda stage: None)
+    job_queue.finalize(job, status=Job.DONE, result=result)
+
+    assert len(requests) == 1
+    subscription.refresh_from_db()
+    assert subscription.sendpulse_sync_status == SYNC_STATUS_SUBSCRIBED
+    assert subscription.sendpulse_synced_at is not None
+
+
+@pytest.mark.django_db
+def test_queue_offload_terminal_failure_marks_subscription(sendpulse_settings):
+    """A terminally failed job records the failure back on the subscription."""
+    from jobs import queue as job_queue
+    from jobs.models import Job
+
+    subscription = NewsletterSubscription.objects.create(
+        email="deadletter@example.com",
+        first_name="Dead",
+        consent_accepted=True,
+    )
+
+    job_queue.enqueue("newsletter_sendpulse", payload={"subscription_id": subscription.pk})
+    job = job_queue.claim_next(["newsletter_sendpulse"])
+    job_queue.finalize(
+        job, status=Job.FAILED, error="SendPulse HTTP 500", retryable=False
+    )
+
+    subscription.refresh_from_db()
+    assert subscription.sendpulse_sync_status == SYNC_STATUS_FAILED
+    assert "SendPulse HTTP 500" in subscription.sendpulse_sync_error

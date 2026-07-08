@@ -2,10 +2,13 @@
 
 import pytest
 from django.core.cache import cache
+from django.test import override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
 from cases.models import NewsletterSubscription, NewsletterSubscriptionStatus
+from cases.services.sendpulse import SYNC_STATUS_DISABLED
+from jobs.models import Job
 
 
 def newsletter_payload(**overrides):
@@ -60,7 +63,9 @@ class TestNewsletterSubscription:
         assert subscription.consent_source == "share_our_vision"
         assert subscription.privacy_version == "2026-07-06"
         assert subscription.locale == "en"
-        assert subscription.ip_address == "192.168.1.10"
+        # Behind a reverse proxy the client IP comes from X-Forwarded-For, not the
+        # proxy's REMOTE_ADDR (matches FeedbackView).
+        assert subscription.ip_address == "203.0.113.5"
         assert subscription.user_agent == "pytest"
         assert subscription.unsubscribe_token is not None
 
@@ -231,3 +236,34 @@ class TestNewsletterSubscription:
 
         assert response.status_code == 429
         assert NewsletterSubscription.objects.count() == 10
+
+    def test_subscribe_enqueues_sendpulse_job_when_enabled(
+        self, api_client, django_capture_on_commit_callbacks
+    ):
+        with override_settings(SENDPULSE_ENABLED=True):
+            with django_capture_on_commit_callbacks(execute=True):
+                response = api_client.post(
+                    "/api/newsletter/subscriptions/",
+                    newsletter_payload(email="queued@example.com"),
+                    format="json",
+                )
+
+        assert response.status_code == 201
+        subscription = NewsletterSubscription.objects.get(email="queued@example.com")
+        job = Job.objects.get(kind="newsletter_sendpulse")
+        assert job.payload["subscription_id"] == subscription.pk
+        # The provider call is deferred to the worker, not made on the request.
+        assert subscription.sendpulse_sync_status == ""
+
+    def test_subscribe_records_disabled_without_enqueue(self, api_client):
+        # SendPulse is disabled by default in tests: no job, disabled recorded inline.
+        response = api_client.post(
+            "/api/newsletter/subscriptions/",
+            newsletter_payload(email="disabled@example.com"),
+            format="json",
+        )
+
+        assert response.status_code == 201
+        subscription = NewsletterSubscription.objects.get(email="disabled@example.com")
+        assert subscription.sendpulse_sync_status == SYNC_STATUS_DISABLED
+        assert Job.objects.filter(kind="newsletter_sendpulse").count() == 0

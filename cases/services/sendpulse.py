@@ -74,14 +74,14 @@ class SendPulseClient:
         self.config = config or SendPulseConfig.from_settings()
         self.config.validate()
 
-    def add_subscription(self, subscription: NewsletterSubscription) -> None:
+    def add_subscription(self, data: dict[str, Any]) -> None:
         variables = {
-            "first_name": subscription.first_name,
-            "last_name": subscription.last_name,
-            "source": subscription.consent_source,
-            "privacy_version": subscription.privacy_version,
-            "locale": subscription.locale,
-            "jawafdehi_status": subscription.status,
+            "first_name": data["first_name"],
+            "last_name": data["last_name"],
+            "source": data["consent_source"],
+            "privacy_version": data["privacy_version"],
+            "locale": data["locale"],
+            "jawafdehi_status": data["status"],
         }
         self._request(
             "POST",
@@ -89,7 +89,7 @@ class SendPulseClient:
             {
                 "emails": [
                     {
-                        "email": subscription.email,
+                        "email": data["email"],
                         "variables": {
                             key: value for key, value in variables.items() if value
                         },
@@ -98,11 +98,11 @@ class SendPulseClient:
             },
         )
 
-    def unsubscribe(self, subscription: NewsletterSubscription) -> None:
+    def unsubscribe(self, data: dict[str, Any]) -> None:
         self._request(
             "POST",
             f"/addressbooks/{self.config.addressbook_id}/emails/unsubscribe",
-            {"emails": [subscription.email]},
+            {"emails": [data["email"]]},
         )
 
     def _request(self, method: str, path: str, payload: dict[str, Any]) -> Any:
@@ -170,35 +170,64 @@ class SendPulseClient:
         return data
 
 
-def sync_subscription_to_sendpulse(subscription: NewsletterSubscription) -> None:
-    """Best-effort provider sync; never raises to the public API caller."""
+def subscription_payload(subscription: NewsletterSubscription) -> dict[str, Any]:
+    """Snapshot the fields SendPulse needs into a plain dict.
 
+    This is what the jobs consumer carries in ``job.payload`` so the worker can
+    push to SendPulse without touching the database (see ``cases.job_handlers``).
+    """
+    return {
+        "email": subscription.email,
+        "first_name": subscription.first_name,
+        "last_name": subscription.last_name,
+        "consent_source": subscription.consent_source,
+        "privacy_version": subscription.privacy_version,
+        "locale": subscription.locale,
+        "status": subscription.status,
+    }
+
+
+def push_subscription(data: dict[str, Any]) -> str:
+    """Push one subscription's current state to SendPulse; return the sync status.
+
+    Database-free (operates only on ``data`` + settings) so it is safe to run in
+    the out-of-process jobs consumer. Raises on provider/config errors so the
+    queue can retry; the disabled case returns ``SYNC_STATUS_DISABLED`` instead.
+    """
     config = SendPulseConfig.from_settings()
     if not config.enabled:
-        _mark_sync(subscription, SYNC_STATUS_DISABLED)
-        return
+        return SYNC_STATUS_DISABLED
 
+    client = SendPulseClient(config)
+    if data["status"] == NewsletterSubscriptionStatus.UNSUBSCRIBED:
+        client.unsubscribe(data)
+        return SYNC_STATUS_UNSUBSCRIBED
+    client.add_subscription(data)
+    return SYNC_STATUS_SUBSCRIBED
+
+
+def sync_subscription_to_sendpulse(subscription: NewsletterSubscription) -> None:
+    """Best-effort in-process sync that records its own outcome; never raises.
+
+    Used by the ``sync_newsletter_sendpulse`` management command (a manual/cron
+    resync where blocking is acceptable). The request path enqueues a
+    ``newsletter_sendpulse`` job instead of calling this directly.
+    """
     try:
-        client = SendPulseClient(config)
-        if subscription.status == NewsletterSubscriptionStatus.UNSUBSCRIBED:
-            client.unsubscribe(subscription)
-            status = SYNC_STATUS_UNSUBSCRIBED
-        else:
-            client.add_subscription(subscription)
-            status = SYNC_STATUS_SUBSCRIBED
-        _mark_sync(subscription, status)
+        status = push_subscription(subscription_payload(subscription))
     except Exception as exc:  # noqa: BLE001 - provider sync must not break signup
         logger.warning(
             "sendpulse newsletter sync failed for subscription %s",
             subscription.pk,
             exc_info=True,
         )
-        _mark_sync(subscription, SYNC_STATUS_FAILED, str(exc))
+        mark_sync_status(subscription.pk, SYNC_STATUS_FAILED, str(exc))
+        return
+    mark_sync_status(subscription.pk, status)
 
 
-def _mark_sync(
-    subscription: NewsletterSubscription, status: str, error: str = ""
-) -> None:
+def mark_sync_status(subscription_id: int, status: str, error: str = "") -> None:
+    """Record a subscription's latest SendPulse sync outcome (by primary key)."""
     now = timezone.now()
     update = {
         "sendpulse_sync_status": status,
@@ -207,4 +236,4 @@ def _mark_sync(
     }
     if status in {SYNC_STATUS_SUBSCRIBED, SYNC_STATUS_UNSUBSCRIBED}:
         update["sendpulse_synced_at"] = now
-    NewsletterSubscription.objects.filter(pk=subscription.pk).update(**update)
+    NewsletterSubscription.objects.filter(pk=subscription_id).update(**update)

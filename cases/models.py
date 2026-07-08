@@ -997,7 +997,8 @@ class NewsletterSubscription(models.Model):
         return self.email
 
     def save(self, *args, **kwargs):
-        self.email = self.email.strip().lower()
+        if self.email:
+            self.email = self.email.strip().lower()
         super().save(*args, **kwargs)
 
 

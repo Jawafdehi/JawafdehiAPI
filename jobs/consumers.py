@@ -142,3 +142,56 @@ register(
         # Material is still served (metadata-searchable), and a re-upload re-runs.
     )
 )
+
+
+# --- newsletter_sendpulse: mirror a subscription's state to SendPulse --------
+#
+# Offloads the SendPulse HTTP call off the public subscribe/unsubscribe request
+# thread (it can block for the provider timeout). build_payload snapshots the
+# subscription's CURRENT fields at claim time (so the worker stays DB-free and a
+# job always syncs the latest state); on_result / on_failure record the outcome
+# back onto the row. The worker-side handler lives in cases.job_handlers.
+
+
+def _newsletter_sendpulse_build_payload(job) -> dict:
+    from cases.models import NewsletterSubscription
+    from cases.services.sendpulse import subscription_payload
+
+    sub_id = (job.payload or {}).get("subscription_id")
+    if not sub_id:
+        raise ValueError("newsletter_sendpulse job payload is missing 'subscription_id'.")
+    try:
+        subscription = NewsletterSubscription.objects.get(pk=sub_id)
+    except NewsletterSubscription.DoesNotExist as exc:
+        # The row was deleted between enqueue and claim; nothing left to sync.
+        raise ValueError(f"newsletter subscription {sub_id} no longer exists") from exc
+    return {"subscription": subscription_payload(subscription)}
+
+
+def _newsletter_sendpulse_on_result(job, result: dict) -> None:
+    from cases.services.sendpulse import mark_sync_status
+
+    sub_id = (job.payload or {}).get("subscription_id")
+    sync_status = result.get("sync_status")
+    if sub_id and sync_status:
+        mark_sync_status(sub_id, sync_status)
+
+
+def _newsletter_sendpulse_on_failure(job) -> None:
+    from cases.services.sendpulse import SYNC_STATUS_FAILED, mark_sync_status
+
+    sub_id = (job.payload or {}).get("subscription_id")
+    if sub_id:
+        mark_sync_status(sub_id, SYNC_STATUS_FAILED, job.error or "sync failed")
+
+
+register(
+    KindSpec(
+        kind="newsletter_sendpulse",
+        lease_seconds=120,  # one bounded HTTP round-trip; provider timeout is ~10s.
+        max_attempts=3,  # transient provider/network flakes retry with backoff.
+        build_payload=_newsletter_sendpulse_build_payload,
+        on_result=_newsletter_sendpulse_on_result,
+        on_failure=_newsletter_sendpulse_on_failure,
+    )
+)
