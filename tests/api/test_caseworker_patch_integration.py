@@ -13,6 +13,7 @@ from cases.models import (
     CaseEntityRelationship,
     CaseState,
     CaseType,
+    RelationshipOutcome,
     RelationshipType,
 )
 from tests.conftest import create_user_with_role
@@ -189,3 +190,130 @@ def test_invalid_post_patch_payload_produces_422_and_no_persistence():
     case.refresh_from_db()
     assert case.title == "Stable title"
     assert case.timeline[0]["date"] == "2024-01-01"
+
+
+@pytest.mark.django_db
+def test_patch_explicit_null_outcome_resets_accused_verdict_to_charged():
+    """An explicit ``outcome: null`` on an accused bind must reset the verdict
+    to the default 'charged' — not silently preserve the prior verdict. The old
+    ``item.get("outcome") or prior_outcomes.get(key)`` fell through on null."""
+    user = create_user_with_role("gita", "gita@example.com", "Caseworker")
+    case = _make_case()
+    case.contributors.add(user)
+
+    accused = "https://jawafdehi.org/entity/person/sushil-adhikari"
+    # Seed a non-default prior verdict for the bind.
+    CaseEntityRelationship.objects.create(
+        case=case,
+        nes_id=accused,
+        relationship_type=RelationshipType.ACCUSED,
+        outcome=RelationshipOutcome.CONVICTED,
+    )
+
+    patch_ops = [
+        {
+            "op": "replace",
+            "path": "/entities",
+            "value": [
+                {
+                    "nes_id": accused,
+                    "relationship_type": RelationshipType.ACCUSED,
+                    # Explicit null: client asks to reset the verdict.
+                    "outcome": None,
+                }
+            ],
+        }
+    ]
+
+    response = _authed_client(user).patch(
+        URL.format(case.slug), data=patch_ops, format="json"
+    )
+
+    assert response.status_code == 200, response.data
+    rel = CaseEntityRelationship.objects.get(
+        case=case, nes_id=accused, relationship_type=RelationshipType.ACCUSED
+    )
+    # Model save() normalizes a null accused verdict to CHARGED, NOT the prior
+    # CONVICTED — the explicit null reset the verdict to the default.
+    assert rel.outcome == RelationshipOutcome.CHARGED
+
+
+@pytest.mark.django_db
+def test_patch_omitted_outcome_preserves_accused_prior_verdict():
+    """When the client OMITS ``outcome`` entirely, the accused bind's prior
+    verdict is preserved across the whole-list delete/recreate (guards against
+    an outcome-unaware client silently resetting verdicts)."""
+    user = create_user_with_role("hari", "hari@example.com", "Caseworker")
+    case = _make_case()
+    case.contributors.add(user)
+
+    accused = "https://jawafdehi.org/entity/person/sushil-adhikari"
+    CaseEntityRelationship.objects.create(
+        case=case,
+        nes_id=accused,
+        relationship_type=RelationshipType.ACCUSED,
+        outcome=RelationshipOutcome.CONVICTED,
+    )
+
+    patch_ops = [
+        {
+            "op": "replace",
+            "path": "/entities",
+            "value": [
+                {
+                    "nes_id": accused,
+                    "relationship_type": RelationshipType.ACCUSED,
+                    # No "outcome" key at all.
+                }
+            ],
+        }
+    ]
+
+    response = _authed_client(user).patch(
+        URL.format(case.slug), data=patch_ops, format="json"
+    )
+
+    assert response.status_code == 200, response.data
+    rel = CaseEntityRelationship.objects.get(
+        case=case, nes_id=accused, relationship_type=RelationshipType.ACCUSED
+    )
+    assert rel.outcome == RelationshipOutcome.CONVICTED
+
+
+@pytest.mark.django_db
+def test_patch_duplicate_entity_bind_returns_422_not_500():
+    """Two payload entries with the same (nes_id, relationship_type) violate the
+    unique_case_entity_relationship_type DB constraint at .create(). The loop
+    detects the dup and returns a field-keyed 422 rather than letting the
+    IntegrityError surface as a 500."""
+    user = create_user_with_role("nabin", "nabin@example.com", "Caseworker")
+    case = _make_case()
+    case.contributors.add(user)
+
+    accused = "https://jawafdehi.org/entity/person/sushil-adhikari"
+    patch_ops = [
+        {
+            "op": "replace",
+            "path": "/entities",
+            "value": [
+                {
+                    "nes_id": accused,
+                    "relationship_type": RelationshipType.ACCUSED,
+                },
+                {
+                    # Same bind identity -> duplicate.
+                    "nes_id": accused,
+                    "relationship_type": RelationshipType.ACCUSED,
+                },
+            ],
+        }
+    ]
+
+    response = _authed_client(user).patch(
+        URL.format(case.slug), data=patch_ops, format="json"
+    )
+
+    assert response.status_code == 422, response.data
+    assert "entities" in response.data
+    # No partial write: the prior (empty) relationship set is intact.
+    assert not CaseEntityRelationship.objects.filter(case=case).exists()
