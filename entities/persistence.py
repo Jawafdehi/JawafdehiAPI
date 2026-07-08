@@ -442,9 +442,14 @@ def _search_forms(text: str) -> frozenset:
     low = (text or "").strip().lower()
     if low:
         forms.update(low.split())
-    roman = to_roman_colloquial(text or "").strip().lower()
-    if roman:
-        forms.update(roman.split())
+        # Skip transliteration for plain ASCII text: it is already Latin, so
+        # ``to_roman_colloquial`` is a no-op cost on the hot path (called per
+        # candidate, up to MAX_SEARCH_CANDIDATES). Only non-ASCII (Devanagari,
+        # IAST/ITRANS diacritics) needs script bridging.
+        if not low.isascii():
+            roman = to_roman_colloquial(text).strip().lower()
+            if roman:
+                forms.update(roman.split())
     return frozenset(forms)
 
 
