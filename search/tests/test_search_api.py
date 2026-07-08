@@ -121,6 +121,20 @@ def test_search_api_passes_sort_and_filters_through():
 
 
 @pytest.mark.django_db
+def test_search_api_threads_status_facet_through():
+    """The case-list ?type=case&status=ongoing filter reaches the OpenSearch DSL."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get(
+            "/api/search/", {"q": "", "type": "case", "status": "ongoing"}
+        )
+    assert resp.status_code == 200
+    body = client.search.call_args.kwargs["body"]
+    assert {"terms": {"case_status": ["ongoing"]}} in body["query"]["bool"]["filter"]
+
+
+@pytest.mark.django_db
 def test_search_api_400_on_invalid_sort():
     resp = APIClient().get("/api/search/", {"q": "x", "sort": "bogus"})
     assert resp.status_code == 400

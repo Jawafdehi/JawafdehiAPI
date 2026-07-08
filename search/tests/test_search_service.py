@@ -502,3 +502,73 @@ def test_search_threads_sort_and_filters_to_client():
     body = kwargs["body"]
     assert body["sort"][0] == {"date": {"order": "desc", "missing": "_last"}}
     assert {"terms": {"case_type": ["CORRUPTION"]}} in body["query"]["bool"]["filter"]
+
+
+# ── status facet (case lifecycle) + denormalized case card ─────────────────────
+
+
+def test_build_query_includes_status_facet_and_filter():
+    """The ``status`` param is backed by the dedicated ``case_status`` field, NOT
+    the generic ``status`` (which holds NGM's scraper enrichment flag)."""
+    assert svc.FACET_FIELDS["status"] == "case_status"
+    body = build_query(q="x", filters={"status": ["ongoing"]})
+    assert body["aggs"]["status"]["terms"]["field"] == "case_status"
+    assert {"terms": {"case_status": ["ongoing"]}} in body["query"]["bool"]["filter"]
+
+
+def _case_card_response():
+    """A single case hit carrying the denormalized ``raw.card`` render payload."""
+    return {
+        "hits": {
+            "total": {"value": 1},
+            "hits": [
+                {
+                    "_index": "jawafdehi-cases",
+                    "_id": "https://jawafdehi.org/case/land-grab",
+                    "_score": 4.2,
+                    "_source": {
+                        "iri": "https://jawafdehi.org/case/land-grab",
+                        "source_app": "jawafdehi",
+                        "title_en": "Land grab",
+                        "type": "Case",
+                        "case_status": "ongoing",
+                        "raw": {
+                            "slug": "land-grab",
+                            "case_type": "CORRUPTION",
+                            "card": {
+                                "slug": "land-grab",
+                                "status": "ongoing",
+                                "tags": ["land"],
+                                "timeline": [{"date": "2024-01-01", "title": "Filed"}],
+                                "entities": [],
+                            },
+                        },
+                    },
+                }
+            ],
+        },
+        "aggregations": {},
+    }
+
+
+def test_case_result_surfaces_denormalized_card():
+    client = MagicMock()
+    client.search.return_value = _case_card_response()
+    out = SearchService(client=client).search(q="land", types=["case"])
+    result = out["results"][0]
+    assert result["type"] == "case"
+    # The whole card payload (incl. timeline/major events) rides on the result,
+    # so the SPA renders without a follow-up /api/cases/{slug}/ fetch.
+    assert result["card"]["slug"] == "land-grab"
+    assert result["card"]["status"] == "ongoing"
+    assert result["card"]["timeline"] == [{"date": "2024-01-01", "title": "Filed"}]
+
+
+def test_non_case_result_has_no_card_key():
+    """Only case hits carry a ``card``; other types keep the lean envelope."""
+    client = MagicMock()
+    client.search.return_value = _canned_response()
+    out = SearchService(client=client).search(q="x")
+    entity = out["results"][0]
+    assert entity["type"] == "entity"
+    assert "card" not in entity
