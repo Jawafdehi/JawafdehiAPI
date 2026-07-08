@@ -3,8 +3,8 @@
 ``DELETE /api/entities/{ref}`` flips ``is_deleted=True`` (never hard-deletes —
 this is an accountability/audit platform): the entity vanishes from list /
 detail / search but the row (and version history) survive. Auth mirrors the
-write plane (``HasNesContributorRole`` -> the ``NES_Contributor`` Django Group);
-unauthenticated / authenticated-without-role assert the 401 / 403 contract.
+write plane (``HasEntityWriteRole`` -> the ``Caseworker`` / ``Moderator`` / ``Admin``
+Django Groups); unauthenticated / authenticated-without-role assert the 401 / 403 contract.
 
 Run under the platform settings (DB-less: sqlite fallback) from the repo root::
 
@@ -53,7 +53,7 @@ class EntityDeleteTests(APITestCase):
 
     @classmethod
     def setUpTestData(cls):
-        g, _ = Group.objects.get_or_create(name="NES_Contributor")
+        g, _ = Group.objects.get_or_create(name="Caseworker")
         cls.contributor = User.objects.create(username="oidc-sub-writer")
         cls.contributor.groups.add(g)
         cls.norole = User.objects.create(username="oidc-sub-norole")
