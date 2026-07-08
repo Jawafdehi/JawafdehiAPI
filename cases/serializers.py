@@ -198,6 +198,8 @@ class CaseSerializer(serializers.ModelSerializer):
             "banner_url",
             "case_start_date",
             "case_end_date",
+            "case_start_date_bs",
+            "case_end_date_bs",
             "entities",
             "tags",
             "description",

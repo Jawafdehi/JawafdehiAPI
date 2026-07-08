@@ -105,6 +105,37 @@ def test_patch_replace_scalar_field():
 
 
 @pytest.mark.django_db
+def test_patch_replace_bs_dates_when_previously_unset():
+    """Regression for BB-11.
+
+    Replacing a Bikram Sambat (BS) date on a case that never had one used to
+    fail with "can't replace a non-existent object 'case_start_date_bs'":
+    there was no such column, so the patch snapshot omitted the key and the
+    RFC-6902 ``replace`` had no target. The BS date columns now exist and are
+    part of the snapshot, so the replace op succeeds and persists.
+    """
+    user = _contributor("gita")
+    case = _make_case()  # no BS dates set
+    case.contributors.add(user)
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[
+            {"op": "replace", "path": "/case_start_date_bs", "value": "2080-09-18"},
+            {"op": "replace", "path": "/case_end_date_bs", "value": "2080-10-01"},
+        ],
+        format="json",
+    )
+    assert response.status_code == 200, response.data
+    assert response.data["case_start_date_bs"] == "2080-09-18"
+    assert response.data["case_end_date_bs"] == "2080-10-01"
+    case.refresh_from_db()
+    assert case.case_start_date_bs == "2080-09-18"
+    assert case.case_end_date_bs == "2080-10-01"
+
+
+@pytest.mark.django_db
 def test_patch_replace_timeline_item_title():
     user = _contributor("sita")
     case = _make_case(

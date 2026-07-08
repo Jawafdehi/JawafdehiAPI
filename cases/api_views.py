@@ -380,6 +380,8 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             "banner_url",
             "case_start_date",
             "case_end_date",
+            "case_start_date_bs",
+            "case_end_date_bs",
             "tags",
             "key_allegations",
             "timeline",
@@ -657,6 +659,8 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 "banner_url",
                 "case_start_date",
                 "case_end_date",
+                "case_start_date_bs",
+                "case_end_date_bs",
                 "tags",
                 "key_allegations",
                 "timeline",
@@ -862,6 +866,11 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 str(case.case_start_date) if case.case_start_date else None
             ),
             "case_end_date": str(case.case_end_date) if case.case_end_date else None,
+            # BS dates are stored as strings; expose the key (even when empty) so
+            # a `replace /case_start_date_bs` op has a target and no longer errors
+            # with "can't replace a non-existent object" (BB-11).
+            "case_start_date_bs": case.case_start_date_bs or None,
+            "case_end_date_bs": case.case_end_date_bs or None,
             "case_type": case.case_type,
             "tags": list(case.tags) if case.tags else [],
             "key_allegations": (

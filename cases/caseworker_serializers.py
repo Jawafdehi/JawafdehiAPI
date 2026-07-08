@@ -244,6 +244,12 @@ class CaseCreateSerializer(
     banner_url = serializers.URLField(required=False, allow_blank=True, max_length=500)
     case_start_date = serializers.DateField(required=False, allow_null=True)
     case_end_date = serializers.DateField(required=False, allow_null=True)
+    case_start_date_bs = serializers.CharField(
+        required=False, allow_null=True, allow_blank=True, max_length=10
+    )
+    case_end_date_bs = serializers.CharField(
+        required=False, allow_null=True, allow_blank=True, max_length=10
+    )
     tags = serializers.ListField(child=serializers.CharField(), required=False)
     key_allegations = serializers.ListField(
         child=serializers.CharField(), required=False
@@ -308,6 +314,12 @@ class CasePatchSerializer(CourtCaseRefsValidationMixin, serializers.Serializer):
     banner_url = serializers.URLField(required=False, allow_blank=True, max_length=500)
     case_start_date = serializers.DateField(required=False, allow_null=True)
     case_end_date = serializers.DateField(required=False, allow_null=True)
+    case_start_date_bs = serializers.CharField(
+        required=False, allow_null=True, allow_blank=True, max_length=10
+    )
+    case_end_date_bs = serializers.CharField(
+        required=False, allow_null=True, allow_blank=True, max_length=10
+    )
     case_type = serializers.ChoiceField(choices=CaseType.choices)
     tags = serializers.ListField(child=serializers.CharField(), required=False)
     key_allegations = serializers.ListField(

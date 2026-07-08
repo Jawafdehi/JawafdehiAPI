@@ -567,6 +567,22 @@ class Case(models.Model):
     case_end_date = models.DateField(
         null=True, blank=True, help_text="When the alleged incident ended"
     )
+    # Optional source-recorded Bikram Sambat (BS) dates, stored as strings
+    # (e.g. "2080-09-18"). BS is not a Gregorian calendar, so these are plain
+    # CharFields rather than DateFields, and are distinct from the AD dates
+    # above (which the frontend can also render as a computed BS value).
+    case_start_date_bs = models.CharField(
+        max_length=10,
+        blank=True,
+        null=True,
+        help_text="Bikram Sambat (BS) start date, e.g. '2080-09-18' (optional)",
+    )
+    case_end_date_bs = models.CharField(
+        max_length=10,
+        blank=True,
+        null=True,
+        help_text="Bikram Sambat (BS) end date, e.g. '2080-09-18' (optional)",
+    )
 
     # Entity relationships live on the CaseEntityRelationship bind (the
     # ``entity_relationships`` reverse relation), which holds the canonical NES
