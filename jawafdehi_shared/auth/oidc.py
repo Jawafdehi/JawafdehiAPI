@@ -108,14 +108,6 @@ DEFAULT_ROLE_TO_GROUP = {
     "ngm_silver": "NGM_SilverTier",
     "ngm_gold": "NGM_GoldTier",
     "ngm_platinum": "NGM_PlatinumTier",
-    # NES-specific roles. The FastAPI NES service gated its write surface on the
-    # NES-specific ``nes_contributor`` role (admin reindex on ``nes_admin``), NOT
-    # the platform-wide contributor/moderator roles. Without these entries a
-    # valid ``nes_contributor`` token mapped to zero Groups and was denied. This
-    # addition is purely additive (other services ignore Groups they don't gate
-    # on), so it is safe for ngm/jawafdehi.
-    "nes_contributor": "NES_Contributor",
-    "nes_admin": "NES_Admin",
 }
 
 

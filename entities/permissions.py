@@ -1,40 +1,43 @@
-"""NES permission classes.
+"""Entity API permission classes.
 
 The shared :class:`jawafdehi_shared.auth.oidc.OIDCAuthentication` validates the
 Zitadel JWT and syncs the token's project roles into Django Groups on every
 request. So role checks here are just Django Group-membership checks — no token
 re-parsing — exactly like NGM's ``HasNgmRole``.
 
-NES write surface (create / patch / add-name / bulk-ingest) requires the
-``nes_contributor`` role; admin reindex requires ``nes_admin``. These map to the
-``NES_Contributor`` / ``NES_Admin`` Django Groups via the shared authenticator's
-``DEFAULT_ROLE_TO_GROUP`` (entries added when this regression was fixed).
+Entity writes (create / patch / delete) require any platform *content* role —
+``Caseworker`` / ``Moderator`` / ``Admin`` (the same set as
+``cases.rules.predicates.has_role``) — plus Django superuser. Admin-only
+operations (reindex) require ``Moderator`` / ``Admin``. The read-only roles
+(``ReadOnly`` / ``Public``) are intentionally excluded from writes.
 
-DECISION (match FastAPI semantics): the FastAPI NES service gated writes on the
-*NES-specific* ``nes_contributor`` role only — the platform-wide ``Contributor``
-/ ``Moderator`` roles could NOT write NES entities. We therefore DELIBERATELY do
-NOT include the generic platform groups in the NES write-allow set; granting
-them would be a privilege expansion over the ported behaviour. The write set is
-``NES_Contributor`` + ``NES_Admin`` (admins can also write) + Django superuser.
-Admin reindex is ``NES_Admin`` + superuser. Unauthenticated → 401 (the
-authenticator sets WWW-Authenticate); authenticated-without-role → 403.
+History: entity writes used to be gated on the NES-specific ``NES_Contributor``
+/ ``NES_Admin`` groups — a carry-over from the standalone FastAPI NES service.
+Post-monolith (all services in one Django project) that separate role namespace
+is dropped in favour of the platform content roles, so a Caseworker/Moderator
+who can author and moderate cases can also write the entities those cases
+reference — no separate ``nes_contributor`` grant required.
+
+Unauthenticated → 401 (the authenticator sets WWW-Authenticate);
+authenticated-without-a-write-role → 403.
 """
 
 from __future__ import annotations
 
 from rest_framework import permissions
 
-# Groups that grant the NES write surface (create/patch/add-name/bulk-ingest).
-# NES_Admin is included because an NES admin is a superset of a contributor.
-NES_CONTRIBUTOR_GROUPS = frozenset({"NES_Contributor", "NES_Admin"})
+# Platform content roles that may write entities (create / patch / delete).
+# Mirrors ``cases.rules.predicates.has_role``; superuser is short-circuited in
+# ``_RequireGroups`` below.
+ENTITY_WRITE_GROUPS = frozenset({"Caseworker", "Moderator", "Admin"})
 
-# Groups that grant the NES admin surface (reindex).
-NES_ADMIN_GROUPS = frozenset({"NES_Admin"})
+# Elevated roles for admin-only entity operations (reindex).
+ENTITY_ADMIN_GROUPS = frozenset({"Moderator", "Admin"})
 
 
 class _RequireGroups(permissions.BasePermission):
     groups: frozenset = frozenset()
-    message = "An NES role is required."
+    message = "A content role is required."
 
     def has_permission(self, request, view) -> bool:
         user = getattr(request, "user", None)
@@ -46,15 +49,15 @@ class _RequireGroups(permissions.BasePermission):
         return bool(user_groups & self.groups)
 
 
-class HasNesContributorRole(_RequireGroups):
-    """Require the ``nes_contributor`` role (or an elevated platform role)."""
+class HasEntityWriteRole(_RequireGroups):
+    """Require a platform content role (Caseworker / Moderator / Admin) to write entities."""
 
-    groups = NES_CONTRIBUTOR_GROUPS
-    message = "The 'nes_contributor' role is required to write entities."
+    groups = ENTITY_WRITE_GROUPS
+    message = "A content role (Caseworker, Moderator, or Admin) is required to write entities."
 
 
-class HasNesAdminRole(_RequireGroups):
-    """Require the ``nes_admin`` role (or platform Admin)."""
+class HasEntityAdminRole(_RequireGroups):
+    """Require Moderator / Admin for admin-only entity operations (reindex)."""
 
-    groups = NES_ADMIN_GROUPS
-    message = "The 'nes_admin' role is required."
+    groups = ENTITY_ADMIN_GROUPS
+    message = "Moderator or Admin is required."

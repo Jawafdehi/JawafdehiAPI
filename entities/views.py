@@ -15,10 +15,11 @@ paths shown are relative to that prefix.
     GET /api/entity_prefixes
   List shape: ``{entities, total, limit, offset}``; detail: the stored JSON-LD doc.
   (Batch-by-ids returns ``{entities, total, requested, not_found}`` instead.)
-- Write plane (OIDC + ``nes_contributor`` via ``HasNesContributorRole``):
-    POST  /api/entities           — create (JSON-LD or authoring shape)
-    PATCH /api/entities/{ref}     — RFC-6902 jsonpatch (immutable @id/@type guarded)
-- Admin plane (OIDC + ``nes_admin`` via ``HasNesAdminRole``):
+- Write plane (OIDC + a content role via ``HasEntityWriteRole`` — Caseworker/Moderator/Admin):
+    POST   /api/entities          — create (JSON-LD or authoring shape)
+    PATCH  /api/entities/{ref}    — RFC-6902 jsonpatch (immutable @id/@type guarded)
+    DELETE /api/entities/{ref}    — soft delete (is_deleted=True)
+- Admin plane (OIDC + Moderator/Admin via ``HasEntityAdminRole``):
     POST  /api/admin/reindex      — reindex stub (no-op until search backend wired)
 
 The detail ``{ref}`` is resolved to the canonical @id IRI by ``_resolve_ref``:
@@ -45,7 +46,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from entities.permissions import HasNesAdminRole, HasNesContributorRole
+from entities.permissions import HasEntityAdminRole, HasEntityWriteRole
 from entities.persistence import (
     EntityRepository,
     _clamp_limit,
@@ -118,7 +119,7 @@ class EntityListCreateView(AuditlogActorMixin, APIView):
 
     def get_permissions(self):
         if self.request.method == "POST":
-            return [HasNesContributorRole()]
+            return [HasEntityWriteRole()]
         return [AllowAny()]
 
     # --- GET: list / search / batch -----------------------------------
@@ -239,7 +240,7 @@ class EntityDetailView(AuditlogActorMixin, APIView):
 
     def get_permissions(self):
         if self.request.method in ("PATCH", "DELETE"):
-            return [HasNesContributorRole()]
+            return [HasEntityWriteRole()]
         return [AllowAny()]
 
     def get(self, request, ref: str):
@@ -374,9 +375,9 @@ def list_entity_prefixes(request):
 
 
 class ReindexView(APIView):
-    """POST /api/admin/reindex — OIDC + ``nes_admin`` gated stub."""
+    """POST /api/admin/reindex — OIDC + Moderator/Admin gated stub."""
 
-    permission_classes = [HasNesAdminRole]
+    permission_classes = [HasEntityAdminRole]
 
     def post(self, request):
         return Response(
