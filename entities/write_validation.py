@@ -39,13 +39,20 @@ JSONLD_CONTEXT: List[Any] = [
     },
 ]
 
-# JSON Pointer prefixes that may never be touched by a PATCH. The @id and @type
-# are the immutable identity/classification; @context/version provenance is
-# owned by the publication service.
+# JSON Pointer prefixes that may never be touched by a PATCH. The @id is the
+# immutable identity (the IRI is the join key other services store); @context and
+# version provenance are owned by the publication service.
+#
+# @type is intentionally NOT blocked (BB-10): a mis-typed entity (e.g. a Location
+# authored as a Person) must be correctable in place. @type is not part of the
+# IRI — the identity is prefix+slug (jawafdehi_shared.entities.ids), and the
+# promoted ``entity_type`` column is re-derived from the doc's @type on every
+# write — so a re-typed doc stays consistent and breaks no inbound references. The
+# patched doc is still re-run through ``validate_jsonld_entity``, which rejects an
+# unknown @type.
 PATCH_BLOCKED_PATH_PREFIXES = frozenset(
     {
         "/@id",
-        "/@type",
         "/@context",
         "/jawafdehi:version",
     }
