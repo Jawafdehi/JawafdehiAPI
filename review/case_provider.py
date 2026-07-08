@@ -38,10 +38,11 @@ def _serialize_local_case(slug):
     try:
         case = Case.objects.get(slug=slug)
     except Case.DoesNotExist:
-        raise CaseNotFound(
-            f"Case '{slug}' is not in the local database. "
-            f"Seed it first with: python manage.py seed_jawafdehi --slug {slug}"
-        )
+        # Submissions are resolved to a canonical slug at submit time
+        # (review.serializers.SubmitSerializer), so reaching here means the case
+        # was removed/renamed between submit and grade — not a "needs seeding"
+        # condition (the review DB IS the live case DB in the monolith).
+        raise CaseNotFound(f"No Jawafdehi case found with slug '{slug}'.")
     # context=None is fine: get_url builds relative URLs when there is no request.
     data = CaseDetailSerializer(case, context={}).data
     # Normalize to plain dict and ensure slug present.
