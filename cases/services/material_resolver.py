@@ -101,8 +101,11 @@ def _links_from_document(data: dict) -> list[ResolvedLink]:
 def _derive_court_case_document(material_iri: str) -> Optional[dict]:
     """Rebuild a court-case material's JSON-LD from the court tables.
 
-    A court-case material (``/material/court/<court>.<case_number>``) usually has
-    no stored ``Material`` row — it is derived on the fly. This mirrors the
+    A court-case material (``/material/court/<court>.<case_number>``) by design
+    almost never has a stored ``Material`` row: the relational ``courts`` tables
+    are the system of record and the material is a derived projection, so it is
+    rebuilt on the fly at read time rather than materialized at ingest. This
+    mirrors the
     court-case fallback in ``materials.views._resolve_material`` but stays in the
     service layer (it depends on ``courts``/``materials.jsonld``, not the
     materials *views* module). Returns ``None`` for any non-court IRI or when the
