@@ -149,4 +149,34 @@ def resolve_materials(material_iris) -> dict[str, ResolvedMaterial]:
             exc_info=True,
         )
 
+    # Court-case materials often have NO stored Material row — they are derived
+    # on the fly from the court tables (the same fallback GET /api/materials/
+    # uses via ``_resolve_material``). Without this, evidence referencing such a
+    # material resolves to a stub (display_name=None) and the public case card
+    # falls back to showing the raw IRI/slug (BB-20). Fill any id that is still a
+    # stub from the derived court-case JSON-LD.
+    unresolved = [iri for iri in ids if resolved[iri]["display_name"] is None]
+    if unresolved:
+        try:
+            from materials.views import _derive_court_case_jsonld
+
+            for iri in unresolved:
+                data = _derive_court_case_jsonld(iri)
+                if not isinstance(data, dict):
+                    continue
+                atype = data.get("@type")
+                resolved[iri] = {
+                    "material_iri": iri,
+                    "display_name": _primary_name_from_document(data),
+                    "material_type": atype if isinstance(atype, str) else None,
+                    "urls": _links_from_document(data),
+                }
+        except Exception:  # pragma: no cover - defensive: court app/DB absent
+            logger.warning(
+                "Failed to derive court-case materials in-process; "
+                "leaving %d id(s) as stubs.",
+                len(unresolved),
+                exc_info=True,
+            )
+
     return resolved

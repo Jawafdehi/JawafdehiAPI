@@ -15,7 +15,8 @@ from django.core.exceptions import ValidationError
 
 from cases.models import Case, CaseMaterialReference, CaseState, CaseType
 from cases.services.material_resolver import resolve_materials
-from materials.jsonld import documentsource_to_jsonld
+from courts.models import Court, CourtCase
+from materials.jsonld import court_case_material_iri, documentsource_to_jsonld
 from materials.models import Material
 
 VALID_IRI = "https://jawafdehi.org/material/jawafdehi/20240115.ab12cd"
@@ -132,3 +133,31 @@ class TestResolveMaterials:
         assert set(resolved) == {mat.iri, unknown}
         assert resolved[mat.iri]["display_name"] == "Known"
         assert resolved[unknown]["display_name"] is None
+
+    def test_derives_court_case_material_without_stored_row(self):
+        """BB-20: a court-case material usually has no stored Material row — it
+        is derived on the fly from the court tables. resolve_materials must
+        derive its display name too, instead of leaving a stub that renders as a
+        raw IRI/slug on the public case card.
+        """
+        court = Court.objects.create(
+            identifier="kathmandudc",
+            court_type="district",
+            full_name_nepali="जिल्ला अदालत काठमाडौं",
+            full_name_english="District Court Kathmandu",
+        )
+        case = CourtCase.objects.create(
+            case_number="082-OA-0503",
+            court=court,
+            case_type="भ्रष्टाचार",
+            case_status="चालु",
+            plaintiff="X",
+            defendant="Y",
+            document_sources=[],
+        )
+        iri = court_case_material_iri(court.identifier, case.case_number)
+        # There is deliberately no stored Material row for this IRI.
+        assert not Material.objects.filter(iri=iri).exists()
+
+        rec = resolve_materials([iri])[iri]
+        assert rec["display_name"] == "082-OA-0503"
