@@ -19,6 +19,28 @@ from .models import (
 logger = logging.getLogger(__name__)
 
 
+def _viewer_has_casework_access(context) -> bool:
+    """Whether the requesting user may see internal casework notes.
+
+    Mirrors the casework-visibility boundary enforced by
+    ``CaseViewSet.get_queryset`` (Admin/Moderator/Caseworker/ReadOnly). Anonymous
+    callers and other authenticated users are "public" and must NOT receive
+    internal ``notes`` — the authoring UI labels notes "not shown publicly"
+    (BB-04).
+    """
+    from cases.rules.predicates import (
+        is_admin_or_moderator,
+        is_caseworker,
+        is_readonly,
+    )
+
+    request = context.get("request") if context else None
+    user = getattr(request, "user", None)
+    if not (user and getattr(user, "is_authenticated", False)):
+        return False
+    return is_admin_or_moderator(user) or is_caseworker(user) or is_readonly(user)
+
+
 class CaseEntityRelationshipSerializer(serializers.ModelSerializer):
     """
     Serializer for the CaseEntityRelationship bind.
@@ -73,6 +95,24 @@ class CaseSerializer(serializers.ModelSerializer):
         help_text="Entity binds for this case (NES entity id, relationship type, "
         "notes), with display details resolved from NES"
     )
+    notes = serializers.SerializerMethodField(
+        help_text="Internal casework notes. Returned only to authenticated "
+        "casework roles (Admin/Moderator/Caseworker/ReadOnly); an empty string "
+        "for public/anonymous callers (notes are 'not shown publicly')."
+    )
+
+    @extend_schema_field(serializers.CharField(allow_blank=True))
+    def get_notes(self, obj):
+        """Return internal notes only to casework viewers, else an empty string.
+
+        ``notes`` is internal-only (the authoring UI labels it "not shown
+        publicly"). Gating here — rather than dropping the field from the
+        serializer — keeps the casework/admin editor round-trip working, since it
+        reloads existing notes through this same read endpoint before PATCHing.
+        """
+        if _viewer_has_casework_access(self.context):
+            return obj.notes
+        return ""
 
     @extend_schema_field(
         inline_serializer(
@@ -100,6 +140,9 @@ class CaseSerializer(serializers.ModelSerializer):
         try:
             relationships = list(obj.entity_relationships.all())
             resolved = resolve_entities(rel.nes_id for rel in relationships)
+            # Per-entity relationship notes are internal-only, same as the
+            # case-level notes field (BB-04): expose them to casework roles only.
+            notes_visible = _viewer_has_casework_access(self.context)
             return [
                 {
                     "nes_id": rel.nes_id,
@@ -107,7 +150,7 @@ class CaseSerializer(serializers.ModelSerializer):
                     "entity_type": resolved[rel.nes_id]["entity_type"],
                     "type": rel.relationship_type,
                     "outcome": rel.outcome,
-                    "notes": rel.notes,
+                    "notes": rel.notes if notes_visible else "",
                 }
                 for rel in relationships
             ]
