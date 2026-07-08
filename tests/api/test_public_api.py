@@ -382,16 +382,22 @@ def test_published_cases_include_all_entity_fields(case_data):
     # Verify unified entity field is present
     assert "entities" in returned_case, "Response should include entities"
 
-    # Every entity exposes a verdict outcome (default 'charged'); this is what
+    # A verdict outcome is meaningful only for the ACCUSED role — that is what
     # lets the SPA badge an acquitted defendant instead of rendering "accused".
+    # Every other role (alleged/related/location) carries outcome=None.
     for entity in returned_case["entities"]:
         assert "outcome" in entity, "Entity should expose an outcome field"
-        assert entity["outcome"] in {
-            "charged",
-            "convicted",
-            "acquitted",
-            "abated",
-        }
+        if entity["type"] == "accused":
+            assert entity["outcome"] in {
+                "charged",
+                "convicted",
+                "acquitted",
+                "abated",
+            }, "An accused entity must carry a verdict outcome"
+        else:
+            assert (
+                entity["outcome"] is None
+            ), "A non-accused entity must not carry a verdict outcome"
 
     # Verify entity lists are present and have correct structure
     alleged_in_response = [
