@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from jawafdehi_shared.entities.ids import (
+    MAX_IRI_LENGTH,
     canonicalize_courtcase_iri,
     is_valid_case_iri,
     is_valid_courtcase_iri,
@@ -104,9 +105,13 @@ def _resolve_iri_to_slug(iri):
 
     if is_valid_courtcase_iri(iri, any_host=True):
         canonical = canonicalize_courtcase_iri(iri)
+        # Order by slug (not id): with values_list(...).distinct(), any ORDER BY
+        # column is folded into the SELECT DISTINCT, so ordering by the unique id
+        # would defeat the de-dup. slug is the projected column, so this stays a
+        # distinct-on-slug and gives a deterministic multi-case message.
         slugs = list(
             Case.objects.filter(courtcase_references__courtcase_iri=canonical)
-            .order_by("id")
+            .order_by("slug")
             .values_list("slug", flat=True)
             .distinct()
         )
@@ -146,7 +151,9 @@ class SubmitSerializer(serializers.Serializer):
     ``validated_data['slug']`` is always the canonical case slug on success.
     """
 
-    iri = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    iri = serializers.CharField(
+        max_length=MAX_IRI_LENGTH, required=False, allow_blank=True
+    )
     slug = serializers.CharField(max_length=255, required=False, allow_blank=True)
 
     def validate(self, attrs):

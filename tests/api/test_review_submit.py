@@ -104,6 +104,24 @@ def test_courtcase_iri_with_no_referencing_case_is_rejected(caseworker):
 
 
 @pytest.mark.django_db
+def test_ambiguous_courtcase_iri_is_rejected(caseworker, case):
+    # A second case referencing the same court-case IRI makes it ambiguous:
+    # the endpoint refuses to guess and lists the candidates.
+    other = Case.objects.create(
+        slug="case-080-cr-0111-beta-revenue",
+        title="Beta revenue",
+        case_type=CaseType.CORRUPTION,
+        state=CaseState.IN_REVIEW,
+        court_cases=[COURTCASE_IRI],
+    )
+    resp = _authed_client(caseworker).post(URL, {"iri": COURTCASE_IRI}, format="json")
+    assert resp.status_code == 400
+    body = str(resp.data)
+    assert case.slug in body and other.slug in body
+    assert not CaseReview.objects.exists()
+
+
+@pytest.mark.django_db
 def test_slug_path_still_accepted_for_rerun(caseworker, case):
     # The re-run / regrade path submits the already-resolved canonical slug.
     resp = _authed_client(caseworker).post(URL, {"slug": CASE_SLUG}, format="json")
@@ -130,7 +148,8 @@ def test_requires_exactly_one_identifier(caseworker, case, payload):
 
 @pytest.mark.django_db
 def test_requires_contributor_role(case):
+    # Authenticated but under-privileged (ReadOnly) -> 403 Forbidden, not 401.
     reader = create_user_with_role("ro", "ro@example.com", "ReadOnly")
     resp = _authed_client(reader).post(URL, {"iri": CASE_IRI}, format="json")
-    assert resp.status_code in (401, 403)
+    assert resp.status_code == 403
     assert not CaseReview.objects.exists()
