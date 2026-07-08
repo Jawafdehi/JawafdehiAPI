@@ -65,7 +65,7 @@ def published_update(db):
 
 
 @pytest.fixture
-def published_entity():
+def published_entity(db):
     return PublicationService().create_entity(
         doc=normalize_authoring_payload(
             {

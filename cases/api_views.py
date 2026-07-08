@@ -1103,6 +1103,10 @@ def _text(value):
     if isinstance(value, str):
         return value
     if isinstance(value, dict):
+        for lang in ("en", "ne"):
+            val = value.get(lang)
+            if isinstance(val, str) and val.strip():
+                return val
         return next((v for v in value.values() if isinstance(v, str) and v.strip()), "")
     if isinstance(value, list):
         for item in value:
@@ -1245,7 +1249,17 @@ class OEmbedView(APIView):
 
         return Response(oembed_data)
 
-    def _base_oembed(self, *, title, embed_url, width, height, thumbnail_url=""):
+    def _base_oembed(
+        self,
+        *,
+        title,
+        embed_url,
+        width,
+        height,
+        thumbnail_url="",
+        thumbnail_width=None,
+        thumbnail_height=None,
+    ):
         return {
             "type": "rich",
             "version": "1.0",
@@ -1259,8 +1273,8 @@ class OEmbedView(APIView):
             "width": width,
             "height": height,
             "thumbnail_url": thumbnail_url or "",
-            "thumbnail_width": width if thumbnail_url else None,
-            "thumbnail_height": height if thumbnail_url else None,
+            "thumbnail_width": thumbnail_width if thumbnail_url else None,
+            "thumbnail_height": thumbnail_height if thumbnail_url else None,
         }
 
     def _case_oembed(self, slug, width, height):
@@ -1289,11 +1303,14 @@ class OEmbedView(APIView):
             return None
 
         thumbnail_url = ""
+        thumbnail_width = None
+        thumbnail_height = None
         if article.thumbnail_id:
             try:
-                thumbnail_url = absolute_media_url(
-                    article.thumbnail.get_rendition("fill-800x450").url
-                )
+                rendition = article.thumbnail.get_rendition("fill-800x450")
+                thumbnail_url = absolute_media_url(rendition.url)
+                thumbnail_width = rendition.width
+                thumbnail_height = rendition.height
             except Exception:  # pragma: no cover - rendition failures should degrade.
                 thumbnail_url = ""
 
@@ -1303,6 +1320,8 @@ class OEmbedView(APIView):
             width=width,
             height=height,
             thumbnail_url=thumbnail_url,
+            thumbnail_width=thumbnail_width,
+            thumbnail_height=thumbnail_height,
         )
 
     def _entity_oembed(self, ref, width, height):
@@ -1322,7 +1341,7 @@ class OEmbedView(APIView):
         if entity is None:
             return None
 
-        title = _text(entity.get("name")) or ref.split("/")[-1].replace("-", " ").title()
+        title = _text(entity.get("name")) or slug.replace("-", " ").title()
 
         return self._base_oembed(
             title=title,
