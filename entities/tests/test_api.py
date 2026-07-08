@@ -272,12 +272,42 @@ class WritePlaneAuthTests(_DbAPITestCase):
     def test_patch_blocked_path_rejected(self):
         self.client.force_authenticate(user=self.contributor)
         self.client.post("/api/entities", _person_payload("blocked-patch"), format="json")
-        for blocked in ("/@id", "/@type", "/@context", "/jawafdehi:version"):
+        for blocked in ("/@id", "/@context", "/jawafdehi:version"):
             patch = {"patch_ops": [{"op": "replace", "path": blocked, "value": "x"}]}
             resp = self.client.patch("/api/entities/person/blocked-patch", patch, format="json")
             self.assertEqual(
                 resp.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY, msg=blocked
             )
+
+    def test_patch_type_is_editable(self):
+        # BB-10: a mis-typed entity must be correctable in place. @type is not
+        # part of the identity (prefix+slug is), so a PATCH may re-type it and the
+        # promoted ``entity_type`` is re-derived from the new @type.
+        self.client.force_authenticate(user=self.contributor)
+        self.client.post("/api/entities", _person_payload("mistyped"), format="json")
+        patch = {
+            "patch_ops": [{"op": "replace", "path": "/@type", "value": "Organization"}],
+            "change_description": "correct entity type",
+        }
+        resp = self.client.patch("/api/entities/person/mistyped", patch, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, msg=resp.data)
+        self.assertEqual(resp.data["@type"], "Organization")
+        # Identity (the IRI) is unchanged — no reference breakage.
+        self.assertEqual(resp.data["@id"], _person_iri("mistyped"))
+        # The re-typed entity now surfaces under the corrected type filter.
+        by_type = self.client.get("/api/entities?entity_type=Organization")
+        self.assertIn(
+            _person_iri("mistyped"),
+            [e["@id"] for e in by_type.data["entities"]],
+        )
+
+    def test_patch_type_rejects_unknown_type(self):
+        # A re-type to a non-schema type is still rejected by validation.
+        self.client.force_authenticate(user=self.contributor)
+        self.client.post("/api/entities", _person_payload("retype-bad"), format="json")
+        patch = {"patch_ops": [{"op": "replace", "path": "/@type", "value": "Wizard"}]}
+        resp = self.client.patch("/api/entities/person/retype-bad", patch, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
 
 
 class BulkIngestServiceTests(_DbAPITestCase):
