@@ -12,6 +12,7 @@ from rest_framework.test import APIClient
 from cases.models import CaseMaterialReference, CaseState, CaseType
 from tests.conftest import (
     create_case_with_entities,
+    create_user_with_role,
 )
 
 VALID_MATERIAL_IRI = "https://jawafdehi.org/material/jawafdehi/20240115.ab12cd"
@@ -238,18 +239,28 @@ class TestPublicAPIWorkflows:
             in_review_case.slug not in case_ids
         ), "In Review cases should not appear in list"
 
-    def test_notes_field_in_case_detail(self):
+    def test_notes_are_hidden_from_public_but_shown_to_casework(self):
         """
-        E2E Test: Verify notes field is included when retrieving case details.
+        E2E Test: internal ``notes`` are gated by casework role (BB-04).
+
+        ``notes`` (case-level and per-entity relationship notes) are internal —
+        the authoring UI labels them "not shown publicly". The public/anonymous
+        response must carry the ``notes`` key (schema stability) but with an empty
+        value; an authenticated casework role sees the real content.
 
         Workflow:
-        1. Create a published case with notes
-        2. Retrieve the case via API
-        3. Verify notes field is included in the response
+        1. Create a published case with case-level and per-entity notes.
+        2. Retrieve anonymously -> notes gated to "" (no leak).
+        3. Retrieve as a Caseworker -> real notes returned (editor round-trip).
 
-        Validates: Requirements 6.3
+        Validates: Requirements 6.3 (corrected: notes are casework-only).
         """
-        # Step 1: Create a published case with notes
+        internal_note = (
+            "## Background\n\nThis case involves corruption at the ministry level."
+        )
+        entity_note = "Internal: suspected primary beneficiary."
+
+        # Step 1: Create a published case with case-level + per-entity notes.
         case = create_case_with_entities(
             title="Case with Notes",
             alleged_entities=["https://jawafdehi.org/entity/person/test-official"],
@@ -258,28 +269,39 @@ class TestPublicAPIWorkflows:
             description="A case with markdown notes.",
             state=CaseState.PUBLISHED,
         )
-        case.notes = (
-            "## Background\n\nThis case involves corruption at the ministry level."
-        )
+        case.notes = internal_note
         case.save()
+        rel = case.entity_relationships.first()
+        rel.notes = entity_note
+        rel.save()
 
-        # Step 2: Retrieve the case via API
+        # Step 2: Anonymous retrieval must NOT leak notes.
         response = self.client.get(f"/api/cases/{case.slug}/")
         assert response.status_code == 200
+        public_detail = response.data
+        assert "notes" in public_detail, "notes key should remain for schema stability"
+        assert public_detail["notes"] == "", "case notes must be hidden from the public"
+        assert all(
+            e["notes"] == "" for e in public_detail["entities"]
+        ), "per-entity notes must be hidden from the public"
 
-        case_detail = response.data
+        # audit_history is still never exposed.
+        assert "audit_history" not in public_detail
 
-        # Step 3: Verify notes field is included
-        assert "notes" in case_detail, "Detail endpoint should include notes field"
-        assert (
-            case_detail["notes"]
-            == "## Background\n\nThis case involves corruption at the ministry level."
-        ), "Notes content should match what was saved"
-
-        # Verify audit_history is NOT included
-        assert (
-            "audit_history" not in case_detail
-        ), "Detail endpoint should not include audit_history"
+        # Step 3: A casework role (Caseworker) still sees the real notes so the
+        # admin editor can reload and round-trip them.
+        caseworker = create_user_with_role(
+            "cw-notes", "cw-notes@example.com", "Caseworker"
+        )
+        casework_client = APIClient()
+        casework_client.force_authenticate(user=caseworker)
+        cw_response = casework_client.get(f"/api/cases/{case.slug}/")
+        assert cw_response.status_code == 200
+        cw_detail = cw_response.data
+        assert cw_detail["notes"] == internal_note, "casework must see case notes"
+        assert any(
+            e["notes"] == entity_note for e in cw_detail["entities"]
+        ), "casework must see per-entity notes"
 
     def test_filter_by_tags_workflow(self):
         """
