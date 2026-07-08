@@ -51,7 +51,7 @@ ngm/                                       was services/jawafdehi/ngm (proxy app
 **Public API (R3):**
 | Path | Resource | Backing app | Auth |
 |---|---|---|---|
-| `/api/entities` | things (people, orgs, **courts**, **firms**, locations) | entities | `nes_contributor` write |
+| `/api/entities` | things (people, orgs, **courts**, **firms**, locations) | entities | content-role write |
 | `/api/materials` | documents (file-bearing CreativeWork) | materials | NGM role write |
 | `/api/courtcases` | court-case records (composite key) + hearings/parties | courts | NGM role write |
 | `/api/cases` | Jawafdehi **corruption** cases (unchanged) | cases | caseworker |

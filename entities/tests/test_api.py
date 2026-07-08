@@ -177,7 +177,7 @@ class SearchAndCountTests(_DbAPITestCase):
 class WritePlaneAuthTests(_DbAPITestCase):
     @classmethod
     def setUpTestData(cls):
-        g, _ = Group.objects.get_or_create(name="NES_Contributor")
+        g, _ = Group.objects.get_or_create(name="Caseworker")
         cls.contributor = User.objects.create(username="oidc-sub-writer")
         cls.contributor.groups.add(g)
         cls.norole = User.objects.create(username="oidc-sub-norole")
@@ -196,12 +196,20 @@ class WritePlaneAuthTests(_DbAPITestCase):
         resp = self.client.post("/api/entities", _person_payload("c-norole"), format="json")
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_platform_contributor_is_403(self):
-        platform = User.objects.create(username="oidc-sub-platform")
-        g, _ = Group.objects.get_or_create(name="Contributor")
-        platform.groups.add(g)
-        self.client.force_authenticate(user=platform)
-        resp = self.client.post("/api/entities", _person_payload("d-platform"), format="json")
+    def test_moderator_can_write(self):
+        moderator = User.objects.create(username="oidc-sub-moderator")
+        g, _ = Group.objects.get_or_create(name="Moderator")
+        moderator.groups.add(g)
+        self.client.force_authenticate(user=moderator)
+        resp = self.client.post("/api/entities", _person_payload("d-moderator"), format="json")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, msg=resp.data)
+
+    def test_readonly_cannot_write(self):
+        readonly = User.objects.create(username="oidc-sub-readonly")
+        g, _ = Group.objects.get_or_create(name="ReadOnly")
+        readonly.groups.add(g)
+        self.client.force_authenticate(user=readonly)
+        resp = self.client.post("/api/entities", _person_payload("e-readonly"), format="json")
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_create_then_get_round_trip(self):
@@ -391,3 +399,29 @@ def _now():
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc)
+
+
+class AdminPlaneAuthTests(_DbAPITestCase):
+    """Reindex (admin plane) is gated on Moderator/Admin — NOT the write role."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.caseworker = User.objects.create(username="oidc-sub-cw")
+        cls.caseworker.groups.add(Group.objects.get_or_create(name="Caseworker")[0])
+        cls.moderator = User.objects.create(username="oidc-sub-mod")
+        cls.moderator.groups.add(Group.objects.get_or_create(name="Moderator")[0])
+
+    def test_reindex_unauth_is_401(self):
+        resp = self.client.post("/api/admin/reindex")
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_reindex_write_role_is_403(self):
+        # A content/write role (Caseworker) must NOT reach the admin plane.
+        self.client.force_authenticate(user=self.caseworker)
+        resp = self.client.post("/api/admin/reindex")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_reindex_moderator_ok(self):
+        self.client.force_authenticate(user=self.moderator)
+        resp = self.client.post("/api/admin/reindex")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)

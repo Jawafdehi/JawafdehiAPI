@@ -381,7 +381,7 @@ class CaseEntityRelationshipInline(admin.TabularInline):
     model = CaseEntityRelationship
     formset = CaseEntityRelationshipInlineFormSet
     extra = 1
-    fields = ["nes_id", "relationship_type", "notes", "created_at"]
+    fields = ["nes_id", "relationship_type", "outcome", "notes", "created_at"]
     readonly_fields = ["created_at"]
     verbose_name = "Entity"
     verbose_name_plural = "Entities"

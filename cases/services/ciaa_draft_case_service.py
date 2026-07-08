@@ -21,6 +21,7 @@ from cases.models import (
     RelationshipType,
 )
 from cases.validators import courtcase_iri_from_parts, parse_courtcase_ref
+from courts.normalize import parse_stated_defendant_count
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,9 @@ class CIAADraftCaseService:
             # Defendants skipped because they had no valid NES id (NES is the
             # source of truth; binds cannot be created from a bare name).
             "entities_skipped_no_nes_id": 0,
+            # Cases whose NGM defendant roster was detected as truncated at
+            # import (accused list incomplete vs the court's stated total).
+            "cases_flagged_truncated": 0,
             "sources_created": 0,
             "sources_reused": 0,
         }
@@ -97,8 +101,11 @@ class CIAADraftCaseService:
                 )
                 logger.debug(f"Created case: {case.slug} - {case.title}")
 
-                self.create_defendants(
-                    ciaa_json.get("court_case", {}).get("defendants", []), case
+                court_case = ciaa_json.get("court_case") or {}
+                defendants = court_case.get("defendants", [])
+                bound = self.create_defendants(defendants, case)
+                self._flag_truncated_roster(
+                    court_case, case, parsed_count=len(defendants), bound_count=len(bound)
                 )
                 self.create_material_evidence(ciaa_json, case)
 
@@ -299,6 +306,58 @@ class CIAADraftCaseService:
             self.stats["entities_bound"] += 1
             bound.append(nes_id)
         return bound
+
+    def _flag_truncated_roster(
+        self, court_case: dict, case: Case, parsed_count: int, bound_count: int
+    ) -> None:
+        """Flag the case when NGM's parsed defendant list is truncated.
+
+        NGM's Special-Court defendant parse is frequently incomplete (capped, or
+        only the lead defendant), while the court's own summary cell states the
+        true total as ``"<lead> समेत N"`` or ends in a bare ``"समेत"``. When the
+        stated total exceeds the number NGM parsed — or the cell is a bare
+        ``"समेत"`` — the accused list is incomplete and the case must be rebuilt
+        from the court order before it is published, so we record that in
+        ``missing_details`` (the review flow surfaces it).
+
+        The truncation decision compares against ``parsed_count`` (what NGM
+        actually parsed), NOT ``bound_count`` (which further drops defendants
+        lacking a NES id) — otherwise a complete roster with a few unresolved
+        ids would be mislabelled as source-truncated. Advisory only: if the NGM
+        read/parse fails, the check is skipped, never fatal to the import.
+        """
+        court = court_case.get("court")
+        case_no = court_case.get("case_no")
+        if not (court and case_no):
+            return
+        # Local import keeps the NGM read plane off this module's import graph.
+        from cases.services.ngm_court_records import get_court_case_details
+
+        try:
+            details = get_court_case_details(court, case_no)
+            cell = (details or {}).get("case", {}).get("defendant")
+            stated, bare = parse_stated_defendant_count(cell)
+        except Exception:
+            logger.warning(
+                "Truncation guard skipped: NGM details unavailable for %s/%s",
+                court,
+                case_no,
+                exc_info=True,
+            )
+            return
+        if not ((stated is not None and stated > parsed_count) or bare):
+            return
+        expected = f"≈{stated}" if stated is not None else "समेत (unknown total)"
+        note = (
+            f"ACCUSED LIST INCOMPLETE: {bound_count} defendant(s) imported "
+            f"(NGM parsed {parsed_count}); court record states {expected}. "
+            "Roster truncated at source — rebuild from the court order before "
+            "publishing."
+        )
+        existing = (case.missing_details or "").strip()
+        case.missing_details = f"{existing}\n{note}".strip() if existing else note
+        case.save(update_fields=["missing_details"])
+        self.stats["cases_flagged_truncated"] += 1
 
     def create_material_evidence(self, ciaa_json: dict, case: Case) -> list[str]:
         """Ingest CIAA press releases, charge sheets, and court orders as evidence.

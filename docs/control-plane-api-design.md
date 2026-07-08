@@ -82,7 +82,7 @@ This doc is **grounded in the code on `v2` as it stands today** (audited 2026-06
 - **Upload mechanism:** **multipart through the API** (decided). Client POSTs the
   file to `/api/materials/.../file`; the monolith streams it to R2 and upserts the
   Material JSON-LD in one call. Mirrors the proven case-evidence upload path.
-- **Auth:** one OIDC/Zitadel gate. Writes to `/api/entities` need `nes_contributor`;
+- **Auth:** one OIDC/Zitadel gate. Writes to `/api/entities` need a content role (Caseworker/Moderator/Admin);
   writes to `/api/materials` + `/api/courtcases` need the NGM role; `/api/cases`
   (corruption cases) keeps its existing caseworker gate. (Role *names* may converge
   later; the gate stays per-resource.)
@@ -102,9 +102,9 @@ This doc is **grounded in the code on `v2` as it stands today** (audited 2026-06
 | `/entities/{ref}` | GET | public | ✅ detail; `ref` = url-encoded IRI **or** `prefix/slug` |
 | `/entities/{ref}/versions` | GET | public | ✅ |
 | `/entities/tags`, `/entity_prefixes` | GET | public | ✅ |
-| `/entities` | POST | `nes_contributor` | ✅ create (JSON-LD or authoring shape) → 201 |
-| `/entities/{ref}` | PATCH | `nes_contributor` | ✅ RFC-6902; blocks `/@id /@type /@context /jawafdehi:version` |
-| `/admin/reindex` | POST | `nes_admin` | ⚠️ no-op stub (no search backend on this plane) |
+| `/entities` | POST | content role | ✅ create (JSON-LD or authoring shape) → 201 |
+| `/entities/{ref}` | PATCH | content role | ✅ RFC-6902; blocks `/@id /@type /@context /jawafdehi:version` |
+| `/admin/reindex` | POST | Moderator/Admin | ⚠️ no-op stub (no search backend on this plane) |
 
 ### 2.2 NGM `/api/ngm/*`
 | Route | Method | Auth | Status |

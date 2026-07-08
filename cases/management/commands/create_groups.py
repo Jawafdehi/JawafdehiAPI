@@ -134,7 +134,8 @@ class Command(BaseCommand):
             self.stdout.write("Caseworker group already exists")
 
         # Caseworkers get view, add, and change permissions (limited by assignment for cases)
-        # Entities: caseworkers can view and add, but cannot change or delete
+        # (NES entity writes are authorized in entities.permissions by Group membership
+        # — Caseworker/Moderator/Admin — not by these model permissions.)
         caseworker_group.permissions.set(
             [
                 case_permissions["view"],

@@ -654,3 +654,148 @@ def test_patch_scalar_only_does_not_touch_entity_relationships():
     assert (
         rel_pk_before == rel_pk_after
     ), "Scalar-only PATCH must not delete and recreate entity relationships"
+
+
+@pytest.mark.django_db
+def test_patch_add_entity_with_outcome():
+    """An entity bind can carry a verdict ``outcome`` (default is 'charged')."""
+    user = _contributor("outcome-add")
+    case = _make_case()
+    case.contributors.add(user)
+    entity = "https://jawafdehi.org/entity/person/test-accused-1"
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[
+            {
+                "op": "add",
+                "path": "/entities/-",
+                "value": {
+                    "nes_id": entity,
+                    "relationship_type": RelationshipType.ACCUSED,
+                    "outcome": "acquitted",
+                },
+            }
+        ],
+        format="json",
+    )
+    assert response.status_code == 200, response.data
+    rel = CaseEntityRelationship.objects.get(case=case, nes_id=entity)
+    assert rel.outcome == "acquitted"
+    returned = [e for e in response.data["entities"] if e["nes_id"] == entity][0]
+    assert returned["outcome"] == "acquitted"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("wire_value", ["ACQUITTED", "Acquitted"])
+def test_patch_outcome_accepts_uppercase(wire_value):
+    # The frontend sends UPPERCASE outcome values, mirroring relationship_type.
+    user = _contributor("outcome-case")
+    case = _make_case()
+    case.contributors.add(user)
+    entity = "https://jawafdehi.org/entity/person/test-accused-2"
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[
+            {
+                "op": "add",
+                "path": "/entities/-",
+                "value": {
+                    "nes_id": entity,
+                    "relationship_type": "ACCUSED",
+                    "outcome": wire_value,
+                },
+            }
+        ],
+        format="json",
+    )
+    assert response.status_code == 200, response.data
+    assert CaseEntityRelationship.objects.get(case=case, nes_id=entity).outcome == (
+        "acquitted"
+    )
+
+
+@pytest.mark.django_db
+def test_patch_entities_preserves_untouched_outcome():
+    """A /entities PATCH that touches one entity must not reset another entity's
+    outcome to the default: the snapshot has to carry outcome through the
+    delete/recreate round-trip."""
+    user = _contributor("outcome-keep")
+    case = _make_case()
+    case.contributors.add(user)
+    acquitted = "https://jawafdehi.org/entity/person/test-acquitted"
+    CaseEntityRelationship.objects.create(
+        case=case,
+        nes_id=acquitted,
+        relationship_type=RelationshipType.ACCUSED,
+        outcome="acquitted",
+    )
+    new_entity = "https://jawafdehi.org/entity/person/test-added"
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[
+            {
+                "op": "add",
+                "path": "/entities/-",
+                "value": {
+                    "nes_id": new_entity,
+                    "relationship_type": RelationshipType.ACCUSED,
+                },
+            }
+        ],
+        format="json",
+    )
+    assert response.status_code == 200, response.data
+    # The pre-existing acquitted bind keeps its outcome across the round-trip.
+    assert (
+        CaseEntityRelationship.objects.get(case=case, nes_id=acquitted).outcome
+        == "acquitted"
+    )
+    # A newly added bind with no stated outcome defaults to 'charged'.
+    assert (
+        CaseEntityRelationship.objects.get(case=case, nes_id=new_entity).outcome
+        == "charged"
+    )
+
+
+@pytest.mark.django_db
+def test_patch_replace_entities_preserves_outcome_when_client_omits_it():
+    """A whole-list /entities replace from an outcome-unaware client (one that
+    doesn't echo outcome) must NOT reset an existing bind's outcome to 'charged'
+    — the server preserves it by (nes_id, relationship_type)."""
+    user = _contributor("outcome-preserve")
+    case = _make_case()
+    case.contributors.add(user)
+    entity = "https://jawafdehi.org/entity/person/test-preserve"
+    CaseEntityRelationship.objects.create(
+        case=case,
+        nes_id=entity,
+        relationship_type=RelationshipType.ACCUSED,
+        outcome="convicted",
+    )
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[
+            {
+                "op": "replace",
+                "path": "/entities",
+                "value": [
+                    # Re-sends the same bind but OMITS outcome.
+                    {"nes_id": entity, "relationship_type": "ACCUSED", "notes": ""}
+                ],
+            }
+        ],
+        format="json",
+    )
+    assert response.status_code == 200, response.data
+    assert (
+        CaseEntityRelationship.objects.get(case=case, nes_id=entity).outcome
+        == "convicted"
+    )
