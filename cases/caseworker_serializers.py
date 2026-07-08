@@ -226,6 +226,21 @@ class CaseEntityValidationMixin:
         return cleaned
 
 
+# Bikram Sambat (BS) dates are stored as strings; enforce the same YYYY-MM-DD
+# shape the timeline BS dates use (TimelineItemSerializer._BS_DATE_RE).
+_CASE_BS_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _validate_optional_bs_date(value):
+    """Normalize an optional BS date: empty/whitespace/None → None; otherwise
+    require the YYYY-MM-DD shape (rejects malformed values at API time)."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if not _CASE_BS_DATE_RE.match(value):
+        raise serializers.ValidationError("BS date must be in the format YYYY-MM-DD.")
+    return value
+
+
 class CaseCreateSerializer(
     CourtCaseRefsValidationMixin, CaseEntityValidationMixin, serializers.Serializer
 ):
@@ -296,6 +311,12 @@ class CaseCreateSerializer(
             return None
         return value
 
+    def validate_case_start_date_bs(self, value):
+        return _validate_optional_bs_date(value)
+
+    def validate_case_end_date_bs(self, value):
+        return _validate_optional_bs_date(value)
+
     def validate_slug(self, value):
         """Normalize empty/whitespace slugs to None."""
         if value is None or (isinstance(value, str) and not value.strip()):
@@ -360,6 +381,12 @@ class CasePatchSerializer(CourtCaseRefsValidationMixin, serializers.Serializer):
         if value is None or (isinstance(value, str) and not value.strip()):
             return None
         return value
+
+    def validate_case_start_date_bs(self, value):
+        return _validate_optional_bs_date(value)
+
+    def validate_case_end_date_bs(self, value):
+        return _validate_optional_bs_date(value)
 
     def validate_slug(self, value):
         """

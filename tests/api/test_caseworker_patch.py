@@ -136,6 +136,22 @@ def test_patch_replace_bs_dates_when_previously_unset():
 
 
 @pytest.mark.django_db
+def test_patch_rejects_malformed_bs_date():
+    """A malformed BS date (not YYYY-MM-DD) is rejected at API time (422)."""
+    user = _contributor("gopal")
+    case = _make_case()
+    case.contributors.add(user)
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[{"op": "replace", "path": "/case_start_date_bs", "value": "2080/09/18"}],
+        format="json",
+    )
+    assert response.status_code == 422
+
+
+@pytest.mark.django_db
 def test_patch_replace_timeline_item_title():
     user = _contributor("sita")
     case = _make_case(
