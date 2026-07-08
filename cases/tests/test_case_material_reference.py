@@ -161,3 +161,5 @@ class TestResolveMaterials:
 
         rec = resolve_materials([iri])[iri]
         assert rec["display_name"] == "082-OA-0503"
+        # Uses the stable NGM material-type token, not the schema.org @type.
+        assert rec["material_type"] == "court_case"
