@@ -153,12 +153,15 @@ class EntityPatchItemSerializer(serializers.Serializer):
     nes_id = serializers.CharField()
     relationship_type = CaseInsensitiveChoiceField(choices=RelationshipType.choices)
     # No default: an omitted outcome stays absent from validated data so the
-    # persist step can PRESERVE the entity's existing outcome across the
-    # whole-list replace, rather than resetting it to 'charged'. A new entity
-    # with no prior outcome falls back to 'charged' server-side.
+    # persist step can PRESERVE an accused bind's existing verdict across the
+    # whole-list replace, rather than resetting it to 'charged'. A new accused
+    # bind with no prior outcome falls back to 'charged' server-side; a
+    # non-accused role always resolves to NULL. allow_null accepts a client
+    # echoing the read snapshot's ``outcome: null`` for non-accused entities.
     outcome = CaseInsensitiveChoiceField(
         choices=RelationshipOutcome.choices,
         required=False,
+        allow_null=True,
     )
     notes = serializers.CharField(
         required=False, allow_blank=True, allow_null=True, default=""
@@ -173,6 +176,24 @@ class EntityPatchItemSerializer(serializers.Serializer):
                 "'https://<authority>/entity/<prefix>/<slug>'."
             )
         return value
+
+    def validate(self, attrs):
+        # A verdict outcome is only meaningful on an ACCUSED bind. Reject it on
+        # any other role (a 400 beats silently dropping it, or a DB
+        # CHECK-constraint 500). 'charged' included — a non-accused role has no
+        # verdict of any kind.
+        if attrs.get("outcome") and (
+            attrs.get("relationship_type") != RelationshipType.ACCUSED
+        ):
+            raise serializers.ValidationError(
+                {
+                    "outcome": (
+                        "A verdict outcome may only be set on an 'accused' "
+                        "entity."
+                    )
+                }
+            )
+        return attrs
 
 
 class CourtCaseRefsValidationMixin:

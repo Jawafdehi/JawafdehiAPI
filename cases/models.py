@@ -174,12 +174,13 @@ class RelationshipType(models.TextChoices):
 
 
 class RelationshipOutcome(models.TextChoices):
-    """Verdict outcome of an entity's involvement in a case.
+    """Verdict outcome for an ACCUSED entity in a case.
 
-    Orthogonal to ``RelationshipType`` (the role). ``CHARGED`` is the neutral
-    default = "no verdict yet / undecided", so pre-verdict binds and
-    non-defendant roles need no value. Set the terminal outcomes only from a
-    primary court order — an acquitted defendant must never render as accused.
+    Meaningful ONLY for ``RelationshipType.ACCUSED`` — every other role leaves
+    ``outcome`` NULL (enforced by the ``outcome_only_on_accused`` CHECK
+    constraint). ``CHARGED`` = "formally charged, verdict pending"; the terminal
+    outcomes (CONVICTED/ACQUITTED/ABATED) are set only from a primary court
+    order — an acquitted defendant must never render as accused.
     """
 
     CHARGED = "charged", "Charged / undecided"
@@ -229,12 +230,13 @@ class CaseEntityRelationship(models.Model):
     outcome = models.CharField(
         max_length=20,
         choices=RelationshipOutcome.choices,
-        default=RelationshipOutcome.CHARGED,
-        db_default=RelationshipOutcome.CHARGED,
+        null=True,
+        blank=True,
         db_index=True,
         help_text=(
-            "Verdict outcome for this entity in this case (default 'charged' = "
-            "undecided). Distinct from relationship_type (the role); set only "
+            "Verdict outcome for this ACCUSED entity (NULL for every other "
+            "role). 'charged' = formally charged, verdict pending. Distinct "
+            "from relationship_type (the role); terminal verdicts are set only "
             "from a primary court order."
         ),
     )
@@ -257,7 +259,15 @@ class CaseEntityRelationship(models.Model):
             models.UniqueConstraint(
                 fields=["case", "nes_id", "relationship_type"],
                 name="unique_case_entity_relationship_type",
-            )
+            ),
+            # A verdict outcome is meaningful only for the ACCUSED role; every
+            # other role must leave it NULL. Backstops the save()/serializer
+            # normalization against any raw-SQL / bulk write path.
+            models.CheckConstraint(
+                condition=models.Q(relationship_type=RelationshipType.ACCUSED)
+                | models.Q(outcome__isnull=True),
+                name="outcome_only_on_accused",
+            ),
         ]
         indexes = [
             models.Index(
@@ -292,7 +302,15 @@ class CaseEntityRelationship(models.Model):
             raise ValidationError(errors)
 
     def save(self, *args, **kwargs):
-        """Override save to validate before saving."""
+        """Normalize the verdict outcome, validate, then save."""
+        # A verdict outcome is meaningful only for the ACCUSED role: force it
+        # NULL for every other role, and default an accused bind with no
+        # explicit outcome to CHARGED (formally charged, verdict pending).
+        # Backstopped by the ``outcome_only_on_accused`` DB CHECK constraint.
+        if self.relationship_type != RelationshipType.ACCUSED:
+            self.outcome = None
+        elif not self.outcome:
+            self.outcome = RelationshipOutcome.CHARGED
         self.full_clean()
         super().save(*args, **kwargs)
 

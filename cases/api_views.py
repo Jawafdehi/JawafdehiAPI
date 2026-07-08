@@ -699,26 +699,39 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             # scalar-only PATCHes.
             case.refresh_from_db()
             if entities_touched:
-                # Preserve an entity's outcome across the whole-list
+                # Preserve an accused bind's verdict across the whole-list
                 # delete/recreate when the client didn't send one, so an
                 # outcome-unaware client/script can't silently reset verdicts
                 # to 'charged'. Keyed by (nes_id, relationship_type) — the bind
-                # identity — so a re-sent bind keeps its outcome; a new bind (or
-                # one whose role changed) falls back to 'charged'.
+                # identity — so a re-sent accused bind keeps its verdict; a new
+                # accused bind falls back to 'charged', and non-accused roles
+                # carry no verdict at all (handled in the loop below).
                 prior_outcomes = {
                     (rel.nes_id, rel.relationship_type): rel.outcome
                     for rel in case.entity_relationships.all()
                 }
                 case.entity_relationships.all().delete()
                 for item in validated["entities"]:
-                    key = (item["nes_id"], item["relationship_type"])
-                    outcome = item.get("outcome") or prior_outcomes.get(
-                        key, RelationshipOutcome.CHARGED
-                    )
+                    rtype = item["relationship_type"]
+                    key = (item["nes_id"], rtype)
+                    if rtype == RelationshipType.ACCUSED:
+                        # Preserve an accused bind's prior verdict when the
+                        # client omits one; a brand-new bind falls back to
+                        # 'charged' (formally charged, verdict pending).
+                        outcome = (
+                            item.get("outcome")
+                            or prior_outcomes.get(key)
+                            or RelationshipOutcome.CHARGED
+                        )
+                    else:
+                        # A verdict is meaningful only for ACCUSED; every other
+                        # role stays NULL (rejected earlier by the serializer,
+                        # enforced by the model save() + CHECK constraint).
+                        outcome = None
                     CaseEntityRelationship.objects.create(
                         case=case,
                         nes_id=item["nes_id"],
-                        relationship_type=item["relationship_type"],
+                        relationship_type=rtype,
                         outcome=outcome,
                         notes=item.get("notes") or "",
                     )
