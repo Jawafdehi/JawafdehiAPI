@@ -349,9 +349,12 @@ class NewsletterSubscriptionSerializer(serializers.ModelSerializer):
 
     def _create_or_update(self, email, defaults):
         with transaction.atomic():
+            # ``email`` is already normalized to lowercase by ``validate_email``
+            # (and ``NewsletterSubscription.save``), so an exact match suffices
+            # and uses the plain email index instead of a case-insensitive scan.
             subscription = (
                 NewsletterSubscription.objects.select_for_update()
-                .filter(email__iexact=email)
+                .filter(email=email)
                 .first()
             )
             if subscription and subscription.status == NewsletterSubscriptionStatus.UNSUBSCRIBED:

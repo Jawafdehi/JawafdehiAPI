@@ -267,3 +267,37 @@ class TestNewsletterSubscription:
         subscription = NewsletterSubscription.objects.get(email="disabled@example.com")
         assert subscription.sendpulse_sync_status == SYNC_STATUS_DISABLED
         assert Job.objects.filter(kind="newsletter_sendpulse").count() == 0
+
+    def test_malformed_forwarded_for_falls_back_to_remote_addr(self, api_client):
+        # A client-supplied, non-IP X-Forwarded-For must not reach the
+        # GenericIPAddressField (it would raise DataError and 500 the signup).
+        response = api_client.post(
+            "/api/newsletter/subscriptions/",
+            newsletter_payload(email="spoofed@example.com"),
+            format="json",
+            REMOTE_ADDR="192.168.1.30",
+            HTTP_X_FORWARDED_FOR="not-an-ip",
+        )
+
+        assert response.status_code == 201
+        subscription = NewsletterSubscription.objects.get(email="spoofed@example.com")
+        assert subscription.ip_address == "192.168.1.30"
+
+    def test_repeated_subscribe_dedups_sendpulse_job(
+        self, api_client, django_capture_on_commit_callbacks
+    ):
+        with override_settings(SENDPULSE_ENABLED=True):
+            for _ in range(2):
+                with django_capture_on_commit_callbacks(execute=True):
+                    response = api_client.post(
+                        "/api/newsletter/subscriptions/",
+                        newsletter_payload(email="dedup@example.com"),
+                        format="json",
+                    )
+                    assert response.status_code == 201
+
+        subscription = NewsletterSubscription.objects.get(email="dedup@example.com")
+        # Repeated submissions collapse onto one queued job via the dedup_key.
+        jobs = Job.objects.filter(kind="newsletter_sendpulse")
+        assert jobs.count() == 1
+        assert jobs.first().payload["subscription_id"] == subscription.pk

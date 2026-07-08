@@ -4,6 +4,7 @@ API ViewSets for the Jawafdehi accountability platform.
 See: .kiro/specs/accountability-platform-core/design.md
 """
 
+import ipaddress
 import logging
 import re
 from xml.etree.ElementTree import Element, SubElement, tostring
@@ -1024,10 +1025,21 @@ def _client_ip(request):
     ``REMOTE_ADDR`` is the proxy's address — using it alone would put every
     client in one rate-limit bucket and store the proxy IP as the consent IP.
     Mirrors ``FeedbackView.get_client_ip``.
+
+    The forwarded value is client-supplied, so a malformed token is validated and
+    rejected before it can be stored in ``NewsletterSubscription.ip_address`` (a
+    ``GenericIPAddressField``), where an invalid value would raise ``DataError``
+    on insert and turn the public signup into a 500.
     """
     x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
     if x_forwarded_for:
-        return x_forwarded_for.split(",")[0].strip()
+        candidate = x_forwarded_for.split(",")[0].strip()
+        try:
+            ipaddress.ip_address(candidate)
+        except ValueError:
+            pass  # malformed header — fall back to REMOTE_ADDR
+        else:
+            return candidate
     return request.META.get("REMOTE_ADDR")
 
 
@@ -1049,7 +1061,9 @@ def _enqueue_sendpulse_sync(subscription):
 
     transaction.on_commit(
         lambda pk=subscription.pk: job_queue.enqueue(
-            "newsletter_sendpulse", payload={"subscription_id": pk}
+            "newsletter_sendpulse",
+            payload={"subscription_id": pk},
+            dedup_key=f"newsletter_sendpulse:{pk}",
         )
     )
 

@@ -18,8 +18,13 @@ def populate_unsubscribe_tokens(apps, schema_editor):
         normalized_email = subscription.email.strip().lower()
         keeper = by_email.get(normalized_email)
         if keeper is not None:
-            if (
-                keeper.status != "subscribed"
+            # Preserve opt-outs: an "unsubscribed" duplicate always wins so a
+            # consolidated keeper never silently drops a recorded opt-out. Only
+            # promote to "subscribed" when the keeper has not opted out.
+            if subscription.status == "unsubscribed":
+                keeper.status = "unsubscribed"
+            elif (
+                keeper.status != "unsubscribed"
                 and subscription.status == "subscribed"
             ):
                 keeper.first_name = subscription.first_name

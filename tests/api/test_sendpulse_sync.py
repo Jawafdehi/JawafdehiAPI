@@ -2,8 +2,10 @@
 
 import json
 import urllib.error
+from io import StringIO
 
 import pytest
+from django.core.management import call_command
 from django.test import override_settings
 
 from cases.models import NewsletterSubscription, NewsletterSubscriptionStatus
@@ -185,3 +187,23 @@ def test_queue_offload_terminal_failure_marks_subscription(sendpulse_settings):
     subscription.refresh_from_db()
     assert subscription.sendpulse_sync_status == SYNC_STATUS_FAILED
     assert "SendPulse HTTP 500" in subscription.sendpulse_sync_error
+
+
+@pytest.mark.django_db
+@override_settings(SENDPULSE_ENABLED=False)
+def test_sync_command_early_exits_when_disabled():
+    """The resync command is a no-op — and writes nothing — when disabled."""
+    subscription = NewsletterSubscription.objects.create(
+        email="offline@example.com",
+        first_name="Off",
+        consent_accepted=True,
+    )
+
+    out = StringIO()
+    call_command("sync_newsletter_sendpulse", stdout=out)
+
+    assert "disabled" in out.getvalue().lower()
+    subscription.refresh_from_db()
+    # No per-record push_subscription/mark_sync_status writes happened.
+    assert subscription.sendpulse_sync_status == ""
+    assert subscription.sendpulse_last_attempt_at is None

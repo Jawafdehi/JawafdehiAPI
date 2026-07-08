@@ -1,5 +1,6 @@
 """Sync local newsletter subscriptions to SendPulse."""
 
+from django.conf import settings
 from django.core.management.base import BaseCommand
 
 from cases.models import NewsletterSubscription, NewsletterSubscriptionStatus
@@ -32,6 +33,18 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+        if not settings.SENDPULSE_ENABLED:
+            # Every record would otherwise be iterated and marked
+            # SYNC_STATUS_DISABLED one by one — skip the wasted writes and make
+            # the no-op explicit to the operator.
+            self.stdout.write(
+                self.style.WARNING(
+                    "SendPulse sync is disabled (SENDPULSE_ENABLED=False). "
+                    "Nothing to do."
+                )
+            )
+            return
+
         queryset = NewsletterSubscription.objects.order_by("id")
         if not options["unsubscribed"]:
             queryset = queryset.filter(status=NewsletterSubscriptionStatus.SUBSCRIBED)
