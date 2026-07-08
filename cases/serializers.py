@@ -27,6 +27,11 @@ def _viewer_has_casework_access(context) -> bool:
     callers and other authenticated users are "public" and must NOT receive
     internal ``notes`` — the authoring UI labels notes "not shown publicly"
     (BB-04).
+
+    The result is memoized on the request for the life of the response: the
+    group-membership check runs a few queries and this helper is called once per
+    case for both ``notes`` and each entity's note, so a list response would
+    otherwise repeat it N times (N+1).
     """
     from cases.rules.predicates import (
         is_admin_or_moderator,
@@ -35,10 +40,26 @@ def _viewer_has_casework_access(context) -> bool:
     )
 
     request = context.get("request") if context else None
+    if request is None:
+        return False
+
+    cached = getattr(request, "_jawafdehi_casework_access", None)
+    if cached is not None:
+        return cached
+
     user = getattr(request, "user", None)
     if not (user and getattr(user, "is_authenticated", False)):
-        return False
-    return is_admin_or_moderator(user) or is_caseworker(user) or is_readonly(user)
+        result = False
+    else:
+        result = (
+            is_admin_or_moderator(user) or is_caseworker(user) or is_readonly(user)
+        )
+
+    try:
+        request._jawafdehi_casework_access = result
+    except Exception:  # pragma: no cover - request objects are normally mutable
+        pass
+    return result
 
 
 class CaseEntityRelationshipSerializer(serializers.ModelSerializer):
