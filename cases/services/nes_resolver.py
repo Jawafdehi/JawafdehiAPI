@@ -130,3 +130,32 @@ def resolve_entities(nes_ids) -> dict[str, ResolvedEntity]:
         )
 
     return resolved
+
+
+def build_entity_binds(
+    relationships, resolved, *, include_notes: bool = False
+) -> list[dict]:
+    """Shape ``CaseEntityRelationship`` rows + resolved NES details into the entity
+    binds used by BOTH the API (``CaseSerializer.get_entities``) and the search
+    index card. One definition so the two consumers can't drift.
+
+    ``resolved`` is a :func:`resolve_entities` result (``nes_id -> ResolvedEntity``);
+    a missing/unresolved id yields ``None`` name/type rather than raising, so this
+    is safe on the best-effort indexing path as well as the API path.
+
+    Per-entity ``notes`` are internal casework content (BB-04): they must NOT reach
+    public/anonymous callers. The ``notes`` key is always present for schema
+    stability, but its value is ``""`` unless ``include_notes`` is set. The API
+    passes ``include_notes`` only for casework-role viewers; the public search-card
+    path leaves it ``False`` so the denormalized card never leaks internal notes."""
+    return [
+        {
+            "nes_id": rel.nes_id,
+            "display_name": (resolved.get(rel.nes_id) or {}).get("display_name"),
+            "entity_type": (resolved.get(rel.nes_id) or {}).get("entity_type"),
+            "type": rel.relationship_type,
+            "outcome": rel.outcome,
+            "notes": rel.notes if include_notes else "",
+        }
+        for rel in relationships
+    ]

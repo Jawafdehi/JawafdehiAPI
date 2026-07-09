@@ -16,7 +16,19 @@ Field mapping:
 * ``keywords``       ← ``tags`` (+ ``case_type``),
 * ``identifiers``    ← the IRI, the slug, and the ``court_cases`` references,
 * ``date``           ← ``case_start_date`` (else created date),
-* ``raw``            ← a light serialized record (return-only).
+* ``case_status``    ← coarse ongoing/closed/others (mirrors the SPA rule); a
+  dedicated keyword (NOT the generic ``status``, which NGM uses for its scraper
+  enrichment flag) so the unified search can facet/filter cases without collision,
+* ``raw``            ← a light record PLUS a ``card`` payload (return-only): every
+  field the SPA case list/card renders — ``short_description``, ``key_allegations``,
+  ``tags``, dates, ``bigo``, thumbnail/banner, the ``timeline`` (major events), and
+  the resolved entity binds — denormalized so a search hit renders WITHOUT a
+  second fetch to ``/api/cases/{slug}/``.
+
+Denormalized entity names come from NES at index time, so a case must be
+re-indexed when a referenced entity is renamed (a scheduled ``reindex_cases``
+reconcile covers this — see the plan's WS3); the write-time signals only fire on
+``Case`` itself.
 
 Best-effort: an OpenSearch error is logged and swallowed.
 """
@@ -52,11 +64,59 @@ def _case_iri(case: Any) -> str | None:
     return getattr(case, "public_iri", None)
 
 
-def build_doc(case: Any) -> dict[str, Any]:
+def _iso(value: Any) -> str | None:
+    """ISO-8601 string for a date/datetime value (or ``None``)."""
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+def _derive_status(case: Any) -> str:
+    """Coarse case lifecycle for the ``case_status`` facet, mirroring the SPA rule.
+
+    ``ongoing`` = a start date but no end date; ``closed`` = both dates present;
+    ``others`` = neither (or only an end date). Kept in lockstep with the frontend
+    ``getCaseStatus`` so the server facet and the client badge agree."""
+    has_start = getattr(case, "case_start_date", None) is not None
+    has_end = getattr(case, "case_end_date", None) is not None
+    if has_start and not has_end:
+        return "ongoing"
+    if has_start and has_end:
+        return "closed"
+    return "others"
+
+
+def _safe_resolve_entities(case: Any) -> list[dict[str, Any]]:
+    """Resolve the case's entity binds to card display details (best-effort).
+
+    Uses the same shaper as ``CaseSerializer.get_entities``
+    (``nes_resolver.build_entity_binds``) so the card and the API can't drift.
+    Any failure — no relation manager (e.g. a bare test object) or NES unreachable
+    — yields ``[]`` (or ``None`` names), so the case is still indexed and a later
+    ``reindex_cases`` reconciles the names."""
+    try:
+        relationships = list(case.entity_relationships.all())
+    except (AttributeError, TypeError):
+        return []
+    if not relationships:
+        return []
+    from cases.services.nes_resolver import build_entity_binds, resolve_entities
+
+    try:
+        resolved = resolve_entities(rel.nes_id for rel in relationships)
+    except Exception:  # noqa: BLE001 — best-effort; index without names on failure.
+        resolved = {}
+    return build_entity_binds(relationships, resolved)
+
+
+def build_doc(case: Any, *, entities: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Map a published ``Case`` to the common index doc. Pure: no OpenSearch.
 
     The caller is responsible for the published gate; this shapes whatever it is
-    given (used directly by tests for the doc shape)."""
+    given (used directly by tests for the doc shape). ``entities`` is the resolved
+    entity-bind list for the ``card`` payload — ``index()`` resolves it via
+    :func:`_safe_resolve_entities`; passing ``None`` (the default) omits names so
+    the doc-shape tests stay pure/DB-free."""
     iri = _case_iri(case)
     title = getattr(case, "title", "") or ""
     title_ne, title_en = name_to_titles(title)
@@ -124,15 +184,63 @@ def build_doc(case: Any) -> dict[str, Any]:
     start = getattr(case, "case_start_date", None)
     created = getattr(case, "created_at", None)
     if start is not None:
-        doc["date"] = start.isoformat() if hasattr(start, "isoformat") else str(start)
+        doc["date"] = _iso(start)
     elif created is not None and hasattr(created, "date"):
         doc["date"] = created.date().isoformat()
     if created is not None:
-        doc["created_at"] = created.isoformat() if hasattr(created, "isoformat") else created
+        doc["created_at"] = _iso(created)
     updated = getattr(case, "updated_at", None)
     if updated is not None:
-        doc["updated_at"] = updated.isoformat() if hasattr(updated, "isoformat") else updated
+        doc["updated_at"] = _iso(updated)
+
+    # Coarse lifecycle as a dedicated indexed keyword so the unified search can
+    # facet/filter cases on it. Deliberately NOT the generic ``status`` field —
+    # NGM courtcases write their scraper enrichment flag (pending/enriched/failed)
+    # there, which must not blend into a case lifecycle facet.
+    case_status = _derive_status(case)
+    doc["case_status"] = case_status
+
+    # Card payload: everything the SPA case card/list renders, denormalized so a
+    # search hit needs no follow-up call to /api/cases/{slug}/. Lives under ``raw``
+    # (mapping ``enabled: false``) — stored + returned, never searched or faceted.
+    # Deliberately self-contained: the SPA reads the whole card off one hit.
+    doc["raw"]["card"] = {
+        "slug": slug,
+        "title": title,
+        "short_description": short.strip() if short and short.strip() else None,
+        "key_allegations": [
+            a.strip()
+            for a in (getattr(case, "key_allegations", None) or [])
+            if isinstance(a, str) and a.strip()
+        ],
+        "tags": tags,
+        "case_type": case_type,
+        "status": case_status,
+        "case_start_date": _iso(getattr(case, "case_start_date", None)),
+        "case_end_date": _iso(getattr(case, "case_end_date", None)),
+        "bigo": getattr(case, "bigo", None),
+        "thumbnail_url": getattr(case, "thumbnail_url", None),
+        "banner_url": getattr(case, "banner_url", None),
+        "timeline": [
+            entry
+            for entry in (getattr(case, "timeline", None) or [])
+            if isinstance(entry, dict)
+        ],
+        "entities": list(entities or []),
+    }
     return doc
+
+
+def build_indexed_doc(case: Any) -> dict[str, Any]:
+    """``build_doc`` for the real index paths: resolves entity names first.
+
+    ``build_doc`` stays pure (entities injected) so the shape tests need no DB;
+    this resolving wrapper is what BOTH the live ``index()`` signal path AND the
+    bulk ``reindex_cases`` driver call, so a rebuild REFRESHES the denormalized
+    entity names rather than blanking them (the driver calls ``build_doc``
+    positionally with no ``entities`` kwarg — see ``jawafdehi_shared/search/
+    reindex.py``)."""
+    return build_doc(case, entities=_safe_resolve_entities(case))
 
 
 @best_effort("index case")
@@ -143,7 +251,7 @@ def index(case: Any, *, client=None) -> None:
     (draft/in-review/closed) deletes the doc so it never appears in search."""
     cl = client or make_client()
     if should_index(case):
-        upsert_doc(cl, CASE_INDEX, build_doc(case))
+        upsert_doc(cl, CASE_INDEX, build_indexed_doc(case))
     else:
         delete(case, client=cl)
 

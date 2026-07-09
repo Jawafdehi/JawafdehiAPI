@@ -211,3 +211,102 @@ def test_case_should_index_only_published():
         case = _published_case()
         case.state = state
         assert case_index.should_index(case) is False
+
+
+def _card_case(**overrides):
+    """A published case with the full render-payload attributes set."""
+    from datetime import date
+
+    base = dict(
+        state="PUBLISHED",
+        public_iri="https://jawafdehi.org/case/land-grab-2081",
+        slug="land-grab-2081",
+        title="Land grab",
+        description="desc",
+        short_description="<b>Short</b> summary.",
+        key_allegations=["Encroachment", ""],
+        tags=["land", "corruption"],
+        case_type="CORRUPTION",
+        court_cases=[],
+        case_start_date=date(2024, 1, 1),
+        case_end_date=None,
+        thumbnail_url="https://cdn/thumb.png",
+        banner_url="https://cdn/banner.png",
+        bigo=12345678,
+        timeline=[{"date": "2024-01-01", "title": "Filed"}, "not-a-dict"],
+        created_at=None,
+        updated_at=None,
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def test_case_build_doc_status_ongoing_closed_others():
+    from datetime import date
+
+    # Coarse lifecycle rides on the dedicated ``case_status`` keyword (NOT the
+    # generic ``status``, which NGM courtcases use for their enrichment flag).
+    assert case_index.build_doc(_card_case())["case_status"] == "ongoing"
+    assert "status" not in case_index.build_doc(_card_case())
+    closed = case_index.build_doc(_card_case(case_end_date=date(2024, 6, 1)))
+    assert closed["case_status"] == "closed"
+    others = case_index.build_doc(_card_case(case_start_date=None))
+    assert others["case_status"] == "others"
+
+
+def test_build_indexed_doc_resolves_entities_for_bulk_path(monkeypatch):
+    """The bulk/live wrapper resolves NES names so a rebuild refreshes (not blanks)
+    the card entities — the pure build_doc alone would leave them empty."""
+    rel = SimpleNamespace(
+        nes_id="https://jawafdehi.org/entity/person/x",
+        relationship_type="accused",
+        outcome="convicted",
+        notes="",
+    )
+    case = _card_case()
+    case.entity_relationships = SimpleNamespace(all=lambda: [rel])
+    monkeypatch.setattr(
+        "cases.services.nes_resolver.resolve_entities",
+        lambda ids: {rel.nes_id: {"display_name": "Person X", "entity_type": "Person"}},
+    )
+    doc = case_index.build_indexed_doc(case)
+    assert doc["raw"]["card"]["entities"][0]["display_name"] == "Person X"
+    # Pure build_doc (what the driver would call without the wrapper) leaves it empty.
+    assert case_index.build_doc(case)["raw"]["card"]["entities"] == []
+
+
+def test_case_build_doc_card_payload():
+    entities = [
+        {
+            "nes_id": "https://jawafdehi.org/entity/person/x",
+            "display_name": "Person X",
+            "entity_type": "Person",
+            "type": "accused",
+            "outcome": "convicted",
+            "notes": "",
+        }
+    ]
+    doc = case_index.build_doc(_card_case(), entities=entities)
+    card = doc["raw"]["card"]
+    # Render fields the SPA card needs, denormalized into the doc.
+    assert card["slug"] == "land-grab-2081"
+    assert card["short_description"] == "<b>Short</b> summary."
+    assert card["key_allegations"] == ["Encroachment"]  # blank dropped
+    assert card["tags"] == ["land", "corruption"]
+    assert card["case_type"] == "CORRUPTION"
+    assert card["status"] == "ongoing"
+    assert card["case_start_date"] == "2024-01-01"
+    assert card["case_end_date"] is None
+    assert card["bigo"] == 12345678
+    assert card["thumbnail_url"] == "https://cdn/thumb.png"
+    assert card["banner_url"] == "https://cdn/banner.png"
+    # timeline (major events) carried verbatim; non-dict entries filtered out.
+    assert card["timeline"] == [{"date": "2024-01-01", "title": "Filed"}]
+    # resolved entity binds (with per-entity outcome) ride along.
+    assert card["entities"] == entities
+
+
+def test_case_build_doc_card_entities_default_empty():
+    """Pure shaping (no ``entities`` arg) still emits a card, with no entities."""
+    doc = case_index.build_doc(_card_case())
+    assert doc["raw"]["card"]["entities"] == []

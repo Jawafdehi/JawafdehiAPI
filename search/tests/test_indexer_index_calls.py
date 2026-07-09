@@ -90,3 +90,61 @@ def test_case_index_non_published_deletes():
         _, kwargs = client.delete.call_args
         # Falls back to building the IRI from the slug since public_iri is None.
         assert kwargs["id"] == "https://jawafdehi.org/case/x"
+
+
+def test_case_index_resolves_and_denormalizes_entities(monkeypatch):
+    """index() resolves NES display names at index time and stores them in the card."""
+    rel = SimpleNamespace(
+        nes_id="https://jawafdehi.org/entity/person/x",
+        relationship_type="accused",
+        outcome="convicted",
+        notes="",
+    )
+    case = _case("PUBLISHED")
+    case.entity_relationships = SimpleNamespace(all=lambda: [rel])
+
+    monkeypatch.setattr(
+        "cases.services.nes_resolver.resolve_entities",
+        lambda ids: {rel.nes_id: {"display_name": "Person X", "entity_type": "Person"}},
+    )
+
+    client = MagicMock()
+    case_index.index(case, client=client)
+    _, kwargs = client.index.call_args
+    entities = kwargs["body"]["raw"]["card"]["entities"]
+    assert entities == [
+        {
+            "nes_id": rel.nes_id,
+            "display_name": "Person X",
+            "entity_type": "Person",
+            "type": "accused",
+            "outcome": "convicted",
+            "notes": "",
+        }
+    ]
+
+
+def test_case_index_survives_entity_resolution_failure(monkeypatch):
+    """A NES resolution error must not stop the case from being indexed."""
+    rel = SimpleNamespace(
+        nes_id="https://jawafdehi.org/entity/person/x",
+        relationship_type="accused",
+        outcome="charged",
+        notes="",
+    )
+    case = _case("PUBLISHED")
+    case.entity_relationships = SimpleNamespace(all=lambda: [rel])
+
+    def _boom(ids):
+        raise RuntimeError("NES down")
+
+    monkeypatch.setattr("cases.services.nes_resolver.resolve_entities", _boom)
+
+    client = MagicMock()
+    case_index.index(case, client=client)
+    client.index.assert_called_once()
+    _, kwargs = client.index.call_args
+    # Still indexed, with the bind present but names left null for the reconcile.
+    entity = kwargs["body"]["raw"]["card"]["entities"][0]
+    assert entity["display_name"] is None
+    assert entity["type"] == "accused"

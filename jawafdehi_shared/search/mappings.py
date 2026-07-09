@@ -207,6 +207,12 @@ def common_mappings() -> dict[str, Any]:
                 "verdict_date": {"type": "date"},
                 "verdict_type": {"type": "keyword"},
                 "status": {"type": "keyword"},
+                # Coarse Jawafdehi-case lifecycle (ongoing/closed/others). A dedicated
+                # keyword so the unified search can facet/filter cases WITHOUT
+                # colliding with the generic ``status`` above (which NGM uses for its
+                # internal scraper enrichment flag pending/enriched/failed). Only
+                # Jawafdehi cases set this; other doc types leave it absent.
+                "case_status": {"type": "keyword"},
                 # Full serialized JSON-LD / record, return-only (not searchable).
                 "raw": {"type": "object", "enabled": False},
             }

@@ -30,15 +30,18 @@ class Command(BaseCommand):
         # Only PUBLISHED cases are indexed. (build_doc also yields no iri for a
         # non-published case, so the reindex driver would skip it anyway — the
         # filter just avoids streaming the whole table.)
-        # build_doc reads the court_cases property (the reference join), so
-        # prefetch it; chunk_size is REQUIRED for prefetch to apply under
-        # .iterator() (ValueError without it on Django 5.x).
+        # build_indexed_doc reads the court_cases property (the reference join) and
+        # the entity_relationships (to resolve + denormalize entity names into the
+        # card), so prefetch both; chunk_size is REQUIRED for prefetch to apply
+        # under .iterator() (ValueError without it on Django 5.x). Using
+        # build_indexed_doc (not the pure build_doc) is what makes a rebuild REFRESH
+        # entity names rather than blanking the card.
         result = reindex(
             index=CASE_INDEX,
             records=Case.objects.filter(state=CaseState.PUBLISHED)
-            .prefetch_related("courtcase_references")
+            .prefetch_related("courtcase_references", "entity_relationships")
             .iterator(chunk_size=200),
-            build_doc=search_index.build_doc,
+            build_doc=search_index.build_indexed_doc,
             rebuild=options["rebuild"],
         )
         self.stdout.write(

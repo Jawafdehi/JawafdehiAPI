@@ -56,6 +56,13 @@ class SearchQuerySerializer(serializers.Serializer):
     tags = serializers.ListField(
         child=serializers.CharField(allow_blank=False), required=False, default=list
     )
+    # Coarse case lifecycle refine facet (ongoing/closed/others). Case-scoped in
+    # practice (the case list sends ?type=case&status=...); the ``status`` param
+    # filters the ``case_status`` keyword field (NOT the generic ``status`` field,
+    # which holds NGM's scraper enrichment flag).
+    status = serializers.ListField(
+        child=serializers.CharField(allow_blank=False), required=False, default=list
+    )
     page = serializers.IntegerField(required=False, min_value=1, default=1)
     page_size = serializers.IntegerField(
         required=False, min_value=1, max_value=MAX_PAGE_SIZE, default=10
@@ -123,6 +130,17 @@ class SearchQuerySerializer(serializers.Serializer):
             many=True,
             description="Refine facet: filter by keyword/tag.",
         ),
+        OpenApiParameter(
+            "status",
+            OpenApiTypes.STR,
+            OpenApiParameter.QUERY,
+            required=False,
+            many=True,
+            description=(
+                "Refine facet: coarse case lifecycle (ongoing/closed/others). "
+                "Case-scoped in practice."
+            ),
+        ),
         OpenApiParameter("page", OpenApiTypes.INT, OpenApiParameter.QUERY, required=False),
         OpenApiParameter(
             "page_size", OpenApiTypes.INT, OpenApiParameter.QUERY, required=False
@@ -154,6 +172,7 @@ class UnifiedSearchView(APIView):
             "entity_type": data["entity_type"],
             "case_type": data["case_type"],
             "tags": data["tags"],
+            "status": data["status"],
         }
         try:
             response = SearchService().search(

@@ -156,25 +156,20 @@ class CaseSerializer(serializers.ModelSerializer):
         ``type`` is the relationship type. ``display_name``/``entity_type`` come
         from the NES resolver (``None`` when NES can't resolve the id).
         """
-        from cases.services.nes_resolver import resolve_entities
+        from cases.services.nes_resolver import build_entity_binds, resolve_entities
 
         try:
             relationships = list(obj.entity_relationships.all())
             resolved = resolve_entities(rel.nes_id for rel in relationships)
             # Per-entity relationship notes are internal-only, same as the
             # case-level notes field (BB-04): expose them to casework roles only.
+            # The shared shaper (build_entity_binds) defaults notes to "" so the
+            # public search-card path can't leak them; we pass include_notes for
+            # casework viewers here.
             notes_visible = _viewer_has_casework_access(self.context)
-            return [
-                {
-                    "nes_id": rel.nes_id,
-                    "display_name": resolved[rel.nes_id]["display_name"],
-                    "entity_type": resolved[rel.nes_id]["entity_type"],
-                    "type": rel.relationship_type,
-                    "outcome": rel.outcome,
-                    "notes": rel.notes if notes_visible else "",
-                }
-                for rel in relationships
-            ]
+            return build_entity_binds(
+                relationships, resolved, include_notes=notes_visible
+            )
         except (ValueError, TypeError, AttributeError) as e:
             logger.error(
                 f"Error serializing entities for case {obj.slug}: {e}",

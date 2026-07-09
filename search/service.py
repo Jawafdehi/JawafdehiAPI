@@ -137,12 +137,15 @@ def _sort_spec(sort: str) -> list[dict[str, Any]]:
 
 # Facet/filter fields: the request param name -> the keyword index field it filters
 # and aggregates over. ``entity_type`` reuses the schema.org ``type`` token; ``tags``
-# reuses the shared ``keywords`` field. These are exact-match (``terms``) facets,
-# distinct from the per-type ``counts`` (which come from the ``_index`` agg).
+# reuses the shared ``keywords`` field; the ``status`` param filters the coarse
+# case lifecycle, backed by the dedicated ``case_status`` field (NOT the generic
+# ``status``, which holds NGM's scraper enrichment flag). These are exact-match
+# (``terms``) facets, distinct from the per-type ``counts`` (from the ``_index`` agg).
 FACET_FIELDS: dict[str, str] = {
     "entity_type": "type",
     "case_type": "case_type",
     "tags": "keywords",
+    "status": "case_status",
 }
 
 
@@ -341,6 +344,7 @@ def build_query(
             "entity_type": {"terms": {"field": "type", "size": 50}},
             "case_type": {"terms": {"field": "case_type", "size": 50}},
             "tags": {"terms": {"field": "keywords", "size": 50}},
+            "status": {"terms": {"field": "case_status", "size": 50}},
         },
     }
 
@@ -471,7 +475,7 @@ def _serialize_hit(hit: dict[str, Any]) -> dict[str, Any]:
         if raw.get(key) is not None:
             extra[key] = raw[key]
 
-    return {
+    envelope: dict[str, Any] = {
         "type": result_type,
         "id": source.get("iri"),
         "source_app": source.get("source_app"),
@@ -486,6 +490,17 @@ def _serialize_hit(hit: dict[str, Any]) -> dict[str, Any]:
         "matched_fields": sorted(highlight.keys()),
         "extra": extra,
     }
+
+    # Case hits carry a denormalized ``card`` payload (indexed under ``raw.card``)
+    # so the SPA renders the result card without a follow-up /api/cases/{slug}/
+    # fetch. Only cases have it; older docs indexed before this field simply omit
+    # it, so the key is absent rather than null.
+    if result_type == "case":
+        card = raw.get("card")
+        if card is not None:
+            envelope["card"] = card
+
+    return envelope
 
 
 def _facets_from_aggs(aggs: dict[str, Any]) -> dict[str, int]:
