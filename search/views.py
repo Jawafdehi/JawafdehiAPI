@@ -33,11 +33,18 @@ class SearchQuerySerializer(serializers.Serializer):
     # endpoint can list/page the corpus and apply facet filters/sort without a
     # search term (e.g. "all entities of type X, newest first").
     q = serializers.CharField(required=False, allow_blank=True, default="")
+    # ``all`` is accepted as an explicit alias for "no type filter" (search every
+    # type) — the SPA sends ``?type=all`` for its default/reset state. It is
+    # normalized away in ``validate_type`` so the service sees an empty list.
     type = serializers.ListField(
-        child=serializers.ChoiceField(choices=list(ALL_TYPES)),
+        child=serializers.ChoiceField(choices=[*ALL_TYPES, "all"]),
         required=False,
         default=list,
     )
+
+    def validate_type(self, value):
+        # Drop the ``all`` sentinel — an empty list means "search all types".
+        return [t for t in value if t != "all"]
     lang = serializers.ChoiceField(
         choices=["ne", "en", "both"], required=False, default="both"
     )

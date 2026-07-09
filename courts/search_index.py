@@ -153,8 +153,12 @@ def build_doc(obj: Any) -> dict[str, Any]:
     }
     # Promote case_type to a top-level keyword so the unified search can filter and
     # facet on it (it also stays in ``keywords`` and ``raw`` for text recall).
+    # NORMALIZE the facet token to upper-case: court-case types are free text from
+    # scrapers with inconsistent casing ("CORRUPTION" vs "Corruption"), which would
+    # otherwise split one concept into duplicate facet buckets. The verbatim value
+    # is preserved in ``raw.case_type`` for display; the label layer upper-cases too.
     if case_type:
-        doc["case_type"] = case_type
+        doc["case_type"] = case_type.upper()
 
     reg_ad = getattr(obj, "registration_date_ad", None)
     if reg_ad is not None:

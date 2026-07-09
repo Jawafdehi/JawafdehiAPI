@@ -148,8 +148,11 @@ def test_courtcase_build_doc_shape_and_title_from_case_number():
     assert "supreme" in doc["identifiers"]
     assert "https://jawafdehi.org/entity/person/ram-bahadur" in doc["identifiers"]
     assert doc["date_bs"] == "2080-10-01"
-    # case_type promoted to a top-level keyword for filtering/faceting.
-    assert doc["case_type"] == "corruption"
+    # case_type promoted to a top-level keyword for filtering/faceting, NORMALIZED
+    # to upper-case so scraper casing variants ("corruption"/"Corruption") don't
+    # split into duplicate facet buckets. The verbatim value stays in ``raw``.
+    assert doc["case_type"] == "CORRUPTION"
+    assert doc["raw"]["case_type"] == "corruption"
 
 
 def test_courtcase_title_en_none_without_english_court_name():
