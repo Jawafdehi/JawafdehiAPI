@@ -1,35 +1,106 @@
-# Integration tests against an ephemeral platform stack.
-# STUB for later wiring (the user will enable GitHub CI). Documents intent:
-# stand up the platform compose stack, wait for health, run the suite.
+# E2E integration gate: brings up the real platform stack, seeds it, and runs BOTH
+# halves against it — the pytest API suite (HTTP contract) and the frontend
+# Playwright suite (browser user-actions). This is the authoritative cross-repo
+# E2E gate; it lives in the API repo because the compose file does.
+#
+# Mirrors the proven local flow (docker-compose.e2e.yml overlay, isolated ports):
+#   build image -> up (no zitadel) -> --wait + health loop -> seed_dev ->
+#   reindex_all --rebuild -> pytest (API) -> playwright (FE) -> artifacts -> down.
+#
+# Currently on workflow_dispatch + PR as a NON-BLOCKING signal (not a required
+# check). Flip it to a required status check once it's proven stable in Actions.
 name: integration-tests
 
 on:
   workflow_dispatch: {}
-  # pull_request:  # enable once repos are pushed and the stack builds in CI
-  # push:
-  #   branches: [v2]
+  pull_request:
+    branches: [main, v2]
+
+# The FE repo to check out alongside for the Playwright half. The compose overlay
+# and env file live at the API repo root (one dir up from integration-tests/).
+env:
+  FRONTEND_REPO: jawafdehi/jawafdehi
+  FRONTEND_REF: main
+  COMPOSE: -p jawaf-e2e --env-file docker-compose.e2e.env -f docker-compose.yml -f docker-compose.e2e.yml
+  PLATFORM_BASE_URL: http://localhost:48010
 
 jobs:
-  integration:
+  e2e:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout API repo (owns the compose file)
+        uses: actions/checkout@v4
 
-      # The monolith compose file lives at the repo root; in CI the image would be
-      # built here (or pulled from a registry) and brought up on the one host.
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Checkout frontend repo (for the Playwright half)
+        uses: actions/checkout@v4
         with:
-          python-version: "3.12"
+          repository: ${{ env.FRONTEND_REPO }}
+          ref: ${{ env.FRONTEND_REF }}
+          path: _frontend
 
-      - name: Install deps
-        run: pip install -e .
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: true
 
-      # - name: Bring up platform 
-      #   run: docker compose -f ../docker-compose.yml up -d --wait
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
 
-      - name: Run integration tests
+      - name: Build the platform image from THIS checkout
+        run: docker build -t jawafdehi-platform:e2e -f Dockerfile .
+
+      - name: Bring up the stack (no zitadel — dev-login replaces OIDC for E2E)
+        run: |
+          docker compose ${COMPOSE} up -d --wait \
+            postgres opensearch minio platform-migrate platform
+
+      - name: Wait for health
+        run: |
+          for i in $(seq 1 60); do
+            curl -sf "${PLATFORM_BASE_URL}/api/health" && break
+            sleep 3
+          done
+          curl -sf "${PLATFORM_BASE_URL}/api/health"
+
+      - name: Seed + index
+        run: |
+          docker compose ${COMPOSE} exec -T platform uv run python manage.py seed_dev
+          docker compose ${COMPOSE} exec -T platform uv run python manage.py reindex_all --rebuild
+
+      - name: API integration tests (pytest, live stack)
+        working-directory: integration-tests
         env:
-          SKIP_IF_STACK_DOWN: "1"  # until the stack is wired in CI
-        run: pytest -v
+          SKIP_IF_STACK_DOWN: "0"
+        run: |
+          uv sync --frozen || pip install -e .
+          uv run pytest -v || pytest -v
+
+      - name: Frontend E2E (Playwright, real backend via proxy)
+        working-directory: _frontend
+        env:
+          VITE_API_PROXY_TARGET: http://127.0.0.1:48010
+        run: |
+          bun install --frozen-lockfile
+          bunx playwright install --with-deps chromium
+          bunx playwright test
+
+      - name: Collect compose logs
+        if: always()
+        run: docker compose ${COMPOSE} logs > compose-logs.txt || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts
+          path: |
+            compose-logs.txt
+            _frontend/playwright-report/**
+          if-no-files-found: ignore
+
+      - name: Tear down
+        if: always()
+        run: docker compose ${COMPOSE} down -v
