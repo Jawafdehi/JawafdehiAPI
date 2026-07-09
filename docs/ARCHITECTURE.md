@@ -16,10 +16,11 @@ a monolith**; this doc describes the shipped result, not the journey.
   `monolith/` + `services/{nes,ngm,jawafdehi}/` layout into top-level apps.)
 - **Apps** (all top-level dirs, in `INSTALLED_APPS`): `entities` (NES), `courts`
   + `materials` (NGM), the Jawafdehi apps `cases` + `review`, plus the
-  platform-level `search`, `discovery`, and `jobs` apps. Project glue lives in the
-  top-level `config/` package (`settings.py`, `urls.py`, `wsgi.py`, `asgi.py`,
-  `db_router.py`). _(The `case_workflows` app was dropped — migration
-  `cases/migrations/0040_drop_case_workflows_tables.py`.)_
+  platform-level `search`, `discovery`, `jobs`, `content` (headless Wagtail CMS —
+  the "Newsroom"; see §3.5), and `llm` (a provider-agnostic LLM invocation layer —
+  see §3.6). Project glue lives in the top-level `config/` package (`settings.py`,
+  `urls.py`, `wsgi.py`, `asgi.py`, `db_router.py`). _(The `case_workflows` app was
+  dropped — migration `cases/migrations/0040_drop_case_workflows_tables.py`.)_
 - **Database-per-service preserved** via a DB **router** (`config.db_router.
   ServiceDatabaseRouter`, wired at `config/settings.py:433`): `entities` → `nes`
   DB, `courts`/`materials` → `ngm` DB, everything else → `default`. **No cross-DB
@@ -92,6 +93,22 @@ per-type Pydantic models were deleted in NES.
   (`4c39d8c`), which briefly 404'd the SPA's `/updates` calls; it was
   **forward-ported back into `v2`** (Wagtail 7.4, PR #270, adapted from
   `origin/main` which has no shared history) with the frontend contract preserved.
+
+## 3.6 LLM invocation layer (`llm/`)
+
+- A **provider-agnostic LLM invocation layer** used by internal pipelines
+  (casework review grading, sourcing/enrichment, digitization helpers) — NOT a
+  public HTTP surface: the `llm` app mounts **no `urls.py`** and is invoked
+  in-process.
+- Entry points (`llm/invoke.py`): `invoke_text` / `invoke_with_tools` /
+  `invoke_json`, with a **tier** (`premium`/`cheap`) resolved to a concrete
+  provider+model by `llm/routing.py` (`provider_for_tier`, `model_for_tier`).
+  `invoke_json` uses `salvage_json` to repair truncated/dirty model output before
+  parsing (fragile string surgery — covered by `tests/test_llm_salvage_json.py`).
+- **Providers** (`llm/providers/`): `bedrock` (multimodal Claude on AWS Bedrock),
+  `proxy` (an HTTP gateway), and `cli` (local CLI harnesses). Token accounting is
+  in `llm/usage.py`; tool-use looping in `llm/tools.py`. `llm/cli_mcp_server.py`
+  exposes an MCP surface for local tooling.
 
 ## 4. Auth: OIDC/Zitadel only
 
