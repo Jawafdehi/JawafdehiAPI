@@ -42,7 +42,7 @@ _IAST_DIACRITICS = re.compile(r"[āīūṛṝḷḹṅñṭḍṇśṣṃḥĀĪ
 # start means real English mixed-case tokens (CamelCase "AsiaInfo", "McMahon",
 # "iPhone"; Titlecase; ALLCAPS "UOB") never match — chosen to be false-positive
 # free because this drives a log warning, not a hard rejection.
-_HK_TOKEN = re.compile(r"^[a-z]+[AIUEMR]([a-z]|$)")
+_HK_TOKEN = re.compile(r"^[a-z]+[AIU]([a-z]|$)")
 # Anusvara/nasal tilde between letters (sA~da, kAThamADau~).
 _HK_TILDE = re.compile(r"[a-zA-Z]~[a-zA-Z]")
 _TOKEN_SPLIT = re.compile(r"[\s,()]+")
