@@ -257,6 +257,13 @@ def test_case_build_doc_status_ongoing_closed_others():
     assert others["case_status"] == "others"
 
 
+def test_case_build_doc_mirrors_case_status_into_raw():
+    """``raw.case_status`` must be set so ``_serialize_hit`` can surface it as
+    ``extra.case_status`` (the SPA's non-card lifecycle fallback)."""
+    doc = case_index.build_doc(_card_case())
+    assert doc["raw"]["case_status"] == doc["case_status"] == "ongoing"
+
+
 def test_build_indexed_doc_resolves_entities_for_bulk_path(monkeypatch):
     """The bulk/live wrapper resolves NES names so a rebuild refreshes (not blanks)
     the card entities — the pure build_doc alone would leave them empty."""
