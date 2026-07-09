@@ -121,6 +121,19 @@ def test_search_api_passes_sort_and_filters_through():
 
 
 @pytest.mark.django_db
+def test_search_api_case_type_filter_normalized_to_upper():
+    """A lowercase ``case_type`` filter must upper-case to match the indexed token
+    (court-case case_type is normalized to upper at index time)."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get("/api/search/", {"q": "x", "case_type": "corruption"})
+    assert resp.status_code == 200
+    filters = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    assert {"terms": {"case_type": ["CORRUPTION"]}} in filters
+
+
+@pytest.mark.django_db
 def test_search_api_threads_status_facet_through():
     """The case-list ?type=case&status=ongoing filter reaches the OpenSearch DSL."""
     client = MagicMock()
@@ -137,4 +150,29 @@ def test_search_api_threads_status_facet_through():
 @pytest.mark.django_db
 def test_search_api_400_on_invalid_sort():
     resp = APIClient().get("/api/search/", {"q": "x", "sort": "bogus"})
+    assert resp.status_code == 400
+
+
+@pytest.mark.django_db
+def test_search_api_type_all_searches_every_type():
+    """``?type=all`` is the SPA's default/reset sentinel — it must search every
+    type (like omitting ``type``), NOT 200-with-an-error-body. Regression: the
+    ChoiceField rejected ``all`` as invalid, so the response carried a validation
+    error while still returning 200, silently yielding zero results.
+    """
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get("/api/search/", {"q": "roads", "type": "all"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "count" in body and body.get("count") is not None
+    # ``all`` normalizes to no type filter → the query hits the multi-index search.
+    index = client.search.call_args.kwargs.get("index")
+    assert index is None or "," in str(index) or isinstance(index, (list, tuple))
+
+
+@pytest.mark.django_db
+def test_search_api_400_on_invalid_type():
+    resp = APIClient().get("/api/search/", {"q": "x", "type": "bogus"})
     assert resp.status_code == 400
