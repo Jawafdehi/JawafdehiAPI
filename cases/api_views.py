@@ -699,26 +699,66 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             # scalar-only PATCHes.
             case.refresh_from_db()
             if entities_touched:
-                # Preserve an entity's outcome across the whole-list
+                # Preserve an accused bind's verdict across the whole-list
                 # delete/recreate when the client didn't send one, so an
                 # outcome-unaware client/script can't silently reset verdicts
                 # to 'charged'. Keyed by (nes_id, relationship_type) — the bind
-                # identity — so a re-sent bind keeps its outcome; a new bind (or
-                # one whose role changed) falls back to 'charged'.
+                # identity — so a re-sent accused bind keeps its verdict; a new
+                # accused bind falls back to 'charged', and non-accused roles
+                # carry no verdict at all (handled in the loop below).
                 prior_outcomes = {
                     (rel.nes_id, rel.relationship_type): rel.outcome
                     for rel in case.entity_relationships.all()
                 }
                 case.entity_relationships.all().delete()
+                # Two payload entries with the same (nes_id, relationship_type)
+                # pass serializer validation but collide on the
+                # ``unique_case_entity_relationship_type`` DB constraint at
+                # .create() (IntegrityError -> 500). Detect the dup here and
+                # return a field-keyed 422 instead. set_rollback + return is the
+                # method's established in-atomic 422 pattern (see the state
+                # transition block below): a raised DRF ValidationError would map
+                # to 400, and this project has no custom exception handler.
+                seen_binds: set[tuple[str, str]] = set()
                 for item in validated["entities"]:
-                    key = (item["nes_id"], item["relationship_type"])
-                    outcome = item.get("outcome") or prior_outcomes.get(
-                        key, RelationshipOutcome.CHARGED
-                    )
+                    rtype = item["relationship_type"]
+                    key = (item["nes_id"], rtype)
+                    if key in seen_binds:
+                        transaction.set_rollback(True)
+                        return Response(
+                            {
+                                "entities": [
+                                    f"Duplicate entity bind: '{item['nes_id']}' "
+                                    f"as '{rtype}' appears more than once."
+                                ]
+                            },
+                            status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        )
+                    seen_binds.add(key)
+                    if rtype == RelationshipType.ACCUSED:
+                        # Distinguish an omitted "outcome" key from an explicit
+                        # null. When the client SENDS ``outcome`` (even null),
+                        # honor it: a null accused verdict is normalized back to
+                        # 'charged' by the model save(), so a client can reset a
+                        # verdict to the default. Only when the key is entirely
+                        # OMITTED do we preserve the accused bind's prior verdict
+                        # across the whole-list replace; a brand-new bind with no
+                        # prior verdict falls back to 'charged'.
+                        if "outcome" in item:
+                            outcome = item["outcome"]
+                        else:
+                            outcome = (
+                                prior_outcomes.get(key) or RelationshipOutcome.CHARGED
+                            )
+                    else:
+                        # A verdict is meaningful only for ACCUSED; every other
+                        # role stays NULL (rejected earlier by the serializer,
+                        # enforced by the model save() + CHECK constraint).
+                        outcome = None
                     CaseEntityRelationship.objects.create(
                         case=case,
                         nes_id=item["nes_id"],
-                        relationship_type=item["relationship_type"],
+                        relationship_type=rtype,
                         outcome=outcome,
                         notes=item.get("notes") or "",
                     )
