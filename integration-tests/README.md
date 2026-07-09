@@ -32,7 +32,7 @@ resource kind (no per-service prefix):
 
 | Resource | Route on the monolith host |
 |---|---|
-| Corruption cases | `/api/cases/`, `/api/sources/` (Jawafdehi) |
+| Corruption cases | `/api/cases/` (Jawafdehi; `/api/sources/` removed — evidence via `/api/materials/`) |
 | Entities         | `/api/entities`, `/api/entity_prefixes`, `/api/health` |
 | Court cases      | `/api/courtcases/` (+ hearings/parties), `/api/courtcase-entities/` |
 | Materials        | `/api/materials/` |

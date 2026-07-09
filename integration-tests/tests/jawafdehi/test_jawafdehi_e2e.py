@@ -7,13 +7,17 @@ falling back to ``JAWAFDEHI_API_BASE_URL``).
 
 Observed live contract (monolith on :48000):
   * ``/api/``            -> 200 browsable root listing the public routers
-                            ``{"cases": ..., "sources": ...}`` (NOTE: the Jawafdehi
-                            DRF root has no ``entities`` router — the unified entity
-                            surface is the NES-owned ``/api/entities`` list view,
-                            mounted on the same ``/api/`` root but not a DRF router).
+                            ``{"cases": ...}`` (NOTE: the Jawafdehi DRF root has no
+                            ``entities`` router — the unified entity surface is the
+                            NES-owned ``/api/entities`` list view, mounted on the
+                            same ``/api/`` root but not a DRF router. It also has no
+                            ``sources`` router: per the ADR "cases own no documents"
+                            the ``/api/sources`` surface was REMOVED — evidence is
+                            referenced via ``/api/materials/`` + CaseMaterialReference).
   * ``/api/cases/``      -> 200 DRF page ``{count, next, previous, results}``
                             (PUBLISHED cases only for anon; empty today -> count 0).
-  * ``/api/sources/``    -> 200 (anonymous reads allowed).
+  * ``/api/materials/``  -> 200 (anonymous reads allowed; the universal document
+                            store that replaced the old ``/api/sources``).
   * Writes (POST) without auth -> 401 (OIDC-only).
   * Legacy DRF ``Authorization: Token xxx`` is IGNORED (read -> 200 as anon;
     write -> 401), not parsed-and-rejected — TokenAuthentication is gone.
@@ -60,6 +64,35 @@ def test_api_root_reachable(client):
     assert "cases" in body, f"expected 'cases' route in API root, got: {body}"
     assert "entities" not in body, (
         f"entities is the NES list view, not a Jawafdehi DRF router: {body}"
+    )
+    # ADR "cases own no documents": the /api/sources router was removed; evidence
+    # lives in /api/materials/. Assert it is gone so a re-introduction is caught.
+    assert "sources" not in body, (
+        f"/api/sources was removed (ADR: cases own no documents); root: {body}"
+    )
+
+
+def test_materials_surface_reachable(client):
+    """``/api/materials/`` is the universal document store that replaced the old
+    ``/api/sources`` (anonymous reads allowed). Cursor-paginated envelope."""
+    r = client.get("/api/materials/")
+    skip_if_throttled(r)
+    assert r.status_code == 200, (
+        f"expected /api/materials/ reachable, got {r.status_code}: {r.text[:200]}"
+    )
+    body = r.json()
+    # CursorPagination envelope: {results, next} (no count).
+    assert "results" in body and isinstance(body["results"], list), body
+
+
+def test_legacy_sources_route_is_gone(client):
+    """The removed ``/api/sources/`` route must 404 (ADR: cases own no documents).
+
+    A 200 here would mean the retired document-source surface came back."""
+    r = client.get("/api/sources/")
+    skip_if_throttled(r)
+    assert r.status_code == 404, (
+        f"/api/sources was removed; expected 404, got {r.status_code}"
     )
 
 

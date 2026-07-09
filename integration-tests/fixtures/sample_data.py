@@ -82,20 +82,22 @@ SAMPLE_CASE_SLUG = "case-077-WO-0123-ram-chandra-poudel"
 SAMPLE_CASE_IRI = f"{IRI_BASE}/case/{SAMPLE_CASE_SLUG}"
 
 
-# --- Document source ({link, role}) -------------------------------------------
-# DocumentSource.url is a JSON list of {link, role} dicts; ``role`` is a
-# SourceLinkRole (RAW, MARKDOWN, PERMALINK, SOURCE_PAGE, ALTERNATE). A missing
-# role defaults to RAW (normalize_url_list). NGM's doc modality maps 1:1.
-SOURCE_LINK_ROLES = {"RAW", "MARKDOWN", "PERMALINK", "SOURCE_PAGE", "ALTERNATE"}
-
-SAMPLE_DOCUMENT_SOURCE: dict = {
-    "source_type": "COURT_ORDER",
-    "publication_date": "2022-06-10",
-    "url": [
-        {"link": "https://supremecourt.gov.np/cases/077-WO-0123/order.pdf", "role": "RAW"},
-        {"link": "https://supremecourt.gov.np/cases/077-WO-0123", "role": "PERMALINK"},
+# --- Material (evidence) ------------------------------------------------------
+# ADR "cases own no documents": the old DocumentSource was RETIRED. Evidence is a
+# schema.org JSON-LD Material keyed by an ``@id`` IRI (/material/<source>/<ident>),
+# referenced from a case via CaseMaterialReference(material_iri=...). This sample
+# is the current shape (a court-order material) for any live-write test.
+SAMPLE_MATERIAL_IRI = f"{IRI_BASE}/material/court_order/supreme.077-wo-0123"
+SAMPLE_MATERIAL: dict = {
+    "@context": "https://schema.org",
+    "@type": ["Manuscript", "DigitalDocument"],
+    "@id": SAMPLE_MATERIAL_IRI,
+    "name": {"en": "Supreme Court order 077-WO-0123", "ne": "सर्वोच्च अदालतको आदेश"},
+    "datePublished": "2022-06-10",
+    # associatedMedia carries the roled links that DocumentSource.url used to hold.
+    "associatedMedia": [
+        {"@type": "MediaObject", "contentUrl": "https://supremecourt.gov.np/cases/077-WO-0123/order.pdf"},
     ],
-    "related_entities": [SAMPLE_ENTITY_IRI],
 }
 
 
@@ -114,6 +116,6 @@ __all__ = [
     "SAMPLE_NGM_PARTY_UNRESOLVED",
     "SAMPLE_CASE_SLUG",
     "SAMPLE_CASE_IRI",
-    "SOURCE_LINK_ROLES",
-    "SAMPLE_DOCUMENT_SOURCE",
+    "SAMPLE_MATERIAL_IRI",
+    "SAMPLE_MATERIAL",
 ]
