@@ -62,6 +62,7 @@ from .rules.predicates import (
     can_transition_case_state,
     can_view_case,
     is_admin_or_moderator,
+    is_case_contributor,
     is_caseworker,
     is_readonly,
 )
@@ -630,15 +631,24 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         """
         case = self.get_object()
 
-        if case.state in (CaseState.DRAFT, CaseState.IN_REVIEW):
-            if not request.user.is_authenticated or not can_view_case(
-                request.user, case
-            ):
-                return Response(
-                    {"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND
-                )
+        # The history carries internal casework data (moderator names + return
+        # reasons) for EVERY state — including PUBLISHED — so it is gated
+        # unconditionally, unlike retrieve() (which exposes a published case's
+        # content to the public). Access = a casework-viewing role OR a
+        # contributor (the author's feedback loop: they must see why their case
+        # was returned, even without a casework role). Anyone else gets 404 so
+        # the endpoint never confirms a case's existence to an outsider.
+        if not request.user.is_authenticated or not (
+            can_view_case(request.user, case)
+            or is_case_contributor(request.user, case)
+        ):
+            return Response(
+                {"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND
+            )
 
-        changes = case.state_changes.all()  # Meta.ordering → newest first
+        # select_related("actor") so the serializer's actor_name lookup per row
+        # doesn't fan out into N+1 queries.
+        changes = case.state_changes.select_related("actor")  # newest first (Meta)
         page = self.paginate_queryset(changes)
         serializer = CaseStateChangeSerializer(
             page if page is not None else changes, many=True
@@ -919,6 +929,18 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             # model's sync is THE single join writer (no-op when unchanged).
             if court_cases_touched:
                 case._sync_courtcase_references(validated.get("court_cases") or [])
+
+            # Bump ``updated_at`` for a relation-only PATCH. The scalar path bumps
+            # it above and every state transition re-saves the row, but a PATCH
+            # that touches ONLY joins (/entities, /evidence, /court_cases) with no
+            # scalar field and no state change writes through the join tables and
+            # never touches the Case row — leaving ``updated_at`` (and the derived
+            # ETag) stale, so a concurrent relation edit could clobber unseen.
+            relations_touched = (
+                entities_touched or evidence_touched or court_cases_touched
+            )
+            if relations_touched and not scalar_updates:
+                Case.objects.filter(pk=case.pk).update(updated_at=timezone.now())
 
             case.refresh_from_db()
 

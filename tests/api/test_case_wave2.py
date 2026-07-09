@@ -288,10 +288,77 @@ def test_history_endpoint_returns_changes_newest_first():
 
 @pytest.mark.django_db
 def test_history_endpoint_hidden_for_public_on_draft():
-    """A draft's history must not leak to an unauthenticated caller (404, same
-    visibility gate as retrieve)."""
+    """A draft's history must not leak to an unauthenticated caller (404)."""
     case = _publishable_case(state=CaseState.DRAFT)
 
     resp = APIClient().get(URL.format(case.slug) + "history/")
 
     assert resp.status_code == 404
+
+
+@pytest.mark.django_db
+def test_history_endpoint_hidden_for_public_on_published():
+    """History carries internal data (moderator names + return reasons), so it
+    must be gated even for a PUBLISHED case — unlike retrieve(), which exposes a
+    published case to the public. An anonymous caller gets 404."""
+    user = create_user_with_role("mod-hp", "mod-hp@example.com", "Moderator")
+    case = _publishable_case(state=CaseState.IN_REVIEW)
+    _patch_state(_authed_client(user), case, CaseState.PUBLISHED)
+
+    resp = APIClient().get(URL.format(case.slug) + "history/")
+
+    assert resp.status_code == 404
+
+
+@pytest.mark.django_db
+def test_history_endpoint_visible_to_contributor_author():
+    """The case author (a contributor without a casework role) can read their
+    own case's history — that's the point of the feedback loop."""
+    author = create_user_with_role("cw-author", "cw-author@example.com", "Caseworker")
+    mod = create_user_with_role("mod-fb", "mod-fb@example.com", "Moderator")
+    case = _publishable_case(state=CaseState.IN_REVIEW)
+    case.contributors.add(author)
+    # Moderator sends it back with a reason.
+    _patch_state(
+        _authed_client(mod),
+        case,
+        CaseState.DRAFT,
+        HTTP_X_TRANSITION_REASON="Please add a second source.",
+    )
+
+    resp = _authed_client(author).get(URL.format(case.slug) + "history/")
+
+    assert resp.status_code == 200
+    rows = resp.data["results"] if "results" in resp.data else resp.data
+    assert any(r["reason"] == "Please add a second source." for r in rows)
+
+
+@pytest.mark.django_db
+def test_relation_only_patch_bumps_etag():
+    """A PATCH touching ONLY relations (no scalar, no state) must still move the
+    optimistic-concurrency token, else a concurrent relation edit clobbers
+    unseen."""
+    user = create_user_with_role("mod-rel", "mod-rel@example.com", "Moderator")
+    case = _publishable_case(state=CaseState.DRAFT)
+    client = _authed_client(user)
+
+    before = client.get(URL.format(case.slug)).headers["ETag"]
+    resp = client.patch(
+        URL.format(case.slug),
+        data=[
+            {
+                "op": "replace",
+                "path": "/entities",
+                "value": [
+                    {
+                        "nes_id": "https://jawafdehi.org/entity/person/some-other-person",
+                        "relationship_type": "RELATED",
+                    }
+                ],
+            }
+        ],
+        format="json",
+    )
+
+    assert resp.status_code == 200
+    assert resp.headers["ETag"] != before  # token moved on a relation-only edit

@@ -918,6 +918,8 @@ class CaseStateChangeAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
     """
 
     list_display = ("case", "from_state", "to_state", "actor", "created_at")
+    # case + actor are FKs rendered per row; join them to avoid N+1 in the list.
+    list_select_related = ("case", "actor")
     list_filter = ("to_state", "from_state", "created_at")
     search_fields = ("case__slug", "case__title", "actor__username", "reason")
     autocomplete_fields = ("case", "actor")
