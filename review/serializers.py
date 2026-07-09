@@ -11,9 +11,53 @@ from jawafdehi_shared.entities.ids import (
 from .models import CaseReview, ReviewConfig
 
 
+def _result_dict(result):
+    """Return ``result`` iff it's a dict, else ``{}``.
+
+    ``CaseReview.result`` is a JSONField, so a malformed/legacy row could hold a
+    list or scalar. All the derived read fields go through this so a bad shape
+    degrades to "no data" instead of 500-ing the review list/detail endpoints.
+    """
+    return result if isinstance(result, dict) else {}
+
+
+def _reviewers_from_result(result):
+    """Project a review's per-tier LLM usage into the reviewer-chip shape.
+
+    The runner records token usage per ``(provider, tier, model)`` bucket in
+    ``result["token_usage"]["by_provider"]`` (see llm.usage.UsageAccumulator).
+    The frontend renders reviewer attribution from a ``reviewers`` list of
+    ``{tier, provider, model, calls}`` — a single review typically lists more
+    than one entry because gate rules use the premium tier while routine
+    rules/narrative use the cheap tier. Return the projected list, or ``None``
+    when the review hasn't produced usage yet (pending/failed runs).
+    """
+    # ``result`` is a JSONField, so guard every level: malformed/legacy stored
+    # data (a non-dict result, a scalar token_usage, a non-list by_provider)
+    # must yield None, never crash the serializer.
+    token_usage = _result_dict(result).get("token_usage")
+    if not isinstance(token_usage, dict):
+        return None
+    buckets = token_usage.get("by_provider")
+    if not isinstance(buckets, list):
+        return None
+    reviewers = [
+        {
+            "tier": b.get("tier", ""),
+            "provider": b.get("provider", ""),
+            "model": b.get("model", ""),
+            "calls": b.get("calls", 0),
+        }
+        for b in buckets
+        if isinstance(b, dict)
+    ]
+    return reviewers or None
+
+
 class CaseReviewListSerializer(serializers.ModelSerializer):
     overall_score = serializers.SerializerMethodField()
     disposition = serializers.SerializerMethodField()
+    reviewers = serializers.SerializerMethodField()
 
     class Meta:
         model = CaseReview
@@ -28,6 +72,7 @@ class CaseReviewListSerializer(serializers.ModelSerializer):
             "sources_converted",
             "overall_score",
             "disposition",
+            "reviewers",
             "case_type",
             "created_at",
             "completed_at",
@@ -35,13 +80,18 @@ class CaseReviewListSerializer(serializers.ModelSerializer):
         ]
 
     def get_overall_score(self, obj):
-        return (obj.result or {}).get("overall_score") if obj.result else None
+        return _result_dict(obj.result).get("overall_score")
 
     def get_disposition(self, obj):
-        return (obj.result or {}).get("disposition") if obj.result else None
+        return _result_dict(obj.result).get("disposition")
+
+    def get_reviewers(self, obj):
+        return _reviewers_from_result(obj.result)
 
 
 class CaseReviewDetailSerializer(serializers.ModelSerializer):
+    reviewers = serializers.SerializerMethodField()
+
     class Meta:
         model = CaseReview
         fields = [
@@ -56,12 +106,16 @@ class CaseReviewDetailSerializer(serializers.ModelSerializer):
             "source_count",
             "sources_converted",
             "result",
+            "reviewers",
             "created_at",
             "updated_at",
             "started_at",
             "completed_at",
             "duration_seconds",
         ]
+
+    def get_reviewers(self, obj):
+        return _reviewers_from_result(obj.result)
 
 
 class ReviewConfigSerializer(serializers.ModelSerializer):
