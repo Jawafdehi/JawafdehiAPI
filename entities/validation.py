@@ -13,9 +13,54 @@ Everything else in the document is free-form JSON-LD and is stored verbatim.
 
 from __future__ import annotations
 
+import logging
+import re
 from typing import Any, Dict, List
 
 from jawafdehi_shared.entities.ids import is_valid_entity_iri
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# IAST / machine-transliteration detection for English names
+# ---------------------------------------------------------------------------
+# Historic bulk loads populated ``name.en`` with a raw character-level
+# transliteration of the Devanagari instead of a real English name — either
+# academic IAST (diacritics: नारायणी → "Nārāyaṇī") or Harvard-Kyoto/ITRANS
+# (long vowels marked by mid-word capitals: नारायणी अस्पताल → "nArAyaNI
+# aspatAla"). A proper English name TRANSLATES generic nouns (अस्पताल→Hospital)
+# and romanizes proper nouns cleanly ("Narayani Hospital"). We can't verify the
+# latter here, but we CAN cheaply spot the machine-transliteration signature and
+# warn, so a regression (a new load reintroducing it) is visible in the logs
+# rather than silent. This is observability only — it never blocks a write.
+
+# Academic IAST diacritics / accented Latin used by transliteration schemes.
+_IAST_DIACRITICS = re.compile(r"[āīūṛṝḷḹṅñṭḍṇśṣṃḥĀĪŪṚṜḶḸṄÑṬḌṆŚṢṂḤ]")
+# Harvard-Kyoto / ITRANS long-vowel + anusvara markers, matched PER TOKEN: an
+# otherwise all-lowercase token carrying an embedded/final capital A I U E M R
+# (aspatAla, baiMka, nArAyaNI, padmA, kampanI). Anchoring to a lowercase-run
+# start means real English mixed-case tokens (CamelCase "AsiaInfo", "McMahon",
+# "iPhone"; Titlecase; ALLCAPS "UOB") never match — chosen to be false-positive
+# free because this drives a log warning, not a hard rejection.
+_HK_TOKEN = re.compile(r"^[a-z]+[AIU]([a-z]|$)")
+# Anusvara/nasal tilde between letters (sA~da, kAThamADau~).
+_HK_TILDE = re.compile(r"[a-zA-Z]~[a-zA-Z]")
+_TOKEN_SPLIT = re.compile(r"[\s,()]+")
+
+
+def looks_like_iast(value: Any) -> bool:
+    """True if a name string carries a machine-transliteration signature.
+
+    Detects academic IAST diacritics and Harvard-Kyoto/ITRANS capital-vowel
+    markers — the hallmark of a romanized-not-translated ``en`` name. Used for a
+    log-only warning during validation; not a hard rule. Tuned to be
+    false-positive free on legitimate English/mixed-case names.
+    """
+    if not isinstance(value, str):
+        return False
+    if _IAST_DIACRITICS.search(value) or _HK_TILDE.search(value):
+        return True
+    return any(_HK_TOKEN.search(tok) for tok in _TOKEN_SPLIT.split(value))
 
 # ---------------------------------------------------------------------------
 # Known @type vocabulary
@@ -132,7 +177,27 @@ def validate_jsonld_entity(doc: Any) -> Dict[str, Any]:
             "name is required (a string or a non-empty language map)."
         )
 
+    # name.en quality — log-only warning if it carries a machine-transliteration
+    # signature (IAST diacritics / Harvard-Kyoto capital-vowel markers). This is
+    # NOT a hard rule: it never blocks the write, only surfaces a likely-bad
+    # English name in the logs so a regression is caught. A backfill fixes the
+    # value properly; see docs / the entity-en normalization mutation set.
+    _warn_if_iast_en(doc)
+
     return doc
+
+
+def _warn_if_iast_en(doc: Dict[str, Any]) -> None:
+    """Emit a warning when ``name.en`` looks like a raw transliteration."""
+    name = doc.get("name")
+    en = name.get("en") if isinstance(name, dict) else None
+    if looks_like_iast(en):
+        logger.warning(
+            "entity %s has a machine-transliterated name.en (%r) — likely IAST/"
+            "Harvard-Kyoto, not a real English name; needs backfill.",
+            doc.get("@id"),
+            en,
+        )
 
 
 def primary_type(doc: Dict[str, Any]) -> str:
