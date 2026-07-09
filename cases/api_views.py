@@ -6,6 +6,8 @@ See: .kiro/specs/accountability-platform-core/design.md
 
 import logging
 import re
+from html import escape
+from urllib.parse import unquote
 from xml.etree.ElementTree import Element, SubElement, tostring
 
 import jsonpatch
@@ -36,6 +38,7 @@ from jawafdehi_shared.identity import (
     JAWAFDEHI_USER_ID_HEADER,
     resolve_or_create_identity,
 )
+from jawafdehi_shared.storage import absolute_media_url
 
 from .caseworker_serializers import (
     BLOCKED_PATH_PREFIXES,
@@ -1145,28 +1148,60 @@ class FeedbackView(APIView):
         return ip
 
 
-OEMBED_CASE_URL_PATTERN = re.compile(
-    r"^https?://(?:www\.)?jawafdehi\.org/case/(?P<slug>[^/?#]+)"
+OEMBED_URL_PATTERN = re.compile(
+    r"^https?://(?:www\.)?jawafdehi\.org/(?P<kind>case|updates|entity)/(?P<ref>[^?#]+?)/?(?:[?#].*)?$"
 )
 EMBED_BASE_URL = "https://jawafdehi.org"
 DEFAULT_EMBED_WIDTH = 600
 DEFAULT_EMBED_HEIGHT = 300
 
 
+def _text(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for lang in ("en", "ne"):
+            val = value.get(lang)
+            if isinstance(val, str) and val.strip():
+                return val
+        return next((v for v in value.values() if isinstance(v, str) and v.strip()), "")
+    if isinstance(value, list):
+        for item in value:
+            text = _text(item).strip()
+            if text:
+                return text
+    return ""
+
+
+def _iframe_html(src, title, width, height):
+    return (
+        f'<iframe src="{escape(src, quote=True)}" '
+        f'width="{width}" '
+        f'height="{height}" '
+        f'frameborder="0" '
+        f'allowtransparency="true" '
+        f'scrolling="no" '
+        f'style="border:0;overflow:hidden;max-width:100%;" '
+        f'title="{escape(title, quote=True)}">'
+        f"</iframe>"
+    )
+
+
 @extend_schema(
     summary="oEmbed endpoint",
     description="""
-    oEmbed provider endpoint for Jawafdehi case pages.
+    oEmbed provider endpoint for public Jawafdehi share pages.
 
-    When a journalist pastes a Jawafdehi case URL into Substack, Medium,
+    When a journalist pastes a Jawafdehi URL into Substack, Medium,
     WordPress, or any oEmbed-compatible platform, the platform discovers
     this endpoint and requests an embeddable widget.
 
     **Parameters:**
-    - `url` (required): the jawafdehi.org case URL to embed
+    - `url` (required): a supported jawafdehi.org share URL to embed
     - `format` (optional): response format — `json` (default) or `xml`
 
-    Only published cases are available for embedding.
+    Supported URLs are public case pages, live update pages, and public entity
+    registry pages.
     Returns a `rich` type embed with an iframe pointing to the embed card.
     """,
     parameters=[
@@ -1174,7 +1209,7 @@ DEFAULT_EMBED_HEIGHT = 300
             name="url",
             type=OpenApiTypes.URI,
             location=OpenApiParameter.QUERY,
-            description="Full jawafdehi.org/case/{slug} URL to embed",
+            description="Full jawafdehi.org share URL to embed",
             required=True,
         ),
         OpenApiParameter(
@@ -1198,9 +1233,11 @@ class OEmbedView(APIView):
     oEmbed provider endpoint.
 
     GET /api/oembed/?url=https://jawafdehi.org/case/{slug}
+    GET /api/oembed/?url=https://jawafdehi.org/updates/{slug}
+    GET /api/oembed/?url=https://jawafdehi.org/entity/{prefix}/{slug}
 
-    Extracts the case slug from the provided URL, looks up the published case,
-    and returns an oEmbed response with an iframe embed code.
+    Extracts the shareable resource ref from the provided URL, looks up the
+    published resource, and returns an oEmbed response with an iframe embed code.
     """
 
     authentication_classes = []
@@ -1223,26 +1260,18 @@ class OEmbedView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        match = OEMBED_CASE_URL_PATTERN.match(url)
+        match = OEMBED_URL_PATTERN.match(url)
         if not match:
             return Response(
                 {
                     "error": (
-                        "URL does not match a supported Jawafdehi case pattern. "
-                        "Expected: https://jawafdehi.org/case/{slug}"
+                        "URL does not match a supported Jawafdehi pattern. "
+                        "Expected: https://jawafdehi.org/case/{slug}, "
+                        "https://jawafdehi.org/updates/{slug}, or "
+                        "https://jawafdehi.org/entity/{prefix}/{slug}"
                     )
                 },
                 status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        slug = match.group("slug")
-
-        try:
-            case = Case.objects.get(slug=slug, state=CaseState.PUBLISHED)
-        except Case.DoesNotExist:
-            return Response(
-                {"error": "Case not found or not published."},
-                status=status.HTTP_404_NOT_FOUND,
             )
 
         if response_format not in ("json", "xml"):
@@ -1258,39 +1287,125 @@ class OEmbedView(APIView):
             request.query_params.get("maxheight"), DEFAULT_EMBED_HEIGHT
         )
 
-        embed_url = f"{EMBED_BASE_URL}/embed/case/{slug}"
+        ref = unquote(match.group("ref")).strip("/")
+        if match.group("kind") == "case":
+            oembed_data = self._case_oembed(ref, width, height)
+        elif match.group("kind") == "updates":
+            oembed_data = self._update_oembed(ref, width, height)
+        else:
+            oembed_data = self._entity_oembed(ref, width, height)
 
-        oembed_data = {
-            "type": "rich",
-            "version": "1.0",
-            "title": case.title,
-            "author_name": "Jawafdehi Editorial",
-            "author_url": EMBED_BASE_URL,
-            "provider_name": "Jawafdehi",
-            "provider_url": EMBED_BASE_URL,
-            "cache_age": 3600,
-            "html": (
-                f'<iframe src="{embed_url}" '
-                f'width="{width}" '
-                f'height="{height}" '
-                f'frameborder="0" '
-                f'allowtransparency="true" '
-                f'scrolling="no" '
-                f'style="border:0;overflow:hidden;max-width:100%;" '
-                f'title="{case.title}">'
-                f"</iframe>"
-            ),
-            "width": width,
-            "height": height,
-            "thumbnail_url": case.thumbnail_url or "",
-            "thumbnail_width": width if case.thumbnail_url else None,
-            "thumbnail_height": height if case.thumbnail_url else None,
-        }
+        if oembed_data is None:
+            return Response(
+                {"error": "Resource not found or not published."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
         if response_format == "xml":
             return self._xml_response(oembed_data)
 
         return Response(oembed_data)
+
+    def _base_oembed(
+        self,
+        *,
+        title,
+        embed_url,
+        width,
+        height,
+        thumbnail_url="",
+        thumbnail_width=None,
+        thumbnail_height=None,
+    ):
+        return {
+            "type": "rich",
+            "version": "1.0",
+            "title": title,
+            "author_name": "Jawafdehi Editorial",
+            "author_url": EMBED_BASE_URL,
+            "provider_name": "Jawafdehi",
+            "provider_url": EMBED_BASE_URL,
+            "cache_age": 3600,
+            "html": _iframe_html(embed_url, title, width, height),
+            "width": width,
+            "height": height,
+            "thumbnail_url": thumbnail_url or "",
+            "thumbnail_width": thumbnail_width if thumbnail_url else None,
+            "thumbnail_height": thumbnail_height if thumbnail_url else None,
+        }
+
+    def _case_oembed(self, slug, width, height):
+        if "/" in slug:
+            return None
+        try:
+            case = Case.objects.get(slug=slug, state=CaseState.PUBLISHED)
+        except Case.DoesNotExist:
+            return None
+
+        return self._base_oembed(
+            title=case.title,
+            embed_url=f"{EMBED_BASE_URL}/embed/case/{slug}",
+            width=width,
+            height=height,
+            thumbnail_url=case.thumbnail_url or "",
+        )
+
+    def _update_oembed(self, slug, width, height):
+        if "/" in slug:
+            return None
+        from content.models import ArticlePage
+
+        article = ArticlePage.objects.live().public().filter(slug=slug).first()
+        if article is None:
+            return None
+
+        thumbnail_url = ""
+        thumbnail_width = None
+        thumbnail_height = None
+        if article.thumbnail_id:
+            try:
+                rendition = article.thumbnail.get_rendition("fill-800x450")
+                thumbnail_url = absolute_media_url(rendition.url)
+                thumbnail_width = rendition.width
+                thumbnail_height = rendition.height
+            except Exception:  # pragma: no cover - rendition failures should degrade.
+                thumbnail_url = ""
+
+        return self._base_oembed(
+            title=article.title,
+            embed_url=f"{EMBED_BASE_URL}/embed/updates/{slug}",
+            width=width,
+            height=height,
+            thumbnail_url=thumbnail_url,
+            thumbnail_width=thumbnail_width,
+            thumbnail_height=thumbnail_height,
+        )
+
+    def _entity_oembed(self, ref, width, height):
+        if "/" not in ref:
+            return None
+
+        from entities.persistence import EntityRepository
+        from jawafdehi_shared.entities.ids import build_entity_iri
+
+        prefix, _, slug = ref.rpartition("/")
+        try:
+            iri = build_entity_iri(prefix, slug)
+        except ValueError:
+            return None
+
+        entity = EntityRepository().get_entity(iri)
+        if entity is None:
+            return None
+
+        title = _text(entity.get("name")) or slug.replace("-", " ").title()
+
+        return self._base_oembed(
+            title=title,
+            embed_url=f"{EMBED_BASE_URL}/embed/entity/{ref}",
+            width=width,
+            height=height,
+        )
 
     def _parse_dimension(self, raw, default):
         if raw is None:
