@@ -63,6 +63,19 @@ class ValidationTests(SimpleTestCase):
         with self.assertRaises(JsonLdValidationError):
             validate_jsonld_entity(_doc(**{"@id": "not-an-iri"}))
 
+    def test_over_length_id_rejected(self):
+        # F6 guard: the entity @id is the platform join key; every consumer column
+        # (Case/CourtCase/Material nes_id) is CharField(MAX_IRI_LENGTH=300). An @id
+        # longer than the bound would bind-truncate/DataError downstream, so the
+        # validator (the write ingress) must reject it BEFORE it is ever stored —
+        # even though the StoredEntity.iri column itself is an unbounded TextField.
+        from jawafdehi_shared.entities.ids import MAX_IRI_LENGTH
+
+        long_id = "https://jawafdehi.org/entity/person/" + ("a" * MAX_IRI_LENGTH)
+        assert len(long_id) > MAX_IRI_LENGTH
+        with self.assertRaises(JsonLdValidationError):
+            validate_jsonld_entity(_doc(**{"@id": long_id}))
+
     def test_unknown_type_rejected(self):
         with self.assertRaises(JsonLdValidationError):
             validate_jsonld_entity(_doc(**{"@type": "Wizard"}))

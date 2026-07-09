@@ -183,8 +183,13 @@ def build_doc(case: Any, *, entities: list[dict[str, Any]] | None = None) -> dic
     }
     # Promote case_type to a top-level keyword so the unified search can filter and
     # facet on it (it also stays in ``keywords`` and ``raw`` for text recall).
-    if case_type:
-        doc["case_type"] = case_type
+    # NORMALIZE to upper-case to share ONE facet vocabulary with the NGM courtcase
+    # docs (courts/search_index.py also upper-cases): a Jawafdehi ``CORRUPTION``
+    # case and a court case typed "Corruption" must land in the SAME facet bucket,
+    # and the ``?case_type=`` filter (which upper-cases too) must match both. The
+    # CaseType enum is already upper-case; this guards against any non-enum value.
+    if case_type and isinstance(case_type, str):
+        doc["case_type"] = case_type.upper()
 
     start = getattr(case, "case_start_date", None)
     created = getattr(case, "created_at", None)

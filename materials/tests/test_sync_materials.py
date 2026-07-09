@@ -51,6 +51,37 @@ class CourtOrderReconciliationTests(SimpleTestCase):
         )
         self.assertEqual(doc["@type"], ["Manuscript", "DigitalDocument"])
 
+    def test_f5_hyphen_underscore_fork_when_court_order_marker_absent(self):
+        # F5 (KNOWN, DEFERRED): the reconciliation invariant above ONLY holds when
+        # the document_id carries the literal ``court-order`` marker so the sync
+        # path routes through parse_court_order_id → court_order_material_iri
+        # (which PRESERVES hyphens in the ident: the ident grammar [a-z0-9._-]
+        # allows them). A COURT_ORDER-typed row whose document_id LACKS that marker
+        # falls through to the generic manuscript minter _manuscript_material_iri,
+        # which converts ``-`` → ``_`` in the ident — minting a DIFFERENT IRI for
+        # the same underlying order (a duplicate Material row).
+        #
+        # This is a MATERIAL-DATA-affecting divergence: aligning the two minters
+        # would re-key already-synced manuscript rows, so it needs a coordinated
+        # re-sync/migration rather than a unilateral code flip. This test PINS the
+        # current (forked) behavior so the fork is visible and any future fix is a
+        # conscious, reviewed change (update this assertion when it lands).
+        from materials.jsonld import _manuscript_material_iri
+
+        canonical = court_order_material_iri("supreme", "082-OA-0503")
+        manuscript = _manuscript_material_iri("ngm:supreme:082-OA-0503")
+        # canonical keeps hyphens; the manuscript fallback underscores them.
+        self.assertEqual(
+            canonical, "https://jawafdehi.org/material/court_order/supreme.082-oa-0503"
+        )
+        self.assertEqual(
+            manuscript, "https://jawafdehi.org/material/supreme/082_oa_0503"
+        )
+        self.assertNotEqual(
+            canonical, manuscript,
+            "F5 fork resolved? Re-key the synced rows + update this assertion.",
+        )
+
 
 class ReindexMaterialsSinceTests(TestCase):
     databases = "__all__"
