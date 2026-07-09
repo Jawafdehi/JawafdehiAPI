@@ -121,6 +121,19 @@ def test_search_api_passes_sort_and_filters_through():
 
 
 @pytest.mark.django_db
+def test_search_api_case_type_filter_normalized_to_upper():
+    """A lowercase ``case_type`` filter must upper-case to match the indexed token
+    (court-case case_type is normalized to upper at index time)."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client):
+        resp = APIClient().get("/api/search/", {"q": "x", "case_type": "corruption"})
+    assert resp.status_code == 200
+    filters = client.search.call_args.kwargs["body"]["query"]["bool"]["filter"]
+    assert {"terms": {"case_type": ["CORRUPTION"]}} in filters
+
+
+@pytest.mark.django_db
 def test_search_api_threads_status_facet_through():
     """The case-list ?type=case&status=ongoing filter reaches the OpenSearch DSL."""
     client = MagicMock()

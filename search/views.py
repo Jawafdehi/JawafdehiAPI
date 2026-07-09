@@ -45,6 +45,13 @@ class SearchQuerySerializer(serializers.Serializer):
     def validate_type(self, value):
         # Drop the ``all`` sentinel — an empty list means "search all types".
         return [t for t in value if t != "all"]
+
+    def validate_case_type(self, value):
+        # The indexed ``case_type`` token is upper-cased (Jawafdehi enums already
+        # are; court-case scraper values are normalized at index time). Upper-case
+        # the exact-match filter too so ``?case_type=corruption`` matches the
+        # indexed ``CORRUPTION`` — otherwise the terms query silently returns nothing.
+        return [t.upper() for t in value]
     lang = serializers.ChoiceField(
         choices=["ne", "en", "both"], required=False, default="both"
     )

@@ -157,7 +157,7 @@ def build_doc(obj: Any) -> dict[str, Any]:
     # scrapers with inconsistent casing ("CORRUPTION" vs "Corruption"), which would
     # otherwise split one concept into duplicate facet buckets. The verbatim value
     # is preserved in ``raw.case_type`` for display; the label layer upper-cases too.
-    if case_type:
+    if case_type and isinstance(case_type, str):
         doc["case_type"] = case_type.upper()
 
     reg_ad = getattr(obj, "registration_date_ad", None)
