@@ -26,6 +26,8 @@ from drf_spectacular.utils import (
     extend_schema_view,
 )
 from rest_framework import filters, status, viewsets
+from rest_framework.decorators import action
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny, DjangoModelPermissions, IsAuthenticated
 from rest_framework.renderers import JSONRenderer
@@ -50,6 +52,7 @@ from .models import (
     CaseEntityRelationship,
     CaseMaterialReference,
     CaseState,
+    CaseStateChange,
     RelationshipOutcome,
     RelationshipType,
     StatisticsSnapshot,
@@ -59,12 +62,14 @@ from .rules.predicates import (
     can_transition_case_state,
     can_view_case,
     is_admin_or_moderator,
+    is_case_contributor,
     is_caseworker,
     is_readonly,
 )
 from .serializers import (
     CaseDetailSerializer,
     CaseSerializer,
+    CaseStateChangeSerializer,
     FeedbackSerializer,
 )
 from .services.statistics import (
@@ -111,6 +116,63 @@ def _recompute_material_visibility(material_iris) -> None:
 # (plan decision #5: OpenSearch is the one-way substrate, no in-process fallback).
 # Platform search now lives in the ``search`` app at ``GET /api/search/`` (see
 # ``search``), which queries all four OpenSearch indices.
+
+
+class CasePagination(PageNumberPagination):
+    """Page-number pagination that lets the client size the page.
+
+    The global default (``PageNumberPagination`` with ``PAGE_SIZE=20`` and no
+    ``page_size_query_param``) caps every list at 20 and ignores ``?page_size=``.
+    The moderation queue (``?state=IN_REVIEW``) and the admin dashboard both
+    need to fetch/​count more than 20 rows in one call, so this subclass honours
+    ``?page_size=`` up to a bounded max. It stays a *page-number* paginator (not
+    cursor) so the ``count`` field is preserved — the dashboard derives queue
+    depth / draft counts from ``count`` with ``page_size=1``.
+    """
+
+    page_size = 20  # unchanged default so existing callers see no difference
+    page_size_query_param = "page_size"
+    max_page_size = 200
+
+
+# ETag / optimistic-concurrency helper. A case's ``updated_at`` is a strong
+# enough version token: any accepted PATCH bumps ``auto_now``, so a stale token
+# reliably signals the caller edited from an out-of-date copy. We hash it to an
+# opaque quoted token so clients treat it as a cursor, not a timestamp to reason
+# about, and so a future switch to a real version column is invisible to them.
+def _version_token(case) -> str:
+    """Opaque, quoted ETag-style token derived from the case's updated_at.
+
+    Returns e.g. ``"a1b2c3d4"``. Quotes make it a well-formed ETag value so it
+    can be echoed in the ``ETag`` response header and matched against
+    ``If-Match``.
+    """
+    import hashlib
+
+    basis = f"{case.pk}:{case.updated_at.isoformat() if case.updated_at else ''}"
+    digest = hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
+    return f'"{digest}"'
+
+
+def _if_match_matches(request, case) -> bool:
+    """Whether the request's ``If-Match`` header matches the case's current token.
+
+    Tolerates the ``W/`` weak-validator prefix and a bare (unquoted) token so a
+    slightly-off client still interoperates. ``*`` matches any existing row
+    (per RFC 7232) — a caller asserting only "it still exists".
+    """
+    raw = request.headers.get("If-Match", "").strip()
+    if not raw:
+        return True  # no precondition supplied → not our concern here
+    current = _version_token(case)
+    for candidate in (t.strip() for t in raw.split(",")):
+        if candidate == "*":
+            return True
+        # Normalize weak prefix and optional missing quotes before comparing.
+        norm = candidate[2:].strip() if candidate.startswith("W/") else candidate
+        if norm == current or norm == current.strip('"'):
+            return True
+    return False
 
 
 @extend_schema_view(
@@ -251,6 +313,9 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
 
     serializer_class = CaseSerializer
     lookup_field = "slug"
+    # Client-sizable page-number pagination (preserves ``count`` for the
+    # dashboard; honours ``?page_size=`` for the moderation queue).
+    pagination_class = CasePagination
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     # ``state`` powers the moderation queue (GET /api/cases/?state=IN_REVIEW,
     # plan §G1). Filtering runs AFTER get_queryset()'s visibility scoping, so a
@@ -537,8 +602,59 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                     {"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND
                 )
 
-        # Case is accessible - return serialized data
+        # Case is accessible - return serialized data. Carry the optimistic-
+        # concurrency token so an editor can echo it back as ``If-Match`` on the
+        # next PATCH.
         serializer = self.get_serializer(case)
+        response = Response(serializer.data)
+        response["ETag"] = _version_token(case)
+        return response
+
+    @extend_schema(
+        summary="Case workflow history",
+        description=(
+            "Append-only log of a case's state transitions (who moved it, when, "
+            "to what state, and any reason). Casework-role only for non-published "
+            "cases — same visibility boundary as retrieve()."
+        ),
+        responses={200: CaseStateChangeSerializer(many=True)},
+        tags=["cases"],
+    )
+    @action(detail=True, methods=["get"], url_path="history")
+    def history(self, request, *args, **kwargs):
+        """GET /api/cases/{slug}/history/
+
+        The case author's feedback loop reads this to show "your submission was
+        sent back to draft by <moderator>: <reason>". Reuses the exact same
+        visibility gate as retrieve() (casework states are not public), so a
+        history request can never leak a draft/in-review case's existence.
+        """
+        case = self.get_object()
+
+        # The history carries internal casework data (moderator names + return
+        # reasons) for EVERY state — including PUBLISHED — so it is gated
+        # unconditionally, unlike retrieve() (which exposes a published case's
+        # content to the public). Access = a casework-viewing role OR a
+        # contributor (the author's feedback loop: they must see why their case
+        # was returned, even without a casework role). Anyone else gets 404 so
+        # the endpoint never confirms a case's existence to an outsider.
+        if not request.user.is_authenticated or not (
+            can_view_case(request.user, case)
+            or is_case_contributor(request.user, case)
+        ):
+            return Response(
+                {"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND
+            )
+
+        # select_related("actor") so the serializer's actor_name lookup per row
+        # doesn't fan out into N+1 queries.
+        changes = case.state_changes.select_related("actor")  # newest first (Meta)
+        page = self.paginate_queryset(changes)
+        serializer = CaseStateChangeSerializer(
+            page if page is not None else changes, many=True
+        )
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
         return Response(serializer.data)
 
     def partial_update(self, request, *args, **kwargs):
@@ -561,6 +677,27 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             return Response(
                 {"detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN
             )
+
+        # Optimistic concurrency (opt-in). When the client sends ``If-Match``
+        # with the token it received on load, reject the write if the case has
+        # changed since (last-write-wins would otherwise silently clobber a
+        # concurrent edit — the whole-list replaces on entities/evidence make
+        # this costly). Absent the header, behaviour is unchanged (backward
+        # compatible with existing clients and scripts). 412 Precondition Failed
+        # is the RFC 7232 status; the response carries the current token so the
+        # client can reconcile.
+        if not _if_match_matches(request, case):
+            resp = Response(
+                {
+                    "detail": (
+                        "This case was modified since you opened it. "
+                        "Reload to get the latest version before saving."
+                    )
+                },
+                status=status.HTTP_412_PRECONDITION_FAILED,
+            )
+            resp["ETag"] = _version_token(case)
+            return resp
 
         patch_ops = request.data
         if not isinstance(patch_ops, list):
@@ -683,7 +820,14 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             }
             if scalar_updates:
                 case = self.get_object()
-                Case.objects.filter(pk=case.pk).update(**scalar_updates)
+                # ``QuerySet.update()`` bypasses the model's ``auto_now`` on
+                # ``updated_at`` (that only fires on ``save()``), so scalar content
+                # edits would otherwise leave ``updated_at`` — and the derived
+                # optimistic-concurrency token — stale. Bump it explicitly so the
+                # serialized timestamp and the ETag both track content edits.
+                Case.objects.filter(pk=case.pk).update(
+                    updated_at=timezone.now(), **scalar_updates
+                )
                 # ``QuerySet.update()`` bypasses ``post_save``, so auditlog's UPDATE
                 # receiver never fires for scalar content edits — the same bypass the
                 # explicit search re-index below compensates for. Record the diff
@@ -786,6 +930,18 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             if court_cases_touched:
                 case._sync_courtcase_references(validated.get("court_cases") or [])
 
+            # Bump ``updated_at`` for a relation-only PATCH. The scalar path bumps
+            # it above and every state transition re-saves the row, but a PATCH
+            # that touches ONLY joins (/entities, /evidence, /court_cases) with no
+            # scalar field and no state change writes through the join tables and
+            # never touches the Case row — leaving ``updated_at`` (and the derived
+            # ETag) stale, so a concurrent relation edit could clobber unseen.
+            relations_touched = (
+                entities_touched or evidence_touched or court_cases_touched
+            )
+            if relations_touched and not scalar_updates:
+                Case.objects.filter(pk=case.pk).update(updated_at=timezone.now())
+
             case.refresh_from_db()
 
             if target_state is not None and target_state != case.state:
@@ -795,6 +951,7 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 # re-implemented here; the permission gate was applied above via
                 # can_transition_case_state. A model ValidationError -> 422 with
                 # field-keyed messages (mirroring the original submit() handling).
+                from_state = case.state
                 try:
                     if target_state == CaseState.IN_REVIEW:
                         case.submit()
@@ -831,6 +988,21 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                     transaction.set_rollback(True)
                     return Response(detail, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
+                # Record the transition in the append-only history log (actor +
+                # optional reason). The reason travels in the ``X-Transition-
+                # Reason`` header so the RFC-6902 body stays a pure patch and we
+                # stop overloading the internal ``/notes`` field for return
+                # reasons. Inside the same atomic block, so the log row and the
+                # state change commit or roll back together.
+                reason = (request.headers.get("X-Transition-Reason") or "").strip()
+                CaseStateChange.objects.create(
+                    case=case,
+                    from_state=from_state,
+                    to_state=case.state,
+                    actor=request.user if request.user.is_authenticated else None,
+                    reason=reason[:2000],  # defensive cap; TextField is unbounded
+                )
+
         # Scalar edits go through queryset .update() and entity-relationship
         # edits through bulk delete/create — neither fires post_save, so the
         # live search-index signal never runs. Re-index explicitly (best-effort,
@@ -851,7 +1023,14 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             )
             _recompute_material_visibility(affected_material_iris)
 
-        return Response(CaseSerializer(case).data, status=status.HTTP_200_OK)
+        # ``case`` was refreshed after the writes above; a state transition also
+        # re-saved it, so ``updated_at`` reflects the just-written row. Echo the
+        # fresh optimistic-concurrency token so a client editing in place can
+        # PATCH again without a re-fetch.
+        case.refresh_from_db(fields=["updated_at"])
+        response = Response(CaseSerializer(case).data, status=status.HTTP_200_OK)
+        response["ETag"] = _version_token(case)
+        return response
 
     def destroy(self, request, *args, **kwargs):
         """

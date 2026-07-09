@@ -767,7 +767,16 @@ CORS_ALLOW_HEADERS = [
     "user-agent",
     "x-csrftoken",
     "x-requested-with",
+    # Case optimistic-concurrency precondition + moderator transition reason
+    # (see CaseViewSet.partial_update). Neither is CORS-safelisted, so a
+    # cross-origin admin panel must be allowed to send them.
+    "if-match",
+    "x-transition-reason",
 ]
+# Expose the ETag so a cross-origin admin panel can read the optimistic-
+# concurrency token off retrieve/PATCH responses (same-origin dev already sees
+# it; this keeps a split-origin deploy working).
+CORS_EXPOSE_HEADERS = ["ETag"]
 CORS_ALLOW_CREDENTIALS = True
 
 if not CSRF_TRUSTED_ORIGINS:

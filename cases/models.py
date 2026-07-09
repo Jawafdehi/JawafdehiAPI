@@ -1155,3 +1155,58 @@ class StatisticsSnapshot(models.Model):
 
     def __str__(self):
         return f"{self.key} @ {self.computed_at.isoformat()}"
+
+
+class CaseStateChange(models.Model):
+    """Append-only log of a case's workflow transitions (DRAFT/IN_REVIEW/
+    PUBLISHED/CLOSED), with the actor and an optional human reason.
+
+    Why a dedicated table rather than reusing ``Case.versionInfo`` or auditlog:
+      - ``versionInfo`` holds only the *latest* action (it is overwritten on
+        every transition) and carries no actor and no reason — so it can't
+        answer "who sent my case back to draft, and why".
+      - auditlog ``LogEntry`` captures the field diff + actor but has no place
+        for a moderator's free-text reason, and isn't API-exposed.
+
+    This log is the source for the case author's feedback loop (a moderator's
+    "send back to draft" reason travels via the ``X-Transition-Reason`` request
+    header and lands in ``reason`` here) and for the case history panel. It is
+    written from the PATCH state-transition path; rows are never mutated or
+    deleted (the case itself is only ever soft-closed).
+    """
+
+    case = models.ForeignKey(
+        Case, on_delete=models.CASCADE, related_name="state_changes"
+    )
+    # from_state may be blank for the very first recorded transition if the
+    # prior state was somehow unknown; in practice it is always set.
+    from_state = models.CharField(
+        max_length=64, choices=CaseState.choices, blank=True, default=""
+    )
+    to_state = models.CharField(max_length=64, choices=CaseState.choices)
+    # SET_NULL (not CASCADE): losing the actor's user row must never erase the
+    # transition record — the history is about the case, not the user.
+    actor = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="case_state_changes",
+    )
+    # Optional free-text reason (e.g. why a submission was sent back or closed).
+    # Never published; internal to casework, same trust boundary as notes.
+    reason = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Case State Change"
+        verbose_name_plural = "Case State Changes"
+        # Newest-first is the display order for the history panel; also the
+        # index the per-case history query rides.
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["case", "-created_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.case_id}: {self.from_state or '∅'} → {self.to_state}"

@@ -13,6 +13,7 @@ from rest_framework import serializers
 from .models import (
     Case,
     CaseEntityRelationship,
+    CaseStateChange,
     Feedback,
 )
 
@@ -96,6 +97,37 @@ class CaseEntityRelationshipSerializer(serializers.ModelSerializer):
                 f"Invalid relationship type '{value}'. Must be one of: {', '.join(valid_types)}"
             )
         return value
+
+
+class CaseStateChangeSerializer(serializers.ModelSerializer):
+    """Read-only serializer for a single case workflow transition.
+
+    Powers the case history / author-feedback panel: what changed, who did it,
+    when, and the moderator's reason. ``actor_name`` is a display label only
+    (username), never an email or other PII.
+    """
+
+    actor_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CaseStateChange
+        fields = [
+            "id",
+            "from_state",
+            "to_state",
+            "actor_name",
+            "reason",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+    @extend_schema_field(OpenApiTypes.STR)
+    def get_actor_name(self, obj):
+        # Prefer a human name, fall back to username; empty when the actor row
+        # was deleted (SET_NULL) or the change was system-initiated.
+        if obj.actor is None:
+            return ""
+        return obj.actor.get_full_name() or obj.actor.get_username()
 
 
 class CaseSerializer(serializers.ModelSerializer):
