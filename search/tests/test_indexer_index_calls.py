@@ -148,3 +148,20 @@ def test_case_index_survives_entity_resolution_failure(monkeypatch):
     entity = kwargs["body"]["raw"]["card"]["entities"][0]
     assert entity["display_name"] is None
     assert entity["type"] == "accused"
+
+
+def test_case_index_survives_corrupt_relationship_row(monkeypatch):
+    """A relationship row missing expected attrs must not crash the best-effort
+    indexer — the case is still indexed, with empty entities."""
+    corrupt = SimpleNamespace()  # no nes_id / relationship_type
+    case = _case("PUBLISHED")
+    case.entity_relationships = SimpleNamespace(all=lambda: [corrupt])
+    monkeypatch.setattr(
+        "cases.services.nes_resolver.resolve_entities", lambda ids: {}
+    )
+
+    client = MagicMock()
+    case_index.index(case, client=client)
+    client.index.assert_called_once()
+    _, kwargs = client.index.call_args
+    assert kwargs["body"]["raw"]["card"]["entities"] == []

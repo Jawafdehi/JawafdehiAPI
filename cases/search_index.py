@@ -106,7 +106,12 @@ def _safe_resolve_entities(case: Any) -> list[dict[str, Any]]:
         resolved = resolve_entities(rel.nes_id for rel in relationships)
     except Exception:  # noqa: BLE001 — best-effort; index without names on failure.
         resolved = {}
-    return build_entity_binds(relationships, resolved)
+    # build_entity_binds is inside the guard too: a corrupt relationship row
+    # (missing nes_id/relationship_type) must not crash the best-effort indexer.
+    try:
+        return build_entity_binds(relationships, resolved)
+    except (AttributeError, TypeError):
+        return []
 
 
 def build_doc(case: Any, *, entities: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -199,6 +204,9 @@ def build_doc(case: Any, *, entities: list[dict[str, Any]] | None = None) -> dic
     # there, which must not blend into a case lifecycle facet.
     case_status = _derive_status(case)
     doc["case_status"] = case_status
+    # Also in ``raw`` so ``_serialize_hit`` surfaces it as ``extra.case_status``
+    # (the SPA's non-card fallback for a hit's lifecycle).
+    doc["raw"]["case_status"] = case_status
 
     # Card payload: everything the SPA case card/list renders, denormalized so a
     # search hit needs no follow-up call to /api/cases/{slug}/. Lives under ``raw``
