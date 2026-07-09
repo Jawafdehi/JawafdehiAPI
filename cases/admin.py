@@ -12,6 +12,7 @@ from .models import (
     Case,
     CaseEntityRelationship,
     CaseState,
+    CaseStateChange,
     ChatUserIdentity,
     Feedback,
     RelationshipType,
@@ -905,3 +906,35 @@ class ChatUserIdentityAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
             },
         ),
     )
+
+
+@admin.register(CaseStateChange)
+class CaseStateChangeAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
+    """Read-only view of the append-only case workflow history.
+
+    The log is written only by the PATCH transition path; it is never edited or
+    deleted through the admin (add/change/delete disabled) so the audit trail
+    stays trustworthy.
+    """
+
+    list_display = ("case", "from_state", "to_state", "actor", "created_at")
+    list_filter = ("to_state", "from_state", "created_at")
+    search_fields = ("case__slug", "case__title", "actor__username", "reason")
+    autocomplete_fields = ("case", "actor")
+    readonly_fields = (
+        "case",
+        "from_state",
+        "to_state",
+        "actor",
+        "reason",
+        "created_at",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
