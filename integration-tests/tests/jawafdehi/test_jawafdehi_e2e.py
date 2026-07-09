@@ -61,14 +61,18 @@ def test_api_root_reachable(client):
     assert r.status_code == 200, r.text
     body = r.json()
     assert isinstance(body, dict)
-    assert "cases" in body, f"expected 'cases' route in API root, got: {body}"
-    assert "entities" not in body, (
-        f"entities is the NES list view, not a Jawafdehi DRF router: {body}"
-    )
-    # ADR "cases own no documents": the /api/sources router was removed; evidence
-    # lives in /api/materials/. Assert it is gone so a re-introduction is caught.
+    # NOTE: entities/courts/materials/cases each mount a DefaultRouter at ``/api/``,
+    # and DRF's browsable root advertises only ONE router's registry (whichever
+    # owns the ``api-root`` name — currently courts). So we do NOT assert a
+    # specific router key is present; the real contract is that the resource
+    # endpoints resolve (asserted in test_published_cases_listing_shape /
+    # test_materials_surface_reachable). We DO assert the retired ``sources``
+    # router is not advertised, and entities is a list view (not a router child).
     assert "sources" not in body, (
         f"/api/sources was removed (ADR: cases own no documents); root: {body}"
+    )
+    assert "entities" not in body, (
+        f"entities is the NES list view, not a Jawafdehi DRF router: {body}"
     )
 
 
@@ -153,10 +157,20 @@ def test_anonymous_write_rejected(client):
 
 
 def test_admin_login_reachable(client):
-    """Django admin login page is served (200)."""
+    """The Django admin login entrypoint is served.
+
+    It either renders the built-in HTML form (200, dev/DEV_AUTH) or, when the
+    platform is wired to OIDC/Zitadel SSO (production posture), 302-redirects the
+    login to the OIDC provider (``/oidc/authenticate/``). Both are 'reachable';
+    what must NOT happen is a 404/500. The client follows no redirects, so accept
+    either the 200 form or the 302 SSO bounce."""
     r = client.get("/django-admin/login/")
-    assert r.status_code == 200, r.text
-    assert "text/html" in r.headers.get("content-type", "")
+    assert r.status_code in (200, 302), r.text
+    if r.status_code == 200:
+        assert "text/html" in r.headers.get("content-type", "")
+    else:
+        # SSO redirect: to the OIDC authorize endpoint, not a broken loop.
+        assert "/oidc/" in r.headers.get("location", ""), r.headers
 
 
 def test_legacy_drf_token_not_accepted(client):

@@ -9,10 +9,17 @@ pytestmark = [pytest.mark.smoke, pytest.mark.live]
 
 
 def test_jawafdehi_root(clients):
-    """``/api/`` is the public DRF root and is reachable (200)."""
+    """``/api/`` is the public DRF root and is reachable (200).
+
+    Several apps mount a DefaultRouter at the same ``/api/`` prefix (entities,
+    courts, materials, cases). DRF's browsable root only advertises ONE router's
+    registry (whichever owns the ``api-root`` name — currently courts), so we do
+    NOT assert a specific router key here — that is a routing implementation
+    detail, not a contract. The real contract (the ``/api/cases/`` resource is
+    reachable) is asserted by ``test_published_cases_listing`` below."""
     r = clients["jawafdehi"].get("/api/")
     assert r.status_code == 200, r.text
-    assert "cases" in r.json()
+    assert isinstance(r.json(), dict)
 
 
 def test_published_cases_listing(clients):

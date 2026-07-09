@@ -72,10 +72,13 @@ def test_topology_single_host_unified_surface_live(clients):
     jaw = clients["jawafdehi"].get("/api/")
     skip_if_throttled(jaw)
     assert jaw.status_code == 200, f"Jawafdehi /api/: {jaw.status_code}"
-    root = jaw.json()
-    # The DRF API root advertises the public Jawafdehi collections. Entities are
-    # no longer here (NES-owned), so only cases/sources are guaranteed.
-    assert "cases" in root, f"Jawafdehi root missing 'cases': {root}"
+    assert isinstance(jaw.json(), dict)
+    # NB: multiple DefaultRouters mount at /api/; DRF's root advertises only one
+    # registry, so we assert the RESOURCE endpoints resolve on the one host rather
+    # than a specific root key.
+    cases = clients["jawafdehi"].get("/api/cases/")
+    skip_if_throttled(cases)
+    assert cases.status_code == 200, f"/api/cases/: {cases.status_code}"
 
     # Same host for every handle — the defining property of the platform.
     assert clients["nes"].base_url == clients["ngm"].base_url == clients["jawafdehi"].base_url
@@ -208,12 +211,19 @@ def test_unified_search_envelope_and_replaces_old_surfaces(clients):
     # Empty corpus today: count 0, no results. (Shape proven; data PENDING.)
 
 
-def test_unified_search_requires_q(clients):
-    """``q`` is mandatory -> 400 when omitted (DRF serializer validation)."""
+def test_unified_search_empty_q_is_browse_all(clients):
+    """An omitted/empty ``q`` is a BROWSE-ALL, not an error.
+
+    The unified search treats an empty query as "return everything" (paginated,
+    faceted) rather than 400-ing — so the archive landing/search page can render a
+    default listing. The response is the normal envelope with an empty ``query``.
+    (This replaced the older 'q is mandatory -> 400' contract.)"""
     r = clients["platform"].get("/api/search/")
     skip_if_throttled(r)
-    assert r.status_code == 400, r.text
-    assert "q" in r.json(), r.text
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("query") == "", body
+    assert "count" in body and "results" in body, body
 
 
 def test_old_per_service_search_surfaces_removed(clients):
