@@ -13,7 +13,7 @@ url-encoded IRI or a bare ``<prefix>/<slug>`` path.
 
 Verified live against the platform (:48000):
   * health ``GET /api/health`` (NO trailing slash — slashless route; the
-    ``/api/health/`` variant 404s) -> ``{"status":"ok","service":"nes-api"}``;
+    ``/api/health/`` variant 404s) -> ``{"status":"ok","service":"jawafdehi-api"}``;
   * list/search shape ``{"entities": [...], "total", "limit", "offset"}``;
   * search param is ``query`` (not ``q``);
   * ``/api/entity_prefixes`` -> ``{"prefixes": [...]}``;
@@ -63,7 +63,7 @@ def test_health_ok(clients):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body.get("status") == "ok", body
-    assert body.get("service") == "nes-api", body
+    assert body.get("service") == "jawafdehi-api", body
 
 
 # --- 2. list response shape --------------------------------------------------

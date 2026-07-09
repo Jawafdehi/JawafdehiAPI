@@ -80,24 +80,6 @@ def _disable_staticfiles_manifest():
 
 
 # ---------------------------------------------------------------------------
-# Pre-existing STALE test, unrelated to the DB engine. ``test_enrich_ciaa_
-# timeline.py`` references ``SourceType.LEGAL_PROCEDURAL`` /
-# ``SourceType.LEGAL_COURT_ORDER`` at import time, but those enum members were
-# REMOVED by the source-type revamp (cases migration
-# ``0027_revamp_source_types``; the current members are CIAA_PRESS_RELEASE /
-# AG_ABHIYOG_PATRA / COURT_ORDER / ...). The module therefore raises
-# ``AttributeError`` on import — a collection-time crash that predates and is
-# independent of the sqlite/DB-agnostic work, and that would otherwise abort the
-# whole single-run suite. It is skipped here (not deleted) so the rest of the
-# suite is green; bringing it in line with the revamped SourceType enum is a
-# content-test fix that belongs to whoever owns the CIAA enrichment command.
-# ---------------------------------------------------------------------------
-collect_ignore = [
-    "cases/tests/test_enrich_ciaa_timeline.py",
-]
-
-
-# ---------------------------------------------------------------------------
 # Cross-database test access (Task: TestCase.databases).
 #
 # The platform routes the ``entities`` app to the ``nes`` alias and

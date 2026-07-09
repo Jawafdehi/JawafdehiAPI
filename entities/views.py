@@ -102,7 +102,10 @@ def _resolve_ref(ref: str) -> Optional[str]:
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def health(request):
-    return Response({"status": "ok", "service": "nes-api"})
+    # This is the platform-wide health route (mounted at /api/health for the whole
+    # unified monolith, not just the entities/NES app). The "nes-api" service name
+    # was the pre-unification identity; the canonical name is now "jawafdehi-api".
+    return Response({"status": "ok", "service": "jawafdehi-api"})
 
 
 # ---------------------------------------------------------------------------
@@ -380,10 +383,19 @@ class ReindexView(APIView):
     permission_classes = [HasEntityAdminRole]
 
     def post(self, request):
+        # Reindexing the unified OpenSearch index is a bulk, potentially
+        # long-running operation, so it is NOT run synchronously inside this
+        # request. It is driven out-of-band by the ``reindex_all`` /
+        # ``reindex_entities`` management commands (see search/management/
+        # commands/). This endpoint acknowledges the request without performing
+        # the reindex itself.
         return Response(
             {
-                "status": "skipped",
-                "detail": "No search backend configured; search is served from the database.",
+                "status": "not_run",
+                "detail": (
+                    "Reindexing is performed out-of-band via the reindex_all / "
+                    "reindex_entities management commands, not synchronously here."
+                ),
                 "requested_by": getattr(request.user, "username", None),
             }
         )

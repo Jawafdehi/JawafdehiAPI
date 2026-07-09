@@ -54,7 +54,7 @@ def ngm():
 def test_health_ok(ngm):
     # ONE canonical platform health (slashless). The per-plane NGM health was
     # dropped in the unified cutover; the surviving endpoint reports service
-    # "nes-api" (the entities app owns the canonical /api/health route).
+    # "jawafdehi-api" (the entities app owns the canonical /api/health route).
     r = ngm.get("/api/health")
     skip_if_throttled(r)
     assert r.status_code == 200, r.text

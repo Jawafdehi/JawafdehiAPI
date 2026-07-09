@@ -97,7 +97,7 @@ Reconciled against the live monolith (verified by curl + the live suite):
   (`https://jawafdehi.org/courtcase/<court>/<case_number>`) also exist. Entity list
   items carry the id under `@id`; the detail body is the raw schema.org JSON-LD doc.
 - **One canonical health, slashless** — `GET /api/health` (the `/health/` variant
-  404s) → `{"status":"ok","service":"nes-api"}`. The per-plane NGM health was dropped.
+  404s) → `{"status":"ok","service":"jawafdehi-api"}`. The per-plane NGM health was dropped.
 - **Court routes are uniformly trailing-slashed**, including the gated POSTs:
   `GET /api/courts/` (bare list `[...]`), `GET /api/courtcases/` (full DRF page
   with `count`), `POST /api/query/`, `POST
