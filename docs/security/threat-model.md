@@ -59,7 +59,13 @@ place, and the residual/accepted risks.
 
 ### Input / injection
 - Gated SQL (`/api/query/`) is SELECT-only, allowlist-guarded, timeout-bounded, and runs on the
-  `ngm` connection only.
+  `ngm` connection only. **The adversarial sweep found and fixed five real guard bypasses**
+  (`courts/query_guard.py`): a comma cross-join reached a blocked table or a system catalog
+  (`FROM courts, pg_catalog.pg_authid` → password hashes on Postgres), a double-quoted identifier
+  slipped past table detection, `pg_sleep` gave a DoS primitive, and a stacked `SELECT` passed. The
+  guard now strips/rejects comments, rejects any statement separator, denylists volatile/file-read
+  functions, blocks system schemas, and enumerates EVERY FROM/JOIN entry (comma-joins + quoted +
+  schema-qualified) against the allow/block lists. _Tests: `courts/tests/test_query_guard_security.py`._
 - Entity/material IRIs are length-bounded (`MAX_IRI_LENGTH=300`) and host-canonicalized on write, so
   a foreign-host or over-length join key can't be stored. _Tests:
   `entities/tests/test_schemaorg.py`, `jawafdehi_shared/entities/tests/test_ids.py`._
