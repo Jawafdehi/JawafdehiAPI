@@ -15,9 +15,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from functools import lru_cache
+
 from django.db import connections, router
 from django.db.models import Q, QuerySet
 from jawafdehi_shared.entities.ids import canonicalize_entity_iri, parse_entity_iri
+from jawafdehi_shared.search.transliterate import to_roman_colloquial
 
 from .models import HeldEntity, StoredAuthor, StoredEntity, StoredVersion
 from .validation import primary_type
@@ -275,6 +278,7 @@ class EntityRepository:
 
         # Textual query: score in Python over a CAPPED candidate set.
         needle = query.lower()
+        needle_forms = _search_forms(query)
         wanted = set(keywords) if (keywords and not keywords_pushed_down) else None
         candidates: List[Dict[str, Any]] = []
         for data in qs.values_list("data", flat=True)[:MAX_SEARCH_CANDIDATES].iterator():
@@ -282,7 +286,7 @@ class EntityRepository:
                 continue
             candidates.append(data)
 
-        scored = [(d, _relevance_score(d, needle)) for d in candidates]
+        scored = [(d, _relevance_score(d, needle, needle_forms)) for d in candidates]
         scored = [(d, s) for d, s in scored if s > 0]
         scored.sort(key=lambda x: (-x[1], x[0].get("@id", "")))
         return [d for d, _ in scored][offset : offset + limit]
@@ -418,32 +422,73 @@ class EntityRepository:
         }
 
 
-def _relevance_score(doc: Dict[str, Any], needle: str) -> float:
+@lru_cache(maxsize=8192)
+def _search_forms(text: str) -> frozenset:
+    """Lowercased word-tokens for a name or query, bridging scripts (BB-12).
+
+    Combines the raw lowercased words with a *colloquial romanization* of any
+    Devanagari — diacritics folded to plain ASCII, word-final schwa emitted both
+    kept and dropped — so a Latin query ("bharat") matches a Devanagari-stored
+    name ("भरत") and vice versa, and IAST/ITRANS spellings collapse to a common
+    ASCII form ("śarmā"/"sharma"). Mirrors the index-time romanization added for
+    case-title search in #272, applied here at query time because the admin
+    entity search has no OpenSearch backend and scores in Python.
+
+    Cached because the same stored names recur across searches. Only word-final
+    schwa is bridged (platform-wide v1 limitation in ``to_roman_colloquial``), so
+    a medial-schwa gap ("bhojraj" vs stored "bhojaraj") can still miss.
+    """
+    forms: set = set()
+    low = (text or "").strip().lower()
+    if low:
+        forms.update(low.split())
+        # Skip transliteration for plain ASCII text: it is already Latin, so
+        # ``to_roman_colloquial`` is a no-op cost on the hot path (called per
+        # candidate, up to MAX_SEARCH_CANDIDATES). Only non-ASCII (Devanagari,
+        # IAST/ITRANS diacritics) needs script bridging.
+        if not low.isascii():
+            roman = to_roman_colloquial(text).strip().lower()
+            if roman:
+                forms.update(roman.split())
+    return frozenset(forms)
+
+
+def _relevance_score(
+    doc: Dict[str, Any], needle: str, needle_forms: frozenset
+) -> float:
     """Lightweight name/keyword relevance for the no-backend fallback search.
 
     Scores over the JSON-LD ``name``/``alternateName`` (string or language map)
-    and ``keywords``.
+    and ``keywords``. Name matching is token-based over romanization-normalized
+    forms (see :func:`_search_forms`): each query token scores ``weight_exact``
+    on a whole-token hit or ``weight_sub`` when it is a substring of a stored
+    token (partial typing). ``keywords`` stay a raw substring match on the query.
     """
     score = 0.0
 
     def _score_name(value: Any, weight_exact: float, weight_sub: float) -> float:
-        s = 0.0
-        texts: List[str] = []
+        text_forms: set = set()
         if isinstance(value, str):
-            texts = [value]
+            text_forms |= _search_forms(value)
         elif isinstance(value, dict):
-            texts = [v for v in value.values() if isinstance(v, str)]
+            for v in value.values():
+                if isinstance(v, str):
+                    text_forms |= _search_forms(v)
         elif isinstance(value, list):
             for item in value:
                 if isinstance(item, str):
-                    texts.append(item)
+                    text_forms |= _search_forms(item)
                 elif isinstance(item, dict):
-                    texts.extend(v for v in item.values() if isinstance(v, str))
-        for t in texts:
-            low = t.lower()
-            if low == needle:
+                    for v in item.values():
+                        if isinstance(v, str):
+                            text_forms |= _search_forms(v)
+        if not text_forms:
+            return 0.0
+        s = 0.0
+        for n in needle_forms:
+            if n in text_forms:
                 s += weight_exact
-            elif needle in low:
+            elif any(n in t for t in text_forms):
                 s += weight_sub
         return s
 

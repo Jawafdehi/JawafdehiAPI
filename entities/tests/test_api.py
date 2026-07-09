@@ -174,6 +174,59 @@ class SearchAndCountTests(_DbAPITestCase):
         self.assertGreaterEqual(len(resp.data["entities"]), 1)
 
 
+class RomanizedEntitySearchTests(_DbAPITestCase):
+    """BB-12: admin entity search must bridge Devanagari <-> Latin spellings.
+
+    The admin ``GET /api/entities?query=`` scores in Python (no OpenSearch
+    backend). Before the fix it was a raw case-insensitive substring match, so a
+    Latin query could never reach a Devanagari-stored name (and vice versa).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from entities.persistence import EntityRepository
+        from entities.write_validation import normalize_authoring_payload
+
+        cls.repo = EntityRepository()
+
+        def _seed(slug, name):
+            doc = normalize_authoring_payload(
+                {"prefix": "person", "slug": slug, "type": "Person", "name": name}
+            )
+            cls.repo.put_entity(doc, version=1, created_at=_now())
+            return doc["@id"]
+
+        cls.bharat = _seed("bharat-devanagari", {"ne": "भरत ताल"})
+        cls.sunila = _seed("sunila-devanagari", {"ne": "सुनिला पौडेल"})
+        cls.sharma = _seed("sharma-devanagari", {"ne": "शर्मा"})
+
+    def _ids(self, query):
+        from urllib.parse import quote
+
+        resp = self.client.get(f"/api/entities?query={quote(query)}")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        return [e["@id"] for e in resp.data["entities"]]
+
+    def test_latin_query_finds_devanagari_name(self):
+        # Word-final schwa: typed "bharat" reaches stored "भरत" (IAST "bharata").
+        self.assertIn(self.bharat, self._ids("bharat"))
+
+    def test_latin_token_finds_devanagari_multiword_name(self):
+        self.assertIn(self.sunila, self._ids("sunila"))
+        self.assertIn(self.sunila, self._ids("paudel"))
+
+    def test_devanagari_query_finds_devanagari_name(self):
+        # Same-script native query still works (raw form retained).
+        self.assertIn(self.bharat, self._ids("भरत"))
+
+    def test_sibilant_name_matched_by_colloquial_spelling(self):
+        # शर्मा romanizes (IAST "śarmā") to the colloquial spelling "sharma".
+        self.assertIn(self.sharma, self._ids("sharma"))
+
+    def test_unrelated_query_does_not_match(self):
+        self.assertNotIn(self.bharat, self._ids("kathmandu"))
+
+
 class WritePlaneAuthTests(_DbAPITestCase):
     @classmethod
     def setUpTestData(cls):
