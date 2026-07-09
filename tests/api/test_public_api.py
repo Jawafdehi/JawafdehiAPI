@@ -280,6 +280,69 @@ def test_filter_by_tags(case_data, tag):
         ), f"Filtered results should only include cases with tag '{tag}'"
 
 
+@pytest.mark.django_db
+def test_tag_filter_postgres_branch_uses_contains_lookup(monkeypatch):
+    """The tag filter has TWO code paths (cases/api_views.py get_queryset):
+
+        if connection.vendor == "postgresql":  # PROD
+            queryset.filter(tags__contains=[tag])
+        else:                                   # SQLite (CI test engine)
+            <filter in Python>
+
+    CI runs on SQLite, so the PROD ``tags__contains`` branch is otherwise NEVER
+    exercised — a regression there (wrong lookup, wrong wrapping of the value)
+    would ship green. This forces the postgres branch by faking
+    ``connection.vendor`` and captures the ``tags__contains`` kwarg the view
+    passes to ``.filter()`` — WITHOUT evaluating the queryset (the JSON contains
+    lookup can't run on the sqlite test DB), so it is a pure branch-selection +
+    argument-shape assertion.
+    """
+    from django.db.models import QuerySet
+    from rest_framework.test import APIRequestFactory
+
+    from cases.api_views import CaseViewSet
+
+    captured = {}
+    orig_filter = QuerySet.filter
+
+    def _spy_filter(self, *args, **kwargs):
+        if "tags__contains" in kwargs:
+            # Record and SHORT-CIRCUIT: don't actually apply the postgres-only
+            # lookup (it would error on sqlite). Returning self is fine — the view
+            # only chains .prefetch_related().order_by() after this, which we also
+            # never evaluate.
+            captured["tags__contains"] = kwargs["tags__contains"]
+            return self
+        return orig_filter(self, *args, **kwargs)
+
+    monkeypatch.setattr(QuerySet, "filter", _spy_filter)
+    # ``connection`` in the view module is a ConnectionProxy; replace the whole
+    # name with a stand-in whose .vendor is postgresql so the prod branch runs.
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "cases.api_views.connection", SimpleNamespace(vendor="postgresql")
+    )
+
+    from django.contrib.auth.models import AnonymousUser
+    from rest_framework.request import Request
+
+    raw = APIRequestFactory().get("/api/cases/", {"tags": "procurement"})
+    request = Request(raw)  # gives .query_params
+    request.user = AnonymousUser()  # anonymous list → PUBLISHED base queryset
+
+    view = CaseViewSet()
+    view.action = "list"
+    view.request = request
+    view.format_kwarg = None
+    view.get_queryset()  # builds the queryset; the tag branch fires .filter()
+
+    assert captured.get("tags__contains") == ["procurement"], (
+        "postgres tag filter must use tags__contains=[tag]; "
+        f"captured={captured!r}"
+    )
+
+
 # ============================================================================
 # Property 16: Published cases display complete data
 # ============================================================================
