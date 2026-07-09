@@ -98,6 +98,44 @@ def _links_from_document(data: dict) -> list[ResolvedLink]:
     return links
 
 
+def _derive_court_case_document(material_iri: str) -> Optional[dict]:
+    """Rebuild a court-case material's JSON-LD from the court tables.
+
+    A court-case material (``/material/court/<court>.<case_number>``) by design
+    almost never has a stored ``Material`` row: the relational ``courts`` tables
+    are the system of record and the material is a derived projection, so it is
+    rebuilt on the fly at read time rather than materialized at ingest. This
+    mirrors the
+    court-case fallback in ``materials.views._resolve_material`` but stays in the
+    service layer (it depends on ``courts``/``materials.jsonld``, not the
+    materials *views* module). Returns ``None`` for any non-court IRI or when the
+    referenced court case does not exist.
+    """
+    try:
+        from courts.models import CourtCase
+        from jawafdehi_shared.entities.ids import parse_material_iri
+        from materials import jsonld as materials_jsonld
+
+        parsed = parse_material_iri(material_iri)
+        if parsed.source != materials_jsonld.COURT_SOURCE or "." not in parsed.ident:
+            return None
+        court_identifier, _, case_number = parsed.ident.partition(".")
+        # The ident is lowercased in the IRI; the stored case_number is uppercased.
+        case = CourtCase.objects.filter(
+            court_id=court_identifier,
+            case_number__iexact=case_number,
+            is_deleted=False,
+        ).first()
+        if case is None:
+            return None
+        return materials_jsonld.court_case_to_jsonld(case)
+    except Exception:  # pragma: no cover - defensive: court app/DB unavailable
+        logger.warning(
+            "court-case derive failed for material %s", material_iri, exc_info=True
+        )
+        return None
+
+
 def resolve_materials(material_iris) -> dict[str, ResolvedMaterial]:
     """Resolve canonical material @id IRIs to display details.
 
@@ -148,5 +186,28 @@ def resolve_materials(material_iris) -> dict[str, ResolvedMaterial]:
             "Failed to resolve NGM materials in-process; returning stubs.",
             exc_info=True,
         )
+
+    # Court-case materials often have NO stored Material row — they are derived
+    # on the fly from the court tables (the same fallback GET /api/materials/
+    # uses via ``_resolve_material``). Without this, evidence referencing such a
+    # material resolves to a stub (display_name=None) and the public case card
+    # falls back to showing the raw IRI/slug (BB-20). Fill any id that is still a
+    # stub from the derived court-case JSON-LD.
+    unresolved = [iri for iri in ids if resolved[iri]["display_name"] is None]
+    if unresolved:
+        from materials.jsonld import MaterialType
+
+        for iri in unresolved:
+            data = _derive_court_case_document(iri)
+            if not isinstance(data, dict):
+                continue
+            resolved[iri] = {
+                "material_iri": iri,
+                "display_name": _primary_name_from_document(data),
+                # Derived docs only ever describe a court case; use the stable
+                # NGM material-type token (not the schema.org @type).
+                "material_type": MaterialType.COURT_CASE,
+                "urls": _links_from_document(data),
+            }
 
     return resolved
