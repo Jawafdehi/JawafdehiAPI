@@ -96,3 +96,33 @@ def test_reviewers_null_when_no_usage_yet():
 
     assert rows["pending-1"]["reviewers"] is None
     assert rows["no-usage"]["reviewers"] is None
+
+
+@pytest.mark.django_db
+def test_reviewers_null_on_malformed_result_shapes():
+    """`result` is a JSONField — malformed/legacy stored shapes must yield null,
+    never crash the serializer (non-dict result, scalar token_usage, non-list
+    by_provider, empty buckets)."""
+    CaseReview.objects.create(slug="m-list", case_title="M", status="done", result=[1, 2])
+    CaseReview.objects.create(
+        slug="m-scalar-usage", case_title="M", status="done", result={"token_usage": 7}
+    )
+    CaseReview.objects.create(
+        slug="m-scalar-bp",
+        case_title="M",
+        status="done",
+        result={"token_usage": {"by_provider": "nope"}},
+    )
+    CaseReview.objects.create(
+        slug="m-empty-bp",
+        case_title="M",
+        status="done",
+        result={"token_usage": {"by_provider": []}},
+    )
+
+    rows = {r["slug"]: r for r in _reader_client().get(FLAT_URL).data["results"]}
+
+    assert rows["m-list"]["reviewers"] is None
+    assert rows["m-scalar-usage"]["reviewers"] is None
+    assert rows["m-scalar-bp"]["reviewers"] is None
+    assert rows["m-empty-bp"]["reviewers"] is None

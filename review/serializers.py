@@ -11,6 +11,16 @@ from jawafdehi_shared.entities.ids import (
 from .models import CaseReview, ReviewConfig
 
 
+def _result_dict(result):
+    """Return ``result`` iff it's a dict, else ``{}``.
+
+    ``CaseReview.result`` is a JSONField, so a malformed/legacy row could hold a
+    list or scalar. All the derived read fields go through this so a bad shape
+    degrades to "no data" instead of 500-ing the review list/detail endpoints.
+    """
+    return result if isinstance(result, dict) else {}
+
+
 def _reviewers_from_result(result):
     """Project a review's per-tier LLM usage into the reviewer-chip shape.
 
@@ -22,12 +32,16 @@ def _reviewers_from_result(result):
     rules/narrative use the cheap tier. Return the projected list, or ``None``
     when the review hasn't produced usage yet (pending/failed runs).
     """
-    if not result:
+    # ``result`` is a JSONField, so guard every level: malformed/legacy stored
+    # data (a non-dict result, a scalar token_usage, a non-list by_provider)
+    # must yield None, never crash the serializer.
+    token_usage = _result_dict(result).get("token_usage")
+    if not isinstance(token_usage, dict):
         return None
-    buckets = (result.get("token_usage") or {}).get("by_provider")
-    if not buckets:
+    buckets = token_usage.get("by_provider")
+    if not isinstance(buckets, list):
         return None
-    return [
+    reviewers = [
         {
             "tier": b.get("tier", ""),
             "provider": b.get("provider", ""),
@@ -35,7 +49,9 @@ def _reviewers_from_result(result):
             "calls": b.get("calls", 0),
         }
         for b in buckets
+        if isinstance(b, dict)
     ]
+    return reviewers or None
 
 
 class CaseReviewListSerializer(serializers.ModelSerializer):
@@ -64,10 +80,10 @@ class CaseReviewListSerializer(serializers.ModelSerializer):
         ]
 
     def get_overall_score(self, obj):
-        return (obj.result or {}).get("overall_score") if obj.result else None
+        return _result_dict(obj.result).get("overall_score")
 
     def get_disposition(self, obj):
-        return (obj.result or {}).get("disposition") if obj.result else None
+        return _result_dict(obj.result).get("disposition")
 
     def get_reviewers(self, obj):
         return _reviewers_from_result(obj.result)
