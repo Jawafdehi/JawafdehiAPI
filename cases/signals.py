@@ -89,11 +89,17 @@ def _recompute_evidence_iris(case, iris) -> None:
 
     from materials.visibility import recompute_material_visibility
 
-    try:
-        for iri in iris:
+    logger = logging.getLogger(__name__)
+    slug = getattr(case, "slug", getattr(case, "pk", "?"))
+    # Isolate per IRI: one material's recompute failing must not skip the rest
+    # (they're independent). Best-effort — the reconciler command backstops any
+    # that still slip through.
+    for iri in iris:
+        try:
             recompute_material_visibility(iri)
-    except Exception:  # noqa: BLE001 — best-effort; the reconciler command backstops
-        logging.getLogger(__name__).exception(
-            "evidence-visibility recompute failed for case %s",
-            getattr(case, "slug", getattr(case, "pk", "?")),
-        )
+        except Exception:  # noqa: BLE001 — best-effort; reconciler command backstops
+            logger.exception(
+                "evidence-visibility recompute failed for case %s material %s",
+                slug,
+                iri,
+            )

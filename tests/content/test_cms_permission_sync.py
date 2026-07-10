@@ -234,17 +234,13 @@ def test_noop_when_cms_tables_absent(monkeypatch):
     from django.contrib.auth.models import Group
     from django.db import connections
 
-    real_introspection = connections["default"].introspection
-
-    class _EmptyIntrospection:
-        def table_names(self, *args, **kwargs):
-            return []
-
-        def __getattr__(self, item):
-            return getattr(real_introspection, item)
-
+    # Pretend no tables exist by patching table_names() directly on the real
+    # introspection object — simpler than a delegating stand-in and safe since the
+    # handler only consults table_names() here.
     monkeypatch.setattr(
-        connections["default"], "introspection", _EmptyIntrospection()
+        connections["default"].introspection,
+        "table_names",
+        lambda *args, **kwargs: [],
     )
 
     Group.objects.filter(name="Admin").delete()
