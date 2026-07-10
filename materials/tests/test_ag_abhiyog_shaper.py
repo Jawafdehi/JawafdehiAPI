@@ -25,10 +25,22 @@ def test_slug_falls_back_when_no_alphanumeric():
     assert _slug_ident("अभियोग", "118689") == "118689"
 
 
-def test_distinct_case_numbers_give_distinct_iris():
-    d1, _ = ag_abhiyog_to_jsonld({"court_case_no": "०८२-FT-०५२४", "record_id": 1, "name": "a"})
-    d2, _ = ag_abhiyog_to_jsonld({"court_case_no": "०८२-FT-०५२५", "record_id": 2, "name": "b"})
+def test_iri_keyed_on_record_id_not_case_number():
+    # court_case_no repeats across offices; the @id must key on the unique
+    # record_id so distinct indictments never collide/overwrite on upsert.
+    d1, _ = ag_abhiyog_to_jsonld({"court_case_no": "082-C1-0069", "record_id": 111, "name": "a"})
+    d2, _ = ag_abhiyog_to_jsonld({"court_case_no": "082-C1-0069", "record_id": 222, "name": "b"})
     assert d1["@id"] != d2["@id"]
+    assert d1["@id"].endswith("/111")
+    assert d2["@id"].endswith("/222")
+
+
+def test_missing_record_id_raises():
+    import pytest
+
+    # no record_id -> cannot mint a unique ident -> must fail loudly, not collide
+    with pytest.raises(ValueError):
+        ag_abhiyog_to_jsonld({"court_case_no": "082-C1-0069", "name": "a"})
 
 
 def test_shape_is_valid_charge_sheet_material():

@@ -95,9 +95,15 @@ def ag_abhiyog_to_jsonld(
     material_type = MaterialType.CHARGE_SHEET
     schema_type, additional_type = type_for(material_type)
 
-    ident = _slug_ident(record.get("court_case_no"), record.get("record_id"))
+    # IRI ident MUST be globally unique. court_case_no is NOT: ~969 case numbers
+    # repeat across AG offices (e.g. '082-C1-0069' filed by 4 different district
+    # offices), so keying on it would collide distinct indictments onto one @id
+    # and silently overwrite them on upsert. record_id is the AG portal's unique,
+    # stable key (verified: present + distinct for all corpus records), so it is
+    # the ident; the (non-unique) court_case_no rides as searchable metadata only.
+    ident = _slug_ident(record.get("record_id"))
     if not ident:
-        raise ValueError(f"AG record has no usable ident: {record!r}")
+        raise ValueError(f"AG record has no usable record_id for ident: {record!r}")
     iri = build_material_iri(AG_SOURCE, ident)
 
     title = str(record.get("name") or "").strip() or (

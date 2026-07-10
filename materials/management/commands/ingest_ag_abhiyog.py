@@ -13,8 +13,10 @@ font-normalized markdown files) and, per record:
   4. upserts via ``upsert_single_source_material`` (bypasses the ≥2-publisher HOLD
      gate — an indictment is inherently single-source). Idempotent by ``@id``.
 
-Modeled on ``ingest_nkp_decisions`` / ``sync_materials_from_index``: batched,
-resumable-by-``@id``, ``--dry-run`` prints shaped docs without writing or uploading.
+Modeled on ``ingest_nkp_decisions`` / ``sync_materials_from_index``:
+resumable-by-``@id`` (a re-run skips records already ingested, so it does NOT
+re-upload files or re-write rows unless ``--reingest`` is passed), and
+``--dry-run`` shapes + validates + prints without uploading or writing.
 
 Input JSONL record shape (from the corpus ``index.jsonl``), per line e.g.:
     {"local": "<sha1>.pdf", "court_case_no": "०८२-FT-०५२४", "record_id": 118689,
@@ -66,7 +68,15 @@ class Command(BaseCommand):
             help="Only ingest this court_tier (e.g. Special, High, District).",
         )
         parser.add_argument("--limit", type=int, default=None)
-        parser.add_argument("--batch-size", type=int, default=200)
+        parser.add_argument(
+            "--progress-every", type=int, default=200,
+            help="Emit a progress line every N processed records.",
+        )
+        parser.add_argument(
+            "--reingest", action="store_true",
+            help="Re-process records whose @id already exists (default: skip them, "
+            "so an interrupted run resumes without re-uploading or re-writing).",
+        )
         parser.add_argument(
             "--dry-run", action="store_true",
             help="Shape + validate + print; NO upload, NO DB write.",
@@ -85,12 +95,16 @@ class Command(BaseCommand):
         pdf_dir = Path(opts["pdf_dir"]) if opts["pdf_dir"] else None
         tier = opts["tier"]
         dry = opts["dry_run"]
+        progress_every = max(1, opts["progress_every"])
 
-        store_file_as_link = None
-        if not dry and pdf_dir is not None:
-            from jawafdehi_shared.storage import store_file_as_link  # noqa
+        store_file_as_link = ContentFile = Material = None
+        if not dry:
+            from materials.models import Material  # for resume-skip lookups
+            if pdf_dir is not None:
+                from django.core.files.base import ContentFile
+                from jawafdehi_shared.storage import store_file_as_link
 
-        total = shaped = ingested = errors = 0
+        total = shaped = ingested = skipped = errors = 0
         for line in index_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line:
@@ -98,47 +112,34 @@ class Command(BaseCommand):
             rec = json.loads(line)
             if tier and rec.get("court_tier") != tier:
                 continue
-            if rec.get("type") != "pdf" and not (md_dir / f"{rec.get('local')}.md").exists():
-                # non-PDF still ingestible if it has markdown; else skip
-                pass
-            total += 1
-            if opts["limit"] and total > opts["limit"]:
-                total -= 1
+            if opts["limit"] and total >= opts["limit"]:
                 break
-
             local = rec.get("local")
             md_path = md_dir / f"{local}.md"
             markdown = md_path.read_text(encoding="utf-8") if md_path.exists() else None
 
+            # A record with neither markdown nor a PDF to upload carries no content
+            # (empty Material) — skip it rather than emit a text-less shell.
+            if markdown is None and pdf_dir is None:
+                skipped += 1
+                continue
+
+            total += 1
+
             # BS filing date → AD (record may already carry date_ad). If the
             # BS→AD converter is unavailable (nepali_datetime not installed),
-            # fall back to preserving the raw BS date so the filing date is NOT
-            # silently dropped — datePublished then carries the BS string, and
-            # the BS original always rides on jawafdehi:filingDateBS below.
+            # preserve the raw BS date so the filing date is NOT silently dropped
+            # (datePublished falls back to the BS string; jawafdehi:filingDateBS
+            # always carries the BS original — see the shaper).
             if not rec.get("date_ad"):
                 ad = _bs_to_ad_iso(rec.get("created_date_np"))
                 if ad:
                     rec["date_ad"] = ad
 
-            pdf_url = markdown_url = None
+            # Shape + validate FIRST (pure, no I/O) so a bad record fails cheaply
+            # BEFORE any upload — never orphan an R2 blob for a record we can't ingest.
             try:
-                if not dry and pdf_dir is not None:
-                    pdf_file = pdf_dir / local
-                    if pdf_file.exists():
-                        with pdf_file.open("rb") as fh:
-                            pdf_url = store_file_as_link(fh, role="RAW")["link"]
-                    if markdown is not None:
-                        from django.core.files.base import ContentFile
-
-                        md_link = store_file_as_link(
-                            ContentFile(markdown.encode("utf-8"), name=f"{local}.md"),
-                            role="MARKDOWN",
-                        )
-                        markdown_url = md_link["link"]
-
-                doc, mt = ag_abhiyog_to_jsonld(
-                    rec, markdown=markdown, pdf_url=pdf_url, markdown_url=markdown_url
-                )
+                doc, mt = ag_abhiyog_to_jsonld(rec, markdown=markdown)
                 validate_material_jsonld(doc, iri=doc["@id"])
                 shaped += 1
             except Exception as e:  # noqa: BLE001
@@ -152,20 +153,53 @@ class Command(BaseCommand):
                         {"@id": doc["@id"], "type": mt,
                          "caseNumber": doc.get("jawafdehi:caseNumber"),
                          "datePublished": doc.get("datePublished"),
-                         "media": [m["jawafdehi:linkRole"] for m in doc.get("associatedMedia", [])],
+                         "has_pdf": pdf_dir is not None and (pdf_dir / local).exists(),
                          "text_chars": len(doc.get("text", {}).get("ne", ""))},
                         ensure_ascii=False))
+                if total % progress_every == 0:
+                    self.stdout.write(f"  ... {total} scanned")
+                continue
+
+            # Resume: skip records already ingested (idempotent by @id) so a
+            # re-run does NOT re-upload files or re-write rows.
+            if not opts["reingest"] and Material.objects.using("ngm").filter(
+                iri=doc["@id"]
+            ).exists():
+                skipped += 1
+                if total % progress_every == 0:
+                    self.stdout.write(f"  ... {total} scanned, {ingested} ingested, {skipped} skipped")
                 continue
 
             try:
+                # Upload files ONLY now that the record is known-good. Hashed
+                # filenames mean a retried upload reuses the same blob (no dup).
+                if pdf_dir is not None:
+                    pdf_file = pdf_dir / local
+                    pdf_url = None
+                    if pdf_file.exists():
+                        with pdf_file.open("rb") as fh:
+                            pdf_url = store_file_as_link(fh, role="RAW")["link"]
+                    md_url = None
+                    if markdown is not None:
+                        md_url = store_file_as_link(
+                            ContentFile(markdown.encode("utf-8"), name=f"{local}.md"),
+                            role="MARKDOWN",
+                        )["link"]
+                    # Re-shape with the R2 URLs now attached as associatedMedia.
+                    doc, mt = ag_abhiyog_to_jsonld(
+                        rec, markdown=markdown, pdf_url=pdf_url, markdown_url=md_url,
+                    )
                 upsert_single_source_material(doc, material_type=mt)
                 ingested += 1
             except Exception as e:  # noqa: BLE001
                 errors += 1
                 self.stderr.write(f"INGEST-ERR {doc['@id']}: {e}")
 
+            if total % progress_every == 0:
+                self.stdout.write(f"  ... {total} scanned, {ingested} ingested, {skipped} skipped")
+
         mode = "DRY RUN" if dry else "INGESTED"
         self.stdout.write(self.style.SUCCESS(
             f"[{mode}] scanned={total} shaped={shaped} "
             f"{'would-ingest' if dry else 'ingested'}={shaped if dry else ingested} "
-            f"errors={errors} (tier={tier or 'ALL'})"))
+            f"skipped={skipped} errors={errors} (tier={tier or 'ALL'})"))
