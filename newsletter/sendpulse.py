@@ -1,8 +1,9 @@
-"""Thin SendPulse REST client for newsletter subscribe/unsubscribe.
+"""Thin SendPulse REST client for newsletter subscribe.
 
 SendPulse is the newsletter system of record: it stores subscribers, runs the
-double opt-in confirmation email, and owns list membership. This module wraps the
-few SendPulse REST calls the two public endpoints need, plus OAuth token caching.
+double opt-in confirmation email, hosts the unsubscribe link in its emails, and
+owns list membership. This module wraps the address-book add call the subscribe
+endpoint needs, plus OAuth token caching.
 
 Design notes
 ------------
@@ -142,23 +143,6 @@ class SendPulseClient:
         if resp.status_code >= 400:
             raise SendPulseError(
                 f"SendPulse add_subscriber failed ({resp.status_code}): {resp.text[:200]}",
-                status=resp.status_code,
-            )
-
-    def remove_subscriber(self, email: str) -> None:
-        """Remove an email from the configured address book."""
-        try:
-            resp = self._request(
-                "DELETE",
-                f"/addressbooks/{self._addressbook_id}/emails",
-                json={"emails": [email]},
-            )
-        except requests.RequestException as exc:
-            raise SendPulseError(f"SendPulse request error: {exc}") from exc
-
-        if resp.status_code >= 400:
-            raise SendPulseError(
-                f"SendPulse remove_subscriber failed ({resp.status_code}): {resp.text[:200]}",
                 status=resp.status_code,
             )
 

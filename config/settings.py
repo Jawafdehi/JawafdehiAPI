@@ -822,19 +822,16 @@ if not DEBUG:
 
 # ---------------------------------------------------------------------------
 # Newsletter / SendPulse ESP. The `newsletter` app is a model-less proxy: SendPulse
-# stores subscribers and runs its own double opt-in confirmation. When these are
-# unset (not yet provisioned, or under CI) the subscribe endpoint still accepts
-# requests (HTTP 202) and logs them — the flow degrades gracefully rather than
-# 500-ing. NEWSLETTER_UNSUBSCRIBE_MAX_AGE_DAYS bounds how long a signed unsubscribe
-# link (see newsletter.tokens) stays valid.
+# stores subscribers and runs its own double opt-in confirmation (and hosts the
+# unsubscribe link in every email, so the backend owns no unsubscribe route). When
+# these are unset (not yet provisioned, or under CI) the subscribe endpoint still
+# accepts requests (HTTP 202) and logs them — the flow degrades gracefully rather
+# than 500-ing.
 # ---------------------------------------------------------------------------
 SENDPULSE_CLIENT_ID = os.getenv("SENDPULSE_CLIENT_ID", "")
 SENDPULSE_CLIENT_SECRET = os.getenv("SENDPULSE_CLIENT_SECRET", "")
 SENDPULSE_ADDRESSBOOK_ID = os.getenv("SENDPULSE_ADDRESSBOOK_ID", "")
 SENDPULSE_TIMEOUT_SECONDS = float(os.getenv("SENDPULSE_TIMEOUT_SECONDS", "5"))
-NEWSLETTER_UNSUBSCRIBE_MAX_AGE_DAYS = int(
-    os.getenv("NEWSLETTER_UNSUBSCRIBE_MAX_AGE_DAYS", "365")
-)
 
 # ---------------------------------------------------------------------------
 # NES/NGM config. After the service consolidation NES and NGM run IN-PROCESS — the

@@ -1,11 +1,10 @@
-"""HTTP-surface tests for the newsletter endpoints (/api/newsletter/*).
+"""HTTP-surface tests for the newsletter subscribe endpoint.
 
 The `newsletter` app is a model-less proxy to SendPulse, so these tests mock the
 SendPulse client (via ``newsletter.views.get_client``) and assert the status-code
 contract the merged frontend depends on:
 
-  subscribe  → 201 ok · 202 ESP-down/unconfigured · 409 conflict · 400 invalid · 429 throttled
-  unsubscribe→ 200 ok · 400 bad/expired token
+  subscribe → 201 ok · 202 ESP-down/unconfigured · 409 conflict · 400 invalid · 429 throttled
 """
 
 from unittest import mock
@@ -15,7 +14,6 @@ from django.urls import reverse
 from rest_framework.test import APIClient
 
 from newsletter.sendpulse import SendPulseError
-from newsletter.tokens import make_unsubscribe_token
 
 VALID_PAYLOAD = {
     "email": "Reader@Example.org",
@@ -37,7 +35,6 @@ def _mock_client():
     """A stand-in SendPulse client whose methods are inspectable mocks."""
     c = mock.Mock()
     c.add_subscriber.return_value = None
-    c.remove_subscriber.return_value = None
     return c
 
 
@@ -123,44 +120,6 @@ def test_subscribe_without_optional_fields(client):
     with mock.patch("newsletter.views.get_client", return_value=fake):
         resp = client.post(reverse("newsletter:subscribe"), payload, format="json")
     assert resp.status_code == 201
-
-
-# -- unsubscribe -------------------------------------------------------------
-
-
-def test_unsubscribe_valid_token_calls_sendpulse(client):
-    fake = _mock_client()
-    token = make_unsubscribe_token("reader@example.org")
-    with mock.patch("newsletter.views.get_client", return_value=fake):
-        resp = client.post(reverse("newsletter:unsubscribe", args=[token]))
-    assert resp.status_code == 200
-    assert resp.data["status"] == "unsubscribed"
-    fake.remove_subscriber.assert_called_once_with("reader@example.org")
-
-
-def test_unsubscribe_bad_token_returns_400(client):
-    with mock.patch("newsletter.views.get_client", return_value=_mock_client()) as gc:
-        resp = client.post(reverse("newsletter:unsubscribe", args=["tampered.token.value"]))
-    assert resp.status_code == 400
-    # A bad token must never reach the ESP.
-    gc.return_value.remove_subscriber.assert_not_called()
-
-
-def test_unsubscribe_esp_failure_still_reports_success(client):
-    """An ESP hiccup on unsubscribe reports success to the user (logged server-side)."""
-    fake = _mock_client()
-    fake.remove_subscriber.side_effect = SendPulseError("boom", status=500)
-    token = make_unsubscribe_token("reader@example.org")
-    with mock.patch("newsletter.views.get_client", return_value=fake):
-        resp = client.post(reverse("newsletter:unsubscribe", args=[token]))
-    assert resp.status_code == 200
-
-
-def test_unsubscribe_unconfigured_esp_returns_200(client):
-    token = make_unsubscribe_token("reader@example.org")
-    with mock.patch("newsletter.views.get_client", return_value=None):
-        resp = client.post(reverse("newsletter:unsubscribe", args=[token]))
-    assert resp.status_code == 200
 
 
 # -- throttle ----------------------------------------------------------------

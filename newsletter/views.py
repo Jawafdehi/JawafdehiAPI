@@ -1,9 +1,12 @@
-"""Public newsletter endpoints: subscribe and unsubscribe.
+"""Public newsletter subscribe endpoint.
 
-Both are anonymous (``AllowAny``) and rate-limited, mirroring
+Anonymous (``AllowAny``) and rate-limited, mirroring
 ``cases.api_views.FeedbackView``. SendPulse is the system of record; this app
-holds no subscriber rows. The unsubscribe token is a stateless signed token that
-encodes the email (see :mod:`newsletter.tokens`).
+holds no subscriber rows.
+
+Unsubscribe is intentionally NOT handled here: SendPulse injects its own hosted
+unsubscribe link into every campaign email (a legal requirement it owns), so the
+sender never routes unsubscribe traffic through its own backend.
 
 Contract (must stay in lockstep with ``jawafdehi-frontend``
 ``src/services/jds-api.ts``):
@@ -12,11 +15,9 @@ Contract (must stay in lockstep with ``jawafdehi-frontend``
   - ``201`` created / accepted by SendPulse
   - ``202`` accepted locally but SendPulse sync is deferred (ESP down / not
     configured) — the SPA treats any 2xx as success
-  - ``409`` the address was previously unsubscribed (SPA shows the
-    "email privacy@" copy)
+  - ``409`` the address was previously unsubscribed / already exists (SPA shows
+    the "email privacy@" copy)
   - ``429`` throttled  ·  ``400`` validation
-- ``POST /api/newsletter/unsubscribe/<token>/``
-  - ``200`` unsubscribed  ·  ``400`` bad/expired token
 """
 
 from __future__ import annotations
@@ -24,7 +25,6 @@ from __future__ import annotations
 import logging
 
 from django.conf import settings
-from django.core import signing
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
@@ -35,7 +35,6 @@ from rest_framework.views import APIView
 
 from .sendpulse import SendPulseError, get_client
 from .serializers import NewsletterSubscriptionSerializer
-from .tokens import unsign_unsubscribe_token
 
 logger = logging.getLogger("newsletter.views")
 
@@ -45,7 +44,7 @@ _SENDPULSE_CONFLICT_STATUS = 409
 
 
 class NewsletterRateThrottle(AnonRateThrottle):
-    """Rate throttle for newsletter subscribe/unsubscribe: 10 per hour per IP."""
+    """Rate throttle for newsletter subscribe: 10 per hour per IP."""
 
     scope = "newsletter"
     rate = "10/hour"
@@ -168,49 +167,4 @@ class NewsletterSubscriptionView(_ThrottledPublicView):
                 "message": "Please check your inbox to confirm your subscription.",
             },
             status=status.HTTP_201_CREATED,
-        )
-
-
-@extend_schema(
-    summary="Unsubscribe from the newsletter",
-    description=(
-        "Unsubscribe using the opaque signed token embedded in newsletter "
-        "emails. The token encodes the subscriber's email; no lookup is stored "
-        "server-side."
-    ),
-    request=None,
-    responses={200: OpenApiTypes.OBJECT, 400: OpenApiTypes.OBJECT},
-)
-class NewsletterUnsubscribeView(_ThrottledPublicView):
-    """Remove a subscriber from SendPulse using a signed unsubscribe token."""
-
-    def post(self, request, token: str):
-        try:
-            email = unsign_unsubscribe_token(token)
-        except signing.BadSignature:
-            # Covers both tampering and expiry (SignatureExpired subclasses it).
-            return Response(
-                {
-                    "error": "Invalid or expired unsubscribe link.",
-                    "detail": "This unsubscribe link is no longer valid.",
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        client = get_client()
-        if client is not None:
-            try:
-                client.remove_subscriber(email)
-            except SendPulseError as exc:
-                # Don't leak ESP state to the user; report success optimistically
-                # and log for reconciliation (an unsubscribe that didn't reach the
-                # ESP is a compliance concern, so it's logged at error level).
-                logger.error("SendPulse unsubscribe failed for a subscriber: %s", exc)
-
-        return Response(
-            {
-                "status": "unsubscribed",
-                "message": "You have been unsubscribed from the newsletter.",
-            },
-            status=status.HTTP_200_OK,
         )

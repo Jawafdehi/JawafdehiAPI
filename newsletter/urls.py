@@ -1,8 +1,8 @@
 """Newsletter routes, mounted by config/urls.py at /api/.
 
-Paths match the frontend contract in ``jawafdehi-frontend``
-``src/services/jds-api.ts`` exactly:
-``/api/newsletter/subscriptions/`` and ``/api/newsletter/unsubscribe/<token>/``.
+Only subscribe is served: unsubscribe is handled by SendPulse's own hosted link
+in campaign emails, so the backend owns no unsubscribe route. Path matches the
+frontend contract in ``jawafdehi-frontend`` ``src/services/jds-api.ts``.
 """
 
 from django.urls import path
@@ -16,12 +16,5 @@ urlpatterns = [
         "newsletter/subscriptions/",
         views.NewsletterSubscriptionView.as_view(),
         name="subscribe",
-    ),
-    # Token is opaque (URL-safe base64 from django.core.signing); match greedily
-    # up to the trailing slash so '.'/'-'/'_'/':' in the signature aren't split.
-    path(
-        "newsletter/unsubscribe/<str:token>/",
-        views.NewsletterUnsubscribeView.as_view(),
-        name="unsubscribe",
     ),
 ]
