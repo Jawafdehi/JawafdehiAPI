@@ -79,7 +79,9 @@ class ReadPlaneTests(_DbAPITestCase):
     def test_health(self):
         resp = self.client.get("/api/health")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(resp.data["service"], "nes-api")
+        # Platform-wide health identity (renamed from the pre-unification
+        # "nes-api"); /api/health serves the whole unified monolith.
+        self.assertEqual(resp.data["service"], "jawafdehi-api")
 
     def test_list_entities_shape(self):
         resp = self.client.get("/api/entities")

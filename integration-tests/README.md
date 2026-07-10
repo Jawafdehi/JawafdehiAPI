@@ -32,7 +32,7 @@ resource kind (no per-service prefix):
 
 | Resource | Route on the monolith host |
 |---|---|
-| Corruption cases | `/api/cases/`, `/api/sources/` (Jawafdehi) |
+| Corruption cases | `/api/cases/` (Jawafdehi; `/api/sources/` removed — evidence via `/api/materials/`) |
 | Entities         | `/api/entities`, `/api/entity_prefixes`, `/api/health` |
 | Court cases      | `/api/courtcases/` (+ hearings/parties), `/api/courtcase-entities/` |
 | Materials        | `/api/materials/` |
@@ -97,7 +97,7 @@ Reconciled against the live monolith (verified by curl + the live suite):
   (`https://jawafdehi.org/courtcase/<court>/<case_number>`) also exist. Entity list
   items carry the id under `@id`; the detail body is the raw schema.org JSON-LD doc.
 - **One canonical health, slashless** — `GET /api/health` (the `/health/` variant
-  404s) → `{"status":"ok","service":"nes-api"}`. The per-plane NGM health was dropped.
+  404s) → `{"status":"ok","service":"jawafdehi-api"}`. The per-plane NGM health was dropped.
 - **Court routes are uniformly trailing-slashed**, including the gated POSTs:
   `GET /api/courts/` (bare list `[...]`), `GET /api/courtcases/` (full DRF page
   with `count`), `POST /api/query/`, `POST
@@ -106,9 +106,11 @@ Reconciled against the live monolith (verified by curl + the live suite):
 - **The old `/api/ngm/search` stub is gone with the prefix** → 404. Search is unified.
 - **Unified search** at `GET /api/search/` (public read) replaces the old
   cases-scoped `/api/search` AND the old NGM 501 stub. Envelope:
-  `{query, lang, page, page_size, count, counts, results}`. `q` is required
-  (missing → 400). No-slash `/api/search` → 301. OpenSearch is a **hard
-  dependency**: 200 when the cluster is up, 503 only if it is down.
+  `{query, lang, page, page_size, count, counts, results}`. An empty/omitted
+  `q` is a **browse-all** (200 with `query: ""`), NOT a 400 — this replaced the
+  older "q is mandatory → 400" contract. No-slash `/api/search` → 301.
+  OpenSearch is a **hard dependency**: 200 when the cluster is up, 503 only if
+  it is down.
 - **Jawafdehi.** `/api/` root advertises `{cases, sources}` only — the DRF root has
   no `entities` router; entities are served by the NES-owned list view at
   `/api/entities` (same `/api/` root, not a router child). `/api/cases/` is

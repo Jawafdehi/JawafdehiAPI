@@ -1,0 +1,60 @@
+# E2E / CI overlay for the platform stack.
+#
+# Usage (local, from the repo root; isolated project name + ports so it never
+# collides with a running dev stack):
+#
+#   docker compose -p jawaf-e2e \
+#     -f docker-compose.yml -f docker-compose.e2e.yml \
+#     up -d --wait postgres opensearch minio platform-migrate platform
+#   docker compose -p jawaf-e2e exec -T platform uv run python manage.py seed_dev
+#   docker compose -p jawaf-e2e exec -T platform uv run python manage.py reindex_all --rebuild
+#
+# Then run the API E2E suite (PLATFORM_BASE_URL=http://localhost:48010) and the
+# Playwright FE suite (VITE_API_PROXY_TARGET=http://127.0.0.1:48010).
+#
+# Host ports are isolated via env vars (the base compose parameterizes EVERY port
+# as ${..._PORT:-default}). Pass them with --env-file docker-compose.e2e.env so a
+# running dev stack (default :48000/:45432/:49200/:49000) is untouched. Compose
+# merges list-valued `ports:` by CONCATENATION, so we must NOT restate `ports:`
+# here — we set the env vars instead.
+#
+# What this overlay changes vs the base compose:
+#   * TESTING=true + DEV_AUTH=true on platform (and platform-migrate, so the
+#     settings module resolves identically) — DEV_AUTH is gated by DEBUG-or-TESTING
+#     in settings.py, and TESTING avoids DEBUG's side effects. This mounts the
+#     dev-login route the Playwright auth.setup.ts uses. zitadel is NOT required
+#     (dev-login replaces OIDC for E2E), so it is simply never brought up.
+#   * A real container healthcheck on platform so `--wait` gates on readiness.
+services:
+  platform:
+    # Distinct tag so the E2E run uses an image built from THIS worktree (the flat
+    # config/ layout), never a stale cached jawafdehi-platform:latest from the old
+    # monolith/ era. Build it with:
+    #   docker build -t jawafdehi-platform:e2e .
+    image: jawafdehi-platform:e2e
+    environment:
+      TESTING: "true"
+      DEV_AUTH: "true"
+      # No 429s during the E2E run (TESTING already disables throttling; explicit
+      # for clarity if TESTING is ever toggled off in a variant).
+      THROTTLE_RATE_ANON: "1000000/hour"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,sys;
+          sys.exit(0 if urllib.request.urlopen('http://localhost:8080/api/health').status==200 else 1)"
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+
+  platform-migrate:
+    # Same worktree-built image so migrations match the running platform. TESTING
+    # here is harmless: config.settings reads DATABASE_URL (postgres) regardless of
+    # TESTING — only config.settings_test switches to sqlite, and this image runs
+    # config.settings.
+    image: jawafdehi-platform:e2e
+    environment:
+      TESTING: "true"
+      DEV_AUTH: "true"

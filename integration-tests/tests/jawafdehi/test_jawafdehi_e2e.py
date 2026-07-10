@@ -7,13 +7,17 @@ falling back to ``JAWAFDEHI_API_BASE_URL``).
 
 Observed live contract (monolith on :48000):
   * ``/api/``            -> 200 browsable root listing the public routers
-                            ``{"cases": ..., "sources": ...}`` (NOTE: the Jawafdehi
-                            DRF root has no ``entities`` router — the unified entity
-                            surface is the NES-owned ``/api/entities`` list view,
-                            mounted on the same ``/api/`` root but not a DRF router).
+                            ``{"cases": ...}`` (NOTE: the Jawafdehi DRF root has no
+                            ``entities`` router — the unified entity surface is the
+                            NES-owned ``/api/entities`` list view, mounted on the
+                            same ``/api/`` root but not a DRF router. It also has no
+                            ``sources`` router: per the ADR "cases own no documents"
+                            the ``/api/sources`` surface was REMOVED — evidence is
+                            referenced via ``/api/materials/`` + CaseMaterialReference).
   * ``/api/cases/``      -> 200 DRF page ``{count, next, previous, results}``
                             (PUBLISHED cases only for anon; empty today -> count 0).
-  * ``/api/sources/``    -> 200 (anonymous reads allowed).
+  * ``/api/materials/``  -> 200 (anonymous reads allowed; the universal document
+                            store that replaced the old ``/api/sources``).
   * Writes (POST) without auth -> 401 (OIDC-only).
   * Legacy DRF ``Authorization: Token xxx`` is IGNORED (read -> 200 as anon;
     write -> 401), not parsed-and-rejected — TokenAuthentication is gone.
@@ -57,9 +61,42 @@ def test_api_root_reachable(client):
     assert r.status_code == 200, r.text
     body = r.json()
     assert isinstance(body, dict)
-    assert "cases" in body, f"expected 'cases' route in API root, got: {body}"
+    # NOTE: entities/courts/materials/cases each mount a DefaultRouter at ``/api/``,
+    # and DRF's browsable root advertises only ONE router's registry (whichever
+    # owns the ``api-root`` name — currently courts). So we do NOT assert a
+    # specific router key is present; the real contract is that the resource
+    # endpoints resolve (asserted in test_published_cases_listing_shape /
+    # test_materials_surface_reachable). We DO assert the retired ``sources``
+    # router is not advertised, and entities is a list view (not a router child).
+    assert "sources" not in body, (
+        f"/api/sources was removed (ADR: cases own no documents); root: {body}"
+    )
     assert "entities" not in body, (
         f"entities is the NES list view, not a Jawafdehi DRF router: {body}"
+    )
+
+
+def test_materials_surface_reachable(client):
+    """``/api/materials/`` is the universal document store that replaced the old
+    ``/api/sources`` (anonymous reads allowed). Cursor-paginated envelope."""
+    r = client.get("/api/materials/")
+    skip_if_throttled(r)
+    assert r.status_code == 200, (
+        f"expected /api/materials/ reachable, got {r.status_code}: {r.text[:200]}"
+    )
+    body = r.json()
+    # CursorPagination envelope: {results, next} (no count).
+    assert "results" in body and isinstance(body["results"], list), body
+
+
+def test_legacy_sources_route_is_gone(client):
+    """The removed ``/api/sources/`` route must 404 (ADR: cases own no documents).
+
+    A 200 here would mean the retired document-source surface came back."""
+    r = client.get("/api/sources/")
+    skip_if_throttled(r)
+    assert r.status_code == 404, (
+        f"/api/sources was removed; expected 404, got {r.status_code}"
     )
 
 
@@ -120,10 +157,20 @@ def test_anonymous_write_rejected(client):
 
 
 def test_admin_login_reachable(client):
-    """Django admin login page is served (200)."""
+    """The Django admin login entrypoint is served.
+
+    It either renders the built-in HTML form (200, dev/DEV_AUTH) or, when the
+    platform is wired to OIDC/Zitadel SSO (production posture), 302-redirects the
+    login to the OIDC provider (``/oidc/authenticate/``). Both are 'reachable';
+    what must NOT happen is a 404/500. The client follows no redirects, so accept
+    either the 200 form or the 302 SSO bounce."""
     r = client.get("/django-admin/login/")
-    assert r.status_code == 200, r.text
-    assert "text/html" in r.headers.get("content-type", "")
+    assert r.status_code in (200, 302), r.text
+    if r.status_code == 200:
+        assert "text/html" in r.headers.get("content-type", "")
+    else:
+        # SSO redirect: to the OIDC authorize endpoint, not a broken loop.
+        assert "/oidc/" in r.headers.get("location", ""), r.headers
 
 
 def test_legacy_drf_token_not_accepted(client):

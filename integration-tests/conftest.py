@@ -5,7 +5,9 @@ host/port (default ``http://localhost:48000``). After the 2026-07-01 HARD CUT
 there are no per-service ``/api/nes`` or ``/api/ngm`` prefixes: every resource
 lives under ONE unified ``/api/`` surface, keyed by resource kind:
 
-  * Corruption cases -> ``/api/cases/``, ``/api/sources/``   (Jawafdehi)
+  * Corruption cases -> ``/api/cases/``   (Jawafdehi; the old ``/api/sources/``
+    surface was removed — ADR "cases own no documents" — evidence is referenced
+    via ``/api/materials/`` + CaseMaterialReference)
   * Entities         -> ``/api/entities``, ``/api/entity_prefixes``, ``/api/health``
   * Court cases      -> ``/api/courtcases/`` (+ hearings/parties), ``/api/courtcase-entities/``
   * Materials        -> ``/api/materials/``

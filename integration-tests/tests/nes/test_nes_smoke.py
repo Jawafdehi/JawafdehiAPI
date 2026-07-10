@@ -4,7 +4,7 @@ Unified surface (HARD CUT 2026-07-01): entities live at ``/api/entities`` on the
 single platform host — the old ``/api/nes/`` prefix is GONE. Verified live
 against the running monolith (:48000):
   * health is ``GET /api/health`` (NO trailing slash — registered slashless; the
-    ``/api/health/`` variant 404s) -> ``{"status": "ok", "service": "nes-api"}``;
+    ``/api/health/`` variant 404s) -> ``{"status": "ok", "service": "jawafdehi-api"}``;
   * search param is ``query`` (``q`` is silently ignored), not ``q``;
   * list shape is ``{"entities": [...], "total", "limit", "offset"}``
     (the entity id field is the schema.org ``@id`` IRI), not ``{"results": [...]}``;
@@ -21,7 +21,7 @@ def test_nes_health(clients):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body.get("status") == "ok", body
-    assert body.get("service") == "nes-api", body
+    assert body.get("service") == "jawafdehi-api", body
 
 
 def test_nes_entity_search_responds(clients):

@@ -176,4 +176,25 @@ class Command(BaseCommand):
                 )
             self.stdout.write(f"case {slug}: state={c.state} created={created}")
 
+        # ── A completed CaseReview for the IN_REVIEW case ──
+        # The moderation queue (admin panel) is driven by CaseReview rows, not by
+        # the case list — without one, the queue is empty and the moderation E2E
+        # spec has nothing real to assert against. Seed a `done` review so the
+        # queue surfaces the seeded IN_REVIEW case end-to-end.
+        from review.models import CaseReview
+
+        CaseReview.objects.get_or_create(
+            slug="seed-in-review",
+            defaults=dict(
+                status=CaseReview.STATUS_DONE,
+                case_title="Review: procurement fraud Ministry X",
+                case_state=CaseState.IN_REVIEW,
+                case_type=CaseType.CORRUPTION,
+                source_count=2,
+                sources_converted=2,
+                result={"overall": {"score": 72, "verdict": "revise"}},
+            ),
+        )
+        self.stdout.write("review seed-in-review: seeded (done)")
+
         self.stdout.write(self.style.SUCCESS("seed_dev complete."))

@@ -111,6 +111,54 @@ class CorpusEnumeratorTests(TestCase):
             2030, 1, 1, tzinfo=timezone.utc
         )
 
+    def test_soft_deleted_entity_absent_from_iter_count_and_lastmod(self):
+        # A soft-deleted entity (is_deleted=True) has vanished from every read
+        # plane (list/detail/search) but its canonical @id must NOT keep
+        # appearing as a live <loc> in the public sitemap / ResourceSync.
+        live = _make_entity(slug="ram-bahadur")
+        gone = _make_entity(prefix="person", slug="deleted-official")
+        gone.is_deleted = True
+        gone.save(update_fields=["is_deleted"])
+        StoredEntity.objects.filter(pk=gone.pk).update(
+            updated_at=datetime(2030, 1, 1, tzinfo=timezone.utc)
+        )
+
+        iris = {r.iri for r in corpus.iter_resources((corpus.TYPE_ENTITY,))}
+        assert iris == {live.iri}
+        assert corpus.count_resources((corpus.TYPE_ENTITY,)) == 1
+        # The newer soft-deleted row must not drive the public lastmod.
+        assert corpus.max_lastmod((corpus.TYPE_ENTITY,)) != datetime(
+            2030, 1, 1, tzinfo=timezone.utc
+        )
+
+    def test_soft_deleted_courtcase_absent_from_iter_count_and_lastmod(self):
+        # Same tombstone guarantee for court cases: a soft-deleted court case is
+        # gone from the read plane and must not remain in public discovery.
+        court = Court.objects.create(
+            identifier="kathmandudc", court_type="district", full_name_nepali="ज"
+        )
+        live = CourtCase.objects.create(
+            case_number="082-OA-0503", court=court, case_type="भ्रष्टाचार",
+            registration_date_ad=date(2026, 1, 11),
+        )
+        gone = CourtCase.objects.create(
+            case_number="082-OA-9999", court=court, case_type="भ्रष्टाचार",
+            registration_date_ad=date(2026, 1, 11),
+        )
+        gone.is_deleted = True
+        gone.save(update_fields=["is_deleted"])
+        CourtCase.objects.filter(pk=gone.pk).update(
+            updated_at=datetime(2030, 1, 1, tzinfo=timezone.utc)
+        )
+
+        iris = {r.iri for r in corpus.iter_resources((corpus.TYPE_COURTCASE,))}
+        assert live.case_number.lower() in " ".join(iris)
+        assert "082-oa-9999" not in " ".join(iris)
+        assert corpus.count_resources((corpus.TYPE_COURTCASE,)) == 1
+        assert corpus.max_lastmod((corpus.TYPE_COURTCASE,)) != datetime(
+            2030, 1, 1, tzinfo=timezone.utc
+        )
+
     def test_courtcase_resource_shape(self):
         _make_courtcase()
         resources = list(corpus.iter_resources((corpus.TYPE_COURTCASE,)))

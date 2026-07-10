@@ -719,6 +719,15 @@ REST_FRAMEWORK = {
 # RUNNING container without 429-ing, while still capping abusive scrapers.
 # Throttling is fully disabled only under the test runner (TESTING) — DRF's
 # rate-limit caches make per-request unit tests flaky otherwise.
+#
+# CACHE CAVEAT (F14): DRF stores throttle counters in the ``default`` cache. That
+# cache is ``LocMemCache`` (per-process) and the container runs gunicorn with
+# multiple workers, so the "1000/hour" limit is enforced PER WORKER, not globally
+# — the effective anon ceiling is ~rate × worker_count and resets on worker
+# recycle. To make the cap truly global, point ``CACHE_URL`` at a SHARED backend
+# (Redis/Memcached); the ``CACHES['default']`` block below reads it. Until a
+# shared cache is provisioned the limit is soft (best-effort abuse dampening,
+# not a hard global quota) — documented in docs/security/threat-model.md.
 if not TESTING:
     REST_FRAMEWORK["DEFAULT_THROTTLE_CLASSES"] = [
         "rest_framework.throttling.AnonRateThrottle",
@@ -820,13 +829,28 @@ if not DEBUG:
 NES_API_URL = os.getenv("NES_API_URL", "https://nes.jawafdehi.org/api")
 NGM_QUERY_MAX_ROWS = int(os.getenv("NGM_QUERY_MAX_ROWS", "500"))
 
-CACHES = {
-    "default": {
-        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-        "LOCATION": "jawafdehi-cache",
-        "TIMEOUT": 300,
+# Default cache. Also backs DRF's rate-limit throttle counters (see the
+# throttling block above). LocMemCache is per-process, so with >1 gunicorn worker
+# the anon/user throttle is per-worker, not global (F14). Set ``CACHE_URL`` to a
+# shared backend (e.g. ``redis://host:6379/0``) to make the throttle a true global
+# quota; when unset we fall back to per-process LocMem (fine for dev/tests).
+_CACHE_URL = os.getenv("CACHE_URL", "").strip()
+if _CACHE_URL:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": _CACHE_URL,
+            "TIMEOUT": 300,
+        }
     }
-}
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "jawafdehi-cache",
+            "TIMEOUT": 300,
+        }
+    }
 
 # Jazzmin admin theme
 JAZZMIN_SETTINGS = {

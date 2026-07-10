@@ -1,9 +1,10 @@
 """The entity-id join contract: the canonical schema.org ``@id`` IRI.
 
 This is the single key that threads NES (canonical owner), NGM
-(``court_case_entities.nes_id``), and Jawafdehi (``JawafEntity.nes_id``)
-together. We assert the *shape* against any data present today, and xfail the
-actual NGM->NES resolution join until ``nes_id`` population lands.
+(``court_case_entities.nes_id``), and Jawafdehi (``CaseEntityRelationship.nes_id``
+— the former ``JawafEntity`` was collapsed into this relationship row) together.
+We assert the *shape* against any data present today, and xfail the actual
+NGM->NES resolution join until ``nes_id`` population lands.
 
 Clean-slate IRI contract (``shared/jawafdehi_shared/entities/ids.py``):
   * entity @id: ``https://jawafdehi.org/entity/<prefix>/<slug>``

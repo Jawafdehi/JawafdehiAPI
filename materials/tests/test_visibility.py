@@ -117,6 +117,106 @@ class TestRecompute:
         mat.refresh_from_db()
         assert mat.visibility == Visibility.PRIVATE
 
+    def test_non_api_case_demotion_recomputes_material_visibility(
+        self, django_capture_on_commit_callbacks
+    ):
+        # F2: demoting a PUBLISHED case OUTSIDE the DRF API path (model .save() /
+        # .delete(), Django admin, a management command, or a shell) must still
+        # recompute the visibility of its evidence — otherwise a draft/closed
+        # case's evidence stays publicly LISTED (a leak). The recompute is wired to
+        # the model post_save (a signal, on_commit), not only the API view.
+        mat = _store("source:20240101:leak01")
+        case = _case("c-leak", CaseState.PUBLISHED)
+        CaseMaterialReference.objects.create(case=case, material_iri=mat.iri)
+        # Reconcile the initial state (a fresh save fires the post_save recompute).
+        with django_capture_on_commit_callbacks(execute=True):
+            case.save()
+        mat.refresh_from_db()
+        assert mat.visibility == Visibility.LISTED
+
+        # Soft-delete the case the model way (state → CLOSED); NO API call.
+        with django_capture_on_commit_callbacks(execute=True):
+            case.delete()
+
+        mat.refresh_from_db()
+        assert mat.visibility == Visibility.PRIVATE, (
+            "evidence of a closed case must not stay publicly LISTED"
+        )
+
+    def test_non_api_case_publish_recomputes_material_visibility(
+        self, django_capture_on_commit_callbacks
+    ):
+        # Inverse of the leak: publishing via the model path must PROMOTE evidence
+        # so a genuinely-public document isn't stuck PRIVATE.
+        mat = _store("source:20240101:promo1", visibility=Visibility.PRIVATE)
+        case = _case("c-promo", CaseState.DRAFT)
+        CaseMaterialReference.objects.create(case=case, material_iri=mat.iri)
+        with django_capture_on_commit_callbacks(execute=True):
+            case.save()
+        mat.refresh_from_db()
+        assert mat.visibility == Visibility.PRIVATE
+
+        # Move to PUBLISHED via a plain model save (a non-API write path — e.g. a
+        # data migration or shell). full_clean() is skipped, so this exercises the
+        # signal without the publish() transition's content validation.
+        case.state = CaseState.PUBLISHED
+        with django_capture_on_commit_callbacks(execute=True):
+            case.save()
+
+        mat.refresh_from_db()
+        assert mat.visibility == Visibility.LISTED
+
+    def test_hard_delete_of_case_demotes_orphaned_evidence(
+        self, django_capture_on_commit_callbacks
+    ):
+        # F2 (hard-delete path): a queryset/admin HARD delete fires post_delete, by
+        # which point the case pk is cleared and its CaseMaterialReference rows are
+        # CASCADE-gone — so a live reverse query finds nothing. The pre_delete
+        # snapshot must carry the IRIs forward so the now-orphaned material (LISTED
+        # only because of this one PUBLISHED case) demotes to PRIVATE. Without the
+        # snapshot this recompute is a silent no-op and the evidence stays LISTED.
+        mat = _store("source:20240101:hard01")
+        case = _case("c-hard", CaseState.PUBLISHED)
+        CaseMaterialReference.objects.create(case=case, material_iri=mat.iri)
+        with django_capture_on_commit_callbacks(execute=True):
+            case.save()
+        mat.refresh_from_db()
+        assert mat.visibility == Visibility.LISTED
+
+        # Hard-delete via the queryset manager (Case.delete() would only soft-delete);
+        # this is the path Django admin's bulk-delete and Case.objects...delete() use.
+        with django_capture_on_commit_callbacks(execute=True):
+            Case.objects.filter(pk=case.pk).delete()
+
+        mat.refresh_from_db()
+        assert mat.visibility == Visibility.PRIVATE, (
+            "evidence orphaned by a hard-deleted case must not stay publicly LISTED"
+        )
+
+    def test_reconciler_command_heals_visibility_drift(
+        self, django_capture_on_commit_callbacks
+    ):
+        # The recompute_material_visibility management command is the periodic
+        # backstop the signals delegate to on failure. Simulate drift (a material
+        # left LISTED though its only referrer is a DRAFT case) and assert the
+        # reconciler heals it.
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        mat = _store("source:20240101:drift1")
+        case = _case("c-drift", CaseState.DRAFT)
+        CaseMaterialReference.objects.create(case=case, material_iri=mat.iri)
+        # Force the drifted state directly, bypassing the recompute.
+        Material.objects.filter(pk=mat.iri).update(visibility=Visibility.LISTED)
+
+        out = StringIO()
+        call_command("recompute_material_visibility", stdout=out)
+
+        mat.refresh_from_db()
+        assert mat.visibility == Visibility.PRIVATE
+        assert "reconciled" in out.getvalue()
+
     def test_soft_deleted_material_not_touched(self):
         mat = _store("source:20240101:aaaa01")
         mat.is_deleted = True
@@ -171,6 +271,42 @@ class TestReadSideGates:
         mat = _store("source:20240101:aaaa02", visibility=Visibility.UNLISTED)
         client = APIClient()
         resp = client.get(f"/api/materials/?iri={mat.iri}")
+        assert resp.status_code == 200
+
+    def test_anon_private_court_material_does_not_leak_derived_doc(self):
+        # F3: a PRIVATE stored material whose IRI is a court-case material IRI must
+        # 404 for anon — it must NOT fall through to the derived court-case JSON-LD
+        # (which would ignore the material's own visibility gate). Even though the
+        # court case is separately public via /api/courtcases/, resolving THIS
+        # material IRI as anon must honor the PRIVATE gate the docstring promises.
+        from courts.models import Court, CourtCase
+        from materials.jsonld import court_case_material_iri
+
+        court = Court.objects.create(
+            identifier="special", court_type="special", full_name_nepali="वि"
+        )
+        CourtCase.objects.create(
+            case_number="T-1", court=court, case_type="भ्रष्टाचार"
+        )
+        iri = court_case_material_iri("special", "T-1")
+        # Store a PRIVATE material row at that same IRI (e.g. a demoted case-source
+        # material that happens to share the court IRI).
+        Material.objects.create(
+            iri=iri,
+            material_type="COURT_ORDER",
+            source="court",
+            ident="special.t-1",
+            data={"@id": iri, "@type": "Legislation", "name": {"ne": "गोप्य"}},
+            visibility=Visibility.PRIVATE,
+        )
+
+        client = APIClient()
+        resp = client.get(f"/api/materials/?iri={iri}")
+        assert resp.status_code == 404, resp.content
+
+        # A privileged principal still sees the stored PRIVATE row.
+        client.force_authenticate(self._privileged())
+        resp = client.get(f"/api/materials/?iri={iri}")
         assert resp.status_code == 200
 
     def test_privileged_retrieve_shows_private(self):

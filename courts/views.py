@@ -29,7 +29,6 @@ from rest_framework import mixins, status, viewsets
 
 from jawafdehi_shared.drf.auditlog import AuditlogActorMixin
 from jawafdehi_shared.entities.ids import is_valid_entity_iri
-from rest_framework.decorators import api_view, permission_classes
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
@@ -47,12 +46,6 @@ from .serializers import (
     CourtCaseWriteSerializer,
     CourtSerializer,
 )
-
-
-@api_view(["GET"])
-@permission_classes([AllowAny])
-def health(request):
-    return Response({"status": "ok", "service": "ngm-api"})
 
 
 # Write-method names shared by the per-method permission gate below. Reads

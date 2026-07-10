@@ -29,6 +29,8 @@ jawafdehi-api/
   lakehouse/              DORMANT Iceberg/DuckDB seam (not a live path)
   content/                headless Wagtail CMS (Newsroom) — Newsroom updates/news;
                           served at /api/cms/v2/; see ARCHITECTURE §3.5
+  llm/                    provider-agnostic LLM invocation (bedrock/proxy/cli,
+                          in-process — no HTTP surface); see ARCHITECTURE §3.6
   docs/                   design docs + sourcing artifacts
 ```
 

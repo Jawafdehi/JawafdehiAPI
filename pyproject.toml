@@ -36,6 +36,12 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "psycopg2-binary>=2.9.11",
     "dj-database-url>=3.0",
+    # Client for the optional shared cache backend (django.core.cache RedisCache),
+    # which backs DRF throttle counters when CACHE_URL is set — see the F14 note in
+    # config/settings.py. Django imports this lazily on first cache use, so it must
+    # be installed or the first throttled request 500s once CACHE_URL points at
+    # Redis in prod.
+    "redis>=5.0",
     # --- entities/materials (NES + NGM) ---
     "jsonpatch>=1.33",          # RFC-6902 PATCH /api/entities/{ref}
     # --- ngm lakehouse / object storage ---
@@ -126,6 +132,12 @@ python_files = ["tests.py", "test_*.py", "*_tests.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 asyncio_mode = "auto"
+# Custom markers. ``security`` tags the adversarial / penetration-test suite
+# (IDOR, role escalation, injection, data-exposure, abuse) so it can be run on its
+# own: ``uv run pytest -m security``. These run in the normal sqlite unit gate.
+markers = [
+    "security: adversarial / penetration-oriented tests (run with -m security)",
+]
 # Each app owns its own ``tests`` package (entities/tests, courts/tests,
 # materials/tests, cases/tests, …) so test module names are unique — no collision,
 # no __init__.py/sys.path juggling needed. The Jawafdehi suite lives at the repo-root

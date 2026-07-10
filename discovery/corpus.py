@@ -17,8 +17,12 @@ Each record type yields a :class:`Resource` ``(iri, lastmod, type, jsonld_url)``
 
 PUBLIC-ONLY GUARANTEE
 ---------------------
-* Entities, materials and court-cases are public by nature (NES/NGM are public
-  read planes), so every row is enumerated.
+* Entities, materials and court-cases are public read planes, but each honors a
+  soft-delete tombstone (``is_deleted``) and materials additionally gate on
+  ``visibility``. This enumerator applies the SAME filters the read planes use —
+  ``is_deleted=False`` for entities/court-cases, ``is_deleted=False`` +
+  ``visibility=LISTED`` for materials — so a deleted/non-public row never lingers
+  as a live ``<loc>`` in the public sitemap / ResourceSync.
 * Cases are the ONE access-controlled type: ONLY ``state == PUBLISHED`` cases are
   public (they mint a ``public_iri``; drafts/in-review/closed return ``None``).
   The case enumerator filters ``state=PUBLISHED`` in the query AND skips any row
@@ -82,7 +86,11 @@ def _iter_entities() -> Iterator[Resource]:
     """Every NES entity (all public). JSON-LD: ``/api/entities/<prefix>/<slug>``."""
     from entities.models import StoredEntity
 
-    qs = StoredEntity.objects.all().values_list(
+    # Exclude soft-deleted rows: DELETE flips ``is_deleted=True`` and the entity
+    # vanishes from every read plane (list/detail/search — ``entities.persistence
+    # ._live()``). Its canonical @id must likewise drop out of the public sitemap /
+    # ResourceSync, or a tombstoned resource keeps advertising a live ``<loc>``.
+    qs = StoredEntity.objects.filter(is_deleted=False).values_list(
         "iri", "prefix", "slug", "updated_at"
     )
     for iri, prefix, slug, updated_at in qs.iterator():
@@ -130,7 +138,12 @@ def _iter_courtcases() -> Iterator[Resource]:
     from materials.jsonld import court_case_material_iri
     from jawafdehi_shared.entities.ids import parse_material_iri
 
-    qs = CourtCase.objects.all().values_list("court", "case_number", "updated_at")
+    # Exclude soft-deleted rows (mirrors ``courts.views`` list/retrieve, which
+    # filter ``is_deleted=False``): a tombstoned court case must not linger as a
+    # live ``<loc>`` in the public sitemap / ResourceSync.
+    qs = CourtCase.objects.filter(is_deleted=False).values_list(
+        "court", "case_number", "updated_at"
+    )
     for court, case_number, updated_at in qs.iterator():
         try:
             # Both the courtcase @id IRI and the describedby material IRI can
@@ -234,13 +247,15 @@ def count_resources(types: tuple[str, ...] | None = None) -> int:
     from materials.models import Material, Visibility
 
     counters: dict[str, Callable[[], int]] = {
-        TYPE_ENTITY: lambda: StoredEntity.objects.count(),
+        # Match _iter_entities: soft-deleted entities are not public.
+        TYPE_ENTITY: lambda: StoredEntity.objects.filter(is_deleted=False).count(),
         # Must match _iter_materials: only LISTED, non-deleted materials are
         # public in the sitemap, so the paging count must exclude the rest.
         TYPE_MATERIAL: lambda: Material.objects.filter(
             is_deleted=False, visibility=Visibility.LISTED
         ).count(),
-        TYPE_COURTCASE: lambda: CourtCase.objects.count(),
+        # Match _iter_courtcases: soft-deleted court cases are not public.
+        TYPE_COURTCASE: lambda: CourtCase.objects.filter(is_deleted=False).count(),
         TYPE_CASE: lambda: Case.objects.filter(state=CaseState.PUBLISHED).count(),
     }
     total = 0
@@ -269,13 +284,17 @@ def max_lastmod(types: tuple[str, ...] | None = None) -> datetime | None:
         return qs.aggregate(m=Max("updated_at"))["m"]
 
     aggregators: dict[str, Callable[[], datetime | None]] = {
-        TYPE_ENTITY: lambda: _agg(StoredEntity.objects),
+        # Match _iter_entities so a soft-deleted entity's mtime can't drive the
+        # public sitemap lastmod / corpus-version cache key.
+        TYPE_ENTITY: lambda: _agg(StoredEntity.objects.filter(is_deleted=False)),
         # Match _iter_materials so a PRIVATE/soft-deleted material's mtime can't
         # drive the public sitemap lastmod / corpus-version cache key.
         TYPE_MATERIAL: lambda: _agg(
             Material.objects.filter(is_deleted=False, visibility=Visibility.LISTED)
         ),
-        TYPE_COURTCASE: lambda: _agg(CourtCase.objects),
+        # Match _iter_courtcases so a soft-deleted court case's mtime can't drive
+        # the public sitemap lastmod / corpus-version cache key.
+        TYPE_COURTCASE: lambda: _agg(CourtCase.objects.filter(is_deleted=False)),
         TYPE_CASE: lambda: _agg(Case.objects.filter(state=CaseState.PUBLISHED)),
     }
     latest: datetime | None = None

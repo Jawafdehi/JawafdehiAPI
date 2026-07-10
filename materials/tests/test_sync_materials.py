@@ -51,6 +51,45 @@ class CourtOrderReconciliationTests(SimpleTestCase):
         )
         self.assertEqual(doc["@type"], ["Manuscript", "DigitalDocument"])
 
+    def test_f5_hyphen_underscore_fork_when_court_order_marker_absent(self):
+        # F5 (KNOWN, DEFERRED): the reconciliation invariant above ONLY holds when
+        # the document_id carries the literal ``court-order`` marker so the sync
+        # path routes through parse_court_order_id → court_order_material_iri
+        # (which PRESERVES hyphens in the ident: the ident grammar [a-z0-9._-]
+        # allows them). A COURT_ORDER-typed row whose document_id LACKS that marker
+        # falls through to the generic manuscript shaper, which underscores the
+        # ident — minting a DIFFERENT IRI for the same underlying order (a
+        # duplicate Material row).
+        #
+        # This drives the ACTUAL sync dispatch, not two isolated minters: it runs
+        # the exact routing the command uses (parse_court_order_id → None →
+        # manuscript_jsonld) on a marker-less COURT_ORDER document_id and compares
+        # the shaped @id against the canonical court_order IRI for the same order.
+        # If someone "fixes" the fork by changing the routing (so a marker-less
+        # COURT_ORDER row reconciles to the canonical IRI), this assertion flips and
+        # forces a conscious, reviewed update + a re-key of already-synced rows.
+        from materials.jsonld import manuscript_jsonld
+
+        # A COURT_ORDER row whose document_id is missing the ``court-order`` marker.
+        marker_less_id = "ngm:supreme:082-OA-0503"
+        assert parse_court_order_id(marker_less_id) is None  # routes to manuscript
+
+        canonical = court_order_material_iri("supreme", "082-OA-0503")
+        # What the command actually produces for this row (the fallthrough branch).
+        shaped = manuscript_jsonld(
+            {"document_id": marker_less_id, "source_type": "COURT_ORDER", "links": []}
+        )
+        self.assertEqual(
+            canonical, "https://jawafdehi.org/material/court_order/supreme.082-oa-0503"
+        )
+        self.assertEqual(
+            shaped["@id"], "https://jawafdehi.org/material/supreme/082_oa_0503"
+        )
+        self.assertNotEqual(
+            canonical, shaped["@id"],
+            "F5 fork resolved? Re-key the synced rows + update this assertion.",
+        )
+
 
 class ReindexMaterialsSinceTests(TestCase):
     databases = "__all__"

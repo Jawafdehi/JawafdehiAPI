@@ -164,12 +164,18 @@ def _resolve_material(iri: str, *, include_nonpublic: bool = False) -> dict | No
 
     try:
         row = Material.objects.get(pk=iri, is_deleted=False)
-        if include_nonpublic or row.visibility in PUBLIC_VISIBILITIES:
-            return row.data
-        return _derive_court_case_jsonld(iri)
     except Material.DoesNotExist:
-        pass
-    return _derive_court_case_jsonld(iri)
+        # No stored row: fall back to the on-the-fly court-case derivation
+        # (court cases are a public read plane in their own right).
+        return _derive_court_case_jsonld(iri)
+
+    if include_nonpublic or row.visibility in PUBLIC_VISIBILITIES:
+        return row.data
+    # A PRIVATE (draft-only) stored row is treated as ABSENT for the public.
+    # We must NOT fall through to _derive_court_case_jsonld here: doing so would
+    # ignore the material's own visibility gate and hand an anon caller the
+    # derived court-case document for an IRI the stored row marks non-public.
+    return None
 
 
 def _derive_court_case_jsonld(iri: str) -> dict | None:
