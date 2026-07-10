@@ -73,12 +73,31 @@ def test_nonpublic_case_absent_from_list_for_anon(state, slug):
     assert SECRET_TITLE not in titles, f"{state} case title leaked into the list"
 
 
-def test_nonpublic_case_not_in_statistics_titles():
-    # Statistics aggregates must not carry a non-public case's identifying text.
+def test_statistics_is_aggregate_only_and_never_names_a_case():
+    # The statistics endpoint intentionally COUNTS non-public cases (the public
+    # "under investigation" tally = DRAFT + IN_REVIEW), so the leak risk isn't the
+    # count — it's the shape ever growing a per-case field (a "recent cases" list,
+    # a sample, etc.) that carries identifying text. Lock that contract: seed a
+    # non-public case AND a distinctly-titled PUBLISHED case, then assert NEITHER
+    # title nor slug appears anywhere in the payload (proving it stays aggregate),
+    # while the non-public case IS reflected in the under-investigation count.
+    # This fails the moment statistics starts emitting any case's identifying text
+    # — which would leak a draft/in-review title to anon.
     _make_case(CaseState.IN_REVIEW, "secret-in-review")
+    pub = _make_case(CaseState.PUBLISHED, "public-stats-one", title="A public case")
+
     resp = APIClient().get("/api/statistics/")
     assert resp.status_code == 200
-    assert SECRET_TITLE not in resp.content.decode()
+    body = resp.json()
+    blob = resp.content.decode()
+
+    # Aggregate-only: no case title or slug (public OR non-public) is emitted.
+    for needle in (SECRET_TITLE, "secret-in-review", "A public case", pub.slug):
+        assert needle not in blob, f"statistics leaked case identifier: {needle!r}"
+
+    # The non-public case is still counted (so the guard above isn't vacuously true
+    # because statistics ignores non-public cases entirely).
+    assert body.get("cases_under_investigation", 0) >= 1
 
 
 def test_nonpublic_case_absent_from_public_corpus():

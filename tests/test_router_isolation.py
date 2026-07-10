@@ -24,7 +24,11 @@ import pytest
 from django.test.testcases import DatabaseOperationForbidden
 from django.test.utils import override_settings
 
-from config.db_router import ServiceDatabaseRouter, _db_for_label
+from config.db_router import (
+    ServiceDatabaseRouter,
+    _db_for_label,
+    route_reads_to_replica,
+)
 
 
 def test_router_maps_apps_to_expected_aliases():
@@ -74,13 +78,40 @@ def test_declared_alias_query_is_allowed():
     assert Case.objects.count() == 0
 
 
-@override_settings(REPLICA_ALIASES={})
-def test_db_for_read_without_replica_returns_primary():
+def test_reads_default_to_primary_outside_a_request():
+    # Outside any request the replica flag is False (its ContextVar default), so
+    # reads MUST go to the primary regardless of REPLICA_ALIASES — this is what
+    # keeps mgmt commands / shell / tasks reading their own writes.
     router = ServiceDatabaseRouter()
     from entities.models import StoredEntity
 
-    # No replica configured → reads go to the primary alias.
-    assert router.db_for_read(StoredEntity) == "nes"
-    from cases.models import Case
+    with override_settings(REPLICA_ALIASES={"nes": "nes_replica"}):
+        # Flag not set → primary, even though a replica IS configured.
+        assert router.db_for_read(StoredEntity) == "nes"
 
-    assert router.db_for_write(Case) == "default"
+
+def test_replica_flagged_read_uses_replica_alias_then_falls_back():
+    # This exercises the replica branch that the old test never entered. With the
+    # request flag ON: a configured replica alias is used; an UNconfigured service
+    # falls back to its primary. Writes always go to the primary. Reset the flag in
+    # finally so it can't leak into other tests sharing this context.
+    router = ServiceDatabaseRouter()
+    from cases.models import Case
+    from courts.models import CourtCase
+    from entities.models import StoredEntity
+
+    route_reads_to_replica(True)
+    try:
+        with override_settings(REPLICA_ALIASES={"nes": "nes_replica"}):
+            # nes has a replica → routed to it.
+            assert router.db_for_read(StoredEntity) == "nes_replica"
+            # ngm has NO replica entry → falls back to its own primary.
+            assert router.db_for_read(CourtCase) == "ngm"
+            # Writes ignore the replica flag entirely.
+            assert router.db_for_write(StoredEntity) == "nes"
+            assert router.db_for_write(Case) == "default"
+        # Empty map with the flag ON → every read falls back to primary.
+        with override_settings(REPLICA_ALIASES={}):
+            assert router.db_for_read(StoredEntity) == "nes"
+    finally:
+        route_reads_to_replica(False)

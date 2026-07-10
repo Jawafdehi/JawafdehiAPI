@@ -57,28 +57,36 @@ class CourtOrderReconciliationTests(SimpleTestCase):
         # path routes through parse_court_order_id → court_order_material_iri
         # (which PRESERVES hyphens in the ident: the ident grammar [a-z0-9._-]
         # allows them). A COURT_ORDER-typed row whose document_id LACKS that marker
-        # falls through to the generic manuscript minter _manuscript_material_iri,
-        # which converts ``-`` → ``_`` in the ident — minting a DIFFERENT IRI for
-        # the same underlying order (a duplicate Material row).
+        # falls through to the generic manuscript shaper, which underscores the
+        # ident — minting a DIFFERENT IRI for the same underlying order (a
+        # duplicate Material row).
         #
-        # This is a MATERIAL-DATA-affecting divergence: aligning the two minters
-        # would re-key already-synced manuscript rows, so it needs a coordinated
-        # re-sync/migration rather than a unilateral code flip. This test PINS the
-        # current (forked) behavior so the fork is visible and any future fix is a
-        # conscious, reviewed change (update this assertion when it lands).
-        from materials.jsonld import _manuscript_material_iri
+        # This drives the ACTUAL sync dispatch, not two isolated minters: it runs
+        # the exact routing the command uses (parse_court_order_id → None →
+        # manuscript_jsonld) on a marker-less COURT_ORDER document_id and compares
+        # the shaped @id against the canonical court_order IRI for the same order.
+        # If someone "fixes" the fork by changing the routing (so a marker-less
+        # COURT_ORDER row reconciles to the canonical IRI), this assertion flips and
+        # forces a conscious, reviewed update + a re-key of already-synced rows.
+        from materials.jsonld import manuscript_jsonld
+
+        # A COURT_ORDER row whose document_id is missing the ``court-order`` marker.
+        marker_less_id = "ngm:supreme:082-OA-0503"
+        assert parse_court_order_id(marker_less_id) is None  # routes to manuscript
 
         canonical = court_order_material_iri("supreme", "082-OA-0503")
-        manuscript = _manuscript_material_iri("ngm:supreme:082-OA-0503")
-        # canonical keeps hyphens; the manuscript fallback underscores them.
+        # What the command actually produces for this row (the fallthrough branch).
+        shaped = manuscript_jsonld(
+            {"document_id": marker_less_id, "source_type": "COURT_ORDER", "links": []}
+        )
         self.assertEqual(
             canonical, "https://jawafdehi.org/material/court_order/supreme.082-oa-0503"
         )
         self.assertEqual(
-            manuscript, "https://jawafdehi.org/material/supreme/082_oa_0503"
+            shaped["@id"], "https://jawafdehi.org/material/supreme/082_oa_0503"
         )
         self.assertNotEqual(
-            canonical, manuscript,
+            canonical, shaped["@id"],
             "F5 fork resolved? Re-key the synced rows + update this assertion.",
         )
 
