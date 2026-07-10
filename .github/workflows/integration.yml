@@ -32,23 +32,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # Action versions are SHA-pinned to match ci.yml / docker-publish-platform.yml
+      # (a bare tag like setup-uv@v8 does not resolve).
       - name: Checkout API repo (owns the compose file)
-        uses: actions/checkout@v4
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Checkout frontend repo (for the Playwright half)
-        uses: actions/checkout@v4
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: ${{ env.FRONTEND_REPO }}
           ref: ${{ env.FRONTEND_REF }}
           path: _frontend
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
           enable-cache: true
 
       - name: Install bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
         with:
           bun-version: latest
 
@@ -86,6 +88,13 @@ jobs:
         env:
           VITE_API_PROXY_TARGET: http://127.0.0.1:48010
         run: |
+          # The Playwright suite lands on the FE trunk via its own PR; until it is
+          # on FRONTEND_REF this step self-skips so the API half still gates and
+          # the FE half auto-activates once the config is present on that ref.
+          if [ ! -f playwright.config.ts ]; then
+            echo "::notice::No playwright.config.ts on ${FRONTEND_REF} yet — skipping the FE half (see the frontend E2E PR)."
+            exit 0
+          fi
           bun install --frozen-lockfile
           bunx playwright install --with-deps chromium
           bunx playwright test
@@ -96,7 +105,7 @@ jobs:
 
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: e2e-artifacts
           path: |
