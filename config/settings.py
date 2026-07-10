@@ -50,13 +50,21 @@ load_dotenv()
 configure_structlog()
 
 _sentry_dsn = os.getenv("SENTRY_DSN")
-if _sentry_dsn:
+_sentry_environment = os.getenv("SENTRY_ENVIRONMENT", "production")
+# Belt-and-suspenders: never ship events from local / dev runs even if a DSN
+# leaked into a developer's .env. Prod sets SENTRY_ENVIRONMENT=production.
+if _sentry_dsn and _sentry_environment.strip().lower() not in {
+    "local",
+    "dev",
+    "development",
+    "test",
+}:
     sentry_sdk.init(
         dsn=_sentry_dsn,
         integrations=[DjangoIntegration()],
         traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "1.0")),
         send_default_pii=False,
-        environment=os.getenv("SENTRY_ENVIRONMENT", "production"),
+        environment=_sentry_environment,
     )
 
 
