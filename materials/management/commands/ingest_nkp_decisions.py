@@ -33,18 +33,6 @@ from django.core.management.base import BaseCommand, CommandError
 from materials.bulk_ingest import MaterialBulkIngestService, MaterialIngestResult
 from materials.jsonld import MaterialType, nkp_decision_to_jsonld
 
-
-def _merge_result(acc: MaterialIngestResult, batch: MaterialIngestResult) -> None:
-    """Fold one batch's ingest result into the running total (for batched runs)."""
-    acc.total += batch.total
-    acc.created += batch.created
-    acc.updated += batch.updated
-    acc.held += batch.held
-    acc.deduped_in_batch += batch.deduped_in_batch
-    acc.failed += batch.failed
-    acc.held_ids.extend(batch.held_ids)
-    acc.errors.extend(batch.errors)
-
 #: NKP precedents publish from a single authoritative government portal, so the
 #: publish gate defaults to 1 (vs. the generic material default of 2).
 NKP_MIN_SOURCES = 1
@@ -132,21 +120,32 @@ class Command(BaseCommand):
         def _flush(batch):
             if not batch:
                 return
-            r = service.ingest(batch, dry_run=opts["dry_run"])
-            _merge_result(result, r)
+            result.merge(service.ingest(batch, dry_run=opts["dry_run"]))
 
         batch: list = []
         with path.open(encoding="utf-8") as fh:
-            for line in fh:
+            for lineno, line in enumerate(fh, start=1):
                 line = line.strip()
                 if not line:
                     continue
-                dec = json.loads(line)
-                if opts["skip_removed"] and dec.get("removed"):
-                    skipped_removed += 1
+                # Isolate per-line parse/shape failures so one malformed line in a
+                # ~500MB stream can't abort a run that has already committed
+                # batches. A failed line is counted (mirroring the service's
+                # per-record isolation), keyed by its file line number, not dropped
+                # silently or fatally.
+                try:
+                    dec = json.loads(line)
+                    if opts["skip_removed"] and dec.get("removed"):
+                        skipped_removed += 1
+                        continue
+                    record = _record_from_decision(dec)
+                except Exception as e:  # noqa: BLE001
+                    result.total += 1
+                    result.failed += 1
+                    result.errors.append({"index": f"line {lineno}", "message": str(e)})
                     continue
                 n_read += 1
-                batch.append(_record_from_decision(dec))
+                batch.append(record)
                 if batch_size and len(batch) >= batch_size:
                     _flush(batch)
                     batch = []
@@ -172,6 +171,10 @@ class Command(BaseCommand):
             f"  Held:    {result.held}  "
             f"(< {opts['min_sources']} distinct-publisher sources — not written)"
         )
+        if result.skipped_deleted:
+            self.stdout.write(
+                f"  Skipped: {result.skipped_deleted} (soft-deleted — not overwritten)"
+            )
         if result.deduped_in_batch:
             self.stdout.write(
                 f"  Deduped: {result.deduped_in_batch}  (same @id earlier in batch)"

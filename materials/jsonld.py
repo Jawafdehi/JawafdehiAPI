@@ -443,6 +443,22 @@ def nkp_precedent_material_iri(decision_no: str) -> str:
     return build_material_iri(NKP_SOURCE, ident)
 
 
+def _bs_to_ad_iso(date_bs: str) -> str | None:
+    """Convert a ``YYYY-MM-DD`` Bikram Sambat date to a Gregorian ISO date string.
+
+    Returns ``None`` on any unparseable/out-of-range input (never raises) — a
+    best-effort Gregorian date for search sorting; the BS date is always kept
+    verbatim regardless.
+    """
+    try:
+        from nepali.datetime import nepalidate
+
+        y, m, d = (int(p) for p in str(date_bs).split("-"))
+        return nepalidate(y, m, d).to_date().isoformat()
+    except Exception:  # noqa: BLE001 — shaping must never hard-fail on a bad date.
+        return None
+
+
 def nkp_decision_to_jsonld(decision: dict[str, Any]) -> dict[str, Any]:
     """Shape one scraped NKP decision (``NkpDecisionItem`` dict) into Material JSON-LD.
 
@@ -493,8 +509,18 @@ def nkp_decision_to_jsonld(decision: dict[str, Any]) -> dict[str, Any]:
         if val:
             doc[key] = val
 
-    if decision.get("decision_date_bs"):
-        doc["jawafdehi:decisionDateBS"] = decision["decision_date_bs"]
+    date_bs = decision.get("decision_date_bs")
+    if date_bs:
+        # The decision date drives search date sort/filter. The unified-search
+        # indexer reads ``jawafdehi:publicationDateBS`` for its BS ``date_bs`` and
+        # ``datePublished`` for the Gregorian ``date``; emit BOTH (plus the
+        # descriptive ``decisionDateBS``) so precedents are date-orderable — not
+        # only ``jawafdehi:decisionDateBS``, which the indexer does not read.
+        doc["jawafdehi:decisionDateBS"] = date_bs
+        doc["jawafdehi:publicationDateBS"] = date_bs
+        ad = _bs_to_ad_iso(date_bs)
+        if ad:
+            doc["datePublished"] = ad
     if decision.get("judges"):
         doc["jawafdehi:judges"] = decision["judges"]
     if decision.get("referenced_laws"):

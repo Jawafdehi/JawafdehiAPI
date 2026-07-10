@@ -14,7 +14,11 @@ from __future__ import annotations
 from django.test import TestCase
 
 from jawafdehi_shared.entities.ids import is_valid_material_iri
-from materials.bulk_ingest import MaterialBulkIngestService
+from materials.bulk_ingest import (
+    MaterialBulkIngestService,
+    MaterialIngestResult,
+    _infer_material_type,
+)
 from materials.jsonld import (
     MaterialType,
     nkp_decision_to_jsonld,
@@ -171,3 +175,81 @@ class NkpIngestCommandTests(_NgmTestCase):
         self.assertFalse(
             Material.objects.using("ngm").filter(iri="https://jawafdehi.org/material/nkp/12001").exists()
         )
+
+
+class NkpDateShapingTests(_NgmTestCase):
+    """Precedent dates must land in the keys the search indexer reads."""
+
+    def test_shaper_emits_search_readable_dates(self):
+        doc = nkp_decision_to_jsonld(_DECISION)
+        # build_doc reads jawafdehi:publicationDateBS for date_bs and datePublished
+        # for the Gregorian date — both must be present, not only decisionDateBS.
+        self.assertEqual(doc["jawafdehi:publicationDateBS"], "2080-03-24")
+        self.assertEqual(doc["jawafdehi:decisionDateBS"], "2080-03-24")
+        self.assertEqual(doc["datePublished"], "2023-07-09")  # BS 2080-03-24 → AD
+
+    def test_index_doc_carries_dates(self):
+        from materials.search_index import build_doc
+
+        mat = MaterialBulkIngestService(min_sources=1)
+        mat.ingest([_record_from_decision(_DECISION)])
+        row = Material.objects.using("ngm").get(iri="https://jawafdehi.org/material/nkp/11376")
+        idx = build_doc(row)
+        self.assertEqual(idx["date"], "2023-07-09")
+        self.assertEqual(idx["date_bs"], "2080-03-24")
+
+    def test_bad_bs_date_does_not_break_shaping(self):
+        d = dict(_DECISION, decision_date_bs="not-a-date")
+        doc = nkp_decision_to_jsonld(d)
+        self.assertEqual(doc["jawafdehi:publicationDateBS"], "not-a-date")
+        self.assertNotIn("datePublished", doc)  # unparseable → no Gregorian date
+
+
+class InferMaterialTypeTests(_NgmTestCase):
+    """A bare precedent doc (no explicit material_type) must not flatten to document."""
+
+    def test_additionaltype_wins_over_bare_creativework(self):
+        doc = nkp_decision_to_jsonld(_DECISION)  # @type CreativeWork + jawafdehi:Precedent
+        self.assertEqual(_infer_material_type(doc), MaterialType.PRECEDENT)
+
+    def test_court_case_additionaltype_inferred(self):
+        doc = {"@type": "CreativeWork", "additionalType": "jawafdehi:CourtCase"}
+        self.assertEqual(_infer_material_type(doc), MaterialType.COURT_CASE)
+
+    def test_plain_creativework_still_document(self):
+        self.assertEqual(_infer_material_type({"@type": "CreativeWork"}), MaterialType.DOCUMENT)
+
+
+class SoftDeleteReingestTests(_NgmTestCase):
+    """A soft-deleted material must not be silently overwritten on re-ingest."""
+
+    def test_reingest_skips_soft_deleted(self):
+        service = MaterialBulkIngestService(min_sources=1)
+        service.ingest([_record_from_decision(_DECISION)])
+        iri = "https://jawafdehi.org/material/nkp/11376"
+        Material.objects.using("ngm").filter(iri=iri).update(is_deleted=True, data={"tomb": 1})
+
+        result = service.ingest([_record_from_decision(_DECISION)])
+        self.assertEqual(result.skipped_deleted, 1)
+        self.assertIn(iri, result.skipped_deleted_ids)
+        self.assertEqual(result.written, 0)
+        # Data was NOT overwritten and the row stays soft-deleted.
+        row = Material.objects.using("ngm").get(iri=iri)
+        self.assertTrue(row.is_deleted)
+        self.assertEqual(row.data, {"tomb": 1})
+
+
+class MergeResultTests(_NgmTestCase):
+    """MaterialIngestResult.merge re-bases per-batch error indices monotonically."""
+
+    def test_merge_rebases_error_index(self):
+        acc = MaterialIngestResult()
+        b1 = MaterialIngestResult(total=500, failed=1, errors=[{"index": 3, "message": "a"}])
+        b2 = MaterialIngestResult(total=500, failed=1, errors=[{"index": 3, "message": "b"}])
+        acc.merge(b1)
+        acc.merge(b2)
+        self.assertEqual(acc.total, 1000)
+        self.assertEqual(acc.failed, 2)
+        # The two batch-local index=3 must not collide after merge.
+        indices = [e["index"] for e in acc.errors]
+        self.assertEqual(indices, [3, 503])

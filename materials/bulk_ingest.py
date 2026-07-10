@@ -44,6 +44,7 @@ from django.db import transaction
 from entities.services.bulk_ingest.models import IngestSource
 
 from .jsonld import (
+    MATERIAL_TYPES,
     MaterialType,
     validate_material_jsonld,
 )
@@ -65,6 +66,18 @@ _TYPE_BY_SCHEMA: dict[str, str] = {
     "CreativeWork": MaterialType.DOCUMENT,
 }
 
+#: jawafdehi ``additionalType`` -> material_type token. Several material types
+#: share one schema.org ``@type`` (court_case, precedent and generic docs are all
+#: ``CreativeWork``); their discriminator is the ``additionalType``. Derived from
+#: MATERIAL_TYPES so it can't drift from the shaping table. Consulted BEFORE the
+#: bare-@type fallback, so a bare precedent/court-case doc isn't flattened to
+#: ``document``.
+_TYPE_BY_ADDITIONAL: dict[str, str] = {
+    additional: token
+    for token, (_schema, additional) in MATERIAL_TYPES.items()
+    if additional
+}
+
 
 @dataclass
 class MaterialIngestResult:
@@ -74,15 +87,42 @@ class MaterialIngestResult:
     created: int = 0
     updated: int = 0
     held: int = 0
+    skipped_deleted: int = 0
     deduped_in_batch: int = 0
     failed: int = 0
     dry_run: bool = False
     held_ids: List[str] = field(default_factory=list)
+    skipped_deleted_ids: List[str] = field(default_factory=list)
     errors: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def written(self) -> int:
         return self.created + self.updated
+
+    def merge(self, other: "MaterialIngestResult") -> None:
+        """Fold another result into this one (accumulate across batches).
+
+        The single definition of how ingest results combine, so batched callers
+        don't hand-enumerate fields (and silently drop new ones). Errors from
+        ``other`` are re-based by this result's running total so a per-batch
+        ``index`` stays a unique, monotonic pointer across batches rather than
+        colliding (batch-local indices would repeat, e.g. two ``[3]`` entries).
+        """
+        base = self.total
+        self.total += other.total
+        self.created += other.created
+        self.updated += other.updated
+        self.held += other.held
+        self.skipped_deleted += other.skipped_deleted
+        self.deduped_in_batch += other.deduped_in_batch
+        self.failed += other.failed
+        self.held_ids.extend(other.held_ids)
+        self.skipped_deleted_ids.extend(other.skipped_deleted_ids)
+        for err in other.errors:
+            merged = dict(err)
+            if isinstance(merged.get("index"), int):
+                merged["index"] += base
+            self.errors.append(merged)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -90,19 +130,31 @@ class MaterialIngestResult:
             "created": self.created,
             "updated": self.updated,
             "held": self.held,
+            "skipped_deleted": self.skipped_deleted,
             "deduped_in_batch": self.deduped_in_batch,
             "failed": self.failed,
             "dry_run": self.dry_run,
             "held_ids": list(self.held_ids),
+            "skipped_deleted_ids": list(self.skipped_deleted_ids),
             "errors": list(self.errors),
         }
 
 
 def _infer_material_type(doc: Dict[str, Any]) -> str:
-    """Derive a material_type token from the doc's @type (first known schema type)."""
+    """Derive a material_type token from a doc that omits an explicit one.
+
+    Prefers the jawafdehi ``additionalType`` discriminator (which distinguishes
+    the several material types sharing one schema.org ``@type`` — e.g. court_case
+    vs precedent vs generic CreativeWork), then falls back to the bare ``@type``.
+    Defaults to DOCUMENT.
+    """
+    additional = doc.get("additionalType")
+    for a in additional if isinstance(additional, list) else [additional]:
+        if isinstance(a, str) and a in _TYPE_BY_ADDITIONAL:
+            return _TYPE_BY_ADDITIONAL[a]
+
     atype = doc.get("@type")
-    types = atype if isinstance(atype, list) else [atype]
-    for t in types:
+    for t in atype if isinstance(atype, list) else [atype]:
         if isinstance(t, str) and t in _TYPE_BY_SCHEMA:
             return _TYPE_BY_SCHEMA[t]
     return MaterialType.DOCUMENT
@@ -155,7 +207,7 @@ class MaterialBulkIngestService:
 
         to_write: List[Tuple[Dict[str, Any], str]] = []  # (doc, material_type)
         seen_ids: set[str] = set()
-        existing_ids = self._existing_ids(record_list)
+        existing_ids, deleted_ids = self._existing_ids(record_list)
 
         for index, raw in enumerate(record_list):
             result.total += 1
@@ -172,6 +224,17 @@ class MaterialBulkIngestService:
                 result.deduped_in_batch += 1
                 continue
             seen_ids.add(iri)
+
+            # Soft-deleted rows are deliberate takedowns (an accountability
+            # platform never hard-deletes). A routine bulk re-ingest must NOT
+            # silently overwrite their (possibly redacted) data — and can't
+            # resurrect them anyway, since ``update_or_create`` here omits
+            # ``is_deleted`` so the row would stay hidden and get evicted from the
+            # index. Skip + report; an explicit un-delete is a separate action.
+            if iri in deleted_ids:
+                result.skipped_deleted += 1
+                result.skipped_deleted_ids.append(iri)
+                continue
 
             # ≥2-source HOLD gate (reported, not written — no NGM staging table).
             if self._distinct_publisher_count(sources) < self.min_sources:
@@ -191,10 +254,10 @@ class MaterialBulkIngestService:
 
         logger.info(
             "Material bulk ingest %s: total=%d created=%d updated=%d held=%d "
-            "deduped_in_batch=%d failed=%d",
+            "skipped_deleted=%d deduped_in_batch=%d failed=%d",
             "(dry-run)" if dry_run else "committed",
             result.total, result.created, result.updated, result.held,
-            result.deduped_in_batch, result.failed,
+            result.skipped_deleted, result.deduped_in_batch, result.failed,
         )
         return result
 
@@ -207,8 +270,14 @@ class MaterialBulkIngestService:
         )
 
     @staticmethod
-    def _existing_ids(records: List[Any]) -> set[str]:
-        """The subset of the batch's @ids that already exist as Material rows."""
+    def _existing_ids(records: List[Any]) -> Tuple[set[str], set[str]]:
+        """Return ``(existing_ids, soft_deleted_ids)`` for the batch's @ids.
+
+        ``existing_ids`` — @ids already present as Material rows (for the
+        created-vs-updated tally). ``soft_deleted_ids`` — the subset of those
+        whose row is ``is_deleted=True`` (skipped on re-ingest; see ``ingest``).
+        One query returns both, keyed on the ngm alias where materials live.
+        """
         ids: set[str] = set()
         for raw in records:
             try:
@@ -217,10 +286,13 @@ class MaterialBulkIngestService:
             except Exception:  # noqa: BLE001
                 continue
         if not ids:
-            return set()
-        return set(
-            Material.objects.filter(pk__in=ids).values_list("pk", flat=True)
+            return set(), set()
+        rows = Material.objects.using("ngm").filter(pk__in=ids).values_list(
+            "pk", "is_deleted"
         )
+        existing = {pk for pk, _ in rows}
+        deleted = {pk for pk, is_deleted in rows if is_deleted}
+        return existing, deleted
 
     def _persist(self, to_write: List[Tuple[Dict[str, Any], str]]) -> None:
         """Upsert each material by ``@id``, running model validation + indexing.
@@ -230,15 +302,29 @@ class MaterialBulkIngestService:
         ``full_clean`` skips ``validate_unique`` (an existing pk is not a
         duplicate) and only the mutable columns are written — preserving
         ``created_at`` (``auto_now_add`` fires on INSERT only) while the
-        ``post_save`` ngm-materials indexer still runs. Mirrors
-        ``single_source_ingest.upsert_single_source_material`` so both write
-        paths are idempotent and behave identically on re-ingest.
+        ``post_save`` ngm-materials indexer still runs. Uses the same upsert
+        primitive as ``single_source_ingest.upsert_single_source_material``
+        (both idempotent by ``@id`` on the ngm alias); this path additionally
+        batches many rows under one ngm transaction.
+
+        The transaction and the query are pinned to the ``ngm`` alias
+        (``Material`` routes there): a bare ``transaction.atomic()`` binds the
+        DEFAULT connection, so it would give the ngm writes NO rollback and a
+        mid-batch validation error would leave a partial write. ``full_clean`` is
+        run BEFORE opening the transaction so a bad doc can't abort a batch that
+        has already written earlier rows.
         """
-        with transaction.atomic():
-            for doc, material_type in to_write:
-                candidate = Material.from_jsonld(doc, material_type=material_type)
-                candidate.full_clean(validate_unique=False)
-                Material.objects.update_or_create(
+        # Validate all docs first (no DB writes) so a ValidationError doesn't
+        # tear a batch that's partway through committing.
+        candidates: List[Material] = []
+        for doc, material_type in to_write:
+            candidate = Material.from_jsonld(doc, material_type=material_type)
+            candidate.full_clean(validate_unique=False)
+            candidates.append(candidate)
+
+        with transaction.atomic(using="ngm"):
+            for candidate in candidates:
+                Material.objects.using("ngm").update_or_create(
                     iri=candidate.iri,
                     defaults={
                         "material_type": candidate.material_type,

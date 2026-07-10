@@ -54,6 +54,19 @@ UA = (
 _CHALLENGE_MARKERS = ("/web/", "/advance_search/web")
 
 
+def _is_bounce(final_url: str) -> bool:
+    """True if a request landed on the F5 portal-shell (challenge/outage).
+
+    Tested against the FINAL (post-redirect) url only. A healthy page — including
+    a ``/full_detail/{id}`` decision — never contains a challenge marker in its
+    final url, so no path-based exemption is needed; adding one (e.g. "full_detail
+    not in url") would wrongly suppress a genuine bounce of a detail request and
+    silently drop the decision instead of backing off. Shared by both fetchers so
+    the rule has a single definition.
+    """
+    return any(m in final_url for m in _CHALLENGE_MARKERS)
+
+
 class Checkpoint:
     """Tracks scraped decision ids + finished (year, month) listings on disk.
 
@@ -130,8 +143,7 @@ class RequestsFetcher:
         """Return ``(html, bounced)``. ``bounced`` = hit the /web/ portal shell."""
         try:
             r = self.s.get(url, timeout=45, allow_redirects=True)
-            bounced = any(m in r.url for m in _CHALLENGE_MARKERS) and "full_detail" not in url
-            if bounced:
+            if _is_bounce(r.url):
                 return None, True
             # The pages are UTF-8 Devanagari but the server omits/mis-declares
             # charset, so requests guesses Latin-1 → mojibake. Force UTF-8 (lxml
@@ -167,8 +179,7 @@ class PlaywrightFetcher:
     def get(self, url: str) -> tuple[str | None, bool]:
         try:
             self.page.goto(url, wait_until="domcontentloaded", timeout=45000)
-            final = self.page.url
-            bounced = any(m in final for m in _CHALLENGE_MARKERS) and "full_detail" not in url
+            bounced = _is_bounce(self.page.url)
             return (None if bounced else self.page.content()), bounced
         except Exception as e:  # noqa: BLE001
             msg = str(e)
@@ -292,73 +303,120 @@ class NkpCrawler:
             key = self.cp.listing_key(year, month)
             if key in self.cp.done_listings:
                 continue
-            self._crawl_listing(year, month)
-            self.cp.done_listings.add(key)
+            complete = self._crawl_listing(year, month)
+            # Only checkpoint the month as DONE when its listing was fully walked
+            # AND every decision was scraped. Marking it done after a partial walk
+            # (a fetch failure on page 2+, or a dropped detail) would make a resume
+            # skip the month wholesale and permanently lose the un-fetched rows.
+            if complete:
+                self.cp.done_listings.add(key)
             self.cp.save()
             if self._hit_limit():
                 return
 
-    def _crawl_listing(self, year: str, month: str) -> None:
+    def _crawl_listing(self, year: str, month: str) -> bool:
         """Walk ALL pages of a month listing (per_page row-offset) and scrape.
 
         Pagination is a ``per_page`` ROW OFFSET (page 1 = none, page 2 =
-        ``per_page=20``, page 3 = ``per_page=40`` …). We step the offset ourselves
-        and stop when: we've collected the page's stated ``total``, OR a page
-        returns no NEW result ids (empty over-run — the site renders its sidebar
-        past the last page, which ``extract_listing`` already excludes). The
-        stated total per month is logged against what we collected as a
-        completeness check.
+        ``per_page=<page_size>``, page 3 = ``per_page=2*page_size`` …). The stride
+        is the number of result rows page 1 returns (the site's page size), taken
+        from actual data rather than the DOM order of pager links. We stop when
+        we've collected the page's stated ``total``, or a page returns no NEW
+        result ids (empty over-run — the sidebar past the last page, which
+        ``extract_listing`` excludes), or a fetch fails.
+
+        Returns ``True`` only if the month is fully done: every listing page was
+        fetched, the collected count matched the page's stated ``total`` (when
+        known), and every decision was successfully scraped. A ``False`` return
+        leaves the month un-checkpointed so a later run retries it.
         """
         seen_ids: list[str] = []
         total: int | None = None
-        page_size = 20
+        stride = 0
         base = f"{BASE}/advance_search/?Submit=Yes&year={year}&month={month}"
         offset = 0
+        listing_complete = True
         max_pages = 100  # hard stop (2000 results/month is far beyond any real month)
         for _ in range(max_pages):
             url = base if offset == 0 else f"{base}&per_page={offset}"
             self._pause()
             html = self._get(url)
             if not html:
+                listing_complete = False  # fetch failed mid-walk — not fully listed
                 break
             listing = extract_listing(html, url)
             if total is None:
                 total = listing["total"]
-                page_size = listing["page_size"] or 20
             new = [d for d in listing["detail_ids"] if d not in seen_ids]
             if not new:
-                break  # empty / over-run page → done
+                # Empty / over-run page → done. Assumes an over-run offset renders
+                # only the sidebar (zero result rows), which extract_listing
+                # excludes. If the site ever CLAMPED an out-of-range offset and
+                # re-served page 1, this would stop early — but the total-vs-collected
+                # check below catches that shortfall (marks the month incomplete →
+                # retried on resume), so it can't silently truncate.
+                break
             seen_ids.extend(new)
+            # Stride = the first (full) page's result count — the true page size,
+            # derived from data not pager-link order.
+            if stride == 0:
+                stride = len(listing["detail_ids"]) or (listing["page_size"] or 20)
             if total is not None and len(seen_ids) >= total:
                 break
-            offset += page_size
+            offset += stride
 
-        note = ""
+        complete = listing_complete
         if total is not None and len(seen_ids) != total:
-            note = f"  ⚠ collected {len(seen_ids)} but page states total={total}"
-        print(f"  listing {year}/{month}: {len(seen_ids)} decisions{note}", file=sys.stderr)
+            print(
+                f"  listing {year}/{month}: {len(seen_ids)} decisions  "
+                f"⚠ page states total={total} (incomplete — will retry on resume)",
+                file=sys.stderr,
+            )
+            complete = False
+        else:
+            print(f"  listing {year}/{month}: {len(seen_ids)} decisions", file=sys.stderr)
+
         for did in seen_ids:
             if did in self.cp.done_ids:
                 continue
-            self._crawl_detail(did)
+            scraped = self._crawl_detail(did)
+            if not scraped:
+                complete = False  # a decision we couldn't scrape — retry the month
             if self._hit_limit():
-                return
+                return False  # stopped early by --max-decisions; month not finished
+        return complete
 
-    def _crawl_detail(self, detail_id: str) -> None:
+    def _crawl_detail(self, detail_id: str) -> bool:
+        """Fetch + parse one decision, append it, mark it done. Returns True if the
+        decision was recorded (so the caller can tell a fully-scraped month from
+        one with dropped detail fetches).
+
+        A fetch failure/bounce (``html is None``) returns False → the month is not
+        checkpointed and the id is retried on resume. A page that parses to no
+        content column returns None from ``parse_detail``; that is a real but empty
+        decision (a handful exist site-side), so it is recorded (with metadata-only
+        via a minimal item) and counted done rather than retried forever.
+        """
         self._pause()
         url = f"{BASE}/full_detail/{detail_id}"
         html = self._get(url)
         if not html:
-            return
+            return False  # fetch failed / bounced — retryable, do not mark done
         item = parse_detail(html, detail_id, url)
         if item is None:
-            print(f"  ! no content for full_detail/{detail_id}", file=sys.stderr)
-            return
+            # Page loaded but has no decision content column. Distinguish a genuine
+            # empty decision (record it, move on) from a bounce shell that slipped
+            # through: a real decision page carries the site chrome, a bounce does
+            # not. We conservatively record a metadata-only stub so the id is not
+            # re-fetched every resume, and log it for review.
+            print(f"  ! no content for full_detail/{detail_id} (recorded as empty)", file=sys.stderr)
+            item = {"detail_id": detail_id, "source_url": url, "empty": True}
         item["scraped_at"] = _now_iso()
         self.fh.write(json.dumps(item, ensure_ascii=False) + "\n")
         self.fh.flush()
         self.cp.done_ids.add(detail_id)
         self.new_count += 1
+        return True
 
     def _hit_limit(self) -> bool:
         return bool(self.args.max_decisions) and self.new_count >= self.args.max_decisions
