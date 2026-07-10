@@ -166,6 +166,57 @@ class TestRecompute:
         mat.refresh_from_db()
         assert mat.visibility == Visibility.LISTED
 
+    def test_hard_delete_of_case_demotes_orphaned_evidence(
+        self, django_capture_on_commit_callbacks
+    ):
+        # F2 (hard-delete path): a queryset/admin HARD delete fires post_delete, by
+        # which point the case pk is cleared and its CaseMaterialReference rows are
+        # CASCADE-gone — so a live reverse query finds nothing. The pre_delete
+        # snapshot must carry the IRIs forward so the now-orphaned material (LISTED
+        # only because of this one PUBLISHED case) demotes to PRIVATE. Without the
+        # snapshot this recompute is a silent no-op and the evidence stays LISTED.
+        mat = _store("source:20240101:hard01")
+        case = _case("c-hard", CaseState.PUBLISHED)
+        CaseMaterialReference.objects.create(case=case, material_iri=mat.iri)
+        with django_capture_on_commit_callbacks(execute=True):
+            case.save()
+        mat.refresh_from_db()
+        assert mat.visibility == Visibility.LISTED
+
+        # Hard-delete via the queryset manager (Case.delete() would only soft-delete);
+        # this is the path Django admin's bulk-delete and Case.objects...delete() use.
+        with django_capture_on_commit_callbacks(execute=True):
+            Case.objects.filter(pk=case.pk).delete()
+
+        mat.refresh_from_db()
+        assert mat.visibility == Visibility.PRIVATE, (
+            "evidence orphaned by a hard-deleted case must not stay publicly LISTED"
+        )
+
+    def test_reconciler_command_heals_visibility_drift(
+        self, django_capture_on_commit_callbacks
+    ):
+        # The recompute_material_visibility management command is the periodic
+        # backstop the signals delegate to on failure. Simulate drift (a material
+        # left LISTED though its only referrer is a DRAFT case) and assert the
+        # reconciler heals it.
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        mat = _store("source:20240101:drift1")
+        case = _case("c-drift", CaseState.DRAFT)
+        CaseMaterialReference.objects.create(case=case, material_iri=mat.iri)
+        # Force the drifted state directly, bypassing the recompute.
+        Material.objects.filter(pk=mat.iri).update(visibility=Visibility.LISTED)
+
+        out = StringIO()
+        call_command("recompute_material_visibility", stdout=out)
+
+        mat.refresh_from_db()
+        assert mat.visibility == Visibility.PRIVATE
+        assert "reconciled" in out.getvalue()
+
     def test_soft_deleted_material_not_touched(self):
         mat = _store("source:20240101:aaaa01")
         mat.is_deleted = True
