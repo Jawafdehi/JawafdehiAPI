@@ -430,7 +430,24 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         return queryset.prefetch_related(
             "entity_relationships",
             "courtcase_references",
+            # ``CaseSerializer.get_evidence`` iterates ``material_references``;
+            # prefetch it so a list page doesn't fire one query per card (N+1).
+            "material_references",
         ).order_by("-created_at")
+
+    # Anonymous list responses are PUBLISHED-only and identical for everyone, so
+    # they are publicly cacheable. ``s-maxage`` lets the CDN edge absorb the
+    # fan-out; ``max-age`` gives browsers a short hold so an immediate reload is
+    # served from cache instead of re-paying the full query cost. Mirrors
+    # StatisticsView.CACHE_CONTROL. Authenticated/casework list responses vary by
+    # role and stay uncached.
+    LIST_CACHE_CONTROL = "public, max-age=60, s-maxage=300"
+
+    def list(self, request, *args, **kwargs):
+        response = super().list(request, *args, **kwargs)
+        if not (request.user and request.user.is_authenticated):
+            response["Cache-Control"] = self.LIST_CACHE_CONTROL
+        return response
 
     # Case model fields that CaseCreateSerializer may set directly on the row.
     # ``court_cases`` is a settable property (canonical IRIs synced to the

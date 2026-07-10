@@ -130,6 +130,35 @@ class CaseStateChangeSerializer(serializers.ModelSerializer):
         return obj.actor.get_full_name() or obj.actor.get_username()
 
 
+class CaseListSerializer(serializers.ListSerializer):
+    """List serializer that resolves NES entities for the whole page in one pass.
+
+    ``CaseSerializer.get_entities`` would otherwise call ``resolve_entities``
+    once per case — a cross-DB N+1 across a page of cards (the home "Recently
+    Documented Cases" section and the ``/cases`` browse list). Here we collect
+    every ``nes_id`` across all cases in the page, resolve them in a single
+    ``resolve_entities`` call, and stash the superset map on the child
+    serializer's context so ``get_entities`` reuses it instead of re-resolving.
+    """
+
+    def to_representation(self, data):
+        from cases.services.nes_resolver import resolve_entities
+
+        # ``data`` is the page of Case instances (entity_relationships prefetched
+        # by CaseViewSet.get_queryset, so this touches no extra DB rows).
+        instances = list(data)
+        nes_ids = [
+            rel.nes_id
+            for case in instances
+            for rel in case.entity_relationships.all()
+            if rel.nes_id
+        ]
+        # One batched lookup for the whole page; keyed by nes_id so per-case
+        # build_entity_binds(resolved) reads its slice via resolved.get(...).
+        self.child.context["resolved_entities"] = resolve_entities(nes_ids)
+        return super().to_representation(instances)
+
+
 class CaseSerializer(serializers.ModelSerializer):
     """
     Serializer for Case model.
@@ -192,7 +221,12 @@ class CaseSerializer(serializers.ModelSerializer):
 
         try:
             relationships = list(obj.entity_relationships.all())
-            resolved = resolve_entities(rel.nes_id for rel in relationships)
+            # On the list path CaseListSerializer pre-resolves the whole page in
+            # one batched call and shares the superset map here (avoids a per-case
+            # N+1). The retrieve path has no such map → resolve this case's ids.
+            resolved = self.context.get("resolved_entities")
+            if resolved is None:
+                resolved = resolve_entities(rel.nes_id for rel in relationships)
             # Per-entity relationship notes are internal-only, same as the
             # case-level notes field (BB-04): expose them to casework roles only.
             # The shared shaper (build_entity_binds) defaults notes to "" so the
@@ -277,6 +311,8 @@ class CaseSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Case
+        # Batch NES entity resolution across a page instead of per-case (N+1).
+        list_serializer_class = CaseListSerializer
         fields = [
             "id",
             "slug",
