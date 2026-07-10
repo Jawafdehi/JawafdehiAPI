@@ -35,6 +35,12 @@ def test_anonymous_list_is_publicly_cacheable():
     resp = APIClient().get("/api/cases/")
     assert resp.status_code == 200
     assert resp["Cache-Control"] == CaseViewSet.LIST_CACHE_CONTROL
+    # Must vary on the auth-bearing headers so a shared/CDN cache can't serve
+    # this public anon snapshot to an authenticated (cookie- or bearer-token)
+    # caseworker who is entitled to a wider, role-scoped list.
+    vary = resp.get("Vary", "")
+    assert "Cookie" in vary
+    assert "Authorization" in vary
 
 
 @pytest.mark.django_db

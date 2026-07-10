@@ -17,6 +17,7 @@ from django.db import IntegrityError, connection, transaction
 from django.db.models import Q
 from django.http import HttpResponse
 from django.utils import timezone
+from django.utils.cache import patch_vary_headers
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import (
@@ -447,6 +448,12 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         response = super().list(request, *args, **kwargs)
         if not (request.user and request.user.is_authenticated):
             response["Cache-Control"] = self.LIST_CACHE_CONTROL
+            # Vary on the auth-bearing headers so a shared/CDN cache never
+            # serves this public, PUBLISHED-only snapshot to an authenticated
+            # caseworker. Auth is OIDC bearer (``Authorization``) or session
+            # (``Cookie``); those requests must miss the anon cache and get
+            # their role-scoped (DRAFT/IN_REVIEW-inclusive) list from origin.
+            patch_vary_headers(response, ["Cookie", "Authorization"])
         return response
 
     # Case model fields that CaseCreateSerializer may set directly on the row.
