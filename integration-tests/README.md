@@ -106,9 +106,11 @@ Reconciled against the live monolith (verified by curl + the live suite):
 - **The old `/api/ngm/search` stub is gone with the prefix** → 404. Search is unified.
 - **Unified search** at `GET /api/search/` (public read) replaces the old
   cases-scoped `/api/search` AND the old NGM 501 stub. Envelope:
-  `{query, lang, page, page_size, count, counts, results}`. `q` is required
-  (missing → 400). No-slash `/api/search` → 301. OpenSearch is a **hard
-  dependency**: 200 when the cluster is up, 503 only if it is down.
+  `{query, lang, page, page_size, count, counts, results}`. An empty/omitted
+  `q` is a **browse-all** (200 with `query: ""`), NOT a 400 — this replaced the
+  older "q is mandatory → 400" contract. No-slash `/api/search` → 301.
+  OpenSearch is a **hard dependency**: 200 when the cluster is up, 503 only if
+  it is down.
 - **Jawafdehi.** `/api/` root advertises `{cases, sources}` only — the DRF root has
   no `entities` router; entities are served by the NES-owned list view at
   `/api/entities` (same `/api/` root, not a router child). `/api/cases/` is

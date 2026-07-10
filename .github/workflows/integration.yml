@@ -17,7 +17,10 @@ on:
     branches: [main, v2]
 
 # The FE repo to check out alongside for the Playwright half. The compose overlay
-# and env file live at the API repo root (one dir up from integration-tests/).
+# and env file live at the API repo root — this workflow and every path below are
+# resolved from that root (GitHub Actions only discovers workflows under the
+# repo-root .github/workflows/, so the workflow lives here, not under
+# integration-tests/; the API suite step sets working-directory: integration-tests).
 env:
   FRONTEND_REPO: jawafdehi/jawafdehi
   FRONTEND_REF: main
