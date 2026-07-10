@@ -62,6 +62,7 @@ class MaterialType:
 
     COURT_CASE = "court_case"          # the case RECORD itself
     COURT_ORDER = "court_order"        # order / verdict / manuscript scan
+    PRECEDENT = "precedent"            # published law-journal precedent (नजिर) — NKP
     MANUSCRIPT = "manuscript"          # a scanned manuscript document
     CHARGE_SHEET = "charge_sheet"      # CIAA/AG अभियोगपत्र
     LEGAL_CORPUS = "legal_corpus"      # acts / laws / ordinances / constitution
@@ -80,6 +81,11 @@ MATERIAL_TYPES: dict[str, tuple[Any, str | None]] = {
     # Court order / verdict / manuscript scan → Manuscript (a digital scan of a
     # written legal document) + DigitalDocument multi-type.
     MaterialType.COURT_ORDER: (["Manuscript", "DigitalDocument"], None),
+    # Published law-journal precedent (नेपाल कानून पत्रिका नजिर): the citable,
+    # edited ruling that establishes binding precedent — neither a raw docket
+    # record (court_case) nor enacted legislation (legal_corpus). schema.org has
+    # no term, so CreativeWork + jawafdehi:Precedent.
+    MaterialType.PRECEDENT: ("CreativeWork", "jawafdehi:Precedent"),
     MaterialType.MANUSCRIPT: (["Manuscript", "DigitalDocument"], None),
     # Charge sheet → DigitalDocument + jawafdehi:ChargeSheet.
     MaterialType.CHARGE_SHEET: ("DigitalDocument", "jawafdehi:ChargeSheet"),
@@ -420,6 +426,90 @@ def documentsource_to_jsonld(
         iso = getattr(publication_date, "isoformat", lambda: str(publication_date))()
         doc["datePublished"] = iso
     return doc, material_type
+
+
+#: ``source`` segment of a precedent material IRI (``/material/nkp/<ident>``).
+NKP_SOURCE = "nkp"
+
+
+def nkp_precedent_material_iri(decision_no: str) -> str:
+    """Canonical material ``@id`` IRI for an NKP law-journal precedent.
+
+    ident is the citable decision number (निर्णय नं.) — unique across the journal
+    and stable across re-scrapes — so the IRI is reconstructable from the record
+    (``11376`` → ``https://<base>/material/nkp/11376``).
+    """
+    ident = str(decision_no).strip().lower()
+    return build_material_iri(NKP_SOURCE, ident)
+
+
+def nkp_decision_to_jsonld(decision: dict[str, Any]) -> dict[str, Any]:
+    """Shape one scraped NKP decision (``NkpDecisionItem`` dict) into Material JSON-LD.
+
+    The published precedent maps to ``CreativeWork`` + ``jawafdehi:Precedent``.
+    The decision's own ``source_url`` (the nkp.gov.np page) is the authoritative
+    RAW source; a ``fallback_pdf_url`` (when the HTML body was an upload-error
+    note) rides as an ALTERNATE source. The full Unicode judgment text lands in
+    the language-tagged ``text`` field so it is search-indexable without OCR.
+
+    Pure function (no DB): takes the scraper's flat dict, returns the JSON-LD doc.
+    The ingest command wraps this with the ``sources`` list bulk_ingest expects.
+    """
+    decision_no = decision.get("decision_no") or decision.get("detail_id")
+    iri = nkp_precedent_material_iri(decision_no)
+    schema_type, additional_type = type_for(MaterialType.PRECEDENT)
+
+    name = decision.get("title") or f"निर्णय नं. {decision_no}"
+    doc: dict[str, Any] = {
+        "@context": MATERIAL_CONTEXT,
+        "@type": schema_type,
+        "@id": iri,
+        "name": {"ne": name},
+        "additionalType": additional_type,
+        "inLanguage": "ne",
+        "isAccessibleForFree": True,
+        "identifier": str(decision_no),
+        "url": decision.get("source_url"),
+        # Publisher: the Supreme Court of Nepal publishes the journal.
+        "publisher": {"@type": "GovernmentOrganization", "name": {"ne": "सर्वोच्च अदालत"}},
+        "isPartOf": {
+            "@type": "Periodical",
+            "name": {"ne": "नेपाल कानून पत्रिका"},
+        },
+    }
+
+    # Journal coordinates + case identity as jawafdehi: extension properties.
+    for field_name, key in (
+        ("case_number", "jawafdehi:caseNumber"),
+        ("case_name", "jawafdehi:caseSubject"),
+        ("court", "jawafdehi:court"),
+        ("bench", "jawafdehi:bench"),
+        ("volume", "jawafdehi:journalVolume"),
+        ("year_bs", "jawafdehi:journalYearBS"),
+        ("month", "jawafdehi:journalMonth"),
+        ("issue", "jawafdehi:journalIssue"),
+    ):
+        val = decision.get(field_name)
+        if val:
+            doc[key] = val
+
+    if decision.get("decision_date_bs"):
+        doc["jawafdehi:decisionDateBS"] = decision["decision_date_bs"]
+    if decision.get("judges"):
+        doc["jawafdehi:judges"] = decision["judges"]
+    if decision.get("referenced_laws"):
+        doc["jawafdehi:referencedLaws"] = decision["referenced_laws"]
+
+    # Headnotes (सूत्र) as description; full judgment text as searchable `text`.
+    headnotes = decision.get("headnotes") or []
+    if headnotes:
+        doc["description"] = {
+            "ne": " ".join(h.get("text", "") for h in headnotes if h.get("text"))[:2000]
+        }
+    if decision.get("full_text"):
+        doc["text"] = {"ne": decision["full_text"]}
+
+    return doc
 
 
 def _case_entity_iris(case: Any) -> list[str]:

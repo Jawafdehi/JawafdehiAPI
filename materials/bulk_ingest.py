@@ -223,9 +223,27 @@ class MaterialBulkIngestService:
         )
 
     def _persist(self, to_write: List[Tuple[Dict[str, Any], str]]) -> None:
-        """Upsert each material. ``save()`` runs ``clean()`` + post_save indexing."""
+        """Upsert each material by ``@id``, running model validation + indexing.
+
+        Upsert-by-``@id`` via ``update_or_create`` (not a fresh-instance
+        ``save()``): re-ingesting an existing ``@id`` is an UPDATE, so
+        ``full_clean`` skips ``validate_unique`` (an existing pk is not a
+        duplicate) and only the mutable columns are written — preserving
+        ``created_at`` (``auto_now_add`` fires on INSERT only) while the
+        ``post_save`` ngm-materials indexer still runs. Mirrors
+        ``single_source_ingest.upsert_single_source_material`` so both write
+        paths are idempotent and behave identically on re-ingest.
+        """
         with transaction.atomic():
             for doc, material_type in to_write:
-                material = Material.from_jsonld(doc, material_type=material_type)
-                material.full_clean()  # mirror model validation (iri/source/ident/data)
-                material.save()
+                candidate = Material.from_jsonld(doc, material_type=material_type)
+                candidate.full_clean(validate_unique=False)
+                Material.objects.update_or_create(
+                    iri=candidate.iri,
+                    defaults={
+                        "material_type": candidate.material_type,
+                        "source": candidate.source,
+                        "ident": candidate.ident,
+                        "data": candidate.data,
+                    },
+                )
