@@ -109,6 +109,7 @@ packages = [
     "lakehouse",
     "cases",
     "review",
+    "newsletter",
     "jobs",
     "llm",
     "search",
