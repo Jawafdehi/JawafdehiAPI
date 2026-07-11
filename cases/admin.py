@@ -718,16 +718,12 @@ class CustomUserAdmin(BaseUserAdmin):
 
     def has_change_permission(self, request, obj=None):
         """User management is superuser-only (``can_manage_user``)."""
-        if obj is None:
-            return is_admin(request.user)
-
+        # can_manage_user ignores the target and returns is_admin(user), so the
+        # obj=None (add/changelist) and per-object cases are the same check.
         return can_manage_user(request.user, obj)
 
     def has_delete_permission(self, request, obj=None):
         """User management is superuser-only (``can_manage_user``)."""
-        if obj is None:
-            return is_admin(request.user)
-
         return can_manage_user(request.user, obj)
 
 

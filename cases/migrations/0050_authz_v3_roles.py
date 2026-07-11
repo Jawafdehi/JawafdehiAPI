@@ -94,10 +94,10 @@ def apply_v3_roles(apps, schema_editor):
     caseworker.permissions.add(*perms)
 
     # 2. Move Moderator members into Caseworker, THEN delete the Moderator row.
+    #    Bulk add (single insert) rather than one query per user.
     moderator = Group.objects.filter(name="Moderator").first()
     if moderator is not None:
-        for user in moderator.user_set.all():
-            user.groups.add(caseworker)
+        caseworker.user_set.add(*moderator.user_set.all())
         moderator.delete()
 
     # 3. Rename ReviewAssistant -> JobPoller (preserves PK + memberships). If a
@@ -110,8 +110,7 @@ def apply_v3_roles(apps, schema_editor):
             review_assistant.name = "JobPoller"
             review_assistant.save(update_fields=["name"])
         else:
-            for user in review_assistant.user_set.all():
-                user.groups.add(existing_poller)
+            existing_poller.user_set.add(*review_assistant.user_set.all())
             review_assistant.delete()
     else:
         Group.objects.get_or_create(name="JobPoller")
