@@ -279,13 +279,15 @@ def test_state_transitions_always_update_version_info(case_data, target_state):
 
 
 @pytest.mark.django_db
-def test_contributor_cannot_publish_case():
+def test_caseworker_can_publish_case():
     """
-    Edge case: Contributors should not be able to publish cases.
-    Validates: Requirements 1.5
+    v3 authz model: the single content-staff role (Caseworker) carries the full
+    powers the old Moderator had — it CAN publish cases. (Inverted from the
+    obsolete "contributors cannot publish" boundary.)
+    Validates: Requirements 2.1
     """
-    # Create contributor user
-    contributor = create_user_with_role(
+    # Create caseworker user
+    caseworker = create_user_with_role(
         "testcontrib", "contrib@example.com", "Caseworker"
     )
 
@@ -299,12 +301,12 @@ def test_contributor_cannot_publish_case():
         state=CaseState.IN_REVIEW,
     )
 
-    # Check that contributor cannot transition to PUBLISHED
-    can_publish = can_transition_case_state(contributor, case, CaseState.PUBLISHED)
+    # Check that the caseworker CAN transition to PUBLISHED
+    can_publish = can_transition_case_state(caseworker, case, CaseState.PUBLISHED)
 
     assert (
-        not can_publish
-    ), "Contributor should NOT be able to transition case to PUBLISHED state"
+        can_publish
+    ), "Caseworker should be able to transition case to PUBLISHED state"
 
 
 @pytest.mark.django_db

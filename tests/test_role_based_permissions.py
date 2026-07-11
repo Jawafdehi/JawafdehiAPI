@@ -59,9 +59,8 @@ def test_contributors_cannot_change_cases_via_django_admin(
         contributor_data["role"],
     )
 
-    # Create a case and assign contributor
+    # Create a case (v3: no object-level assignment)
     case = create_case_with_entities(**case_data)
-    case.contributors.add(contributor)
     case.save()
 
     # Set initial state (opposite of target)
@@ -97,59 +96,53 @@ def test_contributors_cannot_change_cases_via_django_admin(
 @given(
     case_data=complete_case_data(),
     contributor_data=user_with_role("Caseworker"),
-    forbidden_state=st.sampled_from([CaseState.PUBLISHED, CaseState.CLOSED]),
+    target_state=st.sampled_from([CaseState.PUBLISHED, CaseState.CLOSED]),
 )
-def test_contributors_cannot_transition_to_published_or_closed(
-    case_data, contributor_data, forbidden_state
+def test_caseworker_can_transition_to_published_or_closed(
+    case_data, contributor_data, target_state
 ):
     """
-    Feature: accountability-platform-core, Property 5: Contributors can only transition between Draft and In Review
-
-    For any case assigned to a Contributor, attempts to change to Published or
-    Closed should be rejected.
-    Validates: Requirements 1.5
+    v3 authz model: the single content-staff role (Caseworker) has the full
+    powers the old Moderator had — it CAN transition a case to PUBLISHED or
+    CLOSED. (Inverted from the obsolete "contributors confined to DRAFT/IN_REVIEW"
+    boundary.) The admin form's ``clean()`` gate must therefore NOT raise a
+    state error for a Caseworker.
+    Validates: Requirements 2.1
     """
-    # Create contributor user
-    contributor = create_user_with_role(
+    # Create caseworker user
+    caseworker = create_user_with_role(
         contributor_data["username"],
         contributor_data["email"],
         contributor_data["role"],
     )
 
-    # Create a case in IN_REVIEW state and assign contributor
+    # Create a case in IN_REVIEW state (v3: no object-level assignment)
     case = create_case_with_entities(**case_data)
     case.state = CaseState.IN_REVIEW
     case.save()
-    case.contributors.add(contributor)
 
     # Create mock request
-    request = create_mock_request(contributor)
+    request = create_mock_request(caseworker)
 
-    # Use the admin form to test validation
+    # Use the admin form to test the transition-gate validation
     from cases.admin import CaseAdminForm
 
     form_data = {
         "slug": case.slug,
         "title": case.title,
         "case_type": case.case_type,
-        "state": forbidden_state,
+        "state": target_state,
         "key_allegations": case.key_allegations,
         "description": case.description,
     }
 
     form = CaseAdminForm(data=form_data, instance=case, request=request)
 
-    # Form should not be valid
+    # The transition gate must accept the Caseworker: no state error.
+    form.is_valid()
     assert (
-        not form.is_valid()
-    ), f"Form should not be valid for transition to {forbidden_state}"
-    assert "state" in form.errors, "Should have state error"
-
-    # Check error message mentions the restriction
-    error_message = str(form.errors["state"])
-    assert (
-        "Caseworkers can only transition between DRAFT and IN_REVIEW" in error_message
-    ), f"Error message should mention contributor restrictions, got: {error_message}"
+        "state" not in form.errors
+    ), f"Caseworker should be allowed to transition to {target_state}, got: {form.errors.get('state')}"
 
 
 # ============================================================================
@@ -268,11 +261,11 @@ def test_contributor_can_only_access_assigned_cases(case_data, contributor_data)
         contributor_data["role"],
     )
 
-    # Create two cases: one assigned, one not assigned
+    # Create two cases (v3: no object-level assignment — both are visible to
+    # any Caseworker via global read access).
     assigned_case = create_case_with_entities(**case_data)
-    assigned_case.contributors.add(contributor)
 
-    # Create unassigned case with different title to avoid conflicts
+    # Create a second case with different title to avoid conflicts
     unassigned_case_data = case_data.copy()
     unassigned_case_data["title"] = f"{case_data['title']}_unassigned"
     unassigned_case = create_case_with_entities(**unassigned_case_data)
@@ -296,7 +289,9 @@ def test_contributor_can_only_access_assigned_cases(case_data, contributor_data)
 
     # View permission is role-scoped: contributor can view assigned cases
     has_view_assigned = admin.has_view_permission(request, assigned_case)
-    assert has_view_assigned, "Contributor should have view permission for assigned case"
+    assert (
+        has_view_assigned
+    ), "Contributor should have view permission for assigned case"
 
     has_view_unassigned = admin.has_view_permission(request, unassigned_case)
     assert (
@@ -346,54 +341,54 @@ def test_contributor_cannot_modify_unassigned_cases(case_data, contributor_data)
 
 
 # ============================================================================
-# Property 14: Moderators cannot manage other Moderators in Django Admin
+# Property 14: User management is superuser-only in Django Admin
 # ============================================================================
 
 
 @pytest.mark.django_db
 @settings(max_examples=10, deadline=None)
 @given(
-    moderator1_data=user_with_role("Moderator"),
-    moderator2_data=user_with_role("Moderator"),
+    caseworker_data=user_with_role("Caseworker"),
+    other_data=user_with_role("Caseworker"),
 )
-def test_moderators_cannot_manage_other_moderators(moderator1_data, moderator2_data):
+def test_user_management_is_superuser_only(caseworker_data, other_data):
     """
-    Feature: accountability-platform-core, Property 14: Moderators cannot manage other Moderators in Django Admin
-
-    For any Moderator user in Django Admin, attempts to create, edit, or delete
-    other Moderator accounts should be rejected.
+    v3 authz model: user management is SUPERUSER-ONLY. The old
+    "moderators can manage users except other moderators" asymmetry is retired —
+    ``can_manage_user`` now returns True only for superusers. A Caseworker (a
+    non-superuser) cannot manage any user; a superuser can.
     Validates: Requirements 5.3
     """
-    # Create two moderator users
-    moderator1 = create_user_with_role(
-        moderator1_data["username"], moderator1_data["email"], moderator1_data["role"]
+    from cases.rules.predicates import can_manage_user
+
+    # A Caseworker (non-superuser content staff).
+    caseworker = create_user_with_role(
+        caseworker_data["username"], caseworker_data["email"], caseworker_data["role"]
     )
 
-    moderator2 = create_user_with_role(
-        moderator2_data["username"], moderator2_data["email"], moderator2_data["role"]
+    # Another target user.
+    other_user = create_user_with_role(
+        other_data["username"], other_data["email"], other_data["role"]
     )
 
-    # For this property, we need to check User admin permissions
-    # Since we're testing the concept, we'll verify that moderators
-    # should not have permission to manage other moderators
+    # A superuser (v3 "admin").
+    superuser = create_user_with_role(
+        "prop14-admin", "prop14-admin@example.com", "Admin"
+    )
 
-    # Get moderator1's groups
-    moderator1_groups = list(moderator1.groups.values_list("name", flat=True))
-    moderator2_groups = list(moderator2.groups.values_list("name", flat=True))
+    # The Caseworker is not a superuser and cannot manage users.
+    assert not caseworker.is_superuser, "Caseworker should not be a superuser"
+    assert not can_manage_user(
+        caseworker, other_user
+    ), "Non-superuser (Caseworker) must NOT be able to manage users"
+    assert not can_manage_user(
+        caseworker, caseworker
+    ), "Non-superuser must NOT be able to manage even itself"
 
-    # Both should be moderators
-    assert "Moderator" in moderator1_groups, "moderator1 should be in Moderator group"
-    assert "Moderator" in moderator2_groups, "moderator2 should be in Moderator group"
-
-    # Moderator1 should not be a superuser (only Admins are superusers)
-    assert not moderator1.is_superuser, "Moderator should not be a superuser"
-
-    # This property is enforced at the User admin level
-    # The implementation should prevent moderators from editing other moderators
-    # We verify the constraint exists by checking that moderator1 is not an admin
-    assert (
-        "Admin" not in moderator1_groups
-    ), "Moderator should not have Admin privileges to manage other moderators"
+    # The superuser can manage any user.
+    assert can_manage_user(
+        superuser, other_user
+    ), "Superuser should be able to manage users"
 
 
 @pytest.mark.django_db
@@ -477,14 +472,15 @@ def test_user_without_role_has_no_access():
 
 
 @pytest.mark.django_db
-def test_contributor_can_access_multiple_assigned_cases():
+def test_caseworker_can_access_multiple_cases():
     """
-    Edge case: Contributors should be able to access all cases they are assigned to.
+    Edge case: a Caseworker has global read access to all cases (v3: no
+    object-level assignment).
     """
-    # Create contributor
-    contributor = create_user_with_role("contrib", "contrib@example.com", "Caseworker")
+    # Create caseworker
+    caseworker = create_user_with_role("contrib", "contrib@example.com", "Caseworker")
 
-    # Create multiple cases and assign all to contributor
+    # Create multiple cases
     case1 = create_case_with_entities(
         title="Case 1",
         alleged_entities=["https://jawafdehi.org/entity/person/person1"],
@@ -492,7 +488,6 @@ def test_contributor_can_access_multiple_assigned_cases():
         case_type=CaseType.CORRUPTION,
         description="Description 1",
     )
-    case1.contributors.add(contributor)
 
     case2 = create_case_with_entities(
         title="Case 2",
@@ -501,16 +496,15 @@ def test_contributor_can_access_multiple_assigned_cases():
         case_type=CaseType.CORRUPTION,
         description="Description 2",
     )
-    case2.contributors.add(contributor)
 
     # Create mock request
-    request = create_mock_request(contributor)
+    request = create_mock_request(caseworker)
 
     # Create admin instance
     admin = CaseAdmin(Case, None)
 
-    # Check queryset includes both cases
+    # Check queryset includes both cases (global read access)
     queryset = admin.get_queryset(request)
-    assert case1 in queryset, "Contributor should see first assigned case"
-    assert case2 in queryset, "Contributor should see second assigned case"
-    assert queryset.count() == 2, "Contributor should see exactly 2 assigned cases"
+    assert case1 in queryset, "Caseworker should see first case"
+    assert case2 in queryset, "Caseworker should see second case"
+    assert queryset.count() == 2, "Caseworker should see all 2 cases"

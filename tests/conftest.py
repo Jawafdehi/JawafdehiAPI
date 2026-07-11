@@ -195,15 +195,40 @@ def create_user_with_role(username, email, role, password="testpass123"):
     Creates the role group if it doesn't exist and assigns the user to it.
     Also sets up necessary Django permissions.
 
+    v3 authz model: there are three groups — ``Caseworker`` (the single
+    content-staff role), ``ReadOnly`` and ``JobPoller`` — plus ``is_superuser``
+    for admins. LEGACY role names passed by older tests are translated here so
+    those tests keep exercising the right principal:
+
+    - ``"Admin"``      -> superuser (no group)
+    - ``"Moderator"``  -> ``Caseworker`` (moderator folded into caseworker)
+    - ``"Public"``     -> no group (public == unauthenticated-equivalent)
+    - ``"ReviewAssistant"`` -> ``JobPoller``
+
     Args:
         username: Username for the user
         email: Email for the user
-        role: Role name ('Admin', 'Moderator', 'Caseworker', 'ReadOnly', 'Public')
+        role: Role name (v3: 'Caseworker' / 'ReadOnly' / 'JobPoller'; legacy
+            'Admin' / 'Moderator' / 'Public' / 'ReviewAssistant' are translated)
         password: Password for the user (default: 'testpass123')
 
     Returns:
         User object with role assigned
     """
+    # Translate legacy role names to the v3 model. ``is_superuser_role`` drives
+    # the admin (no-group superuser) path; ``group_name`` is None when the role
+    # maps to no group (Admin superuser, or the retired Public role).
+    _LEGACY_TO_V3 = {
+        "Admin": None,  # superuser, no group
+        "Moderator": "Caseworker",
+        "Public": None,  # retired -> behaves as no-role
+        "ReviewAssistant": "JobPoller",
+    }
+    is_superuser_role = role == "Admin"
+    if role in _LEGACY_TO_V3:
+        group_name = _LEGACY_TO_V3[role]
+    else:
+        group_name = role  # v3 names: Caseworker / ReadOnly / JobPoller
     # Hypothesis examples can occasionally reuse generated usernames within the
     # same test transaction. Ensure uniqueness here to avoid IntegrityError
     # flakiness from auth_user.username constraints.
@@ -223,17 +248,18 @@ def create_user_with_role(username, email, role, password="testpass123"):
 
     user = User.objects.create_user(username=username, email=email, password=password)
 
-    # Create or get the role group
-    group, _ = Group.objects.get_or_create(name=role)
-    user.groups.add(group)
+    # Assign the (translated) role group, if any.
+    if group_name is not None:
+        group, _ = Group.objects.get_or_create(name=group_name)
+        user.groups.add(group)
 
-    # Set staff status for Admin, Moderator, and Caseworker
-    if role in ["Admin", "Moderator", "Caseworker"]:
+    # Content-staff (Caseworker) is is_staff; superuser (Admin) is is_staff too.
+    if group_name == "Caseworker" or is_superuser_role:
         user.is_staff = True
         user.save()
 
-    # Set superuser status for Admin
-    if role == "Admin":
+    # Superuser (v3 "admin", no group).
+    if is_superuser_role:
         user.is_superuser = True
         user.save()
 
@@ -252,11 +278,13 @@ def create_user_with_role(username, email, role, password="testpass123"):
         content_type=user_ct,
     )
 
-    if role in ["Admin", "Moderator", "Caseworker"]:
+    # Content staff (Caseworker) gets the full case model perms incl. delete_case.
+    if group_name == "Caseworker":
         user.user_permissions.add(*case_perms)
 
-    # Moderators and Admins can manage users
-    if role in ["Admin", "Moderator"]:
+    # User management is superuser-only in v3 (grant the perms to superusers so
+    # DjangoModelPermissions-gated user endpoints behave faithfully).
+    if is_superuser_role:
         user.user_permissions.add(*user_perms)
 
     # ReadOnly: org-wide read role. No is_staff/is_superuser and no write perms.

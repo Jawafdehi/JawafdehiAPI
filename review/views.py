@@ -42,14 +42,18 @@ from .serializers import (
 
 
 def _user_roles_payload(user):
-    """Shared shape for me/dev-login: username + flattened group roles + is_admin."""
-    roles = list(user.groups.values_list("name", flat=True))
-    if user.is_superuser and "Admin" not in roles:
-        roles = ["Admin"] + roles
+    """Shared shape for me/dev-login: username + real group roles + is_admin.
+
+    v3 authz model: admin == Django superuser (there is no ``Admin`` group), so
+    we no longer inject a synthetic ``"Admin"`` into ``roles``. ``roles`` carries
+    only the user's real group names (e.g. ``["Caseworker"]``); admin-ness is
+    conveyed by the ``is_admin`` bool. Clients MUST read ``is_admin`` for
+    admin-gating — a superuser has an empty ``roles`` list.
+    """
     return {
         "username": user.username,
-        "roles": roles,
-        "is_admin": user.is_superuser or "Admin" in roles,
+        "roles": list(user.groups.values_list("name", flat=True)),
+        "is_admin": user.is_superuser,
     }
 
 
@@ -376,6 +380,4 @@ def regrade_all(request):
     )
     for review in reviews:
         _enqueue_review_job(review, submitted_by=request.user)
-    return Response(
-        {"regrading": len(reviews), "review_ids": [r.id for r in reviews]}
-    )
+    return Response({"regrading": len(reviews), "review_ids": [r.id for r in reviews]})

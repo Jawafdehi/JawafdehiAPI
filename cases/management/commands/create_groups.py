@@ -16,8 +16,9 @@ from cases.models import (
 
 class Command(BaseCommand):
     help = (
-        "Create user groups (Admin, Moderator, Caseworker, ReadOnly, Public, "
-        "ReviewAssistant) with appropriate permissions"
+        "Create user groups (Caseworker, ReadOnly, JobPoller) with appropriate "
+        "permissions. v3 authz model: admin == is_superuser (no group); the "
+        "single content-staff role is Caseworker (folds in the old Moderator)."
     )
 
     def handle(self, *args, **options):
@@ -84,63 +85,23 @@ class Command(BaseCommand):
             )[0],
         }
 
-        # Create Admin group
-        admin_group, created = Group.objects.get_or_create(name="Admin")
-        if created:
-            self.stdout.write(self.style.SUCCESS("Created Admin group"))
-        else:
-            self.stdout.write("Admin group already exists")
-
-        # Admins get all permissions
-        admin_group.permissions.set(
-            [
-                case_permissions["view"],
-                case_permissions["add"],
-                case_permissions["change"],
-                case_permissions["delete"],
-                relationship_permissions["view"],
-                relationship_permissions["add"],
-                relationship_permissions["change"],
-                relationship_permissions["delete"],
-            ]
-        )
-
-        # Create Moderator group
-        moderator_group, created = Group.objects.get_or_create(name="Moderator")
-        if created:
-            self.stdout.write(self.style.SUCCESS("Created Moderator group"))
-        else:
-            self.stdout.write("Moderator group already exists")
-
-        # Moderators get all permissions for cases and entities
-        moderator_group.permissions.set(
-            [
-                case_permissions["view"],
-                case_permissions["add"],
-                case_permissions["change"],
-                case_permissions["delete"],
-                relationship_permissions["view"],
-                relationship_permissions["add"],
-                relationship_permissions["change"],
-                relationship_permissions["delete"],
-            ]
-        )
-
-        # Create Caseworker group (formerly "Contributor")
+        # Caseworker: the single content-staff role (v3). It folds in the old
+        # Moderator, so it holds the FULL case + relationship perm set including
+        # delete_case. NES entity writes are authorized in entities.permissions
+        # by Group membership (Caseworker), not by these model permissions.
+        # Admin == is_superuser (no group), so no Admin group is created.
         caseworker_group, created = Group.objects.get_or_create(name="Caseworker")
         if created:
             self.stdout.write(self.style.SUCCESS("Created Caseworker group"))
         else:
             self.stdout.write("Caseworker group already exists")
 
-        # Caseworkers get view, add, and change permissions (limited by assignment for cases)
-        # (NES entity writes are authorized in entities.permissions by Group membership
-        # — Caseworker/Moderator/Admin — not by these model permissions.)
         caseworker_group.permissions.set(
             [
                 case_permissions["view"],
                 case_permissions["add"],
                 case_permissions["change"],
+                case_permissions["delete"],
                 relationship_permissions["view"],
                 relationship_permissions["add"],
                 relationship_permissions["change"],
@@ -148,29 +109,27 @@ class Command(BaseCommand):
             ]
         )
 
-        # ReviewAssistant: a review-system role that can access reviews. Review
-        # access itself is granted in review/permissions.py by group name. It
-        # previously held document-source permissions; DocumentSource was
-        # removed (ADR: cases own no documents), so it now holds no model
-        # permissions here (document access will be rewired to Material).
-        review_assistant_group, created = Group.objects.get_or_create(
-            name="ReviewAssistant"
-        )
+        # JobPoller: the machine role (the review poller). Review/jobs access is
+        # granted in review/permissions.py + jobs/permissions.py by group name;
+        # it holds no model permissions here. (Renamed from "ReviewAssistant";
+        # the migration renames the existing row so this command must run AFTER
+        # migrate — a bare get_or_create here would otherwise collide with the
+        # migration's rename on the UNIQUE group name.)
+        job_poller_group, created = Group.objects.get_or_create(name="JobPoller")
         if created:
-            self.stdout.write(self.style.SUCCESS("Created ReviewAssistant group"))
+            self.stdout.write(self.style.SUCCESS("Created JobPoller group"))
         else:
-            self.stdout.write("ReviewAssistant group already exists")
+            self.stdout.write("JobPoller group already exists")
 
-        review_assistant_group.permissions.set([])
+        job_poller_group.permissions.set([])
 
         # ReadOnly: an org-wide read role that can be assigned to anyone. Grants
-        # view_* on every content model INCLUDING casework, so the holder can
-        # GET/list all cases (including non-PUBLISHED, non-CLOSED), sources,
-        # uploads, entities, and relationships, but holds no add/change/delete
-        # permission. Casework review read access is granted by group name in
-        # review/permissions.py (CanReadReview); writes there stay gated by
-        # HasContributorRole (the caseworker-role write gate), which excludes
-        # ReadOnly.
+        # view_* INCLUDING casework, so the holder can GET/list all cases
+        # (including non-PUBLISHED, non-CLOSED) and relationships, but holds no
+        # add/change/delete permission. Casework review read access is granted by
+        # group name in review/permissions.py (CanReadReview); writes there stay
+        # gated by HasContributorRole (the content-role write gate), which
+        # excludes ReadOnly.
         readonly_group, created = Group.objects.get_or_create(name="ReadOnly")
         if created:
             self.stdout.write(self.style.SUCCESS("Created ReadOnly group"))
@@ -183,37 +142,5 @@ class Command(BaseCommand):
                 relationship_permissions["view"],
             ]
         )
-
-        # Public: a public-surface read role. Like ReadOnly it can be assigned to
-        # anyone and holds no write permission, but it has NO casework access:
-        # it is granted NO view_* model permissions (view_case /
-        # view_documentsource / view_caseentityrelationship all expose casework
-        # such as draft/in-review material). A Public user therefore sees only
-        # the unauthenticated public surface (PUBLISHED cases via the public API,
-        # which requires no model perm) and is excluded from the casework view
-        # predicates (can_view_case / can_view_source) and CanReadReview. The
-        # group still exists so the role is a first-class, assignable principal
-        # that the OIDC role->group sync can attach.
-        public_group, created = Group.objects.get_or_create(name="Public")
-        if created:
-            self.stdout.write(self.style.SUCCESS("Created Public group"))
-        else:
-            self.stdout.write("Public group already exists")
-
-        # Public = ReadOnly MINUS casework: no model view perms at all.
-        public_group.permissions.set([])
-
-        # NGM rate-limit tier groups. These hold no model permissions; they
-        # exist so the OIDC role->group sync can attach them (the authenticator
-        # only attaches EXISTING groups) and the in-process NGM plane can gate on
-        # them (courts.permissions.NGM_ROLE_GROUPS). Also seeded by
-        # the cases migration 0039_ngm_rate_tier_groups so a fresh DB has them
-        # without running this command; created here too for completeness.
-        for tier_name in ("NGM_SilverTier", "NGM_GoldTier", "NGM_PlatinumTier"):
-            _, created = Group.objects.get_or_create(name=tier_name)
-            if created:
-                self.stdout.write(self.style.SUCCESS(f"Created {tier_name} group"))
-            else:
-                self.stdout.write(f"{tier_name} group already exists")
 
         self.stdout.write(self.style.SUCCESS("Successfully configured all groups"))

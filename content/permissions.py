@@ -14,11 +14,11 @@ v2 divergence: on ``origin/main`` this delegated to ``config.groups.sync_groups`
 (a single source of truth that also reconciled the Django model permissions for
 the case domain). v2 has no ``config.groups`` — its group *membership* and
 case-domain model permissions are owned by ``cases.management.commands.
-create_groups`` (Django Groups: Admin / Moderator / Caseworker / ReadOnly /
-Public / NGM_* tiers). This module therefore only layers the *Wagtail-specific*
-page/collection permissions on top of those groups (creating the group rows if
-they don't exist yet), so the CMS port stays self-contained and does not depend
-on a module that no longer exists.
+create_groups`` (v3 Django Groups: Caseworker / ReadOnly / JobPoller). This
+module therefore only layers the *Wagtail-specific* page/collection permissions
+on top of those groups (creating the group rows if they don't exist yet), so the
+CMS port stays self-contained and does not depend on a module that no longer
+exists.
 """
 
 from django.apps import apps as global_apps
@@ -33,13 +33,11 @@ _ALL_PAGE_PERMS = [
     "lock_page",
     "unlock_page",
 ]
-_EDITOR_PAGE_PERMS = ["add_page", "change_page"]
-
+# v3 authz model: the single content-staff role `Caseworker` (which folds in the
+# old Moderator) gets the FULL page perms incl. publish. Admin == is_superuser
+# (no group; superusers bypass Wagtail perm checks), so no Admin/Moderator keys.
 GROUP_PAGE_PERMS = {
-    "Admin": _ALL_PAGE_PERMS,
-    "Moderator": _ALL_PAGE_PERMS,
-    # "Caseworker" is v2's rename of main's "Contributor" editor tier.
-    "Caseworker": _EDITOR_PAGE_PERMS,
+    "Caseworker": _ALL_PAGE_PERMS,
 }
 
 
@@ -48,17 +46,14 @@ def _collection(ops):
 
 
 _FULL_COLLECTION = _collection(("add", "change", "delete", "choose"))
-_EDITOR_COLLECTION = _collection(("add", "change", "choose"))
 
 # Wagtail collection-permission codenames granted on the root collection.
 GROUP_COLLECTION_PERMS = {
-    "Admin": _FULL_COLLECTION,
-    "Moderator": _FULL_COLLECTION,
-    "Caseworker": _EDITOR_COLLECTION,
+    "Caseworker": _FULL_COLLECTION,
 }
 
 # Groups that need access to the Wagtail admin at all (wagtailadmin.access_admin).
-_ACCESS_ADMIN_GROUPS = ("Admin", "Moderator", "Caseworker")
+_ACCESS_ADMIN_GROUPS = ("Caseworker",)
 
 
 def ensure_article_index(using="default"):
@@ -93,20 +88,26 @@ def _perm(dotted, using="default"):
     from django.contrib.auth.models import Permission
 
     app_label, codename = dotted.split(".", 1)
-    return Permission.objects.using(using).filter(
-        content_type__app_label=app_label, codename=codename
-    ).first()
+    return (
+        Permission.objects.using(using)
+        .filter(content_type__app_label=app_label, codename=codename)
+        .first()
+    )
 
 
 def _collection_perm(codename, using="default"):
     from django.contrib.auth.models import Permission
 
     is_image = codename.endswith("_image")
-    return Permission.objects.using(using).filter(
-        content_type__app_label="wagtailimages" if is_image else "wagtaildocs",
-        content_type__model="image" if is_image else "document",
-        codename=codename,
-    ).first()
+    return (
+        Permission.objects.using(using)
+        .filter(
+            content_type__app_label="wagtailimages" if is_image else "wagtaildocs",
+            content_type__model="image" if is_image else "document",
+            codename=codename,
+        )
+        .first()
+    )
 
 
 def _reconcile_collection_scoped(
@@ -181,8 +182,8 @@ def sync_cms_group_permissions(sender=None, **kwargs):
     )
     access_admin = _perm("wagtailadmin.access_admin", using=using)
 
-    managed = set(GROUP_PAGE_PERMS) | set(GROUP_COLLECTION_PERMS) | set(
-        _ACCESS_ADMIN_GROUPS
+    managed = (
+        set(GROUP_PAGE_PERMS) | set(GROUP_COLLECTION_PERMS) | set(_ACCESS_ADMIN_GROUPS)
     )
     for name in managed:
         group, _ = Group.objects.using(using).get_or_create(name=name)

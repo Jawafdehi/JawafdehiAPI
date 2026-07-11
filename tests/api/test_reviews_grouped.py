@@ -24,8 +24,8 @@ def _reader_client():
 
 @pytest.mark.django_db
 def test_grouped_requires_read_role():
-    """A Public-role user (no casework read access) is denied."""
-    user = create_user_with_role("rev-public", "rev-public@example.com", "Public")
+    """An authenticated user with no role (no casework read access) is denied."""
+    user = create_user_with_role("rev-norole", "rev-norole@example.com", "Public")
     client = APIClient()
     client.force_authenticate(user=user)
 

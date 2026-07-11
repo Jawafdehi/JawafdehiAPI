@@ -104,7 +104,6 @@ class TestPatchWritesEvidence:
     def test_patch_add_evidence(self):
         user = _contributor("patcher")
         case = _make_case()
-        case.contributors.add(user)
         client = _authed(user)
         resp = client.patch(
             URL.format(case.slug),
@@ -123,13 +122,18 @@ class TestPatchWritesEvidence:
     def test_patch_replace_evidence_set(self):
         user = _contributor("patcher2")
         case = _make_case()
-        case.contributors.add(user)
         CaseMaterialReference.objects.create(case=case, material_iri=IRI_A, ordinal=0)
         client = _authed(user)
         # Replace the whole evidence list with a single different material.
         resp = client.patch(
             URL.format(case.slug),
-            data=[{"op": "replace", "path": "/evidence", "value": [{"material_iri": IRI_B}]}],
+            data=[
+                {
+                    "op": "replace",
+                    "path": "/evidence",
+                    "value": [{"material_iri": IRI_B}],
+                }
+            ],
             format="json",
         )
         assert resp.status_code == 200, resp.data
@@ -139,7 +143,6 @@ class TestPatchWritesEvidence:
     def test_patch_remove_all_evidence(self):
         user = _contributor("patcher3")
         case = _make_case()
-        case.contributors.add(user)
         CaseMaterialReference.objects.create(case=case, material_iri=IRI_A, ordinal=0)
         client = _authed(user)
         resp = client.patch(
@@ -153,7 +156,6 @@ class TestPatchWritesEvidence:
     def test_scalar_patch_does_not_wipe_evidence(self):
         user = _contributor("patcher4")
         case = _make_case()
-        case.contributors.add(user)
         CaseMaterialReference.objects.create(case=case, material_iri=IRI_A, ordinal=0)
         client = _authed(user)
         resp = client.patch(
@@ -180,7 +182,6 @@ class TestEvidenceVisibilityTriggers:
         mat = _store_material("source:20240101:aaaa01", visibility=Visibility.PRIVATE)
         # IN_REVIEW requires an accused entity + a key allegation.
         case = _make_case(key_allegations=["Took a bribe of Rs 10 lakh"])
-        case.contributors.add(user)
         CaseEntityRelationship.objects.create(
             case=case,
             nes_id="https://jawafdehi.org/entity/person/accused-one",
@@ -191,7 +192,9 @@ class TestEvidenceVisibilityTriggers:
         with django_capture_on_commit_callbacks(execute=True):
             resp = client.patch(
                 URL.format(case.slug),
-                data=[{"op": "replace", "path": "/state", "value": CaseState.IN_REVIEW}],
+                data=[
+                    {"op": "replace", "path": "/state", "value": CaseState.IN_REVIEW}
+                ],
                 format="json",
             )
         assert resp.status_code == 200, resp.data
@@ -204,7 +207,6 @@ class TestEvidenceVisibilityTriggers:
         user = create_user_with_role("mod2", "mod2@example.com", "Moderator")
         mat = _store_material("source:20240101:aaaa01", visibility=Visibility.LISTED)
         case = _make_case(state=CaseState.DRAFT)
-        case.contributors.add(user)
         CaseMaterialReference.objects.create(case=case, material_iri=mat.iri, ordinal=0)
         client = _authed(user)
         with django_capture_on_commit_callbacks(execute=True):
@@ -220,7 +222,6 @@ class TestEvidenceVisibilityTriggers:
         user = create_user_with_role("mod3", "mod3@example.com", "Moderator")
         mat = _store_material("source:20240101:aaaa01", visibility=Visibility.LISTED)
         case = _make_case(state=CaseState.DRAFT)
-        case.contributors.add(user)
         CaseMaterialReference.objects.create(case=case, material_iri=mat.iri, ordinal=0)
         client = _authed(user)
         # Drop the material from evidence — it now has no referrer → PRIVATE.

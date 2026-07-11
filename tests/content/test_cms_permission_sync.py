@@ -2,19 +2,21 @@
 
 This ``post_migrate`` handler is the who-can-publish-articles boundary: it
 layers the Wagtail-specific page/collection permissions onto the managed
-editorial Django groups (Admin / Moderator / Caseworker), leaving all other
-model permissions to ``cases create_groups``.
+editorial Django group, leaving all other model permissions to
+``cases create_groups``.
+
+v3 authz model: the managed CMS groups are exactly ``{Caseworker}``. Caseworker
+is now a full editor+publisher (it folds in the old Moderator tier); admins are
+``is_superuser`` and carry no group (superusers bypass Wagtail perm checks
+entirely). There are no Admin/Moderator/Public groups anymore.
 
 Contract characterized here (Wagtail 7.4, ``GroupPagePermission`` /
 ``GroupCollectionPermission`` carry a ``permission`` FK):
 
-* Admin + Moderator get the *full* page-permission set on the Articles index,
+* Caseworker gets the *full* page-permission set on the Articles index,
   **including ``publish_page``**, plus full (add/change/delete/choose) image &
   document collection perms on the root collection.
-* Caseworker (v2's rename of main's "Contributor" editor tier) gets *editor*
-  perms only — ``add_page`` + ``change_page`` on the index and add/change/choose
-  (no delete) on the collection — and, notably, **no ``publish_page``**.
-* All three managed groups get ``wagtailadmin.access_admin``.
+* Caseworker gets ``wagtailadmin.access_admin``.
 * A non-CMS group (e.g. ReadOnly) gets NOTHING — no page/collection rows and no
   access_admin — so it cannot edit or publish articles.
 * Re-running is idempotent (no duplicate rows) and authoritative (a stray grant
@@ -62,36 +64,12 @@ def _has_access_admin(group):
 
 
 @pytest.mark.django_db
-def test_admin_and_moderator_can_publish():
-    """Admin + Moderator get the full page perms incl. publish_page."""
-    from django.contrib.auth.models import Group
+def test_caseworker_can_publish():
+    """Caseworker gets the full page perms incl. publish_page.
 
-    sync_cms_group_permissions(using="default")
-
-    for name in ("Admin", "Moderator"):
-        group = Group.objects.get(name=name)
-        page_perms = _page_codenames(group)
-        assert "publish_page" in page_perms
-        assert page_perms == {
-            "add_page",
-            "change_page",
-            "publish_page",
-            "bulk_delete_page",
-            "lock_page",
-            "unlock_page",
-        }
-        # Full collection perms include delete_*.
-        assert "delete_image" in _collection_codenames(group)
-        assert "delete_document" in _collection_codenames(group)
-        assert _has_access_admin(group)
-
-
-@pytest.mark.django_db
-def test_caseworker_is_editor_only_cannot_publish():
-    """Caseworker gets edit perms but NOT publish_page or delete perms.
-
-    This is the load-bearing boundary: the contributor tier may draft/edit
-    articles but must not be able to publish them or delete media.
+    v3 folds the old Admin/Moderator publisher tier into Caseworker, so the
+    single managed content group is now a full editor+publisher. Admins are
+    ``is_superuser`` and bypass Wagtail perm checks, so they need no group.
     """
     from django.contrib.auth.models import Group
 
@@ -99,23 +77,61 @@ def test_caseworker_is_editor_only_cannot_publish():
 
     group = Group.objects.get(name="Caseworker")
     page_perms = _page_codenames(group)
-    assert page_perms == {"add_page", "change_page"}
-    assert "publish_page" not in page_perms
-    assert "bulk_delete_page" not in page_perms
+    assert "publish_page" in page_perms
+    assert page_perms == {
+        "add_page",
+        "change_page",
+        "publish_page",
+        "bulk_delete_page",
+        "lock_page",
+        "unlock_page",
+    }
+    # Full collection perms include delete_*.
+    assert "delete_image" in _collection_codenames(group)
+    assert "delete_document" in _collection_codenames(group)
+    assert _has_access_admin(group)
+
+
+@pytest.mark.django_db
+def test_caseworker_gets_full_editor_publisher_perms():
+    """Caseworker is a full editor+publisher with full media perms.
+
+    v3 inverts the old editor-only boundary: the single content-staff role may
+    now publish articles AND delete media. This is the load-bearing assertion
+    that Caseworker holds the complete page + collection permission set.
+    """
+    from django.contrib.auth.models import Group
+
+    sync_cms_group_permissions(using="default")
+
+    group = Group.objects.get(name="Caseworker")
+    page_perms = _page_codenames(group)
+    assert page_perms == {
+        "add_page",
+        "change_page",
+        "publish_page",
+        "bulk_delete_page",
+        "lock_page",
+        "unlock_page",
+    }
+    assert "publish_page" in page_perms
+    assert "bulk_delete_page" in page_perms
 
     coll_perms = _collection_codenames(group)
     assert coll_perms == {
         "add_image",
         "change_image",
+        "delete_image",
         "choose_image",
         "add_document",
         "change_document",
+        "delete_document",
         "choose_document",
     }
-    # Editor tier must not be able to delete media.
-    assert "delete_image" not in coll_perms
-    assert "delete_document" not in coll_perms
-    # But it does still get admin access to reach the editor.
+    # Full editor now CAN delete media.
+    assert "delete_image" in coll_perms
+    assert "delete_document" in coll_perms
+    # And it gets admin access to reach the editor.
     assert _has_access_admin(group)
 
 
@@ -161,11 +177,11 @@ def test_creates_managed_groups_if_absent():
     """The handler creates the managed group rows when they don't exist yet."""
     from django.contrib.auth.models import Group
 
-    Group.objects.filter(name__in=("Admin", "Moderator", "Caseworker")).delete()
+    Group.objects.filter(name__in=("Caseworker",)).delete()
 
     sync_cms_group_permissions(using="default")
 
-    for name in ("Admin", "Moderator", "Caseworker"):
+    for name in ("Caseworker",):
         assert Group.objects.filter(name=name).exists()
 
 
@@ -177,51 +193,63 @@ def test_idempotent_no_duplicate_rows():
 
     sync_cms_group_permissions(using="default")
 
-    admin = Group.objects.get(name="Admin")
-    pages_after_first = GroupPagePermission.objects.filter(group=admin).count()
-    colls_after_first = GroupCollectionPermission.objects.filter(group=admin).count()
+    caseworker = Group.objects.get(name="Caseworker")
+    pages_after_first = GroupPagePermission.objects.filter(group=caseworker).count()
+    colls_after_first = GroupCollectionPermission.objects.filter(
+        group=caseworker
+    ).count()
 
     # Two more runs must not change the counts.
     sync_cms_group_permissions(using="default")
     sync_cms_group_permissions(using="default")
 
     assert (
-        GroupPagePermission.objects.filter(group=admin).count() == pages_after_first
+        GroupPagePermission.objects.filter(group=caseworker).count()
+        == pages_after_first
     )
     assert (
-        GroupCollectionPermission.objects.filter(group=admin).count()
+        GroupCollectionPermission.objects.filter(group=caseworker).count()
         == colls_after_first
     )
     # And the perm set is unchanged.
-    assert "publish_page" in _page_codenames(admin)
+    assert "publish_page" in _page_codenames(caseworker)
 
 
 @pytest.mark.django_db
 def test_authoritative_revokes_stray_page_grant():
     """A stray page permission is reconciled away on the next sync.
 
-    If a Caseworker were somehow granted publish_page on the Articles index,
-    the authoritative reconcile must strip it back to the editor set.
+    If Caseworker were somehow granted a page permission outside the managed
+    set (here ``delete_page``, which is not part of GROUP_PAGE_PERMS), the
+    authoritative reconcile must strip it back to the managed full-editor set.
     """
     from django.contrib.auth.models import Group, Permission
     from wagtail.models import GroupPagePermission
 
     sync_cms_group_permissions(using="default")
 
+    managed = {
+        "add_page",
+        "change_page",
+        "publish_page",
+        "bulk_delete_page",
+        "lock_page",
+        "unlock_page",
+    }
     caseworker = Group.objects.get(name="Caseworker")
     index = ensure_article_index(using="default")
-    publish = Permission.objects.get(
-        content_type__app_label="wagtailcore", codename="publish_page"
+    # delete_page is a Django default page permission but is intentionally NOT
+    # in the managed CMS set, so it stands in for an unmanaged/stray grant.
+    stray = Permission.objects.get(
+        content_type__app_label="wagtailcore", codename="delete_page"
     )
-    GroupPagePermission.objects.create(
-        group=caseworker, page=index, permission=publish
-    )
-    assert "publish_page" in _page_codenames(caseworker)
+    GroupPagePermission.objects.create(group=caseworker, page=index, permission=stray)
+    assert "delete_page" in _page_codenames(caseworker)
 
     # Re-sync must revoke the stray grant.
     sync_cms_group_permissions(using="default")
-    assert "publish_page" not in _page_codenames(caseworker)
-    assert _page_codenames(caseworker) == {"add_page", "change_page"}
+    assert "delete_page" not in _page_codenames(caseworker)
+    assert _page_codenames(caseworker) == managed
 
 
 @pytest.mark.django_db

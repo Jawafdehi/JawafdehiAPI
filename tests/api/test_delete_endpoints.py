@@ -4,8 +4,8 @@
   existing soft-delete pattern — ``Case.delete()`` is overridden; the ViewSet
   already hides CLOSED cases from every read) and returns 204. Auth: the
   cases.delete_case model permission (DjangoModelPermissions) plus the
-  ``can_change_case`` authorization gate (admin/moderator or assigned
-  contributor).
+  ``can_change_case`` authorization gate (v3: any content-staff user —
+  superuser or Caseworker — with no object-level assignment).
 
 force_authenticate is auth-scheme-agnostic; it exercises the permission /
 authorization logic under test.
@@ -98,22 +98,12 @@ def test_delete_case_without_delete_perm_is_403():
 
 
 @pytest.mark.django_db
-def test_delete_case_unassigned_caseworker_is_403():
-    # Caseworker holds delete_case but is NOT a contributor -> can_change_case
-    # denies (403), proving the authorization gate fires after the model-perm gate.
+def test_delete_case_caseworker_ok():
+    # v3 authz: object-level assignment is retired. The Caseworker group holds
+    # delete_case (model perm) AND can_change_case now admits any content-staff
+    # user, so a Caseworker may soft-delete ANY case with no assignment.
     worker = create_user_with_role("cw_del", "cw_del@example.com", "Caseworker")
     case = _make_case()
-    resp = _authed_client(worker).delete(f"/api/cases/{case.slug}/")
-    assert resp.status_code == 403
-    case.refresh_from_db()
-    assert case.state != CaseState.CLOSED
-
-
-@pytest.mark.django_db
-def test_delete_case_assigned_caseworker_ok():
-    worker = create_user_with_role("cw_del2", "cw_del2@example.com", "Caseworker")
-    case = _make_case()
-    case.contributors.add(worker)
     resp = _authed_client(worker).delete(f"/api/cases/{case.slug}/")
     assert resp.status_code == 204
     case.refresh_from_db()

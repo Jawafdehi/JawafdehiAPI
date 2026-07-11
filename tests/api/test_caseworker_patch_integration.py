@@ -52,7 +52,6 @@ def _authed_client(user):
 def test_patch_multi_operation_end_to_end_persists_all_changes():
     user = create_user_with_role("sarita", "sarita@example.com", "Caseworker")
     case = _make_case()
-    case.contributors.add(user)
 
     # Entities are owned by NES; binds hold the canonical NES id directly.
     alleged_1 = "https://jawafdehi.org/entity/person/sushil-adhikari"
@@ -136,10 +135,12 @@ def test_patch_multi_operation_end_to_end_persists_all_changes():
 
 
 @pytest.mark.django_db
-def test_patch_rejects_unauthorized_state_transition_in_multi_op_without_partial_write():
+def test_patch_rejects_invalid_state_transition_in_multi_op_without_partial_write():
+    # v3 authz: a Caseworker is authorized to publish, but publishing an
+    # incomplete case (no accused entity / key allegation) fails validation.
+    # The multi-op must not persist the title change either — no partial write.
     user = create_user_with_role("dipesh", "dipesh@example.com", "Caseworker")
-    case = _make_case(title="Original title")
-    case.contributors.add(user)
+    case = _make_case(title="Original title", key_allegations=[])
 
     patch_ops = [
         {"op": "replace", "path": "/title", "value": "Should not persist"},
@@ -150,7 +151,7 @@ def test_patch_rejects_unauthorized_state_transition_in_multi_op_without_partial
         URL.format(case.slug), data=patch_ops, format="json"
     )
 
-    assert response.status_code == 403
+    assert response.status_code == 422
     case.refresh_from_db()
     assert case.title == "Original title"
     assert case.state == CaseState.DRAFT
@@ -175,7 +176,6 @@ def test_admin_can_patch_without_assignment():
 def test_invalid_post_patch_payload_produces_422_and_no_persistence():
     user = create_user_with_role("anup", "anup@example.com", "Caseworker")
     case = _make_case(title="Stable title")
-    case.contributors.add(user)
 
     patch_ops = [
         {"op": "replace", "path": "/title", "value": "Transient title"},
@@ -199,7 +199,6 @@ def test_patch_explicit_null_outcome_resets_accused_verdict_to_charged():
     ``item.get("outcome") or prior_outcomes.get(key)`` fell through on null."""
     user = create_user_with_role("gita", "gita@example.com", "Caseworker")
     case = _make_case()
-    case.contributors.add(user)
 
     accused = "https://jawafdehi.org/entity/person/sushil-adhikari"
     # Seed a non-default prior verdict for the bind.
@@ -245,7 +244,6 @@ def test_patch_omitted_outcome_preserves_accused_prior_verdict():
     an outcome-unaware client silently resetting verdicts)."""
     user = create_user_with_role("hari", "hari@example.com", "Caseworker")
     case = _make_case()
-    case.contributors.add(user)
 
     accused = "https://jawafdehi.org/entity/person/sushil-adhikari"
     CaseEntityRelationship.objects.create(
@@ -288,7 +286,6 @@ def test_patch_duplicate_entity_bind_returns_422_not_500():
     IntegrityError surface as a 500."""
     user = create_user_with_role("nabin", "nabin@example.com", "Caseworker")
     case = _make_case()
-    case.contributors.add(user)
 
     accused = "https://jawafdehi.org/entity/person/sushil-adhikari"
     patch_ops = [

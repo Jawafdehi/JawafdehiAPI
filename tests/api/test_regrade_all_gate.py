@@ -5,8 +5,7 @@ review/views.py) is gated by ``HasContributorRole`` — the *write* floor of the
 review system. It must:
 
   * reject anonymous callers (401),
-  * reject read-only roles that can *observe* but not *drive* (Public / ReadOnly
-    -> 403),
+  * reject the org-wide ReadOnly role that can *observe* but not *drive* (403),
   * admit the contributor roles (Caseworker / Moderator / Admin -> 2xx).
 
 And it must re-queue only ONE review per case: the LATEST CaseReview row of each
@@ -40,14 +39,13 @@ def test_regrade_all_requires_authentication():
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("role", ["Public", "ReadOnly"])
-def test_regrade_all_denies_read_only_roles(role):
-    """Public and the org-wide ReadOnly role may observe but not drive: 403.
+def test_regrade_all_denies_read_only_role():
+    """The org-wide ReadOnly role may observe but not drive: 403.
 
-    HasContributorRole deliberately excludes both — they lack any content role
-    (has_role) and are not ReviewAssistant service accounts.
+    HasContributorRole deliberately excludes it — ReadOnly lacks any content role
+    (has_role) and is not a JobPoller service account.
     """
-    assert _client_for_role(role).post(URL).status_code == 403
+    assert _client_for_role("ReadOnly").post(URL).status_code == 403
 
 
 @pytest.mark.django_db

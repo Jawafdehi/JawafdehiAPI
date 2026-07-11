@@ -606,13 +606,8 @@ class Case(models.Model):
     # CaseMaterialReference join (case.material_references) keyed by material_iri
     # (ADR: cases own no documents).
 
-    # Relationships
-    contributors = models.ManyToManyField(
-        User,
-        blank=True,
-        related_name="assigned_cases",
-        help_text="Contributors assigned to this case",
-    )
+    # v3 authz model: the per-case `contributors` M2M (object-level assignment
+    # gating) is retired — the single content-staff role can edit any case.
 
     # Metadata
     versionInfo = models.JSONField(

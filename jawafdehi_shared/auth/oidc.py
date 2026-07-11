@@ -73,9 +73,7 @@ DEFAULT_ROLES_CLAIM = "urn:zitadel:iam:org:project:roles"
 # every project the principal holds grants in); honoring those would let a
 # colliding roleKey like ``admin`` granted in an unrelated project escalate to
 # superuser here.
-_PER_PROJECT_ROLES_CLAIM_RE = re.compile(
-    r"^urn:zitadel:iam:org:project:(\d+):roles$"
-)
+_PER_PROJECT_ROLES_CLAIM_RE = re.compile(r"^urn:zitadel:iam:org:project:(\d+):roles$")
 
 
 def _trusted_project_ids() -> set[str]:
@@ -87,27 +85,29 @@ def _trusted_project_ids() -> set[str]:
         aud = [aud]
     return {str(a) for a in aud}
 
+
 # Default Zitadel project-role key -> existing Django Group name. Overridable via
 # settings.OIDC_ROLE_TO_GROUP. The Group names mirror those the predicates and
-# create_groups.py use (Admin, Moderator, Caseworker, ReadOnly, Public,
-# ReviewAssistant) plus the NGM rate-limit tier groups.
+# create_groups.py use (Caseworker, ReadOnly, JobPoller).
 #
-# Role model (v2):
-#   admin     -> Admin group  (AND user.is_superuser=True, set in _sync_user)
-#   moderator -> Moderator
-#   caseworker-> Caseworker   (renamed from the old "contributor" role)
-#   readonly  -> ReadOnly     (system-wide read INCLUDING casework view)
-#   public    -> Public       (public read EXCLUDING casework view)
+# Role model (v3):
+#   admin      -> (no group) user.is_superuser=True, set in _sync_user; the sole
+#                 user-management capability. NOT in this map.
+#   moderator  -> Caseworker  ) the single content-staff role. Zitadel declares
+#   contributor-> Caseworker  ) `contributor` (not `caseworker`); both — plus the
+#   caseworker -> Caseworker  ) legacy `caseworker` key — collapse to Caseworker.
+#   readonly   -> ReadOnly     (system-wide read INCLUDING casework view)
+#   job_poller -> JobPoller    (machine role: review r/w + jobs consume)
+#
+# Retired: the Admin/Public/Moderator groups and the NGM_{Silver,Gold,Platinum}
+# tiers. Unmapped role keys (e.g. a stale `public`/`ngm_gold` token) are silently
+# ignored by _sync_user, so this is transition-safe.
 DEFAULT_ROLE_TO_GROUP = {
-    "admin": "Admin",
-    "moderator": "Moderator",
+    "moderator": "Caseworker",
+    "contributor": "Caseworker",
     "caseworker": "Caseworker",
     "readonly": "ReadOnly",
-    "public": "Public",
-    "review_assistant": "ReviewAssistant",
-    "ngm_silver": "NGM_SilverTier",
-    "ngm_gold": "NGM_GoldTier",
-    "ngm_platinum": "NGM_PlatinumTier",
+    "job_poller": "JobPoller",
 }
 
 

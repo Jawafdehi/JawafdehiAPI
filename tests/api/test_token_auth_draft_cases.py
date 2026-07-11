@@ -94,7 +94,6 @@ class TestTokenAuthDraftCases:
         )
 
         # Assign contributor to the case
-        case.contributors.add(self.contributor_user)
 
         # Access as contributor
         self.client.force_authenticate(user=self.contributor_user)
@@ -115,7 +114,6 @@ class TestTokenAuthDraftCases:
             description="Test description",
             state=CaseState.DRAFT,
         )
-        case.contributors.add(self.contributor_user)
 
         # Access as other_contributor (not assigned to case)
         self.client.force_authenticate(user=self.other_contributor)
@@ -182,7 +180,6 @@ class TestTokenAuthDraftCases:
             description="Test description",
             state=CaseState.DRAFT,
         )
-        draft_case.contributors.add(self.contributor_user)
 
         published_case = create_case_with_entities(
             title="Published Case",

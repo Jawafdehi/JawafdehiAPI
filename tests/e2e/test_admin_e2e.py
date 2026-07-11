@@ -80,8 +80,6 @@ class TestDjangoAdminWorkflows:
             description="Initial draft description",
             state=CaseState.DRAFT,
         )
-        case.contributors.add(self.contributor1)
-        case.save()
 
         admin_instance = CaseAdmin(Case, None)
         from django.test import RequestFactory
@@ -130,93 +128,58 @@ class TestDjangoAdminWorkflows:
             request_admin, case
         ), "Admin should have view permission for all cases"
 
-    def test_contributor_assignment_and_access_restrictions(self):
+    def test_caseworker_global_view_access(self):
         """
-        E2E Test: Django admin is read-only; validates that contributor
-        assignment controls VIEW access but no role can CHANGE cases here.
+        E2E Test: v3 authz — object-level case assignment is retired. Every
+        Caseworker has global VIEW access to all cases through Django admin,
+        and no role can CHANGE cases here (Django admin is read-only).
 
         Workflow:
-        1. Create a case and assign contributor1
-        2. Contributor1 can VIEW the case (queryset + view permission)
-        3. Contributor2 can VIEW (global read) but NOT change
-        4. Neither contributor can CHANGE via Django admin (read-only)
+        1. Create a case (no assignment concept)
+        2. Both caseworkers can VIEW the case (queryset + view permission)
+        3. Neither caseworker can CHANGE via Django admin (read-only)
 
         Validates: Requirements 3.1, 3.2, 5.2
         """
-        # Step 1: Create a case and assign contributor1
+        # Step 1: Create a case — there is no per-case assignment in v3.
         case = create_case_with_entities(
-            title="Assigned Case",
+            title="Any Case",
             alleged_entities=["https://jawafdehi.org/entity/person/test"],
             key_allegations=["Test allegation"],
             case_type=CaseType.CORRUPTION,
             description="Test description",
             state=CaseState.DRAFT,
         )
-        case.contributors.add(self.contributor1)
-        case.save()
 
         admin_instance = CaseAdmin(Case, None)
         from django.test import RequestFactory
 
         factory = RequestFactory()
 
-        # Step 2: Verify contributor1 can VIEW the case
-        request1 = factory.get("/")
-        request1.user = self.contributor1
+        # Step 2: Both caseworkers see and can view the case (global read access).
+        for user in (self.contributor1, self.contributor2):
+            request = factory.get("/")
+            request.user = user
 
-        queryset1 = admin_instance.get_queryset(request1)
-        assert (
-            case in queryset1
-        ), "Contributor1 should see assigned case in queryset (Requirement 3.1)"
+            queryset = admin_instance.get_queryset(request)
+            assert (
+                case in queryset
+            ), "Every caseworker should see any case in queryset (global read access)"
 
-        has_view1 = admin_instance.has_view_permission(request1, case)
-        assert has_view1, "Contributor1 should have view permission for assigned case"
+            assert admin_instance.has_view_permission(
+                request, case
+            ), "Every caseworker should have view permission for any case"
 
-        # Django admin is read-only: contributor1 CANNOT change
-        has_change1 = admin_instance.has_change_permission(request1, case)
-        assert (
-            not has_change1
-        ), "Django admin is read-only; contributor1 cannot change cases"
-
-        # Step 3: Verify contributor2 can VIEW (global read access) but not change
-        request2 = factory.get("/")
-        request2.user = self.contributor2
-
-        queryset2 = admin_instance.get_queryset(request2)
-        assert (
-            case in queryset2
-        ), "Contributor2 should see unassigned case in queryset (global read access)"
-
-        has_view2 = admin_instance.has_view_permission(request2, case)
-        assert (
-            has_view2
-        ), "Contributor2 should have view permission (global read access)"
-
-        has_change2 = admin_instance.has_change_permission(request2, case)
-        assert (
-            not has_change2
-        ), "Django admin is read-only; contributor2 cannot change cases"
-
-        # Step 4: After assigning contributor2, queryset still includes the case
-        case.contributors.add(self.contributor2)
-        case.save()
-
-        queryset2_after = admin_instance.get_queryset(request2)
-        assert (
-            case in queryset2_after
-        ), "Contributor2 should still see the case after assignment"
-
-        # Still read-only even after assignment
-        has_change2_after = admin_instance.has_change_permission(request2, case)
-        assert (
-            not has_change2_after
-        ), "Django admin is read-only; contributor2 still cannot change after assignment"
+            # Step 3: Django admin is read-only — no caseworker can change cases.
+            assert not admin_instance.has_change_permission(
+                request, case
+            ), "Django admin is read-only; caseworker cannot change cases"
 
     def test_contributor_can_see_own_created_case_in_list(self):
         """
-        E2E Test: Django admin is read-only; validates that a contributor can
-        VIEW their assigned case in the list and detail views, and that other
-        contributors have global read access but no change permission.
+        E2E Test: Django admin is read-only; validates that a caseworker can
+        VIEW any case in the list and detail views (global read access in v3),
+        and no caseworker has change permission.
 
         Validates: Requirements 3.1, 3.2
         """
@@ -228,7 +191,7 @@ class TestDjangoAdminWorkflows:
         request_contrib1 = factory.get("/")
         request_contrib1.user = self.contributor1
 
-        # Create a case assigned to contributor1
+        # Create a case — v3 has no per-case assignment; any caseworker can view.
         case = create_case_with_entities(
             title="Contributor's New Case",
             alleged_entities=["https://jawafdehi.org/entity/person/test-official"],
@@ -237,7 +200,6 @@ class TestDjangoAdminWorkflows:
             description="Case created by contributor1",
             state=CaseState.DRAFT,
         )
-        case.contributors.add(self.contributor1)
 
         # Contributor performs list query: case appears in queryset
         queryset = admin_instance.get_queryset(request_contrib1)
@@ -296,8 +258,7 @@ class TestDjangoAdminWorkflows:
         2. Attempt to transition to IN_REVIEW without required fields (should fail)
         3. Add required fields
         4. Successfully transition to IN_REVIEW
-        5. Contributor attempts to publish (should fail)
-        6. Moderator successfully publishes
+        5. Caseworker publishes (allowed in v3 — single content-staff role)
 
         Validates: Requirements 1.2, 1.5, 2.1
         """
@@ -308,8 +269,6 @@ class TestDjangoAdminWorkflows:
             case_type=CaseType.CORRUPTION,
             state=CaseState.DRAFT,
         )
-        case.contributors.add(self.contributor1)
-        case.save()
 
         # Step 2: Attempt to transition to IN_REVIEW without required fields
         case.state = CaseState.IN_REVIEW
@@ -339,7 +298,8 @@ class TestDjangoAdminWorkflows:
             case.state == CaseState.IN_REVIEW
         ), "Case should transition to IN_REVIEW with complete data"
 
-        # Step 5: Contributor attempts to publish (should fail)
+        # Step 5: Caseworker publishes — allowed in v3 (the single content-staff
+        # role can transition to any state, including PUBLISHED).
         from django.test import RequestFactory
 
         from cases.admin import CaseAdminForm
@@ -358,28 +318,14 @@ class TestDjangoAdminWorkflows:
         }
         form = CaseAdminForm(data=form_data, instance=case, request=request_contrib)
         assert (
-            not form.is_valid()
-        ), "Form should not be valid for contributor publishing"
-        assert "state" in form.errors, "Should have state error"
-        assert "Caseworkers can only transition between DRAFT and IN_REVIEW" in str(
-            form.errors["state"]
-        ), "Contributor should not be able to publish (Requirement 1.5)"
-
-        # Step 6: Moderator successfully publishes
-        request_mod = factory.post("/")
-        request_mod.user = self.moderator
-
-        form_data["state"] = CaseState.PUBLISHED
-        form = CaseAdminForm(data=form_data, instance=case, request=request_mod)
-        assert (
             form.is_valid()
-        ), f"Form should be valid for moderator publishing: {form.errors}"
+        ), f"Form should be valid for caseworker publishing: {form.errors}"
         form.save()
 
         case.refresh_from_db()
         assert (
             case.state == CaseState.PUBLISHED
-        ), "Moderator should be able to publish the case (Requirement 2.1)"
+        ), "Caseworker should be able to publish the case (Requirement 2.1)"
 
     def test_in_place_editing_of_published_cases(self):
         """
@@ -512,7 +458,6 @@ class TestDjangoAdminWorkflows:
             description="Description 1",
             state=CaseState.DRAFT,
         )
-        case1.contributors.add(self.contributor1)
 
         case2 = create_case_with_entities(
             title="Case for Contributor 2",
@@ -522,7 +467,6 @@ class TestDjangoAdminWorkflows:
             description="Description 2",
             state=CaseState.IN_REVIEW,
         )
-        case2.contributors.add(self.contributor2)
 
         admin_instance = CaseAdmin(Case, None)
         from django.test import RequestFactory
@@ -575,24 +519,21 @@ class TestDjangoAdminWorkflows:
             request_admin, self.moderator
         ), "Admin should be able to change moderator users"
 
-    def test_moderator_cannot_manage_other_moderators(self):
+    def test_user_management_is_superuser_only(self):
         """
-        E2E Test: Verify Moderators cannot manage other Moderators.
+        E2E Test: v3 authz — user management is SUPERUSER-ONLY.
+
+        The old "moderators manage users but not other moderators" asymmetry is
+        retired. A non-superuser content-staff user (Caseworker) can neither see
+        nor change users; only a superuser can.
 
         Workflow:
-        1. Create two moderator users
-        2. Verify moderator1 cannot see moderator2 in user queryset
-        3. Verify moderator1 cannot change moderator2
-        4. Verify moderator can manage contributors
+        1. A Caseworker sees NO users in the user queryset
+        2. A Caseworker cannot change or delete any user
+        3. A superuser sees all users and can change/delete them
 
         Validates: Requirements 5.3
         """
-        # Step 1: Two moderators already exist (self.moderator and we'll create another)
-        moderator2 = create_user_with_role(
-            "moderator2", "moderator2@example.com", "Moderator"
-        )
-
-        # Step 2: Verify moderator1 cannot see moderator2 in user queryset
         from django.test import RequestFactory
 
         from cases.admin import CustomUserAdmin
@@ -600,44 +541,44 @@ class TestDjangoAdminWorkflows:
         user_admin = CustomUserAdmin(User, None)
         factory = RequestFactory()
 
-        request_mod = factory.get("/")
-        request_mod.user = self.moderator
+        # Step 1: A Caseworker (self.moderator maps to Caseworker) sees no users.
+        request_caseworker = factory.get("/")
+        request_caseworker.user = self.moderator
 
-        user_queryset = user_admin.get_queryset(request_mod)
+        caseworker_queryset = user_admin.get_queryset(request_caseworker)
+        assert (
+            caseworker_queryset.count() == 0
+        ), "Non-superuser (Caseworker) should see no users (user mgmt is superuser-only)"
 
-        # Moderator should not see other moderators in queryset
-        assert (
-            moderator2 not in user_queryset
-        ), "Moderator should NOT see other moderators in queryset (Requirement 5.3)"
-        assert (
-            self.moderator not in user_queryset
-        ), "Moderator should NOT see themselves in queryset"
+        # Step 2: A Caseworker cannot change or delete any user.
+        assert not user_admin.has_change_permission(
+            request_caseworker
+        ), "Caseworker should NOT have change permission on users"
+        assert not user_admin.has_change_permission(
+            request_caseworker, self.contributor1
+        ), "Caseworker should NOT be able to change another user"
+        assert not user_admin.has_delete_permission(
+            request_caseworker, self.contributor1
+        ), "Caseworker should NOT be able to delete another user"
 
-        # Step 3: Verify moderator1 cannot change moderator2
-        has_permission = user_admin.has_change_permission(request_mod, moderator2)
-        assert (
-            not has_permission
-        ), "Moderator should NOT have permission to change other moderators"
+        # Step 3: A superuser can see and manage all users.
+        request_admin = factory.get("/")
+        request_admin.user = self.admin
 
-        # Verify moderator cannot delete other moderators
-        has_delete_permission = user_admin.has_delete_permission(
-            request_mod, moderator2
-        )
+        admin_queryset = user_admin.get_queryset(request_admin)
         assert (
-            not has_delete_permission
-        ), "Moderator should NOT have permission to delete other moderators"
+            self.moderator in admin_queryset
+        ), "Superuser should see all users in queryset"
+        assert (
+            self.contributor1 in admin_queryset
+        ), "Superuser should see all users in queryset"
 
-        # Step 4: Verify moderator can manage contributors
-        assert (
-            self.contributor1 in user_queryset
-        ), "Moderator should be able to see contributors"
-
-        has_contrib_permission = user_admin.has_change_permission(
-            request_mod, self.contributor1
-        )
-        assert (
-            has_contrib_permission
-        ), "Moderator should have permission to change contributors"
+        assert user_admin.has_change_permission(
+            request_admin, self.moderator
+        ), "Superuser should be able to change any user"
+        assert user_admin.has_delete_permission(
+            request_admin, self.moderator
+        ), "Superuser should be able to delete any user"
 
     def test_complete_edit_publish_workflow(self):
         """
@@ -661,8 +602,6 @@ class TestDjangoAdminWorkflows:
             description="Initial version description",
             state=CaseState.DRAFT,
         )
-        case.contributors.add(self.contributor1)
-        case.save()
 
         assert case.state == CaseState.DRAFT
 
@@ -704,20 +643,21 @@ class TestDjangoAdminWorkflows:
         assert case.versionInfo is not None
         assert "datetime" in case.versionInfo
 
-    def test_contributor_state_transition_restrictions(self):
+    def test_caseworker_can_transition_to_any_state(self):
         """
-        E2E Test: Verify contributors can only transition between DRAFT and IN_REVIEW.
+        E2E Test: v3 authz — the single content-staff role (Caseworker) can
+        transition a case to ANY state, including PUBLISHED and CLOSED. The old
+        Caseworker-confined-to-{DRAFT, IN_REVIEW} boundary is retired.
 
         Workflow:
-        1. Contributor creates a draft
-        2. Contributor transitions DRAFT → IN_REVIEW (allowed)
-        3. Contributor transitions IN_REVIEW → DRAFT (allowed)
-        4. Contributor attempts DRAFT → PUBLISHED (should fail)
-        5. Contributor attempts IN_REVIEW → CLOSED (should fail)
+        1. Caseworker creates a draft
+        2. Caseworker transitions DRAFT → IN_REVIEW (allowed)
+        3. Caseworker transitions IN_REVIEW → PUBLISHED (allowed in v3)
+        4. Caseworker transitions PUBLISHED → CLOSED (allowed in v3)
 
         Validates: Requirements 1.5
         """
-        # Step 1: Contributor creates a draft
+        # Step 1: Caseworker creates a draft
         case = create_case_with_entities(
             title="State Transition Test",
             alleged_entities=["https://jawafdehi.org/entity/person/test"],
@@ -726,8 +666,6 @@ class TestDjangoAdminWorkflows:
             description="Test description",
             state=CaseState.DRAFT,
         )
-        case.contributors.add(self.contributor1)
-        case.save()
 
         from django.test import RequestFactory
 
@@ -737,7 +675,7 @@ class TestDjangoAdminWorkflows:
         request_contrib = factory.post("/")
         request_contrib.user = self.contributor1
 
-        # Step 2: Contributor transitions DRAFT → IN_REVIEW (allowed)
+        # Step 2: Caseworker transitions DRAFT → IN_REVIEW (allowed)
         form_data = {
             "slug": case.slug,
             "title": case.title,
@@ -755,45 +693,33 @@ class TestDjangoAdminWorkflows:
         case.refresh_from_db()
         assert (
             case.state == CaseState.IN_REVIEW
-        ), "Contributor should be able to transition DRAFT → IN_REVIEW"
+        ), "Caseworker should be able to transition DRAFT → IN_REVIEW"
 
-        # Step 3: Contributor transitions IN_REVIEW → DRAFT (allowed)
-        form_data["state"] = CaseState.DRAFT
+        # Step 3: Caseworker transitions IN_REVIEW → PUBLISHED (allowed in v3)
+        form_data["state"] = CaseState.PUBLISHED
         form = CaseAdminForm(data=form_data, instance=case, request=request_contrib)
         assert (
             form.is_valid()
-        ), f"Form should be valid for IN_REVIEW → DRAFT: {form.errors}"
+        ), f"Form should be valid for IN_REVIEW → PUBLISHED: {form.errors}"
         form.save()
 
         case.refresh_from_db()
         assert (
-            case.state == CaseState.DRAFT
-        ), "Contributor should be able to transition IN_REVIEW → DRAFT"
+            case.state == CaseState.PUBLISHED
+        ), "Caseworker should be able to transition to PUBLISHED (Requirement 1.5)"
 
-        # Step 4: Contributor attempts DRAFT → PUBLISHED (should fail)
-        form_data["state"] = CaseState.PUBLISHED
-        form = CaseAdminForm(data=form_data, instance=case, request=request_contrib)
-        assert not form.is_valid(), "Form should not be valid for DRAFT → PUBLISHED"
-        assert "state" in form.errors, "Should have state error"
-        assert "Caseworkers can only transition between DRAFT and IN_REVIEW" in str(
-            form.errors["state"]
-        ), "Contributor should NOT be able to transition to PUBLISHED (Requirement 1.5)"
-
-        # Transition to IN_REVIEW for next test
-        form_data["state"] = CaseState.IN_REVIEW
-        form = CaseAdminForm(data=form_data, instance=case, request=request_contrib)
-        assert form.is_valid(), f"Form should be valid: {form.errors}"
-        form.save()
-        case.refresh_from_db()
-
-        # Step 5: Contributor attempts IN_REVIEW → CLOSED (should fail)
+        # Step 4: Caseworker transitions PUBLISHED → CLOSED (allowed in v3)
         form_data["state"] = CaseState.CLOSED
         form = CaseAdminForm(data=form_data, instance=case, request=request_contrib)
-        assert not form.is_valid(), "Form should not be valid for IN_REVIEW → CLOSED"
-        assert "state" in form.errors, "Should have state error"
-        assert "Caseworkers can only transition between DRAFT and IN_REVIEW" in str(
-            form.errors["state"]
-        ), "Contributor should NOT be able to transition to CLOSED"
+        assert (
+            form.is_valid()
+        ), f"Form should be valid for PUBLISHED → CLOSED: {form.errors}"
+        form.save()
+
+        case.refresh_from_db()
+        assert (
+            case.state == CaseState.CLOSED
+        ), "Caseworker should be able to transition to CLOSED"
 
     def test_contributor_login_create_minimal_case_and_view_workflow(self):
         """
@@ -835,7 +761,6 @@ class TestDjangoAdminWorkflows:
             alleged_entities=["https://jawafdehi.org/entity/person/placeholder"],
             state=CaseState.DRAFT,
         )
-        case.contributors.add(self.contributor1)
 
         # Step 4: Contributor can VIEW the case in their queryset
         queryset = admin_instance.get_queryset(request_contrib)
@@ -901,7 +826,9 @@ class TestDjangoAdminWorkflows:
         request_contrib = factory.post("/django-admin/cases/case/add/")
         request_contrib.user = self.contributor1
 
-        entities = create_entities_from_ids(["https://jawafdehi.org/entity/person/test"])
+        entities = create_entities_from_ids(
+            ["https://jawafdehi.org/entity/person/test"]
+        )
 
         # Step 1: Attempt to create a new case with state=PUBLISHED (should fail)
         form_data = {
@@ -1088,8 +1015,6 @@ class TestDjangoAdminWorkflows:
             alleged_entities=["https://jawafdehi.org/entity/person/original-person"],
             state=CaseState.DRAFT,
         )
-        case.contributors.add(self.contributor1)
-        case.save()
 
         original_id = case.id
 
@@ -1109,7 +1034,10 @@ class TestDjangoAdminWorkflows:
 
         # Step 4: Update with valid entity IDs
         new_entities = create_entities_from_ids(
-            ["https://jawafdehi.org/entity/person/updated-person", "https://jawafdehi.org/entity/organization/new-org"]
+            [
+                "https://jawafdehi.org/entity/person/updated-person",
+                "https://jawafdehi.org/entity/organization/new-org",
+            ]
         )
         case.entity_relationships.filter(
             relationship_type=RelationshipType.ALLEGED
@@ -1215,8 +1143,6 @@ class TestDjangoAdminWorkflows:
             alleged_entities=[],  # Empty list
             state=CaseState.DRAFT,
         )
-        case.contributors.add(self.contributor1)
-        case.save()
 
         # Verify case was created successfully
         assert (
@@ -1245,7 +1171,9 @@ class TestDjangoAdminWorkflows:
         case.save()
 
         # Step 3: Add alleged_entities and required fields for submission
-        alleged_entity = create_entities_from_ids(["https://jawafdehi.org/entity/person/corrupt-official"])[0]
+        alleged_entity = create_entities_from_ids(
+            ["https://jawafdehi.org/entity/person/corrupt-official"]
+        )[0]
         case.entity_relationships.create(
             nes_id=alleged_entity,
             relationship_type=RelationshipType.ACCUSED,
@@ -1290,8 +1218,6 @@ class TestDjangoAdminWorkflows:
             description="Test description",
             state=CaseState.DRAFT,
         )
-        case.contributors.add(self.contributor1)
-        case.save()
 
         # Step 2: Remove alleged_entities and attempt to publish
         case.entity_relationships.filter(
@@ -1312,7 +1238,9 @@ class TestDjangoAdminWorkflows:
         case.save()
 
         # Step 3: Add alleged_entities back and publish
-        alleged_entity = create_entities_from_ids(["https://jawafdehi.org/entity/person/test-official"])[0]
+        alleged_entity = create_entities_from_ids(
+            ["https://jawafdehi.org/entity/person/test-official"]
+        )[0]
         case.entity_relationships.create(
             nes_id=alleged_entity,
             relationship_type=RelationshipType.ACCUSED,

@@ -11,16 +11,7 @@ from .predicates import (
     is_admin_or_moderator as is_admin_or_moderator,
 )
 from .predicates import (
-    is_case_contributor as is_case_contributor,
-)
-from .predicates import (
     is_caseworker as is_caseworker,
-)
-from .predicates import (
-    is_moderator as is_moderator,
-)
-from .predicates import (
-    is_public as is_public,
 )
 from .predicates import (
     is_readonly as is_readonly,

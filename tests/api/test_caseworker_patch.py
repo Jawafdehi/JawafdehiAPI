@@ -69,16 +69,20 @@ def test_patch_requires_authentication():
 
 
 @pytest.mark.django_db
-def test_patch_returns_403_for_unassigned_contributor():
+def test_patch_allowed_for_any_caseworker_without_assignment():
+    # v3 authz: object-level case assignment is retired — any Caseworker can
+    # patch any case without being assigned to it.
     case = _make_case()
     user = _contributor("sunita")
     client = _authed_client(user)
     response = client.patch(
         URL.format(case.slug),
-        data=[{"op": "replace", "path": "/title", "value": "Hacked"}],
+        data=[{"op": "replace", "path": "/title", "value": "Edited"}],
         format="json",
     )
-    assert response.status_code == 403
+    assert response.status_code == 200
+    case.refresh_from_db()
+    assert case.title == "Edited"
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +94,6 @@ def test_patch_returns_403_for_unassigned_contributor():
 def test_patch_replace_scalar_field():
     user = _contributor("hari")
     case = _make_case()
-    case.contributors.add(user)
 
     client = _authed_client(user)
     response = client.patch(
@@ -113,7 +116,6 @@ def test_patch_replace_timeline_item_title():
             {"date": "2024-02-01", "title": "Second event"},
         ]
     )
-    case.contributors.add(user)
 
     client = _authed_client(user)
     response = client.patch(
@@ -132,7 +134,6 @@ def test_patch_timeline_preserves_date_bs_and_span_fields():
     """PATCH must not strip the optional date_bs/end_date/end_date_bs fields."""
     user = _contributor("kamala")
     case = _make_case()
-    case.contributors.add(user)
 
     new_timeline = [
         {
@@ -173,7 +174,6 @@ def test_patch_timeline_rejects_malformed_date_bs():
     """A malformed date_bs in a PATCHed timeline is rejected (422)."""
     user = _contributor("nabin")
     case = _make_case()
-    case.contributors.add(user)
 
     client = _authed_client(user)
     response = client.patch(
@@ -197,7 +197,6 @@ def test_patch_timeline_rejects_malformed_iso_date():
     """A3: a non-ISO `date` in a PATCHed timeline item is rejected (422)."""
     user = _contributor("nabin-2")
     case = _make_case()
-    case.contributors.add(user)
 
     client = _authed_client(user)
     response = client.patch(
@@ -219,7 +218,6 @@ def test_patch_rejects_invalid_court_cases():
     """A3: court_cases entries are validated (unknown court identifier -> 422)."""
     user = _contributor("nabin-3")
     case = _make_case()
-    case.contributors.add(user)
 
     client = _authed_client(user)
     response = client.patch(
@@ -241,7 +239,6 @@ def test_patch_court_cases_stores_iris():
     """court_cases takes canonical @id IRIs; stored on the reference join."""
     user = _contributor("nabin-court-1")
     case = _make_case()
-    case.contributors.add(user)
 
     client = _authed_client(user)
     response = client.patch(
@@ -264,9 +261,7 @@ def test_patch_court_cases_stores_iris():
         "https://jawafdehi.org/courtcase/supreme/078-wc-0123",
     ]
     case.refresh_from_db()
-    assert list(
-        case.courtcase_references.values_list("courtcase_iri", flat=True)
-    ) == [
+    assert list(case.courtcase_references.values_list("courtcase_iri", flat=True)) == [
         "https://jawafdehi.org/courtcase/special/080-cr-0111",
         "https://jawafdehi.org/courtcase/supreme/078-wc-0123",
     ]
@@ -277,7 +272,6 @@ def test_patch_rejects_short_form_court_cases():
     """The legacy <court>:<number> short form is not accepted — IRIs only."""
     user = _contributor("nabin-court-3")
     case = _make_case()
-    case.contributors.add(user)
 
     client = _authed_client(user)
     response = client.patch(
@@ -301,7 +295,6 @@ def test_patch_scalar_field_does_not_wipe_court_cases():
     case = _make_case(
         court_cases=["https://jawafdehi.org/courtcase/special/080-cr-0111"]
     )
-    case.contributors.add(user)
 
     client = _authed_client(user)
     response = client.patch(
@@ -321,7 +314,6 @@ def test_patch_bigo_accepts_integer():
     """A3: bigo (embezzled amount) is a writable integer field."""
     user = _contributor("nabin-4")
     case = _make_case()
-    case.contributors.add(user)
 
     client = _authed_client(user)
     response = client.patch(
@@ -338,7 +330,6 @@ def test_patch_bigo_accepts_integer():
 def test_patch_add_appends_timeline_item():
     user = _contributor("ram")
     case = _make_case(timeline=[{"date": "2024-01-01", "title": "First"}])
-    case.contributors.add(user)
 
     new_item = {"date": "2025-03-15", "title": "New event", "description": "Details"}
     client = _authed_client(user)
@@ -361,7 +352,6 @@ def test_patch_remove_timeline_item():
             {"date": "2024-02-01", "title": "Remove me"},
         ]
     )
-    case.contributors.add(user)
 
     client = _authed_client(user)
     response = client.patch(
@@ -379,7 +369,6 @@ def test_patch_remove_timeline_item():
 def test_patch_add_entity_with_relationship_type():
     user = _contributor("kiran")
     case = _make_case()
-    case.contributors.add(user)
     entity = "https://jawafdehi.org/entity/person/prachanda"
 
     client = _authed_client(user)
@@ -412,7 +401,6 @@ def test_patch_add_entity_accepts_uppercase_relationship_type(wire_value):
     # accept them case-insensitively and STORE/RETURN them lowercase.
     user = _contributor("kiran")
     case = _make_case()
-    case.contributors.add(user)
     entity = "https://jawafdehi.org/entity/person/prachanda"
 
     client = _authed_client(user)
@@ -441,7 +429,6 @@ def test_patch_add_entity_accepts_uppercase_relationship_type(wire_value):
 def test_patch_add_location_entity():
     user = _contributor("kiran-loc")
     case = _make_case()
-    case.contributors.add(user)
     entity = "https://jawafdehi.org/entity/location/district/kathmandu"
 
     client = _authed_client(user)
@@ -477,7 +464,6 @@ def test_patch_add_location_entity():
 def test_patch_400_for_malformed_patch_body():
     user = _contributor("sabita")
     case = _make_case()
-    case.contributors.add(user)
 
     client = _authed_client(user)
     # Send a dict instead of a list — invalid RFC 6902
@@ -493,7 +479,6 @@ def test_patch_400_for_malformed_patch_body():
 def test_patch_400_for_invalid_json_patch_operation():
     user = _contributor("manish")
     case = _make_case()
-    case.contributors.add(user)
 
     client = _authed_client(user)
     # Reference a path index that doesn't exist
@@ -506,10 +491,19 @@ def test_patch_400_for_invalid_json_patch_operation():
 
 
 @pytest.mark.django_db
-def test_patch_403_for_unauthorized_state_transition_to_published():
+def test_patch_caseworker_can_publish_complete_case():
+    # v3 authz: a Caseworker has full publish powers (the old Moderator role
+    # folded into Caseworker), so a complete case transitions DRAFT -> PUBLISHED.
     user = _contributor("deepak")
-    case = _make_case()
-    case.contributors.add(user)
+    case = _make_case(
+        description="Detailed allegation description",
+        key_allegations=["Primary allegation"],
+    )
+    CaseEntityRelationship.objects.create(
+        case=case,
+        nes_id="https://jawafdehi.org/entity/person/ram-prasad-gautam",
+        relationship_type=RelationshipType.ACCUSED,
+    )
 
     client = _authed_client(user)
     response = client.patch(
@@ -517,9 +511,9 @@ def test_patch_403_for_unauthorized_state_transition_to_published():
         data=[{"op": "replace", "path": "/state", "value": "PUBLISHED"}],
         format="json",
     )
-    assert response.status_code == 403
+    assert response.status_code == 200
     case.refresh_from_db()
-    assert case.state == CaseState.DRAFT
+    assert case.state == CaseState.PUBLISHED
 
 
 @pytest.mark.django_db
@@ -529,7 +523,6 @@ def test_patch_200_for_draft_to_in_review_transition():
         description="Detailed allegation description",
         key_allegations=["Primary allegation"],
     )
-    case.contributors.add(user)
     CaseEntityRelationship.objects.create(
         case=case,
         nes_id="https://jawafdehi.org/entity/person/ram-prasad-gautam",
@@ -553,7 +546,6 @@ def test_patch_200_for_draft_to_in_review_transition():
 def test_patch_422_for_draft_to_in_review_missing_required_fields():
     user = _contributor("deepak-3")
     case = _make_case(key_allegations=[])
-    case.contributors.add(user)
 
     client = _authed_client(user)
     response = client.patch(
@@ -578,7 +570,6 @@ def test_patch_rejects_removed_case_id_path():
     # snapshot has no ``/case_id`` member, so the JSON Patch fails to apply.
     user = _contributor("priya")
     case = _make_case()
-    case.contributors.add(user)
 
     client = _authed_client(user)
     response = client.patch(
@@ -593,7 +584,6 @@ def test_patch_rejects_removed_case_id_path():
 def test_patch_422_for_blocked_path_case_type():
     user = _contributor("nisha")
     case = _make_case(case_type=CaseType.CORRUPTION)
-    case.contributors.add(user)
 
     client = _authed_client(user)
     response = client.patch(
@@ -610,7 +600,6 @@ def test_patch_422_for_blocked_path_case_type():
 def test_patch_422_for_invalid_nes_id():
     user = _contributor("anjali")
     case = _make_case()
-    case.contributors.add(user)
 
     client = _authed_client(user)
     response = client.patch(
@@ -632,7 +621,6 @@ def test_patch_scalar_only_does_not_touch_entity_relationships():
     """Scalar-only PATCH must not delete/recreate entity relationships."""
     user = _contributor("binod")
     case = _make_case()
-    case.contributors.add(user)
 
     entity = "https://jawafdehi.org/entity/person/bijaya-shumsher"
     CaseEntityRelationship.objects.create(
@@ -661,7 +649,6 @@ def test_patch_add_entity_with_outcome():
     """An entity bind can carry a verdict ``outcome`` (default is 'charged')."""
     user = _contributor("outcome-add")
     case = _make_case()
-    case.contributors.add(user)
     entity = "https://jawafdehi.org/entity/person/test-accused-1"
 
     client = _authed_client(user)
@@ -693,7 +680,6 @@ def test_patch_outcome_accepts_uppercase(wire_value):
     # The frontend sends UPPERCASE outcome values, mirroring relationship_type.
     user = _contributor("outcome-case")
     case = _make_case()
-    case.contributors.add(user)
     entity = "https://jawafdehi.org/entity/person/test-accused-2"
 
     client = _authed_client(user)
@@ -725,7 +711,6 @@ def test_patch_entities_preserves_untouched_outcome():
     delete/recreate round-trip."""
     user = _contributor("outcome-keep")
     case = _make_case()
-    case.contributors.add(user)
     acquitted = "https://jawafdehi.org/entity/person/test-acquitted"
     CaseEntityRelationship.objects.create(
         case=case,
@@ -770,7 +755,6 @@ def test_patch_replace_entities_preserves_outcome_when_client_omits_it():
     — the server preserves it by (nes_id, relationship_type)."""
     user = _contributor("outcome-preserve")
     case = _make_case()
-    case.contributors.add(user)
     entity = "https://jawafdehi.org/entity/person/test-preserve"
     CaseEntityRelationship.objects.create(
         case=case,
