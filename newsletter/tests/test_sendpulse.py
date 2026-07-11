@@ -262,3 +262,64 @@ def test_get_client_wires_double_opt_in_settings(settings):
     assert c._doi is True
     assert c._sender_email == "inquiry@jawafdehi.org"
     assert c._confirmation_template_id == "tmpl-123"
+
+
+# -- transactional welcome email --------------------------------------------
+
+
+def test_can_send_email_requires_sender():
+    assert SendPulseClient("b", api_key="k", sender_email="a@b.c").can_send_email is True
+    assert SendPulseClient("b", api_key="k").can_send_email is False
+
+
+@mock.patch("newsletter.sendpulse.requests.request")
+def test_send_email_posts_transactional_payload(mock_request):
+    """send_email hits /smtp/emails with from/to and base64-encoded html."""
+    import base64
+
+    resp = mock.Mock()
+    resp.status_code = 200
+    resp.text = ""
+    resp.json.return_value = {"result": True}
+    mock_request.return_value = resp
+    client = SendPulseClient(
+        "719648", api_key="k", sender_email="inquiry@jawafdehi.org", sender_name="Jawafdehi"
+    )
+
+    client.send_email("reader@example.org", "Welcome", "<h1>Hi</h1>", to_name="Sita")
+
+    args, kwargs = mock_request.call_args
+    assert args[0] == "POST"
+    assert args[1].endswith("/smtp/emails")
+    body = kwargs["json"]["email"]
+    assert body["subject"] == "Welcome"
+    assert body["from"] == {"name": "Jawafdehi", "email": "inquiry@jawafdehi.org"}
+    assert body["to"] == [{"email": "reader@example.org", "name": "Sita"}]
+    assert base64.b64decode(body["html"]).decode() == "<h1>Hi</h1>"
+
+
+def test_send_email_needs_sender_configured():
+    client = SendPulseClient("719648", api_key="k")  # no sender_email
+    with pytest.raises(SendPulseError):
+        client.send_email("x@y.z", "S", "<p>h</p>")
+
+
+@mock.patch("newsletter.sendpulse.requests.request")
+def test_send_email_result_false_raises(mock_request):
+    """SendPulse answers 200 with result:false on a rejected send — treat as error."""
+    resp = mock.Mock()
+    resp.status_code = 200
+    resp.text = '{"result":false}'
+    resp.json.return_value = {"result": False}
+    mock_request.return_value = resp
+    client = SendPulseClient("719648", api_key="k", sender_email="inquiry@jawafdehi.org")
+
+    with pytest.raises(SendPulseError):
+        client.send_email("x@y.z", "S", "<p>h</p>")
+
+
+def test_get_client_wires_sender_name(settings):
+    settings.SENDPULSE_API_KEY = "k"
+    settings.SENDPULSE_ADDRESSBOOK_ID = "719648"
+    settings.SENDPULSE_SENDER_NAME = "Jawafdehi"
+    assert get_client()._sender_name == "Jawafdehi"

@@ -852,8 +852,15 @@ SENDPULSE_TIMEOUT_SECONDS = float(os.getenv("SENDPULSE_TIMEOUT_SECONDS", "5"))
 # option, so the bilingual template covers Nepali readers.
 SENDPULSE_CONFIRMATION = env_flag("SENDPULSE_CONFIRMATION", False)
 SENDPULSE_SENDER_EMAIL = os.getenv("SENDPULSE_SENDER_EMAIL", "")
+SENDPULSE_SENDER_NAME = os.getenv("SENDPULSE_SENDER_NAME", "Jawafdehi")
 SENDPULSE_CONFIRMATION_TEMPLATE_ID = os.getenv("SENDPULSE_CONFIRMATION_TEMPLATE_ID", "")
 SENDPULSE_MESSAGE_LANG = os.getenv("SENDPULSE_MESSAGE_LANG", "en")
+# Welcome email: when on (and a verified SENDPULSE_SENDER_EMAIL is set), a
+# transactional welcome is sent to each new subscriber via SendPulse /smtp/emails.
+# This is the "email send" for single opt-in (double opt-in via API is unavailable
+# for this account). Best-effort — a send failure never fails the subscribe.
+SENDPULSE_WELCOME_EMAIL = env_flag("SENDPULSE_WELCOME_EMAIL", False)
+SENDPULSE_WELCOME_SUBJECT = os.getenv("SENDPULSE_WELCOME_SUBJECT", "Welcome to Jawafdehi")
 
 # ---------------------------------------------------------------------------
 # NES/NGM config. After the service consolidation NES and NGM run IN-PROCESS — the

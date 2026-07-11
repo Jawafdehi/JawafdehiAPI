@@ -138,3 +138,41 @@ def test_throttle_enforced_when_enabled(client, settings):
         ]
     assert codes.count(429) >= 1
     cache.clear()
+
+
+# -- welcome email -----------------------------------------------------------
+
+
+def test_subscribe_sends_welcome_when_enabled(client, settings):
+    settings.SENDPULSE_WELCOME_EMAIL = True
+    fake = _mock_client()
+    fake.can_send_email = True
+    with mock.patch("newsletter.views.get_client", return_value=fake):
+        resp = client.post(reverse("newsletter:subscribe"), VALID_PAYLOAD, format="json")
+    assert resp.status_code == 201
+    fake.send_email.assert_called_once()
+    # Sent to the (normalized) subscriber address, greeting them by first name.
+    args, kwargs = fake.send_email.call_args
+    assert args[0] == "reader@example.org"
+    assert kwargs["to_name"] == "राम"
+
+
+def test_subscribe_skips_welcome_when_disabled(client, settings):
+    settings.SENDPULSE_WELCOME_EMAIL = False
+    fake = _mock_client()
+    fake.can_send_email = True
+    with mock.patch("newsletter.views.get_client", return_value=fake):
+        resp = client.post(reverse("newsletter:subscribe"), VALID_PAYLOAD, format="json")
+    assert resp.status_code == 201
+    fake.send_email.assert_not_called()
+
+
+def test_welcome_failure_does_not_break_subscribe(client, settings):
+    """A welcome-send error is swallowed — the subscribe still returns 201."""
+    settings.SENDPULSE_WELCOME_EMAIL = True
+    fake = _mock_client()
+    fake.can_send_email = True
+    fake.send_email.side_effect = SendPulseError("smtp down")
+    with mock.patch("newsletter.views.get_client", return_value=fake):
+        resp = client.post(reverse("newsletter:subscribe"), VALID_PAYLOAD, format="json")
+    assert resp.status_code == 201
