@@ -275,6 +275,8 @@ INSTALLED_APPS = [
     # ── Jawafdehi apps (route to the `default` DB) ───────────────────────────
     "cases",
     "review",
+    # ── Newsletter (model-less proxy to the SendPulse ESP; no DB tables) ──────
+    "newsletter",
     # ── Central job queue (platform-wide; Postgres-backed, no broker) ─────────
     "jobs",
     # ── Generic LLM invocation (provider registry: bedrock/proxy/CLI harnesses) ─
@@ -825,6 +827,19 @@ if not DEBUG:
     SESSION_COOKIE_SECURE = True
     SESSION_COOKIE_HTTPONLY = True
     CSRF_COOKIE_HTTPONLY = True
+
+# ---------------------------------------------------------------------------
+# Newsletter / SendPulse ESP. The `newsletter` app is a model-less proxy: SendPulse
+# stores subscribers and runs its own double opt-in confirmation (and hosts the
+# unsubscribe link in every email, so the backend owns no unsubscribe route). When
+# these are unset (not yet provisioned, or under CI) the subscribe endpoint still
+# accepts requests (HTTP 202) and logs them — the flow degrades gracefully rather
+# than 500-ing.
+# ---------------------------------------------------------------------------
+SENDPULSE_CLIENT_ID = os.getenv("SENDPULSE_CLIENT_ID", "")
+SENDPULSE_CLIENT_SECRET = os.getenv("SENDPULSE_CLIENT_SECRET", "")
+SENDPULSE_ADDRESSBOOK_ID = os.getenv("SENDPULSE_ADDRESSBOOK_ID", "")
+SENDPULSE_TIMEOUT_SECONDS = float(os.getenv("SENDPULSE_TIMEOUT_SECONDS", "5"))
 
 # ---------------------------------------------------------------------------
 # NES/NGM config. After the service consolidation NES and NGM run IN-PROCESS — the

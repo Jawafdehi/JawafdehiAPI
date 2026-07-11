@@ -78,6 +78,7 @@ urlpatterns = [
     path("api/", include("entities.urls")),
     path("api/", include("courts.urls")),
     path("api/", include("materials.urls")),
+    path("api/", include("newsletter.urls")),
     path("api/", include("cases.urls")),
     path("oembed/", OEmbedView.as_view(), name="oembed"),
     path("api/caseworker/me", MeView.as_view(), name="cw-me"),
