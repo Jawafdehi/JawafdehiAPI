@@ -132,6 +132,8 @@ _TYPE_BY_SCHEMA: dict[str, str] = {
     "Manuscript": MaterialType.MANUSCRIPT,
     "DigitalDocument": MaterialType.DOCUMENT,
     "CreativeWork": MaterialType.DOCUMENT,
+    "NewsArticle": MaterialType.NEWS,
+    "SocialMediaPosting": MaterialType.SOCIAL_MEDIA,
 }
 
 #: jawafdehi ``additionalType`` -> material_type token. Several material types

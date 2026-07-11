@@ -96,16 +96,19 @@ class Checkpoint:
 
     def _load(self) -> None:
         if self.out_path.exists():
-            for line in self.out_path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                    if rec.get("detail_id"):
-                        self.done_ids.add(str(rec["detail_id"]))
-                except json.JSONDecodeError:
-                    continue
+            # Stream line-by-line — the full corpus cache is ~500 MB, so never
+            # read it whole into memory.
+            with self.out_path.open(encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                        if rec.get("detail_id"):
+                            self.done_ids.add(str(rec["detail_id"]))
+                    except json.JSONDecodeError:
+                        continue
         if self.state_path.exists():
             try:
                 s = json.loads(self.state_path.read_text(encoding="utf-8"))
@@ -158,6 +161,13 @@ class RequestsFetcher:
             r = self.s.get(url, timeout=45, allow_redirects=True)
             if _is_bounce(r.url):
                 return None, True
+            # A transient/error status (5xx, 404, …) returns an error page, not
+            # the decision. Treat it as a retryable failure — NOT content — so the
+            # id is left un-checkpointed rather than cached as an empty stub and
+            # skipped forever.
+            if not r.ok:
+                print(f"  ! http {r.status_code} for {url}", file=sys.stderr)
+                return None, False
             # The pages are UTF-8 Devanagari but the server omits/mis-declares
             # charset, so requests guesses Latin-1 → mojibake. Force UTF-8 (lxml
             # in the parser also re-decodes, but decode here so the text is right
@@ -191,9 +201,16 @@ class PlaywrightFetcher:
 
     def get(self, url: str) -> tuple[str | None, bool]:
         try:
-            self.page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            response = self.page.goto(url, wait_until="domcontentloaded", timeout=45000)
             bounced = _is_bounce(self.page.url)
-            return (None if bounced else self.page.content()), bounced
+            if bounced:
+                return None, True
+            # A transient/error status is an error page, not the decision — treat
+            # it as a retryable failure so the id isn't cached as an empty stub.
+            if response is not None and not response.ok:
+                print(f"  ! nav {response.status} for {url}", file=sys.stderr)
+                return None, False
+            return self.page.content(), False
         except Exception as e:  # noqa: BLE001
             msg = str(e)
             bounced = "ERR_TOO_MANY_REDIRECTS" in msg or "challenge" in msg.lower()
@@ -481,10 +498,10 @@ class NkpCrawler:
         """Fetch → cache → POST one decision. Returns True iff it was fully handled
         (so the caller can tell a complete month from one with dropped/failed rows).
 
-        Steps: fetch the page; append the parsed item to the JSONL cache; POST it
-        to the material API (unless ``--dry-run``); checkpoint the id only after a
-        successful post. A fetch failure/bounce or an API error returns False → the
-        id is NOT checkpointed and is retried on the next run (posting is
+        Steps: fetch the page; POST it to the material API (unless ``--dry-run``);
+        cache to the JSONL and checkpoint the id only after a successful post. A
+        fetch failure/bounce or an API error returns False → the id is neither
+        cached nor checkpointed and is retried on the next run (posting is
         idempotent). A page with no content column is a genuine empty decision (a
         handful exist site-side): it is cached as a metadata-only stub and counted
         done (not posted, nothing to ingest) rather than retried forever.
@@ -500,18 +517,29 @@ class NkpCrawler:
             print(f"  ! no content for full_detail/{detail_id} (cached as empty)", file=sys.stderr)
             item = {"detail_id": detail_id, "source_url": url, "empty": True}
         item["scraped_at"] = _now_iso()
-        # Cache first (so a later API failure doesn't force a re-fetch of the site).
+
+        # An empty decision has nothing to POST: cache the metadata-only stub and
+        # mark it done (a handful exist site-side; retrying forever is pointless).
+        if empty:
+            self._cache(item)
+            self.cp.done_ids.add(detail_id)
+            return True
+
+        # Cache only AFTER a successful POST. ``Checkpoint._load`` seeds
+        # ``done_ids`` from the cached JSONL, so a row written before a failed POST
+        # would be treated as done on the next run and its ingestion never retried.
+        # Posting is idempotent by ``@id``, so re-fetch-and-post on resume is safe.
+        if not self._post_decision(item):
+            return False  # API failure — retry the id (and the month) next run
+        self._cache(item)
+        self.cp.done_ids.add(detail_id)
+        return True
+
+    def _cache(self, item: dict[str, Any]) -> None:
+        """Append one scraped item to the JSONL cache (flushed for crash-safety)."""
         self.fh.write(json.dumps(item, ensure_ascii=False) + "\n")
         self.fh.flush()
         self.new_count += 1
-
-        if empty:
-            self.cp.done_ids.add(detail_id)  # nothing to ingest
-            return True
-        if not self._post_decision(item):
-            return False  # API failure — retry the id (and the month) next run
-        self.cp.done_ids.add(detail_id)
-        return True
 
     def _post_decision(self, decision: dict[str, Any]) -> bool:
         """Shape a cached decision and POST it to the material API.

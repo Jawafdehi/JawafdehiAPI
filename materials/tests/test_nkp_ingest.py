@@ -152,6 +152,13 @@ class InferMaterialTypeTests(_NgmTestCase):
     def test_plain_creativework_still_document(self):
         self.assertEqual(infer_material_type({"@type": "CreativeWork"}), MaterialType.DOCUMENT)
 
+    def test_news_and_social_inferred_from_bare_type(self):
+        # These have additionalType=None, so they can only be inferred from @type.
+        self.assertEqual(infer_material_type({"@type": "NewsArticle"}), MaterialType.NEWS)
+        self.assertEqual(
+            infer_material_type({"@type": "SocialMediaPosting"}), MaterialType.SOCIAL_MEDIA
+        )
+
 
 class NkpApiIngestTests(_NgmTestCase):
     """Precedents source through the material API plane (POST /api/materials/)."""
