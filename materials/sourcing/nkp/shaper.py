@@ -11,6 +11,7 @@ crawler under ``materials/sourcing/nkp/`` — the home for external-source shape
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from jawafdehi_shared.dates import bs_to_ad_iso
@@ -27,15 +28,38 @@ from materials.jsonld import (
 NKP_SOURCE = "nkp"
 
 
-def nkp_precedent_material_iri(decision_no: str) -> str:
-    """Canonical material ``@id`` IRI for an NKP law-journal precedent.
+def nkp_precedent_ident(decision: dict[str, Any]) -> str:
+    """Stable, unique ident for an NKP precedent's ``@id``.
 
-    ident is the citable decision number (निर्णय नं.) — unique across the journal
-    and stable across re-scrapes — so the IRI is reconstructable from the record
-    (``11376`` → ``https://<base>/material/nkp/11376``).
+    Keyed on the site's own ``detail_id`` (the ``/full_detail/{id}`` row id) — the
+    only per-decision stable primary key on nkp.gov.np. The citable decision
+    number (निर्णय नं.) is NOT unique: ~57 numbers are reused across the corpus
+    (a fresh sequence per volume/era), so keying the ``@id`` on it would upsert
+    genuinely-distinct precedents onto one row and silently lose them.
+
+    Fallback: if a record has no ``detail_id`` (none do in the current corpus —
+    purely defensive), mint an artificial ``jawa-<hash>`` ident deterministically
+    from the decision's identifying fields, so a re-scrape reproduces the same
+    ``@id`` (idempotent upsert) rather than duplicating the row.
     """
-    ident = str(decision_no).strip().lower()
-    return build_material_iri(NKP_SOURCE, ident)
+    detail_id = str(decision.get("detail_id") or "").strip().lower()
+    if detail_id:
+        return detail_id
+    basis = "|".join(
+        str(decision.get(k) or "")
+        for k in ("decision_no", "year_bs", "month", "case_name", "source_url")
+    )
+    digest = hashlib.sha1(basis.encode("utf-8")).hexdigest()[:12]
+    return f"jawa-{digest}"
+
+
+def nkp_precedent_material_iri(ident: str) -> str:
+    """Canonical material ``@id`` IRI for an NKP precedent from its stable ident.
+
+    ``ident`` is :func:`nkp_precedent_ident` (the site ``detail_id`` or a
+    ``jawa-<hash>`` fallback) — e.g. ``8880`` → ``https://<base>/material/nkp/8880``.
+    """
+    return build_material_iri(NKP_SOURCE, str(ident).strip().lower())
 
 
 def nkp_decision_to_jsonld(decision: dict[str, Any]) -> tuple[dict[str, Any], str]:
@@ -51,8 +75,10 @@ def nkp_decision_to_jsonld(decision: dict[str, Any]) -> tuple[dict[str, Any], st
     plus its ``material_type`` (the crawler is the API client).
     """
     material_type = MaterialType.PRECEDENT
+    # @id keys on the site's stable detail_id (see nkp_precedent_ident); the human
+    # decision number (निर्णय नं.) is carried as ``identifier`` but is NOT unique.
     decision_no = decision.get("decision_no") or decision.get("detail_id")
-    iri = nkp_precedent_material_iri(decision_no)
+    iri = nkp_precedent_material_iri(nkp_precedent_ident(decision))
     schema_type, additional_type = type_for(material_type)
 
     name = decision.get("title") or f"निर्णय नं. {decision_no}"

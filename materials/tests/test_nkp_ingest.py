@@ -26,6 +26,7 @@ from materials.jsonld import (
 from materials.models import Material
 from materials.sourcing.nkp.shaper import (
     nkp_decision_to_jsonld,
+    nkp_precedent_ident,
     nkp_precedent_material_iri,
 )
 
@@ -84,11 +85,37 @@ class NkpShapeTests(_NgmTestCase):
         self.assertEqual(material_type, MaterialType.PRECEDENT)
         self.assertIsInstance(doc, dict)
 
-    def test_iri_is_valid_and_keyed_on_decision_no(self):
+    def test_iri_is_valid_and_keyed_on_detail_id(self):
+        # @id keys on the site's stable detail_id (10471), NOT the decision number
+        # (निर्णय नं. 11376) — decision numbers are reused across the corpus.
         doc, _ = nkp_decision_to_jsonld(_DECISION)
-        self.assertEqual(doc["@id"], "https://jawafdehi.org/material/nkp/11376")
+        self.assertEqual(doc["@id"], "https://jawafdehi.org/material/nkp/10471")
         self.assertTrue(is_valid_material_iri(doc["@id"]))
-        self.assertEqual(doc["@id"], nkp_precedent_material_iri("11376"))
+        self.assertEqual(doc["@id"], nkp_precedent_material_iri("10471"))
+        # The human decision number is still carried as identifier.
+        self.assertEqual(doc["identifier"], "11376")
+
+    def test_reused_decision_no_yields_distinct_ids(self):
+        # Two genuinely-different decisions that share a decision number must NOT
+        # collapse onto one @id — the detail_id keeps them distinct.
+        a = dict(_DECISION, detail_id="4276", decision_no="5", case_name="A")
+        b = dict(_DECISION, detail_id="4277", decision_no="5", case_name="B")
+        doc_a, _ = nkp_decision_to_jsonld(a)
+        doc_b, _ = nkp_decision_to_jsonld(b)
+        self.assertNotEqual(doc_a["@id"], doc_b["@id"])
+        self.assertEqual(doc_a["@id"], "https://jawafdehi.org/material/nkp/4276")
+        self.assertEqual(doc_b["@id"], "https://jawafdehi.org/material/nkp/4277")
+
+    def test_missing_detail_id_falls_back_to_stable_jawa_ident(self):
+        # No detail_id (defensive — none in the current corpus): mint a
+        # deterministic jawa-<hash> so a re-scrape reproduces the same @id.
+        d = {k: v for k, v in _DECISION.items() if k != "detail_id"}
+        ident = nkp_precedent_ident(d)
+        self.assertTrue(ident.startswith("jawa-"))
+        self.assertEqual(ident, nkp_precedent_ident(dict(d)))  # deterministic
+        doc, _ = nkp_decision_to_jsonld(d)
+        self.assertTrue(is_valid_material_iri(doc["@id"]))
+        self.assertEqual(doc["@id"], nkp_precedent_material_iri(ident))
 
     def test_shaped_doc_validates(self):
         doc, _ = nkp_decision_to_jsonld(_DECISION)
@@ -163,7 +190,7 @@ class InferMaterialTypeTests(_NgmTestCase):
 class NkpApiIngestTests(_NgmTestCase):
     """Precedents source through the material API plane (POST /api/materials/)."""
 
-    _IRI = "https://jawafdehi.org/material/nkp/11376"
+    _IRI = "https://jawafdehi.org/material/nkp/10471"  # keyed on detail_id
 
     @classmethod
     def setUpTestData(cls):
@@ -264,7 +291,7 @@ class NkpCrawlerClientTests(_NgmTestCase):
         c.api = _FakeApi()
         self.assertTrue(c._post_decision(_DECISION))
         self.assertEqual(sent["material_type"], "precedent")
-        self.assertEqual(sent["doc"]["@id"], "https://jawafdehi.org/material/nkp/11376")
+        self.assertEqual(sent["doc"]["@id"], "https://jawafdehi.org/material/nkp/10471")
         self.assertEqual(c.posted_count, 1)
 
     def test_api_error_leaves_id_for_retry(self):

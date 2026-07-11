@@ -238,7 +238,11 @@ class MaterialApiClient:
 
         self.url = api_base.rstrip("/") + "/api/materials/"
         self.s = requests.Session()
-        self.s.headers.update({"Accept": "application/ld+json"})
+        # The material API serves JSON-LD-shaped bodies through DRF's JSONRenderer
+        # (media type application/json) — it does not register an
+        # application/ld+json renderer, so asking only for ld+json fails content
+        # negotiation with 406. Accept plain JSON (the wire shape is identical).
+        self.s.headers.update({"Accept": "application/json"})
         if token:
             self.s.headers["Authorization"] = f"Bearer {token}"
 
