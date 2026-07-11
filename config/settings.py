@@ -835,7 +835,12 @@ if not DEBUG:
 # these are unset (not yet provisioned, or under CI) the subscribe endpoint still
 # accepts requests (HTTP 202) and logs them — the flow degrades gracefully rather
 # than 500-ing.
+#
+# Auth is either a static SENDPULSE_API_KEY (preferred: one secret, used directly
+# as a Bearer token, no OAuth exchange) or the classic SENDPULSE_CLIENT_ID /
+# _CLIENT_SECRET pair. An address book id is required for both.
 # ---------------------------------------------------------------------------
+SENDPULSE_API_KEY = os.getenv("SENDPULSE_API_KEY", "")
 SENDPULSE_CLIENT_ID = os.getenv("SENDPULSE_CLIENT_ID", "")
 SENDPULSE_CLIENT_SECRET = os.getenv("SENDPULSE_CLIENT_SECRET", "")
 SENDPULSE_ADDRESSBOOK_ID = os.getenv("SENDPULSE_ADDRESSBOOK_ID", "")

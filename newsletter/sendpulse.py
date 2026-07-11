@@ -3,19 +3,26 @@
 SendPulse is the newsletter system of record: it stores subscribers, runs the
 double opt-in confirmation email, hosts the unsubscribe link in its emails, and
 owns list membership. This module wraps the address-book add call the subscribe
-endpoint needs, plus OAuth token caching.
+endpoint needs, plus SendPulse auth (a static API key used directly as a Bearer,
+or the OAuth client-credentials flow with token caching).
 
 Design notes
 ------------
-- **Config-gated.** When the ``SENDPULSE_*`` settings are unset (e.g. before the
-  ESP is provisioned, or in CI), :func:`get_client` returns ``None`` and the
-  views degrade gracefully rather than 500. This keeps the endpoints deployable
-  and fully testable before credentials land.
+- **Two auth modes.** SendPulse accepts either a static API key (newer scheme:
+  ``Authorization: Bearer <sp_apikey_...>``, no token exchange) or the classic
+  OAuth ``client_credentials`` pair. When ``SENDPULSE_API_KEY`` is set it is used
+  directly and the OAuth round-trip / token cache are skipped entirely; otherwise
+  the client falls back to ``SENDPULSE_CLIENT_ID`` / ``_CLIENT_SECRET``.
+- **Config-gated.** When neither auth mode is configured (e.g. before the ESP is
+  provisioned, or in CI), :func:`get_client` returns ``None`` and the views
+  degrade gracefully rather than 500. This keeps the endpoints deployable and
+  fully testable before credentials land.
 - **Short timeouts.** Every request uses a small timeout so a slow/500 SendPulse
   can't hang a user's subscribe. Callers translate failures into a graceful
   ``202`` (the record is accepted; SendPulse sync is retried out of band).
-- **Token cache.** The OAuth access token is cached in Django's cache under a
-  fixed key until shortly before it expires; a 401 forces a one-shot refresh.
+- **Token cache.** In OAuth mode the access token is cached in Django's cache
+  under a fixed key until shortly before it expires; a 401 forces a one-shot
+  refresh. A static API key is long-lived, so it is never cached or refreshed.
 - **No PII logged.** Errors log status codes and SendPulse error bodies, never the
   subscriber's email address.
 """
@@ -54,11 +61,13 @@ class SendPulseError(Exception):
 class SendPulseClient:
     """Minimal SendPulse Marketing API client (address-book membership only)."""
 
-    def __init__(self, client_id: str, client_secret: str, addressbook_id: str,
+    def __init__(self, addressbook_id: str, *, api_key: str = "",
+                 client_id: str = "", client_secret: str = "",
                  timeout: float = _DEFAULT_TIMEOUT_SECONDS):
+        self._addressbook_id = addressbook_id
+        self._api_key = api_key
         self._client_id = client_id
         self._client_secret = client_secret
-        self._addressbook_id = addressbook_id
         self._timeout = timeout
 
     # -- auth ---------------------------------------------------------------
@@ -89,6 +98,9 @@ class SendPulseClient:
         return token
 
     def _token(self, *, force_refresh: bool = False) -> str:
+        # Static API key: use it verbatim, no exchange/cache/refresh.
+        if self._api_key:
+            return self._api_key
         if not force_refresh:
             cached = cache.get(_TOKEN_CACHE_KEY)
             if cached:
@@ -96,7 +108,11 @@ class SendPulseClient:
         return self._fetch_token()
 
     def _request(self, method: str, path: str, *, json: Optional[dict] = None) -> requests.Response:
-        """Issue an authenticated request, refreshing the token once on 401."""
+        """Issue an authenticated request, refreshing the token once on 401.
+
+        A 401 refresh only helps in OAuth mode (an expired access token); a static
+        API key would just be re-sent unchanged, so the retry is skipped for it.
+        """
         token = self._token()
         resp = requests.request(
             method,
@@ -105,7 +121,7 @@ class SendPulseClient:
             headers={"Authorization": f"Bearer {token}"},
             timeout=self._timeout,
         )
-        if resp.status_code == 401:
+        if resp.status_code == 401 and not self._api_key:
             token = self._token(force_refresh=True)
             resp = requests.request(
                 method,
@@ -152,11 +168,23 @@ def get_client() -> Optional[SendPulseClient]:
 
     Views must treat ``None`` as "ESP not wired yet" and degrade gracefully — the
     subscription is still accepted so the flow works end-to-end before creds land.
+
+    Auth is configured by either a static ``SENDPULSE_API_KEY`` (preferred: one
+    secret, no token exchange) or the OAuth ``SENDPULSE_CLIENT_ID`` /
+    ``_CLIENT_SECRET`` pair. An address book id is required for both.
     """
+    api_key = getattr(settings, "SENDPULSE_API_KEY", "") or ""
     client_id = getattr(settings, "SENDPULSE_CLIENT_ID", "") or ""
     client_secret = getattr(settings, "SENDPULSE_CLIENT_SECRET", "") or ""
     addressbook_id = getattr(settings, "SENDPULSE_ADDRESSBOOK_ID", "") or ""
-    if not (client_id and client_secret and addressbook_id):
+    has_auth = bool(api_key) or bool(client_id and client_secret)
+    if not (addressbook_id and has_auth):
         return None
     timeout = float(getattr(settings, "SENDPULSE_TIMEOUT_SECONDS", _DEFAULT_TIMEOUT_SECONDS))
-    return SendPulseClient(client_id, client_secret, addressbook_id, timeout=timeout)
+    return SendPulseClient(
+        addressbook_id,
+        api_key=api_key,
+        client_id=client_id,
+        client_secret=client_secret,
+        timeout=timeout,
+    )
