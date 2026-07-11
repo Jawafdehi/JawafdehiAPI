@@ -285,8 +285,11 @@ def material_file_upload(request, source: str, ident: str):
     ``material_type``); an existing material is UPDATED in place.
 
     Multipart fields: ``file`` (required binary), ``role`` (RAW|ALTERNATE|PERMALINK,
-    default RAW), ``material_type`` (required only when creating a fresh material).
-    NGM-role gated. Returns the material JSON-LD (201 created / 200 updated).
+    default RAW), ``material_type`` (required only when creating a fresh material),
+    ``skip_convert`` (optional; when truthy, suppress the automatic server-side
+    ``material_convert`` re-OCR for a convertible role — for clients that supply
+    their own extracted ``text``). NGM-role gated. Returns the material JSON-LD
+    (201 created / 200 updated).
     """
     denied = _require_ngm_role(request)
     if denied is not None:
@@ -378,7 +381,16 @@ def material_file_upload(request, source: str, ident: str):
     # OCR-able source roles — never for our own MARKDOWN output or SOURCE_PAGE
     # HTML. Idempotent (dedup on the IRI); best-effort so a queue hiccup never
     # fails the upload.
-    if role in _CONVERTIBLE_ROLES:
+    #
+    # ``skip_convert`` lets a client that ALREADY holds authoritative extracted
+    # text (e.g. a sourcing pipeline that ran its own OCR/normalization and will
+    # PUT ``text`` itself) suppress the server-side re-OCR that would otherwise
+    # overwrite ``data["text"]`` — and re-incur the OCR cost. Truthy values:
+    # "1"/"true"/"yes"/"on" (case-insensitive). Default off (unchanged behavior).
+    skip_convert = str(request.data.get("skip_convert") or "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    if role in _CONVERTIBLE_ROLES and not skip_convert:
         try:
             from .conversion import enqueue_material_convert
 
