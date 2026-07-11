@@ -69,6 +69,9 @@ dependencies = [
     # --- unified search substrate (OpenSearch + Devanagari<->Latin transliteration) ---
     "opensearch-py>=2.4",
     "indic-transliteration>=2.3.82",
+    # --- sourcing (materials.sourcing.nkp): HTML parsing for the NKP precedent
+    # crawler. requests (HTTP transport) is already pulled in transitively. ---
+    "lxml>=5.0",
     # --- headless CMS (Wagtail "Jawafdehi Newsroom" — public /updates section) ---
     # 7.4 is the current LTS; supports Django 5.2 + Python 3.12. Pulls in its own
     # deps (taggit, modelcluster, willow, etc.). wagtail-headless-preview 0.9

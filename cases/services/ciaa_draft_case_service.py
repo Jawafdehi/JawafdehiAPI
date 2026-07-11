@@ -9,8 +9,8 @@ from typing import Optional
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from nepali.datetime import nepalidate
 
+from jawafdehi_shared.dates import bs_to_ad
 from jawafdehi_shared.entities.ids import is_valid_entity_iri
 
 from cases.models import (
@@ -260,19 +260,13 @@ class CIAADraftCaseService:
         return case_data
 
     def convert_bs_to_ad(self, bs_date_str: str) -> Optional[datetime]:
-        """Convert Bikram Sambat date string to AD date. Returns date or None."""
-        if not bs_date_str:
-            return None
-        try:
-            devanagari_to_ascii = str.maketrans("०१२३४५६७८९", "0123456789")
-            normalized = bs_date_str.translate(devanagari_to_ascii).replace("/", "-")
-            parts = normalized.split("-")
-            if len(parts) != 3:
-                return None
-            year, month, day = int(parts[0]), int(parts[1]), int(parts[2])
-            return nepalidate(year, month, day).to_datetime().date()
-        except Exception:
-            return None
+        """Convert Bikram Sambat date string to AD date. Returns date or None.
+
+        Delegates to the shared :func:`jawafdehi_shared.dates.bs_to_ad` contract
+        (which folds in this method's Devanagari-digit/``/``-separator tolerance);
+        retained as a thin instance method so existing callers are unchanged.
+        """
+        return bs_to_ad(bs_date_str)
 
     def create_defendants(self, defendants: list[dict], case: Case) -> list[str]:
         """Bind defendants that carry a valid NES id to the case as ACCUSED.

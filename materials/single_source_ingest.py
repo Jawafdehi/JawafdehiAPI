@@ -1,23 +1,32 @@
-"""Single-source ``Material`` upsert — the ≥2-publisher gate BYPASSED.
+"""The single ``Material`` upsert primitive — validate + upsert one doc by ``@id``.
 
-The bulk path (:class:`materials.bulk_ingest.MaterialBulkIngestService`)
-HOLDs any material with fewer than two distinct-publisher sources. That is the
-right default for general public documents, but it is WRONG for inherently
-single-source documents:
+Every write to a ``Material`` funnels through :func:`upsert_single_source_material`:
+the API plane (``POST``/``PUT``/``/file`` — see :func:`materials.views._upsert_material`),
+the court-case importer, and the Jawafdehi case-source ingest. Keeping one
+primitive means one answer to how an upsert behaves — the DB alias, validation,
+``created_at`` preservation, indexing, and the soft-delete policy are decided
+here, once, rather than re-implemented (and drifting) per call site.
 
-  * a **court order / verdict** — published by exactly one authority (the court);
-  * a **court-case record** Material — derived from one court's relational row;
-  * (spec 06) a **Jawafdehi case source** — one cited document.
+Behavior:
+- ``from_jsonld`` derives ``source``/``ident`` from the ``@id`` and validates the
+  doc; ``full_clean`` checks iri/source/ident/data agreement.
+- Upsert-by-``@id`` via ``update_or_create`` (NOT a fresh-instance ``save()``,
+  which would write ``created_at=NULL`` over an existing row on UPDATE, since
+  ``auto_now_add`` fires only on INSERT). Only the mutable columns are written,
+  so ``created_at`` is preserved and ``updated_at`` bumped.
+- **Soft-delete policy — REVIVE.** A re-upsert of a soft-deleted ``@id`` clears
+  ``is_deleted`` (it is in ``defaults``): the incoming write is the source of
+  truth. This is the platform-wide rule (overwrites are permitted; re-sourcing a
+  previously-taken-down document republishes it). Reviving via ``defaults`` is
+  also what keeps the ``post_save`` indexer correct — a row left
+  ``is_deleted=True`` would be silently evicted from the search index on save.
+- Routed to the ``ngm`` DB (where ``Material`` lives) under one transaction; the
+  ``post_save`` ``ngm-materials`` indexer fires. Idempotent by ``@id``.
 
-For those, the ≥2-source gate would HOLD every record. Rather than weaken the
-gate on the bulk service (which would let genuinely multi-source materials slip
-through under-vetted), this helper writes ONE material directly:
-``from_jsonld`` → ``full_clean`` → ``update_or_create`` by ``@id``. It does NOT
-``save()`` a fresh instance the way ``bulk_ingest._persist`` does — that would
-write ``created_at=NULL`` over an existing row on UPDATE (``auto_now_add`` fires
-only on INSERT). Model validation (iri/source/ident/data) still runs via
-``full_clean``, the ``post_save`` ``ngm-materials`` indexer still fires, and the
-upsert is idempotent by ``@id``.
+There is no ≥2-publisher HOLD gate on this path: gating is a sourcing-policy
+decision made before the write (an inherently single-source document — a court
+order, a charge sheet, a law-journal precedent — has exactly one authority), not
+a property of the upsert.
 """
 
 from __future__ import annotations
@@ -32,23 +41,16 @@ from .models import Material
 def upsert_single_source_material(
     jsonld: dict[str, Any], *, material_type: str
 ) -> Material:
-    """Validate + upsert ONE ``Material`` from a JSON-LD doc, with NO source gate.
+    """Validate + upsert ONE ``Material`` from a JSON-LD doc by ``@id``.
 
-    Reuses ``Material.from_jsonld`` (derives ``source``/``ident`` from the ``@id``
-    and validates the doc) + ``full_clean`` (iri/source/ident/data agreement) +
-    ``save`` (post_save → ``ngm-materials`` index). Upsert-by-``@id``: a second
-    call with the same ``@id`` updates the row in place. Routed to the ``ngm`` DB.
+    The single upsert primitive (see the module docstring): idempotent by ``@id``,
+    preserves ``created_at``, fires the ngm-materials indexer, and REVIVES a
+    soft-deleted row (``is_deleted=False`` in ``defaults`` — the write wins).
     """
     # Validate the doc + the promoted-column agreement on a transient instance
     # (validate_unique=False — an existing ``@id`` is an UPDATE, not a duplicate).
     candidate = Material.from_jsonld(jsonld, material_type=material_type)
     candidate.full_clean(validate_unique=False)
-    # Upsert by ``@id`` via update_or_create rather than a fresh-instance
-    # ``save()``: a fresh instance has ``created_at=None``, and ``save()`` on a set
-    # PK issues an UPDATE that would write that NULL over the existing row's
-    # ``created_at`` (auto_now_add only fires on INSERT). update_or_create writes
-    # only the mutable columns (so ``created_at`` is preserved, ``updated_at``
-    # bumped) and still fires the ``post_save`` ngm-materials indexer.
     with transaction.atomic(using="ngm"):
         material, _ = Material.objects.using("ngm").update_or_create(
             iri=candidate.iri,
@@ -57,6 +59,10 @@ def upsert_single_source_material(
                 "source": candidate.source,
                 "ident": candidate.ident,
                 "data": candidate.data,
+                # Revive on re-upsert: an incoming write to a soft-deleted @id
+                # republishes it. Omitting this would overwrite the row's data
+                # while leaving it hidden AND trigger an index eviction on save.
+                "is_deleted": False,
             },
         )
     return material

@@ -128,6 +128,35 @@ class MaterialFileUploadTests(_DbAPITestCase):
         self.assertIn("material_type", resp.data["detail"])
         self.assertFalse(Material.objects.filter(pk=self.IRI).exists())
 
+    def test_raw_upload_enqueues_convert_by_default(self):
+        # A convertible RAW upload triggers server-side OCR unless suppressed.
+        from unittest.mock import patch
+
+        self.client.force_authenticate(user=self.user)
+        with patch("materials.conversion.enqueue_material_convert") as enq:
+            resp = self.client.post(
+                self.URL,
+                {"file": self._pdf(), "material_type": "court_order"},
+                format="multipart",
+            )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        enq.assert_called_once_with(self.IRI)
+
+    def test_skip_convert_suppresses_reocr(self):
+        # A client with its own authoritative text passes skip_convert=1 so the
+        # RAW upload does NOT enqueue material_convert (which would overwrite text).
+        from unittest.mock import patch
+
+        self.client.force_authenticate(user=self.user)
+        with patch("materials.conversion.enqueue_material_convert") as enq:
+            resp = self.client.post(
+                self.URL,
+                {"file": self._pdf(), "material_type": "court_order", "skip_convert": "1"},
+                format="multipart",
+            )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        enq.assert_not_called()
+
     def test_upload_missing_file_is_400(self):
         self.client.force_authenticate(user=self.user)
         resp = self.client.post(
