@@ -29,6 +29,7 @@ Design notes
 
 from __future__ import annotations
 
+import base64
 import logging
 from typing import Optional
 
@@ -71,7 +72,7 @@ class SendPulseClient:
     def __init__(self, addressbook_id: str, *, api_key: str = "",
                  client_id: str = "", client_secret: str = "",
                  confirmation: bool = False, sender_email: str = "",
-                 confirmation_template_id: str = "",
+                 sender_name: str = "", confirmation_template_id: str = "",
                  message_lang: str = _DEFAULT_MESSAGE_LANG,
                  timeout: float = _DEFAULT_TIMEOUT_SECONDS):
         self._addressbook_id = addressbook_id
@@ -83,11 +84,17 @@ class SendPulseClient:
         # (verified) sender address, so DOI is only active when both are set.
         self._doi = bool(confirmation and sender_email)
         self._sender_email = sender_email
+        self._sender_name = sender_name
         self._confirmation_template_id = confirmation_template_id
         self._message_lang = (
             message_lang if message_lang in _SUPPORTED_MESSAGE_LANGS else _DEFAULT_MESSAGE_LANG
         )
         self._timeout = timeout
+
+    @property
+    def can_send_email(self) -> bool:
+        """True when a verified sender is configured for transactional sends."""
+        return bool(self._sender_email)
 
     # -- auth ---------------------------------------------------------------
 
@@ -193,6 +200,43 @@ class SendPulseClient:
                 status=resp.status_code,
             )
 
+    def send_email(self, to_email: str, subject: str, html: str, *, to_name: str = "") -> None:
+        """Send a one-off transactional email via SendPulse's ``/smtp/emails``.
+
+        Used for the welcome email on subscribe (double opt-in isn't available via
+        the API for this account, so single opt-in + a transactional welcome is
+        the "email send" path). ``html`` is sent base64-encoded, as the endpoint
+        requires. Raises :class:`SendPulseError` on failure (callers treat the
+        welcome as best-effort and never fail the subscribe on it).
+        """
+        if not self._sender_email:
+            raise SendPulseError("SendPulse send_email needs a configured sender_email")
+        payload = {
+            "email": {
+                "subject": subject,
+                "from": {"name": self._sender_name or "Jawafdehi", "email": self._sender_email},
+                "to": [{"email": to_email, **({"name": to_name} if to_name else {})}],
+                "html": base64.b64encode(html.encode("utf-8")).decode("ascii"),
+            }
+        }
+        try:
+            resp = self._request("POST", "/smtp/emails", json=payload)
+        except requests.RequestException as exc:  # timeout / connection error
+            raise SendPulseError(f"SendPulse request error: {exc}") from exc
+
+        if resp.status_code >= 400:
+            raise SendPulseError(
+                f"SendPulse send_email failed ({resp.status_code}): {resp.text[:200]}",
+                status=resp.status_code,
+            )
+        # SendPulse answers 200 with {"result": true|false}; treat false as failure.
+        try:
+            body = resp.json()
+        except ValueError:
+            body = {}
+        if body.get("result") is False:
+            raise SendPulseError(f"SendPulse send_email rejected: {resp.text[:200]}")
+
 
 def get_client() -> Optional[SendPulseClient]:
     """Return a configured client, or ``None`` when SendPulse isn't provisioned.
@@ -218,6 +262,7 @@ def get_client() -> Optional[SendPulseClient]:
     sender_email = str(getattr(settings, "SENDPULSE_SENDER_EMAIL", "") or "").strip()
     template_id = str(getattr(settings, "SENDPULSE_CONFIRMATION_TEMPLATE_ID", "") or "").strip()
     message_lang = str(getattr(settings, "SENDPULSE_MESSAGE_LANG", _DEFAULT_MESSAGE_LANG) or "").strip()
+    sender_name = str(getattr(settings, "SENDPULSE_SENDER_NAME", "Jawafdehi") or "").strip()
     if confirmation and not sender_email:
         # DOI needs a verified sender; misconfig would 400 every subscribe, so
         # fall back to single opt-in and make the reason visible.
@@ -232,6 +277,7 @@ def get_client() -> Optional[SendPulseClient]:
         client_secret=client_secret,
         confirmation=confirmation,
         sender_email=sender_email,
+        sender_name=sender_name,
         confirmation_template_id=template_id,
         message_lang=message_lang or _DEFAULT_MESSAGE_LANG,
         timeout=timeout,

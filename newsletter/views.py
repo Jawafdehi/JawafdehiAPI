@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 
 from django.conf import settings
+from django.template.loader import render_to_string
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
@@ -33,7 +34,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
 
-from .sendpulse import SendPulseError, get_client
+from .sendpulse import SendPulseClient, SendPulseError, get_client
 from .serializers import NewsletterSubscriptionSerializer
 
 logger = logging.getLogger("newsletter.views")
@@ -41,6 +42,23 @@ logger = logging.getLogger("newsletter.views")
 # SendPulse returns 409 when the email already exists in the address book. We map
 # that to a local 409 so the SPA can show its "previously unsubscribed" copy.
 _SENDPULSE_CONFLICT_STATUS = 409
+
+
+def _send_welcome_email(client: SendPulseClient, email: str, first_name: str) -> None:
+    """Best-effort welcome email on subscribe.
+
+    Double opt-in isn't available via SendPulse's API for this account, so the
+    subscribe is single opt-in and this transactional welcome is the "email send"
+    step. It never fails the subscribe: any error is logged and swallowed.
+    """
+    if not getattr(settings, "SENDPULSE_WELCOME_EMAIL", False) or not client.can_send_email:
+        return
+    try:
+        html = render_to_string("newsletter/welcome_email.html", {"first_name": first_name})
+        subject = getattr(settings, "SENDPULSE_WELCOME_SUBJECT", "Welcome to Jawafdehi")
+        client.send_email(email, subject, html, to_name=first_name)
+    except Exception as exc:  # noqa: BLE001 — welcome is best-effort, never block subscribe
+        logger.warning("Newsletter welcome email failed (subscribe still succeeded): %s", exc)
 
 
 class NewsletterRateThrottle(AnonRateThrottle):
@@ -160,11 +178,13 @@ class NewsletterSubscriptionView(_ThrottledPublicView):
                 status=status.HTTP_202_ACCEPTED,
             )
 
+        _send_welcome_email(client, email, data["firstName"])
+
         return Response(
             {
                 "email": email,
                 "status": "subscribed",
-                "message": "Please check your inbox to confirm your subscription.",
+                "message": "You're subscribed. Check your inbox for a welcome email.",
             },
             status=status.HTTP_201_CREATED,
         )
