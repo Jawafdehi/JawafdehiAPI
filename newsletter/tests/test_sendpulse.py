@@ -126,3 +126,43 @@ def test_oauth_mode_fetches_and_uses_token(mock_request, mock_post, settings):
     _, kwargs = mock_request.call_args
     assert kwargs["headers"]["Authorization"] == "Bearer tok_abc"
     cache.clear()
+
+
+@mock.patch("newsletter.sendpulse.requests.post")
+@mock.patch("newsletter.sendpulse.requests.request")
+def test_oauth_mode_retries_once_on_401(mock_request, mock_post):
+    """A cached-but-rejected token: the 401 forces one refresh and one retry."""
+    from django.core.cache import cache
+
+    from newsletter.sendpulse import _TOKEN_CACHE_KEY
+
+    # Seed a stale token so the first request uses it (no fetch); the 401 is what
+    # drives the single refresh — the branch this test guards.
+    cache.set(_TOKEN_CACHE_KEY, "tok_stale", 3600)
+    token_resp = mock.Mock()
+    token_resp.status_code = 200
+    token_resp.json.return_value = {"access_token": "tok_fresh", "expires_in": 3600}
+    mock_post.return_value = token_resp
+    mock_request.side_effect = [_ok(401), _ok(201)]
+
+    client = SendPulseClient("719648", client_id="id", client_secret="secret")
+    client.add_subscriber("reader@example.org")
+
+    assert mock_request.call_count == 2  # initial 401 + retry
+    mock_post.assert_called_once()  # exactly one token refresh (no initial fetch)
+    first_headers = mock_request.call_args_list[0].kwargs["headers"]
+    retry_headers = mock_request.call_args_list[1].kwargs["headers"]
+    assert first_headers["Authorization"] == "Bearer tok_stale"
+    assert retry_headers["Authorization"] == "Bearer tok_fresh"
+    cache.clear()
+
+
+def test_get_client_strips_whitespace(settings):
+    """A key with stray whitespace (copy-paste / env round-trip) is trimmed."""
+    settings.SENDPULSE_API_KEY = "  sp_apikey_test\n"
+    settings.SENDPULSE_CLIENT_ID = ""
+    settings.SENDPULSE_CLIENT_SECRET = ""
+    settings.SENDPULSE_ADDRESSBOOK_ID = " 719648 "
+    c = get_client()
+    assert c._api_key == "sp_apikey_test"
+    assert c._addressbook_id == "719648"

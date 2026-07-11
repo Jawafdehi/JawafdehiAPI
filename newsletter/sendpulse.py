@@ -173,10 +173,12 @@ def get_client() -> Optional[SendPulseClient]:
     secret, no token exchange) or the OAuth ``SENDPULSE_CLIENT_ID`` /
     ``_CLIENT_SECRET`` pair. An address book id is required for both.
     """
-    api_key = getattr(settings, "SENDPULSE_API_KEY", "") or ""
-    client_id = getattr(settings, "SENDPULSE_CLIENT_ID", "") or ""
-    client_secret = getattr(settings, "SENDPULSE_CLIENT_SECRET", "") or ""
-    addressbook_id = getattr(settings, "SENDPULSE_ADDRESSBOOK_ID", "") or ""
+    # str()+strip(): tolerate an int address book id and drop stray whitespace/
+    # newlines a copy-pasted key or a Bao→env round-trip can leave on the value.
+    api_key = str(getattr(settings, "SENDPULSE_API_KEY", "") or "").strip()
+    client_id = str(getattr(settings, "SENDPULSE_CLIENT_ID", "") or "").strip()
+    client_secret = str(getattr(settings, "SENDPULSE_CLIENT_SECRET", "") or "").strip()
+    addressbook_id = str(getattr(settings, "SENDPULSE_ADDRESSBOOK_ID", "") or "").strip()
     has_auth = bool(api_key) or bool(client_id and client_secret)
     if not (addressbook_id and has_auth):
         return None
