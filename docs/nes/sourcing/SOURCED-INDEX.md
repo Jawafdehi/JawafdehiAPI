@@ -204,5 +204,7 @@ then these stay sampled-or-HELD. Engineering is done; access is the constraint.
 Per-wave RESULTS.md run records live under `nes/sourcing/<bucket>/` in this docs tree.
 The sourcing scripts, captured snapshots, and record JSON (the `normalize_*.py` /
 `fetch_*.sh` / `*_records.json` siblings) are kept with the sourcing working set outside
-this repo. Ingest is via `manage.py bulk_ingest` (entities) / `bulk_ingest_materials`
-(NGM). Role consolidation via `manage.py consolidate_roles`.
+this repo. Entity ingest is via `manage.py bulk_ingest` (entities); materials are
+ingested through the material API plane (`POST /api/materials/`, or the
+`/file` upload endpoint) — see `materials/sourcing/README.md`. Role consolidation
+via `manage.py consolidate_roles`.

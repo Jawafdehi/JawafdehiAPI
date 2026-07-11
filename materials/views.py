@@ -39,8 +39,8 @@ from courts.permissions import HasNgmRole
 
 from . import jsonld
 from . import provenance
-from .bulk_ingest import _infer_material_type
 from .models import Material
+from .single_source_ingest import upsert_single_source_material
 
 LD_JSON = "application/ld+json"
 
@@ -110,8 +110,9 @@ def _upsert_material(data, *, material_type: str | None, expected_iri: str | Non
 
     On success: ``(doc, 200_or_201, None)``. On validation failure:
     ``(None, 400, {"detail": ...})``. ``material_type`` is inferred from the doc's
-    @type when not supplied (mirroring bulk_ingest). When ``expected_iri`` is set
-    (the PUT path) the body's @id must match the URL's IRI.
+    ``additionalType``/``@type`` (via :func:`jsonld.infer_material_type`) when not
+    supplied. When ``expected_iri`` is set (the PUT path) the body's @id must match
+    the URL's IRI.
     """
     if not isinstance(data, dict) or "@id" not in data:
         return None, status.HTTP_400_BAD_REQUEST, {
@@ -121,32 +122,21 @@ def _upsert_material(data, *, material_type: str | None, expected_iri: str | Non
         return None, status.HTTP_400_BAD_REQUEST, {
             "detail": f"Body @id {data.get('@id')!r} must match the URL IRI {expected_iri!r}."
         }
-    mtype = material_type or _infer_material_type(data)
+    mtype = material_type or jsonld.infer_material_type(data)
+    # 200-vs-201 is a report of whether a row already existed. Read it before the
+    # write; the upsert itself is idempotent so a lost race only mislabels the
+    # status, never the data. Pinned to ngm (where Material lives) to match the
+    # write alias and avoid a replica read racing the primary.
+    existed = Material.objects.using("ngm").filter(pk=data["@id"]).exists()
     try:
-        # from_jsonld validates the doc + derives the promoted columns from @id.
-        built = Material.from_jsonld(data, material_type=mtype)
-        existing = Material.objects.filter(pk=built.iri).first()
-        if existing is not None:
-            # Replace the existing row in place so auto-managed columns
-            # (created_at) are preserved and Django issues an UPDATE.
-            existing.material_type = built.material_type
-            existing.source = built.source
-            existing.ident = built.ident
-            existing.data = built.data
-            # A (re-)upsert revives a soft-deleted row: the write is the source
-            # of truth, so clear the soft-delete flag.
-            existing.is_deleted = False
-            material = existing
-        else:
-            material = built
-        # validate_unique=False: an upsert intentionally targets an existing @id
-        # (the PK); the iri/source/ident/data checks in clean() still run.
-        material.full_clean(validate_unique=False)
-        material.save()
+        # Delegate the write to the one upsert primitive (validation +
+        # update_or_create by @id + created_at preservation + soft-delete revive
+        # + post_save indexing all live there).
+        material = upsert_single_source_material(data, material_type=mtype)
     except (ValueError, DjangoValidationError) as exc:
         detail = exc.message_dict if isinstance(exc, DjangoValidationError) else str(exc)
         return None, status.HTTP_400_BAD_REQUEST, {"detail": detail}
-    code = status.HTTP_200_OK if existing is not None else status.HTTP_201_CREATED
+    code = status.HTTP_200_OK if existed else status.HTTP_201_CREATED
     return material.data, code, None
 
 
@@ -285,8 +275,11 @@ def material_file_upload(request, source: str, ident: str):
     ``material_type``); an existing material is UPDATED in place.
 
     Multipart fields: ``file`` (required binary), ``role`` (RAW|ALTERNATE|PERMALINK,
-    default RAW), ``material_type`` (required only when creating a fresh material).
-    NGM-role gated. Returns the material JSON-LD (201 created / 200 updated).
+    default RAW), ``material_type`` (required only when creating a fresh material),
+    ``skip_convert`` (optional; when truthy, suppress the automatic server-side
+    ``material_convert`` re-OCR for a convertible role — for clients that supply
+    their own extracted ``text``). NGM-role gated. Returns the material JSON-LD
+    (201 created / 200 updated).
     """
     denied = _require_ngm_role(request)
     if denied is not None:
@@ -378,7 +371,16 @@ def material_file_upload(request, source: str, ident: str):
     # OCR-able source roles — never for our own MARKDOWN output or SOURCE_PAGE
     # HTML. Idempotent (dedup on the IRI); best-effort so a queue hiccup never
     # fails the upload.
-    if role in _CONVERTIBLE_ROLES:
+    #
+    # ``skip_convert`` lets a client that ALREADY holds authoritative extracted
+    # text (e.g. a sourcing pipeline that ran its own OCR/normalization and will
+    # PUT ``text`` itself) suppress the server-side re-OCR that would otherwise
+    # overwrite ``data["text"]`` — and re-incur the OCR cost. Truthy values:
+    # "1"/"true"/"yes"/"on" (case-insensitive). Default off (unchanged behavior).
+    skip_convert = str(request.data.get("skip_convert") or "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    if role in _CONVERTIBLE_ROLES and not skip_convert:
         try:
             from .conversion import enqueue_material_convert
 
@@ -437,7 +439,7 @@ def material_by_iri(request):
     ``POST`` creates/upserts a material from a JSON-LD body (NGM-role gated); the
     body is either a bare JSON-LD doc (``@id`` present) or the
     ``{"material": {...}, "material_type": "..."}`` envelope (``material_type`` is
-    inferred from the doc's ``@type`` when absent, mirroring bulk_ingest).
+    inferred from the doc's ``additionalType``/``@type`` when absent).
     ``DELETE /api/materials/?iri=<full-iri>`` soft-deletes the material (NGM-role
     gated, 204).
     """

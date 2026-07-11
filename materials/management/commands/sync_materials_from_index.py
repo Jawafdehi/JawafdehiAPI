@@ -23,6 +23,7 @@ from django.core.management.base import BaseCommand
 from django.db import connections
 from django.utils import timezone
 
+from jawafdehi_shared.dates import bs_to_ad_iso
 from jawafdehi_shared.entities.ids import build_material_iri
 
 from ...jsonld import (
@@ -33,24 +34,8 @@ from ...jsonld import (
 )
 from ...models import Material
 
-try:  # the `nepali` package provides the BS calendar tables
-    from nepali.datetime import nepalidate
-except ImportError:  # pragma: no cover
-    nepalidate = None
-
 SOURCE_DB_NAME = "ngm_v1"
 SOURCE_ALIAS = "index_src"
-
-
-def bs_to_ad_iso(date_bs) -> str | None:
-    """``YYYY-MM-DD`` Bikram Sambat → AD ISO date string, or None if unconvertible."""
-    if not date_bs or nepalidate is None:
-        return None
-    try:
-        y, m, d = (int(p) for p in str(date_bs).split("-"))
-        return nepalidate(y, m, d).to_datetime().date().isoformat()
-    except Exception:
-        return None
 
 
 def parse_court_order_id(document_id) -> tuple[str, str] | None:

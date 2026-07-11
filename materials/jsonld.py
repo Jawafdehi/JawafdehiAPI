@@ -62,6 +62,7 @@ class MaterialType:
 
     COURT_CASE = "court_case"          # the case RECORD itself
     COURT_ORDER = "court_order"        # order / verdict / manuscript scan
+    PRECEDENT = "precedent"            # published law-journal precedent (नजिर) — NKP
     MANUSCRIPT = "manuscript"          # a scanned manuscript document
     CHARGE_SHEET = "charge_sheet"      # CIAA/AG अभियोगपत्र
     LEGAL_CORPUS = "legal_corpus"      # acts / laws / ordinances / constitution
@@ -80,6 +81,11 @@ MATERIAL_TYPES: dict[str, tuple[Any, str | None]] = {
     # Court order / verdict / manuscript scan → Manuscript (a digital scan of a
     # written legal document) + DigitalDocument multi-type.
     MaterialType.COURT_ORDER: (["Manuscript", "DigitalDocument"], None),
+    # Published law-journal precedent (नेपाल कानून पत्रिका नजिर): the citable,
+    # edited ruling that establishes binding precedent — neither a raw docket
+    # record (court_case) nor enacted legislation (legal_corpus). schema.org has
+    # no term, so CreativeWork + jawafdehi:Precedent.
+    MaterialType.PRECEDENT: ("CreativeWork", "jawafdehi:Precedent"),
     MaterialType.MANUSCRIPT: (["Manuscript", "DigitalDocument"], None),
     # Charge sheet → DigitalDocument + jawafdehi:ChargeSheet.
     MaterialType.CHARGE_SHEET: ("DigitalDocument", "jawafdehi:ChargeSheet"),
@@ -115,6 +121,50 @@ KNOWN_MATERIAL_SCHEMA_TYPES: frozenset[str] = frozenset(
 def type_for(material_type: str) -> tuple[Any, str | None]:
     """(@type, additionalType) for a material_type token. Defaults to DigitalDocument."""
     return MATERIAL_TYPES.get(material_type, ("DigitalDocument", None))
+
+
+#: schema.org @type -> material_type token, for deriving the promoted column when
+#: a doc doesn't state material_type explicitly. Falls back to DOCUMENT.
+_TYPE_BY_SCHEMA: dict[str, str] = {
+    "Legislation": MaterialType.LEGAL_CORPUS,
+    "LegislationObject": MaterialType.LEGAL_CORPUS,
+    "Report": MaterialType.OFFICIAL_REPORT,
+    "Manuscript": MaterialType.MANUSCRIPT,
+    "DigitalDocument": MaterialType.DOCUMENT,
+    "CreativeWork": MaterialType.DOCUMENT,
+}
+
+#: jawafdehi ``additionalType`` -> material_type token. Several material types
+#: share one schema.org ``@type`` (court_case, precedent and generic docs are all
+#: ``CreativeWork``); their discriminator is the ``additionalType``. Derived from
+#: MATERIAL_TYPES so it can't drift from the shaping table. Consulted BEFORE the
+#: bare-@type fallback, so a bare precedent/court-case doc isn't flattened to
+#: ``document``.
+_TYPE_BY_ADDITIONAL: dict[str, str] = {
+    additional: token
+    for token, (_schema, additional) in MATERIAL_TYPES.items()
+    if additional
+}
+
+
+def infer_material_type(doc: dict[str, Any]) -> str:
+    """Derive a material_type token from a doc that omits an explicit one.
+
+    Prefers the jawafdehi ``additionalType`` discriminator (which distinguishes
+    the several material types sharing one schema.org ``@type`` — e.g. court_case
+    vs precedent vs generic CreativeWork), then falls back to the bare ``@type``.
+    Defaults to DOCUMENT.
+    """
+    additional = doc.get("additionalType")
+    for a in additional if isinstance(additional, list) else [additional]:
+        if isinstance(a, str) and a in _TYPE_BY_ADDITIONAL:
+            return _TYPE_BY_ADDITIONAL[a]
+
+    atype = doc.get("@type")
+    for t in atype if isinstance(atype, list) else [atype]:
+        if isinstance(t, str) and t in _TYPE_BY_SCHEMA:
+            return _TYPE_BY_SCHEMA[t]
+    return MaterialType.DOCUMENT
 
 
 # ── DocumentSource modality → associatedMedia / MediaObject ──────────────────
