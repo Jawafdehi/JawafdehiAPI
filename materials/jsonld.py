@@ -463,13 +463,13 @@ def nkp_decision_to_jsonld(decision: dict[str, Any]) -> dict[str, Any]:
     """Shape one scraped NKP decision (``NkpDecisionItem`` dict) into Material JSON-LD.
 
     The published precedent maps to ``CreativeWork`` + ``jawafdehi:Precedent``.
-    The decision's own ``source_url`` (the nkp.gov.np page) is the authoritative
-    RAW source; a ``fallback_pdf_url`` (when the HTML body was an upload-error
-    note) rides as an ALTERNATE source. The full Unicode judgment text lands in
+    The decision's own ``source_url`` (the nkp.gov.np page) is the ``url``; a
+    ``fallback_pdf_url`` (when the HTML body was an upload-error note) rides as an
+    ALTERNATE ``associatedMedia`` link. The full Unicode judgment text lands in
     the language-tagged ``text`` field so it is search-indexable without OCR.
 
-    Pure function (no DB): takes the scraper's flat dict, returns the JSON-LD doc.
-    The ingest command wraps this with the ``sources`` list bulk_ingest expects.
+    Pure function (no DB): takes the scraper's flat dict, returns the JSON-LD doc
+    ready to POST to ``/api/materials/`` (the crawler is the API client).
     """
     decision_no = decision.get("decision_no") or decision.get("detail_id")
     iri = nkp_precedent_material_iri(decision_no)
@@ -534,6 +534,16 @@ def nkp_decision_to_jsonld(decision: dict[str, Any]) -> dict[str, Any]:
         }
     if decision.get("full_text"):
         doc["text"] = {"ne": decision["full_text"]}
+
+    # When the HTML body was an upload-error note, the scanned issue PDF on
+    # supremecourt.gov.np is the recoverable source — carry it as an ALTERNATE
+    # associatedMedia so the link survives on the material doc itself (the write
+    # goes through the single-material API, which stores the doc verbatim).
+    fallback_pdf = decision.get("fallback_pdf_url")
+    if fallback_pdf:
+        doc["associatedMedia"] = media_objects_from_document_sources(
+            [{"url": [{"link": fallback_pdf, "role": "ALTERNATE"}]}]
+        )
 
     return doc
 

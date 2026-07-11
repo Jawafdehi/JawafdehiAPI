@@ -11,7 +11,9 @@ government portal self-corroborates its own precedents). Run from the repo root:
 
 from __future__ import annotations
 
-from django.test import TestCase
+from django.contrib.auth.models import Group
+from rest_framework import status
+from rest_framework.test import APITestCase
 
 from jawafdehi_shared.entities.ids import is_valid_material_iri
 from materials.bulk_ingest import (
@@ -26,8 +28,20 @@ from materials.jsonld import (
     type_for,
     validate_material_jsonld,
 )
-from materials.management.commands.ingest_nkp_decisions import _record_from_decision
 from materials.models import Material
+
+
+def _envelope(decision: dict) -> dict:
+    """The {material, material_type, sources} record the bulk service accepts.
+
+    (The single-material API path ignores ``sources``; the bulk service uses it
+    for the distinct-publisher gate — one authoritative portal source here.)
+    """
+    return {
+        "material": nkp_decision_to_jsonld(decision),
+        "material_type": MaterialType.PRECEDENT,
+        "sources": [{"url": decision.get("source_url"), "authority": "nkp.gov.np"}],
+    }
 
 # A representative scraped decision (the shape NkpDecisionItem emits).
 _DECISION = {
@@ -68,7 +82,7 @@ _DECISION_WITH_PDF = {
 }
 
 
-class _NgmTestCase(TestCase):
+class _NgmTestCase(APITestCase):
     databases = "__all__"
 
 
@@ -97,83 +111,39 @@ class NkpShapeTests(_NgmTestCase):
         self.assertIn("ne", doc["text"])
         self.assertIn("बैंकिङ", doc["text"]["ne"])
 
-    def test_record_envelope_single_authoritative_source(self):
-        rec = _record_from_decision(_DECISION)
-        self.assertEqual(rec["material_type"], MaterialType.PRECEDENT)
-        self.assertEqual(len(rec["sources"]), 1)
-        self.assertEqual(rec["sources"][0]["authority"], "nkp.gov.np")
+    def test_fallback_pdf_rides_as_associated_media(self):
+        # When routed through the single-material API (which ignores a sources
+        # envelope), the recoverable scanned PDF must survive on the doc itself.
+        doc = nkp_decision_to_jsonld(_DECISION_WITH_PDF)
+        media = doc.get("associatedMedia") or []
+        self.assertEqual(len(media), 1)
+        self.assertEqual(
+            media[0]["contentUrl"],
+            "https://supremecourt.gov.np/publication/materials/102484.pdf",
+        )
+        self.assertEqual(media[0]["jawafdehi:linkRole"], "ALTERNATE")
 
-    def test_fallback_pdf_adds_second_source(self):
-        rec = _record_from_decision(_DECISION_WITH_PDF)
-        self.assertEqual(len(rec["sources"]), 2)
-        self.assertEqual(rec["sources"][1]["authority"], "supremecourt.gov.np")
+    def test_no_fallback_no_associated_media(self):
+        self.assertNotIn("associatedMedia", nkp_decision_to_jsonld(_DECISION))
 
 
 class NkpIngestTests(_NgmTestCase):
-    def test_single_source_published_with_min_sources_1(self):
+    """Precedents ingest via the shared material write engine (used by the API)."""
+
+    def test_precedent_written_as_precedent(self):
         service = MaterialBulkIngestService(min_sources=1)
-        result = service.ingest([_record_from_decision(_DECISION)])
+        result = service.ingest([_envelope(_DECISION)])
         self.assertEqual(result.written, 1)
-        self.assertEqual(result.held, 0)
         mat = Material.objects.using("ngm").get(iri="https://jawafdehi.org/material/nkp/11376")
         self.assertEqual(mat.material_type, MaterialType.PRECEDENT)
         self.assertEqual(mat.source, "nkp")
 
-    def test_single_source_held_with_default_gate(self):
-        # Under the generic ≥2 gate, a lone-portal precedent HOLDs.
-        service = MaterialBulkIngestService(min_sources=2)
-        result = service.ingest([_record_from_decision(_DECISION)])
-        self.assertEqual(result.written, 0)
-        self.assertEqual(result.held, 1)
-
     def test_ingest_idempotent_by_decision_no(self):
         service = MaterialBulkIngestService(min_sources=1)
-        service.ingest([_record_from_decision(_DECISION)])
-        service.ingest([_record_from_decision(_DECISION)])
+        service.ingest([_envelope(_DECISION)])
+        service.ingest([_envelope(_DECISION)])
         self.assertEqual(
             Material.objects.using("ngm").filter(source="nkp").count(), 1
-        )
-
-
-class NkpIngestCommandTests(_NgmTestCase):
-    """The ``ingest_nkp_decisions`` command's streaming/batched file path."""
-
-    def _write_jsonl(self, decisions):
-        import json
-        import tempfile
-
-        fh = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False, encoding="utf-8")
-        for d in decisions:
-            fh.write(json.dumps(d, ensure_ascii=False) + "\n")
-        fh.close()
-        return fh.name
-
-    def test_command_batches_across_multiple_batches(self):
-        from django.core.management import call_command
-
-        # 5 distinct decisions, batch-size 2 → 3 batches; all should be written.
-        decs = []
-        for i in range(5):
-            d = dict(_DECISION)
-            d["decision_no"] = str(11000 + i)
-            d["title"] = f"निर्णय नं. {11000 + i} - बैंकिङ कसुर"
-            decs.append(d)
-        path = self._write_jsonl(decs)
-        call_command("ingest_nkp_decisions", path, "--min-sources", "1", "--batch-size", "2")
-        self.assertEqual(Material.objects.using("ngm").filter(source="nkp").count(), 5)
-
-    def test_command_skip_removed(self):
-        from django.core.management import call_command
-
-        keep = dict(_DECISION, decision_no="12000", title="निर्णय नं. 12000 - x", removed=False)
-        drop = dict(_DECISION, decision_no="12001", title="निर्णय नं. 12001 - y", removed=True)
-        path = self._write_jsonl([keep, drop])
-        call_command("ingest_nkp_decisions", path, "--min-sources", "1", "--skip-removed")
-        self.assertTrue(
-            Material.objects.using("ngm").filter(iri="https://jawafdehi.org/material/nkp/12000").exists()
-        )
-        self.assertFalse(
-            Material.objects.using("ngm").filter(iri="https://jawafdehi.org/material/nkp/12001").exists()
         )
 
 
@@ -192,7 +162,7 @@ class NkpDateShapingTests(_NgmTestCase):
         from materials.search_index import build_doc
 
         mat = MaterialBulkIngestService(min_sources=1)
-        mat.ingest([_record_from_decision(_DECISION)])
+        mat.ingest([_envelope(_DECISION)])
         row = Material.objects.using("ngm").get(iri="https://jawafdehi.org/material/nkp/11376")
         idx = build_doc(row)
         self.assertEqual(idx["date"], "2023-07-09")
@@ -225,11 +195,11 @@ class SoftDeleteReingestTests(_NgmTestCase):
 
     def test_reingest_skips_soft_deleted(self):
         service = MaterialBulkIngestService(min_sources=1)
-        service.ingest([_record_from_decision(_DECISION)])
+        service.ingest([_envelope(_DECISION)])
         iri = "https://jawafdehi.org/material/nkp/11376"
         Material.objects.using("ngm").filter(iri=iri).update(is_deleted=True, data={"tomb": 1})
 
-        result = service.ingest([_record_from_decision(_DECISION)])
+        result = service.ingest([_envelope(_DECISION)])
         self.assertEqual(result.skipped_deleted, 1)
         self.assertIn(iri, result.skipped_deleted_ids)
         self.assertEqual(result.written, 0)
@@ -253,3 +223,106 @@ class MergeResultTests(_NgmTestCase):
         # The two batch-local index=3 must not collide after merge.
         indices = [e["index"] for e in acc.errors]
         self.assertEqual(indices, [3, 503])
+
+
+class NkpApiIngestTests(_NgmTestCase):
+    """Precedents source through the material API plane (POST /api/materials/)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+        g, _ = Group.objects.get_or_create(name="Caseworker")  # an NGM-capable role
+        cls.writer = User.objects.create(username="oidc-nkp-writer")
+        cls.writer.groups.add(g)
+        cls.norole = User.objects.create(username="oidc-nkp-norole")
+
+    def test_post_precedent_creates_material(self):
+        self.client.force_authenticate(user=self.writer)
+        resp = self.client.post(
+            "/api/materials/",
+            {"material": nkp_decision_to_jsonld(_DECISION), "material_type": MaterialType.PRECEDENT},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, getattr(resp, "data", None))
+        row = Material.objects.using("ngm").get(iri="https://jawafdehi.org/material/nkp/11376")
+        self.assertEqual(row.material_type, MaterialType.PRECEDENT)
+        self.assertEqual(row.source, "nkp")
+
+    def test_repost_is_idempotent_upsert(self):
+        self.client.force_authenticate(user=self.writer)
+        body = {"material": nkp_decision_to_jsonld(_DECISION), "material_type": MaterialType.PRECEDENT}
+        self.client.post("/api/materials/", body, format="json")
+        resp = self.client.post("/api/materials/", body, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)  # updated, not duplicated
+        self.assertEqual(Material.objects.using("ngm").filter(source="nkp").count(), 1)
+
+    def test_write_requires_ngm_role(self):
+        self.client.force_authenticate(user=self.norole)
+        resp = self.client.post(
+            "/api/materials/",
+            {"material": nkp_decision_to_jsonld(_DECISION), "material_type": MaterialType.PRECEDENT},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+
+class NkpCrawlerClientTests(_NgmTestCase):
+    """The crawler posts through MaterialApiClient (unless --dry-run)."""
+
+    def _crawler(self, **overrides):
+        from argparse import Namespace
+
+        from materials.sourcing.nkp.crawl import NkpCrawler
+
+        import tempfile
+        cache = tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False).name
+        args = Namespace(
+            cache=cache, api_base=None, token=None, dry_run=True, from_cache=False,
+            year=None, year_min=None, year_max=None, delay=0.0, transport="requests",
+            headful=False, max_decisions=0,
+        )
+        for k, v in overrides.items():
+            setattr(args, k, v)
+        return NkpCrawler(args)
+
+    def test_dry_run_posts_nothing(self):
+        c = self._crawler(dry_run=True)
+        self.assertIsNone(c.api)
+        self.assertTrue(c._post_decision(_DECISION))  # no-op success
+        self.assertEqual(c.posted_count, 0)
+
+    def test_post_decision_shapes_and_calls_client(self):
+        c = self._crawler(dry_run=True)
+        sent = {}
+
+        class _FakeApi:
+            def post(self, doc, material_type):
+                sent["doc"] = doc
+                sent["material_type"] = material_type
+
+            def close(self):
+                pass
+
+        c.api = _FakeApi()
+        self.assertTrue(c._post_decision(_DECISION))
+        self.assertEqual(sent["material_type"], "precedent")
+        self.assertEqual(sent["doc"]["@id"], "https://jawafdehi.org/material/nkp/11376")
+        self.assertEqual(c.posted_count, 1)
+
+    def test_api_error_leaves_id_for_retry(self):
+        from materials.sourcing.nkp.crawl import MaterialApiError
+
+        c = self._crawler(dry_run=True)
+
+        class _FailApi:
+            def post(self, doc, material_type):
+                raise MaterialApiError("503: down")
+
+            def close(self):
+                pass
+
+        c.api = _FailApi()
+        self.assertFalse(c._post_decision(_DECISION))  # False → not checkpointed
+        self.assertEqual(c.posted_count, 0)

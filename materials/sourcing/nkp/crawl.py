@@ -1,29 +1,37 @@
-"""Resumable crawler for nkp.gov.np (Nepal Law Journal) precedents.
+"""Resumable crawler + API-ingest client for nkp.gov.np (Nepal Law Journal).
 
-A one-time / periodic data-acquisition tool (dev/ops, not request-path product).
-It crawls the whole NKP precedent corpus (~10.5k decisions) into a JSONL file
-that ``manage.py ingest_nkp_decisions`` then lands as ``precedent`` Materials.
+A data-acquisition tool (dev/ops, not request-path product). It crawls the NKP
+precedent corpus (~10.5k decisions) and **POSTs each one to the platform's
+material API** (``POST <api-base>/api/materials/``) — sourcing goes through the
+API plane, not a direct-DB management command. The scraped ``decisions.jsonl``
+is an on-disk CACHE (dedup + resume + audit), not the write path.
+
+Run as a plain module (no management command — writes flow through HTTP):
+
+    python -m materials.sourcing.nkp.crawl \\
+        --api-base https://api.jawafdehi.org --token "$NGM_TOKEN" \\
+        --cache /path/to/nkp/decisions.jsonl [--year 2082] [--delay 3.0]
+
+    # scrape only, don't post (populate/refresh the cache):
+    python -m materials.sourcing.nkp.crawl --cache … --dry-run
+
+    # ingest an existing cache without re-scraping the site:
+    python -m materials.sourcing.nkp.crawl --cache … --api-base … --token … --from-cache
 
 Design notes learned the hard way:
 
-- **Transport:** default ``requests`` (plain HTTP works when the site is healthy).
-  A ``playwright`` transport is kept as a fallback for the F5 BIG-IP JS challenge
-  the site serves during maintenance windows (all routes 302→``/web/``); that was
-  a transient site-wide outage, not a persistent bot-wall.
+- **Fetch transport:** default ``requests`` (plain HTTP works when the site is
+  healthy). A ``playwright`` fetch fallback handles the F5 BIG-IP JS challenge the
+  site serves during maintenance windows (all routes 302→``/web/``); that was a
+  transient site-wide outage, not a persistent bot-wall.
 - **Pagination:** month listings paginate via a ``per_page`` ROW OFFSET (≈20/page)
   and print their exact total ("<N> खोजी नतिजाहरु") — the crawler steps the offset
   and stops at the total (an early bug read only page 1 → capped at 20/month).
 - **Encoding:** the pages are UTF-8 Devanagari but the server mis-declares charset,
   so the requests transport forces ``utf-8`` (else mojibake).
-- **Resumable:** every scraped decision id + finished (year, month) is checkpointed
-  (``<out>`` + ``<out>.state.json``), so a re-run only fetches what's missing.
-
-Prefer the ``crawl_nkp`` management command; this module is also runnable directly.
-
-Usage::
-
-    python manage.py crawl_nkp --out /path/to/nkp/decisions.jsonl [--year 2082] \\
-        [--year-min 2076 --year-max 2082] [--delay 3.0] [--transport requests]
+- **Resumable:** every posted decision id + finished (year, month) is checkpointed
+  (``<cache>`` + ``<cache>.state.json``), so a re-run only fetches/posts what's
+  missing. Posting is idempotent server-side (upsert by ``@id``).
 """
 
 from __future__ import annotations
@@ -36,6 +44,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from materials.jsonld import nkp_decision_to_jsonld
+
 from .parse import (
     BASE,
     extract_listing,
@@ -43,6 +53,12 @@ from .parse import (
     parse_detail,
     parse_year_months,
 )
+
+#: NKP precedents publish from a single authoritative government portal.
+NKP_AUTHORITY = "nkp.gov.np"
+SUPREME_COURT_AUTHORITY = "supremecourt.gov.np"
+#: material_type token posted with each precedent (== MaterialType.PRECEDENT).
+PRECEDENT_MATERIAL_TYPE = "precedent"
 
 # F5 serves a real page only to a browser-like client; keep a current desktop UA.
 UA = (
@@ -193,16 +209,57 @@ class PlaywrightFetcher:
         self._pw.stop()
 
 
+class MaterialApiClient:
+    """Posts a shaped material to the platform material API (the ingest path).
+
+    ``POST <api_base>/api/materials/`` with a ``{"material": <json-ld>,
+    "material_type": ...}`` body, Bearer-authenticated (NGM-role gated). Upsert by
+    ``@id`` is idempotent server-side, so re-posting is safe. Raises
+    :class:`MaterialApiError` on a non-2xx so the caller can leave the id
+    un-checkpointed and retry on the next run.
+    """
+
+    def __init__(self, api_base: str, token: str | None):
+        import requests
+
+        self.url = api_base.rstrip("/") + "/api/materials/"
+        self.s = requests.Session()
+        self.s.headers.update({"Accept": "application/ld+json"})
+        if token:
+            self.s.headers["Authorization"] = f"Bearer {token}"
+
+    def post(self, doc: dict[str, Any], material_type: str) -> None:
+        r = self.s.post(
+            self.url,
+            json={"material": doc, "material_type": material_type},
+            timeout=60,
+        )
+        if r.status_code >= 300:
+            raise MaterialApiError(f"{r.status_code}: {r.text[:200]}")
+
+    def close(self) -> None:
+        self.s.close()
+
+
+class MaterialApiError(Exception):
+    """A material POST returned a non-2xx status."""
+
+
 class NkpCrawler:
     def __init__(self, args):
         self.args = args
-        self.out_path = Path(args.out)
-        self.out_path.parent.mkdir(parents=True, exist_ok=True)
-        self.cp = Checkpoint(self.out_path)
-        self.fh = self.out_path.open("a", encoding="utf-8")
+        self.cache_path = Path(args.cache)
+        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        self.cp = Checkpoint(self.cache_path)
+        self.fh = self.cache_path.open("a", encoding="utf-8")
         self.new_count = 0
+        self.posted_count = 0
         self.expected_total = 0
         self.fetcher = None
+        # Ingest client — required unless --dry-run (scrape-to-cache only).
+        self.api: MaterialApiClient | None = None
+        if not args.dry_run:
+            self.api = MaterialApiClient(args.api_base, args.token)
 
     # --- pacing / fetch -----------------------------------------------------
 
@@ -231,18 +288,55 @@ class NkpCrawler:
     # --- crawl levels -------------------------------------------------------
 
     def crawl(self) -> None:
-        if self.args.transport == "playwright":
-            self.fetcher = PlaywrightFetcher(self.args.headful)
-        else:
-            self.fetcher = RequestsFetcher()
         try:
-            self._run()
+            if self.args.from_cache:
+                self._ingest_cache()
+            else:
+                self._run()
         finally:
-            self.fetcher.close()
+            if self.fetcher is not None:
+                self.fetcher.close()
+            if self.api is not None:
+                self.api.close()
             self.fh.close()
 
+    def _ingest_cache(self) -> None:
+        """Post every cached decision to the API without re-scraping the site.
+
+        For re-driving ingestion from an existing ``decisions.jsonl`` (e.g. after
+        an API outage) — no fetch transport is opened. Posting is idempotent, so
+        already-ingested ids simply upsert; the checkpoint still skips them.
+        """
+        if self.api is None:
+            print("FATAL: --from-cache needs the API (remove --dry-run).", file=sys.stderr)
+            return
+        posted = 0
+        with self.cache_path.open(encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    dec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if dec.get("empty"):
+                    continue  # metadata-only stub, nothing to ingest
+                if self._post_decision(dec):
+                    posted += 1
+        print(f"from-cache: posted {posted} decisions to the API.", file=sys.stderr)
+
     def _run(self) -> None:
-        print(f"warming session (transport={self.args.transport})…", file=sys.stderr)
+        self.fetcher = (
+            PlaywrightFetcher(self.args.headful)
+            if self.args.transport == "playwright"
+            else RequestsFetcher()
+        )
+        mode = "dry-run (cache only)" if self.args.dry_run else f"→ {self.args.api_base}"
+        print(
+            f"warming session (transport={self.args.transport}); ingest {mode}",
+            file=sys.stderr,
+        )
         self.fetcher.warm()
 
         browse_html = self._get(BASE + "/browse")
@@ -265,8 +359,8 @@ class NkpCrawler:
                 break
 
         print(
-            f"done: +{self.new_count} new decisions this run; "
-            f"{len(self.cp.done_ids)} total banked / {self.expected_total} expected",
+            f"done: +{self.new_count} new decisions scraped, {self.posted_count} posted; "
+            f"{len(self.cp.done_ids)} total done / {self.expected_total} expected",
             file=sys.stderr,
         )
 
@@ -387,15 +481,16 @@ class NkpCrawler:
         return complete
 
     def _crawl_detail(self, detail_id: str) -> bool:
-        """Fetch + parse one decision, append it, mark it done. Returns True if the
-        decision was recorded (so the caller can tell a fully-scraped month from
-        one with dropped detail fetches).
+        """Fetch → cache → POST one decision. Returns True iff it was fully handled
+        (so the caller can tell a complete month from one with dropped/failed rows).
 
-        A fetch failure/bounce (``html is None``) returns False → the month is not
-        checkpointed and the id is retried on resume. A page that parses to no
-        content column returns None from ``parse_detail``; that is a real but empty
-        decision (a handful exist site-side), so it is recorded (with metadata-only
-        via a minimal item) and counted done rather than retried forever.
+        Steps: fetch the page; append the parsed item to the JSONL cache; POST it
+        to the material API (unless ``--dry-run``); checkpoint the id only after a
+        successful post. A fetch failure/bounce or an API error returns False → the
+        id is NOT checkpointed and is retried on the next run (posting is
+        idempotent). A page with no content column is a genuine empty decision (a
+        handful exist site-side): it is cached as a metadata-only stub and counted
+        done (not posted, nothing to ingest) rather than retried forever.
         """
         self._pause()
         url = f"{BASE}/full_detail/{detail_id}"
@@ -403,19 +498,39 @@ class NkpCrawler:
         if not html:
             return False  # fetch failed / bounced — retryable, do not mark done
         item = parse_detail(html, detail_id, url)
-        if item is None:
-            # Page loaded but has no decision content column. Distinguish a genuine
-            # empty decision (record it, move on) from a bounce shell that slipped
-            # through: a real decision page carries the site chrome, a bounce does
-            # not. We conservatively record a metadata-only stub so the id is not
-            # re-fetched every resume, and log it for review.
-            print(f"  ! no content for full_detail/{detail_id} (recorded as empty)", file=sys.stderr)
+        empty = item is None
+        if empty:
+            print(f"  ! no content for full_detail/{detail_id} (cached as empty)", file=sys.stderr)
             item = {"detail_id": detail_id, "source_url": url, "empty": True}
         item["scraped_at"] = _now_iso()
+        # Cache first (so a later API failure doesn't force a re-fetch of the site).
         self.fh.write(json.dumps(item, ensure_ascii=False) + "\n")
         self.fh.flush()
-        self.cp.done_ids.add(detail_id)
         self.new_count += 1
+
+        if empty:
+            self.cp.done_ids.add(detail_id)  # nothing to ingest
+            return True
+        if not self._post_decision(item):
+            return False  # API failure — retry the id (and the month) next run
+        self.cp.done_ids.add(detail_id)
+        return True
+
+    def _post_decision(self, decision: dict[str, Any]) -> bool:
+        """Shape a cached decision and POST it to the material API.
+
+        ``--dry-run`` skips the POST (scrape-to-cache only). Returns True on a
+        successful post (or dry-run), False on an API error (left for retry).
+        """
+        if self.api is None:  # dry-run
+            return True
+        doc = nkp_decision_to_jsonld(decision)
+        try:
+            self.api.post(doc, PRECEDENT_MATERIAL_TYPE)
+        except MaterialApiError as e:
+            print(f"  ! API post failed for {decision.get('detail_id')}: {e}", file=sys.stderr)
+            return False
+        self.posted_count += 1
         return True
 
     def _hit_limit(self) -> bool:
@@ -431,8 +546,14 @@ def _now_iso() -> str:
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Resumable Playwright crawler for nkp.gov.np")
-    ap.add_argument("--out", required=True, help="decisions.jsonl path (appended; resume source)")
+    ap = argparse.ArgumentParser(
+        description="Crawl nkp.gov.np precedents and POST them to the material API."
+    )
+    ap.add_argument("--cache", required=True, help="decisions.jsonl cache path (appended; resume source)")
+    ap.add_argument("--api-base", help="Platform base URL, e.g. https://api.jawafdehi.org (required unless --dry-run)")
+    ap.add_argument("--token", help="Bearer token for the NGM-role-gated material API")
+    ap.add_argument("--dry-run", action="store_true", help="Scrape to the cache only; do NOT post to the API")
+    ap.add_argument("--from-cache", action="store_true", help="Post the existing cache to the API without re-scraping")
     ap.add_argument("--year", help="Limit to one BS year (default: whole corpus)")
     ap.add_argument("--year-min", type=int, default=None, help="Shard: lowest BS year (inclusive)")
     ap.add_argument("--year-max", type=int, default=None, help="Shard: highest BS year (inclusive)")
@@ -445,6 +566,8 @@ def main(argv=None):
     ap.add_argument("--headful", action="store_true", help="Show the browser (playwright transport only)")
     ap.add_argument("--max-decisions", type=int, default=0, help="Stop after N new decisions (0=all)")
     args = ap.parse_args(argv)
+    if not args.dry_run and not args.api_base:
+        ap.error("--api-base is required unless --dry-run is set.")
     NkpCrawler(args).crawl()
 
 
