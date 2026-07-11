@@ -845,6 +845,15 @@ SENDPULSE_CLIENT_ID = os.getenv("SENDPULSE_CLIENT_ID", "")
 SENDPULSE_CLIENT_SECRET = os.getenv("SENDPULSE_CLIENT_SECRET", "")
 SENDPULSE_ADDRESSBOOK_ID = os.getenv("SENDPULSE_ADDRESSBOOK_ID", "")
 SENDPULSE_TIMEOUT_SECONDS = float(os.getenv("SENDPULSE_TIMEOUT_SECONDS", "5"))
+# Double opt-in: when SENDPULSE_CONFIRMATION is on AND a (verified) sender is set,
+# SendPulse sends its confirmation email and holds the contact until they click.
+# SENDPULSE_CONFIRMATION_TEMPLATE_ID is optional (SendPulse's default confirmation
+# email is used until a custom template is moderated). message_lang has no Nepali
+# option, so the bilingual template covers Nepali readers.
+SENDPULSE_CONFIRMATION = env_flag("SENDPULSE_CONFIRMATION", False)
+SENDPULSE_SENDER_EMAIL = os.getenv("SENDPULSE_SENDER_EMAIL", "")
+SENDPULSE_CONFIRMATION_TEMPLATE_ID = os.getenv("SENDPULSE_CONFIRMATION_TEMPLATE_ID", "")
+SENDPULSE_MESSAGE_LANG = os.getenv("SENDPULSE_MESSAGE_LANG", "en")
 
 # ---------------------------------------------------------------------------
 # NES/NGM config. After the service consolidation NES and NGM run IN-PROCESS — the
