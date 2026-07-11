@@ -166,3 +166,99 @@ def test_get_client_strips_whitespace(settings):
     c = get_client()
     assert c._api_key == "sp_apikey_test"
     assert c._addressbook_id == "719648"
+
+
+# -- double opt-in -----------------------------------------------------------
+
+
+@mock.patch("newsletter.sendpulse.requests.request")
+def test_single_opt_in_omits_confirmation_params(mock_request):
+    """Default (no confirmation config) sends no DOI params — backward compatible."""
+    mock_request.return_value = _ok(201)
+    client = SendPulseClient("719648", api_key="k")
+
+    client.add_subscriber("reader@example.org")
+
+    _, kwargs = mock_request.call_args
+    body = kwargs["json"]
+    assert "confirmation" not in body
+    assert "sender_email" not in body
+
+
+@mock.patch("newsletter.sendpulse.requests.request")
+def test_double_opt_in_sends_confirmation_params(mock_request):
+    """DOI attaches confirmation/sender_email/message_lang/template_id top-level."""
+    mock_request.return_value = _ok(200)
+    client = SendPulseClient(
+        "719648",
+        api_key="k",
+        confirmation=True,
+        sender_email="inquiry@jawafdehi.org",
+        confirmation_template_id="tmpl-123",
+        message_lang="en",
+    )
+
+    client.add_subscriber("reader@example.org", name="Sita")
+
+    body = mock_request.call_args.kwargs["json"]
+    assert body["confirmation"] == "force"
+    assert body["sender_email"] == "inquiry@jawafdehi.org"
+    assert body["message_lang"] == "en"
+    assert body["template_id"] == "tmpl-123"
+    # The contact + its variables still ride along in "emails".
+    assert body["emails"][0]["email"] == "reader@example.org"
+
+
+@mock.patch("newsletter.sendpulse.requests.request")
+def test_double_opt_in_requires_sender_email(mock_request):
+    """confirmation=True without a sender is inert — SendPulse would reject it."""
+    mock_request.return_value = _ok(201)
+    client = SendPulseClient("719648", api_key="k", confirmation=True, sender_email="")
+
+    client.add_subscriber("reader@example.org")
+
+    assert "confirmation" not in mock_request.call_args.kwargs["json"]
+
+
+@mock.patch("newsletter.sendpulse.requests.request")
+def test_unsupported_message_lang_falls_back_to_en(mock_request):
+    """Nepali isn't a supported message_lang, so it degrades to English."""
+    mock_request.return_value = _ok(200)
+    client = SendPulseClient(
+        "719648", api_key="k", confirmation=True,
+        sender_email="inquiry@jawafdehi.org", message_lang="ne",
+    )
+
+    client.add_subscriber("reader@example.org")
+
+    assert mock_request.call_args.kwargs["json"]["message_lang"] == "en"
+
+
+@mock.patch("newsletter.sendpulse.requests.request")
+def test_double_opt_in_omits_template_id_when_unset(mock_request):
+    """No template_id → SendPulse uses its default confirmation email."""
+    mock_request.return_value = _ok(200)
+    client = SendPulseClient(
+        "719648", api_key="k", confirmation=True,
+        sender_email="inquiry@jawafdehi.org",
+    )
+
+    client.add_subscriber("reader@example.org")
+
+    body = mock_request.call_args.kwargs["json"]
+    assert body["confirmation"] == "force"
+    assert "template_id" not in body
+
+
+def test_get_client_wires_double_opt_in_settings(settings):
+    """get_client threads the DOI settings onto the client."""
+    settings.SENDPULSE_API_KEY = "k"
+    settings.SENDPULSE_ADDRESSBOOK_ID = "719648"
+    settings.SENDPULSE_CONFIRMATION = True
+    settings.SENDPULSE_SENDER_EMAIL = "  inquiry@jawafdehi.org "
+    settings.SENDPULSE_CONFIRMATION_TEMPLATE_ID = " tmpl-123 "
+    settings.SENDPULSE_MESSAGE_LANG = "en"
+    c = get_client()
+    assert c._doi is True
+    assert c._sender_email == "inquiry@jawafdehi.org"
+    assert c._confirmation_template_id == "tmpl-123"

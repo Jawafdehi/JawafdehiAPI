@@ -44,6 +44,13 @@ _TOKEN_CACHE_KEY = "newsletter:sendpulse:access_token"
 _TOKEN_EXPIRY_SKEW_SECONDS = 60
 _DEFAULT_TIMEOUT_SECONDS = 5.0
 
+# Languages SendPulse accepts for the double opt-in confirmation email's
+# ``message_lang``. Nepali is NOT supported, so ``ne`` (and anything else) falls
+# back to English — our confirmation template is bilingual, so Nepali readers can
+# still confirm.
+_SUPPORTED_MESSAGE_LANGS = frozenset({"en", "ru", "ua", "tr", "es", "pt"})
+_DEFAULT_MESSAGE_LANG = "en"
+
 
 class SendPulseError(Exception):
     """Raised when a SendPulse call fails after (at most) one token refresh.
@@ -63,11 +70,23 @@ class SendPulseClient:
 
     def __init__(self, addressbook_id: str, *, api_key: str = "",
                  client_id: str = "", client_secret: str = "",
+                 confirmation: bool = False, sender_email: str = "",
+                 confirmation_template_id: str = "",
+                 message_lang: str = _DEFAULT_MESSAGE_LANG,
                  timeout: float = _DEFAULT_TIMEOUT_SECONDS):
         self._addressbook_id = addressbook_id
         self._api_key = api_key
         self._client_id = client_id
         self._client_secret = client_secret
+        # Double opt-in: SendPulse sends its confirmation email and holds the
+        # contact as "confirmation requested" until they click. It REQUIRES a
+        # (verified) sender address, so DOI is only active when both are set.
+        self._doi = bool(confirmation and sender_email)
+        self._sender_email = sender_email
+        self._confirmation_template_id = confirmation_template_id
+        self._message_lang = (
+            message_lang if message_lang in _SUPPORTED_MESSAGE_LANGS else _DEFAULT_MESSAGE_LANG
+        )
         self._timeout = timeout
 
     # -- auth ---------------------------------------------------------------
@@ -137,9 +156,12 @@ class SendPulseClient:
     def add_subscriber(self, email: str, *, name: str = "", variables: Optional[dict] = None) -> None:
         """Add an email to the configured address book.
 
-        SendPulse triggers its own double opt-in confirmation for the address
-        book when configured to do so. Raises :class:`SendPulseError` on failure;
-        the ``status`` attribute carries the upstream HTTP status when available.
+        When double opt-in is configured (``confirmation`` + ``sender_email``),
+        SendPulse holds the contact as "confirmation requested", sends its
+        confirmation email, and activates the contact only after they click the
+        link. Otherwise the contact is added active (single opt-in). Raises
+        :class:`SendPulseError` on failure; the ``status`` attribute carries the
+        upstream HTTP status when available.
         """
         payload = {
             "emails": [
@@ -149,6 +171,15 @@ class SendPulseClient:
                 }
             ]
         }
+        if self._doi:
+            # Top-level DOI params alongside "emails" (per SendPulse's add-emails
+            # method). template_id is optional — SendPulse uses its default (and
+            # currently-moderating) confirmation email when it's omitted.
+            payload["confirmation"] = "force"
+            payload["sender_email"] = self._sender_email
+            payload["message_lang"] = self._message_lang
+            if self._confirmation_template_id:
+                payload["template_id"] = self._confirmation_template_id
         try:
             resp = self._request(
                 "POST", f"/addressbooks/{self._addressbook_id}/emails", json=payload
@@ -183,10 +214,25 @@ def get_client() -> Optional[SendPulseClient]:
     if not (addressbook_id and has_auth):
         return None
     timeout = float(getattr(settings, "SENDPULSE_TIMEOUT_SECONDS", _DEFAULT_TIMEOUT_SECONDS))
+    confirmation = bool(getattr(settings, "SENDPULSE_CONFIRMATION", False))
+    sender_email = str(getattr(settings, "SENDPULSE_SENDER_EMAIL", "") or "").strip()
+    template_id = str(getattr(settings, "SENDPULSE_CONFIRMATION_TEMPLATE_ID", "") or "").strip()
+    message_lang = str(getattr(settings, "SENDPULSE_MESSAGE_LANG", _DEFAULT_MESSAGE_LANG) or "").strip()
+    if confirmation and not sender_email:
+        # DOI needs a verified sender; misconfig would 400 every subscribe, so
+        # fall back to single opt-in and make the reason visible.
+        logger.warning(
+            "SENDPULSE_CONFIRMATION is set but SENDPULSE_SENDER_EMAIL is empty; "
+            "double opt-in disabled (adding contacts as active)."
+        )
     return SendPulseClient(
         addressbook_id,
         api_key=api_key,
         client_id=client_id,
         client_secret=client_secret,
+        confirmation=confirmation,
+        sender_email=sender_email,
+        confirmation_template_id=template_id,
+        message_lang=message_lang or _DEFAULT_MESSAGE_LANG,
         timeout=timeout,
     )
