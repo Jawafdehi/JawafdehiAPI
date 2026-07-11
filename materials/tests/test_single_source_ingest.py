@@ -1,9 +1,11 @@
 """Tests for single-source Material ingest + standalone court-order materialization.
 
 Covers the gate-BYPASS write path (court orders are inherently single-publisher,
-so the bulk ≥2-source HOLD gate must not apply) and the LOCKED #1 shape: each
-order becomes its OWN ``court_order`` Material and the case record REFERENCES it
-via ``hasPart``. Run from the repo root:
+so the bulk ≥2-source HOLD gate must not apply) and the documents-only shape:
+each order becomes its OWN ``court_order`` Material that ``isPartOf`` the case's
+canonical ``/courtcase/<court>/<num>`` IRI. NO ``court_case`` shadow Material is
+minted — case identity + metadata live in the courtcase read plane. Run from the
+repo root:
 
     TESTING=true DATABASE_URL=sqlite:// NES_DB_URL=sqlite:// NGM_DATABASE_URL=sqlite:// \
         uv run pytest materials/tests/test_single_source_ingest.py
@@ -16,9 +18,9 @@ from datetime import date
 from django.test import TestCase
 
 from courts.importer import CourtCaseImporter, ImportConfig, ImportMode
+from jawafdehi_shared.entities.ids import build_courtcase_iri
 from materials.jsonld import (
     MaterialType,
-    court_case_material_iri,
     court_order_material_iri,
     court_order_to_jsonld,
 )
@@ -70,9 +72,14 @@ class CourtOrderShapeTests(_NgmTestCase):
         )
         self.assertEqual(doc["@type"], ["Manuscript", "DigitalDocument"])
         self.assertEqual(len(doc["associatedMedia"]), 2)
+        # isPartOf the case's canonical courtcase IRI (NOT a court_case shadow
+        # Material); name is the human case-order title (raw document_id rides on
+        # identifier only).
         self.assertEqual(
-            doc["isPartOf"]["@id"], court_case_material_iri("supreme", "081-CR-0081")
+            doc["isPartOf"]["@id"], build_courtcase_iri("supreme", "081-CR-0081")
         )
+        self.assertEqual(doc["name"], {"ne": "081-CR-0081 आदेश"})
+        self.assertEqual(doc["identifier"], "ngm:court-order:supreme:081-CR-0081")
 
     def test_iri_is_stable_and_derivable_for_dedup(self):
         # cross-ref spec 06: the same (court, case_number) yields the SAME order IRI
@@ -116,19 +123,22 @@ class MaterializeOrdersViaImporterTests(_NgmTestCase):
         cfg.update(over)
         return CourtCaseImporter(ImportConfig(**cfg)).run()
 
-    def test_order_is_standalone_material_referenced_by_case(self):
+    def test_order_is_standalone_material_and_no_case_shadow(self):
         res = self._run()
         self.assertEqual(res.orders_materialized, 1)
         order_iri = court_order_material_iri("supreme", "081-CR-0081")
         order = Material.objects.using("ngm").get(iri=order_iri)
         self.assertEqual(order.data["@type"], ["Manuscript", "DigitalDocument"])
         self.assertEqual(len(order.data["associatedMedia"]), 2)
-        # the case record Material references the order via hasPart (not embedded).
-        case_mat = Material.objects.using("ngm").get(
-            iri=court_case_material_iri("supreme", "081-CR-0081")
+        # Documents-only: the order isPartOf the case's canonical /courtcase IRI,
+        # and NO court_case shadow Material is minted.
+        self.assertEqual(
+            order.data["isPartOf"]["@id"],
+            build_courtcase_iri("supreme", "081-CR-0081"),
         )
-        self.assertIn({"@id": order_iri}, case_mat.data["hasPart"])
-        self.assertNotIn("associatedMedia", case_mat.data)
+        self.assertFalse(
+            Material.objects.using("ngm").filter(source="court").exists()
+        )
 
     def test_rerun_is_idempotent(self):
         self._run()
@@ -137,8 +147,10 @@ class MaterializeOrdersViaImporterTests(_NgmTestCase):
         self.assertEqual(
             Material.objects.using("ngm").filter(source="court_order").count(), 1
         )
+        # No court_case shadow Material is minted (case identity lives in the
+        # courtcase read plane, /courtcase/<court>/<num>).
         self.assertEqual(
-            Material.objects.using("ngm").filter(source="court").count(), 1
+            Material.objects.using("ngm").filter(source="court").count(), 0
         )
 
     def test_dry_run_materializes_nothing(self):

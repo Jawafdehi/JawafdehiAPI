@@ -693,3 +693,36 @@ class TestNgmMetrics:
         assert ngm["completeness"]["nes_resolved"] == pytest.approx(33.3)
         assert ngm["completeness"]["with_registration_date"] == pytest.approx(66.7)
         assert ngm["completeness"]["with_document_sources"] == pytest.approx(33.3)
+
+    def test_materials_exclude_soft_deleted(self, api_client):
+        # Soft-deleted materials are off every read plane (retrieve/search/sitemap
+        # filter is_deleted=False); the coverage stats must match, so a tombstoned
+        # court_case shadow does not linger in the by-source breakdown.
+        Material.objects.create(
+            iri="https://jawafdehi.org/material/nkp/live-1",
+            material_type="Legislation",
+            source="nkp",
+            ident="live-1",
+            data={
+                "@id": "https://jawafdehi.org/material/nkp/live-1",
+                "@type": "Legislation",
+                "name": "Live",
+            },
+        )
+        Material.objects.create(
+            iri="https://jawafdehi.org/material/court/sc.082-cr-0009",
+            material_type="court_case",
+            source="court",
+            ident="sc.082-cr-0009",
+            is_deleted=True,
+            data={
+                "@id": "https://jawafdehi.org/material/court/sc.082-cr-0009",
+                "@type": "CreativeWork",
+                "name": "Tombstoned shadow",
+            },
+        )
+
+        mats = api_client.get("/api/statistics/").json()["materials"]
+        assert mats["total"] == 1
+        assert {row["source"] for row in mats["by_source"]} == {"nkp"}
+        assert {row["material_type"] for row in mats["by_type"]} == {"Legislation"}

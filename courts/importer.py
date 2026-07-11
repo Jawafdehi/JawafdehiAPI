@@ -45,7 +45,6 @@ from courts.normalize import best_effort_normalize, is_verdict_sentinel
 from materials.jsonld import (
     MaterialType,
     case_order_sources,
-    court_case_to_jsonld,
     court_order_to_jsonld,
 )
 from materials.models import Material
@@ -594,6 +593,12 @@ class CourtCaseImporter:
 
     # ── order materialization (§4) ───────────────────────────────────────────
     def _materialize_orders(self, case: CourtCase) -> None:
+        # The materials layer owns DOCUMENTS only: each order DocumentSource is
+        # materialized as a standalone ``court_order`` Material (the file). We do
+        # NOT mint a ``court_case`` Material — case identity + metadata live in
+        # the courtcase read plane (/courtcase/<court>/<num>), so a court_case
+        # Material was a redundant shadow of it. Each order ``isPartOf`` that
+        # courtcase IRI (set in court_order_to_jsonld).
         pairs = case_order_sources(case.document_sources)
         if not pairs:
             return
@@ -603,8 +608,6 @@ class CourtCaseImporter:
             )
             self._write_material(doc, MaterialType.COURT_ORDER)
             self.res.orders_materialized += 1
-        # The case-record Material references the order Materials via hasPart.
-        self._write_material(court_case_to_jsonld(case), MaterialType.COURT_CASE)
 
     def _write_material(self, doc: dict[str, Any], material_type: str) -> None:
         if self.cfg.dry_run:
