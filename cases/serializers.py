@@ -36,7 +36,6 @@ def _viewer_has_casework_access(context) -> bool:
     """
     from cases.rules.predicates import (
         is_admin_or_moderator,
-        is_caseworker,
         is_readonly,
     )
 
@@ -52,9 +51,7 @@ def _viewer_has_casework_access(context) -> bool:
     if not (user and getattr(user, "is_authenticated", False)):
         result = False
     else:
-        result = (
-            is_admin_or_moderator(user) or is_caseworker(user) or is_readonly(user)
-        )
+        result = is_admin_or_moderator(user) or is_readonly(user)
 
     try:
         request._jawafdehi_casework_access = result
@@ -481,5 +478,3 @@ class FeedbackSerializer(serializers.ModelSerializer):
             "submittedAt": data["submittedAt"],
             "message": "Thank you for your feedback! We will review it and get back to you if needed.",
         }
-
-

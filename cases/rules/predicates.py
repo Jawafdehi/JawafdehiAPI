@@ -21,42 +21,49 @@ if TYPE_CHECKING:
 
 @rules.predicate
 def is_admin(user: User) -> bool:
-    """Check if user is in the Admin group."""
-    return user.is_superuser or user.groups.filter(name="Admin").exists()
+    """Check if user is an admin.
 
-
-@rules.predicate
-def is_moderator(user: User) -> bool:
-    """Check if user is in the Moderator group."""
-    return user.groups.filter(name="Moderator").exists()
+    v3 authz model: the ``Admin`` Django group is retired; admin == Django
+    superuser (the Zitadel ``admin`` role sets ``is_superuser`` on every request;
+    see ``jawafdehi_shared.auth.oidc``). User management is the admin-only
+    capability (see ``can_manage_user``).
+    """
+    return user.is_superuser
 
 
 @rules.predicate
 def is_caseworker(user: User) -> bool:
     """Check if user is in the Caseworker group.
 
-    "Caseworker" is the v2 name for the role formerly called "contributor": a
-    content role that can create/edit casework. NOTE: this is distinct from the
-    ``is_case_contributor`` / ``is_source_contributor`` predicates below, which
-    are per-object *assignment* checks against the ``Case.contributors`` /
-    ``DocumentSource.contributors`` model fields (unrelated to the role name).
+    v3 authz model: ``Caseworker`` is the single content-staff role — it carries
+    the powers the retired ``Moderator`` role used to have (publish/close any
+    case, edit any case, review-config, entities, CMS). The Zitadel keys
+    ``moderator``, ``contributor`` (and legacy ``caseworker``) all map to this
+    one group. Object-level assignment (the old ``Case.contributors``) is retired.
     """
     return user.groups.filter(name="Caseworker").exists()
 
 
 @rules.predicate
 def is_admin_or_moderator(user: User) -> bool:
-    """Check if user is Admin or Moderator."""
-    return (
-        user.is_superuser
-        or user.groups.filter(name__in=["Admin", "Moderator"]).exists()
-    )
+    """Superuser or the single content-staff (Caseworker) role.
+
+    Kept under this name to avoid churn at the many call sites; in the v3 model
+    "admin or moderator" == "superuser or Caseworker". This is the ONLY predicate
+    below that carries the ``is_superuser`` term, so combined predicates that
+    must admit superusers (e.g. ``can_view_case``) must keep it.
+    """
+    return user.is_superuser or user.groups.filter(name="Caseworker").exists()
 
 
 @rules.predicate
 def has_role(user: User) -> bool:
-    """Check if user has any content role (Admin, Moderator, or Caseworker)."""
-    return user.groups.filter(name__in=["Admin", "Moderator", "Caseworker"]).exists()
+    """Check if user has the content-staff role (superuser or Caseworker).
+
+    In the v3 model this is identical to ``is_admin_or_moderator``; kept as a
+    separate symbol for the DRF permission classes that call it by this name.
+    """
+    return user.is_superuser or user.groups.filter(name="Caseworker").exists()
 
 
 @rules.predicate
@@ -66,23 +73,10 @@ def is_readonly(user: User) -> bool:
     ReadOnly is an assign-to-anyone role that grants system-wide read access
     INCLUDING casework (view draft/in-review cases, sources, and the review
     queue) via view_* model perms, but no write perms. It deliberately does NOT
-    imply has_role, so write rules that build on is_admin_or_moderator /
-    is_*_contributor continue to exclude ReadOnly users.
+    imply has_role, so write rules that build on is_admin_or_moderator continue
+    to exclude ReadOnly users.
     """
     return user.groups.filter(name="ReadOnly").exists()
-
-
-@rules.predicate
-def is_public(user: User) -> bool:
-    """Check if user is in the Public group.
-
-    Public is read-only like ReadOnly, but EXCLUDES casework: a Public user can
-    read the public surface (PUBLISHED cases) but cannot view draft/in-review
-    casework, draft-only sources, or the review queue. It does NOT join the
-    casework view predicates (can_view_case / can_view_source / CanReadReview)
-    and, like ReadOnly, does not imply has_role.
-    """
-    return user.groups.filter(name="Public").exists()
 
 
 # ============================================================================
@@ -91,17 +85,16 @@ def is_public(user: User) -> bool:
 
 
 @rules.predicate
-def is_case_contributor(user: User, case: Optional["Case"]) -> bool:
-    """
-    Check if user is assigned as a contributor to the case.
+def can_change_case(user: User, case: Optional["Case"] = None) -> bool:
+    """Whether ``user`` may edit/delete ``case``.
 
-    Note: This is a pure assignment check. Admins/Moderators are NOT automatically
-    considered contributors. Use combined predicates like (is_admin_or_moderator | is_case_contributor)
-    for permission rules where Admins/Moderators should have access to all cases.
+    v3 authz model: object-level assignment is retired, so this no longer
+    depends on the case — any content-staff user (superuser or Caseworker) may
+    change any case. Kept as a 2-arg predicate (``case`` accepted but ignored)
+    because call sites pass ``(user, case)`` — e.g. ``cases/api_views.py``
+    partial_update/destroy — and it is also composed into django-rules rules.
     """
-    if case is None:
-        return False
-    return case.contributors.filter(id=user.id).exists()
+    return bool(is_admin_or_moderator(user))
 
 
 def can_transition_case_state(
@@ -110,9 +103,10 @@ def can_transition_case_state(
     """
     Check if user can transition case from its current state to the target state.
 
-    Rules:
-    - Admins and Moderators: Can transition to any state
-    - Caseworkers: Can only transition when BOTH source and destination states are in {DRAFT, IN_REVIEW}
+    v3 authz model: there is a single content-staff role (Caseworker, +
+    superuser) that can transition to ANY state, including PUBLISHED and CLOSED.
+    The old Caseworker-confined-to-{DRAFT, IN_REVIEW} tier is retired with the
+    Caseworker/Moderator collapse.
 
     Args:
         user: The user attempting the transition
@@ -122,21 +116,11 @@ def can_transition_case_state(
     Returns:
         bool: True if the transition is allowed
     """
-    from cases.models import CaseState
-
     if case is None:
         return True
 
-    # Admins and Moderators can transition to any state
-    if is_admin_or_moderator(user):
-        return True
-
-    # Caseworkers can only transition when both states are in {DRAFT, IN_REVIEW}
-    if is_caseworker(user):
-        allowed_states = {CaseState.DRAFT, CaseState.IN_REVIEW}
-        return case.state in allowed_states and to_state in allowed_states
-
-    return False
+    # Content staff (superuser or Caseworker) can transition to any state.
+    return bool(is_admin_or_moderator(user))
 
 
 # ============================================================================
@@ -149,22 +133,11 @@ def can_manage_user(user: User, target_user: Optional[User]) -> bool:
     """
     Check if user can manage the target user.
 
-    Rules:
-    - Admins: Can manage all users
-    - Moderators: Can manage all users EXCEPT other Moderators
+    v3 authz model: user management is superuser-only. The content-staff
+    (Caseworker) role does NOT manage users, and the old
+    "moderators can manage users except other moderators" asymmetry is retired.
     """
-    if target_user is None:
-        return True
-
-    # Admins can manage everyone
-    if is_admin(user):
-        return True
-
-    # Moderators cannot manage other Moderators
-    if is_moderator(user):
-        return not is_moderator(target_user)
-
-    return False
+    return bool(is_admin(user))
 
 
 # ============================================================================
@@ -174,14 +147,17 @@ def can_manage_user(user: User, target_user: Optional[User]) -> bool:
 # Case permissions
 # These are the *casework* view predicates: they expose draft/in-review cases.
 # ReadOnly joins so the org-wide read role can list AND retrieve all non-CLOSED
-# cases (the retrieve() DRAFT gate uses can_view_case). Public is deliberately
-# EXCLUDED — it is a public-surface read role with no casework access. Write
-# predicates intentionally omit both is_readonly and is_public.
-can_view_case = is_admin_or_moderator | is_caseworker | is_readonly
-can_change_case = is_admin_or_moderator | is_case_contributor
+# cases (the retrieve() DRAFT gate uses can_view_case). Anonymous/unauthenticated
+# callers see only PUBLISHED. Write predicates intentionally omit is_readonly.
+#
+# NOTE: ``is_admin_or_moderator`` is the only term here that carries the
+# ``is_superuser`` short-circuit AND already covers the Caseworker group (it is
+# ``is_superuser | Caseworker`` in v3), so it subsumes a standalone
+# ``is_caseworker`` term — don't re-add one (it would just re-run the same
+# Caseworker query). Do NOT reduce this to ``is_caseworker | is_readonly``
+# either, or a superuser (who has no group) would lose draft-case view.
+can_view_case = is_admin_or_moderator | is_readonly
+# can_change_case is defined above as a 2-arg predicate (callers pass the case).
 
 # Source permissions were removed with DocumentSource (ADR: cases own no
 # documents). Documents are NGM Materials, gated by the NGM write role.
-
-# User management permissions
-can_manage_user_account = is_admin | can_manage_user

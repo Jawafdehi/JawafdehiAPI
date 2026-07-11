@@ -19,9 +19,9 @@ from cases.rules.predicates import has_role
 class CanConsumeJobs(permissions.BasePermission):
     """Allow claim/stage/result/enqueue — mutating queue operations.
 
-    Satisfied by a superuser, any Admin/Moderator/Caseworker (``has_role``), or a
-    ReviewAssistant service account (the poller). Anonymous, ReadOnly and Public
-    are denied — they may observe the queue but not drive it.
+    Satisfied by a superuser, the Caseworker content-staff role (``has_role``),
+    or the JobPoller machine account (the poller). Anonymous and ReadOnly are
+    denied — they may observe the queue but not drive it.
     """
 
     message = "Driving the job queue requires at least the Caseworker role."
@@ -32,7 +32,7 @@ class CanConsumeJobs(permissions.BasePermission):
             return False
         if user.is_superuser:
             return True
-        if user.groups.filter(name="ReviewAssistant").exists():
+        if user.groups.filter(name="JobPoller").exists():
             return True
         return bool(has_role(user))
 
@@ -41,7 +41,7 @@ class CanObserveJobs(permissions.BasePermission):
     """Allow the read-only queue dashboard (GET /api/jobs).
 
     Admits everyone ``CanConsumeJobs`` does, plus the org-wide ReadOnly role
-    (observe without driving). Public is excluded.
+    (observe without driving).
     """
 
     message = "Observing the job queue requires a role with casework read access."
@@ -52,6 +52,6 @@ class CanObserveJobs(permissions.BasePermission):
             return False
         if user.is_superuser:
             return True
-        if user.groups.filter(name__in=["ReviewAssistant", "ReadOnly"]).exists():
+        if user.groups.filter(name__in=["JobPoller", "ReadOnly"]).exists():
             return True
         return bool(has_role(user))

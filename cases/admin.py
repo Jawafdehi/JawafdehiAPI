@@ -24,8 +24,7 @@ from .rules.predicates import (
     can_view_case,
     is_admin,
     is_admin_or_moderator,
-    is_caseworker,
-    is_moderator,
+    is_readonly,
 )
 from .validators import validate_courtcase_iri
 from .widgets import (
@@ -165,15 +164,8 @@ class CaseAdminForm(forms.ModelForm):
         if self.instance.pk and "court_cases" not in self.initial:
             self.initial["court_cases"] = self.instance.court_cases
 
-        # Disable PUBLISHED and CLOSED states for Caseworkers
-        if self.request:
-            user = self.request.user
-            if is_caseworker(user) and not is_admin_or_moderator(user):
-                # Disable PUBLISHED and CLOSED options for caseworkers
-                state_field = self.fields.get("state")
-                if state_field:
-                    # Create custom choices with disabled options
-                    state_field.widget.attrs["class"] = "contributor-state-field"
+        # v3 authz model: the single content-staff role (Caseworker) may
+        # transition to any state, so there is no state-field restriction here.
 
     class Media:
         css = {
@@ -253,7 +245,8 @@ class CaseAdminForm(forms.ModelForm):
                     self.request.user, self.instance, new_state
                 ):
                     errors["state"] = (
-                        f"You do not have permission to transition from {old_state} to {new_state}. Caseworkers can only transition between DRAFT and IN_REVIEW states."
+                        f"You do not have permission to transition from {old_state} to {new_state}. "
+                        "Case state transitions require the Caseworker role."
                     )
 
         # Validate required fields based on state
@@ -448,7 +441,6 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         "title_with_view_link",
         "case_type",
         "state_badge",
-        "contributors_list",
         "created_at",
         "updated_at",
     ]
@@ -516,7 +508,6 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
                 )
             },
         ),
-        ("Assignment", {"fields": ("contributors",)}),
         (
             "Metadata",
             {
@@ -529,10 +520,6 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
             },
         ),
     )
-
-    filter_horizontal = [
-        "contributors",
-    ]
 
     def state_badge(self, obj):
         """Display state as a colored badge."""
@@ -550,22 +537,6 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         )
 
     state_badge.short_description = "State"
-
-    def contributors_list(self, obj):
-        """Display contributors as a comma-separated list of full names."""
-        contributors = obj.contributors.all()
-        if not contributors:
-            return "—"
-        names = []
-        for user in contributors:
-            full_name = user.get_full_name()
-            if full_name:
-                names.append(f"{full_name} ({user.username})")
-            else:
-                names.append(user.username)
-        return ", ".join(names)
-
-    contributors_list.short_description = "Contributors"
 
     def title_with_view_link(self, obj):
         """Display the case title with a View on Site link right after it."""
@@ -630,17 +601,18 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         """
         Filter queryset based on user role.
 
-        - Caseworkers: See all non-CLOSED cases (global read access)
-        - Moderators/Admins: See all cases
+        - Content staff (Caseworker, superuser): see all cases
+        - ReadOnly: see all non-CLOSED cases
+        - No role: see nothing
         """
         qs = super().get_queryset(request)
 
-        # Admins and Moderators see everything
+        # Content staff (superuser or Caseworker) see everything.
         if is_admin_or_moderator(request.user):
             return qs
 
-        # Caseworkers see all non-CLOSED cases (global read-only access)
-        if is_caseworker(request.user):
+        # ReadOnly sees all non-CLOSED cases (org-wide read access).
+        if is_readonly(request.user):
             return qs.exclude(state=CaseState.CLOSED)
 
         # No role - see nothing
@@ -707,21 +679,15 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
     def save_related(self, request, form, formsets, change):
         """
         Save related objects (including many-to-many relationships).
-        Automatically adds the creator to contributors when creating a new case.
         Validates alleged entity requirement after inline formsets are saved.
         """
-        # First save the form's many-to-many data and inline formsets
+        # Save the form's many-to-many data and inline formsets.
         super().save_related(request, form, formsets, change)
-
-        # Then add creator to contributors for new cases
-        if not change:
-            form.instance.contributors.add(request.user)
 
     def get_actions(self, request):
         """No write actions — case state transitions happen through the SPA
         `/admin` panel (the sole write surface), not Django admin."""
         return {}
-
 
 
 # ============================================================================
@@ -731,58 +697,33 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
 
 class CustomUserAdmin(BaseUserAdmin):
     """
-    Custom User admin to prevent Moderators from managing other Moderators.
-
-    Property 14: Moderators cannot manage other Moderators in Django Admin
+    Custom User admin. v3 authz model: user management is superuser-only —
+    the content-staff (Caseworker) role cannot manage users.
     """
 
     def get_queryset(self, request):
         """
         Filter queryset based on user role.
 
-        - Admins: See all users
-        - Moderators: See all users except other Moderators
-        - Others: See nothing
+        - Admins (superuser): see all users
+        - Everyone else: see nothing
         """
         qs = super().get_queryset(request)
 
-        # Admins see everything
+        # Admins (superuser) see everything; everyone else sees nothing.
         if is_admin(request.user):
             return qs
 
-        # Moderators see all users except other Moderators
-        if is_moderator(request.user):
-            # Exclude users who are in the Moderator group
-            moderator_group_users = User.objects.filter(
-                groups__name="Moderator"
-            ).values_list("id", flat=True)
-            return qs.exclude(id__in=moderator_group_users)
-
-        # Others see nothing
         return qs.none()
 
     def has_change_permission(self, request, obj=None):
-        """
-        Check if user can change another user.
-
-        - Admins: Can change all users
-        - Moderators: Cannot change other Moderators
-        """
-        if obj is None:
-            return True
-
+        """User management is superuser-only (``can_manage_user``)."""
+        # can_manage_user ignores the target and returns is_admin(user), so the
+        # obj=None (add/changelist) and per-object cases are the same check.
         return can_manage_user(request.user, obj)
 
     def has_delete_permission(self, request, obj=None):
-        """
-        Check if user can delete another user.
-
-        - Admins: Can delete users
-        - Moderators: Cannot delete other Moderators
-        """
-        if obj is None:
-            return True
-
+        """User management is superuser-only (``can_manage_user``)."""
         return can_manage_user(request.user, obj)
 
 

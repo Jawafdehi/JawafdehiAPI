@@ -8,6 +8,7 @@ the bearer API. This is separate from the DRF bearer auth
 (``jawafdehi_shared.auth.oidc.OIDCAuthentication``): that gates the API, this
 gates the session-based /django-admin/.
 """
+
 from __future__ import annotations
 
 from django.contrib.auth.models import Group
@@ -20,8 +21,16 @@ from jawafdehi_shared.auth.oidc import (
     extract_role_keys,
 )
 
-# Project roles that grant Django-admin access (is_staff). Superuser is admin-only.
-STAFF_ROLES = {DEFAULT_SUPERUSER_ROLE, "moderator"}
+# Project roles that grant Django-admin access (is_staff). v3: every role key
+# that maps to the content-staff Caseworker group gets is_staff so content staff
+# (Zitadel `caseworker`/`moderator`/`contributor`) can reach Django admin +
+# Wagtail CMS. DERIVED from DEFAULT_ROLE_TO_GROUP so the content-staff key set
+# has a single source of truth (the role->group map) and can't drift — adding a
+# new Caseworker-mapped role key here is automatic. Superuser is admin-only (the
+# `admin` role, via DEFAULT_SUPERUSER_ROLE).
+STAFF_ROLES = {DEFAULT_SUPERUSER_ROLE} | {
+    key for key, group in DEFAULT_ROLE_TO_GROUP.items() if group == "Caseworker"
+}
 
 
 def _roles_from_claims(claims: dict) -> set[str]:

@@ -33,7 +33,13 @@ User = get_user_model()
 ENTITIES = [
     ("person", "ram-bahadur", "Person", "Ram Bahadur", "राम बहादुर"),
     ("person", "sita-sharma", "Person", "Sita Sharma", "सीता शर्मा"),
-    ("organization", "ministry-of-works", "Organization", "Ministry of Works", "निर्माण मन्त्रालय"),
+    (
+        "organization",
+        "ministry-of-works",
+        "Organization",
+        "Ministry of Works",
+        "निर्माण मन्त्रालय",
+    ),
     ("organization", "board-y", "Organization", "Board Y", "बोर्ड वाई"),
     ("place", "kathmandu", "Place", "Kathmandu", "काठमाडौँ"),
 ]
@@ -46,10 +52,14 @@ MATERIALS = [
     ("court", "verdict-075-cr-0123", "court_order", "Verdict 075-CR-0123"),
 ]
 
+# v3 authz model: admin == superuser (no group); the single content-staff role
+# is Caseworker. The `moderator` username is kept for dev/E2E continuity but now
+# lands in the Caseworker group (moderator folded into caseworker).
 USERS = [
     ("admin", [], True),
-    ("moderator", ["Moderator"], False),
+    ("moderator", ["Caseworker"], False),
     ("caseworker", ["Caseworker"], False),
+    ("readonly", ["ReadOnly"], False),
 ]
 
 CASES = [
@@ -163,9 +173,9 @@ class Command(BaseCommand):
                     state=state,
                     short_description="Seed case for local testing.",
                     description="## Summary\n\nSeed **markdown** body.",
-                    key_allegations=["Misappropriation", "Bid rigging"]
-                    if strict
-                    else [],
+                    key_allegations=(
+                        ["Misappropriation", "Bid rigging"] if strict else []
+                    ),
                 ),
             )
             if created and strict:

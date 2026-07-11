@@ -2,12 +2,13 @@
 
 The review config holds GLOBAL scoring thresholds (pass/revise) + LLM sampling
 that affect every review's disposition. The endpoint deliberately splits its
-permissions: any casework READ role may GET the config, but only Admin /
-Moderator may PUT it. That write gate is enforced by an INLINE
-``IsAdminOrModerator().has_permission(...)`` check inside the view (not the
-``permission_classes``), which is easy to regress silently — a caseworker able
-to rewrite global thresholds is a privilege-escalation bug. These tests pin the
-matrix so a regression can't slip through.
+permissions: any casework READ role may GET the config, but only content staff
+(superuser or Caseworker) may PUT it. That write gate is enforced by an INLINE
+``IsContentStaff().has_permission(...)`` check inside the view (not the
+``permission_classes``); in the v3 model the Moderator role is folded into
+Caseworker, so a Caseworker legitimately CAN rewrite the thresholds while the
+org-wide ReadOnly role cannot. These tests pin the matrix so a regression can't
+slip through.
 """
 
 import pytest
@@ -34,7 +35,9 @@ def test_config_get_requires_authentication():
 
 @pytest.mark.django_db
 def test_config_put_requires_authentication():
-    assert APIClient().put(URL, {"pass_threshold": 90}, format="json").status_code == 401
+    assert (
+        APIClient().put(URL, {"pass_threshold": 90}, format="json").status_code == 401
+    )
 
 
 @pytest.mark.django_db
@@ -47,16 +50,18 @@ def test_read_roles_can_get_config(role):
 
 
 @pytest.mark.django_db
-def test_public_role_cannot_get_config():
-    assert _client("Public").get(URL).status_code == 403
+def test_unauthenticated_cannot_get_config():
+    """An anonymous (no-token) caller cannot read the config."""
+    assert APIClient().get(URL).status_code == 401
 
 
 @pytest.mark.django_db
-def test_caseworker_cannot_put_config():
-    """The escalation guard: a plain Caseworker may READ but must NOT rewrite the
-    global thresholds — PUT is Admin/Moderator only."""
+def test_caseworker_can_put_config():
+    """v3: the Caseworker role carries the old Moderator powers, so a Caseworker
+    MAY rewrite the global thresholds (PUT 200)."""
     resp = _client("Caseworker").put(URL, {"pass_threshold": 99}, format="json")
-    assert resp.status_code == 403
+    assert resp.status_code == 200
+    assert resp.data["pass_threshold"] == 99
 
 
 @pytest.mark.django_db

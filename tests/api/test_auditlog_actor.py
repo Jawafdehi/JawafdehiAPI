@@ -67,12 +67,13 @@ def test_content_patch_creates_audit_entry():
     """A scalar content edit (persisted via QuerySet.update) is logged."""
     user = _contributor("hari")
     case = _make_case(description="Original description")
-    case.contributors.add(user)
 
     before = _case_updates(case).count()
     response = _authed_client(user).patch(
         URL.format(case.slug),
-        data=[{"op": "replace", "path": "/description", "value": "Amended description"}],
+        data=[
+            {"op": "replace", "path": "/description", "value": "Amended description"}
+        ],
         format="json",
     )
     assert response.status_code == 200
@@ -91,7 +92,6 @@ def test_content_patch_logs_only_changed_fields():
     """The diff is scoped to the fields the patch actually touched."""
     user = _contributor("gita")
     case = _make_case(title="Keep me", description="Change me")
-    case.contributors.add(user)
 
     response = _authed_client(user).patch(
         URL.format(case.slug),
@@ -115,7 +115,6 @@ def test_scalar_only_patch_does_not_log_when_unchanged():
     # which is itself a real (loggable) column change. Pre-set it so the patch is a
     # genuine no-op and we can assert the "no diff -> no entry" guarantee.
     case = _make_case(description="Same", court_cases=[])
-    case.contributors.add(user)
 
     before = _case_updates(case).count()
     response = _authed_client(user).patch(
@@ -136,7 +135,6 @@ def test_scalar_only_patch_does_not_log_when_unchanged():
 def test_content_patch_entry_attributes_actor():
     user = _contributor("bikash")
     case = _make_case(description="Original")
-    case.contributors.add(user)
 
     response = _authed_client(user).patch(
         URL.format(case.slug),
@@ -155,13 +153,14 @@ def test_state_transition_entry_attributes_actor():
     user = _contributor("puja")
     # DRAFT->IN_REVIEW enforces the publish gate (accused entity + allegations +
     # description), so build a case that satisfies it.
-    case = _make_case(description="Ready for review", key_allegations=["Primary allegation"])
+    case = _make_case(
+        description="Ready for review", key_allegations=["Primary allegation"]
+    )
     CaseEntityRelationship.objects.create(
         case=case,
         nes_id="https://jawafdehi.org/entity/person/ram-prasad-gautam",
         relationship_type=RelationshipType.ACCUSED,
     )
-    case.contributors.add(user)
 
     response = _authed_client(user).patch(
         URL.format(case.slug),

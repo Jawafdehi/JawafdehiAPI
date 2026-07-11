@@ -138,8 +138,12 @@ def test_oidc_bearer_token_authorizes_write():
 
 @pytest.mark.django_db
 def test_oidc_bearer_without_add_perm_is_forbidden():
-    Group.objects.get_or_create(name="Caseworker")
-    token = _make_token(sub="oidc-noperm", roles={"caseworker": {"1": "d"}})
+    # A ReadOnly principal is authenticated but its group holds only view_*, not
+    # cases.add_case, so DjangoModelPermissions (POST -> add_case) rejects it.
+    # (Caseworker can no longer stand in for "no add perm": v3 grants it
+    # add_case, so it is a legitimate case creator.)
+    Group.objects.get_or_create(name="ReadOnly")
+    token = _make_token(sub="oidc-noperm", roles={"readonly": {"1": "d"}})
     client = APIClient()
     client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
     response = client.post(CASES_URL, data=VALID_CASE_PAYLOAD, format="json")

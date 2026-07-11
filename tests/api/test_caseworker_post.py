@@ -36,7 +36,9 @@ def test_post_requires_authentication():
 
 
 @pytest.mark.django_db
-def test_post_creates_draft_and_assigns_creator():
+def test_post_creates_draft():
+    # v3 authz: per-case contributor assignment is retired, so POST no longer
+    # auto-adds the creator to a contributors set — it just creates the draft.
     user = create_user_with_role("ashok", "ashok@example.com", "Caseworker")
 
     response = _authed_client(user).post(
@@ -57,7 +59,6 @@ def test_post_creates_draft_and_assigns_creator():
 
     case = Case.objects.get(pk=response.data["id"])
     assert case.state == CaseState.DRAFT
-    assert case.contributors.filter(pk=user.pk).exists()
 
 
 @pytest.mark.django_db
@@ -80,9 +81,9 @@ def test_post_court_cases_stores_iris():
         "https://jawafdehi.org/courtcase/special/080-cr-0111"
     ]
     case = Case.objects.get(pk=response.data["id"])
-    assert list(
-        case.courtcase_references.values_list("courtcase_iri", flat=True)
-    ) == ["https://jawafdehi.org/courtcase/special/080-cr-0111"]
+    assert list(case.courtcase_references.values_list("courtcase_iri", flat=True)) == [
+        "https://jawafdehi.org/courtcase/special/080-cr-0111"
+    ]
     # The slug derives from the court case number ("case-" prefix: slugs must
     # start with a letter).
     assert response.data["slug"].startswith("case-080-cr-0111-")
@@ -91,7 +92,9 @@ def test_post_court_cases_stores_iris():
 @pytest.mark.django_db
 def test_post_rejects_non_iri_court_refs():
     """Short-form refs and unknown courts are rejected — IRIs only."""
-    user = create_user_with_role("ashok-court2", "ashok-court2@example.com", "Caseworker")
+    user = create_user_with_role(
+        "ashok-court2", "ashok-court2@example.com", "Caseworker"
+    )
     client = _authed_client(user)
 
     for bad_refs in (
@@ -200,24 +203,6 @@ def test_post_rejects_non_draft_state():
 
     assert response.status_code == 422
     assert "state" in response.data
-    assert Case.objects.count() == 0
-
-
-@pytest.mark.django_db
-def test_post_rejects_client_supplied_contributors_field():
-    user = create_user_with_role("dipa", "dipa@example.com", "Caseworker")
-
-    response = _authed_client(user).post(
-        URL,
-        data={
-            "title": "Should not accept contributors",
-            "case_type": CaseType.CORRUPTION,
-            "contributors": [999],
-        },
-        format="json",
-    )
-
-    assert response.status_code == 422
     assert Case.objects.count() == 0
 
 

@@ -1,11 +1,9 @@
 """
 Tests for authenticated user visibility in the case list endpoint.
 
-GET /api/cases/ visibility rules:
+GET /api/cases/ visibility rules (v3 authz — per-case assignment retired):
   - Unauthenticated: PUBLISHED only (IN_REVIEW is NOT shown)
-  - Admin / Moderator: all non-CLOSED cases
-  - Contributor (or other authenticated):
-      PUBLISHED + DRAFT/IN_REVIEW cases where they are in contributors
+  - Caseworker / Admin: all non-CLOSED cases (global casework read access)
 
 Feature: accountability-platform-core
 Validates: Requirements 1.5, 3.1, 6.1
@@ -53,7 +51,6 @@ def draft_assigned(db, contributor):
         case_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT,
     )
-    case.contributors.add(contributor)
     return case
 
 
@@ -73,7 +70,6 @@ def in_review_assigned(db, contributor):
         case_type=CaseType.CORRUPTION,
         state=CaseState.IN_REVIEW,
     )
-    case.contributors.add(contributor)
     return case
 
 

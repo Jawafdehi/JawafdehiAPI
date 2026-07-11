@@ -52,9 +52,10 @@ def test_admin_cannot_add_cases(contributor_user, case_admin):
 
 
 @pytest.mark.django_db
-def test_creator_has_view_permission(contributor_user, case_admin):
+def test_caseworker_has_view_permission(contributor_user, case_admin):
     """
-    Test that the creator has view permission for their created case.
+    v3 authz model: object-level assignment is retired — the content-staff
+    (Caseworker) role has global read access to any case.
 
     Validates: Requirements 1.5, 3.1
     """
@@ -67,16 +68,13 @@ def test_creator_has_view_permission(contributor_user, case_admin):
         state=CaseState.DRAFT,
     )
 
-    # Simulate the creator being added (as would happen in save_model)
-    case.contributors.add(contributor_user)
-
     # Create a mock request
     request = create_mock_request(contributor_user)
 
     # Check view permission
     has_permission = case_admin.has_view_permission(request, case)
 
-    assert has_permission, "Creator should have view permission for their created case"
+    assert has_permission, "Caseworker should have view permission for any case"
 
 
 @pytest.mark.django_db
@@ -88,14 +86,13 @@ def test_admin_is_read_only_even_for_creator(contributor_user, case_admin):
     Validates: SPA-is-sole-write-surface (Django-admin case decommission).
     """
 
-    # Create a case and add contributor
+    # Create a case
     case = create_case_with_entities(
         title="Test Case",
         case_type=CaseType.CORRUPTION,
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
         state=CaseState.DRAFT,
     )
-    case.contributors.add(contributor_user)
 
     request = create_mock_request(contributor_user)
 
@@ -108,55 +105,55 @@ def test_admin_is_read_only_even_for_creator(contributor_user, case_admin):
 
 
 @pytest.mark.django_db
-def test_non_creator_contributor_cannot_access(
+def test_other_caseworker_has_global_read_but_no_admin_change(
     contributor_user, another_contributor, case_admin
 ):
     """
-    Test that a contributor who didn't create the case cannot access it.
+    v3 authz model: any Caseworker has global read access to any case, but
+    Django admin is uniformly read-only (change is the SPA's domain).
 
     Validates: Requirements 1.5, 3.1
     """
 
-    # Create a case by first contributor
+    # Create a case (no object-level assignment in v3)
     case = create_case_with_entities(
         title="Test Case",
         case_type=CaseType.CORRUPTION,
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
         state=CaseState.DRAFT,
     )
-    case.contributors.add(contributor_user)
 
-    # Try to access with another contributor
+    # Access with another caseworker
     request = create_mock_request(another_contributor)
 
-    # Check view permission — Contributors now have global read access
+    # Check view permission — Caseworkers have global read access
     has_view = case_admin.has_view_permission(request, case)
     has_change = case_admin.has_change_permission(request, case)
 
     assert (
         has_view
-    ), "Contributor should have view permission for all cases (global read access)"
-    assert not has_change, "Non-creator contributor should NOT have change permission"
+    ), "Caseworker should have view permission for all cases (global read access)"
+    assert not has_change, "Django admin is read-only; no change permission"
 
 
 @pytest.mark.django_db
-def test_creator_can_see_case_in_queryset(
+def test_caseworker_sees_all_cases_in_queryset(
     contributor_user, another_contributor, case_admin
 ):
     """
-    Test that the creator can see their case in the admin queryset.
+    v3 authz model: a Caseworker sees ALL cases in the admin queryset (global
+    read access), regardless of who created them.
 
     Validates: Requirements 1.5, 3.1
     """
 
-    # Create cases by different contributors
+    # Create cases (no object-level assignment in v3)
     case1 = create_case_with_entities(
         title="Case by Contributor 1",
         case_type=CaseType.CORRUPTION,
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
         state=CaseState.DRAFT,
     )
-    case1.contributors.add(contributor_user)
 
     case2 = create_case_with_entities(
         title="Case by Another Contributor",
@@ -164,29 +161,26 @@ def test_creator_can_see_case_in_queryset(
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
         state=CaseState.DRAFT,
     )
-    case2.contributors.add(another_contributor)
 
-    # Get queryset for first contributor
+    # Get queryset for a caseworker
     request = create_mock_request(contributor_user)
 
     queryset = case_admin.get_queryset(request)
 
     # Should see all non-CLOSED cases (global read access)
-    assert case1 in queryset, "Creator should see their own case in queryset"
+    assert case1 in queryset, "Caseworker should see case1 in queryset"
 
-    assert (
-        case2 in queryset
-    ), "Creator should see other contributors' cases (global read access)"
+    assert case2 in queryset, "Caseworker should see all cases (global read access)"
 
     assert (
         queryset.count() >= 2
-    ), f"Creator should see at least 2 cases, but saw {queryset.count()}"
+    ), f"Caseworker should see at least 2 cases, but saw {queryset.count()}"
 
 
 @pytest.mark.django_db
-def test_multiple_cases_by_same_creator(contributor_user, case_admin):
+def test_caseworker_sees_multiple_cases(contributor_user, case_admin):
     """
-    Test that a creator can access all cases they created.
+    v3 authz model: a Caseworker sees all non-CLOSED cases in the queryset.
 
     Validates: Requirements 1.5, 3.1
     """
@@ -198,7 +192,6 @@ def test_multiple_cases_by_same_creator(contributor_user, case_admin):
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
         state=CaseState.DRAFT,
     )
-    case1.contributors.add(contributor_user)
 
     case2 = create_case_with_entities(
         title="Case 2",
@@ -206,7 +199,6 @@ def test_multiple_cases_by_same_creator(contributor_user, case_admin):
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
         state=CaseState.DRAFT,
     )
-    case2.contributors.add(contributor_user)
 
     case3 = create_case_with_entities(
         title="Case 3",
@@ -214,27 +206,27 @@ def test_multiple_cases_by_same_creator(contributor_user, case_admin):
         alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
         state=CaseState.IN_REVIEW,
     )
-    case3.contributors.add(contributor_user)
 
-    # Get queryset for contributor
+    # Get queryset for the caseworker
     request = create_mock_request(contributor_user)
 
     queryset = case_admin.get_queryset(request)
 
-    # Should see all their cases
+    # Should see all cases
     assert (
         queryset.count() == 3
-    ), f"Creator should see all 3 of their cases, but saw {queryset.count()}"
+    ), f"Caseworker should see all 3 cases, but saw {queryset.count()}"
 
-    assert case1 in queryset, "Creator should see case 1"
-    assert case2 in queryset, "Creator should see case 2"
-    assert case3 in queryset, "Creator should see case 3"
+    assert case1 in queryset, "Caseworker should see case 1"
+    assert case2 in queryset, "Caseworker should see case 2"
+    assert case3 in queryset, "Caseworker should see case 3"
 
 
 @pytest.mark.django_db
-def test_creator_access_persists_after_state_change(contributor_user, case_admin):
+def test_caseworker_access_persists_after_state_change(contributor_user, case_admin):
     """
-    Test that creator access persists even after case state changes.
+    v3 authz model: a Caseworker's global read access is unaffected by case
+    state changes.
 
     Validates: Requirements 1.5, 3.1
     """
@@ -248,7 +240,6 @@ def test_creator_access_persists_after_state_change(contributor_user, case_admin
         description="Test description",
         state=CaseState.DRAFT,
     )
-    case.contributors.add(contributor_user)
 
     # Create a mock request
     request = create_mock_request(contributor_user)
@@ -256,7 +247,7 @@ def test_creator_access_persists_after_state_change(contributor_user, case_admin
     # Check access in DRAFT state
     assert case_admin.has_view_permission(
         request, case
-    ), "Creator should have access in DRAFT state"
+    ), "Caseworker should have access in DRAFT state"
 
     # Change to IN_REVIEW
     case.state = CaseState.IN_REVIEW
@@ -265,9 +256,4 @@ def test_creator_access_persists_after_state_change(contributor_user, case_admin
     # Check access still exists
     assert case_admin.has_view_permission(
         request, case
-    ), "Creator should still have access in IN_REVIEW state"
-
-    # Verify contributor is still in the list
-    assert (
-        contributor_user in case.contributors.all()
-    ), "Creator should still be in contributors after state change"
+    ), "Caseworker should still have access in IN_REVIEW state"

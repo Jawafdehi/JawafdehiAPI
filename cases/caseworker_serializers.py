@@ -44,6 +44,7 @@ class CaseInsensitiveChoiceField(serializers.ChoiceField):
                     break
         return super().to_internal_value(data)
 
+
 # Paths that callers are not permitted to target in a patch operation.
 # The view rejects any op whose `path` equals or is prefixed by one of these.
 # Note: /slug is conditionally blocked based on case state (see api_views.py)
@@ -52,7 +53,6 @@ BLOCKED_PATH_PREFIXES = frozenset(
         "/id",
         "/case_type",
         "/version",
-        "/contributors",
         "/created_at",
         "/updated_at",
         "/versionInfo",
@@ -188,8 +188,7 @@ class EntityPatchItemSerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 {
                     "outcome": (
-                        "A verdict outcome may only be set on an 'accused' "
-                        "entity."
+                        "A verdict outcome may only be set on an 'accused' " "entity."
                     )
                 }
             )

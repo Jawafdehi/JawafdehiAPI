@@ -2,9 +2,9 @@
 
 The shared :class:`jawafdehi_shared.auth.oidc.OIDCAuthentication` validates the
 Zitadel JWT and SYNCS the token's project roles into Django Groups on every
-request (``contributor`` -> ``Contributor``, ``ngm_gold`` -> ``NGM_GoldTier``,
-etc.). So role checks here are just Django Group-membership checks on
-``request.user.groups`` — no token re-parsing.
+request (``moderator``/``contributor`` -> ``Caseworker``, etc.). So role checks
+here are just Django Group-membership checks on ``request.user.groups`` — no
+token re-parsing.
 
 ``HasNgmRole`` gates the internal write/query planes (the gated SQL endpoint and
 ingestion). Unauthenticated requests fail with 401 (the authenticator returns a
@@ -16,18 +16,13 @@ from __future__ import annotations
 
 from rest_framework import permissions
 
-# Django Group names that grant access to the NGM internal planes. These mirror
-# the OIDC role->group mapping in the shared authenticator: a caseworker (human
-# or service account) or any NGM rate-limit tier may run the gated query /
-# ingestion surface. ("Contributor" was renamed to "Caseworker" platform-wide.)
+# Django Group names that grant access to the court-data internal planes. v3:
+# the single content-staff role (Caseworker) — human or service account — may
+# run the gated query / ingestion surface. Superuser is short-circuited in the
+# permission classes below. The old court-data rate tiers are retired.
 NGM_ROLE_GROUPS = frozenset(
     {
-        "Admin",
-        "Moderator",
         "Caseworker",
-        "NGM_SilverTier",
-        "NGM_GoldTier",
-        "NGM_PlatinumTier",
     }
 )
 

@@ -238,25 +238,34 @@ class WritePlaneAuthTests(_DbAPITestCase):
         cls.norole = User.objects.create(username="oidc-sub-norole")
 
     def test_unauth_create_is_401(self):
-        resp = self.client.post("/api/entities", _person_payload("a-unauth"), format="json")
+        resp = self.client.post(
+            "/api/entities", _person_payload("a-unauth"), format="json"
+        )
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_bogus_token_is_401(self):
         self.client.credentials(HTTP_AUTHORIZATION="Bearer not-a-real-jwt")
-        resp = self.client.post("/api/entities", _person_payload("b-bogus"), format="json")
+        resp = self.client.post(
+            "/api/entities", _person_payload("b-bogus"), format="json"
+        )
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_authed_without_role_is_403(self):
         self.client.force_authenticate(user=self.norole)
-        resp = self.client.post("/api/entities", _person_payload("c-norole"), format="json")
+        resp = self.client.post(
+            "/api/entities", _person_payload("c-norole"), format="json"
+        )
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_moderator_can_write(self):
-        moderator = User.objects.create(username="oidc-sub-moderator")
-        g, _ = Group.objects.get_or_create(name="Moderator")
-        moderator.groups.add(g)
-        self.client.force_authenticate(user=moderator)
-        resp = self.client.post("/api/entities", _person_payload("d-moderator"), format="json")
+    def test_caseworker_can_write(self):
+        # v3: the single content-staff role (Caseworker) may write entities.
+        caseworker = User.objects.create(username="oidc-sub-caseworker")
+        g, _ = Group.objects.get_or_create(name="Caseworker")
+        caseworker.groups.add(g)
+        self.client.force_authenticate(user=caseworker)
+        resp = self.client.post(
+            "/api/entities", _person_payload("d-caseworker"), format="json"
+        )
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, msg=resp.data)
 
     def test_readonly_cannot_write(self):
@@ -264,12 +273,16 @@ class WritePlaneAuthTests(_DbAPITestCase):
         g, _ = Group.objects.get_or_create(name="ReadOnly")
         readonly.groups.add(g)
         self.client.force_authenticate(user=readonly)
-        resp = self.client.post("/api/entities", _person_payload("e-readonly"), format="json")
+        resp = self.client.post(
+            "/api/entities", _person_payload("e-readonly"), format="json"
+        )
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_create_then_get_round_trip(self):
         self.client.force_authenticate(user=self.contributor)
-        resp = self.client.post("/api/entities", _person_payload("created-via-api"), format="json")
+        resp = self.client.post(
+            "/api/entities", _person_payload("created-via-api"), format="json"
+        )
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, msg=resp.data)
         iri = resp.data["@id"]
         self.assertEqual(iri, _person_iri("created-via-api"))
@@ -296,7 +309,12 @@ class WritePlaneAuthTests(_DbAPITestCase):
 
     def test_create_invalid_type_is_422(self):
         self.client.force_authenticate(user=self.contributor)
-        bad = {"prefix": "person", "slug": "bad-type", "type": "Wizard", "name": {"en": "X"}}
+        bad = {
+            "prefix": "person",
+            "slug": "bad-type",
+            "type": "Wizard",
+            "name": {"en": "X"},
+        }
         resp = self.client.post("/api/entities", bad, format="json")
         self.assertEqual(resp.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
 
@@ -309,7 +327,9 @@ class WritePlaneAuthTests(_DbAPITestCase):
     def test_duplicate_create_is_409(self):
         self.client.force_authenticate(user=self.contributor)
         self.client.post("/api/entities", _person_payload("dup-slug"), format="json")
-        resp = self.client.post("/api/entities", _person_payload("dup-slug"), format="json")
+        resp = self.client.post(
+            "/api/entities", _person_payload("dup-slug"), format="json"
+        )
         self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
 
     def test_patch_update_bumps_version(self):
@@ -326,10 +346,14 @@ class WritePlaneAuthTests(_DbAPITestCase):
 
     def test_patch_blocked_path_rejected(self):
         self.client.force_authenticate(user=self.contributor)
-        self.client.post("/api/entities", _person_payload("blocked-patch"), format="json")
+        self.client.post(
+            "/api/entities", _person_payload("blocked-patch"), format="json"
+        )
         for blocked in ("/@id", "/@context", "/jawafdehi:version"):
             patch = {"patch_ops": [{"op": "replace", "path": blocked, "value": "x"}]}
-            resp = self.client.patch("/api/entities/person/blocked-patch", patch, format="json")
+            resp = self.client.patch(
+                "/api/entities/person/blocked-patch", patch, format="json"
+            )
             self.assertEqual(
                 resp.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY, msg=blocked
             )
@@ -361,7 +385,9 @@ class WritePlaneAuthTests(_DbAPITestCase):
         self.client.force_authenticate(user=self.contributor)
         self.client.post("/api/entities", _person_payload("retype-bad"), format="json")
         patch = {"patch_ops": [{"op": "replace", "path": "/@type", "value": "Wizard"}]}
-        resp = self.client.patch("/api/entities/person/retype-bad", patch, format="json")
+        resp = self.client.patch(
+            "/api/entities/person/retype-bad", patch, format="json"
+        )
         self.assertEqual(resp.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
 
 
@@ -451,7 +477,11 @@ class CanonicalAuthorityStoreTests(_DbAPITestCase):
         self.assertEqual(created["@id"], canonical)
         self.assertIsNotNone(EntityRepository().get_entity(canonical))
         # The non-canonical host was never persisted as a separate PK.
-        self.assertIsNone(EntityRepository().get_entity(doc_id_was := "http://evil.com:8443/entity/person/canon-me"))
+        self.assertIsNone(
+            EntityRepository().get_entity(
+                doc_id_was := "http://evil.com:8443/entity/person/canon-me"
+            )
+        )
         self.assertNotEqual(doc_id_was, canonical)
 
     def test_persistence_put_entity_canonicalizes(self):
@@ -487,26 +517,29 @@ def _now():
 
 
 class AdminPlaneAuthTests(_DbAPITestCase):
-    """Reindex (admin plane) is gated on Moderator/Admin — NOT the write role."""
+    """Reindex (admin plane). v3: gated on the single content-staff role
+    (Caseworker) or superuser — the old separate Moderator/Admin tier is retired.
+    ReadOnly (and no-role) are still denied."""
 
     @classmethod
     def setUpTestData(cls):
         cls.caseworker = User.objects.create(username="oidc-sub-cw")
         cls.caseworker.groups.add(Group.objects.get_or_create(name="Caseworker")[0])
-        cls.moderator = User.objects.create(username="oidc-sub-mod")
-        cls.moderator.groups.add(Group.objects.get_or_create(name="Moderator")[0])
+        cls.readonly = User.objects.create(username="oidc-sub-ro")
+        cls.readonly.groups.add(Group.objects.get_or_create(name="ReadOnly")[0])
 
     def test_reindex_unauth_is_401(self):
         resp = self.client.post("/api/admin/reindex")
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
-    def test_reindex_write_role_is_403(self):
-        # A content/write role (Caseworker) must NOT reach the admin plane.
-        self.client.force_authenticate(user=self.caseworker)
+    def test_reindex_readonly_is_403(self):
+        # ReadOnly must NOT reach the admin plane.
+        self.client.force_authenticate(user=self.readonly)
         resp = self.client.post("/api/admin/reindex")
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
-    def test_reindex_moderator_ok(self):
-        self.client.force_authenticate(user=self.moderator)
+    def test_reindex_caseworker_ok(self):
+        # v3: the single content-staff role may reindex.
+        self.client.force_authenticate(user=self.caseworker)
         resp = self.client.post("/api/admin/reindex")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)

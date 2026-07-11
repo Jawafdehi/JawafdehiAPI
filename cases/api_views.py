@@ -14,7 +14,6 @@ import jsonpatch
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, connection, transaction
-from django.db.models import Q
 from django.http import HttpResponse
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
@@ -62,8 +61,6 @@ from .rules.predicates import (
     can_transition_case_state,
     can_view_case,
     is_admin_or_moderator,
-    is_case_contributor,
-    is_caseworker,
     is_readonly,
 )
 from .serializers import (
@@ -195,10 +192,9 @@ def _if_match_matches(request, case) -> bool:
 
         **Visibility rules:**
         - Unauthenticated requests: only PUBLISHED cases.
-        - Admin / Moderator / Caseworker / ReadOnly: all non-CLOSED cases
-          (PUBLISHED + IN_REVIEW + DRAFT).
-        - Other authenticated users: PUBLISHED cases + any DRAFT or IN_REVIEW cases
-          they are explicitly assigned to as contributors.
+        - Content staff (Caseworker / superuser) and ReadOnly: all non-CLOSED
+          cases (PUBLISHED + IN_REVIEW + DRAFT).
+        - Other authenticated users (no role): only PUBLISHED cases.
 
         Results are ordered by creation date (newest first).
 
@@ -390,24 +386,18 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         else:
             # List endpoint: visibility depends on authentication/role.
             # - Unauthenticated: PUBLISHED only
-            # - Admin/Moderator/Caseworker/ReadOnly: all non-CLOSED cases
-            # - Other authenticated: PUBLISHED + cases they are assigned to
+            # - Content staff (Caseworker/superuser) + ReadOnly: all non-CLOSED
+            # - Other authenticated (no role): PUBLISHED only
+            #   (v3: object-level case assignment is retired, so there is no
+            #   "cases I'm assigned to" widening for role-less users.)
             if not (self.request.user and self.request.user.is_authenticated):
                 queryset = Case.objects.filter(state=CaseState.PUBLISHED)
-            elif (
-                is_admin_or_moderator(self.request.user)
-                or is_caseworker(self.request.user)
-                or is_readonly(self.request.user)
+            elif is_admin_or_moderator(self.request.user) or is_readonly(
+                self.request.user
             ):
                 queryset = Case.objects.exclude(state=CaseState.CLOSED)
             else:
-                queryset = (
-                    Case.objects.exclude(state=CaseState.CLOSED)
-                    .filter(
-                        Q(state=CaseState.PUBLISHED) | Q(contributors=self.request.user)
-                    )
-                    .distinct()
-                )
+                queryset = Case.objects.filter(state=CaseState.PUBLISHED)
 
         # Apply tag filtering if provided
         tags_param = self.request.query_params.get("tags", None)
@@ -525,7 +515,6 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             case.validate()
             with transaction.atomic():
                 case.save()
-                case.contributors.add(request.user)
 
                 # Create entity binds (NES ids) for alleged/related entities
                 for nes_id in validated.get("alleged_entities", []):
@@ -574,7 +563,6 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 additional_details=item.get("additional_details") or "",
                 ordinal=ordinal,
             )
-
 
     def retrieve(self, request, *args, **kwargs):
         """
@@ -634,17 +622,12 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         # The history carries internal casework data (moderator names + return
         # reasons) for EVERY state — including PUBLISHED — so it is gated
         # unconditionally, unlike retrieve() (which exposes a published case's
-        # content to the public). Access = a casework-viewing role OR a
-        # contributor (the author's feedback loop: they must see why their case
-        # was returned, even without a casework role). Anyone else gets 404 so
-        # the endpoint never confirms a case's existence to an outsider.
-        if not request.user.is_authenticated or not (
-            can_view_case(request.user, case)
-            or is_case_contributor(request.user, case)
-        ):
-            return Response(
-                {"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND
-            )
+        # content to the public). Access = a casework-viewing role
+        # (content staff or ReadOnly). Anyone else gets 404 so the endpoint
+        # never confirms a case's existence to an outsider. (v3: the old
+        # per-object contributor fallback is retired with Case.contributors.)
+        if not request.user.is_authenticated or not can_view_case(request.user, case):
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
 
         # select_related("actor") so the serializer's actor_name lookup per row
         # doesn't fan out into N+1 queries.
@@ -665,8 +648,8 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         snapshot of the case. The snapshot is validated after patching, then scalar
         fields are saved via a bulk UPDATE and M2M relations are updated with .set().
 
-        Blocked paths (id, version, contributors, timestamps,
-        versionInfo) are rejected before the patch is applied.
+        Blocked paths (id, version, timestamps, versionInfo) are rejected
+        before the patch is applied.
         """
         # get_object() raises DRF's Http404/NotFound (→ 404) when the case is
         # absent; the ViewSet's queryset already scopes visibility, so no manual
@@ -765,9 +748,9 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             )
         # All target states (IN_REVIEW / PUBLISHED / CLOSED / DRAFT) are
         # supported; each dispatches to the corresponding model method below.
-        # can_transition_case_state gates the roles: Caseworkers are confined to
-        # DRAFT<->IN_REVIEW by the predicate, so PUBLISHED/CLOSED/revert-to-DRAFT
-        # are effectively Admin/Moderator only.
+        # can_transition_case_state gates the roles: v3 allows any content-staff
+        # principal (superuser or Caseworker) to transition to ANY state — the
+        # old Caseworker DRAFT<->IN_REVIEW confinement is retired.
 
         # Gate each join rewrite (entities / evidence / court-case refs) to ops
         # that actually target its path: _build_snapshot always carries these
@@ -1158,8 +1141,14 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 "cases_closed": {"type": "integer", "example": 31},
                 "entities_tracked": {"type": "integer", "example": 89},
                 "nes": {"type": "object", "description": "NES coverage metrics"},
-                "ngm": {"type": "object", "description": "NGM judicial coverage metrics"},
-                "materials": {"type": "object", "description": "NGM materials coverage metrics"},
+                "ngm": {
+                    "type": "object",
+                    "description": "NGM judicial coverage metrics",
+                },
+                "materials": {
+                    "type": "object",
+                    "description": "NGM materials coverage metrics",
+                },
                 "last_updated": {
                     "type": "string",
                     "format": "date-time",
@@ -1192,9 +1181,7 @@ class StatisticsView(APIView):
 
     def get(self, request):
         """Serve the shared precomputed statistics snapshot (O(1) PK lookup)."""
-        snapshot = StatisticsSnapshot.objects.filter(
-            pk=STATISTICS_SNAPSHOT_KEY
-        ).first()
+        snapshot = StatisticsSnapshot.objects.filter(pk=STATISTICS_SNAPSHOT_KEY).first()
         if snapshot is not None:
             # A bootstrap-placeholder row (committed by the claim below while
             # the winning request is still computing) must never be pinned at
@@ -1203,9 +1190,7 @@ class StatisticsView(APIView):
             cache_control = (
                 "no-store" if snapshot.is_placeholder else self.CACHE_CONTROL
             )
-            return Response(
-                snapshot.data, headers={"Cache-Control": cache_control}
-            )
+            return Response(snapshot.data, headers={"Cache-Control": cache_control})
         # Bootstrap: no snapshot row yet (fresh database, before the first
         # scheduled refresh has run). Claim the row with an atomic INSERT so
         # exactly ONE request pays the aggregation; concurrent requests that
@@ -1689,6 +1674,10 @@ class MeView(APIView):
             {
                 "mapped": True,
                 "roles": roles,
+                # v3: admin == Django superuser (no group), so ``roles`` is empty
+                # for an admin — admin-ness is carried by ``is_admin``. Mirrors
+                # review.views._user_roles_payload so both "me" surfaces agree.
+                "is_admin": real_user.is_superuser,
                 "user_id": real_user.id,
                 "username": real_user.get_username(),
                 "owui_user_id": identity.owui_user_id,

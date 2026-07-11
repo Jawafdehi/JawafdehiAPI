@@ -126,10 +126,9 @@ def test_published_to_draft_revert_allowed_for_admin_moderator(role):
 
 @pytest.mark.django_db
 def test_in_review_to_draft_revert_allowed_for_caseworker():
-    """Caseworkers may revert IN_REVIEW -> DRAFT (both in the allowed set)."""
+    """Caseworkers may revert IN_REVIEW -> DRAFT."""
     user = create_user_with_role("cw-revert", "cw-revert@example.com", "Caseworker")
     case = _publishable_case(state=CaseState.IN_REVIEW)
-    case.contributors.add(user)
 
     response = _patch_state(_authed_client(user), case, CaseState.DRAFT)
 
@@ -139,34 +138,34 @@ def test_in_review_to_draft_revert_allowed_for_caseworker():
 
 
 # ---------------------------------------------------------------------------
-# Forbidden transitions per role (403)
+# v3 authz model: the single content-staff role (Caseworker) can transition to
+# ANY state, including PUBLISHED and CLOSED. The old caseworker-confined-to-
+# {DRAFT, IN_REVIEW} boundary is retired with the Caseworker/Moderator collapse.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
-def test_caseworker_cannot_publish():
+def test_caseworker_can_publish():
     user = create_user_with_role("cw-pub", "cw-pub@example.com", "Caseworker")
     case = _publishable_case(state=CaseState.IN_REVIEW)
-    case.contributors.add(user)
 
     response = _patch_state(_authed_client(user), case, CaseState.PUBLISHED)
 
-    assert response.status_code == 403
+    assert response.status_code == 200
     case.refresh_from_db()
-    assert case.state == CaseState.IN_REVIEW
+    assert case.state == CaseState.PUBLISHED
 
 
 @pytest.mark.django_db
-def test_caseworker_cannot_close():
+def test_caseworker_can_close():
     user = create_user_with_role("cw-close", "cw-close@example.com", "Caseworker")
     case = _publishable_case(state=CaseState.IN_REVIEW)
-    case.contributors.add(user)
 
     response = _patch_state(_authed_client(user), case, CaseState.CLOSED)
 
-    assert response.status_code == 403
+    assert response.status_code == 200
     case.refresh_from_db()
-    assert case.state == CaseState.IN_REVIEW
+    assert case.state == CaseState.CLOSED
 
 
 # ---------------------------------------------------------------------------

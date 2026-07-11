@@ -311,13 +311,12 @@ def test_history_endpoint_hidden_for_public_on_published():
 
 
 @pytest.mark.django_db
-def test_history_endpoint_visible_to_contributor_author():
-    """The case author (a contributor without a casework role) can read their
-    own case's history — that's the point of the feedback loop."""
+def test_history_endpoint_visible_to_caseworker():
+    """A Caseworker can read any case's history — v3 retires object-level
+    assignment, so the content-staff role sees the whole feedback loop."""
     author = create_user_with_role("cw-author", "cw-author@example.com", "Caseworker")
     mod = create_user_with_role("mod-fb", "mod-fb@example.com", "Moderator")
     case = _publishable_case(state=CaseState.IN_REVIEW)
-    case.contributors.add(author)
     # Moderator sends it back with a reason.
     _patch_state(
         _authed_client(mod),

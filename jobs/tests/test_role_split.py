@@ -3,9 +3,9 @@
 The queue draws a read-vs-drive line (jobs/permissions.py):
 
   * ``CanObserveJobs`` gates the read-only dashboard (GET /api/jobs). It admits
-    superuser, the content roles (Admin/Moderator/Caseworker via ``has_role``),
-    the ReviewAssistant service account, and the org-wide ReadOnly role. Public
-    and anonymous are excluded.
+    superuser, the Caseworker content role (via ``has_role``), the JobPoller
+    service account, and the org-wide ReadOnly role. No-role and anonymous
+    callers are excluded.
   * ``CanConsumeJobs`` gates every MUTATING op (POST enqueue, claim, stage,
     result). It admits the same set MINUS ReadOnly — a read-only role may watch
     the queue but never drive it.
@@ -58,18 +58,19 @@ def test_dashboard_anon_denied():
 
 
 @pytest.mark.django_db
-def test_dashboard_public_denied():
-    """Public has no queue access at all."""
-    assert _client_for("pub-observer", "Public").get("/api/jobs/").status_code == 403
+def test_dashboard_no_role_denied():
+    """An authenticated user with no group has no queue access at all."""
+    assert _client_for("norole-observer", None).get("/api/jobs/").status_code == 403
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize(
-    "group", ["Caseworker", "Moderator", "Admin", "ReadOnly", "ReviewAssistant"]
-)
+@pytest.mark.parametrize("group", ["Caseworker", "ReadOnly", "JobPoller"])
 def test_dashboard_observers_allowed(group):
-    """Content roles, ReviewAssistant, AND the org-wide ReadOnly role may observe."""
-    assert _client_for(f"obs-{group.lower()}", group).get("/api/jobs/").status_code == 200
+    """The Caseworker content role, the JobPoller service account, AND the
+    org-wide ReadOnly role may observe."""
+    assert (
+        _client_for(f"obs-{group.lower()}", group).get("/api/jobs/").status_code == 200
+    )
 
 
 # --------------------------------------------------------------------------
@@ -87,17 +88,17 @@ def test_enqueue_readonly_denied(_demo_kind):
 
 
 @pytest.mark.django_db
-def test_enqueue_public_denied(_demo_kind):
-    r = _client_for("pub-enqueue", "Public").post(
+def test_enqueue_no_role_denied(_demo_kind):
+    r = _client_for("norole-enqueue", None).post(
         "/api/jobs/", {"kind": "demo"}, format="json"
     )
     assert r.status_code == 403
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("group", ["Caseworker", "Moderator", "Admin", "ReviewAssistant"])
+@pytest.mark.parametrize("group", ["Caseworker", "JobPoller"])
 def test_enqueue_drivers_allowed(_demo_kind, group):
-    """Content roles + the ReviewAssistant service account may enqueue."""
+    """The Caseworker content role + the JobPoller service account may enqueue."""
     r = _client_for(f"enq-{group.lower()}", group).post(
         "/api/jobs/", {"kind": "demo", "payload": {"n": 1}}, format="json"
     )

@@ -31,16 +31,14 @@ ROLES_CLAIM = "urn:zitadel:iam:org:project:roles"
 
 # Groups the role mapping references; created per test so the sync can attach
 # them. Mirrors create_groups.py / the predicate group names.
+#
+# v3 authz model: the only Django groups are Caseworker (the single content-staff
+# role), ReadOnly and JobPoller. Admin is is_superuser (no group); the old
+# Moderator/Public groups and the NGM_* tiers are retired.
 ALL_GROUPS = [
-    "Admin",
-    "Moderator",
     "Caseworker",
     "ReadOnly",
-    "Public",
-    "ReviewAssistant",
-    "NGM_SilverTier",
-    "NGM_GoldTier",
-    "NGM_PlatinumTier",
+    "JobPoller",
 ]
 
 
@@ -161,12 +159,14 @@ def test_valid_token_creates_user_once_and_resyncs_groups(groups):
     assert set(user1.groups.values_list("name", flat=True)) == {"Caseworker"}
 
     # Second request for the same sub with different roles: same user, groups
-    # overwritten (Zitadel is source of truth).
+    # overwritten (Zitadel is source of truth). In v3 ``admin`` maps to no group
+    # (it only sets is_superuser); ``readonly`` maps to the ReadOnly group.
     t2 = _make_token(sub="sub-x", roles={"admin": {"1": "d"}, "readonly": {"1": "d"}})
     user2, _ = _authenticate(t2)
     assert user2.pk == user1.pk
     assert User.objects.filter(username="sub-x").count() == 1
-    assert set(user2.groups.values_list("name", flat=True)) == {"Admin", "ReadOnly"}
+    assert set(user2.groups.values_list("name", flat=True)) == {"ReadOnly"}
+    assert user2.is_superuser is True
 
 
 @pytest.mark.django_db
@@ -256,19 +256,18 @@ def test_malformed_bearer_header_rejected(groups):
 # ---------------------------------------------------------------------------
 @pytest.mark.django_db
 def test_multiple_roles_map_to_multiple_groups(groups):
+    # v3 keys: moderator + readonly collapse/map to {Caseworker, ReadOnly}.
     token = _make_token(
         sub="multi",
         roles={
-            "admin": {"1": "d"},
-            "ngm_gold": {"1": "d"},
-            "review_assistant": {"1": "d"},
+            "moderator": {"1": "d"},
+            "readonly": {"1": "d"},
         },
     )
     user, _ = _authenticate(token)
     assert set(user.groups.values_list("name", flat=True)) == {
-        "Admin",
-        "NGM_GoldTier",
-        "ReviewAssistant",
+        "Caseworker",
+        "ReadOnly",
     }
 
 
@@ -286,13 +285,13 @@ def test_unknown_roles_ignored(groups):
 def test_array_wrapped_roles_claim_normalized(groups):
     # Zitadel docs sometimes render the claim array-wrapped; extract_role_keys
     # normalizes both shapes.
+    # v3: moderator and caseworker both collapse to the single Caseworker group.
     token = _make_token(
         sub="array-roles",
         roles=[{"moderator": {"1": "d"}}, {"caseworker": {"1": "d"}}],
     )
     user, _ = _authenticate(token)
     assert set(user.groups.values_list("name", flat=True)) == {
-        "Moderator",
         "Caseworker",
     }
 
@@ -374,10 +373,10 @@ def test_synced_groups_satisfy_existing_predicates(groups):
 # ---------------------------------------------------------------------------
 @pytest.mark.django_db
 def test_admin_role_sets_is_superuser(groups):
-    """The ``admin`` role maps to the Admin group AND promotes is_superuser."""
+    """The ``admin`` role promotes is_superuser and attaches NO group (v3)."""
     token = _make_token(sub="su-1", roles={"admin": {"1": "d"}})
     user, _ = _authenticate(token)
-    assert set(user.groups.values_list("name", flat=True)) == {"Admin"}
+    assert set(user.groups.values_list("name", flat=True)) == set()
     assert user.is_superuser is True
 
 
@@ -404,12 +403,3 @@ def test_non_admin_roles_do_not_set_is_superuser(groups):
         token = _make_token(sub=f"nonsu-{role}", roles={role: {"1": "d"}})
         user, _ = _authenticate(token)
         assert user.is_superuser is False, role
-
-
-@pytest.mark.django_db
-def test_public_role_maps_to_public_group(groups):
-    """The new ``public`` role maps to the Public group."""
-    token = _make_token(sub="pub-1", roles={"public": {"1": "d"}})
-    user, _ = _authenticate(token)
-    assert set(user.groups.values_list("name", flat=True)) == {"Public"}
-    assert user.is_superuser is False

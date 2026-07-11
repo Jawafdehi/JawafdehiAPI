@@ -32,8 +32,7 @@ class HasContributorRole(permissions.BasePermission):
     """
 
     message = (
-        "Access to the Casework Review System requires at least the "
-        "Caseworker role."
+        "Access to the Casework Review System requires at least the " "Caseworker role."
     )
 
     def has_permission(self, request, view):
@@ -42,10 +41,10 @@ class HasContributorRole(permissions.BasePermission):
             return False
         if user.is_superuser:
             return True
-        # has_role covers Admin / Moderator / Caseworker. ReviewAssistant is a
-        # review-system role (manages reviews + document sources) that also gets
-        # in here without being a general content caseworker.
-        if user.groups.filter(name="ReviewAssistant").exists():
+        # has_role covers the Caseworker content-staff role. JobPoller is the
+        # machine role (the review poller) that also drives the review system
+        # without being a content caseworker.
+        if user.groups.filter(name="JobPoller").exists():
             return True
         # has_role is a django-rules predicate; call it directly.
         return bool(has_role(user))
@@ -54,13 +53,13 @@ class HasContributorRole(permissions.BasePermission):
 class CanReadReview(permissions.BasePermission):
     """Allow read access to the Casework Review System.
 
-    Admits superuser, Admin, Moderator, Caseworker, ReviewAssistant, and the
-    org-wide ReadOnly role (ReadOnly includes casework view). The Public role is
-    deliberately EXCLUDED — it has no casework access. Used only on GET
-    endpoints (review list/detail, rules, config read, ``me``); mutation
-    endpoints keep HasContributorRole, which deliberately excludes ReadOnly and
-    Public. This is what lets a read-only role observe the queue without being
-    able to claim jobs, submit results, or re-queue reviews.
+    Admits superuser, the Caseworker content-staff role, the JobPoller machine
+    role, and the org-wide ReadOnly role (ReadOnly includes casework view).
+    Unauthenticated/no-role callers are excluded. Used only on GET endpoints
+    (review list/detail, rules, config read, ``me``); mutation endpoints keep
+    HasContributorRole, which deliberately excludes ReadOnly. This is what lets
+    a read-only role observe the queue without being able to claim jobs, submit
+    results, or re-queue reviews.
     """
 
     message = "Reading the Casework Review System requires a role with read access."
@@ -71,22 +70,22 @@ class CanReadReview(permissions.BasePermission):
             return False
         if user.is_superuser:
             return True
-        # ReviewAssistant + ReadOnly get read access by group name; the rest
-        # (Admin / Moderator / Caseworker) come through has_role. Public is
-        # intentionally NOT listed here — it has no casework read access.
-        if user.groups.filter(name__in=["ReviewAssistant", "ReadOnly"]).exists():
+        # JobPoller + ReadOnly get read access by group name; the Caseworker
+        # content role comes through has_role.
+        if user.groups.filter(name__in=["JobPoller", "ReadOnly"]).exists():
             return True
         return bool(has_role(user))
 
 
-class IsAdminOrModerator(permissions.BasePermission):
-    """Allow only Admin / Moderator (or superuser).
+class IsContentStaff(permissions.BasePermission):
+    """Allow the content-staff role (Caseworker) or a superuser.
 
-    Used to gate review-wide settings (e.g. the global scoring thresholds) that
-    a plain Caseworker should be able to read but not change.
+    v3 authz model: there is one content role (Caseworker, folding in the old
+    Moderator). Used to gate review-wide settings (e.g. the global scoring
+    thresholds) to content staff; ReadOnly may read but not change them.
     """
 
-    message = "This action requires the Admin or Moderator role."
+    message = "This action requires the Caseworker role."
 
     def has_permission(self, request, view):
         user = request.user
