@@ -77,14 +77,15 @@ class CanReadReview(permissions.BasePermission):
         return bool(has_role(user))
 
 
-class IsAdminOrModerator(permissions.BasePermission):
-    """Allow only Admin / Moderator (or superuser).
+class IsContentStaff(permissions.BasePermission):
+    """Allow the content-staff role (Caseworker) or a superuser.
 
-    Used to gate review-wide settings (e.g. the global scoring thresholds) that
-    a plain Caseworker should be able to read but not change.
+    v3 authz model: there is one content role (Caseworker, folding in the old
+    Moderator). Used to gate review-wide settings (e.g. the global scoring
+    thresholds) to content staff; ReadOnly may read but not change them.
     """
 
-    message = "This action requires the Admin or Moderator role."
+    message = "This action requires the Caseworker role."
 
     def has_permission(self, request, view):
         user = request.user

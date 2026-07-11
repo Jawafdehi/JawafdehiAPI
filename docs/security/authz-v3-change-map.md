@@ -10,7 +10,7 @@ frontend: `worktrees/wt-authz-v3-fe` (branch `authz-v3`).
 - **superuser** ← Zitadel `admin` (no group). Only principal that manages users.
 - **`Caseworker`** ← Zitadel `moderator` + `contributor` (+ legacy `caseworker`).
   Single content-staff role with the *old Moderator's* full powers: view/create/
-  edit/delete/publish any case, entities, courts/materials + NGM query/ingest,
+  edit/delete/publish any case, entities, court-data query/ingest + materials,
   reviews + review-config PUT, `is_staff` + Wagtail CMS. **Cannot manage users.**
 - **`ReadOnly`** ← `readonly`. Reads incl. casework, no writes.
 - **`JobPoller`** ← `job_poller` (renamed from `ReviewAssistant`). Review r/w +

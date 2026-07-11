@@ -16,10 +16,10 @@ from __future__ import annotations
 
 from rest_framework import permissions
 
-# Django Group names that grant access to the NGM internal planes. v3: the
-# single content-staff role (Caseworker) — human or service account — may run
-# the gated query / ingestion surface. Superuser is short-circuited in the
-# permission classes below. The old NGM rate tiers are retired.
+# Django Group names that grant access to the court-data internal planes. v3:
+# the single content-staff role (Caseworker) — human or service account — may
+# run the gated query / ingestion surface. Superuser is short-circuited in the
+# permission classes below. The old court-data rate tiers are retired.
 NGM_ROLE_GROUPS = frozenset(
     {
         "Caseworker",

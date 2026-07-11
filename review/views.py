@@ -31,7 +31,7 @@ from .models import CaseReview, ReviewConfig
 from .permissions import (
     CanReadReview,
     HasContributorRole,
-    IsAdminOrModerator,
+    IsContentStaff,
 )
 from .serializers import (
     CaseReviewDetailSerializer,
@@ -329,15 +329,16 @@ def rule_detail(request, pk):
 def config_view(request):
     """Get or edit global review config (thresholds + LLM sampling).
 
-    Any caseworker may read the config, but only Admin / Moderator may change
-    it — the thresholds are global and affect every review's disposition.
+    Any role with review-read access may GET the config; only content staff
+    (Caseworker, or a superuser) may change it — the thresholds are global and
+    affect every review's disposition.
     """
     cfg = ReviewConfig.get_active()
     if request.method == "GET":
         return Response(ReviewConfigSerializer(cfg).data)
-    if not IsAdminOrModerator().has_permission(request, None):
+    if not IsContentStaff().has_permission(request, None):
         return Response(
-            {"detail": IsAdminOrModerator.message},
+            {"detail": IsContentStaff.message},
             status=status.HTTP_403_FORBIDDEN,
         )
     s = ReviewConfigSerializer(cfg, data=request.data, partial=True)

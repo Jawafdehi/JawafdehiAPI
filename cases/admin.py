@@ -245,7 +245,8 @@ class CaseAdminForm(forms.ModelForm):
                     self.request.user, self.instance, new_state
                 ):
                     errors["state"] = (
-                        f"You do not have permission to transition from {old_state} to {new_state}. Caseworkers can only transition between DRAFT and IN_REVIEW states."
+                        f"You do not have permission to transition from {old_state} to {new_state}. "
+                        "Case state transitions require the Caseworker role."
                     )
 
         # Validate required fields based on state

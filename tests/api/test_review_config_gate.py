@@ -4,7 +4,7 @@ The review config holds GLOBAL scoring thresholds (pass/revise) + LLM sampling
 that affect every review's disposition. The endpoint deliberately splits its
 permissions: any casework READ role may GET the config, but only content staff
 (superuser or Caseworker) may PUT it. That write gate is enforced by an INLINE
-``IsAdminOrModerator().has_permission(...)`` check inside the view (not the
+``IsContentStaff().has_permission(...)`` check inside the view (not the
 ``permission_classes``); in the v3 model the Moderator role is folded into
 Caseworker, so a Caseworker legitimately CAN rewrite the thresholds while the
 org-wide ReadOnly role cannot. These tests pin the matrix so a regression can't

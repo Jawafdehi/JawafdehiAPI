@@ -151,10 +151,12 @@ def can_manage_user(user: User, target_user: Optional[User]) -> bool:
 # callers see only PUBLISHED. Write predicates intentionally omit is_readonly.
 #
 # NOTE: ``is_admin_or_moderator`` is the only term here that carries the
-# ``is_superuser`` short-circuit — do NOT drop it in favour of
-# ``is_caseworker | is_readonly``, or a superuser (who has no group) would lose
-# draft-case view. ``is_caseworker`` is now redundant with it but kept explicit.
-can_view_case = is_admin_or_moderator | is_caseworker | is_readonly
+# ``is_superuser`` short-circuit AND already covers the Caseworker group (it is
+# ``is_superuser | Caseworker`` in v3), so it subsumes a standalone
+# ``is_caseworker`` term — don't re-add one (it would just re-run the same
+# Caseworker query). Do NOT reduce this to ``is_caseworker | is_readonly``
+# either, or a superuser (who has no group) would lose draft-case view.
+can_view_case = is_admin_or_moderator | is_readonly
 # can_change_case is defined above as a 2-arg predicate (callers pass the case).
 
 # Source permissions were removed with DocumentSource (ADR: cases own no

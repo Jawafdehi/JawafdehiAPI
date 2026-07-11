@@ -87,9 +87,10 @@ class Command(BaseCommand):
 
         # Caseworker: the single content-staff role (v3). It folds in the old
         # Moderator, so it holds the FULL case + relationship perm set including
-        # delete_case. NES entity writes are authorized in entities.permissions
-        # by Group membership (Caseworker), not by these model permissions.
-        # Admin == is_superuser (no group), so no Admin group is created.
+        # delete_case. Entity-registry writes are authorized in
+        # entities.permissions by Group membership (Caseworker), not by these
+        # model permissions. Admin == is_superuser (no group), so no Admin group
+        # is created.
         caseworker_group, created = Group.objects.get_or_create(name="Caseworker")
         if created:
             self.stdout.write(self.style.SUCCESS("Created Caseworker group"))

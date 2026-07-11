@@ -748,9 +748,9 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             )
         # All target states (IN_REVIEW / PUBLISHED / CLOSED / DRAFT) are
         # supported; each dispatches to the corresponding model method below.
-        # can_transition_case_state gates the roles: Caseworkers are confined to
-        # DRAFT<->IN_REVIEW by the predicate, so PUBLISHED/CLOSED/revert-to-DRAFT
-        # are effectively Admin/Moderator only.
+        # can_transition_case_state gates the roles: v3 allows any content-staff
+        # principal (superuser or Caseworker) to transition to ANY state — the
+        # old Caseworker DRAFT<->IN_REVIEW confinement is retired.
 
         # Gate each join rewrite (entities / evidence / court-case refs) to ops
         # that actually target its path: _build_snapshot always carries these
@@ -1674,6 +1674,10 @@ class MeView(APIView):
             {
                 "mapped": True,
                 "roles": roles,
+                # v3: admin == Django superuser (no group), so ``roles`` is empty
+                # for an admin — admin-ness is carried by ``is_admin``. Mirrors
+                # review.views._user_roles_payload so both "me" surfaces agree.
+                "is_admin": real_user.is_superuser,
                 "user_id": real_user.id,
                 "username": real_user.get_username(),
                 "owui_user_id": identity.owui_user_id,

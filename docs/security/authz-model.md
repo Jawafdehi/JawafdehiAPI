@@ -101,7 +101,7 @@ Superuser (R1) is allow for every row and omitted from columns.
 | Create / patch / delete entity | ❌ | ❌ | ✅ | ✅ | ✅ | `HasEntityWriteRole` = {Caseworker, Moderator, Admin}. |
 | Reindex entities | ❌ | ❌ | ❌ | ✅ | ✅ | `HasEntityAdminRole` = {Moderator, Admin}. |
 
-### 4c. Courts + Materials — NGM plane (`courts/`, `materials/`)
+### 4c. Courts + Materials — court-data plane (`courts/`, `materials/`)
 
 | Action | Anon | Public/ReadOnly | Caseworker | NGM tiers | Moderator/Admin | Rule / notes |
 |---|---|---|---|---|---|---|

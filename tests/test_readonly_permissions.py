@@ -18,7 +18,7 @@ from cases.rules.predicates import (
     is_caseworker,
     is_readonly,
 )
-from review.permissions import CanReadReview, HasContributorRole, IsAdminOrModerator
+from review.permissions import CanReadReview, HasContributorRole, IsContentStaff
 from tests.conftest import create_case_with_entities, create_user_with_role
 
 User = get_user_model()
@@ -163,11 +163,9 @@ def test_readonly_denied_casework_mutations():
 
 @pytest.mark.django_db
 def test_readonly_denied_config_put():
-    """The inline config PUT guard (IsAdminOrModerator) rejects ReadOnly."""
+    """The inline config PUT guard (IsContentStaff) rejects ReadOnly."""
     readonly = _make_readonly()
-    assert not IsAdminOrModerator().has_permission(
-        _build_request("PUT", readonly), None
-    )
+    assert not IsContentStaff().has_permission(_build_request("PUT", readonly), None)
 
 
 # ============================================================================

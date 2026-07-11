@@ -22,10 +22,15 @@ from jawafdehi_shared.auth.oidc import (
 )
 
 # Project roles that grant Django-admin access (is_staff). v3: every role key
-# that maps to the content-staff Caseworker group gets is_staff so moderators
-# (Zitadel `moderator`/`contributor`) can reach Django admin + Wagtail CMS.
-# Superuser is admin-only (the `admin` role, via DEFAULT_SUPERUSER_ROLE).
-STAFF_ROLES = {DEFAULT_SUPERUSER_ROLE, "moderator", "contributor", "caseworker"}
+# that maps to the content-staff Caseworker group gets is_staff so content staff
+# (Zitadel `caseworker`/`moderator`/`contributor`) can reach Django admin +
+# Wagtail CMS. DERIVED from DEFAULT_ROLE_TO_GROUP so the content-staff key set
+# has a single source of truth (the role->group map) and can't drift — adding a
+# new Caseworker-mapped role key here is automatic. Superuser is admin-only (the
+# `admin` role, via DEFAULT_SUPERUSER_ROLE).
+STAFF_ROLES = {DEFAULT_SUPERUSER_ROLE} | {
+    key for key, group in DEFAULT_ROLE_TO_GROUP.items() if group == "Caseworker"
+}
 
 
 def _roles_from_claims(claims: dict) -> set[str]:

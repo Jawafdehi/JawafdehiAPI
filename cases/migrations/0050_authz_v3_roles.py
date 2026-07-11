@@ -50,30 +50,48 @@ _DELETE_GROUPS = (
     "NGM_PlatinumTier",
 )
 
-# Case + relationship perm codenames the surviving Caseworker group must hold
-# (the full former-Moderator set, incl. delete_case).
-_CASEWORKER_PERM_CODENAMES = (
-    "view_case",
-    "add_case",
-    "change_case",
-    "delete_case",
-    "view_caseentityrelationship",
-    "add_caseentityrelationship",
-    "change_caseentityrelationship",
-    "delete_caseentityrelationship",
+# Case + relationship perms the surviving Caseworker group must hold (the full
+# former-Moderator set, incl. delete_case), keyed by (model, codename) so the
+# lookup is content_type-scoped — never matching a same-codename permission from
+# another app. ``model`` is the lowercase model name in the ``cases`` app_label.
+_CASEWORKER_PERMS = (
+    ("case", "view_case"),
+    ("case", "add_case"),
+    ("case", "change_case"),
+    ("case", "delete_case"),
+    ("caseentityrelationship", "view_caseentityrelationship"),
+    ("caseentityrelationship", "add_caseentityrelationship"),
+    ("caseentityrelationship", "change_caseentityrelationship"),
+    ("caseentityrelationship", "delete_caseentityrelationship"),
 )
 
 
 def apply_v3_roles(apps, schema_editor):
     Group = apps.get_model("auth", "Group")
     Permission = apps.get_model("auth", "Permission")
+    ContentType = apps.get_model("contenttypes", "ContentType")
 
     # 1. Ensure the surviving content-staff group exists and holds full perms.
+    #    Django auto-creates model Permission rows on the post_migrate signal,
+    #    which fires ONCE at the very END of the whole migrate run — so on a
+    #    FRESH database these rows do NOT exist yet during this RunPython, and a
+    #    plain filter() would return nothing and silently grant no perms. We
+    #    therefore get_or_create each (content_type, codename) row here (scoped
+    #    to the cases models so no cross-app codename collision is possible),
+    #    matching what cases.management.commands.create_groups does, so the grant
+    #    is correct whether or not create_groups is run afterward.
     caseworker, _ = Group.objects.get_or_create(name="Caseworker")
-    perms = list(Permission.objects.filter(codename__in=_CASEWORKER_PERM_CODENAMES))
-    if perms:
-        # Add (don't replace) so any pre-existing grants are preserved.
-        caseworker.permissions.add(*perms)
+    perms = []
+    for model_name, codename in _CASEWORKER_PERMS:
+        ct, _ = ContentType.objects.get_or_create(app_label="cases", model=model_name)
+        perm, _ = Permission.objects.get_or_create(
+            content_type=ct,
+            codename=codename,
+            defaults={"name": f"Can {codename.split('_', 1)[0]} {model_name}"},
+        )
+        perms.append(perm)
+    # Add (don't replace) so any pre-existing grants are preserved.
+    caseworker.permissions.add(*perms)
 
     # 2. Move Moderator members into Caseworker, THEN delete the Moderator row.
     moderator = Group.objects.filter(name="Moderator").first()
