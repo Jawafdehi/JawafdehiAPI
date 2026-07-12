@@ -22,7 +22,7 @@ from materials.jsonld import (
 from materials.management.commands.sync_materials_from_index import (
     parse_court_order_id,
 )
-from materials.models import Material
+from materials.models import Material, Visibility
 
 
 class CourtOrderReconciliationTests(SimpleTestCase):
@@ -94,12 +94,30 @@ class CourtOrderReconciliationTests(SimpleTestCase):
 class ReindexMaterialsSinceTests(TestCase):
     databases = "__all__"
 
-    def _make(self, ident: str) -> Material:
+    def _make(self, ident: str, **extra) -> Material:
         iri = f"https://jawafdehi.org/material/nkp/{ident}"
         return Material.objects.using("ngm").create(
             iri=iri, material_type="legal_corpus", source="nkp", ident=ident,
             data={"@type": "Legislation", "@id": iri, "name": {"ne": ident}},
+            **extra,
         )
+
+    def test_only_searchable_rows_are_reindexed(self):
+        # A full rebuild must index the SAME set the live signal keeps: live +
+        # LISTED. Soft-deleted (tombstoned) and non-LISTED (draft/in-review case
+        # evidence) rows must NOT be re-added, else a rebuild resurrects/leaks them.
+        live = self._make("live-act")
+        self._make("gone-act", is_deleted=True)
+        self._make("unlisted-act", visibility=Visibility.UNLISTED)
+        self._make("private-act", visibility=Visibility.PRIVATE)
+        with mock.patch(
+            "materials.management.commands.reindex_materials.reindex",
+            return_value={"indexed": 0, "skipped": 0},
+        ) as m:
+            call_command("reindex_materials", rebuild=True)
+        iris = {r.iri for r in m.call_args.kwargs["records"]}
+        self.assertEqual(iris, {live.iri})
+        self.assertTrue(m.call_args.kwargs["rebuild"])
 
     def test_since_indexes_only_recently_touched(self):
         old = self._make("old-act")
@@ -110,7 +128,7 @@ class ReindexMaterialsSinceTests(TestCase):
         )
         cutoff = (timezone.now() - datetime.timedelta(days=1)).isoformat()
         with mock.patch(
-            "jawafdehi_shared.search.reindex.reindex",
+            "materials.management.commands.reindex_materials.reindex",
             return_value={"indexed": 0, "skipped": 0},
         ) as m:
             call_command("reindex_materials", since=cutoff)
