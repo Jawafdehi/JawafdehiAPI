@@ -1,7 +1,15 @@
 """``reindex_materials`` — bulk-(re)index NGM materials into ``ngm-materials``.
 
-Streams every ``Material`` through the material indexer into OpenSearch.
-``--rebuild`` drops + recreates the index. The router pins ``Material`` to ``ngm``.
+Streams the SEARCHABLE ``Material`` set through the material indexer into
+OpenSearch. ``--rebuild`` drops + recreates the index. The router pins
+``Material`` to ``ngm``.
+
+Only ``is_deleted=False`` + ``visibility=LISTED`` rows are indexed — the SAME
+gate the live ``post_save`` signal applies (``materials.signals``: a soft-deleted
+or non-LISTED row is EVICTED, not indexed). Without this filter a ``--rebuild``
+would re-add every soft-deleted material (tombstones resurrected) and every
+UNLISTED/PRIVATE case-source material (a draft case's evidence leaked into anon
+search) — the exact rows the signal spent its writes evicting.
 """
 
 from __future__ import annotations
@@ -11,7 +19,7 @@ from django.core.management.base import BaseCommand
 from jawafdehi_shared.search.opensearch import MATERIAL_INDEX
 from jawafdehi_shared.search.reindex import reindex
 from materials import search_index
-from materials.models import Material
+from materials.models import Material, Visibility
 
 
 class Command(BaseCommand):
@@ -32,7 +40,12 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        qs = Material.objects.all()
+        # Mirror the live indexer's gate (materials.signals): index ONLY the
+        # searchable set (live + LISTED). A --rebuild otherwise resurrects
+        # soft-deleted rows and leaks non-LISTED (draft/in-review) evidence.
+        qs = Material.objects.filter(
+            is_deleted=False, visibility=Visibility.LISTED
+        )
         if options.get("since") and not options["rebuild"]:
             qs = qs.filter(updated_at__gte=options["since"])
         result = reindex(
