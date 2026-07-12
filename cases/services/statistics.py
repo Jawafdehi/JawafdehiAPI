@@ -289,28 +289,27 @@ def _materials_metrics():
     total, by-type / by-source breakdowns, and completeness measured over
     the material ``data`` JSON-LD doc. Materials are NOT judicial records;
     they get their own block separate from ``_ngm_metrics``."""
-    total = Material.objects.count()
+    # Soft-deleted materials are off every read plane (retrieve/search/sitemap
+    # all filter ``is_deleted=False``); the coverage stats must match, else a
+    # tombstoned pile (e.g. the retired ``court`` court_case shadows) lingers in
+    # the by-source breakdown after it is gone everywhere else.
+    live = Material.objects.filter(is_deleted=False)
+    total = live.count()
 
     by_type = list(
-        Material.objects.values("material_type")
-        .annotate(count=Count("iri"))
-        .order_by("-count")
+        live.values("material_type").annotate(count=Count("iri")).order_by("-count")
     )
     by_source = list(
-        Material.objects.values("source")
-        .annotate(count=Count("iri"))
-        .order_by("-count")
+        live.values("source").annotate(count=Count("iri")).order_by("-count")
     )
 
     # Completeness signals over the stored schema.org JSON-LD doc. On Postgres
     # answered with JSON-key existence lookups; sqlite (empty local / test DB)
     # degrades to 0 without a full scan.
     if connections[Material.objects.db].vendor == "postgresql":
-        with_description = Material.objects.filter(
-            data__has_key="description"
-        ).count()
-        with_url = Material.objects.filter(data__has_key="url").count()
-        with_date = Material.objects.filter(data__has_key="dateCreated").count()
+        with_description = live.filter(data__has_key="description").count()
+        with_url = live.filter(data__has_key="url").count()
+        with_date = live.filter(data__has_key="dateCreated").count()
     else:
         with_description = with_url = with_date = 0
 

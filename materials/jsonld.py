@@ -26,6 +26,7 @@ from __future__ import annotations
 from typing import Any
 
 from jawafdehi_shared.entities.ids import (
+    build_courtcase_iri,
     build_material_iri,
     build_source_material_iri,
     is_valid_material_iri,
@@ -299,11 +300,15 @@ def court_order_to_jsonld(
 ) -> dict[str, Any]:
     """Shape ONE court-order ``DocumentSource`` into its own Material JSON-LD.
 
-    LOCKED #1: each order doc is a STANDALONE Material (``court_order``,
+    Each order doc is a STANDALONE Material (``court_order``,
     ``@type [Manuscript, DigitalDocument]``) carrying the order's roled file links
-    as ``associatedMedia``. It ``isPartOf`` the case record's Material
-    (``court_case_material_iri``) — the inverse of that record's ``hasPart``. ``n``
-    disambiguates multiple orders on one case (``None`` → the sole order).
+    as ``associatedMedia`` — the ONE court material per document-bearing case (the
+    materials layer owns documents; case identity + metadata live in the courtcase
+    layer). It ``isPartOf`` the case's canonical ``/courtcase/<court>/<num>`` IRI,
+    NOT a ``court_case`` Material (those were retired as redundant shadows of the
+    courtcase read plane). ``n`` disambiguates multiple orders on one case
+    (``None`` → the sole order). ``name`` is the human case-order title (the raw
+    ``document_id`` rides on ``identifier`` only, never as the display name).
     """
     schema_type, additional_type = type_for(MaterialType.COURT_ORDER)
     iri = court_order_material_iri(court_identifier, case_number, n)
@@ -314,9 +319,9 @@ def court_order_to_jsonld(
         "@context": MATERIAL_CONTEXT,
         "@type": schema_type,  # ["Manuscript", "DigitalDocument"]
         "@id": iri,
-        "name": {"ne": str(document_id or f"{case_number} आदेश")},
+        "name": {"ne": f"{case_number} आदेश"},
         "inLanguage": "ne",
-        "isPartOf": {"@id": court_case_material_iri(court_identifier, case_number)},
+        "isPartOf": {"@id": build_courtcase_iri(court_identifier, case_number)},
         "jawafdehi:court": court_identifier,
         "jawafdehi:caseNumber": case_number,
     }
@@ -332,6 +337,12 @@ def court_order_to_jsonld(
 
 def court_case_to_jsonld(case: Any) -> dict[str, Any]:
     """Project a ``CourtCase`` ORM row into its schema.org CreativeWork JSON-LD.
+
+    NOTE: ``court_case`` Materials are NO LONGER persisted (the materials layer
+    owns documents only; case identity lives in the courtcase read plane). This
+    projection now backs solely the on-the-fly read-plane derivation for a
+    ``/material/court/<court>.<num>`` IRI with no stored row (``materials.views``
+    + ``cases.services.material_resolver``) — a graceful linked-data fallback.
 
     The case RECORD maps to ``CreativeWork`` + ``jawafdehi:CourtCase`` (schema.org
     has no LegalCase). Bilingual party/subject text rides in language-tagged
