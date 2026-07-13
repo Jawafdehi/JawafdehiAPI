@@ -454,6 +454,14 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             # (``Cookie``); those requests must miss the anon cache and get
             # their role-scoped (DRAFT/IN_REVIEW-inclusive) list from origin.
             patch_vary_headers(response, ["Cookie", "Authorization"])
+        else:
+            # Role-scoped list (may include DRAFT/IN_REVIEW cases the public
+            # must never see). Set an explicit ``no-store`` on every
+            # authenticated path so a "Cache Everything" CDN rule can't store
+            # this response and later serve it to an anonymous visitor. Mirror
+            # StatisticsView, which sets a Cache-Control header on every branch.
+            response["Cache-Control"] = "private, no-store"
+            patch_vary_headers(response, ["Cookie", "Authorization"])
         return response
 
     # Case model fields that CaseCreateSerializer may set directly on the row.

@@ -51,7 +51,11 @@ def test_authenticated_list_is_not_publicly_cached():
     client.force_authenticate(user=moderator)
     resp = client.get("/api/cases/")
     assert resp.status_code == 200
-    assert resp.get("Cache-Control") != CaseViewSet.LIST_CACHE_CONTROL
+    # Assert the safe value directly, not merely "!= the cacheable value":
+    # ``resp.get("Cache-Control")`` is ``None`` when the header is absent, and
+    # ``None != LIST_CACHE_CONTROL`` is True — so the weaker check would pass
+    # even in the unsafe "no header at all" state this test guards against.
+    assert "no-store" in resp["Cache-Control"]
 
 
 @pytest.mark.django_db
