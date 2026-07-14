@@ -831,6 +831,10 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 "slug",
                 "missing_details",
                 "bigo",
+                # Internal casework notes (Case.notes TextField). A scalar column,
+                # so it persists via the bulk UPDATE like the other scalars — the
+                # missing entry here is what silently dropped a patched note (BB-28).
+                "notes",
             ]
         )
 
@@ -1138,6 +1142,12 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             "court_cases": case.court_cases,
             "missing_details": case.missing_details,
             "bigo": case.bigo,
+            # Internal casework notes (BB-04-gated on read; casework-only). This
+            # is the top-level case ``notes`` TextField, distinct from the nested
+            # per-entity relationship ``notes`` above. Carried here so the editor's
+            # ``replace /notes`` JSON-Patch op resolves against an existing key
+            # (BB-28) and the scalar-field save below can persist it.
+            "notes": case.notes,
         }
 
 

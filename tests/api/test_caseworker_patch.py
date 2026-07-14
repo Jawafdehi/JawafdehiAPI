@@ -108,6 +108,55 @@ def test_patch_replace_scalar_field():
 
 
 @pytest.mark.django_db
+def test_patch_replace_notes_persists_on_case_without_notes():
+    # BB-28: the editor sends `replace /notes`, but the patch surface omitted
+    # `notes` (no snapshot key, no serializer field, no scalar write), so the
+    # patch failed with 400 "can't replace a non-existent object 'notes'".
+    # Same class as BB-11 (a writable field missing from the patch surface).
+    user = _contributor("bikash")
+    case = _make_case()  # notes defaults to ""
+    assert case.notes == ""
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[{"op": "replace", "path": "/notes", "value": "internal note"}],
+        format="json",
+    )
+    assert response.status_code == 200, response.data
+    # The patched note is persisted to the Case row.
+    case.refresh_from_db()
+    assert case.notes == "internal note"
+    # And it survives the editor's reload path — the casework read serializer
+    # returns notes to casework viewers (BB-04). (The PATCH response body itself
+    # blanks notes because CaseSerializer is built there without request context;
+    # that's pre-existing and orthogonal to this persistence fix.)
+    reload = client.get(URL.format(case.slug))
+    assert reload.status_code == 200
+    assert reload.data["notes"] == "internal note"
+
+
+@pytest.mark.django_db
+def test_patch_scalar_only_leaves_existing_notes_untouched():
+    # A PATCH that does NOT touch /notes must not clobber an existing note: the
+    # snapshot carries the current notes value, so a scalar-only edit round-trips
+    # it back unchanged.
+    user = _contributor("chandra")
+    case = _make_case(notes="pre-existing internal note")
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[{"op": "replace", "path": "/title", "value": "Retitled"}],
+        format="json",
+    )
+    assert response.status_code == 200, response.data
+    case.refresh_from_db()
+    assert case.title == "Retitled"
+    assert case.notes == "pre-existing internal note"
+
+
+@pytest.mark.django_db
 def test_patch_replace_timeline_item_title():
     user = _contributor("sita")
     case = _make_case(
