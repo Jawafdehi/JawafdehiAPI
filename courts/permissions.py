@@ -77,7 +77,7 @@ class HasNgmRole(permissions.BasePermission):
         return bool(user_groups & NGM_ROLE_GROUPS)
 
 
-class HasNgmQueryAccess(HasNgmRole):
+class HasNgmQueryAccess(permissions.BasePermission):
     """Gate the SELECT plane on the ``ngm.query`` OAuth scope OR a read role.
 
     The FastAPI POST /query route gated on the OAuth scope ``ngm.query`` via
@@ -88,17 +88,19 @@ class HasNgmQueryAccess(HasNgmRole):
     in a query-capable Django Group. Either is sufficient.
 
     Query-capable is WIDER than ``HasNgmRole`` (the write gate): it is superuser,
-    the NGM content role (Caseworker / any NGM tier), OR the org-wide ReadOnly
-    read role. Querying is a read — the guard is SELECT-only and the rows are
-    already public via the REST read plane — so ReadOnly is admitted here even
-    though it is excluded from every write gate.
+    the NGM content role (Caseworker), OR the org-wide ReadOnly read role.
+    Querying is a read — the guard is SELECT-only and the rows are already public
+    via the REST read plane — so ReadOnly is admitted here even though it is
+    excluded from every write gate. (This deliberately shares no logic with
+    ``HasNgmRole``, so it subclasses ``BasePermission`` directly rather than
+    that gate.)
 
     Unauthenticated -> 401; authenticated but lacking scope and a read role -> 403.
     """
 
     message = (
         "The 'ngm.query' OAuth scope or a read-capable role "
-        "(ReadOnly, caseworker, or an NGM tier) is required."
+        "(ReadOnly or Caseworker) is required."
     )
 
     def has_permission(self, request, view) -> bool:
@@ -109,6 +111,7 @@ class HasNgmQueryAccess(HasNgmRole):
             return True
         if NGM_QUERY_SCOPE in token_scopes(request):
             return True
-        # One group query covers ReadOnly + the NGM role(s); NOT super()'s
-        # NGM_ROLE_GROUPS check, which excludes ReadOnly.
+        # ONE group query over the read-capable set. Note this is NGM_QUERY_GROUPS
+        # (ReadOnly + NGM roles), NOT HasNgmRole's NGM_ROLE_GROUPS, which excludes
+        # ReadOnly and gates writes only.
         return user.groups.filter(name__in=NGM_QUERY_GROUPS).exists()

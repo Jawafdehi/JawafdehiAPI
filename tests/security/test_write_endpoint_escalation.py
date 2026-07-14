@@ -23,10 +23,13 @@ pytestmark = [pytest.mark.security, pytest.mark.django_db]
 
 
 # (method, url, json-body) for each role-gated write endpoint.
+#
+# NOTE: ``/api/query/`` is deliberately NOT here — it is a SELECT-only READ
+# surface, so the org-wide ReadOnly role is admitted to it (see
+# ``test_query_plane_is_read_not_write`` below), unlike these write planes.
 WRITE_ENDPOINTS = [
     ("post", "/api/entities", {"@type": "Person", "@id": "x"}),
     ("post", "/api/courtcases/", {}),
-    ("post", "/api/query/", {"sql": "SELECT 1"}),
     ("post", "/api/ingestion/cases/", {}),
     ("post", "/api/admin/reindex", {}),
 ]
@@ -68,3 +71,32 @@ def test_readonly_can_still_read_but_not_write_cases():
     # DjangoModelPermissions gates POST on cases.add_case, which ReadOnly lacks.
     resp = client.post("/api/cases/", {"case_type": "CORRUPTION", "title": "x"}, format="json")
     assert resp.status_code == 403
+
+
+@pytest.mark.django_db(databases="__all__")
+def test_query_plane_is_read_not_write():
+    """``/api/query/`` is a SELECT-only READ surface, so its role contract differs
+    from the write planes above: anon → 401, a lower-privilege authenticated role
+    (Public) → 403, but the org-wide ReadOnly read role is ADMITTED (passes the
+    auth gate). Writes still can't ride through it — the SELECT-only guard is
+    covered by courts/tests/test_query_guard_security.py."""
+    body = {"query": "SELECT 1"}
+
+    # Anonymous: 401 (authenticator sets WWW-Authenticate).
+    assert APIClient().post("/api/query/", body, format="json").status_code == 401
+
+    # Public (authenticated, no query role): still forbidden.
+    public = create_user_with_role("esc-pub-q", "esc-pub-q@example.com", "Public")
+    pc = APIClient()
+    pc.force_authenticate(user=public)
+    assert pc.post("/api/query/", body, format="json").status_code == 403
+
+    # ReadOnly: admitted — it must clear the auth gate (NOT 401/403); the response
+    # is then a normal query outcome (200, or a guard/DB 400), never a rejection.
+    readonly = create_user_with_role("esc-ro-q", "esc-ro-q@example.com", "ReadOnly")
+    rc = APIClient()
+    rc.force_authenticate(user=readonly)
+    ro_status = rc.post("/api/query/", body, format="json").status_code
+    assert ro_status not in (401, 403), (
+        f"ReadOnly must clear the /api/query/ auth gate, got {ro_status}"
+    )
