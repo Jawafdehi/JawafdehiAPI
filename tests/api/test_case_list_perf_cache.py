@@ -1,9 +1,11 @@
 """Perf/caching regression tests for the case list endpoint (GET /api/cases/).
 
 These lock in the fixes for the slow "Recently Documented Cases" home section:
-  - anonymous (public) list responses are publicly cacheable so an immediate
-    reload is served from cache instead of re-paying the query cost;
-  - authenticated/casework list responses are NOT publicly cached (role-scoped);
+  - anonymous list responses are browser-cacheable (an immediate reload is
+    free) but stay OUT of shared/CDN caches: the same URL serves a wider
+    role-scoped list to authenticated caseworkers and Cloudflare can't vary
+    the cache on auth, so a shared cache must not hold this snapshot;
+  - authenticated/casework list responses are NOT cached at all (role-scoped);
   - the per-card entity + material resolution no longer scales the SQL query
     count with the number of cards (N+1 removed via batched resolution +
     material_references prefetch).
@@ -30,14 +32,28 @@ def _make_published_case(i):
 
 
 @pytest.mark.django_db
-def test_anonymous_list_is_publicly_cacheable():
+def test_anonymous_list_is_browser_cacheable_but_not_shared_cacheable():
+    """Anon list is role-scoped-by-URL: the browser may hold it briefly, but a
+    shared/CDN cache must NOT store it. Cloudflare keys by URL and can't vary
+    on auth, so a cached ``public`` snapshot would be served to a signed-in
+    caseworker and hide their DRAFT/IN_REVIEW cases. So: ``private`` +
+    ``max-age``, and explicitly NOT ``public``/``s-maxage`` — this guards
+    against a future re-introduction of edge caching on this endpoint."""
     _make_published_case(1)
     resp = APIClient().get("/api/cases/")
     assert resp.status_code == 200
-    assert resp["Cache-Control"] == CaseViewSet.LIST_CACHE_CONTROL
-    # Must vary on the auth-bearing headers so a shared/CDN cache can't serve
-    # this public anon snapshot to an authenticated (cookie- or bearer-token)
-    # caseworker who is entitled to a wider, role-scoped list.
+    cc = resp["Cache-Control"]
+    assert cc == CaseViewSet.LIST_CACHE_CONTROL
+    # Browser may cache briefly, but the response must stay out of shared
+    # caches. Assert the directives literally (not just == the constant) so a
+    # regression in the constant itself is caught here too.
+    assert "max-age=60" in cc
+    assert "private" in cc
+    assert "public" not in cc
+    assert "s-maxage" not in cc
+    # Vary on the auth-bearing headers so the browser's own cache can't reuse
+    # this anon entry for a post-login (cookie- or bearer-token) request that
+    # is entitled to the wider, role-scoped list.
     vary = resp.get("Vary", "")
     assert "Cookie" in vary
     assert "Authorization" in vary
