@@ -557,12 +557,19 @@ class CaseQuerySet(models.QuerySet):
         # write. Rows already at ``new_slug`` are excluded — nothing retires.
         # ``slug`` is globally unique on Case, so a slug update targets at most
         # one row in practice; the loop is written for correctness regardless.
-        changing = list(self.exclude(slug=new_slug))
+        # Only pk + slug are needed to record history; ``.only()`` avoids loading
+        # the case's large text columns (description, notes, timeline, …).
+        changing = list(self.only("id", "slug").exclude(slug=new_slug))
         result = super().update(**kwargs)
-        for case in changing:
-            # ``update()`` does not touch the in-memory instances, so
-            # ``case.slug`` still holds the retired value here.
-            CaseSlugHistory.record(case, case.slug, new_slug)
+        # ``result`` is the count of rows actually updated. If a concurrent
+        # delete raced the snapshot to zero, record nothing — the snapshot is
+        # stale and its case may no longer exist (a dangling FK insert would
+        # fail).
+        if result:
+            for case in changing:
+                # ``update()`` does not touch the in-memory instances, so
+                # ``case.slug`` still holds the retired value here.
+                CaseSlugHistory.record(case, case.slug, new_slug)
         return result
 
 
