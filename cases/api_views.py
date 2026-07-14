@@ -1146,8 +1146,12 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             # is the top-level case ``notes`` TextField, distinct from the nested
             # per-entity relationship ``notes`` above. Carried here so the editor's
             # ``replace /notes`` JSON-Patch op resolves against an existing key
-            # (BB-28) and the scalar-field save below can persist it.
-            "notes": case.notes,
+            # (BB-28) and the scalar-field save below can persist it. Coerce a
+            # ``None`` (the column is NOT NULL / ``default=""``, but a legacy or
+            # raw row could still read back NULL) to "" so a snapshot value never
+            # trips ``CasePatchSerializer.notes`` (``allow_blank`` but not
+            # ``allow_null``) and 422s an otherwise-unrelated PATCH.
+            "notes": case.notes or "",
         }
 
 

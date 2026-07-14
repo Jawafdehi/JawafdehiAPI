@@ -339,6 +339,9 @@ class CasePatchSerializer(CourtCaseRefsValidationMixin, serializers.Serializer):
     # Internal casework notes (Case.notes TextField; no max_length). Casework-only
     # — read gating stays in the read serializer's SerializerMethodField (BB-04);
     # this only makes the field writable via PATCH (BB-28). Mirrors the create path.
+    # NOT ``allow_null``: the model column is NOT NULL (``default=""``), so a JSON
+    # ``null`` can't be stored — clear notes by sending "" (allow_blank). A literal
+    # ``null`` is rejected (422) rather than silently coerced, matching the column.
     notes = serializers.CharField(required=False, allow_blank=True)
     slug = serializers.SlugField(
         max_length=50,
