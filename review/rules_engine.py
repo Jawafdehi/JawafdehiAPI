@@ -175,8 +175,14 @@ def structural_completeness(case):
 # Authoritative material types — the NGM equivalents of the old
 # OFFICIAL_GOVERNMENT / LEGAL_* "strong" source types (ADR: cases own no
 # documents). A case with at least one of these has an authoritative source.
+# press_release stays here on purpose: a CIAA प्रेस विज्ञप्ति is a primary
+# government source (the old OFFICIAL_GOVERNMENT) and counts as authoritative
+# sourcing, even though it is NOT the charge sheet — the charge_sheet detector
+# tracks the indictment separately, so a press-release-only case is still typed
+# CIAA_BASIC. Do not drop it or press-release-only cases lose their sourcing.
 _STRONG_MATERIAL_TYPES = {
     "CHARGE_SHEET",
+    "PRESS_RELEASE",
     "COURT_ORDER",
     "OFFICIAL_REPORT",
     "LEGAL_CORPUS",
@@ -209,7 +215,7 @@ def sourcing(case):
     if not strong:
         issues.append(
             "No authoritative material (charge sheet / court order / official "
-            "report / legal corpus) present."
+            "report / legal corpus / CIAA press release) present."
         )
     return _clamp(pts), issues
 
@@ -217,8 +223,7 @@ def sourcing(case):
 def ciaa_press_release(case):
     tt = _source_titles(case)
     present = any(
-        (_any(t, _PRESS_RELEASE) and (_any(t, _CIAA) or st == "OFFICIAL_GOVERNMENT"))
-        or (_any(t, _CIAA) and _any(t, _PRESS_RELEASE))
+        st == "PRESS_RELEASE" or (_any(t, _PRESS_RELEASE) and _any(t, _CIAA))
         for t, st in tt
     )
     if present:
@@ -233,7 +238,9 @@ def ciaa_press_release(case):
 
 def charge_sheet(case):
     tt = _source_titles(case)
-    has_cs = any(_any(t, _CHARGESHEET) for t, _ in tt)
+    # Exclude anything explicitly typed press_release — a CIAA press release is
+    # not the charge sheet (अभियोग पत्र), even if its title mentions the charge.
+    has_cs = any(_any(t, _CHARGESHEET) and st != "PRESS_RELEASE" for t, st in tt)
     if has_cs:
         return 100, []
     return 0, ["No charge sheet (अभियोग पत्र) document among sources."]
@@ -241,7 +248,7 @@ def charge_sheet(case):
 
 def court_record(case):
     tt = _source_titles(case)
-    has_cs = any(_any(t, _CHARGESHEET) for t, _ in tt)
+    has_cs = any(_any(t, _CHARGESHEET) and st != "PRESS_RELEASE" for t, st in tt)
     has_verdict = any(_any(t, _VERDICT) for t, _ in tt)
     has_order = any(_any(t, _COURT_ORDER) for t, _ in tt)
     pts = 0
