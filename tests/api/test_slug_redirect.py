@@ -4,11 +4,17 @@ Changing a case's slug (DRAFT re-slug, operational re-slug) used to orphan the
 old URL as a hard 404. These tests cover (a) that a slug change is recorded in
 CaseSlugHistory, (b) that a retired slug 301-redirects to the canonical URL,
 (c) that a genuinely unknown slug stays a 404, (d) that a reused slug resolves
-to its live owner (not a redirect), and (e) that a retired slug never leaks a
-non-public case's existence.
+to its live owner (not a redirect), (e) that a retired slug never leaks a
+non-public case's existence, (f) that ANY bulk ``update(slug=…)`` — the path a
+PUBLISHED case is re-slugged through, which bypasses ``save()`` — records
+history, and (g) that ``backfill_slug_history`` reconstructs retired slugs from
+CaseReview snapshots.
 """
 
+from io import StringIO
+
 import pytest
+from django.core.management import call_command
 from rest_framework.test import APIClient
 
 from cases.models import Case, CaseSlugHistory, CaseState, CaseType
@@ -199,3 +205,110 @@ def test_retired_slug_of_closed_case_is_404_even_for_caseworker():
 
     # CLOSED cases are never exposed via this API, even to casework roles.
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# (f) ANY bulk update(slug=…) records history — the durable choke point.
+#     A PUBLISHED case's slug is immutable through save(), so it is re-slugged
+#     operationally via QuerySet.update(), which bypasses the save() hook.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_bulk_update_slug_records_old_slug_for_published_case():
+    case = _make_case("published-old", state=CaseState.PUBLISHED)
+
+    Case.objects.filter(pk=case.pk).update(slug="published-new")
+
+    case.refresh_from_db()
+    assert case.slug == "published-new"
+    assert CaseSlugHistory.objects.filter(slug="published-old", case=case).exists()
+    # The new (now-live) slug is never recorded as its own predecessor.
+    assert not CaseSlugHistory.objects.filter(slug="published-new").exists()
+
+
+@pytest.mark.django_db
+def test_published_reslug_via_update_then_old_url_redirects():
+    """End-to-end: a published case re-slugged via update() 301-redirects."""
+    case = _make_case("pub-canon-old", state=CaseState.PUBLISHED)
+
+    Case.objects.filter(pk=case.pk).update(slug="pub-canon-new")
+
+    resp = APIClient().get(URL.format("pub-canon-old"))
+    assert resp.status_code == 301
+    assert resp["Location"].endswith("/api/cases/pub-canon-new/")
+
+
+@pytest.mark.django_db
+def test_bulk_update_without_slug_records_nothing():
+    """A non-slug bulk update must not touch CaseSlugHistory."""
+    case = _make_case("state-change", state=CaseState.DRAFT)
+
+    Case.objects.filter(pk=case.pk).update(state=CaseState.PUBLISHED)
+
+    assert not CaseSlugHistory.objects.exists()
+
+
+@pytest.mark.django_db
+def test_bulk_update_to_same_slug_records_nothing():
+    """update(slug=<current>) is a no-op — nothing retires."""
+    case = _make_case("same", state=CaseState.PUBLISHED)
+
+    Case.objects.filter(pk=case.pk).update(slug="same")
+
+    assert not CaseSlugHistory.objects.filter(slug="same").exists()
+
+
+# ---------------------------------------------------------------------------
+# (g) backfill_slug_history rebuilds retired slugs from CaseReview snapshots.
+# ---------------------------------------------------------------------------
+
+
+def _run_backfill(*args) -> str:
+    out = StringIO()
+    call_command("backfill_slug_history", *args, stdout=out)
+    return out.getvalue()
+
+
+@pytest.mark.django_db
+def test_backfill_records_outdated_review_slug():
+    from review.models import CaseReview
+
+    case = _make_case("current-slug", state=CaseState.PUBLISHED, title="Distinct Title")
+    # A review captured the case under a slug it no longer carries; resolves by
+    # the exact snapshot title (tier 3).
+    CaseReview.objects.create(slug="retired-slug", case_title="Distinct Title")
+
+    # Dry-run writes nothing.
+    _run_backfill()
+    assert not CaseSlugHistory.objects.exists()
+
+    out = _run_backfill("--apply")
+    assert "retired-slug -> current-slug" in out
+    assert CaseSlugHistory.objects.filter(slug="retired-slug", case=case).exists()
+
+
+@pytest.mark.django_db
+def test_backfill_skips_slug_that_is_still_live():
+    from review.models import CaseReview
+
+    _make_case("still-live", state=CaseState.PUBLISHED, title="Live One")
+    CaseReview.objects.create(slug="still-live", case_title="Live One")
+
+    _run_backfill("--apply")
+
+    # The review's slug still addresses a live case — not outdated, not recorded.
+    assert not CaseSlugHistory.objects.filter(slug="still-live").exists()
+
+
+@pytest.mark.django_db
+def test_backfill_is_idempotent():
+    from review.models import CaseReview
+
+    case = _make_case("live-canon", state=CaseState.PUBLISHED, title="Idem Title")
+    CaseReview.objects.create(slug="idem-old", case_title="Idem Title")
+
+    _run_backfill("--apply")
+    _run_backfill("--apply")
+
+    assert CaseSlugHistory.objects.filter(slug="idem-old", case=case).count() == 1
