@@ -939,7 +939,7 @@ JAZZMIN_SETTINGS = {
 # Casework Review System (VOL-3)
 # ============================================================================
 REVIEW_CASE_SOURCE = os.getenv("REVIEW_CASE_SOURCE", "local")
-JAWAFDEHI_API_BASE = os.getenv("JAWAFDEHI_API_BASE", "https://portal.jawafdehi.org/api")
+JAWAFDEHI_API_BASE = os.getenv("JAWAFDEHI_API_BASE", "https://api.jawafdehi.org/api")
 JAWAFDEHI_API_TOKEN = os.getenv("JAWAFDEHI_API_TOKEN", "")
 JAWAFDEHI_S3_BASE = os.getenv("JAWAFDEHI_S3_BASE", "https://s3.jawafdehi.org")
 
