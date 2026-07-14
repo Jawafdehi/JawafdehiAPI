@@ -338,6 +338,15 @@ MIDDLEWARE = [
 ROOT_URLCONF = "config.urls"
 WSGI_APPLICATION = "config.wsgi.application"
 
+# django-auditlog: the audited manager (jawafdehi_shared.db.audited) logs one
+# LogEntry per changed row for a bulk ``QuerySet.update()`` / ``bulk_update()``
+# up to this many affected rows; a larger write records a single summary entry
+# instead, bounding both LogEntry growth and the O(rows) diff cost of a big
+# backfill. AUDITLOG_STORE_JSON_CHANGES is intentionally left at its default
+# (False → ``{field: [old, new]}``); flipping it would change the stored diff
+# shape that existing rows/tests rely on.
+AUDIT_BULK_UPDATE_MAX_ROWS = 1000
+
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",

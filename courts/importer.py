@@ -213,6 +213,8 @@ class CourtCaseImporter:
     # ── signal muting (suppress per-row OpenSearch upserts during bulk write) ──
     @contextmanager
     def _signals_muted(self) -> Iterator[None]:
+        from auditlog.context import disable_auditlog
+
         from courts import signals as s
         from materials import signals as ms
         from materials.models import Material
@@ -239,7 +241,14 @@ class CourtCaseImporter:
             if sig.disconnect(dispatch_uid=uid, sender=sender):
                 disconnected.append((sig, sender, uid, func))
         try:
-            yield
+            # Also suppress audit logging for the whole bulk import: the surgical
+            # per-row ``.update()`` (via the audited manager) and ``update_or_create``
+            # saves here are a bulk data load, not human edits, and would otherwise
+            # write a cross-DB LogEntry per row across the 1.6M/5.2M ngm tables.
+            # ``disable_auditlog`` gates both the post_save signal path AND the
+            # audited manager (which honors the same context flag).
+            with disable_auditlog():
+                yield
         finally:
             for sig, sender, uid, func in disconnected:
                 sig.connect(func, sender=sender, dispatch_uid=uid)
