@@ -36,7 +36,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
 from rest_framework.views import APIView
 
-from jawafdehi_shared.drf.auditlog import AuditlogActorMixin, log_bulk_update
+from jawafdehi_shared.drf.auditlog import AuditlogActorMixin
 from jawafdehi_shared.identity import (
     JAWAFDEHI_USER_ID_HEADER,
     resolve_or_create_identity,
@@ -922,18 +922,12 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 Case.objects.filter(pk=case.pk).update(
                     updated_at=timezone.now(), **scalar_updates
                 )
-                # ``QuerySet.update()`` bypasses ``post_save``, so auditlog's UPDATE
-                # receiver never fires for scalar content edits — the same bypass the
-                # explicit search re-index below compensates for. Record the diff
-                # explicitly so content changes (description, timeline, allegations, …)
-                # are attributable, not just workflow/state saves. ``case`` still holds
-                # the pre-update values here (``update()`` doesn't touch the in-memory
-                # instance); it is refreshed to the new values on the next line.
-                log_bulk_update(
-                    case,
-                    Case.objects.get(pk=case.pk),
-                    fields=list(scalar_updates.keys()),
-                )
+                # ``QuerySet.update()`` bypasses ``post_save``, so auditlog's
+                # UPDATE receiver never fires for scalar content edits. ``Case``
+                # carries the audited manager (jawafdehi_shared.db.audited), whose
+                # ``update()`` override records the scalar diff (with the request
+                # actor; the auto_now ``updated_at`` bump above is excluded) — so
+                # this write is logged automatically, no explicit call needed.
 
             # Persist entity relationship changes only when a /entities op
             # was explicitly included — avoids unnecessary delete/recreate on
