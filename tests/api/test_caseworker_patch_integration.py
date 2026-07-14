@@ -135,6 +135,33 @@ def test_patch_multi_operation_end_to_end_persists_all_changes():
 
 
 @pytest.mark.django_db
+def test_patch_notes_persists_and_survives_read_back_for_caseworker():
+    # BB-28 end-to-end: replace /notes on a case with no notes -> 200, the note
+    # persists, and reloading the case through the read endpoint (the way the
+    # editor reloads before the next PATCH) returns it to the caseworker.
+    user = create_user_with_role("bimala", "bimala@example.com", "Caseworker")
+    case = _make_case()
+    assert case.notes == ""
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[{"op": "replace", "path": "/notes", "value": "internal casework note"}],
+        format="json",
+    )
+    assert response.status_code == 200, response.data
+
+    case.refresh_from_db()
+    assert case.notes == "internal casework note"
+
+    # Reload via GET — the casework read serializer exposes notes to casework
+    # roles (BB-04), so the editor's round-trip shows the saved note.
+    reload = client.get(URL.format(case.slug))
+    assert reload.status_code == 200
+    assert reload.data["notes"] == "internal casework note"
+
+
+@pytest.mark.django_db
 def test_patch_rejects_invalid_state_transition_in_multi_op_without_partial_write():
     # v3 authz: a Caseworker is authorized to publish, but publishing an
     # incomplete case (no accused entity / key allegation) fails validation.
