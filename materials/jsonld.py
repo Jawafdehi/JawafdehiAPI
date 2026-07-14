@@ -65,7 +65,8 @@ class MaterialType:
     COURT_ORDER = "court_order"        # order / verdict / manuscript scan
     PRECEDENT = "precedent"            # published law-journal precedent (नजिर) — NKP
     MANUSCRIPT = "manuscript"          # a scanned manuscript document
-    CHARGE_SHEET = "charge_sheet"      # CIAA/AG अभियोगपत्र
+    CHARGE_SHEET = "charge_sheet"      # CIAA/AG अभियोगपत्र (the indictment)
+    PRESS_RELEASE = "press_release"    # CIAA/agency प्रेस विज्ञप्ति (public announcement)
     LEGAL_CORPUS = "legal_corpus"      # acts / laws / ordinances / constitution
     OFFICIAL_REPORT = "official_report"  # OAG / annual reports
     NEWS = "news"                      # news / media article (was Jawafdehi SourceType.NEWS)
@@ -90,6 +91,10 @@ MATERIAL_TYPES: dict[str, tuple[Any, str | None]] = {
     MaterialType.MANUSCRIPT: (["Manuscript", "DigitalDocument"], None),
     # Charge sheet → DigitalDocument + jawafdehi:ChargeSheet.
     MaterialType.CHARGE_SHEET: ("DigitalDocument", "jawafdehi:ChargeSheet"),
+    # Press release (प्रेस विज्ञप्ति): a public announcement, NOT the indictment.
+    # schema.org has no PressRelease term, so CreativeWork + jawafdehi:PressRelease
+    # (distinct additionalType from charge_sheet's jawafdehi:ChargeSheet).
+    MaterialType.PRESS_RELEASE: ("CreativeWork", "jawafdehi:PressRelease"),
     # Legal corpus (acts/laws/ordinances/constitution) → Legislation.
     MaterialType.LEGAL_CORPUS: ("Legislation", None),
     # Official report (OAG audit, annual reports) → Report.
@@ -418,7 +423,7 @@ def court_case_to_jsonld(case: Any) -> dict[str, Any]:
 #: *value* strings (``cases.models.SourceType``) to avoid importing the enum here
 #: (keeps this module Django-model-free).
 JAWAF_SOURCE_TYPE_TO_MATERIAL: dict[str, str] = {
-    "CIAA_PRESS_RELEASE": MaterialType.CHARGE_SHEET,
+    "CIAA_PRESS_RELEASE": MaterialType.PRESS_RELEASE,
     "AG_ABHIYOG_PATRA": MaterialType.CHARGE_SHEET,
     "OAG_AUDIT_REPORT": MaterialType.OFFICIAL_REPORT,
     "COURT_ORDER": MaterialType.COURT_ORDER,
@@ -513,7 +518,7 @@ def _case_entity_iris(case: Any) -> list[str]:
 #: to the right schema.org @type. Mirrors ngm.index.models.SourceType.
 INDEX_SOURCE_TYPE_TO_MATERIAL = {
     "COURT_ORDER": MaterialType.COURT_ORDER,
-    "CIAA_PRESS_RELEASE": MaterialType.CHARGE_SHEET,
+    "CIAA_PRESS_RELEASE": MaterialType.PRESS_RELEASE,
     "AG_ABHIYOG_PATRA": MaterialType.CHARGE_SHEET,
     "OAG_AUDIT_REPORT": MaterialType.OFFICIAL_REPORT,
     "LAW_OR_BILL": MaterialType.LEGAL_CORPUS,

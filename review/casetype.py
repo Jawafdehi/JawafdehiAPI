@@ -59,13 +59,16 @@ def detect(case):
     court_cases = case.get("court_cases") or []
 
     has_press_release = any(
-        (_any(t, _PRESS_RELEASE) and (_any(t, _CIAA) or st == "OFFICIAL_GOVERNMENT"))
-        or _any(t, _CIAA)
-        and _any(t, _PRESS_RELEASE)
+        st == "PRESS_RELEASE" or (_any(t, _PRESS_RELEASE) and _any(t, _CIAA))
         for t, st in tt
     )
     has_ciaa_source = any(_any(t, _CIAA) for t, _ in tt)
-    has_chargesheet = any(_any(t, _CHARGESHEET) for t, _ in tt)
+    # A material explicitly typed press_release is never counted as a charge
+    # sheet, even if its title mentions the charge (अभियोग) — a press release
+    # (प्रेस विज्ञप्ति) is the announcement, not the indictment.
+    has_chargesheet = any(
+        _any(t, _CHARGESHEET) and st != "PRESS_RELEASE" for t, st in tt
+    )
     has_verdict = any(_any(t, _VERDICT) for t, _ in tt)
     has_court_order = any(_any(t, _COURT_ORDER) for t, _ in tt)
     has_special_court = any(_any(t, _SPECIAL_COURT) for t, _ in tt)

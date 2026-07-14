@@ -360,13 +360,15 @@ class IndexJsonLdNodeShapeTests(_DbAPITestCase):
         self.assertEqual(len(doc["associatedMedia"]), 2)
         self.assertEqual(doc["associatedMedia"][0]["jawafdehi:linkRole"], "RAW")
 
-    def test_press_release_maps_to_charge_sheet(self):
+    def test_press_release_maps_to_press_release(self):
+        # A CIAA press release is the public announcement, not the indictment:
+        # it must shape to press_release, distinct from a charge sheet.
         doc = manuscript_jsonld(
             {"document_id": "ngm:ciaa-press-release:42", "source_type": "CIAA_PRESS_RELEASE",
              "links": [], "metadata": {}}
         )
-        self.assertEqual(doc["@type"], "DigitalDocument")
-        self.assertEqual(doc["additionalType"], "jawafdehi:ChargeSheet")
+        self.assertEqual(doc["@type"], "CreativeWork")
+        self.assertEqual(doc["additionalType"], "jawafdehi:PressRelease")
 
     def test_leaf_node_shape(self):
         node = {

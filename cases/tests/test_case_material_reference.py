@@ -98,7 +98,7 @@ class TestResolveMaterials:
         resolved = resolve_materials([mat.iri])
         rec = resolved[mat.iri]
         assert rec["display_name"] == "CIAA press release"
-        assert rec["material_type"] == "charge_sheet"
+        assert rec["material_type"] == "press_release"
         assert rec["urls"] == [
             {"link": "https://ciaa.gov.np/pr/1.pdf", "role": "RAW"}
         ]

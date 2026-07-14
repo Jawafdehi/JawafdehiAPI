@@ -35,7 +35,7 @@ class TestUpsertSourceMaterial:
         )
         assert iri == "https://jawafdehi.org/material/jawafdehi/20240115.ab12cd"
         mat = Material.objects.get(iri=iri)
-        assert mat.material_type == "charge_sheet"
+        assert mat.material_type == "press_release"
         assert mat.data["associatedMedia"][0]["contentUrl"] == (
             "https://ciaa.gov.np/pr/1.pdf"
         )
@@ -149,9 +149,10 @@ class TestCIAADraftServiceIngest:
         iris = CIAADraftCaseService().create_material_evidence(ciaa_json, case)
         assert len(iris) == 3
         assert case.material_references.count() == 3
-        # material types cover charge_sheet (PR + AG) and court_order
+        # material types: press_release (PR), charge_sheet (AG abhiyogpatra), court_order
         types = set(
             Material.objects.filter(iri__in=iris).values_list("material_type", flat=True)
         )
+        assert "press_release" in types
         assert "charge_sheet" in types
         assert "court_order" in types

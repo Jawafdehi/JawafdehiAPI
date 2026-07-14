@@ -47,7 +47,7 @@ class TestMaterialTypeMapping:
     @pytest.mark.parametrize(
         "source_type,expected",
         [
-            ("CIAA_PRESS_RELEASE", MaterialType.CHARGE_SHEET),
+            ("CIAA_PRESS_RELEASE", MaterialType.PRESS_RELEASE),
             ("AG_ABHIYOG_PATRA", MaterialType.CHARGE_SHEET),
             ("OAG_AUDIT_REPORT", MaterialType.OFFICIAL_REPORT),
             ("COURT_ORDER", MaterialType.COURT_ORDER),
@@ -74,16 +74,18 @@ class TestDocumentSourceToJsonld:
                 {"link": "https://ciaa.gov.np/pr/1.pdf", "role": "RAW"},
                 {"link": "https://ciaa.gov.np/pr/1", "role": "SOURCE_PAGE"},
             ],
-            description="A charge sheet summary.",
+            description="A press release summary.",
             related_entities=["https://jawafdehi.org/entity/person/ram-bahadur"],
             publication_date=date(2024, 1, 15),
         )
-        assert material_type == MaterialType.CHARGE_SHEET
+        # A CIAA press release is the announcement, NOT the indictment: it must
+        # shape to press_release, distinct from a charge sheet (अभियोगपत्र).
+        assert material_type == MaterialType.PRESS_RELEASE
         assert doc["@id"] == "https://jawafdehi.org/material/jawafdehi/20240115.ab12cd"
-        assert doc["@type"] == "DigitalDocument"
-        assert doc["additionalType"] == "jawafdehi:ChargeSheet"
+        assert doc["@type"] == "CreativeWork"
+        assert doc["additionalType"] == "jawafdehi:PressRelease"
         assert doc["name"] == {"ne": "CIAA press release on X"}
-        assert doc["description"] == {"ne": "A charge sheet summary."}
+        assert doc["description"] == {"ne": "A press release summary."}
         assert doc["jawafdehi:sourceType"] == "CIAA_PRESS_RELEASE"
         assert doc["datePublished"] == "2024-01-15"
         # roled links → associatedMedia MediaObjects, order + roles preserved
@@ -96,6 +98,19 @@ class TestDocumentSourceToJsonld:
         assert doc["about"] == [
             {"@id": "https://jawafdehi.org/entity/person/ram-bahadur"}
         ]
+
+    def test_charge_sheet_shape_is_distinct_from_press_release(self):
+        # An AG अभियोगपत्र (the indictment) stays charge_sheet: DigitalDocument +
+        # jawafdehi:ChargeSheet — NOT the press_release type/additionalType.
+        doc, material_type = documentsource_to_jsonld(
+            source_id="source:20240115:cs0001",
+            title="AG Charge Sheet - 081-CR-0095",
+            source_type="AG_ABHIYOG_PATRA",
+            url=None,
+        )
+        assert material_type == MaterialType.CHARGE_SHEET
+        assert doc["@type"] == "DigitalDocument"
+        assert doc["additionalType"] == "jawafdehi:ChargeSheet"
 
     def test_minimal_shape_no_optional_fields(self):
         doc, material_type = documentsource_to_jsonld(
