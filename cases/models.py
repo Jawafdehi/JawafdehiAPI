@@ -615,6 +615,13 @@ class Case(models.Model):
     )
 
     # Timestamps
+    # NOTE: the list endpoint orders by ``-created_at`` on every request, but
+    # the cases table is small (hundreds–few thousand rows) so the sort is
+    # sub-millisecond and an index buys ~nothing today — the endpoint's speed
+    # comes from the anon cache + batched entity resolution, not from here. If
+    # the table grows, add a *composite* index matching the hot public query
+    # (``WHERE state='PUBLISHED' ORDER BY created_at DESC``):
+    #   indexes = [models.Index(fields=["state", "-created_at"])]
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
