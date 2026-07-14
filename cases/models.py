@@ -553,6 +553,14 @@ class CaseQuerySet(models.QuerySet):
             return super().update(**kwargs)
 
         new_slug = kwargs["slug"]
+        # Only a concrete string slug can be retired. A query expression
+        # (``F()``, the ``Case``/``When`` that Django's own ``bulk_update()``
+        # builds, a subquery, …) has no Python-side value to record, so fall
+        # through to a plain update rather than feeding an expression object
+        # into ``record()``.
+        if not isinstance(new_slug, str):
+            return super().update(**kwargs)
+
         # Snapshot the affected cases (with their PRE-update slugs) before the
         # write. Rows already at ``new_slug`` are excluded — nothing retires.
         # ``slug`` is globally unique on Case, so a slug update targets at most
