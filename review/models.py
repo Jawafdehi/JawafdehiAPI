@@ -16,7 +16,9 @@ class CaseReview(models.Model):
         (STATUS_FAILED, "Failed"),
     ]
 
-    slug = models.CharField(max_length=255)
+    # Indexed: the flat list (?slug=), the grouped view, and regrade-all all
+    # filter/group by slug, so a plain scan would degrade as the table grows.
+    slug = models.CharField(max_length=255, db_index=True)
     status = models.CharField(
         max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING
     )

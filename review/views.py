@@ -237,7 +237,11 @@ class ReviewListView(generics.ListAPIView):
         # whole run history without pulling the entire table.
         slug = self.request.query_params.get("slug")
         if slug:
-            qs = qs.filter(slug=slug)
+            # Normalize like SubmitSerializer (strip whitespace + surrounding
+            # slashes) so "?slug=case-a/" and "?slug= case-a " still match.
+            slug = slug.strip().strip("/")
+            if slug:
+                qs = qs.filter(slug=slug)
         return qs
 
 

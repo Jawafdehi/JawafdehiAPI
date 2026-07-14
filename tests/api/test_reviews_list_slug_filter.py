@@ -4,7 +4,10 @@ The per-case review page fetches one case's whole run history via the flat list
 scoped to a slug. Without the filter it would have to page the entire table.
 """
 
+from datetime import timedelta
+
 import pytest
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from review.models import CaseReview
@@ -38,6 +41,11 @@ def test_slug_filter_returns_only_that_cases_runs():
 @pytest.mark.django_db
 def test_slug_filter_orders_newest_first():
     older = CaseReview.objects.create(slug="case-c", case_title="Case C")
+    # Back-date the older row: two back-to-back creates can share a created_at
+    # on fast DBs, which would make the -created_at ordering non-deterministic.
+    CaseReview.objects.filter(id=older.id).update(
+        created_at=timezone.now() - timedelta(seconds=1)
+    )
     newer = CaseReview.objects.create(slug="case-c", case_title="Case C")
 
     response = _reader_client().get(URL, {"slug": "case-c"})
