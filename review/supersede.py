@@ -1,9 +1,9 @@
 """Supersede stale queued review jobs.
 
 A ``case_review`` job grades the LIVE case (the case dict is resolved
-server-side at claim time), so two QUEUED jobs for the same slug would produce
+server-side at claim time), so two QUEUED jobs for the same case would produce
 the same grading twice — and each duplicate is a full LLM run. Whenever a newer
-review of a slug is enqueued, any older still-queued job for that slug is dead
+review of a case is enqueued, any older still-queued job for that case is dead
 weight: this module marks it DEAD (dead-letter, never claimed) and finalizes its
 CaseReview row as failed/"superseded" so nothing dangles as pending forever.
 
@@ -19,8 +19,8 @@ from jobs.models import Job
 from .models import CaseReview
 
 
-def supersede_older_queued_jobs(slug, keep_job_id):
-    """Dead-letter every QUEUED ``case_review`` job for ``slug`` except ``keep_job_id``.
+def supersede_older_queued_jobs(case_id, keep_job_id):
+    """Dead-letter every QUEUED ``case_review`` job for ``case_id`` except ``keep_job_id``.
 
     Returns the number of jobs superseded. Row-locks the stale jobs (skipping any
     a consumer is concurrently claiming) so a job cannot be claimed and superseded
@@ -30,7 +30,7 @@ def supersede_older_queued_jobs(slug, keep_job_id):
     with transaction.atomic():
         stale_jobs = list(
             Job.objects.select_for_update(skip_locked=True)
-            .filter(kind="case_review", status=Job.QUEUED, payload__slug=slug)
+            .filter(kind="case_review", status=Job.QUEUED, payload__case_id=case_id)
             .exclude(pk=keep_job_id)
         )
         now = timezone.now()

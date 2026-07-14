@@ -1,17 +1,30 @@
 """Tests for E1 — GET /api/casework/reviews/grouped/.
 
-The grouped endpoint groups CaseReview rows by case slug, paginating BY CASE:
-each entry carries {slug, case_title, latest, executions[]} with executions
-newest-first and cases ordered by their most-recent execution.
+The grouped endpoint groups CaseReview rows by case, paginating BY CASE: each
+entry carries {slug, case_title, latest, executions[]} with executions
+newest-first and cases ordered by their most-recent execution. The group ``slug``
+is derived from the (shared) linked case, not stored on the review.
 """
 
 import pytest
 from rest_framework.test import APIClient
 
+from cases.models import Case, CaseType
 from review.models import CaseReview
 from tests.conftest import create_user_with_role
 
 URL = "/api/casework/reviews/grouped/"
+
+
+def _review(slug, **kwargs):
+    """Create a CaseReview linked to the Case with ``slug`` (created on demand).
+
+    Reviews key on the case FK now; the ``slug`` they expose is derived from it.
+    """
+    case, _ = Case.objects.get_or_create(
+        slug=slug, defaults=dict(title=slug, case_type=CaseType.CORRUPTION)
+    )
+    return CaseReview.objects.create(case=case, **kwargs)
 
 
 def _reader_client():
@@ -42,9 +55,9 @@ def test_grouped_requires_authentication():
 @pytest.mark.django_db
 def test_grouped_groups_executions_by_slug():
     # Two executions for case-a, one for case-b.
-    CaseReview.objects.create(slug="case-a", case_title="Case A", status="done")
-    CaseReview.objects.create(slug="case-a", case_title="Case A", status="done")
-    CaseReview.objects.create(slug="case-b", case_title="Case B", status="pending")
+    _review("case-a", case_title="Case A", status="done")
+    _review("case-a", case_title="Case A", status="done")
+    _review("case-b", case_title="Case B", status="pending")
 
     response = _reader_client().get(URL)
 
@@ -60,8 +73,8 @@ def test_grouped_groups_executions_by_slug():
 
 @pytest.mark.django_db
 def test_grouped_latest_is_newest_execution():
-    older = CaseReview.objects.create(slug="case-c", case_title="Old title")
-    newer = CaseReview.objects.create(slug="case-c", case_title="New title")
+    older = _review("case-c", case_title="Old title")
+    newer = _review("case-c", case_title="New title")
 
     response = _reader_client().get(URL)
 
@@ -77,8 +90,8 @@ def test_grouped_latest_is_newest_execution():
 @pytest.mark.django_db
 def test_grouped_cases_ordered_by_most_recent_execution():
     # case-x reviewed first, then case-y — case-y (newer) should come first.
-    CaseReview.objects.create(slug="case-x", case_title="X")
-    CaseReview.objects.create(slug="case-y", case_title="Y")
+    _review("case-x", case_title="X")
+    _review("case-y", case_title="Y")
 
     response = _reader_client().get(URL)
 
@@ -90,7 +103,7 @@ def test_grouped_cases_ordered_by_most_recent_execution():
 def test_grouped_paginates_by_case():
     # 25 distinct cases > default PAGE_SIZE (20) -> paginated by case.
     for i in range(25):
-        CaseReview.objects.create(slug=f"case-{i:02d}", case_title=f"Case {i}")
+        _review(f"case-{i:02d}", case_title=f"Case {i}")
 
     response = _reader_client().get(URL)
 
@@ -108,7 +121,7 @@ def test_grouped_pagination_ranks_cases_across_pages():
     descending ranking without gaps or repeats.
     """
     for i in range(25):
-        CaseReview.objects.create(slug=f"case-{i:02d}", case_title=f"Case {i}")
+        _review(f"case-{i:02d}", case_title=f"Case {i}")
 
     client = _reader_client()
     page1 = client.get(URL)
@@ -127,10 +140,26 @@ def test_grouped_pagination_ranks_cases_across_pages():
 @pytest.mark.django_db
 def test_grouped_item_shape_matches_flat_list():
     """Each execution item carries the same fields the flat /reviews/ list emits."""
-    CaseReview.objects.create(slug="case-shape", case_title="Shape")
+    _review("case-shape", case_title="Shape")
 
     response = _reader_client().get(URL)
 
     item = response.data["results"][0]["latest"]
     for field in ("id", "slug", "status", "case_title", "overall_score", "disposition"):
         assert field in item
+
+
+@pytest.mark.django_db
+def test_grouped_excludes_unlinked_reviews():
+    """A review with no linked case (case_id NULL) must not form a bogus group.
+
+    The FK is nullable only as a backfill safety valve; an unlinked row would
+    otherwise surface as a None-keyed group with an empty slug in the UI.
+    """
+    _review("case-linked", case_title="Linked")
+    CaseReview.objects.create(case=None, case_title="Orphan")
+
+    response = _reader_client().get(URL)
+
+    assert response.data["count"] == 1
+    assert [g["slug"] for g in response.data["results"]] == ["case-linked"]

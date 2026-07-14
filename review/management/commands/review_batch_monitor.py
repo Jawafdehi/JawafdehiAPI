@@ -59,8 +59,9 @@ class Command(BaseCommand):
             time.sleep(interval)
 
         # Defensive: no active rows now; nothing to mark failed unless a row is
-        # stuck (none expected). Build the report.
-        reviews = list(CaseReview.objects.all())
+        # stuck (none expected). Build the report. select_related("case") so the
+        # per-row derived ``slug`` (read off the case) doesn't N+1 in the report.
+        reviews = list(CaseReview.objects.select_related("case"))
         total = len(reviews)
         by_status = Counter(r.status for r in reviews)
         done = [r for r in reviews if r.status == CaseReview.STATUS_DONE]

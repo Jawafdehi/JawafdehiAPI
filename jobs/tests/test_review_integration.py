@@ -10,33 +10,42 @@ from unittest import mock
 
 import pytest
 
+from cases.models import Case, CaseType
 from jobs import queue
 from jobs.models import Job
 from review.models import CaseReview
 
 
+def _review(slug, **kwargs):
+    """Create a CaseReview linked to the Case with ``slug`` (created on demand)."""
+    case, _ = Case.objects.get_or_create(
+        slug=slug, defaults=dict(title=slug, case_type=CaseType.CORRUPTION)
+    )
+    return CaseReview.objects.create(case=case, **kwargs)
+
+
 @pytest.mark.django_db
 def test_submit_review_enqueues_case_review_job(client_helper=None):
-    review = CaseReview.objects.create(slug="some-case")
+    review = _review("some-case")
     # Enqueue via the same helper the view uses.
     from review.views import _enqueue_review_job
 
     job = _enqueue_review_job(review)
     assert job.kind == "case_review"
-    assert job.payload["slug"] == "some-case"
+    assert job.payload["case_id"] == review.case_id
     assert job.payload["review_id"] == review.id
     assert job.dedup_key == f"case_review:{review.id}"
 
 
 @pytest.mark.django_db
 def test_claim_resolves_case_dict_via_build_payload():
-    review = CaseReview.objects.create(slug="case-x")
+    review = _review("case-x")
     from review.views import _enqueue_review_job
 
     _enqueue_review_job(review)
 
     fake_case = {"title": "Case X", "state": "published", "entities": []}
-    with mock.patch("review.case_provider.get_case", return_value=fake_case):
+    with mock.patch("review.case_provider.get_case_by_id", return_value=fake_case):
         job = queue.claim_next(["case_review"])
 
     assert job is not None
@@ -52,11 +61,11 @@ def test_claim_resolves_case_dict_via_build_payload():
 
 @pytest.mark.django_db
 def test_on_result_finalizes_the_review_row():
-    review = CaseReview.objects.create(slug="case-y")
+    review = _review("case-y")
     from review.views import _enqueue_review_job
 
     _enqueue_review_job(review)
-    with mock.patch("review.case_provider.get_case", return_value={"title": "Y"}):
+    with mock.patch("review.case_provider.get_case_by_id", return_value={"title": "Y"}):
         job = queue.claim_next(["case_review"])
 
     result = {
@@ -80,11 +89,11 @@ def test_on_result_finalizes_the_review_row():
 
 @pytest.mark.django_db
 def test_on_failure_marks_the_review_failed():
-    review = CaseReview.objects.create(slug="case-z")
+    review = _review("case-z")
     from review.views import _enqueue_review_job
 
     _enqueue_review_job(review, submitted_by=None)
-    with mock.patch("review.case_provider.get_case", return_value={"title": "Z"}):
+    with mock.patch("review.case_provider.get_case_by_id", return_value={"title": "Z"}):
         job = queue.claim_next(["case_review"])
 
     queue.finalize(job, status=Job.FAILED, error="scorer exploded", retryable=False)
@@ -96,11 +105,11 @@ def test_on_failure_marks_the_review_failed():
 
 @pytest.mark.django_db
 def test_regrade_reenqueues_after_prior_job_terminal():
-    review = CaseReview.objects.create(slug="case-r")
+    review = _review("case-r")
     from review.views import _enqueue_review_job
 
     j1 = _enqueue_review_job(review)
-    with mock.patch("review.case_provider.get_case", return_value={"title": "R"}):
+    with mock.patch("review.case_provider.get_case_by_id", return_value={"title": "R"}):
         claimed = queue.claim_next(["case_review"])
     queue.finalize(claimed, status=Job.DONE, result={"case_title": "R", "result": {}})
 
@@ -108,6 +117,38 @@ def test_regrade_reenqueues_after_prior_job_terminal():
     j2 = _enqueue_review_job(review)
     assert j2.id != j1.id
     assert j2.status == Job.QUEUED
+
+
+@pytest.mark.django_db
+def test_review_survives_a_case_reslug():
+    """The whole point of keying on the case FK: a re-slug must not orphan the
+    review. The enqueued payload carries the stable ``case_id`` (never ``slug``),
+    the derived ``slug`` follows the case, and build_payload still resolves the
+    case by id after the slug changes.
+    """
+    from jobs.consumers import _case_review_build_payload
+    from review.views import _enqueue_review_job
+
+    # DRAFT so the slug is mutable via save() (immutable outside DRAFT).
+    review = _review("orig-slug")
+    case = review.case
+
+    job = _enqueue_review_job(review)
+    assert job.payload["case_id"] == case.id
+    assert "slug" not in job.payload
+
+    # Re-slug the case; the review's FK is untouched.
+    case.slug = "new-slug"
+    case.save()
+
+    # Fetch the review fresh so the derived slug is read off the persisted case.
+    fresh = CaseReview.objects.select_related("case").get(pk=review.pk)
+    assert fresh.slug == "new-slug"
+
+    # build_payload resolves by case_id — no raise — and the serialized case dict
+    # carries the CURRENT slug.
+    payload = _case_review_build_payload(job)
+    assert payload["case"]["slug"] == "new-slug"
 
 
 @pytest.mark.django_db
@@ -129,9 +170,11 @@ def test_consumer_result_body_through_the_view_finalizes_the_review():
     api = APIClient()
     api.force_authenticate(user=user)
 
-    review = CaseReview.objects.create(slug="case-seam")
+    review = _review("case-seam")
     _enqueue_review_job(review)
-    with mock.patch("review.case_provider.get_case", return_value={"title": "Seam"}):
+    with mock.patch(
+        "review.case_provider.get_case_by_id", return_value={"title": "Seam"}
+    ):
         job = queue.claim_next(["case_review"])
 
     # Exactly what review_poller._process_job submits: the handler wrapper

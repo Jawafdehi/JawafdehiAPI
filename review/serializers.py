@@ -58,6 +58,9 @@ class CaseReviewListSerializer(serializers.ModelSerializer):
     overall_score = serializers.SerializerMethodField()
     disposition = serializers.SerializerMethodField()
     reviewers = serializers.SerializerMethodField()
+    # Derived (read-only) from the linked case: the FE builds the case URL/link
+    # from it. It is the model ``slug`` property, not a stored column.
+    slug = serializers.ReadOnlyField()
 
     class Meta:
         model = CaseReview
@@ -91,6 +94,8 @@ class CaseReviewListSerializer(serializers.ModelSerializer):
 
 class CaseReviewDetailSerializer(serializers.ModelSerializer):
     reviewers = serializers.SerializerMethodField()
+    # Derived (read-only) from the linked case — see CaseReviewListSerializer.
+    slug = serializers.ReadOnlyField()
 
     class Meta:
         model = CaseReview
@@ -125,23 +130,36 @@ class ReviewConfigSerializer(serializers.ModelSerializer):
         read_only_fields = ["updated_at"]
 
 
-def _require_case_slug(slug, *, source_label):
-    """Return ``slug`` iff a Case row has it; else raise a 400 naming the input.
+def _require_case(identifier, *, source_label):
+    """Return the Case named by ``identifier`` (its slug); else raise a 400.
 
     ``source_label`` is the field the caseworker actually submitted (``iri`` or
-    ``slug``) so the error attaches to it in the DRF response.
+    ``slug``) so the error attaches to it in the DRF response. Returns the Case
+    OBJECT — reviews key on the stable case PK, not the mutable slug.
+
+    A live slug wins; on a miss we consult the retired-slug map
+    (``CaseSlugHistory``, BB-38) so a submit against a stale URL — one whose slug
+    the case has since vacated (bookmarked / newslettered / search-indexed) —
+    still lands on the right case rather than hard-404ing. This mirrors the
+    case-retrieve path's "live slug first, then history" resolution.
     """
-    from cases.models import Case
+    from cases.models import Case, CaseSlugHistory
 
-    if not Case.objects.filter(slug=slug).exists():
-        raise serializers.ValidationError(
-            {source_label: f"No Jawafdehi case found for slug '{slug}'."}
-        )
-    return slug
+    case = Case.objects.filter(slug=identifier).first()
+    if case is not None:
+        return case
+    hist = (
+        CaseSlugHistory.objects.filter(slug=identifier).select_related("case").first()
+    )
+    if hist is not None:
+        return hist.case
+    raise serializers.ValidationError(
+        {source_label: f"No Jawafdehi case found for slug '{identifier}'."}
+    )
 
 
-def _resolve_iri_to_slug(iri):
-    """Resolve a canonical @id IRI to the slug of the Jawafdehi case it names.
+def _resolve_iri_to_case(iri):
+    """Resolve a canonical @id IRI to the Jawafdehi Case it names.
 
     Accepts either form (host is not anchored — the DB lookup is the authority):
 
@@ -151,11 +169,13 @@ def _resolve_iri_to_slug(iri):
         resolved to the single Jawafdehi case that references it (via the
         ``CaseCourtCaseReference`` join). Ambiguous (>1 case) or unreferenced
         court cases are rejected with a 400.
+
+    Returns the Case OBJECT on success (reviews key on the case PK).
     """
     from cases.models import Case
 
     if is_valid_case_iri(iri, any_host=True):
-        return _require_case_slug(parse_case_iri(iri).slug, source_label="iri")
+        return _require_case(parse_case_iri(iri).slug, source_label="iri")
 
     if is_valid_courtcase_iri(iri, any_host=True):
         canonical = canonicalize_courtcase_iri(iri)
@@ -182,7 +202,7 @@ def _resolve_iri_to_slug(iri):
                     )
                 }
             )
-        return slugs[0]
+        return Case.objects.get(slug=slugs[0])
 
     raise serializers.ValidationError(
         {
@@ -196,13 +216,14 @@ def _resolve_iri_to_slug(iri):
 
 
 class SubmitSerializer(serializers.Serializer):
-    """Resolve a submitted identifier to a canonical Jawafdehi case slug.
+    """Resolve a submitted identifier to the Jawafdehi Case it names.
 
     Caseworkers submit an ``iri`` — either the Jawafdehi case IRI or a
-    court-case IRI (see :func:`_resolve_iri_to_slug`). A bare ``slug`` (an exact
+    court-case IRI (see :func:`_resolve_iri_to_case`). A bare ``slug`` (an exact
     canonical case slug) is also accepted for the internal re-run / regrade
     paths, which already hold the resolved slug. Exactly one must be given.
-    ``validated_data['slug']`` is always the canonical case slug on success.
+    ``validated_data['case']`` is the resolved Case object on success (reviews
+    key on the stable case PK, not the mutable slug).
     """
 
     iri = serializers.CharField(
@@ -219,10 +240,11 @@ class SubmitSerializer(serializers.Serializer):
                 "or 'slug'."
             )
         attrs.pop("iri", None)
-        attrs["slug"] = (
-            _resolve_iri_to_slug(iri)
+        attrs.pop("slug", None)
+        attrs["case"] = (
+            _resolve_iri_to_case(iri)
             if iri
-            else _require_case_slug(slug, source_label="slug")
+            else _require_case(slug, source_label="slug")
         )
         return attrs
 

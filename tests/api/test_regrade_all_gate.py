@@ -17,10 +17,19 @@ same live case N times at full LLM cost).
 import pytest
 from rest_framework.test import APIClient
 
+from cases.models import Case, CaseType
 from review.models import CaseReview
 from tests.conftest import create_user_with_role
 
 URL = "/api/casework/reviews/regrade-all/"
+
+
+def _review(slug, **kwargs):
+    """Create a CaseReview linked to the Case with ``slug`` (created on demand)."""
+    case, _ = Case.objects.get_or_create(
+        slug=slug, defaults=dict(title=slug, case_type=CaseType.CORRUPTION)
+    )
+    return CaseReview.objects.create(case=case, **kwargs)
 
 
 def _client_for_role(role):
@@ -65,21 +74,21 @@ def test_regrade_all_targets_only_the_latest_review_per_slug():
     reset to pending/``queued_for_regrade``; the older ``case-a`` row is left
     exactly as it was (still ``done`` / its old stage / its old error).
     """
-    older_a = CaseReview.objects.create(
-        slug="case-a",
+    older_a = _review(
+        "case-a",
         case_title="Case A",
         status=CaseReview.STATUS_DONE,
         stage="complete",
         error="prior-error-should-survive",
     )
-    newer_a = CaseReview.objects.create(
-        slug="case-a",
+    newer_a = _review(
+        "case-a",
         case_title="Case A",
         status=CaseReview.STATUS_DONE,
         stage="complete",
     )
-    only_b = CaseReview.objects.create(
-        slug="case-b",
+    only_b = _review(
+        "case-b",
         case_title="Case B",
         status=CaseReview.STATUS_DONE,
         stage="complete",

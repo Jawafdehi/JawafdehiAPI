@@ -13,16 +13,29 @@ from django.core.management import call_command
 
 import pytest
 
+from cases.models import Case, CaseType
 from jobs.models import Job
 from review.models import CaseReview
 from review.views import _enqueue_review_job
 
 
+def _review(slug, **kwargs):
+    """Create a CaseReview linked to the Case with ``slug`` (created on demand).
+
+    Reviews of the same slug share one Case, so their jobs carry the same
+    ``case_id`` and the supersede/regrade paths (now keyed on case_id) group them.
+    """
+    case, _ = Case.objects.get_or_create(
+        slug=slug, defaults=dict(title=slug, case_type=CaseType.CORRUPTION)
+    )
+    return CaseReview.objects.create(case=case, **kwargs)
+
+
 def _enqueue_pair(slug):
-    """Two reviews of the same slug, enqueued oldest-first. Returns (old, new) jobs."""
-    r1 = CaseReview.objects.create(slug=slug)
+    """Two reviews of the same case, enqueued oldest-first. Returns (old, new) jobs."""
+    r1 = _review(slug)
     j1 = _enqueue_review_job(r1)
-    r2 = CaseReview.objects.create(slug=slug)
+    r2 = _review(slug)
     j2 = _enqueue_review_job(r2)
     j1.refresh_from_db()
     return j1, j2
@@ -43,14 +56,14 @@ def test_enqueue_supersedes_older_queued_job_for_same_slug():
 
 @pytest.mark.django_db
 def test_enqueue_does_not_touch_other_slugs_or_running_jobs():
-    other = CaseReview.objects.create(slug="case-other")
+    other = _review("case-other")
     other_job = _enqueue_review_job(other)
 
-    running = CaseReview.objects.create(slug="case-dup")
+    running = _review("case-dup")
     running_job = _enqueue_review_job(running)
     Job.objects.filter(pk=running_job.pk).update(status=Job.RUNNING)
 
-    newer = CaseReview.objects.create(slug="case-dup")
+    newer = _review("case-dup")
     _enqueue_review_job(newer)
 
     other_job.refresh_from_db()
@@ -90,12 +103,8 @@ def test_regrade_all_targets_only_the_latest_review_per_slug():
     from django.contrib.auth import get_user_model
     from rest_framework.test import APIRequestFactory, force_authenticate
 
-    old = CaseReview.objects.create(
-        slug="case-hist", status=CaseReview.STATUS_DONE, stage="complete"
-    )
-    latest = CaseReview.objects.create(
-        slug="case-hist", status=CaseReview.STATUS_DONE, stage="complete"
-    )
+    old = _review("case-hist", status=CaseReview.STATUS_DONE, stage="complete")
+    latest = _review("case-hist", status=CaseReview.STATUS_DONE, stage="complete")
 
     from review import views
 

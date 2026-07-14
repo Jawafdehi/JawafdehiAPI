@@ -51,11 +51,41 @@ def _serialize_local_case(slug):
     return data
 
 
+def _serialize_local_case_by_id(case_id):
+    """Serialize a local cases.Case (looked up by pk) to the case dict shape.
+
+    Reviews key on the stable case PK, so the payload build resolves the case by
+    id — a re-slug between submit and grade can never orphan the lookup. The
+    serialized dict already carries the case's CURRENT slug, so no fix-up here.
+    """
+    from cases.models import Case
+    from cases.serializers import CaseDetailSerializer
+
+    try:
+        case = Case.objects.get(pk=case_id)
+    except Case.DoesNotExist:
+        raise CaseNotFound(f"No Jawafdehi case found with id {case_id}.")
+    return dict(CaseDetailSerializer(case, context={}).data)
+
+
 def get_case(slug):
-    """Return the normalized case dict for a slug, honoring REVIEW_CASE_SOURCE."""
+    """Return the normalized case dict for a slug, honoring REVIEW_CASE_SOURCE.
+
+    Legacy/slug-addressed path — kept for the remote (JDS) source. The case
+    review pipeline now resolves cases by PK via :func:`get_case_by_id`.
+    """
     source = getattr(settings, "REVIEW_CASE_SOURCE", "local")
     if source == "remote":
         case = jds_client.get_case(slug)
         case.setdefault("slug", slug)
         return case
     return _serialize_local_case(slug)
+
+
+def get_case_by_id(case_id):
+    """Return the normalized case dict for a case PK (the review payload key).
+
+    Only the local source is PK-addressable; the remote/JDS API (:func:`get_case`)
+    is slug-addressed and legacy, so id lookups always serialize the local row.
+    """
+    return _serialize_local_case_by_id(case_id)

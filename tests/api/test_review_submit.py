@@ -12,7 +12,7 @@ with a clear 400 — NOT silently enqueued to die later at payload-build.
 import pytest
 from rest_framework.test import APIClient
 
-from cases.models import Case, CaseState, CaseType
+from cases.models import Case, CaseSlugHistory, CaseState, CaseType
 from review.models import CaseReview
 from tests.conftest import create_user_with_role
 
@@ -50,7 +50,8 @@ def test_case_iri_resolves_to_slug(caseworker, case):
     resp = _authed_client(caseworker).post(URL, {"iri": CASE_IRI}, format="json")
     assert resp.status_code == 201, resp.data
     assert resp.data["slug"] == CASE_SLUG
-    assert CaseReview.objects.filter(slug=CASE_SLUG).exists()
+    # Reviews now key on the case FK; the exposed slug is derived from it.
+    assert CaseReview.objects.filter(case__slug=CASE_SLUG).exists()
 
 
 @pytest.mark.django_db
@@ -134,6 +135,36 @@ def test_slug_path_for_unknown_case_is_rejected(caseworker):
     resp = _authed_client(caseworker).post(URL, {"slug": "no-such-case"}, format="json")
     assert resp.status_code == 400
     assert not CaseReview.objects.exists()
+
+
+@pytest.mark.django_db
+def test_retired_slug_resolves_to_current_case(caseworker, case):
+    # A slug the case has since vacated (BB-38) still resolves: submit lands on
+    # the current case and the exposed slug is the CURRENT one, not the stale one.
+    CaseSlugHistory.objects.create(slug="old-alpha-land-slug", case=case)
+
+    resp = _authed_client(caseworker).post(
+        URL, {"slug": "old-alpha-land-slug"}, format="json"
+    )
+
+    assert resp.status_code == 201, resp.data
+    assert resp.data["slug"] == CASE_SLUG
+    assert CaseReview.objects.filter(case=case).exists()
+
+
+@pytest.mark.django_db
+def test_retired_case_iri_resolves_to_current_case(caseworker, case):
+    # Same fallback via a stale case @id IRI (e.g. a newslettered/bookmarked URL).
+    CaseSlugHistory.objects.create(slug="old-alpha-land-slug", case=case)
+
+    resp = _authed_client(caseworker).post(
+        URL,
+        {"iri": "https://jawafdehi.org/case/old-alpha-land-slug"},
+        format="json",
+    )
+
+    assert resp.status_code == 201, resp.data
+    assert resp.data["slug"] == CASE_SLUG
 
 
 @pytest.mark.django_db
