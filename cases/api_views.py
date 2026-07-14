@@ -426,23 +426,29 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             "material_references",
         ).order_by("-created_at")
 
-    # Anonymous list responses are PUBLISHED-only and identical for everyone, so
-    # they are publicly cacheable. ``s-maxage`` lets the CDN edge absorb the
-    # fan-out; ``max-age`` gives browsers a short hold so an immediate reload is
-    # served from cache instead of re-paying the full query cost. Mirrors
-    # StatisticsView.CACHE_CONTROL. Authenticated/casework list responses vary by
-    # role and stay uncached.
-    LIST_CACHE_CONTROL = "public, max-age=60, s-maxage=300"
+    # This list is ROLE-SCOPED: an anonymous caller gets a PUBLISHED-only page,
+    # but the SAME URL returns a wider DRAFT/IN_REVIEW-inclusive page to an
+    # authenticated caseworker. A shared/CDN cache keys by URL and cannot vary
+    # on auth (Cloudflare honours no ``Vary`` other than Accept-Encoding), so a
+    # cached anon snapshot would be handed to a signed-in caseworker and
+    # silently hide their in-review cases. So the anon response is kept OUT of
+    # shared caches (``private``) and only the browser may hold it briefly
+    # (``max-age`` → an immediate reload is free). Deliberately NOT
+    # ``public``/``s-maxage``: unlike StatisticsView (identical for every
+    # caller, safe to edge-cache), this endpoint must never enter the edge
+    # cache. The batched entity resolution + ``material_references`` prefetch
+    # keep an uncached hit cheap, so forgoing the edge cache costs little.
+    LIST_CACHE_CONTROL = "private, max-age=60"
 
     def list(self, request, *args, **kwargs):
         response = super().list(request, *args, **kwargs)
         if not (request.user and request.user.is_authenticated):
             response["Cache-Control"] = self.LIST_CACHE_CONTROL
-            # Vary on the auth-bearing headers so a shared/CDN cache never
-            # serves this public, PUBLISHED-only snapshot to an authenticated
-            # caseworker. Auth is OIDC bearer (``Authorization``) or session
-            # (``Cookie``); those requests must miss the anon cache and get
-            # their role-scoped (DRAFT/IN_REVIEW-inclusive) list from origin.
+            # ``private`` already keeps this out of shared/CDN caches; Vary on
+            # the auth-bearing headers so the browser's OWN cache can't reuse
+            # this anon entry for a request issued after the user signs in
+            # (OIDC bearer ``Authorization`` or session ``Cookie``) — that one
+            # must fetch the role-scoped list fresh.
             patch_vary_headers(response, ["Cookie", "Authorization"])
         else:
             # Role-scoped list (may include DRAFT/IN_REVIEW cases the public
