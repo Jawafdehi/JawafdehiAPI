@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Group
 from rest_framework.test import APIClient
 
 from cases.models import Case, CaseMaterialReference, CaseState, CaseType
@@ -261,6 +262,19 @@ class TestReadSideGates:
         u.save()
         return u
 
+    def _readonly(self):
+        # The org-wide ReadOnly role as the bearer authenticator produces it:
+        # in the ReadOnly Group, but NOT is_staff / is_superuser (that flag is
+        # only ever set by the Django-admin session path, never by bearer auth).
+        u = User.objects.create_user("ro1", password="x")
+        u.groups.add(Group.objects.get_or_create(name="ReadOnly")[0])
+        return u
+
+    def _plain_authed(self):
+        # Authenticated but roleless: the boundary case. Systemwide read is the
+        # ReadOnly *role*, not mere authentication — this principal stays gated.
+        return User.objects.create_user("nobody1", password="x")
+
     def test_anon_retrieve_hides_private(self):
         mat = _store("source:20240101:aaaa01", visibility=Visibility.PRIVATE)
         client = APIClient()
@@ -336,6 +350,33 @@ class TestReadSideGates:
         resp = client.get("/api/materials/")
         ids = {d["@id"] for d in resp.json()["results"]}
         assert any("priv01" in i for i in ids)
+
+    def test_readonly_retrieve_shows_private(self):
+        # Org-wide ReadOnly is a systemwide READ role: it must resolve PRIVATE
+        # (draft-only) materials, exactly like content staff.
+        mat = _store("source:20240101:aaaa01", visibility=Visibility.PRIVATE)
+        client = APIClient()
+        client.force_authenticate(self._readonly())
+        resp = client.get(f"/api/materials/?iri={mat.iri}")
+        assert resp.status_code == 200, resp.content
+
+    def test_readonly_list_includes_private(self):
+        _store("source:20240101:list01", visibility=Visibility.LISTED)
+        _store("source:20240101:priv01", visibility=Visibility.PRIVATE)
+        client = APIClient()
+        client.force_authenticate(self._readonly())
+        resp = client.get("/api/materials/")
+        ids = {d["@id"] for d in resp.json()["results"]}
+        assert any("priv01" in i for i in ids)
+
+    def test_plain_authed_hides_private(self):
+        # Boundary: a roleless authenticated user is NOT a read role and stays
+        # gated out of PRIVATE (only the ReadOnly role / content staff lift it).
+        mat = _store("source:20240101:aaaa01", visibility=Visibility.PRIVATE)
+        client = APIClient()
+        client.force_authenticate(self._plain_authed())
+        resp = client.get(f"/api/materials/?iri={mat.iri}")
+        assert resp.status_code == 404, resp.content
 
 
 @pytest.mark.django_db
