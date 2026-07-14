@@ -170,6 +170,9 @@ class QueryGateTests(_DbAPITestCase):
         cls.user = User.objects.create(username="oidc-sub-123")
         cls.user.groups.add(cls.contrib_group)
         cls.nobody = User.objects.create(username="oidc-sub-norole")
+        cls.readonly_group, _ = Group.objects.get_or_create(name="ReadOnly")
+        cls.readonly = User.objects.create(username="oidc-sub-readonly")
+        cls.readonly.groups.add(cls.readonly_group)
 
     def test_unauth_is_401(self):
         resp = self.client.post("/api/query/", {"query": "SELECT 1"}, format="json")
@@ -209,6 +212,17 @@ class QueryGateTests(_DbAPITestCase):
         self.assertIn("rows", resp.data)
         self.assertEqual(resp.data["max_rows"], 500)
 
+    def test_readonly_role_may_query(self):
+        # ReadOnly is a systemwide READ role: the SELECT-only query plane returns
+        # data already public via the REST read plane, so it is admitted — even
+        # though ReadOnly is excluded from the write / ingestion gates.
+        self.client.force_authenticate(user=self.readonly)
+        resp = self.client.post(
+            "/api/query/", {"query": "SELECT identifier FROM courts"}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIn("rows", resp.data)
+
     def test_ngm_query_scope_grants_access_without_role(self):
         # A principal with no NGM role but bearing the ``ngm.query`` OAuth scope
         # (the FastAPI scope control) is accepted — scope OR role suffices.
@@ -235,10 +249,26 @@ class IngestionGateTests(_DbAPITestCase):
         g, _ = Group.objects.get_or_create(name="Caseworker")
         cls.user = User.objects.create(username="ingest-user")
         cls.user.groups.add(g)
+        ro, _ = Group.objects.get_or_create(name="ReadOnly")
+        cls.readonly = User.objects.create(username="ingest-readonly")
+        cls.readonly.groups.add(ro)
 
     def test_unauth_ingestion_is_401(self):
         resp = self.client.post("/api/ingestion/cases/", {"items": []}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_readonly_role_cannot_ingest_is_403(self):
+        # The read/write split: ReadOnly may run the SELECT query plane but must
+        # NOT reach any ingestion writer — HasNgmRole (NGM_ROLE_GROUPS) excludes
+        # it. Guards against widening the write gate when widening the read one.
+        self.client.force_authenticate(user=self.readonly)
+        for path in (
+            "/api/ingestion/cases/",
+            "/api/ingestion/entities/resolve/",
+            "/api/ingestion/documents/",
+        ):
+            resp = self.client.post(path, {"items": []}, format="json")
+            self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN, msg=path)
 
     def test_authed_ingestion_requires_items_list(self):
         # The ingestion writers are now REAL: a body with no `items` list is a
