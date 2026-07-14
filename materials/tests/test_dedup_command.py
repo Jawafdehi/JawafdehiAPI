@@ -1,8 +1,10 @@
-"""Tests for the read-only ``audit_jawafdehi_duplicates`` management command.
+"""Tests for the ``dedup_jawafdehi_materials`` management command.
 
-The command scans ``/material/jawafdehi/*`` materials, matches each against the
-canonical corpus by natural key (via ``materials.dedup``), and writes a JSONL
-report + a stdout summary. It MUTATES NOTHING. These run on sqlite.
+Focus on the DETECT (``--dry-run``, the default) surface: it scans
+``/material/jawafdehi/*`` materials, classifies each via ``materials.dedup``, writes a
+JSONL report + a summary, and MUTATES NOTHING. The mutating ``--apply`` path's semantics
+are covered by ``test_dedup_merge``; here we only assert the command wires ``--apply``,
+``--dry-run`` guarding, the merge plan, and ``--output -`` streaming. Runs on sqlite.
 See docs/superpowers/specs/2026-07-14-jawafdehi-dedup-audit-design.md.
 """
 
@@ -13,6 +15,7 @@ import json
 
 import pytest
 from django.core.management import call_command
+from django.core.management.base import CommandError
 
 from cases.models import Case, CaseMaterialReference, CaseState, CaseType
 from materials.models import Material
@@ -46,10 +49,10 @@ def _canonical(source, ident, material_type="document"):
     )
 
 
-def _run(tmp_path):
+def _run(tmp_path, *args):
     out = tmp_path / "report.jsonl"
     stdout = io.StringIO()
-    call_command("audit_jawafdehi_duplicates", "--output", str(out), stdout=stdout)
+    call_command("dedup_jawafdehi_materials", "--output", str(out), *args, stdout=stdout)
     rows = [json.loads(line) for line in out.read_text().splitlines() if line.strip()]
     return {r["jawafdehi_iri"]: r for r in rows}, stdout.getvalue()
 
@@ -62,7 +65,6 @@ def test_press_release_with_canonical_is_a_duplicate(tmp_path):
     assert row["outcome"] == "duplicate"
     assert row["canonical_iri"] == f"{BASE}/material/ciaa_press_release/3155"
     assert "3155" in row["signal"]
-    # The summary reports the headline duplicate count.
     assert "duplicate a document we already hold" in summary
 
 
@@ -93,7 +95,7 @@ def test_charge_sheet_has_no_key(tmp_path):
     assert report[m.iri]["outcome"] == "no_canonical_key"
 
 
-def test_referencing_cases_are_reported(tmp_path):
+def test_referencing_cases_and_plan_are_reported(tmp_path):
     m = _jawaf("20260507.pr3", "CIAA_PRESS_RELEASE", "प्रेस विज्ञप्ति नं. ३१५५")
     _canonical("ciaa_press_release", "3155")
     case = Case.objects.create(
@@ -102,15 +104,64 @@ def test_referencing_cases_are_reported(tmp_path):
     )
     CaseMaterialReference.objects.create(case=case, material_iri=m.iri, ordinal=0)
     report, _ = _run(tmp_path)
-    assert report[m.iri]["referencing_cases"] == ["case-081-cr-0138-jhalak"]
+    row = report[m.iri]
+    assert row["referencing_cases"] == ["case-081-cr-0138-jhalak"]
+    # Dry-run duplicates carry a merge plan (mutating nothing).
+    assert row["plan"]["refs_to_repoint"] == ["case-081-cr-0138-jhalak"]
+    assert row["plan"]["collisions"] == []
 
 
-def test_command_mutates_nothing(tmp_path):
+def test_default_run_mutates_nothing(tmp_path):
     m = _jawaf("20260507.pr4", "CIAA_PRESS_RELEASE", "प्रेस विज्ञप्ति नं. ३१५५")
     _canonical("ciaa_press_release", "3155")
+    case = Case.objects.create(
+        case_type=CaseType.CORRUPTION, state=CaseState.PUBLISHED,
+        title="X", slug="case-x",
+    )
+    CaseMaterialReference.objects.create(case=case, material_iri=m.iri, ordinal=0)
     before_count = Material.objects.count()
     before_updated = Material.objects.get(pk=m.iri).updated_at
     _run(tmp_path)
     assert Material.objects.count() == before_count
     assert Material.objects.get(pk=m.iri).updated_at == before_updated
     assert Material.objects.filter(is_deleted=True).count() == 0
+    # The reference was not repointed.
+    assert CaseMaterialReference.objects.get(case=case).material_iri == m.iri
+
+
+def test_apply_and_dry_run_are_mutually_exclusive(tmp_path):
+    with pytest.raises(CommandError):
+        call_command(
+            "dedup_jawafdehi_materials", "--apply", "--dry-run",
+            "--output", str(tmp_path / "r.jsonl"),
+        )
+
+
+def test_apply_repoints_and_soft_deletes(tmp_path):
+    m = _jawaf("20260507.pr5", "CIAA_PRESS_RELEASE", "प्रेस विज्ञप्ति नं. ३१५५")
+    canonical = _canonical("ciaa_press_release", "3155")
+    case = Case.objects.create(
+        case_type=CaseType.CORRUPTION, state=CaseState.PUBLISHED,
+        title="Y", slug="case-y",
+    )
+    CaseMaterialReference.objects.create(case=case, material_iri=m.iri, ordinal=0)
+
+    report, summary = _run(tmp_path, "--apply")
+
+    assert report[m.iri]["applied"] == {
+        "refs_repointed": 1, "refs_deduped": 0, "soft_deleted": True,
+    }
+    assert Material.objects.get(pk=m.iri).is_deleted is True
+    assert CaseMaterialReference.objects.get(case=case).material_iri == canonical.iri
+    assert "Merged 1 of" in summary
+
+
+def test_output_dash_streams_jsonl_to_stdout_summary_to_stderr():
+    _jawaf("20260507.news2", "NEWS", "समाचार")
+    stdout, stderr = io.StringIO(), io.StringIO()
+    call_command("dedup_jawafdehi_materials", "--output", "-", stdout=stdout, stderr=stderr)
+    # stdout is pure JSONL (every non-empty line parses); summary is on stderr.
+    lines = [ln for ln in stdout.getvalue().splitlines() if ln.strip()]
+    assert lines and all(json.loads(ln) for ln in lines)
+    assert "duplicate a document we already hold" in stderr.getvalue()
+    assert "duplicate a document we already hold" not in stdout.getvalue()

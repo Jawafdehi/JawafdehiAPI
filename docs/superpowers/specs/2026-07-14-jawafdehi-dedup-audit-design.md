@@ -1,8 +1,10 @@
-# Jawafdehi case-upload duplicate audit — design
+# Jawafdehi case-upload dedup — design (detect + merge)
 
-**Status:** approved design, Stage 1 (audit) only.
+**Status:** implemented. Stage 1 (detect, read-only default) + Stage 2 (merge, `--apply`).
 **Date:** 2026-07-14
-**Scope:** backend-only (`services/JawafdehiAPI`), read-only. No frontend, no data mutation.
+**Scope:** backend-only (`services/JawafdehiAPI`). One command,
+`dedup_jawafdehi_materials`, read-only by default (`--dry-run`) with an opt-in
+mutating `--apply`. No frontend changes.
 
 ## Context
 
@@ -19,19 +21,19 @@ re-uploading documents already in the corpus.
 
 Deduplication is never a single destructive step. It is staged:
 
-1. **Audit (detect), read-only** — find which jawafdehi materials duplicate a
-   canonical document. Mutates nothing. **← this spec.**
-2. **Merge (remove)** — repoint each case reference to the canonical material,
-   soft-delete the confirmed duplicate, recompute visibility. Touches evidence;
-   runs behind review. **Deferred** — decided after the audit's real output is seen.
+1. **Detect, read-only** (`--dry-run`, default) — find which jawafdehi materials
+   duplicate a canonical document + print the merge plan. Mutates nothing. **← this spec.**
+2. **Merge** (`--apply`) — repoint each case reference to the canonical material and
+   soft-delete the confirmed duplicate (canonical visibility left untouched). Touches
+   evidence; runs behind review, operator-driven. **← this spec (Stage 2 below).**
 3. **Prevent (ingest guard)** — catch dupes at upload time. **Deferred.**
 
-This spec covers Stage 1 only. Nothing is deleted or modified. The audit's output
-is what we use to decide whether/how Stage 2 runs.
+Both stages live in one command, `dedup_jawafdehi_materials`; the detect pass is the
+default and the operator reviews its output before running `--apply`.
 
 ## Goal
 
-A read-only Django management command, `audit_jawafdehi_duplicates`, that scans
+A management command, `dedup_jawafdehi_materials` (read-only by default), that scans
 every `/material/jawafdehi/*` material, decides whether it duplicates a canonical
 corpus material by **natural key**, and writes a reviewable report plus a printed
 summary. It classifies every material into an outcome bucket and records the
@@ -39,7 +41,8 @@ signal that produced each match.
 
 ## Non-goals (explicit)
 
-- **No mutation.** No soft-delete, no reference rewrite, no `save()`. Reads only.
+- **No mutation by default.** The default (`--dry-run`) reads only. Mutation happens
+  only under the explicit `--apply` flag (Stage 2, below).
 - **No fuzzy / text-similarity matching.** Natural-key only (see Match scope). The
   charge-sheet bucket, which has no shared key with the AG corpus, is reported as
   `no_canonical_key`, not force-matched.
@@ -126,7 +129,9 @@ The court-case-code alternation is a module constant so it is easy to extend.
 `name.ne` may be a bilingual dict or a plain string; a small `_text()` helper
 (mirroring `person_sector._text`) handles both.
 
-### 2. Read-only command — `materials/management/commands/audit_jawafdehi_duplicates.py`
+### 2. Command — `materials/management/commands/dedup_jawafdehi_materials.py`
+
+Read-only by default (`--dry-run`); `handle()` for the detect pass:
 
 `handle()`:
 
@@ -153,9 +158,11 @@ The court-case-code alternation is a module constant so it is easy to extend.
 Final outcome buckets: `duplicate`, `key_but_absent`, `no_canonical_key`,
 `no_canonical_twin`.
 
-Command options: `--output <path>` (default `duplicate-audit-<runstamp>.jsonl` in
-the CWD; the runstamp is passed in / derived from `django.utils.timezone.now()` at
-call time, not inside the pure module), `--limit N` (cap rows, for spot checks).
+Command options: `--dry-run` (default; read-only detect + merge plan), `--apply`
+(Stage 2 merge — mutually exclusive with `--dry-run`), `--limit N` (cap rows, for
+spot checks / staged apply), `--output <path>` (default `dedup-<runstamp>.jsonl` in
+the CWD; `--output -` streams the JSONL report to **stdout** and routes the human
+summary to **stderr**, the retrievable channel on an ephemeral prod pod).
 
 ### Report schema (one JSON object per line)
 
@@ -188,7 +195,7 @@ by-`source_type` breakdown (the re-bucket view, produced for free).
 - `CIAA_PRESS_RELEASE` with a number-less name → `NO_CANONICAL_KEY`.
 - `name` as bilingual dict vs plain string both parse.
 
-**Command** — `materials/tests/test_audit_command.py` (`@pytest.mark.django_db`):
+**Command (detect)** — `materials/tests/test_dedup_command.py` (`@pytest.mark.django_db`):
 
 - Seed a jawafdehi `CIAA_PRESS_RELEASE` material (name carries `३१५५`) **and** a
   canonical `Material(source="ciaa_press_release", ident="3155")` → that row lands
@@ -200,13 +207,19 @@ by-`source_type` breakdown (the re-bucket view, produced for free).
   `CaseMaterialReference` points at the material.
 - Assert **no writes**: material `updated_at` / count unchanged after the run.
 
-Run: `pytest materials/tests/test_dedup.py materials/tests/test_audit_command.py -v`.
+**Merge (`--apply`)** — `materials/tests/test_dedup_merge.py`: repoint (note+ordinal
+preserved), collision-dedupe, save()-not-update() soft-delete (search eviction),
+canonical-visibility-untouched, and idempotency.
+
+Run: `pytest materials/tests/test_dedup.py materials/tests/test_dedup_command.py materials/tests/test_dedup_merge.py -v`.
 
 ## Files
 
 - Create `materials/dedup.py` — pure matcher.
-- Create `materials/management/commands/audit_jawafdehi_duplicates.py` — command.
-- Create `materials/tests/test_dedup.py`, `materials/tests/test_audit_command.py`.
+- Create `materials/management/commands/dedup_jawafdehi_materials.py` — command.
+- Create `materials/dedup_merge.py` — Stage 2 merge (`plan_merge`/`apply_merge`).
+- Create `materials/tests/test_dedup.py`, `materials/tests/test_dedup_command.py`,
+  `materials/tests/test_dedup_merge.py`.
 - No changes to models, statistics, the API payload, or the frontend.
 
 ## Deployment note (matters here)
@@ -223,11 +236,39 @@ The database is reachable only through the API — there is **no local DB**. So:
 This is why Stage 1 is a management command rather than a stats aggregate: the
 audit is an on-demand review artifact, not a per-request page number.
 
-## Future stages (out of scope, recorded for the plan)
+## Stage 2 — Merge (`--apply`, implemented)
 
-- **Stage 2 — Merge.** For `duplicate` rows: repoint each `CaseMaterialReference`
-  from the jawafdehi IRI to `canonical_iri` (preserving `additional_details` +
-  `ordinal`), soft-delete the jawafdehi material, recompute visibility. Runs behind
-  review, informed by this audit's output.
-- **Stage 3 — Prevent.** Run the matcher at ingest so a document already in the
-  corpus binds the canonical material instead of minting a new jawafdehi copy.
+Lives in `materials/dedup_merge.py` (`plan_merge` / `apply_merge`), django_db-tested in
+`materials/tests/test_dedup_merge.py`. For each `duplicate` row, `apply_merge`:
+
+1. **Repoint** each `CaseMaterialReference` from the jawafdehi IRI to `canonical_iri`,
+   preserving `additional_details` + `ordinal`.
+2. **Collision-dedupe.** `CaseMaterialReference` has a `unique_case_material_reference`
+   constraint on `(case, material_iri)`, so if the case already references the canonical,
+   a repoint would raise. Instead, fold the jawafdehi ref's note into the existing
+   canonical ref and **delete** the jawafdehi ref.
+3. **Soft-delete** the jawafdehi material via the sanctioned model `save()` path
+   (`is_deleted=True`, `update_fields=["is_deleted","updated_at"]`) so the `post_save`
+   search-index eviction signal fires — a raw `.update()` would leave it in search.
+
+**Canonical visibility is deliberately NOT recomputed.** The canonical is NGM-native
+public corpus (`ciaa_press_release` / `court_order`), LISTED and public independent of
+any case. `recompute_material_visibility` takes the MAX over referring case states with
+no NGM-native guard, so recomputing would **demote** a public press release to
+PRIVATE/UNLISTED the instant a draft/in-review case referenced it — hiding public data.
+Leaving it LISTED leaks nothing: the document was already public, and the draft case
+itself stays hidden (case evidence links surface only for PUBLISHED cases).
+
+**Cross-DB + idempotency.** References live on the `default` DB, materials on `ngm`; no
+atomic transaction spans both. The per-material ref rewrite is a `default`-DB
+transaction; the material soft-delete is a separate `ngm` write. Re-runs are safe — a
+soft-deleted material drops out of the detect pass (`is_deleted=False`), and a partial
+run (refs moved, material still live) re-detects and completes the soft-delete.
+
+**Operation.** Operator runs `--dry-run` first and reviews the JSONL, then `--apply`
+(optionally `--limit N` for a staged rollout), on staging/prod against the real Postgres.
+
+## Stage 3 — Prevent (out of scope, recorded for the plan)
+
+Run the matcher at ingest so a document already in the corpus binds the canonical
+material instead of minting a new jawafdehi copy.
