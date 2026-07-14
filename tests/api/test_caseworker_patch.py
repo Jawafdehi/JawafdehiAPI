@@ -2,10 +2,13 @@
 Tests for PATCH /api/cases/{id}/ (RFC 6902 JSON Patch endpoint).
 """
 
+from unittest import mock
+
 import pytest
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 
+from cases.api_views import CaseViewSet
 from cases.models import (
     Case,
     CaseEntityRelationship,
@@ -105,6 +108,94 @@ def test_patch_replace_scalar_field():
     assert response.data["title"] == "Updated title"
     case.refresh_from_db()
     assert case.title == "Updated title"
+
+
+@pytest.mark.django_db
+def test_patch_replace_notes_persists_on_case_without_notes():
+    # BB-28: the editor sends `replace /notes`, but the patch surface omitted
+    # `notes` (no snapshot key, no serializer field, no scalar write), so the
+    # patch failed with 400 "can't replace a non-existent object 'notes'".
+    # Same class as BB-11 (a writable field missing from the patch surface).
+    user = _contributor("bikash")
+    case = _make_case()  # notes defaults to ""
+    assert case.notes == ""
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[{"op": "replace", "path": "/notes", "value": "internal note"}],
+        format="json",
+    )
+    assert response.status_code == 200, response.data
+    # The patched note is persisted to the Case row.
+    case.refresh_from_db()
+    assert case.notes == "internal note"
+    # And it survives the editor's reload path — the casework read serializer
+    # returns notes to casework viewers (BB-04). (The PATCH response body itself
+    # blanks notes because CaseSerializer is built there without request context;
+    # that's pre-existing and orthogonal to this persistence fix.)
+    reload = client.get(URL.format(case.slug))
+    assert reload.status_code == 200
+    assert reload.data["notes"] == "internal note"
+
+
+@pytest.mark.django_db
+def test_patch_scalar_only_leaves_existing_notes_untouched():
+    # A PATCH that does NOT touch /notes must not clobber an existing note: the
+    # snapshot carries the current notes value, so a scalar-only edit round-trips
+    # it back unchanged.
+    user = _contributor("chandra")
+    case = _make_case(notes="pre-existing internal note")
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[{"op": "replace", "path": "/title", "value": "Retitled"}],
+        format="json",
+    )
+    assert response.status_code == 200, response.data
+    case.refresh_from_db()
+    assert case.title == "Retitled"
+    assert case.notes == "pre-existing internal note"
+
+
+@pytest.mark.django_db
+def test_build_snapshot_coerces_null_notes_to_empty_string():
+    # Regression (Gemini HIGH): a legacy/raw row whose notes reads back NULL must
+    # not put ``None`` into the snapshot — CasePatchSerializer.notes is allow_blank
+    # but NOT allow_null, so a None would 422 EVERY patch to that case. The column
+    # is NOT NULL (default=""), so we exercise the coercion directly on the
+    # snapshot builder with an in-memory None (which the ORM can't persist).
+    case = _make_case()
+    case.notes = None  # simulate a NULL read-back
+    snapshot = CaseViewSet()._build_snapshot(case)
+    assert snapshot["notes"] == ""
+
+
+@pytest.mark.django_db
+def test_patch_unrelated_field_survives_null_notes_row():
+    # Regression (Gemini HIGH), end-to-end: with a row whose notes reads back NULL,
+    # patching an UNRELATED field must return 200 (not 422). The NOT NULL column
+    # can't hold NULL via the ORM, so we force the fetched instance's notes to None
+    # and let the real _build_snapshot coercion run through the endpoint.
+    user = _contributor("null-notes")
+    case = _make_case(title="Original title")
+    case.notes = None
+
+    client = _authed_client(user)
+    # get_object() is the single source of the case the view reads/writes; return
+    # our NULL-notes instance so _build_snapshot sees None and must coerce it.
+    with mock.patch.object(CaseViewSet, "get_object", return_value=case):
+        response = client.patch(
+            URL.format(case.slug),
+            data=[{"op": "replace", "path": "/title", "value": "Renamed"}],
+            format="json",
+        )
+    assert response.status_code == 200, response.data
+    case.refresh_from_db()
+    assert case.title == "Renamed"
+    # The coerced-empty note landed as "" (never NULL), consistent with the column.
+    assert case.notes == ""
 
 
 @pytest.mark.django_db

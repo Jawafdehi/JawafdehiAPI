@@ -858,6 +858,17 @@ class Case(models.Model):
 
         super().save(*args, **kwargs)
 
+        # Record a slug change (old → new) so the retired slug's URL can
+        # 301-redirect to the canonical one (BB-38). ``_original_slug`` still
+        # holds the pre-save value here (it is refreshed on the next line);
+        # brand-new cases (no prior slug) and no-op saves are ignored by
+        # ``record()``. NOTE: the API's DRAFT re-slug PATCH persists via a bulk
+        # ``QuerySet.update()`` that bypasses ``save()`` — that path records
+        # history explicitly in ``CaseViewSet.partial_update``.
+        previous_slug = getattr(self, "_original_slug", None)
+        if previous_slug and previous_slug != self.slug:
+            CaseSlugHistory.record(self, previous_slug, self.slug)
+
         # Update cached original slug after successful save
         self._original_slug = self.slug
 
@@ -1212,3 +1223,63 @@ class CaseStateChange(models.Model):
 
     def __str__(self):
         return f"{self.case_id}: {self.from_state or '∅'} → {self.to_state}"
+
+
+class CaseSlugHistory(models.Model):
+    """Retired case slugs → their current case, for 301-redirecting stale URLs.
+
+    A case's ``slug`` is its public URL handle (the canonical ``@id`` IRI is
+    derived from it). It is editable while DRAFT (regenerates from the title),
+    and published cases are also re-slugged operationally — so a slug that was
+    already shared, newslettered, or search-indexed can go stale and hard-404
+    (BB-38). Each row remembers that ``slug`` USED to address ``case``; the
+    case-retrieve path consults this table on a lookup miss and 301-redirects
+    the caller to the case's current canonical URL.
+
+    Invariants (maintained by :meth:`record`):
+      * A LIVE slug always wins. The retrieve path resolves a live case first
+        and only falls back to this table on a 404, so a slug currently owned
+        by some case never redirects; :meth:`record` additionally drops any
+        history row that collides with a newly-claimed live slug, so the table
+        never shadows a live slug.
+      * ``slug`` is globally unique here, and a recycled slug repoints to its
+        most-recent former owner (update-or-create), so the redirect always
+        targets the latest case that vacated the slug.
+    """
+
+    # Mirrors Case.slug (SlugField, max_length=50). Unique so a retired slug
+    # maps to exactly one former owner; indexed for the retrieve-path lookup.
+    slug = models.SlugField(max_length=50, unique=True, db_index=True)
+    # CASCADE: a redirect target that no longer exists is useless, so history
+    # rows die with their case (cases are only ever soft-CLOSED, never deleted,
+    # in normal operation — this is a safety net, not a routine path).
+    case = models.ForeignKey(
+        Case, on_delete=models.CASCADE, related_name="slug_history"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Case Slug History"
+        verbose_name_plural = "Case Slug Histories"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.slug} → {self.case_id}"
+
+    @classmethod
+    def record(cls, case, old_slug, new_slug):
+        """Remember that ``old_slug`` used to address ``case`` (now ``new_slug``).
+
+        No-ops when there is nothing to record (no prior slug, or the slug did
+        not actually change). Upholds the "live slug wins" invariant by dropping
+        any history row that collides with the new (now-live) slug, then upserts
+        ``old_slug → case`` so a recycled slug repoints to its newest former
+        owner rather than tripping the unique constraint.
+        """
+        if not old_slug or old_slug == new_slug:
+            return
+        # The new slug is now LIVE for ``case``; never let a stale history row
+        # shadow it with a redirect (a live slug must resolve to its own case).
+        if new_slug:
+            cls.objects.filter(slug=new_slug).delete()
+        cls.objects.update_or_create(slug=old_slug, defaults={"case": case})
