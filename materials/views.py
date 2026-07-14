@@ -96,12 +96,19 @@ def _can_see_nonpublic(request) -> bool:
     user = getattr(request, "user", None)
     if not (user and user.is_authenticated):
         return False
-    # Any authenticated staff-ish principal (NGM role, caseworker, readonly, or
-    # a superuser) may inspect drafts. HasNgmRole covers the write role; the
-    # broader "authenticated internal user" check keeps caseworker/readonly able
-    # to review their own draft evidence.
+    # A superuser (or a Django-admin-session staff principal) may inspect drafts.
     if getattr(user, "is_staff", False) or getattr(user, "is_superuser", False):
         return True
+    # Org-wide ReadOnly is the systemwide READ role: it sees non-public
+    # (draft-only) materials just like content staff. It is admitted here by
+    # group name — matching the casework read gates in cases/review/jobs, which
+    # all honour ReadOnly — because the bearer authenticator syncs roles into
+    # Groups but never sets is_staff, so the is_staff short-circuit above never
+    # catches a ReadOnly (or a bearer-only Caseworker) principal. ReadOnly stays
+    # excluded from every WRITE gate (HasNgmRole / HasContributorRole).
+    if user.groups.filter(name="ReadOnly").exists():
+        return True
+    # NGM-capable content role (Caseworker) / NGM tiers, or superuser.
     return HasNgmRole().has_permission(request, None)
 
 
