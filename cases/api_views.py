@@ -14,7 +14,8 @@ import jsonpatch
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, connection, transaction
-from django.http import HttpResponse
+from django.http import Http404, HttpResponse, HttpResponsePermanentRedirect
+from django.urls import reverse
 from django.utils import timezone
 from django.utils.cache import patch_vary_headers
 from django_filters.rest_framework import DjangoFilterBackend
@@ -51,6 +52,7 @@ from .models import (
     Case,
     CaseEntityRelationship,
     CaseMaterialReference,
+    CaseSlugHistory,
     CaseState,
     CaseStateChange,
     RelationshipOutcome,
@@ -602,6 +604,57 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 ordinal=ordinal,
             )
 
+    def _slug_history_redirect(self, request, requested_slug):
+        """Resolve a retired slug to a 301 redirect, or ``None`` for a true 404.
+
+        Consulted only when :meth:`get_object` misses (no live case owns the
+        slug), so a live slug is never overridden — the live case always wins
+        (BB-38). Returns an ``HttpResponsePermanentRedirect`` to the case's
+        canonical ``/api/cases/<current-slug>/`` (query string preserved) when
+        ``requested_slug`` is a former slug of a case the requester may see;
+        otherwise ``None`` (the caller re-raises the 404).
+
+        Visibility mirrors :meth:`retrieve` exactly, so a retired slug never
+        leaks a non-public case's existence: CLOSED is never exposed; DRAFT /
+        IN_REVIEW (casework) redirect only for a casework-viewing role; only
+        PUBLISHED redirects for anonymous callers.
+        """
+        if not requested_slug:
+            return None
+
+        history = (
+            CaseSlugHistory.objects.filter(slug=requested_slug)
+            .select_related("case")
+            .first()
+        )
+        if history is None:
+            return None
+
+        case = history.case
+        # CLOSED cases are never exposed via this API — don't confirm existence.
+        if case.state == CaseState.CLOSED:
+            return None
+        # Casework states are not public: only redirect for a casework-viewing
+        # role, else 404 (same boundary retrieve() enforces for a live case).
+        if case.state in (CaseState.DRAFT, CaseState.IN_REVIEW):
+            user = request.user
+            if not (
+                user and user.is_authenticated and can_view_case(user, case)
+            ):
+                return None
+        # Defensive: a self-redirect would loop. A live slug can't reach here
+        # (get_object would have resolved it), but guard against a stale row.
+        if case.slug == requested_slug:
+            return None
+
+        location = request.build_absolute_uri(
+            reverse("case-detail", kwargs={"slug": case.slug})
+        )
+        query_string = request.META.get("QUERY_STRING", "")
+        if query_string:
+            location = f"{location}?{query_string}"
+        return HttpResponsePermanentRedirect(location)
+
     def retrieve(self, request, *args, **kwargs):
         """
         GET /api/cases/{id}/
@@ -611,8 +664,20 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         - DRAFT and IN_REVIEW cases (casework): require a casework-viewing role
           (readonly/caseworker/moderator/admin); public callers get 404
         - CLOSED cases: not accessible via public API (returns 404)
+
+        When the slug matches no live case, fall back to CaseSlugHistory: a
+        retired slug 301-redirects to the case's canonical URL (BB-38); a
+        genuinely unknown slug stays a 404.
         """
-        case = self.get_object()
+        try:
+            case = self.get_object()
+        except Http404:
+            redirect = self._slug_history_redirect(
+                request, self.kwargs.get(self.lookup_field)
+            )
+            if redirect is not None:
+                return redirect
+            raise
 
         # Casework states (DRAFT, IN_REVIEW) are not public — require authz.
         # Public = readonly EXCEPT no casework access, so it cannot view these.
@@ -865,6 +930,15 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                     Case.objects.get(pk=case.pk),
                     fields=list(scalar_updates.keys()),
                 )
+
+                # Record a slug change so the retired slug's URL 301-redirects
+                # to the new canonical one (BB-38). This bulk ``update()``
+                # bypasses ``Case.save()``, so the model-level history hook
+                # never fires for this (primary) DRAFT re-slug path — record it
+                # explicitly. ``case`` still holds the pre-update slug here.
+                new_slug = scalar_updates.get("slug")
+                if new_slug and new_slug != case.slug:
+                    CaseSlugHistory.record(case, case.slug, new_slug)
 
             # Persist entity relationship changes only when a /entities op
             # was explicitly included — avoids unnecessary delete/recreate on
