@@ -527,6 +527,60 @@ class CaseState(models.TextChoices):
     CLOSED = "CLOSED", "Closed"
 
 
+class CaseQuerySet(models.QuerySet):
+    """Case queryset that records slug history on ANY bulk ``.update(slug=…)``.
+
+    ``Case.save()`` records a slug change (BB-38), but the model's ``slug`` is
+    immutable once the case leaves DRAFT — so re-slugging a PUBLISHED case is
+    done operationally with a bulk ``QuerySet.update(slug=…)``, which bypasses
+    ``save()`` and its history hook entirely. The API's DRAFT re-slug PATCH also
+    persists via ``update()``. Recording here makes the bulk-update path the
+    single durable choke point: whatever route re-slugs a case — the API PATCH,
+    an admin action, or an ad-hoc pod ORM edit — the retired slug is remembered
+    and its URL 301-redirects instead of hard-404ing.
+
+    History migrations use ``apps.get_model()`` historical models with plain
+    managers, so schema migrations that touch ``slug`` do NOT record history
+    (correctly — they run before the redirect feature existed) and cannot
+    recurse through this override.
+    """
+
+    def update(self, **kwargs):
+        # Only slug changes are of interest; every other bulk update (state
+        # transitions, the updated_at bump, enrichment writes, …) takes the
+        # cheap path with no extra query.
+        if "slug" not in kwargs:
+            return super().update(**kwargs)
+
+        new_slug = kwargs["slug"]
+        # Only a concrete string slug can be retired. A query expression
+        # (``F()``, the ``Case``/``When`` that Django's own ``bulk_update()``
+        # builds, a subquery, …) has no Python-side value to record, so fall
+        # through to a plain update rather than feeding an expression object
+        # into ``record()``.
+        if not isinstance(new_slug, str):
+            return super().update(**kwargs)
+
+        # Snapshot the affected cases (with their PRE-update slugs) before the
+        # write. Rows already at ``new_slug`` are excluded — nothing retires.
+        # ``slug`` is globally unique on Case, so a slug update targets at most
+        # one row in practice; the loop is written for correctness regardless.
+        # Only pk + slug are needed to record history; ``.only()`` avoids loading
+        # the case's large text columns (description, notes, timeline, …).
+        changing = list(self.only("id", "slug").exclude(slug=new_slug))
+        result = super().update(**kwargs)
+        # ``result`` is the count of rows actually updated. If a concurrent
+        # delete raced the snapshot to zero, record nothing — the snapshot is
+        # stale and its case may no longer exist (a dangling FK insert would
+        # fail).
+        if result:
+            for case in changing:
+                # ``update()`` does not touch the in-memory instances, so
+                # ``case.slug`` still holds the retired value here.
+                CaseSlugHistory.record(case, case.slug, new_slug)
+        return result
+
+
 class Case(models.Model):
     """
     Core model representing a case of alleged misconduct.
@@ -552,6 +606,12 @@ class Case(models.Model):
     Each case has a single row. Edits are made in-place. State transitions
     (submit/publish) are recorded in the versionInfo JSON field.
     """
+
+    # ``CaseQuerySet.update()`` records slug history for any bulk re-slug
+    # (published-case re-slugs and the API's DRAFT PATCH both use ``update()``).
+    # ``as_manager()`` has ``use_in_migrations = False``, so this adds no
+    # migration and historical models keep their plain manager.
+    objects = CaseQuerySet.as_manager()
 
     # Core fields
     case_type = models.CharField(

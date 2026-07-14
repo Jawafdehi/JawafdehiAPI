@@ -915,6 +915,10 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 # edits would otherwise leave ``updated_at`` — and the derived
                 # optimistic-concurrency token — stale. Bump it explicitly so the
                 # serialized timestamp and the ETag both track content edits.
+                # ``CaseQuerySet.update()`` records the slug change into
+                # CaseSlugHistory when ``scalar_updates`` carries a new ``slug``,
+                # so the retired slug's URL 301-redirects instead of 404ing
+                # (BB-38) — no explicit ``record()`` call is needed here.
                 Case.objects.filter(pk=case.pk).update(
                     updated_at=timezone.now(), **scalar_updates
                 )
@@ -930,15 +934,6 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                     Case.objects.get(pk=case.pk),
                     fields=list(scalar_updates.keys()),
                 )
-
-                # Record a slug change so the retired slug's URL 301-redirects
-                # to the new canonical one (BB-38). This bulk ``update()``
-                # bypasses ``Case.save()``, so the model-level history hook
-                # never fires for this (primary) DRAFT re-slug path — record it
-                # explicitly. ``case`` still holds the pre-update slug here.
-                new_slug = scalar_updates.get("slug")
-                if new_slug and new_slug != case.slug:
-                    CaseSlugHistory.record(case, case.slug, new_slug)
 
             # Persist entity relationship changes only when a /entities op
             # was explicitly included — avoids unnecessary delete/recreate on

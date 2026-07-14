@@ -4,8 +4,10 @@ Changing a case's slug (DRAFT re-slug, operational re-slug) used to orphan the
 old URL as a hard 404. These tests cover (a) that a slug change is recorded in
 CaseSlugHistory, (b) that a retired slug 301-redirects to the canonical URL,
 (c) that a genuinely unknown slug stays a 404, (d) that a reused slug resolves
-to its live owner (not a redirect), and (e) that a retired slug never leaks a
-non-public case's existence.
+to its live owner (not a redirect), (e) that a retired slug never leaks a
+non-public case's existence, and (f) that ANY bulk ``update(slug=…)`` — the
+path a PUBLISHED case is re-slugged through, which bypasses ``save()`` —
+records history.
 """
 
 import pytest
@@ -199,3 +201,55 @@ def test_retired_slug_of_closed_case_is_404_even_for_caseworker():
 
     # CLOSED cases are never exposed via this API, even to casework roles.
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# (f) ANY bulk update(slug=…) records history — the durable choke point.
+#     A PUBLISHED case's slug is immutable through save(), so it is re-slugged
+#     operationally via QuerySet.update(), which bypasses the save() hook.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_bulk_update_slug_records_old_slug_for_published_case():
+    case = _make_case("published-old", state=CaseState.PUBLISHED)
+
+    Case.objects.filter(pk=case.pk).update(slug="published-new")
+
+    case.refresh_from_db()
+    assert case.slug == "published-new"
+    assert CaseSlugHistory.objects.filter(slug="published-old", case=case).exists()
+    # The new (now-live) slug is never recorded as its own predecessor.
+    assert not CaseSlugHistory.objects.filter(slug="published-new").exists()
+
+
+@pytest.mark.django_db
+def test_published_reslug_via_update_then_old_url_redirects():
+    """End-to-end: a published case re-slugged via update() 301-redirects."""
+    case = _make_case("pub-canon-old", state=CaseState.PUBLISHED)
+
+    Case.objects.filter(pk=case.pk).update(slug="pub-canon-new")
+
+    resp = APIClient().get(URL.format("pub-canon-old"))
+    assert resp.status_code == 301
+    assert resp["Location"].endswith("/api/cases/pub-canon-new/")
+
+
+@pytest.mark.django_db
+def test_bulk_update_without_slug_records_nothing():
+    """A non-slug bulk update must not touch CaseSlugHistory."""
+    case = _make_case("state-change", state=CaseState.DRAFT)
+
+    Case.objects.filter(pk=case.pk).update(state=CaseState.PUBLISHED)
+
+    assert not CaseSlugHistory.objects.exists()
+
+
+@pytest.mark.django_db
+def test_bulk_update_to_same_slug_records_nothing():
+    """update(slug=<current>) is a no-op — nothing retires."""
+    case = _make_case("same", state=CaseState.PUBLISHED)
+
+    Case.objects.filter(pk=case.pk).update(slug="same")
+
+    assert not CaseSlugHistory.objects.filter(slug="same").exists()
