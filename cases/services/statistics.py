@@ -19,8 +19,11 @@ request-blocking recompute or an error.
 
 from __future__ import annotations
 
+import json
+
 from django.db import connections
 from django.db.models import Count, Q
+from django.db.models.functions import ExtractYear
 from django.utils import timezone
 
 # NES + NGM models live in sibling apps; the DB router (config.db_router) sends
@@ -34,6 +37,7 @@ from cases.models import (
     Case,
     CaseEntityRelationship,
     CaseState,
+    CaseType,
     StatisticsSnapshot,
 )
 
@@ -76,6 +80,7 @@ def bootstrap_placeholder() -> dict:
             "total": 0,
             "by_prefix": [],
             "by_type": [],
+            "persons_by_sector": [],
             "counts": {
                 "with_identifier": 0,
                 "with_provenance": 0,
@@ -91,6 +96,8 @@ def bootstrap_placeholder() -> dict:
             "court_cases_total": 0,
             "courts_total": 0,
             "by_court_type": [],
+            "by_year": [],
+            "by_court_type_year": [],
             "counts": {
                 "nes_resolved": 0,
                 "with_registration_date": 0,
@@ -128,12 +135,23 @@ def _case_counts() -> dict:
         under_investigation=Count(
             "pk", filter=Q(state__in=[CaseState.DRAFT, CaseState.IN_REVIEW])
         ),
+        # "In review" (being prepared for publication) split out of the broader
+        # under-investigation bucket, which also covers DRAFT.
+        in_review=Count("pk", filter=Q(state=CaseState.IN_REVIEW)),
         closed=Count("pk", filter=Q(state=CaseState.CLOSED)),
+        # CIAA vs non-CIAA split. CIAA corruption cases are drafted with
+        # case_type=CORRUPTION (see ciaa_draft_case_service); every other type
+        # (bribery, forgery, embezzlement, ...) runs through other bodies.
+        ciaa=Count("pk", filter=Q(case_type=CaseType.CORRUPTION)),
+        non_ciaa=Count("pk", filter=~Q(case_type=CaseType.CORRUPTION)),
     )
     return {
         "published_cases": by_state["published"],
         "cases_under_investigation": by_state["under_investigation"],
+        "cases_in_review": by_state["in_review"],
         "cases_closed": by_state["closed"],
+        "cases_ciaa": by_state["ciaa"],
+        "cases_non_ciaa": by_state["non_ciaa"],
         # Unique NES entities tracked across published cases (binds hold the
         # nes_id directly; NES owns the entity records).
         "entities_tracked": (
@@ -169,6 +187,82 @@ def refresh_statistics() -> dict:
         update_fields=["data", "computed_at", "is_placeholder"],
     )
     return stats
+
+
+def _sector_from_member_iri(iri: str) -> str | None:
+    """Map an organization IRI (a person's ``memberOf``) to a person sector.
+
+    The org IRI path encodes its kind (``.../organization/government/ward/...``),
+    so the sector is read straight off the structured identifier — no free-text /
+    keyword guessing. Only the org kinds that actually occur in the dataset are
+    distinguished; any other resolvable org is ``other``. Returns None when the
+    IRI carries no organization segment (so the caller can keep scanning roles).
+    """
+    if (
+        "/organization/government/ward" in iri
+        or "/organization/government/localunit" in iri
+    ):
+        return "local_gov"
+    if "/organization/political_party" in iri:
+        return "politicians"
+    if "/organization/hospital" in iri:
+        return "health"
+    if "/organization" in iri:
+        return "other"
+    return None
+
+
+def _sector_for_roles(roles) -> str:
+    """A person's sector from their ``hasOccupation`` value (dict | list | None).
+
+    Takes the first role whose ``memberOf`` resolves to a sector; a person with
+    no role, or no resolvable office, is ``not_recorded`` (shown honestly rather
+    than dropped). Defensive against the value arriving JSON-encoded (sqlite).
+    """
+    if isinstance(roles, str):
+        try:
+            roles = json.loads(roles)
+        except (ValueError, TypeError):
+            return "not_recorded"
+    if isinstance(roles, dict):
+        roles = [roles]
+    if isinstance(roles, list):
+        for role in roles:
+            if not isinstance(role, dict):
+                continue
+            member = role.get("memberOf")
+            if isinstance(member, dict):
+                iri = member.get("@id") or ""
+            elif isinstance(member, str):
+                iri = member
+            else:
+                iri = ""
+            sector = _sector_from_member_iri(iri)
+            if sector:
+                return sector
+    return "not_recorded"
+
+
+def _persons_by_sector() -> list[dict]:
+    """Tally Person entities by the sector of the office they hold.
+
+    Reads only the ``hasOccupation`` sub-document per person (a JSON key
+    projection, not the whole doc) and streams with a server-side cursor, so the
+    scan stays cheap enough for the out-of-band refresh. Ordered largest-first.
+    """
+    tally: dict[str, int] = {}
+    roles_iter = (
+        StoredEntity.objects.filter(entity_type="Person")
+        .values_list("data__hasOccupation", flat=True)
+        .iterator(chunk_size=5000)
+    )
+    for roles in roles_iter:
+        sector = _sector_for_roles(roles)
+        tally[sector] = tally.get(sector, 0) + 1
+    return [
+        {"sector": sector, "count": count}
+        for sector, count in sorted(tally.items(), key=lambda kv: -kv[1])
+    ]
 
 
 def _nes_metrics():
@@ -221,6 +315,7 @@ def _nes_metrics():
         "total": total,
         "by_prefix": by_prefix,
         "by_type": by_type,
+        "persons_by_sector": _persons_by_sector(),
         "counts": {
             "with_identifier": with_identifier,
             "with_provenance": with_provenance,
@@ -246,6 +341,29 @@ def _ngm_metrics():
         .order_by("-count")
     )
 
+    # Court cases filed per year, and per court level per year (the matrix). Both
+    # key off the indexed registration_date_ad; cases with no registration date
+    # are excluded so a null year never appears as a column. Capped to the most
+    # recent N years so an outlier/dirty registration year cannot make the matrix
+    # grow unbounded (the heatmap has one column per kept year).
+    _MATRIX_YEARS = 25
+    dated = CourtCase.objects.exclude(registration_date_ad__isnull=True).annotate(
+        year=ExtractYear("registration_date_ad")
+    )
+    year_rows = list(
+        dated.values("year").annotate(count=Count("case_number")).order_by("year")
+    )
+    # Keep the most-recent N years, but return them ascending (frontend order).
+    kept_years = {row["year"] for row in year_rows[-_MATRIX_YEARS:]}
+    by_year = [row for row in year_rows if row["year"] in kept_years]
+    by_court_type_year = [
+        row
+        for row in dated.values("court__court_type", "year")
+        .annotate(count=Count("case_number"))
+        .order_by("court__court_type", "year")
+        if row["year"] in kept_years
+    ]
+
     nes_resolved = (
         CourtCase.objects.exclude(nes_id__isnull=True).exclude(nes_id="").count()
     )
@@ -267,6 +385,8 @@ def _ngm_metrics():
         "court_cases_total": court_cases_total,
         "courts_total": Court.objects.count(),
         "by_court_type": by_court_type,
+        "by_year": by_year,
+        "by_court_type_year": by_court_type_year,
         "counts": {
             "nes_resolved": nes_resolved,
             "with_registration_date": with_registration_date,
