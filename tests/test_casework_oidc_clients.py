@@ -98,7 +98,7 @@ def test_ngm_get_court_case_sends_bearer(oidc_configured, monkeypatch):
     _stub_token(monkeypatch)
     captured = {}
 
-    def fake_get(url, headers=None, timeout=None):
+    def fake_get(url, headers=None, timeout=None, allow_redirects=None):
         captured["headers"] = headers
         return FakeResponse(json_body={"entities": []})
 
@@ -117,7 +117,7 @@ def test_ngm_no_auth_header_when_unconfigured(settings, monkeypatch):
     cc.reset_provider()
     captured = {}
 
-    def fake_get(url, headers=None, timeout=None):
+    def fake_get(url, headers=None, timeout=None, allow_redirects=None):
         captured["headers"] = headers
         return FakeResponse(json_body={"entities": []})
 
@@ -125,6 +125,41 @@ def test_ngm_no_auth_header_when_unconfigured(settings, monkeypatch):
     ngm_client.get_court_case("https://jawafdehi.org/courtcase/special/081-cr-0079")
     assert "Authorization" not in captured["headers"]
     cc.reset_provider()
+
+
+def test_ngm_get_raises_on_redirect(oidc_configured, monkeypatch):
+    """A 3xx (e.g. a retired host 301-ing to the SPA) surfaces as NgmError.
+
+    Regression guard: JAWAFDEHI_API_BASE once defaulted to a decommissioned host
+    that 301-redirected to the SPA; with redirects followed, ``.json()`` then
+    choked on the HTML page and the failure masqueraded as "court record not
+    found" instead of a loud misconfiguration.
+    """
+    _stub_token(monkeypatch)
+
+    def fake_get(url, headers=None, timeout=None, allow_redirects=None):
+        assert allow_redirects is False
+        return FakeResponse(status_code=301, text="<!doctype html>")
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    with pytest.raises(ngm_client.NgmError):
+        ngm_client.get_court_case("https://jawafdehi.org/courtcase/special/081-cr-0079")
+
+
+def test_ngm_get_raises_on_non_json_body(oidc_configured, monkeypatch):
+    """A 200 with a non-JSON body raises NgmError, not an unhandled ValueError."""
+    _stub_token(monkeypatch)
+
+    class HtmlResponse(FakeResponse):
+        def json(self):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    def fake_get(url, headers=None, timeout=None, allow_redirects=None):
+        return HtmlResponse(status_code=200, text="<!doctype html>")
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    with pytest.raises(ngm_client.NgmError):
+        ngm_client.get_court_case("https://jawafdehi.org/courtcase/special/081-cr-0079")
 
 
 # ---------------------------------------------------------------------------

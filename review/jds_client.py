@@ -27,7 +27,7 @@ class JdsError(Exception):
 
 def _base():
     return getattr(
-        settings, "JAWAFDEHI_API_BASE", "https://portal.jawafdehi.org/api"
+        settings, "JAWAFDEHI_API_BASE", "https://api.jawafdehi.org/api"
     ).rstrip("/")
 
 

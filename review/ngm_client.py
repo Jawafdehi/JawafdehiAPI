@@ -11,7 +11,7 @@ targets the read plane directly:
   * ``GET {ngm_base}/courtcases/{court}/{number}/hearings``   → hearings (paginated)
 
 It still speaks HTTP (not the ORM) because casework can run against a REMOTE
-portal (``JAWAFDEHI_API_BASE`` may point at portal.jawafdehi.org while the
+API host (``JAWAFDEHI_API_BASE`` may point at api.jawafdehi.org while the
 review worker runs elsewhere). ``get_court_case`` reassembles the case +
 hearings + entities into one dict so its callers keep the previous contract.
 
@@ -55,7 +55,7 @@ def _ngm_base():
     already the ``/api`` base; normalize to end in exactly ``/api``.
     """
     base = getattr(
-        settings, "JAWAFDEHI_API_BASE", "https://portal.jawafdehi.org/api"
+        settings, "JAWAFDEHI_API_BASE", "https://api.jawafdehi.org/api"
     ).rstrip("/")
     if not base.endswith("/api"):
         base = f"{base}/api"
@@ -116,9 +116,18 @@ def _auth_headers():
 
 
 def _get(url, timeout, *, allow_404=False):
-    """GET ``url`` with auth headers; return parsed JSON (or None on allowed 404)."""
+    """GET ``url`` with auth headers; return parsed JSON (or None on allowed 404).
+
+    Redirects are NOT followed: the read plane answers 2xx JSON directly, so a
+    3xx means the configured base URL is wrong (e.g. it points at a retired host
+    that 301s to the SPA). Surfacing that — and any non-JSON 200 body — as an
+    NgmError keeps a base-URL misconfiguration from masquerading as a clean
+    "court record not found" result.
+    """
     try:
-        r = requests.get(url, headers=_auth_headers(), timeout=timeout)
+        r = requests.get(
+            url, headers=_auth_headers(), timeout=timeout, allow_redirects=False
+        )
     except requests.RequestException as e:
         raise NgmError(f"NGM request failed: {e}") from e
     if r.status_code == 404 and allow_404:
@@ -127,7 +136,10 @@ def _get(url, timeout, *, allow_404=False):
         raise NgmNotFound(f"NGM resource not found: {url}")
     if r.status_code != 200:
         raise NgmError(f"NGM HTTP {r.status_code}: {r.text[:300]}")
-    return r.json()
+    try:
+        return r.json()
+    except ValueError as e:
+        raise NgmError(f"NGM non-JSON response from {url}: {e}") from e
 
 
 def _collect_paginated(url, timeout):
