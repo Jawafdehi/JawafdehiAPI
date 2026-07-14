@@ -40,6 +40,22 @@ def _case_review_build_payload(job) -> dict:
 
     case = case_provider.get_case(slug)
     case.setdefault("slug", slug)
+
+    # Stamp the review's "picked up" time from the job's claim time so the UI can
+    # show it (and compute elapsed = finished - picked up) while the review is
+    # still running, not only once it finishes. Best-effort: a failure here must
+    # never fail the claim, and we never overwrite an existing value.
+    review_id = (job.payload or {}).get("review_id")
+    if review_id and job.started_at is not None:
+        try:
+            from review.models import CaseReview
+
+            CaseReview.objects.filter(pk=review_id, started_at__isnull=True).update(
+                started_at=job.started_at
+            )
+        except Exception as exc:  # noqa: BLE001 - pickup stamp is best-effort
+            logger.warning("could not stamp started_at for review %s: %s", review_id, exc)
+
     cfg = ReviewConfig.get_active()
     return {
         "case": case,
@@ -73,6 +89,8 @@ def _case_review_on_result(job, result: dict) -> None:
     review.source_count = result.get("source_count", 0) or 0
     review.sources_converted = result.get("sources_converted", 0) or 0
     review.result = result.get("result")
+    # "Picked up" time = the job's claim time; keep any earlier stamp from claim.
+    review.started_at = review.started_at or job.started_at
     review.completed_at = job.completed_at
     if result.get("duration_seconds") is not None:
         review.duration_seconds = result["duration_seconds"]
@@ -92,6 +110,7 @@ def _case_review_on_failure(job) -> None:
         status=CaseReview.STATUS_FAILED,
         stage="failed",
         error=job.error or "job failed",
+        started_at=job.started_at,
         completed_at=job.completed_at,
     )
     if not updated:
