@@ -11,20 +11,33 @@ def _backfill_case(apps, schema_editor):
     """Point every existing CaseReview at its Case via the (removed) ``slug``.
 
     Runs BETWEEN AddField(case) and RemoveField(slug): the historical model still
-    carries ``slug`` to read, and the new ``case`` FK to write. Resolution tiers
-    (validated against prod: 356 exact / 71 court-ref / 4 prefix, 0 unmapped):
-    exact slug, then a court-case reference number embedded in the slug, then the
-    snapshotted case title, then a unique slug prefix. Rows that resolve to
-    nothing are left with a NULL case and logged, never dropped.
+    carries ``slug`` to read, and the new ``case`` FK to write. Resolution tiers:
+    exact live slug, then the retired-slug map (CaseSlugHistory, BB-38) which
+    resolves a re-slugged review to its current case *exactly*, then the fuzzy
+    fallbacks — a court-case reference number embedded in the slug, the
+    snapshotted case title, a unique slug prefix. Rows that resolve to nothing
+    are left with a NULL case and logged, never dropped.
+
+    Validated against prod (431 rows): 356 live slug + 75 retired-slug map, 0
+    fuzzy, 0 unmapped — every review maps authoritatively, no guessing. (The 75
+    re-slugged reviews were the ones the fuzzy tiers used to catch by luck.)
     """
     CaseReview = apps.get_model("review", "CaseReview")
     Case = apps.get_model("cases", "Case")
+    CaseSlugHistory = apps.get_model("cases", "CaseSlugHistory")
 
     def resolve(rv):
         s = (rv.slug or "").strip()
         c = Case.objects.filter(slug=s).first()
         if c:
             return c
+        # A re-slugged case's stored review-slug no longer matches any live
+        # Case.slug — but CaseSlugHistory maps that retired slug to its current
+        # case exactly (this is the scenario the FK refactor exists for). An
+        # authoritative hit here means we never fall through to the fuzzy tiers.
+        hist = CaseSlugHistory.objects.filter(slug=s).first()
+        if hist:
+            return Case.objects.filter(pk=hist.case_id).first()
         m = re.search(r"(\d{3}-[a-z]{2}-\d{3,4})", s.lower())
         if m:
             qs = Case.objects.filter(
@@ -59,7 +72,9 @@ def _backfill_case(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("cases", "0050_authz_v3_roles"),
+        # 0051 creates CaseSlugHistory; the backfill reads it as an authoritative
+        # retired-slug -> current-case map, so it must exist before this runs.
+        ("cases", "0051_caseslughistory"),
         ("review", "0003_alter_casereview_slug"),
     ]
 

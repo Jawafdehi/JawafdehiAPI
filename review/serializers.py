@@ -136,15 +136,26 @@ def _require_case(identifier, *, source_label):
     ``source_label`` is the field the caseworker actually submitted (``iri`` or
     ``slug``) so the error attaches to it in the DRF response. Returns the Case
     OBJECT — reviews key on the stable case PK, not the mutable slug.
+
+    A live slug wins; on a miss we consult the retired-slug map
+    (``CaseSlugHistory``, BB-38) so a submit against a stale URL — one whose slug
+    the case has since vacated (bookmarked / newslettered / search-indexed) —
+    still lands on the right case rather than hard-404ing. This mirrors the
+    case-retrieve path's "live slug first, then history" resolution.
     """
-    from cases.models import Case
+    from cases.models import Case, CaseSlugHistory
 
     case = Case.objects.filter(slug=identifier).first()
-    if case is None:
-        raise serializers.ValidationError(
-            {source_label: f"No Jawafdehi case found for slug '{identifier}'."}
-        )
-    return case
+    if case is not None:
+        return case
+    hist = (
+        CaseSlugHistory.objects.filter(slug=identifier).select_related("case").first()
+    )
+    if hist is not None:
+        return hist.case
+    raise serializers.ValidationError(
+        {source_label: f"No Jawafdehi case found for slug '{identifier}'."}
+    )
 
 
 def _resolve_iri_to_case(iri):
