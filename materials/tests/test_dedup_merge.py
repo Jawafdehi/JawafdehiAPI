@@ -87,6 +87,21 @@ def test_collision_dedupes_and_merges_note():
     assert "jawafdehi note" in ref.additional_details
 
 
+def test_collision_note_that_is_a_substring_is_still_kept():
+    # "fraud" is a substring of the canonical note but not a whole line — it must
+    # be appended, not silently dropped when the jawafdehi ref is deleted.
+    j, c = _jawaf(), _canonical()
+    case = _case("case-sub")
+    _ref(case, c.iri, note="fraud investigation ongoing")
+    _ref(case, j.iri, note="fraud")
+
+    apply_merge(j.iri, c.iri)
+
+    note = CaseMaterialReference.objects.get(case=case).additional_details
+    assert "fraud" in note.splitlines()
+    assert "fraud investigation ongoing" in note
+
+
 def test_soft_delete_goes_through_save_not_update():
     # .update() bypasses auto_now; a real save() bumps updated_at. Pin updated_at
     # to the past, then assert apply_merge advanced it -> proves the save() path

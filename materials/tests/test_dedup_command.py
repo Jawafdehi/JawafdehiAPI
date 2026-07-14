@@ -155,6 +155,26 @@ def test_apply_repoints_and_soft_deletes(tmp_path):
     assert "Merged 1 of" in summary
 
 
+def test_court_order_matches_canonical_with_uppercase_ident(tmp_path):
+    # The jawafdehi case number is lowercased; a stored court_order ident may carry
+    # an uppercase code. iendswith must still match it.
+    m = _jawaf("20260507.co2", "COURT_ORDER", "मुद्दा नं. ०८१-CR-०१३८ आदेश")
+    _canonical("court_order", "special.081-CR-0138")
+    report, _ = _run(tmp_path)
+    assert report[m.iri]["outcome"] == "duplicate"
+    assert report[m.iri]["canonical_iri"].endswith("/court_order/special.081-CR-0138")
+
+
+def test_limit_caps_rows_and_zero_processes_nothing(tmp_path):
+    _jawaf("20260507.a", "NEWS", "a")
+    _jawaf("20260507.b", "NEWS", "b")
+    report_one, _ = _run(tmp_path, "--limit", "1")
+    assert len(report_one) == 1
+    report_zero, summary = _run(tmp_path, "--limit", "0")
+    assert len(report_zero) == 0
+    assert "0 of 0 jawafdehi materials" in summary
+
+
 def test_output_dash_streams_jsonl_to_stdout_summary_to_stderr():
     _jawaf("20260507.news2", "NEWS", "समाचार")
     stdout, stderr = io.StringIO(), io.StringIO()

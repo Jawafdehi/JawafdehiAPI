@@ -67,16 +67,20 @@ def plan_merge(jawafdehi_iri: str, canonical_iri: str) -> MergePlan:
 
     repoint: list[str] = []
     collisions: list[str] = []
-    refs = CaseMaterialReference.objects.filter(
-        material_iri=jawafdehi_iri
-    ).select_related("case")
-    for ref in refs:
-        if CaseMaterialReference.objects.filter(
-            case=ref.case, material_iri=canonical_iri
-        ).exists():
-            collisions.append(ref.case.slug)
-        else:
-            repoint.append(ref.case.slug)
+    refs = list(
+        CaseMaterialReference.objects.filter(
+            material_iri=jawafdehi_iri
+        ).select_related("case")
+    )
+    if refs:
+        # One query for all colliding cases instead of one per ref (avoid N+1).
+        colliding = set(
+            CaseMaterialReference.objects.filter(
+                case_id__in=[r.case_id for r in refs], material_iri=canonical_iri
+            ).values_list("case_id", flat=True)
+        )
+        for ref in refs:
+            (collisions if ref.case_id in colliding else repoint).append(ref.case.slug)
     return MergePlan(jawafdehi_iri, canonical_iri, repoint, collisions)
 
 
@@ -92,14 +96,18 @@ def apply_merge(jawafdehi_iri: str, canonical_iri: str) -> MergeResult:
     deduped = 0
     with transaction.atomic(using="default"):
         refs = list(
-            CaseMaterialReference.objects.select_for_update()
-            .filter(material_iri=jawafdehi_iri)
-            .select_related("case")
+            CaseMaterialReference.objects.select_for_update().filter(
+                material_iri=jawafdehi_iri
+            )
         )
         for ref in refs:
-            existing = CaseMaterialReference.objects.filter(
-                case=ref.case, material_iri=canonical_iri
-            ).first()
+            # Lock the canonical ref too so a concurrent merge can't race the
+            # collision check (no-op on sqlite; real on Postgres).
+            existing = (
+                CaseMaterialReference.objects.select_for_update()
+                .filter(case_id=ref.case_id, material_iri=canonical_iri)
+                .first()
+            )
             if existing is not None:
                 _merge_note(existing, ref)
                 ref.delete()
@@ -126,7 +134,9 @@ def _merge_note(canonical_ref, jawafdehi_ref) -> None:
     if not note:
         return
     existing = (canonical_ref.additional_details or "").strip()
-    if note in existing:
+    # Match on whole lines, not raw substring — a note that merely appears inside
+    # unrelated text (a shared case number, a common phrase) must not be dropped.
+    if note in existing.splitlines():
         return
     canonical_ref.additional_details = f"{existing}\n{note}".strip()
     canonical_ref.save(update_fields=["additional_details"])

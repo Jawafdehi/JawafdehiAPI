@@ -63,9 +63,11 @@ def _find_canonical(ref: CanonicalRef) -> str | None:
         ).first()
         return row.iri if row else None
     if ref.case_number:
+        # Case-insensitive: the jawafdehi case number is lowercased, but a stored
+        # court_order ident may carry an uppercase code (e.g. ``.081-CR-0138``).
         row = Material.objects.filter(
             source=ref.source,
-            ident__endswith=f".{ref.case_number}",
+            ident__iendswith=f".{ref.case_number}",
             is_deleted=False,
         ).first()
         return row.iri if row else None
@@ -115,8 +117,10 @@ class Command(BaseCommand):
             ))
 
         qs = Material.objects.filter(source="jawafdehi", is_deleted=False).order_by("iri")
-        if options.get("limit"):
-            qs = qs[: options["limit"]]
+        # ``is not None`` so an explicit ``--limit 0`` means zero rows (not "no limit").
+        limit = options.get("limit")
+        if limit is not None:
+            qs = qs[:limit]
 
         buckets: Counter = Counter()
         by_source_type: Counter = Counter()
@@ -132,7 +136,9 @@ class Command(BaseCommand):
                 else:
                     fh.write(line + "\n")
 
-            for row in qs.iterator(chunk_size=500):
+            # Stream the full run; a sliced (--limit) queryset is small, iterate directly.
+            rows = qs if limit is not None else qs.iterator(chunk_size=500)
+            for row in rows:
                 total += 1
                 data = row.data or {}
                 source_type = data.get("jawafdehi:sourceType") or "MISC"
