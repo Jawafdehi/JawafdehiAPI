@@ -3,8 +3,7 @@
 DB-free: the matcher is a pure function over a Material JSON-LD ``data`` dict, so
 these run without a database (mirroring the person-sector classifier tests). The
 matcher decides, by natural key, whether a ``/material/jawafdehi/*`` document
-duplicates a canonical corpus material. See
-docs/superpowers/specs/2026-07-14-jawafdehi-dedup-audit-design.md.
+duplicates a canonical corpus material.
 """
 
 from __future__ import annotations

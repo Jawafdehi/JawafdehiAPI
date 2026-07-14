@@ -8,3 +8,5 @@ media/
 staticfiles/
 docker-compose.override.yml
 .hypothesis/
+# Local design/plan/scratch artifacts — never commit or push.
+docs/superpowers/

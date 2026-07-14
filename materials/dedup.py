@@ -8,8 +8,7 @@ a duplicate and, if so, what canonical material to look for.
 
 It is a PURE function (no DB, no Django) so it unit-tests on sqlite / no DB, and so
 the existence check (does that canonical material actually exist?) stays in the
-command where the DB lives. See
-docs/superpowers/specs/2026-07-14-jawafdehi-dedup-audit-design.md.
+command where the DB lives.
 
 Matching is by NATURAL KEY only — there is no content hash on these documents:
 

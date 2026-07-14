@@ -5,7 +5,6 @@ Focus on the DETECT (``--dry-run``, the default) surface: it scans
 JSONL report + a summary, and MUTATES NOTHING. The mutating ``--apply`` path's semantics
 are covered by ``test_dedup_merge``; here we only assert the command wires ``--apply``,
 ``--dry-run`` guarding, the merge plan, and ``--output -`` streaming. Runs on sqlite.
-See docs/superpowers/specs/2026-07-14-jawafdehi-dedup-audit-design.md.
 """
 
 from __future__ import annotations

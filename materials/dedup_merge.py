@@ -20,8 +20,7 @@ MAX over referring case states with no NGM-native guard, so recomputing would DE
 public press release to PRIVATE/UNLISTED the moment a draft/in-review case referenced
 it — hiding public data. There is no leak in leaving it LISTED: the document was
 already public, and the draft case itself stays hidden (case evidence links are shown
-only for published cases). See
-docs/superpowers/specs/2026-07-14-jawafdehi-dedup-audit-design.md (Stage 2).
+only for published cases).
 
 Cross-DB: references live on the ``default`` DB, materials on ``ngm``; no atomic
 transaction spans both. The per-material ref rewrite is wrapped in a ``default``-DB

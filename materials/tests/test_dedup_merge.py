@@ -4,7 +4,6 @@ Covers repoint, collision-dedupe (the ``unique_case_material_reference`` case),
 note preservation, idempotency, the save()-not-update() soft-delete (so the
 search-eviction signal fires), and the deliberate NON-recompute of the canonical's
 visibility. Runs on sqlite across the default (cases) + ngm (materials) DBs.
-See docs/superpowers/specs/2026-07-14-jawafdehi-dedup-audit-design.md (Stage 2).
 """
 
 from __future__ import annotations

@@ -19,8 +19,7 @@ Because the database is reachable only through the API (no local DB), this produ
 numbers only when run on a deployed environment (staging / prod) against the real
 Postgres; locally its correctness is proven by the sqlite tests. On an ephemeral prod
 pod, use ``--output -`` to stream the JSONL report to stdout (the summary then goes to
-stderr) — the only reliably-retrievable channel. See
-docs/superpowers/specs/2026-07-14-jawafdehi-dedup-audit-design.md.
+stderr) — the only reliably-retrievable channel.
 
 Usage::
 
