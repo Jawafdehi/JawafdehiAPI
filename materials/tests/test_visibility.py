@@ -275,6 +275,14 @@ class TestReadSideGates:
         # ReadOnly *role*, not mere authentication — this principal stays gated.
         return User.objects.create_user("nobody1", password="x")
 
+    def _caseworker(self):
+        # The NGM content role via bearer auth: in the Caseworker Group but NOT
+        # is_staff (bearer auth never sets it), so it exercises the NGM-group
+        # read path rather than the is_staff short-circuit.
+        u = User.objects.create_user("cw1", password="x")
+        u.groups.add(Group.objects.get_or_create(name="Caseworker")[0])
+        return u
+
     def test_anon_retrieve_hides_private(self):
         mat = _store("source:20240101:aaaa01", visibility=Visibility.PRIVATE)
         client = APIClient()
@@ -377,6 +385,27 @@ class TestReadSideGates:
         client.force_authenticate(self._plain_authed())
         resp = client.get(f"/api/materials/?iri={mat.iri}")
         assert resp.status_code == 404, resp.content
+
+    def test_caseworker_retrieve_shows_private(self):
+        # A bearer-only Caseworker (content role, not is_staff/superuser) resolves
+        # PRIVATE materials via the NGM-group read path — the branch the
+        # single-query gate now covers alongside ReadOnly.
+        mat = _store("source:20240101:aaaa01", visibility=Visibility.PRIVATE)
+        client = APIClient()
+        client.force_authenticate(self._caseworker())
+        resp = client.get(f"/api/materials/?iri={mat.iri}")
+        assert resp.status_code == 200, resp.content
+
+    def test_nonpublic_gate_uses_single_group_query(self, django_assert_num_queries):
+        # Efficiency guard: a role-carrying principal is resolved in ONE group
+        # query — not a ReadOnly `.exists()` miss followed by a second NGM query.
+        from types import SimpleNamespace
+
+        from materials.views import _can_see_nonpublic
+
+        cw = self._caseworker()
+        with django_assert_num_queries(1):
+            assert _can_see_nonpublic(SimpleNamespace(user=cw)) is True
 
 
 @pytest.mark.django_db

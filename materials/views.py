@@ -35,7 +35,7 @@ from jawafdehi_shared.entities.ids import (
 )
 from jawafdehi_shared.drf.base import PlatformCursorPagination
 from jawafdehi_shared.storage import store_file_as_link
-from courts.permissions import HasNgmRole
+from courts.permissions import NGM_ROLE_GROUPS, HasNgmRole
 
 from . import jsonld
 from . import provenance
@@ -85,6 +85,14 @@ def _require_ngm_role(request):
     return None
 
 
+# Django Groups whose members may READ non-public (draft-only) materials: the
+# org-wide ReadOnly read role plus the NGM-capable content role(s) that
+# ``HasNgmRole`` gates (Caseworker / any future NGM tier). Derived from
+# ``NGM_ROLE_GROUPS`` so that set stays the single source of truth. Writes stay
+# gated separately — ``HasNgmRole`` / ``HasContributorRole`` exclude ReadOnly.
+_NONPUBLIC_READ_GROUPS = frozenset({"ReadOnly"}) | NGM_ROLE_GROUPS
+
+
 def _can_see_nonpublic(request) -> bool:
     """True iff the principal may see PRIVATE (draft-only) materials.
 
@@ -99,17 +107,12 @@ def _can_see_nonpublic(request) -> bool:
     # A superuser (or a Django-admin-session staff principal) may inspect drafts.
     if getattr(user, "is_staff", False) or getattr(user, "is_superuser", False):
         return True
-    # Org-wide ReadOnly is the systemwide READ role: it sees non-public
-    # (draft-only) materials just like content staff. It is admitted here by
-    # group name — matching the casework read gates in cases/review/jobs, which
-    # all honour ReadOnly — because the bearer authenticator syncs roles into
-    # Groups but never sets is_staff, so the is_staff short-circuit above never
-    # catches a ReadOnly (or a bearer-only Caseworker) principal. ReadOnly stays
-    # excluded from every WRITE gate (HasNgmRole / HasContributorRole).
-    if user.groups.filter(name="ReadOnly").exists():
-        return True
-    # NGM-capable content role (Caseworker) / NGM tiers, or superuser.
-    return HasNgmRole().has_permission(request, None)
+    # Everyone else needs a read-capable role. ReadOnly (systemwide read) and the
+    # NGM content role(s) are checked in a SINGLE group query — the bearer
+    # authenticator syncs roles into Groups but never sets is_staff, so a
+    # ReadOnly or bearer-only Caseworker principal is caught here, not by the
+    # is_staff short-circuit above.
+    return user.groups.filter(name__in=_NONPUBLIC_READ_GROUPS).exists()
 
 
 def _upsert_material(data, *, material_type: str | None, expected_iri: str | None = None):
