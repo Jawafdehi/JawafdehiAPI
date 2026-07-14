@@ -147,3 +147,19 @@ def test_grouped_item_shape_matches_flat_list():
     item = response.data["results"][0]["latest"]
     for field in ("id", "slug", "status", "case_title", "overall_score", "disposition"):
         assert field in item
+
+
+@pytest.mark.django_db
+def test_grouped_excludes_unlinked_reviews():
+    """A review with no linked case (case_id NULL) must not form a bogus group.
+
+    The FK is nullable only as a backfill safety valve; an unlinked row would
+    otherwise surface as a None-keyed group with an empty slug in the UI.
+    """
+    _review("case-linked", case_title="Linked")
+    CaseReview.objects.create(case=None, case_title="Orphan")
+
+    response = _reader_client().get(URL)
+
+    assert response.data["count"] == 1
+    assert [g["slug"] for g in response.data["results"]] == ["case-linked"]

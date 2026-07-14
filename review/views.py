@@ -274,8 +274,11 @@ class GroupedReviewListView(generics.ListAPIView):
         # Paginate BY CASE at the DB level: rank cases by their most-recent
         # execution, then fetch only the current page's rows — instead of
         # loading the whole CaseReview table into memory to group in Python.
+        # exclude(case_id=None): a review whose backfill left it unlinked would
+        # otherwise form a bogus None-group with an empty slug in the UI.
         case_id_qs = (
-            CaseReview.objects.values("case_id")
+            CaseReview.objects.exclude(case_id=None)
+            .values("case_id")
             .annotate(latest_created_at=Max("created_at"))
             .order_by("-latest_created_at")
             .values_list("case_id", flat=True)
@@ -391,7 +394,8 @@ def regrade_all(request):
     # the grouping-by-case is covered by test_regrade_all_targets_only_the_
     # latest_review_per_slug either way.
     latest_ids = (
-        CaseReview.objects.values("case_id")
+        CaseReview.objects.exclude(case_id=None)
+        .values("case_id")
         .annotate(latest_id=Max("id"))
         .order_by()
         .values_list("latest_id", flat=True)

@@ -48,7 +48,7 @@ def _backfill_case(apps, schema_editor):
             unmapped.append(rv.id)
             continue
         rv.case_id = c.id
-        rv.save(update_fields=["case"])
+        rv.save(update_fields=["case_id"])
     if unmapped:
         logging.getLogger("review.migrations").warning(
             "0004 backfill: %d CaseReview rows unmapped, case left NULL: %s",
