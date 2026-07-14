@@ -231,7 +231,18 @@ class ReviewListView(generics.ListAPIView):
     permission_classes = [CanReadReview]
 
     def get_queryset(self):
-        return CaseReview.objects.all()
+        qs = CaseReview.objects.all()
+        # ``?slug=`` scopes the flat list to one case's runs, newest-first (via
+        # Meta.ordering). The per-case review page uses this to show a case's
+        # whole run history without pulling the entire table.
+        slug = self.request.query_params.get("slug")
+        if slug:
+            # Normalize like SubmitSerializer (strip whitespace + surrounding
+            # slashes) so "?slug=case-a/" and "?slug= case-a " still match.
+            slug = slug.strip().strip("/")
+            if slug:
+                qs = qs.filter(slug=slug)
+        return qs
 
 
 class GroupedReviewListView(generics.ListAPIView):
