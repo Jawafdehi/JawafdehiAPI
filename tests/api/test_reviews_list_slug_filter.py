@@ -10,10 +10,19 @@ import pytest
 from django.utils import timezone
 from rest_framework.test import APIClient
 
+from cases.models import Case, CaseType
 from review.models import CaseReview
 from tests.conftest import create_user_with_role
 
 URL = "/api/casework/reviews/"
+
+
+def _review(slug, **kwargs):
+    """Create a CaseReview linked to the Case with ``slug`` (created on demand)."""
+    case, _ = Case.objects.get_or_create(
+        slug=slug, defaults=dict(title=slug, case_type=CaseType.CORRUPTION)
+    )
+    return CaseReview.objects.create(case=case, **kwargs)
 
 
 def _reader_client():
@@ -26,9 +35,9 @@ def _reader_client():
 
 @pytest.mark.django_db
 def test_slug_filter_returns_only_that_cases_runs():
-    CaseReview.objects.create(slug="case-a", case_title="Case A", status="done")
-    CaseReview.objects.create(slug="case-a", case_title="Case A", status="done")
-    CaseReview.objects.create(slug="case-b", case_title="Case B", status="done")
+    _review("case-a", case_title="Case A", status="done")
+    _review("case-a", case_title="Case A", status="done")
+    _review("case-b", case_title="Case B", status="done")
 
     response = _reader_client().get(URL, {"slug": "case-a"})
 
@@ -40,13 +49,13 @@ def test_slug_filter_returns_only_that_cases_runs():
 
 @pytest.mark.django_db
 def test_slug_filter_orders_newest_first():
-    older = CaseReview.objects.create(slug="case-c", case_title="Case C")
+    older = _review("case-c", case_title="Case C")
     # Back-date the older row: two back-to-back creates can share a created_at
     # on fast DBs, which would make the -created_at ordering non-deterministic.
     CaseReview.objects.filter(id=older.id).update(
         created_at=timezone.now() - timedelta(seconds=1)
     )
-    newer = CaseReview.objects.create(slug="case-c", case_title="Case C")
+    newer = _review("case-c", case_title="Case C")
 
     response = _reader_client().get(URL, {"slug": "case-c"})
 
@@ -56,8 +65,8 @@ def test_slug_filter_orders_newest_first():
 
 @pytest.mark.django_db
 def test_unfiltered_list_returns_all_runs():
-    CaseReview.objects.create(slug="case-a", case_title="Case A")
-    CaseReview.objects.create(slug="case-b", case_title="Case B")
+    _review("case-a", case_title="Case A")
+    _review("case-b", case_title="Case B")
 
     response = _reader_client().get(URL)
 
@@ -66,7 +75,7 @@ def test_unfiltered_list_returns_all_runs():
 
 @pytest.mark.django_db
 def test_unknown_slug_returns_empty():
-    CaseReview.objects.create(slug="case-a", case_title="Case A")
+    _review("case-a", case_title="Case A")
 
     response = _reader_client().get(URL, {"slug": "no-such-case"})
 

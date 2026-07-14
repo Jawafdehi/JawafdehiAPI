@@ -50,7 +50,8 @@ def test_case_iri_resolves_to_slug(caseworker, case):
     resp = _authed_client(caseworker).post(URL, {"iri": CASE_IRI}, format="json")
     assert resp.status_code == 201, resp.data
     assert resp.data["slug"] == CASE_SLUG
-    assert CaseReview.objects.filter(slug=CASE_SLUG).exists()
+    # Reviews now key on the case FK; the exposed slug is derived from it.
+    assert CaseReview.objects.filter(case__slug=CASE_SLUG).exists()
 
 
 @pytest.mark.django_db

@@ -3,7 +3,7 @@ from django.db import models
 
 
 class CaseReview(models.Model):
-    """A single review run for one Jawafdehi case slug."""
+    """A single review run for one Jawafdehi case."""
 
     STATUS_PENDING = "pending"
     STATUS_RUNNING = "running"
@@ -16,9 +16,20 @@ class CaseReview(models.Model):
         (STATUS_FAILED, "Failed"),
     ]
 
-    # Indexed: the flat list (?slug=), the grouped view, and regrade-all all
-    # filter/group by slug, so a plain scan would degrade as the table grows.
-    slug = models.CharField(max_length=255, db_index=True)
+    # Identity is the stable Case PK, not the mutable slug: a case can be
+    # re-slugged, which used to orphan its reviews (grade-time resolution was by
+    # slug). The FK keys each review to its case row; the display slug is derived
+    # from it (see the ``slug`` property). CASCADE so deleting a case takes its
+    # reviews with it. null=True is a DB-level safety valve only (kept nullable
+    # so the backfill migration can add the column before it is populated); the
+    # code path always sets it. The FK column is indexed by Django, covering the
+    # flat list (?slug=), the grouped view, and regrade-all, which key on it.
+    case = models.ForeignKey(
+        "cases.Case",
+        on_delete=models.CASCADE,
+        related_name="reviews",
+        null=True,
+    )
     status = models.CharField(
         max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING
     )
@@ -50,8 +61,18 @@ class CaseReview(models.Model):
     class Meta:
         ordering = ["-created_at"]
 
+    @property
+    def slug(self):
+        """The linked case's current slug, derived from the FK (else empty).
+
+        The slug is exposed for the frontend URL/link but is NO LONGER stored on
+        the review — it is read live off the case, so a re-slug is reflected
+        automatically and can never orphan the review from its case.
+        """
+        return self.case.slug if self.case_id else ""
+
     def __str__(self):
-        return f"{self.slug} [{self.status}]"
+        return f"{self.slug or self.case_id} [{self.status}]"
 
 
 class ReviewConfig(models.Model):

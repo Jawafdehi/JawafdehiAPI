@@ -34,12 +34,13 @@ def _case_review_build_payload(job) -> dict:
     from review import case_provider
     from review.models import ReviewConfig
 
-    slug = (job.payload or {}).get("slug")
-    if not slug:
-        raise ValueError("case_review job payload is missing 'slug'.")
+    case_id = (job.payload or {}).get("case_id")
+    if not case_id:
+        raise ValueError("case_review job payload is missing 'case_id'.")
 
-    case = case_provider.get_case(slug)
-    case.setdefault("slug", slug)
+    # Resolve by the stable case PK: the serialized dict already carries the
+    # case's current slug, so a re-slug between submit and claim never orphans it.
+    case = case_provider.get_case_by_id(case_id)
 
     # Stamp the review's "picked up" time from the job's claim time so the UI can
     # show it (and compute elapsed = finished - picked up) while the review is

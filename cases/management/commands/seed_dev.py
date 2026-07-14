@@ -193,8 +193,9 @@ class Command(BaseCommand):
         # queue surfaces the seeded IN_REVIEW case end-to-end.
         from review.models import CaseReview
 
+        seed_review_case = Case.objects.get(slug="seed-in-review")
         CaseReview.objects.get_or_create(
-            slug="seed-in-review",
+            case=seed_review_case,
             defaults=dict(
                 status=CaseReview.STATUS_DONE,
                 case_title="Review: procurement fraud Ministry X",

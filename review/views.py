@@ -159,7 +159,7 @@ def dev_logout_view(request):
 @api_view(["POST"])
 @permission_classes([HasContributorRole])
 def submit_review(request):
-    """Submit a new case slug for review.
+    """Submit a case for review.
 
     Creates the review as `pending` and enqueues a ``case_review`` job on the
     central queue (``jobs`` app). The out-of-process poller — now a generic jobs
@@ -168,8 +168,13 @@ def submit_review(request):
     """
     s = SubmitSerializer(data=request.data)
     s.is_valid(raise_exception=True)
-    slug = s.validated_data["slug"]
-    review = CaseReview.objects.create(slug=slug, submitted_by=request.user)
+    case = s.validated_data["case"]
+    review = CaseReview.objects.create(
+        case=case,
+        case_title=(case.title or ""),
+        case_state=(case.state or ""),
+        submitted_by=request.user,
+    )
     _enqueue_review_job(review, submitted_by=request.user)
     return Response(
         CaseReviewDetailSerializer(review).data, status=status.HTTP_201_CREATED
@@ -184,9 +189,9 @@ def _enqueue_review_job(review, *, submitted_by=None):
     regrade can enqueue afresh. The case dict is resolved SERVER-SIDE at claim
     time by the kind's ``build_payload`` hook, so the poller stays DB-free.
 
-    Enqueuing also SUPERSEDES any older still-queued job for the same slug
+    Enqueuing also SUPERSEDES any older still-queued job for the same case
     (dead-lettered; its review is finalized as failed/"superseded"): the case is
-    resolved live at claim time, so a second queued job for the same slug would
+    resolved live at claim time, so a second queued job for the same case would
     just re-grade identical content at full LLM cost.
     """
     from django.db import transaction
@@ -201,11 +206,11 @@ def _enqueue_review_job(review, *, submitted_by=None):
     with transaction.atomic():
         job = job_queue.enqueue(
             "case_review",
-            payload={"slug": review.slug, "review_id": review.id},
+            payload={"case_id": review.case_id, "review_id": review.id},
             dedup_key=f"case_review:{review.id}",
             submitted_by=submitted_by,
         )
-        supersede_older_queued_jobs(review.slug, keep_job_id=job.pk)
+        supersede_older_queued_jobs(review.case_id, keep_job_id=job.pk)
     return job
 
 
@@ -231,7 +236,9 @@ class ReviewListView(generics.ListAPIView):
     permission_classes = [CanReadReview]
 
     def get_queryset(self):
-        qs = CaseReview.objects.all()
+        # select_related("case") so the derived ``slug`` on each serialized row
+        # doesn't fire a query per row.
+        qs = CaseReview.objects.select_related("case")
         # ``?slug=`` scopes the flat list to one case's runs, newest-first (via
         # Meta.ordering). The per-case review page uses this to show a case's
         # whole run history without pulling the entire table.
@@ -241,7 +248,7 @@ class ReviewListView(generics.ListAPIView):
             # slashes) so "?slug=case-a/" and "?slug= case-a " still match.
             slug = slug.strip().strip("/")
             if slug:
-                qs = qs.filter(slug=slug)
+                qs = qs.filter(case__slug=slug)
         return qs
 
 
@@ -251,7 +258,7 @@ class GroupedReviewListView(generics.ListAPIView):
     The flat review list carries one row per execution; the SPA's review list
     page instead wants ONE entry per case with ALL of that case's executions
     (so an older run doesn't fall onto a later page of the flat list). This view
-    groups CaseReview rows by case slug and paginates BY CASE.
+    groups CaseReview rows by case and paginates BY CASE.
 
     Each result: {slug, case_title, latest: <ReviewListItem>,
     executions: [<ReviewListItem> ...]} — executions newest-first, cases ordered
@@ -264,36 +271,41 @@ class GroupedReviewListView(generics.ListAPIView):
     serializer_class = CaseReviewListSerializer
 
     def list(self, request, *args, **kwargs):
-        # Paginate BY CASE at the DB level: rank slugs by their most-recent
+        # Paginate BY CASE at the DB level: rank cases by their most-recent
         # execution, then fetch only the current page's rows — instead of
         # loading the whole CaseReview table into memory to group in Python.
-        slug_qs = (
-            CaseReview.objects.values("slug")
+        case_id_qs = (
+            CaseReview.objects.values("case_id")
             .annotate(latest_created_at=Max("created_at"))
             .order_by("-latest_created_at")
-            .values_list("slug", flat=True)
+            .values_list("case_id", flat=True)
         )
 
-        page = self.paginate_queryset(slug_qs)
-        page_slugs = list(page) if page is not None else list(slug_qs)
+        page = self.paginate_queryset(case_id_qs)
+        page_case_ids = list(page) if page is not None else list(case_id_qs)
 
-        # Fetch executions only for this page's slugs. Meta.ordering (-created_at)
+        # Fetch executions only for this page's cases. Meta.ordering (-created_at)
         # gives newest-first, so grouping in iteration order keeps each case's
-        # executions newest-first.
-        groups: dict[str, list[CaseReview]] = {}
-        for review in CaseReview.objects.filter(slug__in=page_slugs):
-            groups.setdefault(review.slug, []).append(review)
+        # executions newest-first. select_related("case") so the derived slug
+        # (read off the case) doesn't N+1 across the serialized rows.
+        groups: dict[int, list[CaseReview]] = {}
+        for review in CaseReview.objects.select_related("case").filter(
+            case_id__in=page_case_ids
+        ):
+            groups.setdefault(review.case_id, []).append(review)
 
         results = []
-        for slug in page_slugs:  # preserves the DB-ranked newest-case-first order
-            executions = groups.get(slug)
-            if not executions:  # defensive: a slug vanished between the two queries
+        for case_id in page_case_ids:  # preserves the DB-ranked newest-case-first order
+            executions = groups.get(case_id)
+            if not executions:  # defensive: a case vanished between the two queries
                 continue
             items = CaseReviewListSerializer(executions, many=True).data
             latest = executions[0]
             results.append(
                 {
-                    "slug": slug,
+                    # The group slug is the case's current slug, derived from the
+                    # (shared) linked case via the model ``slug`` property.
+                    "slug": latest.slug,
                     # The case title is snapshotted on every review row; the
                     # newest execution carries the freshest value.
                     "case_title": latest.case_title,
@@ -310,7 +322,8 @@ class GroupedReviewListView(generics.ListAPIView):
 class ReviewDetailView(generics.RetrieveAPIView):
     serializer_class = CaseReviewDetailSerializer
     permission_classes = [CanReadReview]
-    queryset = CaseReview.objects.all()
+    # select_related("case") so the derived ``slug`` doesn't fire an extra query.
+    queryset = CaseReview.objects.select_related("case")
 
 
 # ---------------- Rules (code-enforced, read-only) ----------------
@@ -363,27 +376,27 @@ def config_view(request):
 def regrade_all(request):
     """Re-queue every distinct CASE for regrading against the current rules.
 
-    One regrade per slug — the LATEST review row of each slug is reset to
+    One regrade per case — the LATEST review row of each case is reset to
     pending and a fresh ``case_review`` job is enqueued on the central queue;
     the out-of-process consumer then claims and runs them. Older review rows of
-    the same slug are history and stay untouched: a review grades the LIVE case
+    the same case are history and stay untouched: a review grades the LIVE case
     (resolved at claim time), so re-running every historical row would grade the
     same content N times at full LLM cost — that is exactly how the queue once
     accumulated hundreds of duplicate jobs over a few dozen cases.
     """
-    # Only id + slug are needed to reset + enqueue; avoid loading the (large)
+    # Only id + case_id are needed to reset + enqueue; avoid loading the (large)
     # result JSON for every review.
     # .order_by() clears CaseReview's Meta.ordering for explicitness. Django
     # >= 3.0 ignores Meta.ordering when grouping, so this is belt-and-braces —
-    # the grouping-by-slug is covered by test_regrade_all_targets_only_the_
+    # the grouping-by-case is covered by test_regrade_all_targets_only_the_
     # latest_review_per_slug either way.
     latest_ids = (
-        CaseReview.objects.values("slug")
+        CaseReview.objects.values("case_id")
         .annotate(latest_id=Max("id"))
         .order_by()
         .values_list("latest_id", flat=True)
     )
-    reviews = list(CaseReview.objects.only("id", "slug").filter(id__in=latest_ids))
+    reviews = list(CaseReview.objects.only("id", "case_id").filter(id__in=latest_ids))
     CaseReview.objects.filter(id__in=[r.id for r in reviews]).update(
         status=CaseReview.STATUS_PENDING,
         stage="queued_for_regrade",
