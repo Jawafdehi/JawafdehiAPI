@@ -33,6 +33,35 @@ def _flatten(content):
     return "\n\n".join(b.get("text", "") for b in content)
 
 
+def _dominant_model(model_usage):
+    """Pick the model that did the real work from claude -p's ``modelUsage`` map.
+
+    A single ``claude -p`` call can report usage for MORE than one model — the
+    model we requested via ``--model`` plus an auxiliary the CLI drives itself
+    for internal housekeeping (e.g. a small model for a quota/title side-task).
+    Taking ``list(modelUsage)[0]`` mislabels the usage bucket with whichever key
+    hashes first, which can be the auxiliary model even though the requested
+    model produced the entire graded result (and the flat ``total_cost_usd``
+    already reflects it). Choose the model with the highest reported cost —
+    tie-broken by token count — so the bucket label names the actual grader.
+    Cost is the primary key because per-model ``inputTokens`` excludes cache
+    tokens, so a cache-heavy primary call can report fewer counted tokens than a
+    tiny uncached auxiliary one while still costing far more. Returns "" when
+    ``modelUsage`` is absent/empty/malformed so the caller can fall back.
+    """
+    if not isinstance(model_usage, dict) or not model_usage:
+        return ""
+
+    def weight(item):
+        _name, u = item
+        u = u if isinstance(u, dict) else {}
+        cost = float(u.get("costUSD") or 0.0)
+        tokens = int(u.get("inputTokens") or 0) + int(u.get("outputTokens") or 0)
+        return (cost, tokens)
+
+    return max(model_usage.items(), key=weight)[0]
+
+
 class _CliProvider(Provider):
     """Base class for subprocess-based CLI providers.
 
@@ -157,9 +186,7 @@ class ClaudeCliProvider(_CliProvider):
             usage_data = data.get("usage", {})
             model_usage = data.get("modelUsage", {})
             reported_model = (
-                list(model_usage.keys())[0]
-                if model_usage
-                else (effective_model or model_id or "claude")
+                _dominant_model(model_usage) or effective_model or model_id or "claude"
             )
             input_tokens = (
                 usage_data.get("input_tokens", 0)

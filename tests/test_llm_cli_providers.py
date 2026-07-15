@@ -71,6 +71,88 @@ class TestClaudeCliProvider(unittest.TestCase):
             self.assertEqual(by_provider[0]["tier"], "cheap")
             self.assertEqual(by_provider[0]["model"], "claude-opus-4-7[1m]")
 
+    def test_multi_model_usage_labels_bucket_with_the_dominant_model(self):
+        """When claude -p reports usage for more than one model, the usage bucket
+        must be labelled with the model that did the real work (highest cost),
+        not whichever key the CLI happens to list first. Regression: a review
+        graded on opus was mislabelled as the auxiliary haiku the CLI runs for
+        internal housekeeping, because the parser took modelUsage's first key."""
+        provider = ClaudeCliProvider()
+
+        # The auxiliary (haiku) key is listed FIRST but is a tiny side-task; the
+        # requested opus model produced the graded result and dominates by cost.
+        sample_output = json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": '{"score": 88}',
+                "total_cost_usd": 2.85,
+                "usage": {
+                    "input_tokens": 10,
+                    "cache_creation_input_tokens": 500000,
+                    "cache_read_input_tokens": 44000,
+                    "output_tokens": 11000,
+                },
+                "modelUsage": {
+                    "claude-haiku-4-5-20251001": {
+                        "inputTokens": 300,
+                        "outputTokens": 40,
+                        "costUSD": 0.0007,
+                    },
+                    "claude-opus-4-8[1m]": {
+                        "inputTokens": 10,
+                        "outputTokens": 11000,
+                        "costUSD": 2.8493,
+                    },
+                },
+            }
+        )
+
+        with patch.object(provider, "_run", return_value=sample_output):
+            usage = UsageAccumulator()
+            provider.invoke_text(
+                system="grade this",
+                content="test",
+                max_tokens=900,
+                model_id="claude-opus-4-8[1m]",
+                tier="cheap",
+                usage=usage,
+            )
+
+            by_provider = usage.as_dict()["by_provider"]
+            self.assertEqual(len(by_provider), 1)
+            self.assertEqual(by_provider[0]["model"], "claude-opus-4-8[1m]")
+
+    def test_empty_model_usage_falls_back_to_requested_model(self):
+        """With no modelUsage map, the bucket is labelled with the model we asked
+        the CLI to run (``--model``), not the "claude" last-resort default."""
+        provider = ClaudeCliProvider()
+        sample_output = json.dumps(
+            {
+                "type": "result",
+                "is_error": False,
+                "result": '{"score": 70}',
+                "total_cost_usd": 0.01,
+                "usage": {"input_tokens": 5, "output_tokens": 5},
+                # no modelUsage key at all
+            }
+        )
+
+        with patch.object(provider, "_run", return_value=sample_output):
+            usage = UsageAccumulator()
+            provider.invoke_text(
+                system="grade this",
+                content="test",
+                max_tokens=900,
+                model_id="claude-opus-4-8[1m]",
+                tier="cheap",
+                usage=usage,
+            )
+
+            by_provider = usage.as_dict()["by_provider"]
+            self.assertEqual(by_provider[0]["model"], "claude-opus-4-8[1m]")
+
     def test_invoke_text_handles_error(self):
         """Test error handling when is_error is true."""
         provider = ClaudeCliProvider()
