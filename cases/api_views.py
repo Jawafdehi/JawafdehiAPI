@@ -694,13 +694,13 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         # is public, so neither is gated here. CLOSED never reaches this method
         # (excluded from every retrieve queryset).
         if case.state == CaseState.DRAFT:
-            if not request.user.is_authenticated:
-                return Response(
-                    {"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND
-                )
-
-            # Check if user is authorized to view this draft case.
-            if not can_view_case(request.user, case):
+            # A DRAFT is casework-only: anon or a role-less user gets 404. This
+            # mirrors history()'s gate; get_queryset already keeps DRAFT out of
+            # the anon retrieve queryset, so this is the defensive object-level
+            # check (can_view_case is False for AnonymousUser).
+            if not request.user.is_authenticated or not can_view_case(
+                request.user, case
+            ):
                 return Response(
                     {"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND
                 )
