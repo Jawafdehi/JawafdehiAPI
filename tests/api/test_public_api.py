@@ -39,8 +39,9 @@ def test_public_api_only_shows_published_cases(case_data, state):
     Feature: accountability-platform-core, Property 8: Public API only shows published cases
 
     For any API request to list cases, only cases with state=PUBLISHED should be returned.
-    The detail endpoint also only returns PUBLISHED cases to the public; casework
-    states (DRAFT, IN_REVIEW) require a casework-viewing role and otherwise 404.
+    The detail endpoint is wider: PUBLISHED and IN_REVIEW are public by direct
+    slug (IN_REVIEW is "unlisted" — retrievable but absent from listings/search);
+    DRAFT requires a casework-viewing role and CLOSED is never exposed (both 404).
     Validates: Requirements 6.1, 8.3
     """
 
@@ -75,16 +76,17 @@ def test_public_api_only_shows_published_cases(case_data, state):
             case.slug not in case_ids_in_response
         ), f"Case {case.slug} with state={state} should NOT appear in API list response"
 
-    # Test detail endpoint - only PUBLISHED is publicly accessible; casework
-    # states (DRAFT, IN_REVIEW) and CLOSED return 404 to anonymous callers.
+    # Test detail endpoint - PUBLISHED and IN_REVIEW are publicly retrievable by
+    # direct slug (IN_REVIEW is unlisted, not hidden); DRAFT (casework) and
+    # CLOSED return 404 to anonymous callers.
     detail_response = client.get(f"/api/cases/{case.slug}/")
 
-    if state == CaseState.PUBLISHED:
+    if state in (CaseState.PUBLISHED, CaseState.IN_REVIEW):
         assert (
             detail_response.status_code == 200
-        ), "PUBLISHED case should be accessible via detail endpoint"
+        ), f"{state} case should be retrievable by direct slug"
     else:
-        # DRAFT, IN_REVIEW (casework), and CLOSED are not publicly accessible.
+        # DRAFT (casework) and CLOSED are not publicly accessible.
         assert (
             detail_response.status_code == 404
         ), f"{state} case should NOT be publicly accessible via detail endpoint"
@@ -580,15 +582,16 @@ def test_api_exposes_state_field():
 @pytest.mark.django_db
 @settings(max_examples=10, deadline=800)
 @given(case_data=complete_case_data())
-def test_public_api_hides_in_review_case_from_retrieve(case_data):
+def test_public_api_unlists_in_review_but_serves_by_slug(case_data):
     """
-    Feature: IN_REVIEW cases are casework and NOT publicly accessible.
+    Feature: IN_REVIEW cases are UNLISTED but publicly retrievable by direct slug.
 
-    Under the new role model (public = readonly EXCEPT no casework), an IN_REVIEW
-    case is casework. The retrieve (detail) endpoint must return 404 to anonymous
-    callers, and IN_REVIEW cases must NOT appear in the public list endpoint.
+    An IN_REVIEW case is "unlisted" (like an unlisted video): reachable by anyone
+    who has the exact slug, but kept out of the public list endpoint (and search).
+    So the retrieve (detail) endpoint returns 200 to an anonymous caller, while
+    the list endpoint must NOT include it.
 
-    Validates: in-review = casework = not public
+    Validates: in-review = unlisted (slug-accessible, not listed)
     """
     # Create an IN_REVIEW case
     case = create_case_with_entities(**case_data)
@@ -597,13 +600,14 @@ def test_public_api_hides_in_review_case_from_retrieve(case_data):
 
     client = APIClient()
 
-    # Test 1: Detail endpoint must hide IN_REVIEW cases from the public (404)
+    # Test 1: Detail endpoint serves IN_REVIEW cases by direct slug (200)
     detail_response = client.get(f"/api/cases/{case.slug}/")
     assert (
-        detail_response.status_code == 404
-    ), "IN_REVIEW case should NOT be publicly accessible via detail endpoint"
+        detail_response.status_code == 200
+    ), "IN_REVIEW case SHOULD be retrievable by direct slug (unlisted, not hidden)"
+    assert detail_response.data["slug"] == case.slug
 
-    # Test 2: List endpoint should NOT show IN_REVIEW cases
+    # Test 2: List endpoint must NOT show IN_REVIEW cases (unlisted)
     list_response = client.get("/api/cases/")
     assert list_response.status_code == 200
 

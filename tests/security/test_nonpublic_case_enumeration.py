@@ -1,8 +1,12 @@
-"""Adversarial: a non-public case must not leak through ANY read surface.
+"""Adversarial: a non-public case must not leak through any ENUMERATION surface.
 
-Threat: an anonymous visitor (or the accused party) tries to discover a case that
-has not cleared the verification queue — DRAFT / IN_REVIEW / CLOSED — by hitting
-every surface that enumerates or resolves cases, not just /api/cases/.
+Threat model by state:
+- DRAFT / CLOSED are fully hidden: no read surface may confirm they exist, even
+  to a caller who guesses the exact slug (horizontal IDOR).
+- IN_REVIEW is "unlisted": intentionally retrievable by a caller who already has
+  the exact slug, but must NOT be discoverable — absent from the list endpoint,
+  search, the statistics payload (aggregate-only), and the sitemap/discovery
+  corpus. Knowing a slug is allowed; enumerating slugs is not.
 
 Run with: ``uv run pytest -m security``.
 """
@@ -39,14 +43,30 @@ def _make_case(state, slug, title=SECRET_TITLE):
     "state,slug",
     [
         (CaseState.DRAFT, "secret-draft"),
-        (CaseState.IN_REVIEW, "secret-in-review"),
         (CaseState.CLOSED, "secret-closed"),
     ],
 )
-def test_nonpublic_case_404s_on_detail_for_anon(state, slug):
+def test_hidden_case_404s_on_detail_for_anon(state, slug):
+    # DRAFT and CLOSED are fully hidden — the detail endpoint must not confirm
+    # they exist. (IN_REVIEW is deliberately slug-retrievable; see below.)
     _make_case(state, slug)
     resp = APIClient().get(f"/api/cases/{slug}/")
     assert resp.status_code == 404, resp.content
+
+
+def test_in_review_is_unlisted_but_slug_retrievable_for_anon():
+    # IN_REVIEW is "unlisted": an anon caller WITH the exact slug may retrieve it
+    # (200), but it must stay out of the public list endpoint.
+    case = _make_case(CaseState.IN_REVIEW, "secret-in-review")
+    client = APIClient()
+
+    detail = client.get(f"/api/cases/{case.slug}/")
+    assert detail.status_code == 200, detail.content
+    assert detail.json()["slug"] == case.slug
+
+    listing = client.get("/api/cases/")
+    slugs = {c.get("slug") for c in listing.json().get("results", [])}
+    assert case.slug not in slugs, "unlisted IN_REVIEW case leaked into the list"
 
 
 @pytest.mark.parametrize(
@@ -115,8 +135,10 @@ def test_nonpublic_case_absent_from_public_corpus():
         assert not any(leaked in iri for iri in iris), f"{leaked} in public corpus"
 
 
-def test_guessing_a_valid_nonpublic_slug_still_404s_for_anon():
-    # Horizontal IDOR: knowing the exact slug of a non-public case must not help.
-    _make_case(CaseState.IN_REVIEW, "known-slug-abc123")
+def test_guessing_a_hidden_slug_still_404s_for_anon():
+    # Horizontal IDOR: knowing the exact slug of a fully-hidden case (DRAFT /
+    # CLOSED) must not help. (IN_REVIEW is intentionally slug-reachable — it is
+    # unlisted, not hidden — so it is excluded here.)
+    _make_case(CaseState.DRAFT, "known-slug-abc123")
     resp = APIClient().get("/api/cases/known-slug-abc123/")
     assert resp.status_code == 404

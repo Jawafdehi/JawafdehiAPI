@@ -244,6 +244,20 @@ def test_closed_case_records_history_but_retrieve_404s():
     assert _cw_client().get(URL.format("closed-old2")).status_code == 404
 
 
+@pytest.mark.django_db
+def test_in_review_retired_slug_301s_for_anon():
+    # IN_REVIEW is unlisted-but-public-by-slug, so a retired IN_REVIEW slug must
+    # 301-redirect an ANONYMOUS caller to the canonical URL (this is what makes
+    # the BB-38 backfill of historically re-slugged in-review cases pay off).
+    case = _make_case("inrev-old", state=CaseState.IN_REVIEW, title="In review")
+    Case.objects.filter(pk=case.pk).update(slug="inrev-new")
+    assert CaseSlugHistory.objects.filter(slug="inrev-old", case=case).exists()
+
+    resp = APIClient().get(URL.format("inrev-old"))
+    assert resp.status_code == 301
+    assert resp["Location"].endswith("/api/cases/inrev-new/")
+
+
 # ===========================================================================
 # Regression: the save() path still records (untouched by this change)
 # ===========================================================================
