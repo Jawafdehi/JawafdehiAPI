@@ -113,6 +113,7 @@ def bootstrap_placeholder() -> dict:
             "total": 0,
             "by_type": [],
             "by_source": [],
+            "by_source_type": [],
             "counts": {
                 "with_description": 0,
                 "with_url": 0,
@@ -425,6 +426,16 @@ def _materials_metrics():
     by_source = list(
         live.values("source").annotate(count=Count("iri")).order_by("-count")
     )
+    # Source×type cross-tab: which document types each source contributes. Lets
+    # the frontend roll sources up into publishing institutions (e.g. CIAA press
+    # releases + annual reports → one "CIAA" row) and name the types that
+    # institution produces. Backed by the ["source", "material_type"] composite
+    # index on ``materials``.
+    by_source_type = list(
+        live.values("source", "material_type")
+        .annotate(count=Count("iri"))
+        .order_by("-count")
+    )
 
     # Completeness signals over the stored schema.org JSON-LD doc. On Postgres
     # answered with JSON-key existence lookups; sqlite (empty local / test DB)
@@ -440,6 +451,7 @@ def _materials_metrics():
         "total": total,
         "by_type": by_type,
         "by_source": by_source,
+        "by_source_type": by_source_type,
         "counts": {
             "with_description": with_description,
             "with_url": with_url,
