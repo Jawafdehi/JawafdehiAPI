@@ -232,7 +232,10 @@ def _sector_for_roles(roles) -> str:
                 continue
             member = role.get("memberOf")
             if isinstance(member, dict):
-                iri = member.get("@id") or ""
+                # ``@id`` should be a string; coerce anything else to "" so a single
+                # malformed entity can't crash the whole refresh_statistics job.
+                val = member.get("@id")
+                iri = val if isinstance(val, str) else ""
             elif isinstance(member, str):
                 iri = member
             else:
