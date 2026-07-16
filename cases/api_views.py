@@ -1226,13 +1226,20 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
     Returns:
     - `published_cases`: Number of cases with state PUBLISHED
     - `cases_under_investigation`: Number of cases with state DRAFT or IN_REVIEW
+    - `cases_in_review`: Number of cases with state IN_REVIEW (subset of
+      under-investigation — cases being prepared for publication)
     - `cases_closed`: Number of cases with state CLOSED
+    - `cases_ciaa`: Number of CIAA corruption cases (case_type CORRUPTION)
+    - `cases_non_ciaa`: Number of cases handled outside CIAA (all other types)
     - `entities_tracked`: Number of unique entities involved in published cases
-    - `nes`: NES (entities) coverage — total, by-prefix / by-type breakdowns, and
-      completeness percentages (identifier / provenance / bilingual name)
+    - `nes`: NES (entities) coverage — total, by-prefix / by-type breakdowns,
+      persons-by-sector (`persons_by_sector`, derived from the office each person
+      holds), and completeness percentages (identifier / provenance / bilingual
+      name)
     - `ngm`: NGM (judicial) coverage — court-case / court totals, by-court-type
-      breakdown, and completeness percentages (NES-resolved / registration date /
-      document sources)
+      breakdown, court-cases-per-year (`by_year`) and per-court-level-per-year
+      (`by_court_type_year`), and completeness percentages (NES-resolved /
+      registration date / document sources)
     - `materials`: NGM materials (development-project / document dataset) coverage —
       total, by-type / by-source breakdowns, and completeness percentages
       (description / url / date)
@@ -1253,7 +1260,10 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             "properties": {
                 "published_cases": {"type": "integer", "example": 127},
                 "cases_under_investigation": {"type": "integer", "example": 43},
+                "cases_in_review": {"type": "integer", "example": 12},
                 "cases_closed": {"type": "integer", "example": 31},
+                "cases_ciaa": {"type": "integer", "example": 88},
+                "cases_non_ciaa": {"type": "integer", "example": 39},
                 "entities_tracked": {"type": "integer", "example": 89},
                 "nes": {"type": "object", "description": "NES coverage metrics"},
                 "ngm": {

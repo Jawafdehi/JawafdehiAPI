@@ -65,8 +65,14 @@ class TestStatisticsEndpoint:
         assert "published_cases" in data
         assert "entities_tracked" in data
         assert "cases_under_investigation" in data
+        assert "cases_in_review" in data
         assert "cases_closed" in data
+        assert "cases_ciaa" in data
+        assert "cases_non_ciaa" in data
         assert "last_updated" in data
+        # NGM court-cases-per-year aggregations for the coverage matrix.
+        assert "by_year" in data["ngm"]
+        assert "by_court_type_year" in data["ngm"]
 
     def test_statistics_field_types(self, api_client):
         """Test that all fields have correct types."""
@@ -258,8 +264,49 @@ class TestStatisticsCounting:
 
         assert data["published_cases"] == 1
         assert data["cases_under_investigation"] == 2
+        assert data["cases_in_review"] == 1
         assert data["cases_closed"] == 1
         assert data["entities_tracked"] == 1
+        # All four cases are CORRUPTION -> all CIAA, none non-CIAA.
+        assert data["cases_ciaa"] == 4
+        assert data["cases_non_ciaa"] == 0
+
+    def test_ciaa_split_by_case_type(self, api_client):
+        """CIAA count = CORRUPTION cases; every other case_type is non-CIAA."""
+        Case.objects.create(
+            case_type=CaseType.CORRUPTION, state=CaseState.PUBLISHED, title="Corruption 1"
+        )
+        Case.objects.create(
+            case_type=CaseType.CORRUPTION, state=CaseState.DRAFT, title="Corruption 2"
+        )
+        Case.objects.create(
+            case_type=CaseType.BRIBERY, state=CaseState.PUBLISHED, title="Bribery"
+        )
+        Case.objects.create(
+            case_type=CaseType.EMBEZZLEMENT, state=CaseState.CLOSED, title="Embezzlement"
+        )
+
+        data = api_client.get("/api/statistics/").json()
+
+        assert data["cases_ciaa"] == 2
+        assert data["cases_non_ciaa"] == 2
+
+    def test_cases_in_review_is_subset_of_under_investigation(self, api_client):
+        """cases_in_review counts only IN_REVIEW; under-investigation keeps DRAFT+IN_REVIEW."""
+        Case.objects.create(
+            case_type=CaseType.CORRUPTION, state=CaseState.IN_REVIEW, title="Review 1"
+        )
+        Case.objects.create(
+            case_type=CaseType.CORRUPTION, state=CaseState.IN_REVIEW, title="Review 2"
+        )
+        Case.objects.create(
+            case_type=CaseType.CORRUPTION, state=CaseState.DRAFT, title="Draft"
+        )
+
+        data = api_client.get("/api/statistics/").json()
+
+        assert data["cases_in_review"] == 2
+        assert data["cases_under_investigation"] == 3
 
 
 @pytest.mark.django_db
@@ -571,9 +618,68 @@ class TestNesMetrics:
         assert nes["total"] == 0
         assert nes["by_prefix"] == []
         assert nes["by_type"] == []
+        assert nes["persons_by_sector"] == []
         for key in ("with_identifier", "with_provenance", "with_bilingual_name"):
             assert nes["counts"][key] == 0
             assert nes["completeness"][key] == 0.0
+
+    def test_persons_by_sector_classifies_by_memberof_org(self, api_client):
+        """Each person is bucketed by the org (memberOf) they hold a position in;
+        a person with no resolvable office is 'not_recorded'."""
+        _make_entity(
+            "person",
+            "ward-mayor",
+            "Person",
+            {
+                "hasOccupation": [
+                    {
+                        "roleName": "Mayor",
+                        "memberOf": {
+                            "@id": "https://jawafdehi.org/entity/organization/government/ward/ktm-1"
+                        },
+                    }
+                ]
+            },
+        )
+        _make_entity(
+            "person",
+            "party-chair",
+            "Person",
+            {
+                "hasOccupation": {
+                    "roleName": "Chair",
+                    "memberOf": {
+                        "@id": "https://jawafdehi.org/entity/organization/political_party/abc"
+                    },
+                }
+            },
+        )
+        _make_entity(
+            "person",
+            "hospital-director",
+            "Person",
+            {
+                "hasOccupation": [
+                    {
+                        "memberOf": {
+                            "@id": "https://jawafdehi.org/entity/organization/hospital/bir"
+                        }
+                    }
+                ]
+            },
+        )
+        _make_entity("person", "unaffiliated", "Person", {})
+
+        data = api_client.get("/api/statistics/").json()
+        by_sector = {
+            row["sector"]: row["count"] for row in data["nes"]["persons_by_sector"]
+        }
+        assert by_sector == {
+            "local_gov": 1,
+            "politicians": 1,
+            "health": 1,
+            "not_recorded": 1,
+        }
 
     def test_nes_total_and_breakdowns(self, api_client):
         _make_entity("person", "ram", "Person", {"name": {"en": "Ram", "ne": "राम"}})
@@ -675,6 +781,16 @@ class TestNgmMetrics:
             row["court__court_type"]: row["count"] for row in ngm["by_court_type"]
         }
         assert by_court_type == {"district": 2, "supreme": 1}
+
+        # Court-cases-per-year and per-court-level-per-year (the bare case with
+        # no registration date is excluded, so only the 2 dated cases count).
+        by_year = {row["year"]: row["count"] for row in ngm["by_year"]}
+        assert by_year == {2026: 2}
+        by_type_year = {
+            (row["court__court_type"], row["year"]): row["count"]
+            for row in ngm["by_court_type_year"]
+        }
+        assert by_type_year == {("district", 2026): 1, ("supreme", 2026): 1}
 
         # Materials now live in their own top-level block, not under ngm.
         mats = payload["materials"]
