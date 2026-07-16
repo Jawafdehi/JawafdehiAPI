@@ -141,11 +141,11 @@ class TestTokenAuthDraftCases:
         assert response.data["slug"] == case.slug
         assert response.data["state"] == CaseState.PUBLISHED
 
-    def test_in_review_case_requires_authorization(self):
-        """IN_REVIEW is casework: anonymous gets 404, a casework-role user gets 200.
+    def test_in_review_case_is_unlisted_but_slug_retrievable(self):
+        """IN_REVIEW is UNLISTED: retrievable by direct slug for anyone, incl. anon.
 
-        Under the new role model (public = readonly EXCEPT no casework), an
-        IN_REVIEW case is casework and is no longer publicly retrievable.
+        IN_REVIEW is "unlisted" (reachable by exact slug, absent from listings /
+        search), so both an anonymous caller and a casework-role user get 200.
         """
         # Create an IN_REVIEW case
         case = create_case_with_entities(
@@ -157,11 +157,13 @@ class TestTokenAuthDraftCases:
             state=CaseState.IN_REVIEW,
         )
 
-        # Anonymous (public) access is denied with 404.
+        # Anonymous (public) access by direct slug succeeds (unlisted, not hidden).
         response = self.client.get(f"/api/cases/{case.slug}/")
-        assert response.status_code == 404
+        assert response.status_code == 200
+        assert response.data["slug"] == case.slug
+        assert response.data["state"] == CaseState.IN_REVIEW
 
-        # A casework-role user (Caseworker) can retrieve the in-review case.
+        # A casework-role user (Caseworker) can also retrieve the in-review case.
         self.client.force_authenticate(user=self.contributor_user)
         response = self.client.get(f"/api/cases/{case.slug}/")
 

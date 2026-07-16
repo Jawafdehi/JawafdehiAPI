@@ -267,10 +267,11 @@ def _if_match_matches(request, case) -> bool:
         evidence, timeline) and any internal notes.
 
         **Access control:**
-        - PUBLISHED cases: accessible to everyone (public)
-        - DRAFT and IN_REVIEW cases (casework): require a casework-viewing role
-          (ReadOnly / Caseworker / Moderator / Admin, or an assigned contributor);
-          anonymous/public callers get 404
+        - PUBLISHED cases: accessible to everyone (public, listed + searchable)
+        - IN_REVIEW cases: UNLISTED but publicly retrievable by direct slug —
+          accessible to everyone, just kept out of listings and search
+        - DRAFT cases (casework): require a casework-viewing role
+          (ReadOnly / Caseworker / Moderator / Admin); anonymous/public callers get 404
         - CLOSED cases: not accessible via this API
 
         Returns 404 if the case doesn't exist or if the user is not authorized to view it.
@@ -304,10 +305,12 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
     Search:
     - Full-text search across title, description, key_allegations
 
-    Read visibility is role-based: unauthenticated/public callers see PUBLISHED
-    cases only (DRAFT and IN_REVIEW are casework → 404 for them). Admin /
-    Moderator / Caseworker / ReadOnly see all non-CLOSED cases (incl. DRAFT and
-    IN_REVIEW). CLOSED cases are never exposed via this API.
+    Read visibility is state-based. LISTING and SEARCH: unauthenticated/public
+    callers see PUBLISHED only; casework roles (Admin / Moderator / Caseworker /
+    ReadOnly) also see DRAFT + IN_REVIEW. RETRIEVE by slug is wider: PUBLISHED and
+    IN_REVIEW are public (IN_REVIEW is "unlisted" — reachable by direct slug but
+    absent from listings/search); DRAFT stays casework-only; CLOSED is never
+    exposed via this API.
     """
 
     serializer_class = CaseSerializer
@@ -357,7 +360,8 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         List endpoint: PUBLISHED cases only for anonymous/public; casework roles
         (Admin/Moderator/Caseworker/ReadOnly) also see IN_REVIEW + DRAFT.
         Retrieve endpoint:
-          - Unauthenticated/public: PUBLISHED only (DRAFT/IN_REVIEW → 404)
+          - Unauthenticated/public: PUBLISHED + IN_REVIEW (IN_REVIEW is unlisted
+            but reachable by direct slug); DRAFT → 404
           - Casework roles: PUBLISHED, IN_REVIEW, and DRAFT (authz check in retrieve)
           - CLOSED cases are never exposed via this API
         Partial update endpoint: all cases except CLOSED (authorization check happens in partial_update).
@@ -375,17 +379,19 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             return Case.objects.exclude(state=CaseState.CLOSED)
 
         if self.action == "retrieve":
-            # Casework (DRAFT + IN_REVIEW) is viewable only by casework roles
-            # (readonly/caseworker/moderator/admin) — NOT the public. Anonymous /
-            # public callers see only PUBLISHED. (Role model: public = readonly
-            # EXCEPT no casework access; the per-object check is in retrieve().)
+            # Retrieve-by-slug is wider than listing: IN_REVIEW is "unlisted" —
+            # publicly reachable by direct slug, just absent from listings/search.
+            # DRAFT stays casework-only; the per-object gate is in retrieve().
             if self.request.user and self.request.user.is_authenticated:
                 # Exclude CLOSED cases from the API; the retrieve() gate enforces
-                # casework-role for non-PUBLISHED states.
+                # casework-role for DRAFT.
                 queryset = Case.objects.exclude(state=CaseState.CLOSED)
             else:
-                # Unauthenticated: PUBLISHED only (no in-review/draft casework).
-                queryset = Case.objects.filter(state=CaseState.PUBLISHED)
+                # Unauthenticated: PUBLISHED + IN_REVIEW (unlisted-by-slug);
+                # DRAFT and CLOSED stay hidden.
+                queryset = Case.objects.filter(
+                    state__in=[CaseState.PUBLISHED, CaseState.IN_REVIEW]
+                )
         else:
             # List endpoint: visibility depends on authentication/role.
             # - Unauthenticated: PUBLISHED only
@@ -615,9 +621,9 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         otherwise ``None`` (the caller re-raises the 404).
 
         Visibility mirrors :meth:`retrieve` exactly, so a retired slug never
-        leaks a non-public case's existence: CLOSED is never exposed; DRAFT /
-        IN_REVIEW (casework) redirect only for a casework-viewing role; only
-        PUBLISHED redirects for anonymous callers.
+        leaks a non-public case's existence: CLOSED is never exposed; DRAFT
+        (casework) redirects only for a casework-viewing role; PUBLISHED and
+        IN_REVIEW (unlisted-but-public-by-slug) redirect for anonymous callers.
         """
         if not requested_slug:
             return None
@@ -634,9 +640,10 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         # CLOSED cases are never exposed via this API — don't confirm existence.
         if case.state == CaseState.CLOSED:
             return None
-        # Casework states are not public: only redirect for a casework-viewing
-        # role, else 404 (same boundary retrieve() enforces for a live case).
-        if case.state in (CaseState.DRAFT, CaseState.IN_REVIEW):
+        # DRAFT is not public: only redirect for a casework-viewing role, else
+        # 404 (same boundary retrieve() enforces for a live case). IN_REVIEW is
+        # unlisted-but-public-by-slug, so its retired slugs redirect for anyone.
+        if case.state == CaseState.DRAFT:
             user = request.user
             if not (
                 user and user.is_authenticated and can_view_case(user, case)
@@ -659,9 +666,11 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         """
         GET /api/cases/{id}/
 
-        Retrieve a case with permission-based access control:
-        - PUBLISHED cases: accessible to everyone (public)
-        - DRAFT and IN_REVIEW cases (casework): require a casework-viewing role
+        Retrieve a case with state-based access control:
+        - PUBLISHED cases: accessible to everyone (public, listed + searchable)
+        - IN_REVIEW cases: UNLISTED but public by direct slug — accessible to
+          everyone, just absent from listings/search
+        - DRAFT cases (casework): require a casework-viewing role
           (readonly/caseworker/moderator/admin); public callers get 404
         - CLOSED cases: not accessible via public API (returns 404)
 
@@ -679,16 +688,19 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 return redirect
             raise
 
-        # Casework states (DRAFT, IN_REVIEW) are not public — require authz.
-        # Public = readonly EXCEPT no casework access, so it cannot view these.
-        if case.state in (CaseState.DRAFT, CaseState.IN_REVIEW):
-            if not request.user.is_authenticated:
-                return Response(
-                    {"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND
-                )
-
-            # Check if user is authorized to view this casework case.
-            if not can_view_case(request.user, case):
+        # DRAFT is the only non-public retrieve state: it requires a casework
+        # role. IN_REVIEW is "unlisted" — public by direct slug (kept out of
+        # listings/search via get_queryset + the search indexer) — and PUBLISHED
+        # is public, so neither is gated here. CLOSED never reaches this method
+        # (excluded from every retrieve queryset).
+        if case.state == CaseState.DRAFT:
+            # A DRAFT is casework-only: anon or a role-less user gets 404. This
+            # mirrors history()'s gate; get_queryset already keeps DRAFT out of
+            # the anon retrieve queryset, so this is the defensive object-level
+            # check (can_view_case is False for AnonymousUser).
+            if not request.user.is_authenticated or not can_view_case(
+                request.user, case
+            ):
                 return Response(
                     {"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND
                 )

@@ -215,7 +215,7 @@ class TestPublicAPIWorkflows:
             response.status_code == 404
         ), "Closed cases should not be accessible via detail endpoint"
 
-        # Test 4: Create an IN_REVIEW case and verify accessibility
+        # Test 4: Create an IN_REVIEW case and verify unlisted-but-slug-accessible
         in_review_case = create_case_with_entities(
             title="In Review Case",
             alleged_entities=["https://jawafdehi.org/entity/person/test-person"],
@@ -225,14 +225,14 @@ class TestPublicAPIWorkflows:
             state=CaseState.IN_REVIEW,
         )
 
-        # IN_REVIEW is casework → NOT publicly accessible via detail (role model:
-        # public = readonly EXCEPT no casework). Anonymous gets 404.
+        # IN_REVIEW is UNLISTED but public by direct slug: an anonymous caller
+        # with the exact slug retrieves it (200), it's just kept out of listings.
         response = self.client.get(f"/api/cases/{in_review_case.slug}/")
         assert (
-            response.status_code == 404
-        ), "IN_REVIEW (casework) must not be retrievable by an anonymous/public caller"
+            response.status_code == 200
+        ), "IN_REVIEW must be retrievable by direct slug (unlisted, not hidden)"
 
-        # IN_REVIEW cases should not appear in list endpoint
+        # IN_REVIEW cases should still not appear in the list endpoint (unlisted)
         response = self.client.get("/api/cases/")
         case_ids = [case["slug"] for case in response.data.get("results", [])]
         assert (
