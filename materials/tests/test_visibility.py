@@ -53,6 +53,24 @@ def _case(slug, state):
     )
 
 
+def _store_corpus(source, ident, material_type="court_order", visibility=Visibility.LISTED):
+    """An NGM-native corpus material (non-``jawafdehi`` source) — e.g. a court
+    order or CIAA press release that is public on its own merits, independent of
+    any case. Built directly so ``source``/``ident`` are the corpus namespace,
+    not the ``jawafdehi`` case-upload namespace that ``_store`` mints."""
+    iri = f"https://jawafdehi.org/material/{source}/{ident}"
+    mat = Material(
+        iri=iri,
+        material_type=material_type,
+        source=source,
+        ident=ident,
+        data={"@id": iri, "@type": "DigitalDocument", "name": {"en": "Corpus doc"}},
+        visibility=visibility,
+    )
+    mat.save()
+    return mat
+
+
 class TestVisibilityForStates:
     def test_empty_is_private(self):
         assert visibility_for_states([]) == Visibility.PRIVATE
@@ -427,3 +445,61 @@ class TestDiscoveryAndSearchHonorVisibility:
             _store("source:20240101:priv01", visibility=Visibility.PRIVATE)
         # on_commit fires at transaction end in tests via django_db; force it:
         assert not idx.called or dele.called
+
+
+@pytest.mark.django_db
+class TestNgmNativeGuard:
+    """NGM-native corpus materials (non-``jawafdehi`` source) are independently
+    public; case referrers must NEVER demote them. This is what makes the
+    jawafdehi-dedup re-point (case evidence: duplicate upload → canonical corpus
+    doc) safe — without the guard a DRAFT case referencing a public press release
+    would hide it."""
+
+    def test_draft_referrer_does_not_demote_corpus_material(self):
+        # The exact dedup shape: a DRAFT case is re-pointed at a canonical corpus
+        # press release. It must stay LISTED (a duplicate cleanup can't hide a
+        # public document).
+        mat = _store_corpus("ciaa_press_release", "2402", material_type="press_release")
+        case = _case("c-draft", CaseState.DRAFT)
+        CaseMaterialReference.objects.create(case=case, material_iri=mat.iri)
+        assert recompute_material_visibility(mat.iri) == Visibility.LISTED
+        mat.refresh_from_db()
+        assert mat.visibility == Visibility.LISTED
+
+    def test_in_review_referrer_does_not_demote_corpus_material(self):
+        mat = _store_corpus("court_order", "special.080-cr-0001")
+        case = _case("c-review", CaseState.IN_REVIEW)
+        CaseMaterialReference.objects.create(case=case, material_iri=mat.iri)
+        assert recompute_material_visibility(mat.iri) == Visibility.LISTED
+        mat.refresh_from_db()
+        assert mat.visibility == Visibility.LISTED
+
+    def test_recompute_heals_a_mis_demoted_corpus_material(self):
+        # Reproduces the fleet damage: a corpus doc left PRIVATE by an
+        # unguarded recompute is healed back to LISTED on the next pass.
+        mat = _store_corpus(
+            "ciaa_press_release", "2403",
+            material_type="press_release", visibility=Visibility.PRIVATE,
+        )
+        case = _case("c-draft", CaseState.DRAFT)
+        CaseMaterialReference.objects.create(case=case, material_iri=mat.iri)
+        assert recompute_material_visibility(mat.iri) == Visibility.LISTED
+        mat.refresh_from_db()
+        assert mat.visibility == Visibility.LISTED
+
+    def test_recompute_all_heals_corpus_but_still_demotes_case_source(self):
+        # One reconciler pass: the corpus doc is restored to LISTED while a
+        # genuine case-source (jawafdehi) upload referenced only by a DRAFT case
+        # is still correctly demoted to PRIVATE.
+        corpus = _store_corpus(
+            "court_order", "special.080-cr-0002", visibility=Visibility.PRIVATE
+        )
+        upload = _store("source:20240101:up0001")  # jawafdehi case-source, LISTED
+        draft = _case("c-draft", CaseState.DRAFT)
+        CaseMaterialReference.objects.create(case=draft, material_iri=corpus.iri)
+        CaseMaterialReference.objects.create(case=draft, material_iri=upload.iri)
+        recompute_all()
+        corpus.refresh_from_db()
+        upload.refresh_from_db()
+        assert corpus.visibility == Visibility.LISTED
+        assert upload.visibility == Visibility.PRIVATE

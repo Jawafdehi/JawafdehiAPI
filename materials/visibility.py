@@ -12,6 +12,17 @@ query ``CaseMaterialReference`` by ``material_iri`` string. Materials with NO
 case referrers keep their current visibility (NGM-native court materials stay
 LISTED by default); only materials that ARE referenced get (re)computed.
 
+**Only case-source (``jawafdehi``) materials derive visibility from case state.**
+An NGM-native corpus material (court order, CIAA press release, AG charge sheet,
+NKP precedent, ...) is independently public on its own merits — it existed and
+was LISTED before any case referenced it. Case referrers must NEVER demote it:
+a DRAFT case citing a public press release must not hide that press release from
+the site. This became load-bearing once the jawafdehi-dedup re-points a case's
+evidence FROM a duplicate upload TO the canonical corpus doc — that is the first
+time corpus materials acquire (draft/in-review) case referrers, and without this
+guard the MAX-over-states recompute would demote ~all of them. So the guard is:
+``source != JAWAF_SOURCE`` → fixed ``LISTED``, never the case-state MAX.
+
 The recompute TRIGGERS (case publish/review/unpublish/delete, evidence add/
 remove) live on the case-side transition path (wired in the evidence-cutover
 slice). A periodic ``recompute_all`` reconciler is the backstop against a missed
@@ -21,6 +32,8 @@ trigger (a missed demotion is a leak; a missed promotion hides a public doc).
 from __future__ import annotations
 
 import logging
+
+from jawafdehi_shared.entities.ids import JAWAF_SOURCE
 
 from .models import Material, Visibility
 
@@ -82,6 +95,17 @@ def recompute_material_visibility(material_iri: str) -> Visibility | None:
     material = Material.objects.filter(pk=material_iri, is_deleted=False).first()
     if material is None:
         return None
+    if material.source != JAWAF_SOURCE:
+        # NGM-native corpus material — independently public; case referrers never
+        # demote it. Pin LISTED (healing any prior mis-demotion), never the MAX.
+        if material.visibility != Visibility.LISTED:
+            material.visibility = Visibility.LISTED
+            material.save(update_fields=["visibility", "updated_at"])
+            logger.info(
+                "material %s visibility → LISTED (ngm-native, guarded)",
+                material_iri,
+            )
+        return Visibility.LISTED
     new_visibility = visibility_for_states(_referring_case_states(material_iri))
     if material.visibility != new_visibility:
         material.visibility = new_visibility
@@ -147,7 +171,11 @@ def recompute_all() -> int:
     changed: list[Material] = []
     now = timezone.now()
     for mat in materials:
-        new_visibility = visibility_for_states(iri_to_states.get(mat.iri, []))
+        if mat.source != JAWAF_SOURCE:
+            # NGM-native corpus material stays LISTED regardless of referrers.
+            new_visibility = Visibility.LISTED
+        else:
+            new_visibility = visibility_for_states(iri_to_states.get(mat.iri, []))
         if mat.visibility != new_visibility:
             mat.visibility = new_visibility
             mat.updated_at = now
