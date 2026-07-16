@@ -690,3 +690,67 @@ class TestPatchVisibilityPolicy:
         # Anon never sees the admin fields.
         anon = APIClient().get(f"/api/materials/?iri={mat.iri}")
         assert "jawafdehi:visibilityPolicy" not in anon.data
+
+    def test_anon_patch_without_iri_is_401_not_422(self):
+        # Auth precedes iri-param validation: an anon caller gets 401, never a
+        # 422/400 input-validation disclosure (matches the DELETE branch).
+        resp = APIClient().patch(
+            "/api/materials/", {"visibility_policy": "PRIVATE"}, format="json"
+        )
+        assert resp.status_code == 401
+
+
+@pytest.mark.django_db
+class TestControlKeysNotPersisted:
+    """Server-owned keys must never land in a Material's stored JSON-LD `data`."""
+
+    def _caseworker_client(self):
+        u = User.objects.create_user("cw-strip", password="x")
+        u.groups.add(Group.objects.get_or_create(name="Caseworker")[0])
+        c = APIClient()
+        c.force_authenticate(u)
+        return c
+
+    def test_bare_put_strips_control_key_but_applies_policy(self):
+        # A bare PUT body carrying a top-level `visibility_policy` must NOT persist
+        # that key into `data` (it would leak to anon), yet the policy IS applied.
+        iri = "https://jawafdehi.org/material/court_order/strip01"
+        client = self._caseworker_client()
+        resp = client.put(
+            "/api/materials/court_order/strip01",
+            {
+                "@id": iri,
+                "@type": "DigitalDocument",
+                "name": {"en": "Order"},
+                "visibility_policy": "PRIVATE",
+            },
+            format="json",
+        )
+        assert resp.status_code in (200, 201)
+        mat = Material.objects.get(pk=iri)
+        assert "visibility_policy" not in mat.data
+        assert mat.visibility_policy == Policy.PRIVATE
+
+    def test_annotated_authed_get_does_not_round_trip_into_data(self):
+        # GET as caseworker (doc is annotated with jawafdehi:visibility[Policy]),
+        # then PUT that exact doc back — the annotations must be stripped, not baked
+        # into the stored document.
+        mat = _store_corpus("court_order", "strip02")
+        client = self._caseworker_client()
+        got = client.get(f"/api/materials/?iri={mat.iri}")
+        assert "jawafdehi:visibilityPolicy" in got.data
+        client.put("/api/materials/court_order/strip02", got.data, format="json")
+        mat.refresh_from_db()
+        assert "jawafdehi:visibility" not in mat.data
+        assert "jawafdehi:visibilityPolicy" not in mat.data
+
+    def test_primitive_rejects_invalid_explicit_policy(self):
+        from django.core.exceptions import ValidationError
+
+        doc, mtype = documentsource_to_jsonld(
+            source_id="source:20240101:bad01", title="D", source_type="MISC", url=None
+        )
+        with pytest.raises(ValidationError):
+            upsert_single_source_material(
+                doc, material_type=mtype, visibility_policy="NOT_A_POLICY"
+            )

@@ -56,6 +56,16 @@ _UPLOAD_ROLES = frozenset(
 #: Excludes MARKDOWN (our own extraction output) + SOURCE_PAGE (HTML, not a scan).
 _CONVERTIBLE_ROLES = frozenset({"RAW", "ALTERNATE", "PERMALINK"})
 
+#: Server-owned keys that must NEVER be persisted into a Material's stored JSON-LD
+#: ``data``: the write-envelope control field ``visibility_policy`` and the
+#: authed-read annotations ``jawafdehi:visibility``/``jawafdehi:visibilityPolicy``.
+#: Stripped at the write chokepoint so a bare body — or a read-modify-write
+#: round-trip of an annotated authed GET — can't bake them into the canonical doc
+#: (which would leak the policy to anon and serve a stale visibility snapshot).
+_RESERVED_WRITE_KEYS = frozenset(
+    {"visibility_policy", "jawafdehi:visibility", "jawafdehi:visibilityPolicy"}
+)
+
 logger = logging.getLogger("materials.views")
 
 #: Upper bound on an uploaded material file. Generous (scanned court orders /
@@ -166,6 +176,12 @@ def _upsert_material(
         return None, status.HTTP_400_BAD_REQUEST, {
             "detail": "Body must be a JSON-LD object with an '@id'."
         }
+    # Drop server-owned control/annotation keys so they never land in stored data
+    # (a bare body's top-level visibility_policy; a round-tripped authed GET's
+    # jawafdehi:visibility[Policy]). The policy itself arrives via the dedicated
+    # `visibility_policy` argument, not the document.
+    if _RESERVED_WRITE_KEYS.intersection(data):
+        data = {k: v for k, v in data.items() if k not in _RESERVED_WRITE_KEYS}
     if expected_iri is not None and data.get("@id") != expected_iri:
         return None, status.HTTP_400_BAD_REQUEST, {
             "detail": f"Body @id {data.get('@id')!r} must match the URL IRI {expected_iri!r}."
@@ -304,13 +320,16 @@ def _patch_visibility_policy(request, iri: str) -> Response:
         return Response(
             {"detail": "Material not found."}, status=status.HTTP_404_NOT_FOUND
         )
-    if row.visibility_policy != policy:
-        row.visibility_policy = policy
-        row.save(update_fields=["visibility_policy", "updated_at"])
-    from .visibility import recompute_material_visibility
+    # Derive the new cached visibility from the new policy and persist BOTH in one
+    # save — a synchronized write, so post_save fires exactly once with the final
+    # state (the search-index reconcile never sees a stale intermediate).
+    from .visibility import _referring_case_states, visibility_for_policy
 
-    recompute_material_visibility(iri)
-    row.refresh_from_db()
+    new_visibility = visibility_for_policy(policy, lambda: _referring_case_states(iri))
+    if row.visibility_policy != policy or row.visibility != new_visibility:
+        row.visibility_policy = policy
+        row.visibility = new_visibility
+        row.save(update_fields=["visibility_policy", "visibility", "updated_at"])
     return Response(
         _with_admin_visibility(row), status=status.HTTP_200_OK, content_type=LD_JSON
     )
@@ -580,6 +599,12 @@ def material_by_iri(request):
     iri = (request.query_params.get("iri") or "").strip()
 
     if request.method == "PATCH":
+        # Authenticate BEFORE validating the iri query param (matches the sibling
+        # DELETE branch + _require_ngm_role's contract: anon is 401, not a 400/422
+        # input-validation disclosure).
+        denied = _require_ngm_role(request)
+        if denied is not None:
+            return denied
         if not iri:
             return Response(
                 {"detail": "Query parameter 'iri' is required."},

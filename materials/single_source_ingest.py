@@ -35,7 +35,7 @@ from typing import Any
 
 from django.db import transaction
 
-from .models import Material, default_policy_for
+from .models import Material
 
 
 def upsert_single_source_material(
@@ -59,6 +59,12 @@ def upsert_single_source_material(
     # Validate the doc + the promoted-column agreement on a transient instance
     # (validate_unique=False — an existing ``@id`` is an UPDATE, not a duplicate).
     candidate = Material.from_jsonld(jsonld, material_type=material_type)
+    # from_jsonld already set the source-based birth default; an explicit override
+    # wins. Assign it BEFORE full_clean so an invalid policy is REJECTED by the
+    # choices check rather than silently persisted (this is the single validation
+    # point for a direct caller that bypasses the API's _clean_policy).
+    if visibility_policy is not None:
+        candidate.visibility_policy = visibility_policy
     candidate.full_clean(validate_unique=False)
     # Mutable columns written on every upsert (create AND update). Reviving on
     # re-upsert: an incoming write to a soft-deleted @id republishes it — omitting
@@ -71,15 +77,13 @@ def upsert_single_source_material(
         "data": candidate.data,
         "is_deleted": False,
     }
-    # An explicit override applies on update too; an implicit default must NOT (it
-    # would reset a caseworker's manual policy every re-ingest), so it goes only
-    # into create_defaults.
+    # An explicit override applies on update too; the implicit birth default must
+    # NOT (it would reset a caseworker's manual policy every re-ingest), so it
+    # goes only into create_defaults (candidate.visibility_policy is the single,
+    # already-validated source of truth for both).
     if visibility_policy is not None:
-        mutable["visibility_policy"] = visibility_policy
-    create_defaults = {
-        **mutable,
-        "visibility_policy": visibility_policy or default_policy_for(candidate.source),
-    }
+        mutable["visibility_policy"] = candidate.visibility_policy
+    create_defaults = {**mutable, "visibility_policy": candidate.visibility_policy}
     with transaction.atomic(using="ngm"):
         material, _ = Material.objects.using("ngm").update_or_create(
             iri=candidate.iri,
