@@ -723,6 +723,7 @@ class TestNgmMetrics:
         assert mats["total"] == 0
         assert mats["by_type"] == []
         assert mats["by_source"] == []
+        assert mats["by_source_type"] == []
         for key in ("with_description", "with_url", "with_date"):
             assert mats["counts"][key] == 0
             assert mats["completeness"][key] == 0.0
@@ -801,6 +802,12 @@ class TestNgmMetrics:
         assert by_material_type == {"Legislation": 1}
         by_source = {row["source"]: row["count"] for row in mats["by_source"]}
         assert by_source == {"nkp": 1}
+        # Source×type cross-tab: which types each source contributes.
+        by_source_type = {
+            (row["source"], row["material_type"]): row["count"]
+            for row in mats["by_source_type"]
+        }
+        assert by_source_type == {("nkp", "Legislation"): 1}
 
         # 1 of 3 NES-resolved; 2 of 3 have a reg date; 1 of 3 has document sources.
         assert ngm["counts"]["nes_resolved"] == 1
