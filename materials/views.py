@@ -39,7 +39,7 @@ from courts.permissions import NGM_ROLE_GROUPS, HasNgmRole
 
 from . import jsonld
 from . import provenance
-from .models import Material
+from .models import Material, Policy
 from .single_source_ingest import upsert_single_source_material
 
 LD_JSON = "application/ld+json"
@@ -115,14 +115,52 @@ def _can_see_nonpublic(request) -> bool:
     return user.groups.filter(name__in=_NONPUBLIC_READ_GROUPS).exists()
 
 
-def _upsert_material(data, *, material_type: str | None, expected_iri: str | None = None):
+def _with_admin_visibility(row) -> dict:
+    """A COPY of a stored material's JSON-LD annotated with its cached
+    ``visibility`` + caseworker ``visibility_policy``, for authed (caseworker/
+    readonly) reads so the FE editor can render + drive the policy control. Public
+    reads never see these fields; derived (court-case) docs have no stored row and
+    are not annotated. We copy so the stored ``data`` dict is never mutated.
+    """
+    doc = dict(row.data)
+    doc["jawafdehi:visibility"] = row.visibility
+    doc["jawafdehi:visibilityPolicy"] = row.visibility_policy
+    return doc
+
+
+def _clean_policy(body):
+    """Extract + validate an optional ``visibility_policy`` from a write body.
+
+    Returns ``(policy_or_None, error_response_or_None)``: ``(None, None)`` when the
+    key is absent (no change), ``(POLICY, None)`` when valid, or
+    ``(None, Response(400))`` when present but not a known ``Policy``.
+    """
+    if not isinstance(body, dict) or "visibility_policy" not in body:
+        return None, None
+    policy = str(body.get("visibility_policy") or "").strip().upper()
+    if policy not in Policy.values:
+        return None, Response(
+            {"detail": f"visibility_policy must be one of {sorted(Policy.values)}."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return policy, None
+
+
+def _upsert_material(
+    data,
+    *,
+    material_type: str | None,
+    expected_iri: str | None = None,
+    visibility_policy: str | None = None,
+):
     """Validate + upsert a Material from a JSON-LD body. Returns (doc, status, error).
 
     On success: ``(doc, 200_or_201, None)``. On validation failure:
     ``(None, 400, {"detail": ...})``. ``material_type`` is inferred from the doc's
     ``additionalType``/``@type`` (via :func:`jsonld.infer_material_type`) when not
     supplied. When ``expected_iri`` is set (the PUT path) the body's @id must match
-    the URL's IRI.
+    the URL's IRI. ``visibility_policy`` (optional) is an explicit caseworker
+    override; when omitted a NEW row is born at the source-derived default.
     """
     if not isinstance(data, dict) or "@id" not in data:
         return None, status.HTTP_400_BAD_REQUEST, {
@@ -142,10 +180,22 @@ def _upsert_material(data, *, material_type: str | None, expected_iri: str | Non
         # Delegate the write to the one upsert primitive (validation +
         # update_or_create by @id + created_at preservation + soft-delete revive
         # + post_save indexing all live there).
-        material = upsert_single_source_material(data, material_type=mtype)
+        material = upsert_single_source_material(
+            data, material_type=mtype, visibility_policy=visibility_policy
+        )
     except (ValueError, DjangoValidationError) as exc:
         detail = exc.message_dict if isinstance(exc, DjangoValidationError) else str(exc)
         return None, status.HTTP_400_BAD_REQUEST, {"detail": detail}
+    # Settle the cached ``visibility`` from the (possibly new) policy so an anon
+    # read reflects it immediately. The materials API is low-volume (not the bulk
+    # importer, which relies on recompute_all / the case-side trigger), so a
+    # per-write recompute is cheap. Best-effort: never fail a stored write on it.
+    try:
+        from .visibility import recompute_material_visibility
+
+        recompute_material_visibility(material.iri)
+    except Exception:  # noqa: BLE001 - the row is written; visibility can heal.
+        logger.warning("visibility recompute failed for %s", material.iri, exc_info=True)
     code = status.HTTP_200_OK if existed else status.HTTP_201_CREATED
     return material.data, code, None
 
@@ -169,7 +219,11 @@ def _resolve_material(iri: str, *, include_nonpublic: bool = False) -> dict | No
         # (court cases are a public read plane in their own right).
         return _derive_court_case_jsonld(iri)
 
-    if include_nonpublic or row.visibility in PUBLIC_VISIBILITIES:
+    if include_nonpublic:
+        # Authed caseworker/readonly: surface the cached visibility + policy so the
+        # FE editor can render + drive the control.
+        return _with_admin_visibility(row)
+    if row.visibility in PUBLIC_VISIBILITIES:
         return row.data
     # A PRIVATE (draft-only) stored row is treated as ABSENT for the public.
     # We must NOT fall through to _derive_court_case_jsonld here: doing so would
@@ -223,12 +277,52 @@ def _soft_delete_material(iri: str) -> bool:
     return True
 
 
-@api_view(["GET", "PUT", "DELETE"])
+def _patch_visibility_policy(request, iri: str) -> Response:
+    """``PATCH`` a material's caseworker ``visibility_policy`` + recompute.
+
+    Body ``{"visibility_policy": "PUBLIC"|"CASE_GATED"|"PRIVATE"}``. NGM-role
+    (Caseworker) gated. Sets the policy on the existing stored row, then settles
+    the cached ``visibility`` via ``recompute_material_visibility`` (which also
+    reconciles the search index through ``post_save``). Returns the updated doc
+    annotated with ``jawafdehi:visibility``/``jawafdehi:visibilityPolicy`` (200),
+    404 if no live stored row exists (derived court-case materials have no policy).
+    """
+    denied = _require_ngm_role(request)
+    if denied is not None:
+        return denied
+    body = request.data if isinstance(request.data, dict) else {}
+    policy, error = _clean_policy(body)
+    if error is not None:
+        return error
+    if policy is None:
+        return Response(
+            {"detail": "Body must include a 'visibility_policy'."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    row = Material.objects.filter(pk=iri, is_deleted=False).first()
+    if row is None:
+        return Response(
+            {"detail": "Material not found."}, status=status.HTTP_404_NOT_FOUND
+        )
+    if row.visibility_policy != policy:
+        row.visibility_policy = policy
+        row.save(update_fields=["visibility_policy", "updated_at"])
+    from .visibility import recompute_material_visibility
+
+    recompute_material_visibility(iri)
+    row.refresh_from_db()
+    return Response(
+        _with_admin_visibility(row), status=status.HTTP_200_OK, content_type=LD_JSON
+    )
+
+
+@api_view(["GET", "PUT", "PATCH", "DELETE"])
 @permission_classes([AllowAny])
 def material_detail(request, source: str, ident: str):
     """``GET /api/materials/<source>/<ident>`` → the material JSON-LD doc.
 
-    ``PUT`` replaces the material's stored JSON-LD (NGM-role gated). ``DELETE``
+    ``PUT`` replaces the material's stored JSON-LD (NGM-role gated). ``PATCH``
+    sets the caseworker ``visibility_policy`` (NGM-role gated). ``DELETE``
     soft-deletes the stored material (NGM-role gated, 204). The GET path is
     byte-identical to before (stored row, else on-the-fly court-case fallback).
     """
@@ -240,6 +334,9 @@ def material_detail(request, source: str, ident: str):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    if request.method == "PATCH":
+        return _patch_visibility_policy(request, iri)
+
     if request.method == "PUT":
         denied = _require_ngm_role(request)
         if denied is not None:
@@ -247,8 +344,11 @@ def material_detail(request, source: str, ident: str):
         body = request.data if isinstance(request.data, dict) else {}
         material_type = body.get("material_type") if isinstance(body, dict) else None
         doc = body.get("material") if isinstance(body, dict) and "material" in body else body
+        policy, error = _clean_policy(body)
+        if error is not None:
+            return error
         result, code, error = _upsert_material(
-            doc, material_type=material_type, expected_iri=iri
+            doc, material_type=material_type, expected_iri=iri, visibility_policy=policy
         )
         if error is not None:
             return Response(error, status=code)
@@ -422,8 +522,9 @@ def _list_materials(request) -> Response:
     """
     from .models import Visibility
 
+    can_see_nonpublic = _can_see_nonpublic(request)
     qs = Material.objects.filter(is_deleted=False)
-    if not _can_see_nonpublic(request):
+    if not can_see_nonpublic:
         qs = qs.filter(visibility=Visibility.LISTED)
     params = request.query_params
     if (source := params.get("source")):
@@ -433,11 +534,15 @@ def _list_materials(request) -> Response:
 
     paginator = PlatformCursorPagination()
     page = paginator.paginate_queryset(qs, request)
-    docs = [row.data for row in page]
+    # Authed callers get the cached visibility + policy per row (for the admin
+    # table); anon callers get the raw JSON-LD unchanged.
+    docs = [
+        _with_admin_visibility(row) if can_see_nonpublic else row.data for row in page
+    ]
     return paginator.get_paginated_response(docs)
 
 
-@api_view(["GET", "POST", "DELETE"])
+@api_view(["GET", "POST", "PATCH", "DELETE"])
 @permission_classes([AllowAny])
 def material_by_iri(request):
     """``GET /api/materials/`` → paginated list of materials (``{results, next}``);
@@ -449,9 +554,11 @@ def material_by_iri(request):
     ``POST`` creates/upserts a material from a JSON-LD body (NGM-role gated); the
     body is either a bare JSON-LD doc (``@id`` present) or the
     ``{"material": {...}, "material_type": "..."}`` envelope (``material_type`` is
-    inferred from the doc's ``additionalType``/``@type`` when absent).
-    ``DELETE /api/materials/?iri=<full-iri>`` soft-deletes the material (NGM-role
-    gated, 204).
+    inferred from the doc's ``additionalType``/``@type`` when absent). An optional
+    top-level ``visibility_policy`` sets the caseworker policy on the write.
+    ``PATCH /api/materials/?iri=<full-iri>`` sets just the ``visibility_policy``
+    (NGM-role gated). ``DELETE /api/materials/?iri=<full-iri>`` soft-deletes the
+    material (NGM-role gated, 204).
     """
     if request.method == "POST":
         denied = _require_ngm_role(request)
@@ -460,12 +567,31 @@ def material_by_iri(request):
         body = request.data if isinstance(request.data, dict) else {}
         material_type = body.get("material_type") if isinstance(body, dict) else None
         doc = body.get("material") if isinstance(body, dict) and "material" in body else body
-        result, code, error = _upsert_material(doc, material_type=material_type)
+        policy, error = _clean_policy(body)
+        if error is not None:
+            return error
+        result, code, error = _upsert_material(
+            doc, material_type=material_type, visibility_policy=policy
+        )
         if error is not None:
             return Response(error, status=code)
         return Response(result, status=code, content_type=LD_JSON)
 
     iri = (request.query_params.get("iri") or "").strip()
+
+    if request.method == "PATCH":
+        if not iri:
+            return Response(
+                {"detail": "Query parameter 'iri' is required."},
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        iri = _normalize_iri_param(iri)
+        if not is_valid_material_iri(iri):
+            return Response(
+                {"detail": "Not a valid material @id IRI."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return _patch_visibility_policy(request, iri)
 
     if request.method == "DELETE":
         denied = _require_ngm_role(request)

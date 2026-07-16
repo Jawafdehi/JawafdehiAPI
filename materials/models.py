@@ -16,6 +16,7 @@ from django.core.exceptions import ValidationError
 from django.db import models
 
 from jawafdehi_shared.entities.ids import (
+    JAWAF_SOURCE,
     MAX_IRI_LENGTH,
     is_valid_material_iri,
     parse_material_iri,
@@ -34,27 +35,67 @@ def validate_material_iri(value: str) -> None:
 
 
 class Visibility(models.TextChoices):
-    """Derived publication tier for a Material (ADR: cases own no documents).
+    """Cached publication tier for a Material (ADR: cases own no documents).
 
-    A material's visibility is the MAX over the states of all cases that
-    reference it as evidence (YouTube-unlisted semantics):
+    ``visibility`` is the DERIVED, cached result that every anon-facing consumer
+    (sitemaps, unified search, retrieve endpoint) keys on. It is computed from the
+    material's ``visibility_policy`` (the caseworker-controlled INPUT — see
+    :class:`Policy`) by ``materials.visibility.recompute_material_visibility``:
 
-    * ``LISTED``   — ≥1 PUBLISHED case references it (or it's an NGM-native
-      material with no case referrers): public, searchable, in sitemaps.
-    * ``UNLISTED`` — only IN_REVIEW referrers: reachable by direct IRI, but NOT
-      searchable and NOT in sitemaps.
-    * ``PRIVATE``  — only DRAFT/CLOSED referrers (or none, for a source-only
-      draft): not public at all; authed caseworker/readonly only. (CLOSED is the
-      case soft-delete tombstone, so a deleted case cannot keep evidence public.)
+    * ``LISTED``   — public, searchable, in sitemaps.
+    * ``UNLISTED`` — reachable by direct IRI, but NOT searchable / NOT in sitemaps.
+    * ``PRIVATE``  — not public at all; authed caseworker/readonly only.
 
-    Default is ``LISTED`` so NGM-native materials (court cases/orders, bulk
-    ingest) are unaffected — only case-source materials get demoted by the
-    recompute path.
+    How ``visibility_policy`` maps here: ``PUBLIC`` → always ``LISTED``;
+    ``PRIVATE`` → always ``PRIVATE``; ``CASE_GATED`` → the MAX over the states of
+    the cases that cite the material as evidence (PUBLISHED→LISTED,
+    IN_REVIEW→UNLISTED, DRAFT/CLOSED/none→PRIVATE — YouTube-unlisted semantics).
+
+    Default is ``LISTED`` so a freshly-inserted row is public until the recompute
+    settles it (corpus materials are born ``PUBLIC`` and stay ``LISTED``).
     """
 
     LISTED = "LISTED", "Listed"
     UNLISTED = "UNLISTED", "Unlisted"
     PRIVATE = "PRIVATE", "Private"
+
+
+class Policy(models.TextChoices):
+    """Caseworker-controlled visibility policy — the INPUT that determines a
+    material's cached :class:`Visibility` (ADR: cases own no documents).
+
+    Separates a document's intrinsic publicness from the publication state of the
+    case that happens to cite it, so a DRAFT case can no longer hide an
+    already-public document:
+
+    * ``PUBLIC``     — always ``LISTED``, regardless of any citing case's state.
+      The default for corpus materials (court orders, press releases, charge
+      sheets, precedents, ...) that are public on their own merits.
+    * ``CASE_GATED`` — visibility tracks the citing cases (the historical rule):
+      not public until a case reaches in-review/published. The default for
+      case-UPLOADED evidence (``source == jawafdehi``), so raw uploads attached to
+      a draft are not exposed until a caseworker vets + publishes (or opts the
+      material into ``PUBLIC``).
+    * ``PRIVATE``    — always ``PRIVATE``: an absolute withhold for a sensitive
+      source, even after the citing case is published.
+    """
+
+    PUBLIC = "PUBLIC", "Public"
+    CASE_GATED = "CASE_GATED", "Case-gated"
+    PRIVATE = "PRIVATE", "Private"
+
+
+def default_policy_for(source: str) -> str:
+    """The visibility policy a freshly-ingested material is born with.
+
+    Keyed on ``source`` (not ``material_type``): a case-uploaded document is
+    minted at ``/material/jawafdehi/<ident>`` (``JAWAF_SOURCE``) regardless of the
+    ``material_type`` the caseworker picked, so ``source`` is the reliable signal
+    that a document was uploaded THROUGH a case (embargo by default) versus a
+    corpus document that exists on its own merits (public by default). A
+    caseworker can override either default per material (see the materials PATCH).
+    """
+    return Policy.CASE_GATED if source == JAWAF_SOURCE else Policy.PUBLIC
 
 
 #: Visibility tiers a member of the public (anon) may retrieve by direct IRI.
@@ -89,11 +130,21 @@ class Material(models.Model):
     # Soft-delete flag (accountability platform: rows are never hard-deleted).
     # Reads (list/detail) exclude ``is_deleted=True`` rows; DELETE flips it True.
     is_deleted = models.BooleanField(default=False, db_index=True)
-    # Derived publication tier (see Visibility). Default LISTED so NGM-native
-    # materials are public as before; case-source materials are demoted to
-    # UNLISTED/PRIVATE by the recompute path when only draft/in-review cases
-    # reference them. The anon-facing consumers (sitemaps, unified search,
-    # retrieve endpoint) MUST honor this or a draft case's evidence leaks.
+    # Caseworker-controlled visibility policy (see Policy) — the INPUT the
+    # recompute maps to ``visibility``. Default PUBLIC so corpus materials are
+    # public as before; case-uploaded evidence is born CASE_GATED at ingest (see
+    # default_policy_for / the upsert primitive). A re-ingest never clobbers this
+    # (create_defaults, INSERT-only); a caseworker changes it via the PATCH.
+    visibility_policy = models.CharField(
+        max_length=12,
+        choices=Policy.choices,
+        default=Policy.PUBLIC,
+        db_index=True,
+    )
+    # Cached, derived publication tier (see Visibility). Computed from
+    # ``visibility_policy`` by materials.visibility.recompute_material_visibility.
+    # The anon-facing consumers (sitemaps, unified search, retrieve endpoint) key
+    # on THIS column, so it MUST be kept in sync or a draft case's evidence leaks.
     visibility = models.CharField(
         max_length=10,
         choices=Visibility.choices,
@@ -131,8 +182,14 @@ class Material(models.Model):
     @classmethod
     def from_jsonld(cls, data: dict, *, material_type: str) -> Material:
         """Build (unsaved) a ``Material`` from a JSON-LD doc, deriving the
-        promoted ``source``/``ident`` columns from its ``@id``. Validates the
-        doc (known @type, valid @id, name present)."""
+        promoted ``source``/``ident`` columns from its ``@id`` and the source-based
+        default ``visibility_policy``. Validates the doc (known @type, valid @id,
+        name present).
+
+        The policy here is the birth default only (corpus→PUBLIC,
+        jawafdehi-upload→CASE_GATED); the upsert primitive keeps it INSERT-only so
+        a re-upsert never clobbers a caseworker's manual policy on an UPDATE.
+        """
         validate_material_jsonld(data)
         parsed = parse_material_iri(data["@id"])
         return cls(
@@ -141,4 +198,5 @@ class Material(models.Model):
             source=parsed.source,
             ident=parsed.ident,
             data=data,
+            visibility_policy=default_policy_for(parsed.source),
         )

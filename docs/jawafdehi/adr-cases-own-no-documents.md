@@ -147,6 +147,24 @@ state transitions (plan OQ5's "single chokepoint" concern now includes join-row
 edits). A periodic reconciler backstop is recommended. Without this, a draft case's
 evidence leaks into public search/sitemaps.
 
+### Amendment: `visibility` is derived from a caseworker `visibility_policy`
+
+The pure "MAX over referring case states" rule above is correct for case-uploaded
+evidence but wrong for an already-public document: once the doc-dedup work
+re-points a case's evidence from a duplicate upload onto a canonical corpus doc
+(court order, CIAA press release, charge sheet), a DRAFT referrer would demote
+that public document to PRIVATE. So `visibility` is now the DERIVED, cached result
+of a caseworker-controlled `visibility_policy` (`materials.models.Policy`):
+`PUBLIC` → always LISTED; `PRIVATE` → always PRIVATE; `CASE_GATED` → the MAX over
+referring case states (the historical rule). A material is born
+`default_policy_for(source)` — corpus (`source != jawafdehi`) → `PUBLIC`,
+case-upload (`source == jawafdehi`) → `CASE_GATED` — INSERT-only, so re-sourcing
+never clobbers a manual policy. Caseworkers flip a material's policy via
+`PATCH /api/materials/`. The recompute path (`materials.visibility`) and its
+trigger sites are unchanged; only the state→visibility map gained the policy
+short-circuit. `recompute_all()` heals the corpus documents the old rule
+mis-demoted.
+
 ## Migration (design-only for now — owner-decided)
 
 The ~799 existing `DocumentSource` rows + all evidence refs must be backfilled to
