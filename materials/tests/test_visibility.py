@@ -21,11 +21,13 @@ from rest_framework.test import APIClient
 
 from cases.models import Case, CaseMaterialReference, CaseState, CaseType
 from materials.jsonld import documentsource_to_jsonld
-from materials.models import Material, Visibility
+from materials.models import Material, Policy, Visibility, default_policy_for
+from materials.single_source_ingest import upsert_single_source_material
 from materials.visibility import (
     recompute_all,
     recompute_for_case,
     recompute_material_visibility,
+    visibility_for_policy,
     visibility_for_states,
 )
 
@@ -39,6 +41,24 @@ def _store(source_id, title="Doc", source_type="MISC", url=None, visibility=None
     mat = Material.from_jsonld(doc, material_type=mtype)
     if visibility is not None:
         mat.visibility = visibility
+    mat.save()
+    return mat
+
+
+def _store_corpus(source, ident, material_type="court_order", visibility=Visibility.LISTED):
+    """A corpus material (non-``jawafdehi`` source) — e.g. a court order or CIAA
+    press release that is public on its own merits, independent of any case. Built
+    directly so ``source``/``ident`` are the corpus namespace (policy defaults to
+    PUBLIC), not the ``jawafdehi`` case-upload namespace that ``_store`` mints."""
+    iri = f"https://jawafdehi.org/material/{source}/{ident}"
+    mat = Material(
+        iri=iri,
+        material_type=material_type,
+        source=source,
+        ident=ident,
+        data={"@id": iri, "@type": "DigitalDocument", "name": {"en": "Corpus doc"}},
+        visibility=visibility,
+    )
     mat.save()
     return mat
 
@@ -427,3 +447,310 @@ class TestDiscoveryAndSearchHonorVisibility:
             _store("source:20240101:priv01", visibility=Visibility.PRIVATE)
         # on_commit fires at transaction end in tests via django_db; force it:
         assert not idx.called or dele.called
+
+
+class TestVisibilityForPolicy:
+    def test_public_is_always_listed(self):
+        # states_fn must NOT be consulted for a PUBLIC policy (no DB round-trip).
+        def _boom():
+            raise AssertionError("states_fn should not be called for PUBLIC")
+
+        assert visibility_for_policy(Policy.PUBLIC, _boom) == Visibility.LISTED
+
+    def test_private_is_always_private(self):
+        def _boom():
+            raise AssertionError("states_fn should not be called for PRIVATE")
+
+        assert visibility_for_policy(Policy.PRIVATE, _boom) == Visibility.PRIVATE
+
+    def test_case_gated_defers_to_states(self):
+        assert visibility_for_policy(Policy.CASE_GATED, lambda: ["DRAFT"]) == (
+            Visibility.PRIVATE
+        )
+        assert visibility_for_policy(Policy.CASE_GATED, lambda: ["PUBLISHED"]) == (
+            Visibility.LISTED
+        )
+
+    def test_unknown_policy_treated_as_case_gated(self):
+        assert visibility_for_policy("BOGUS", lambda: ["PUBLISHED"]) == Visibility.LISTED
+
+
+class TestDefaultPolicyForSource:
+    def test_case_upload_source_is_case_gated(self):
+        assert default_policy_for("jawafdehi") == Policy.CASE_GATED
+
+    def test_corpus_sources_are_public(self):
+        assert default_policy_for("court_order") == Policy.PUBLIC
+        assert default_policy_for("ciaa_press_release") == Policy.PUBLIC
+        assert default_policy_for("court") == Policy.PUBLIC
+
+    def test_from_jsonld_derives_policy_from_source(self):
+        # A case-uploaded document (jawafdehi source) is born CASE_GATED …
+        doc, mtype = documentsource_to_jsonld(
+            source_id="source:20240101:pol01", title="D", source_type="MISC", url=None
+        )
+        assert Material.from_jsonld(doc, material_type=mtype).visibility_policy == (
+            Policy.CASE_GATED
+        )
+        # … a corpus document (non-jawafdehi source) is born PUBLIC.
+        corpus = {
+            "@id": "https://jawafdehi.org/material/court_order/pol02",
+            "@type": "DigitalDocument",
+            "name": {"en": "Order"},
+        }
+        assert Material.from_jsonld(corpus, material_type="court_order").visibility_policy == (
+            Policy.PUBLIC
+        )
+
+
+@pytest.mark.django_db
+class TestPolicyRecompute:
+    """The bug fix: a corpus document (PUBLIC policy) stays LISTED no matter what
+    state the citing case is in — a DRAFT case can no longer hide it. This is what
+    makes the doc-dedup re-point (case evidence: duplicate upload → canonical
+    corpus doc) safe."""
+
+    def test_public_material_cited_by_draft_stays_listed(self):
+        mat = _store_corpus("ciaa_press_release", "2402", material_type="press_release")
+        case = _case("c-draft", CaseState.DRAFT)
+        CaseMaterialReference.objects.create(case=case, material_iri=mat.iri)
+        assert recompute_material_visibility(mat.iri) == Visibility.LISTED
+        mat.refresh_from_db()
+        assert mat.visibility == Visibility.LISTED
+
+    def test_public_material_cited_by_in_review_stays_listed(self):
+        mat = _store_corpus("court_order", "special.080-cr-0001")
+        case = _case("c-review", CaseState.IN_REVIEW)
+        CaseMaterialReference.objects.create(case=case, material_iri=mat.iri)
+        assert recompute_material_visibility(mat.iri) == Visibility.LISTED
+
+    def test_recompute_heals_a_mis_demoted_public_material(self):
+        # The dedup fleet damage: a corpus doc left PRIVATE by an earlier unguarded
+        # recompute is healed back to LISTED once its policy is PUBLIC.
+        mat = _store_corpus(
+            "ciaa_press_release", "2403",
+            material_type="press_release", visibility=Visibility.PRIVATE,
+        )
+        case = _case("c-draft", CaseState.DRAFT)
+        CaseMaterialReference.objects.create(case=case, material_iri=mat.iri)
+        assert recompute_material_visibility(mat.iri) == Visibility.LISTED
+
+    def test_private_policy_withholds_even_from_published_case(self):
+        # An absolute withhold: PRIVATE policy beats a PUBLISHED referrer.
+        mat = _store_corpus("court_order", "special.080-cr-0009")
+        mat.visibility_policy = Policy.PRIVATE
+        mat.save(update_fields=["visibility_policy"])
+        case = _case("c-pub", CaseState.PUBLISHED)
+        CaseMaterialReference.objects.create(case=case, material_iri=mat.iri)
+        assert recompute_material_visibility(mat.iri) == Visibility.PRIVATE
+
+    def test_recompute_all_settles_every_policy(self):
+        # One reconciler pass over a mix: corpus (PUBLIC) → LISTED, case-upload
+        # (CASE_GATED) referenced only by a DRAFT → PRIVATE, and an UNREFERENCED
+        # PRIVATE-policy withhold → PRIVATE (the full scan reaches it even with no
+        # CaseMaterialReference).
+        corpus = _store_corpus(
+            "court_order", "special.080-cr-0002", visibility=Visibility.PRIVATE
+        )
+        upload = _store("source:20240101:up0001")  # jawafdehi CASE_GATED, LISTED
+        withheld = _store_corpus("court_order", "special.080-cr-0003")
+        withheld.visibility_policy = Policy.PRIVATE
+        withheld.save(update_fields=["visibility_policy"])
+        draft = _case("c-draft", CaseState.DRAFT)
+        CaseMaterialReference.objects.create(case=draft, material_iri=corpus.iri)
+        CaseMaterialReference.objects.create(case=draft, material_iri=upload.iri)
+        recompute_all()
+        corpus.refresh_from_db()
+        upload.refresh_from_db()
+        withheld.refresh_from_db()
+        assert corpus.visibility == Visibility.LISTED
+        assert upload.visibility == Visibility.PRIVATE
+        assert withheld.visibility == Visibility.PRIVATE
+
+
+@pytest.mark.django_db
+class TestUpsertPolicyDefaults:
+    def _doc(self, source_id):
+        doc, mtype = documentsource_to_jsonld(
+            source_id=source_id, title="D", source_type="MISC", url=None
+        )
+        return doc, mtype
+
+    def test_upsert_births_case_upload_case_gated(self):
+        doc, mtype = self._doc("source:20240101:ins01")
+        mat = upsert_single_source_material(doc, material_type=mtype)
+        assert mat.visibility_policy == Policy.CASE_GATED
+
+    def test_reupsert_preserves_manual_policy(self):
+        # A caseworker sets PUBLIC on a case-upload; re-sourcing the SAME @id must
+        # NOT reset it to the CASE_GATED birth default (create_defaults is
+        # INSERT-only).
+        doc, mtype = self._doc("source:20240101:ins02")
+        mat = upsert_single_source_material(doc, material_type=mtype)
+        mat.visibility_policy = Policy.PUBLIC
+        mat.save(update_fields=["visibility_policy"])
+        again = upsert_single_source_material(doc, material_type=mtype)
+        assert again.visibility_policy == Policy.PUBLIC
+
+    def test_explicit_override_applies_on_update(self):
+        doc, mtype = self._doc("source:20240101:ins03")
+        upsert_single_source_material(doc, material_type=mtype)  # CASE_GATED
+        again = upsert_single_source_material(
+            doc, material_type=mtype, visibility_policy=Policy.PRIVATE
+        )
+        assert again.visibility_policy == Policy.PRIVATE
+
+
+@pytest.mark.django_db
+class TestPatchVisibilityPolicy:
+    def _caseworker(self):
+        u = User.objects.create_user("cw-patch", password="x")
+        u.groups.add(Group.objects.get_or_create(name="Caseworker")[0])
+        return u
+
+    def test_anon_patch_is_401(self):
+        mat = _store_corpus("court_order", "special.080-cr-0100")
+        resp = APIClient().patch(
+            f"/api/materials/?iri={mat.iri}",
+            {"visibility_policy": "PRIVATE"},
+            format="json",
+        )
+        assert resp.status_code == 401
+
+    def test_roleless_authed_patch_is_403(self):
+        mat = _store_corpus("court_order", "special.080-cr-0101")
+        client = APIClient()
+        client.force_authenticate(User.objects.create_user("nobody-patch", password="x"))
+        resp = client.patch(
+            f"/api/materials/?iri={mat.iri}",
+            {"visibility_policy": "PRIVATE"},
+            format="json",
+        )
+        assert resp.status_code == 403
+
+    def test_caseworker_patch_sets_policy_and_recomputes(self):
+        # A public court order cited by a DRAFT case is LISTED; a caseworker PATCHes
+        # it to CASE_GATED → it demotes to PRIVATE (draft-only) and 404s for anon;
+        # PATCH back to PUBLIC → LISTED and visible again.
+        mat = _store_corpus("court_order", "special.080-cr-0102")
+        draft = _case("c-draft", CaseState.DRAFT)
+        CaseMaterialReference.objects.create(case=draft, material_iri=mat.iri)
+        client = APIClient()
+        client.force_authenticate(self._caseworker())
+
+        resp = client.patch(
+            f"/api/materials/?iri={mat.iri}",
+            {"visibility_policy": "CASE_GATED"},
+            format="json",
+        )
+        assert resp.status_code == 200
+        assert resp.data["jawafdehi:visibilityPolicy"] == Policy.CASE_GATED
+        assert resp.data["jawafdehi:visibility"] == Visibility.PRIVATE
+        mat.refresh_from_db()
+        assert mat.visibility == Visibility.PRIVATE
+        assert APIClient().get(f"/api/materials/?iri={mat.iri}").status_code == 404
+
+        resp = client.patch(
+            f"/api/materials/?iri={mat.iri}",
+            {"visibility_policy": "PUBLIC"},
+            format="json",
+        )
+        assert resp.status_code == 200
+        assert resp.data["jawafdehi:visibility"] == Visibility.LISTED
+        assert APIClient().get(f"/api/materials/?iri={mat.iri}").status_code == 200
+
+    def test_patch_invalid_policy_is_400(self):
+        mat = _store_corpus("court_order", "special.080-cr-0103")
+        client = APIClient()
+        client.force_authenticate(self._caseworker())
+        resp = client.patch(
+            f"/api/materials/?iri={mat.iri}",
+            {"visibility_policy": "SORTA_PUBLIC"},
+            format="json",
+        )
+        assert resp.status_code == 400
+
+    def test_patch_missing_material_is_404(self):
+        client = APIClient()
+        client.force_authenticate(self._caseworker())
+        resp = client.patch(
+            "/api/materials/?iri=https://jawafdehi.org/material/court_order/nope",
+            {"visibility_policy": "PRIVATE"},
+            format="json",
+        )
+        assert resp.status_code == 404
+
+    def test_authed_get_surfaces_policy(self):
+        mat = _store_corpus("court_order", "special.080-cr-0104")
+        client = APIClient()
+        client.force_authenticate(self._caseworker())
+        resp = client.get(f"/api/materials/?iri={mat.iri}")
+        assert resp.status_code == 200
+        assert resp.data["jawafdehi:visibilityPolicy"] == Policy.PUBLIC
+        # Anon never sees the admin fields.
+        anon = APIClient().get(f"/api/materials/?iri={mat.iri}")
+        assert "jawafdehi:visibilityPolicy" not in anon.data
+
+    def test_anon_patch_without_iri_is_401_not_422(self):
+        # Auth precedes iri-param validation: an anon caller gets 401, never a
+        # 422/400 input-validation disclosure (matches the DELETE branch).
+        resp = APIClient().patch(
+            "/api/materials/", {"visibility_policy": "PRIVATE"}, format="json"
+        )
+        assert resp.status_code == 401
+
+
+@pytest.mark.django_db
+class TestControlKeysNotPersisted:
+    """Server-owned keys must never land in a Material's stored JSON-LD `data`."""
+
+    def _caseworker_client(self):
+        u = User.objects.create_user("cw-strip", password="x")
+        u.groups.add(Group.objects.get_or_create(name="Caseworker")[0])
+        c = APIClient()
+        c.force_authenticate(u)
+        return c
+
+    def test_bare_put_strips_control_key_but_applies_policy(self):
+        # A bare PUT body carrying a top-level `visibility_policy` must NOT persist
+        # that key into `data` (it would leak to anon), yet the policy IS applied.
+        iri = "https://jawafdehi.org/material/court_order/strip01"
+        client = self._caseworker_client()
+        resp = client.put(
+            "/api/materials/court_order/strip01",
+            {
+                "@id": iri,
+                "@type": "DigitalDocument",
+                "name": {"en": "Order"},
+                "visibility_policy": "PRIVATE",
+            },
+            format="json",
+        )
+        assert resp.status_code in (200, 201)
+        mat = Material.objects.get(pk=iri)
+        assert "visibility_policy" not in mat.data
+        assert mat.visibility_policy == Policy.PRIVATE
+
+    def test_annotated_authed_get_does_not_round_trip_into_data(self):
+        # GET as caseworker (doc is annotated with jawafdehi:visibility[Policy]),
+        # then PUT that exact doc back — the annotations must be stripped, not baked
+        # into the stored document.
+        mat = _store_corpus("court_order", "strip02")
+        client = self._caseworker_client()
+        got = client.get(f"/api/materials/?iri={mat.iri}")
+        assert "jawafdehi:visibilityPolicy" in got.data
+        client.put("/api/materials/court_order/strip02", got.data, format="json")
+        mat.refresh_from_db()
+        assert "jawafdehi:visibility" not in mat.data
+        assert "jawafdehi:visibilityPolicy" not in mat.data
+
+    def test_primitive_rejects_invalid_explicit_policy(self):
+        from django.core.exceptions import ValidationError
+
+        doc, mtype = documentsource_to_jsonld(
+            source_id="source:20240101:bad01", title="D", source_type="MISC", url=None
+        )
+        with pytest.raises(ValidationError):
+            upsert_single_source_material(
+                doc, material_type=mtype, visibility_policy="NOT_A_POLICY"
+            )
