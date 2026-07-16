@@ -434,7 +434,9 @@ def _materials_metrics():
     by_source_type = list(
         live.values("source", "material_type")
         .annotate(count=Count("iri"))
-        .order_by("-count")
+        # Secondary keys make tie order deterministic across backends, so the
+        # snapshot payload is byte-stable between refreshes (CDN-cache friendly).
+        .order_by("-count", "source", "material_type")
     )
 
     # Completeness signals over the stored schema.org JSON-LD doc. On Postgres
