@@ -952,23 +952,23 @@ class Case(models.Model):
 
         # Strict validation for IN_REVIEW and PUBLISHED states
         if self.state in [CaseState.IN_REVIEW, CaseState.PUBLISHED]:
-            # Entity requirement depends on case type. CORRUPTION cases must name
-            # at least one ACCUSED entity; other case types (e.g. TAX_EVASION)
-            # only require a named subject — any non-location entity. A
-            # location-only case is not a valid subject (the UI also excludes
-            # locations when naming a case's subject).
-            if requires_accused(self.case_type):
-                has_required_entity = self.entity_relationships.filter(
-                    relationship_type=RelationshipType.ACCUSED
-                ).exists()
-                entity_error = "At least one accused entity is required for IN_REVIEW or PUBLISHED state"
-            else:
-                has_required_entity = self.entity_relationships.exclude(
-                    relationship_type=RelationshipType.LOCATION
-                ).exists()
-                entity_error = "At least one non-location entity is required for IN_REVIEW or PUBLISHED state"
+            # Every case type requires a named SUBJECT — at least one non-location
+            # entity (a person or organization) — before it can leave DRAFT. The
+            # former CORRUPTION-only "at least one ACCUSED" hard gate is retired:
+            # systemic / unsubstantiated cases (e.g. a project-level irregularity
+            # with no charged individual, like budhigandaki) must be publishable,
+            # so the requirement is a named subject, not specifically an accused
+            # party. Naming an accused is still tracked as a review-quality signal
+            # (see cases.models.requires_accused / review.rules_engine), just no
+            # longer a publish blocker. A location-only case is not a valid subject
+            # (the UI also excludes locations when naming a case's subject).
+            has_required_entity = self.entity_relationships.exclude(
+                relationship_type=RelationshipType.LOCATION
+            ).exists()
             if not has_required_entity:
-                errors["entities"] = entity_error
+                errors["entities"] = (
+                    "At least one non-location entity is required for IN_REVIEW or PUBLISHED state"
+                )
 
             if not self.key_allegations or len(self.key_allegations) == 0:
                 errors["key_allegations"] = (

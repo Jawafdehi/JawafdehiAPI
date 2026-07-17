@@ -16,7 +16,6 @@ from .models import (
     ChatUserIdentity,
     Feedback,
     RelationshipType,
-    requires_accused,
 )
 from .rules.predicates import (
     can_manage_user,
@@ -321,28 +320,18 @@ class CaseEntityRelationshipInlineFormSet(BaseInlineFormSet):
             return
         if self.instance.state not in {CaseState.IN_REVIEW, CaseState.PUBLISHED}:
             return
-        # CORRUPTION cases require an ACCUSED entity; other case types (e.g.
-        # TAX_EVASION) only require a named subject — any non-location entity.
-        # The accepted relationship types and the error message differ, but the
-        # form-scanning loop is otherwise identical.
-        if requires_accused(self.instance.case_type):
+        # Every case type only requires a named SUBJECT — any non-location entity
+        # (person or organization). The former CORRUPTION-only "at least one
+        # ACCUSED" hard gate is retired so systemic / unsubstantiated cases (no
+        # charged individual) can publish; mirrors Case.validate(). Naming an
+        # accused remains a review-quality signal, not a publish blocker.
+        def is_required_entity(rel_type):
+            return rel_type != RelationshipType.LOCATION
 
-            def is_required_entity(rel_type):
-                return rel_type == RelationshipType.ACCUSED
-
-            error = (
-                "At least one accused entity relationship is required for IN_REVIEW or PUBLISHED state. "
-                "Please add accused entities using the 'Case Entity Relationships' section below."
-            )
-        else:
-
-            def is_required_entity(rel_type):
-                return rel_type != RelationshipType.LOCATION
-
-            error = (
-                "At least one non-location entity relationship is required for IN_REVIEW or PUBLISHED state. "
-                "Please add entities using the 'Case Entity Relationships' section below."
-            )
+        error = (
+            "At least one non-location entity relationship is required for IN_REVIEW or PUBLISHED state. "
+            "Please add entities using the 'Case Entity Relationships' section below."
+        )
         has_required_entity = any(
             form.cleaned_data
             and not form.cleaned_data.get("DELETE")
