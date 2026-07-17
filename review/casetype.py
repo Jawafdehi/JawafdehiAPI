@@ -28,6 +28,15 @@ complaint was filed) unable, on its own, to promote a case into the CIAA
 family — while still correctly typing the ~thousands of Special-Court cases
 that have a court number but no attached documents yet.
 
+One exception overrides the forum: a **money-laundering** (सम्पत्ति
+शुद्धीकरण) case is the Department of Money Laundering Investigation (DMLI) /
+Special Government Attorney track. It is prosecuted at the Special Court
+alongside — but is distinct from — CIAA corruption cases, and both carry
+Special-Court ``…-CR-…`` numbers, so the forum alone cannot tell them apart.
+The case's ``case_type`` is the deciding signal, so a case typed
+``MONEY_LAUNDERING`` is classified NON_CIAA even though its forum is the
+Special Court.
+
 The **tier** within the CIAA family (BASIC / EXTENDED / HAS_VERDICT) is then
 driven by which documents are attached, read from each source's
 ``material_type`` (with a title-keyword fallback), so a mistyped or
@@ -54,6 +63,13 @@ _SPECIAL_COURT = ["विशेष अदालत", "special court"]
 # Supreme-Court constitutional-writ registers (रिट). A case tried only under one
 # of these is a writ petition, not a CIAA corruption prosecution.
 _SUPREME_WRIT_CODES = {"wc", "wo", "wf", "wh", "ws", "wm"}
+
+# Case-type tracks that are NON_CIAA regardless of court forum. Money laundering
+# (सम्पत्ति शुद्धीकरण) is the DMLI / Special Government Attorney track: tried at
+# the Special Court like CIAA cases (same ``…-CR-…`` numbering), but not a CIAA
+# prosecution. The ``case_type`` is the only signal that separates the two, so it
+# overrides the forum. A frozenset so further non-CIAA tracks can be added.
+_NON_CIAA_CASE_TYPES = frozenset({"MONEY_LAUNDERING"})
 
 
 def _titles_and_types(case):
@@ -132,6 +148,7 @@ def detect(case):
     tt = _titles_and_types(case)
     court_cases = case.get("court_cases") or []
     forum = _court_forum(court_cases)
+    case_type = (case.get("case_type") or "").upper()
 
     has_press_release = any(
         st == "PRESS_RELEASE" or (_any(t, _PRESS_RELEASE) and _any(t, _CIAA))
@@ -165,10 +182,17 @@ def detect(case):
         "court_case_number": has_court_case_no,
         "verdict_text_available": has_verdict_text,
         "court_forum": forum,
+        "case_type": case_type or None,
     }
 
     # --- Family: decided by the court forum, not by a keyword in a source. ---
-    if forum in ("special", "supreme_appeal"):
+    if case_type in _NON_CIAA_CASE_TYPES:
+        # Money-laundering (सम्पत्ति शुद्धीकरण) is the DMLI / Special Government
+        # Attorney track, tried at the Special Court alongside CIAA cases (same
+        # …-CR-… numbering) but distinct from them. The forum cannot separate
+        # the two, so the case_type overrides it: this is NON_CIAA.
+        is_ciaa = False
+    elif forum in ("special", "supreme_appeal"):
         is_ciaa = True
     elif forum in ("supreme_writ", "supreme_other", "ordinary"):
         # Tried in a non-CIAA forum: a stray CIAA mention in a source (e.g. a
@@ -203,6 +227,14 @@ def detect(case):
         rationale = (
             "CIAA (अख्तियार / विशेष अदालत) case for which no charge sheet and no "
             "special-court verdict record are attached yet."
+        )
+    elif case_type in _NON_CIAA_CASE_TYPES:
+        ctype, label = "NON_CIAA", "Non-CIAA case (money laundering)"
+        rationale = (
+            "Money-laundering (सम्पत्ति शुद्धीकरण) case — the Department of Money "
+            "Laundering Investigation / Special Government Attorney track, "
+            "distinct from a CIAA corruption prosecution even when tried at the "
+            "Special Court; treated as a non-CIAA case."
         )
     else:
         ctype, label = "NON_CIAA", "Non-CIAA case"
