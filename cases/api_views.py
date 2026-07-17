@@ -799,6 +799,26 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
 
         patch_ops = request.data
         if not isinstance(patch_ops, list):
+            # Tripwire: a valid client (the SPA) always sends a bare RFC-6902
+            # array here, so a non-list body is anomalous. An intermittent
+            # empty/object body was seen in prod publish traffic but could not be
+            # reproduced from the SPA — capture enough to identify the culprit if
+            # it recurs. The body is not a valid patch (so it carries no case
+            # content worth redacting); still truncate + type-tag it defensively.
+            body_repr = repr(request.data)
+            if len(body_repr) > 500:
+                body_repr = body_repr[:500] + "…"
+            logger.warning(
+                "cases.partial_update rejected a non-array PATCH body: "
+                "type=%s content_type=%r content_length=%s user=%s case=%s ua=%r body=%s",
+                type(request.data).__name__,
+                request.content_type,
+                request.META.get("CONTENT_LENGTH"),
+                getattr(request.user, "username", None) or "anon",
+                case.slug,
+                request.META.get("HTTP_USER_AGENT", "")[:200],
+                body_repr,
+            )
             return Response(
                 {"detail": "Request body must be a JSON array of patch operations."},
                 status=status.HTTP_400_BAD_REQUEST,
