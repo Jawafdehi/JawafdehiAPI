@@ -318,6 +318,10 @@ class CaseSerializer(serializers.ModelSerializer):
             "state",
             "title",
             "short_description",
+            # Public caseworker-authored notes (Case.public_notes): attribution +
+            # human-written edit dates. A plain model field — returned to
+            # everyone, unlike the BB-04-gated internal ``notes`` below.
+            "public_notes",
             "thumbnail_url",
             "banner_url",
             "case_start_date",
