@@ -13,9 +13,12 @@ evidence entry. They now:
      additional_details), deduped by ``(case, material_iri)``.
 
 The Material @id is derived from the source's stable ``source_id`` via
-``build_source_material_iri`` (``/material/jawafdehi/<ident>``), so re-ingesting
-the same source is idempotent and callers that lack a source_id can pass any
-stable natural key (e.g. a hashed URL) as ``source_id``.
+``build_source_material_iri``, sourced by the document's ``material_type``
+(``/material/<material_type>/<ident>`` — news → ``news``, a misc upload →
+``document``, …) rather than the legacy monolithic ``/material/jawafdehi/``
+bucket, so an upload's source reads as its kind and it is born ``PUBLIC``.
+Re-ingesting the same source is idempotent, and callers that lack a source_id
+can pass any stable natural key (e.g. a hashed URL) as ``source_id``.
 """
 
 from __future__ import annotations
@@ -179,12 +182,14 @@ def ingest_source_as_evidence(
         additional_details=additional_details or description or "",
         ordinal=ordinal,
     )
-    # A freshly-upserted Material is born at the model default visibility=LISTED,
-    # and its post_save signal has already indexed it into public search. Ingest
-    # runs outside the API's on_commit recompute (e.g. management commands), so
-    # recompute NOW from the binding case's state — else a DRAFT case's evidence
-    # is momentarily (or lastingly) public. This is the ADR draft-leak guard on
-    # the ingest path. Best-effort: never let a visibility issue abort the ingest.
+    # Settle the cached visibility from the material's policy now. A case upload
+    # is born PUBLIC (→ LISTED), so this is usually a no-op; but it correctly
+    # HONORS a caseworker who has embargoed this @id (CASE_GATED/PRIVATE) on an
+    # earlier pass — recompute maps that policy to the right cached visibility
+    # from the binding case's state, rather than leaving the model-default LISTED.
+    # Ingest runs outside the API's on_commit recompute (e.g. management
+    # commands), so we recompute here. Best-effort: never let a visibility issue
+    # abort the ingest.
     try:
         from materials.visibility import recompute_material_visibility
 

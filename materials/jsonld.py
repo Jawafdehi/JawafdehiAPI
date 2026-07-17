@@ -413,8 +413,12 @@ def court_case_to_jsonld(case: Any) -> dict[str, Any]:
 # A Jawafdehi case "document source" is the same modality as an NGM material:
 # a titled document with roled file links + related entities. When sources fold
 # into materials (ADR: cases-own-no-documents), each source becomes a first-class
-# Material at /material/jawafdehi/<ident>. This shaper is the projection; it is a
-# PURE function (no DB) so it unit-tests like court_case_to_jsonld.
+# Material sourced by its material_type (/material/<material_type>/<ident>) —
+# news → /material/news/…, a charge sheet → /material/charge_sheet/…, a misc
+# upload → /material/document/… — so source reads as the kind of document rather
+# than the legacy monolithic /material/jawafdehi/ bucket. This shaper is the
+# projection; it is a PURE function (no DB) so it unit-tests like
+# court_case_to_jsonld.
 
 #: Jawafdehi ``SourceType`` value → NGM ``MaterialType`` token. Governance docs
 #: map to their issuer-faithful material types; news/social get first-class
@@ -454,15 +458,17 @@ def documentsource_to_jsonld(
 
     Returns the material_type alongside the doc because ``Material`` stores it as
     a promoted column and ``from_jsonld`` requires it explicitly. The ``@id`` is
-    ``/material/jawafdehi/<normalized source_id>``; roled links become
-    ``associatedMedia`` (reusing ``media_objects_from_document_sources``);
-    ``related_entities`` NES IRIs ride as ``about``; ``publication_date`` →
-    ``datePublished``. Accepts primitive fields (not the ORM object) so it stays
-    a pure, DB-free projection.
+    ``/material/<material_type>/<normalized source_id>`` (the source segment is
+    the document's material_type, NOT the legacy ``jawafdehi`` bucket — so an
+    upload's source reads as its kind, and, being non-``jawafdehi``, it is born
+    ``PUBLIC`` per ``default_policy_for``); roled links become ``associatedMedia``
+    (reusing ``media_objects_from_document_sources``); ``related_entities`` NES
+    IRIs ride as ``about``; ``publication_date`` → ``datePublished``. Accepts
+    primitive fields (not the ORM object) so it stays a pure, DB-free projection.
     """
     material_type = material_type_for_source_type(source_type)
     schema_type, additional_type = type_for(material_type)
-    iri = build_source_material_iri(source_id)
+    iri = build_source_material_iri(source_id, source=material_type)
 
     doc: dict[str, Any] = {
         "@context": MATERIAL_CONTEXT,

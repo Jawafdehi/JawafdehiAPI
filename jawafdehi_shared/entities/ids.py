@@ -195,16 +195,19 @@ def canonicalize_material_iri(value: str) -> str:
     return build_material_iri(parsed.source, parsed.ident)
 
 
-#: Material IRI ``source`` segment for a document that originated as a Jawafdehi
-#: case source (``/material/jawafdehi/<ident>``). NGM court materials use
-#: ``court``/``court_order``; issuer collections use ``ciaa``/``ag``/…; a document
-#: that has no NGM-native home (a news link, a social post, a misc upload cited
-#: only by a case) lands under ``jawafdehi``. Kept as a distinct source segment
-#: so provenance ("came in via a case") stays legible.
+#: Legacy Material IRI ``source`` segment for a document uploaded through a
+#: Jawafdehi case (``/material/jawafdehi/<ident>``). NGM court materials use
+#: ``court``/``court_order``; issuer collections use ``ciaa``/``ag``/…. Case
+#: uploads are now sourced by their ``material_type`` instead (news → ``news``, a
+#: misc upload → ``document``, …) so ``source`` reads as the kind of document,
+#: not "came in via a case" — see ``documentsource_to_jsonld``. Kept as a valid
+#: segment for the historical namespace, but no longer minted for new uploads.
 JAWAF_SOURCE = "jawafdehi"
 
 
-def build_source_material_iri(source_id: str, base: str | None = None) -> str:
+def build_source_material_iri(
+    source_id: str, base: str | None = None, *, source: str = JAWAF_SOURCE
+) -> str:
     """Canonical material ``@id`` IRI for a Jawafdehi case-source document.
 
     The legacy ``DocumentSource.source_id`` (``source:YYYYMMDD:hex8``) carries
@@ -213,9 +216,14 @@ def build_source_material_iri(source_id: str, base: str | None = None) -> str:
     map ``:`` separators to ``.``, lowercase, then coerce any remaining
     out-of-grammar characters to ``-`` and ensure a valid leading char so an
     arbitrary caller-supplied ``source_id`` never raises
-    (``source:20240115:ab12cd`` → ``jawafdehi/20240115.ab12cd``). Idempotent for
+    (``source:20240115:ab12cd`` → ``<source>/20240115.ab12cd``). Idempotent for
     an already-normalized id. Raises ``ValueError`` only if the id is empty after
     normalization.
+
+    ``source`` is the IRI's source segment; it defaults to ``JAWAF_SOURCE`` for
+    back-compat, but the case-source shaper passes the document's
+    ``material_type`` so uploads land under a type-legible source rather than the
+    monolithic ``jawafdehi`` bucket.
     """
     ident = source_id.strip()
     if ident.startswith("source:"):
@@ -227,7 +235,7 @@ def build_source_material_iri(source_id: str, base: str | None = None) -> str:
     ident = ident.lstrip("._-")
     if not ident:
         raise ValueError(f"source_id normalizes to an empty material ident: {source_id!r}")
-    return build_material_iri(JAWAF_SOURCE, ident, base)
+    return build_material_iri(source, ident, base)
 
 
 # ── Case ids (Jawafdehi published cases) ─────────────────────────────────────

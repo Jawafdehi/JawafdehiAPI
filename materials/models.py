@@ -70,12 +70,14 @@ class Policy(models.TextChoices):
 
     * ``PUBLIC``     — always ``LISTED``, regardless of any citing case's state.
       The default for corpus materials (court orders, press releases, charge
-      sheets, precedents, ...) that are public on their own merits.
+      sheets, precedents, ...) that are public on their own merits — and now also
+      the default for case uploads (see ``default_policy_for``), which are sourced
+      by their material_type rather than the legacy ``jawafdehi`` bucket.
     * ``CASE_GATED`` — visibility tracks the citing cases (the historical rule):
-      not public until a case reaches in-review/published. The default for
-      case-UPLOADED evidence (``source == jawafdehi``), so raw uploads attached to
-      a draft are not exposed until a caseworker vets + publishes (or opts the
-      material into ``PUBLIC``).
+      not public until a case reaches in-review/published. No longer a birth
+      default; a caseworker sets it explicitly (via the materials PATCH) to
+      embargo a document until its case is vetted + published. It also still
+      governs any residual ``jawafdehi``-sourced rows.
     * ``PRIVATE``    — always ``PRIVATE``: an absolute withhold for a sensitive
       source, even after the citing case is published.
     """
@@ -88,12 +90,13 @@ class Policy(models.TextChoices):
 def default_policy_for(source: str) -> str:
     """The visibility policy a freshly-ingested material is born with.
 
-    Keyed on ``source`` (not ``material_type``): a case-uploaded document is
-    minted at ``/material/jawafdehi/<ident>`` (``JAWAF_SOURCE``) regardless of the
-    ``material_type`` the caseworker picked, so ``source`` is the reliable signal
-    that a document was uploaded THROUGH a case (embargo by default) versus a
-    corpus document that exists on its own merits (public by default). A
-    caseworker can override either default per material (see the materials PATCH).
+    Every non-``jawafdehi`` material is born ``PUBLIC``. Case uploads are now
+    sourced by their ``material_type`` (news → ``news``, a misc upload →
+    ``document``, …), so they too are born ``PUBLIC`` — a case-attached document
+    is public on ingest, and a caseworker embargoes a sensitive one by explicitly
+    setting ``CASE_GATED``/``PRIVATE`` via the materials PATCH. The legacy
+    ``jawafdehi`` source is retained here as ``CASE_GATED`` for any residual rows
+    in that historical namespace, but new uploads never land there.
     """
     return Policy.CASE_GATED if source == JAWAF_SOURCE else Policy.PUBLIC
 

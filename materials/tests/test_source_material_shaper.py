@@ -2,9 +2,11 @@
 documents). Pure functions — no DB — mirroring the court_case_to_jsonld tests.
 
 Covers:
-- build_source_material_iri: source_id (with colons) → canonical /material/jawafdehi/<ident>,
+- build_source_material_iri: source_id (with colons) → canonical ident; source
+  segment defaults to /material/jawafdehi/ but is caller-selectable,
 - material_type_for_source_type mapping (governance/news/social/misc),
-- documentsource_to_jsonld shape: @id/@type/name/associatedMedia/about/datePublished,
+- documentsource_to_jsonld shape: @id sourced by material_type (NOT jawafdehi),
+  plus @type/name/associatedMedia/about/datePublished,
 - the produced doc validates under validate_material_jsonld + Material.from_jsonld.
 """
 
@@ -41,6 +43,13 @@ class TestBuildSourceMaterialIri:
     def test_lowercases_ident(self):
         iri = build_source_material_iri("source:20240115:AB12CD")
         assert iri.endswith("/20240115.ab12cd")
+
+    def test_source_segment_is_caller_selectable(self):
+        # The case-source shaper routes uploads by material_type instead of the
+        # legacy jawafdehi bucket; the ident normalization is identical.
+        iri = build_source_material_iri("source:20240115:ab12cd", source="news")
+        assert iri == "https://jawafdehi.org/material/news/20240115.ab12cd"
+        assert is_valid_material_iri(iri)
 
 
 class TestMaterialTypeMapping:
@@ -81,7 +90,8 @@ class TestDocumentSourceToJsonld:
         # A CIAA press release is the announcement, NOT the indictment: it must
         # shape to press_release, distinct from a charge sheet (अभियोगपत्र).
         assert material_type == MaterialType.PRESS_RELEASE
-        assert doc["@id"] == "https://jawafdehi.org/material/jawafdehi/20240115.ab12cd"
+        # Sourced by material_type (press_release), NOT the legacy jawafdehi bucket.
+        assert doc["@id"] == "https://jawafdehi.org/material/press_release/20240115.ab12cd"
         assert doc["@type"] == "CreativeWork"
         assert doc["additionalType"] == "jawafdehi:PressRelease"
         assert doc["name"] == {"ne": "CIAA press release on X"}
@@ -111,6 +121,35 @@ class TestDocumentSourceToJsonld:
         assert material_type == MaterialType.CHARGE_SHEET
         assert doc["@type"] == "DigitalDocument"
         assert doc["additionalType"] == "jawafdehi:ChargeSheet"
+        assert doc["@id"] == "https://jawafdehi.org/material/charge_sheet/20240115.cs0001"
+
+    @pytest.mark.parametrize(
+        "source_type,expected_source",
+        [
+            ("CIAA_PRESS_RELEASE", "press_release"),
+            ("AG_ABHIYOG_PATRA", "charge_sheet"),
+            ("OAG_AUDIT_REPORT", "official_report"),
+            ("COURT_ORDER", "court_order"),
+            ("LAW_OR_BILL", "legal_corpus"),
+            ("NEWS", "news"),
+            ("SOCIAL_MEDIA", "social_media"),
+            ("COURT_FILING_OTHER", "document"),
+            ("MISC", "document"),
+            (None, "document"),
+        ],
+    )
+    def test_id_is_sourced_by_material_type_not_jawafdehi(self, source_type, expected_source):
+        # The @id's source segment is the document's material_type, so an upload
+        # is type-legible and (being non-jawafdehi) born PUBLIC — never the
+        # monolithic /material/jawafdehi/ bucket.
+        doc, _ = documentsource_to_jsonld(
+            source_id="source:20240115:ab12cd",
+            title="T",
+            source_type=source_type,
+            url=None,
+        )
+        assert doc["@id"] == f"https://jawafdehi.org/material/{expected_source}/20240115.ab12cd"
+        assert "/material/jawafdehi/" not in doc["@id"]
 
     def test_minimal_shape_no_optional_fields(self):
         doc, material_type = documentsource_to_jsonld(
@@ -157,7 +196,11 @@ class TestDocumentSourceToJsonld:
 
         mat = Material.from_jsonld(doc, material_type=material_type)
         assert mat.iri == doc["@id"]
-        assert mat.source == "jawafdehi"
+        # source segment == material_type (news), so from_jsonld births it PUBLIC.
+        assert mat.source == "news"
         assert mat.ident == "20240115.ab12cd"
         assert mat.material_type == MaterialType.NEWS
+        from materials.models import Policy
+
+        assert mat.visibility_policy == Policy.PUBLIC
         mat.clean()  # promoted-column agreement + jsonld validation

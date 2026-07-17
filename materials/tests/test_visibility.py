@@ -485,14 +485,16 @@ class TestDefaultPolicyForSource:
         assert default_policy_for("court") == Policy.PUBLIC
 
     def test_from_jsonld_derives_policy_from_source(self):
-        # A case-uploaded document (jawafdehi source) is born CASE_GATED …
+        # A case upload is now sourced by material_type (MISC → document), so it is
+        # non-jawafdehi and born PUBLIC — case uploads are public by default.
         doc, mtype = documentsource_to_jsonld(
             source_id="source:20240101:pol01", title="D", source_type="MISC", url=None
         )
+        assert doc["@id"] == "https://jawafdehi.org/material/document/20240101.pol01"
         assert Material.from_jsonld(doc, material_type=mtype).visibility_policy == (
-            Policy.CASE_GATED
+            Policy.PUBLIC
         )
-        # … a corpus document (non-jawafdehi source) is born PUBLIC.
+        # A corpus document (non-jawafdehi source) is likewise born PUBLIC.
         corpus = {
             "@id": "https://jawafdehi.org/material/court_order/pol02",
             "@type": "DigitalDocument",
@@ -500,6 +502,15 @@ class TestDefaultPolicyForSource:
         }
         assert Material.from_jsonld(corpus, material_type="court_order").visibility_policy == (
             Policy.PUBLIC
+        )
+        # Only a residual jawafdehi-sourced row stays CASE_GATED at birth.
+        legacy = {
+            "@id": "https://jawafdehi.org/material/jawafdehi/pol03",
+            "@type": "DigitalDocument",
+            "name": {"en": "Legacy upload"},
+        }
+        assert Material.from_jsonld(legacy, material_type="document").visibility_policy == (
+            Policy.CASE_GATED
         )
 
 
