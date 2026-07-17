@@ -64,12 +64,25 @@ _SPECIAL_COURT = ["विशेष अदालत", "special court"]
 # of these is a writ petition, not a CIAA corruption prosecution.
 _SUPREME_WRIT_CODES = {"wc", "wo", "wf", "wh", "ws", "wm"}
 
-# Case-type tracks that are NON_CIAA regardless of court forum. Money laundering
-# (सम्पत्ति शुद्धीकरण) is the DMLI / Special Government Attorney track: tried at
-# the Special Court like CIAA cases (same ``…-CR-…`` numbering), but not a CIAA
-# prosecution. The ``case_type`` is the only signal that separates the two, so it
-# overrides the forum. A frozenset so further non-CIAA tracks can be added.
-_NON_CIAA_CASE_TYPES = frozenset({"MONEY_LAUNDERING"})
+# Case-type tracks that are NON_CIAA regardless of court forum, each mapped to
+# its own display label + rationale. Money laundering (सम्पत्ति शुद्धीकरण) is the
+# DMLI / Special Government Attorney track: tried at the Special Court like CIAA
+# cases (same ``…-CR-…`` numbering), but not a CIAA prosecution — the
+# ``case_type`` is the only signal that separates the two, so it overrides the
+# forum. A dict (not a bare set) so a future non-CIAA track carries its OWN
+# label/rationale rather than inheriting the money-laundering strings.
+_NON_CIAA_CASE_TYPE_DETAILS = {
+    "MONEY_LAUNDERING": {
+        "label": "Non-CIAA case (money laundering)",
+        "rationale": (
+            "Money-laundering (सम्पत्ति शुद्धीकरण) case — the Department of Money "
+            "Laundering Investigation / Special Government Attorney track, "
+            "distinct from a CIAA corruption prosecution even when tried at the "
+            "Special Court; treated as a non-CIAA case."
+        ),
+    },
+}
+_NON_CIAA_CASE_TYPES = frozenset(_NON_CIAA_CASE_TYPE_DETAILS)
 
 
 def _titles_and_types(case):
@@ -229,13 +242,9 @@ def detect(case):
             "special-court verdict record are attached yet."
         )
     elif case_type in _NON_CIAA_CASE_TYPES:
-        ctype, label = "NON_CIAA", "Non-CIAA case (money laundering)"
-        rationale = (
-            "Money-laundering (सम्पत्ति शुद्धीकरण) case — the Department of Money "
-            "Laundering Investigation / Special Government Attorney track, "
-            "distinct from a CIAA corruption prosecution even when tried at the "
-            "Special Court; treated as a non-CIAA case."
-        )
+        details = _NON_CIAA_CASE_TYPE_DETAILS[case_type]
+        ctype, label = "NON_CIAA", details["label"]
+        rationale = details["rationale"]
     else:
         ctype, label = "NON_CIAA", "Non-CIAA case"
         rationale = (
