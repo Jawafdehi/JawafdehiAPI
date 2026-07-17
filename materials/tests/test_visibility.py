@@ -35,10 +35,15 @@ User = get_user_model()
 
 
 def _store(source_id, title="Doc", source_type="MISC", url=None, visibility=None):
+    # A CASE-GATED upload. Case uploads are now type-sourced and born PUBLIC, so
+    # pin the caseworker-embargoed policy these gating tests exercise: a
+    # CASE_GATED material tracks its citing cases (draft/in-review/closed →
+    # PRIVATE/UNLISTED via recompute), which is the behaviour under test here.
     doc, mtype = documentsource_to_jsonld(
         source_id=source_id, title=title, source_type=source_type, url=url
     )
     mat = Material.from_jsonld(doc, material_type=mtype)
+    mat.visibility_policy = Policy.CASE_GATED
     if visibility is not None:
         mat.visibility = visibility
     mat.save()
@@ -485,14 +490,16 @@ class TestDefaultPolicyForSource:
         assert default_policy_for("court") == Policy.PUBLIC
 
     def test_from_jsonld_derives_policy_from_source(self):
-        # A case-uploaded document (jawafdehi source) is born CASE_GATED …
+        # A case upload is now sourced by material_type (MISC → document), so it is
+        # non-jawafdehi and born PUBLIC — case uploads are public by default.
         doc, mtype = documentsource_to_jsonld(
             source_id="source:20240101:pol01", title="D", source_type="MISC", url=None
         )
+        assert doc["@id"] == "https://jawafdehi.org/material/document/20240101.pol01"
         assert Material.from_jsonld(doc, material_type=mtype).visibility_policy == (
-            Policy.CASE_GATED
+            Policy.PUBLIC
         )
-        # … a corpus document (non-jawafdehi source) is born PUBLIC.
+        # A corpus document (non-jawafdehi source) is likewise born PUBLIC.
         corpus = {
             "@id": "https://jawafdehi.org/material/court_order/pol02",
             "@type": "DigitalDocument",
@@ -500,6 +507,15 @@ class TestDefaultPolicyForSource:
         }
         assert Material.from_jsonld(corpus, material_type="court_order").visibility_policy == (
             Policy.PUBLIC
+        )
+        # Only a residual jawafdehi-sourced row stays CASE_GATED at birth.
+        legacy = {
+            "@id": "https://jawafdehi.org/material/jawafdehi/pol03",
+            "@type": "DigitalDocument",
+            "name": {"en": "Legacy upload"},
+        }
+        assert Material.from_jsonld(legacy, material_type="document").visibility_policy == (
+            Policy.CASE_GATED
         )
 
 
@@ -552,7 +568,7 @@ class TestPolicyRecompute:
         corpus = _store_corpus(
             "court_order", "special.080-cr-0002", visibility=Visibility.PRIVATE
         )
-        upload = _store("source:20240101:up0001")  # jawafdehi CASE_GATED, LISTED
+        upload = _store("source:20240101:up0001")  # a CASE_GATED upload, LISTED
         withheld = _store_corpus("court_order", "special.080-cr-0003")
         withheld.visibility_policy = Policy.PRIVATE
         withheld.save(update_fields=["visibility_policy"])
@@ -576,25 +592,29 @@ class TestUpsertPolicyDefaults:
         )
         return doc, mtype
 
-    def test_upsert_births_case_upload_case_gated(self):
+    def test_upsert_births_case_upload_public(self):
+        # Case uploads are now type-sourced (MISC → /material/document/…), so —
+        # being non-jawafdehi — they are born PUBLIC. A caseworker embargoes a
+        # sensitive one by explicitly setting CASE_GATED/PRIVATE afterward.
         doc, mtype = self._doc("source:20240101:ins01")
         mat = upsert_single_source_material(doc, material_type=mtype)
-        assert mat.visibility_policy == Policy.CASE_GATED
+        assert mat.source == "document"
+        assert mat.visibility_policy == Policy.PUBLIC
 
     def test_reupsert_preserves_manual_policy(self):
-        # A caseworker sets PUBLIC on a case-upload; re-sourcing the SAME @id must
-        # NOT reset it to the CASE_GATED birth default (create_defaults is
-        # INSERT-only).
+        # A caseworker embargoes a case-upload (CASE_GATED — now a non-default
+        # override); re-sourcing the SAME @id must NOT reset it to the PUBLIC
+        # birth default (create_defaults is INSERT-only).
         doc, mtype = self._doc("source:20240101:ins02")
         mat = upsert_single_source_material(doc, material_type=mtype)
-        mat.visibility_policy = Policy.PUBLIC
+        mat.visibility_policy = Policy.CASE_GATED
         mat.save(update_fields=["visibility_policy"])
         again = upsert_single_source_material(doc, material_type=mtype)
-        assert again.visibility_policy == Policy.PUBLIC
+        assert again.visibility_policy == Policy.CASE_GATED
 
     def test_explicit_override_applies_on_update(self):
         doc, mtype = self._doc("source:20240101:ins03")
-        upsert_single_source_material(doc, material_type=mtype)  # CASE_GATED
+        upsert_single_source_material(doc, material_type=mtype)  # born PUBLIC
         again = upsert_single_source_material(
             doc, material_type=mtype, visibility_policy=Policy.PRIVATE
         )
