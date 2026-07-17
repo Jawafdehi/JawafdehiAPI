@@ -27,6 +27,15 @@ def nepali_to_roman_numerals(text: object) -> str:
     return str(text or "").translate(_DEVANAGARI_TO_ASCII_TABLE)
 
 
+_ASCII_TO_DEVANAGARI_TABLE = str.maketrans({v: k for k, v in DEVANAGARI_TO_ASCII.items()})
+
+
+def roman_to_nepali_numerals(text: object) -> str:
+    """Transliterate ASCII digits (0-9) to Devanagari (०-९) — some portal search
+    forms expect the case number in Devanagari."""
+    return str(text or "").translate(_ASCII_TO_DEVANAGARI_TABLE)
+
+
 def normalize_date(date_str: object) -> str:
     """Normalise a BS date to zero-padded ASCII ``YYYY-MM-DD`` (any separator).
 

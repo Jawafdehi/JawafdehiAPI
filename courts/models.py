@@ -223,3 +223,33 @@ class BlacklistedFirm(models.Model):
 
     def __str__(self) -> str:
         return self.firm_name
+
+
+class ScrapedDate(models.Model):
+    """Crawl frontier: which ``(court, BS date)`` cause-lists have been fetched.
+
+    Lets the ``scrape_courtcases`` command resume from where it left off instead
+    of re-walking years of daily cause-lists on every run. New in the monorepo
+    (the legacy ngm_v1 ``scraped_dates`` table has no ORM home here yet); routed
+    to the ``ngm`` DB with the other courts models.
+    """
+
+    id = models.AutoField(primary_key=True)
+    court = models.ForeignKey(
+        Court, on_delete=models.DO_NOTHING, db_column="court_identifier",
+        related_name="scraped_dates",
+    )
+    date_bs = models.CharField(max_length=20, db_index=True)
+    note = models.CharField(max_length=200, null=True, blank=True)
+    scraped_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "scraped_dates"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["court", "date_bs"], name="uniq_scraped_court_date"
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.court_id}@{self.date_bs}"

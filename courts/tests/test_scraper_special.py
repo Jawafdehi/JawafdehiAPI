@@ -2,7 +2,7 @@
 → composed with the ported case_status normalization. Pure (no network, no DB)."""
 
 from courts.case_status import ACQUITTED, verdict_from_hearings
-from courts.scraper.special import parse_bench_options, parse_bench_page
+from courts.scraper.special import parse_bench_options, parse_bench_page, parse_detail
 
 # One bench page: header row + a DECIDED row (फैसला / सफाई = acquittal) and a
 # PENDING row (पेशी). 11 cells per row, matching the portal's table layout.
@@ -88,3 +88,46 @@ def test_ported_normalization_composes_with_parse():
 
 def test_empty_table_returns_no_rows():
     assert parse_bench_page("<html><body>no table</body></html>", date_bs="2082-01-05") == []
+
+
+_DETAIL = """
+<html><body>
+<table width="100%" border="0" cellspacing="0" cellpadding="1">
+  <tr><td class="caption">दर्ता नँ .</td><td>१२३</td>
+      <td class="caption">मुद्दा</td><td>भ्रष्टाचार</td></tr>
+  <tr><td class="caption">दर्ता मिती</td><td>२०८१/०५/१२</td>
+      <td class="caption">फाँट</td><td>रिट १</td></tr>
+  <tr><td class="caption">मुद्दाको स्थिती</td><td>आदेश /फैसलाको किसिम</td>
+      <td class="caption">मुद्दाको किसिम</td><td>देवानी</td></tr>
+  <tr><td class="caption">वादीहरु</td><td>नेपाल सरकार</td>
+      <td class="caption">प्रतिवादीहरु</td><td>क, ख</td></tr>
+</table>
+<table>
+  <tr><td>पेशी को विवरण</td></tr>
+  <tr><td><table class="utivtbl">
+    <tr><th>मिति</th><th>न्यायाधीश</th><th>स्थिति</th><th>किसिम</th></tr>
+    <tr><td>२०८२/०९/२८</td><td>राम</td><td>फैसला</td><td>सफाई</td></tr>
+  </table></td></tr>
+</table>
+</body></html>
+"""
+
+
+def test_parse_detail_maps_core_extra_entities_hearings():
+    enr = parse_detail(_DETAIL)
+    assert enr.core_fields["registration_number"] == "१२३"
+    assert enr.core_fields["case_type"] == "भ्रष्टाचार"
+    assert enr.core_fields["registration_date_bs"] == "2081-05-12"
+    assert enr.core_fields["registration_date_ad"] is not None
+    # raw status stored by the parser (header dropped later at write time), not a column
+    assert enr.core_fields["case_status"] == "आदेश /फैसलाको किसिम"
+    # legacy fields → extra_data, never columns
+    assert enr.extra_data["division"] == "रिट १"
+    assert enr.extra_data["category"] == "देवानी"
+    # parties split on comma; sides tagged
+    sides = sorted((e["side"], e["name"]) for e in enr.entities)
+    assert sides == [("defendant", "क"), ("defendant", "ख"), ("plaintiff", "नेपाल सरकार")]
+    # hearing section → enrichment_hearings, which the write path turns into a verdict
+    assert enr.extra_data["enrichment_hearings"][0]["decision_type"] == "सफाई"
+    assert verdict_from_hearings(enr.extra_data["enrichment_hearings"]) == ACQUITTED
+    assert enr.core_fields["hearing_count"] == 1
