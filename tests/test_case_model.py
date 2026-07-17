@@ -423,10 +423,14 @@ def test_multiple_drafts_get_unique_auto_slugs():
 
 
 @pytest.mark.django_db
-def test_corruption_requires_accused_entity_for_review():
-    """CORRUPTION cases still need an ACCUSED entity to leave DRAFT.
+def test_corruption_does_not_require_accused_entity_for_review():
+    """CORRUPTION cases no longer require an ACCUSED entity to leave DRAFT.
 
-    A related-only entity does not satisfy the requirement.
+    Systemic / unsubstantiated cases (a project-level irregularity with no
+    charged individual, e.g. budhigandaki) must be publishable, so a non-location
+    subject — a related person or organization — satisfies the requirement. The
+    former CORRUPTION-only "at least one accused" hard gate is retired; naming an
+    accused is now a review-quality signal, not a publish blocker.
     """
     case = create_case_with_entities(
         title="Corruption Case",
@@ -437,9 +441,36 @@ def test_corruption_requires_accused_entity_for_review():
     )
     case.state = CaseState.IN_REVIEW
 
+    try:
+        case.validate()
+    except ValidationError as e:
+        pytest.fail(f"CORRUPTION should not require an accused entity: {e}")
+
+
+@pytest.mark.django_db
+def test_corruption_location_only_entity_is_insufficient():
+    """A CORRUPTION case with only a location entity has no named subject.
+
+    The non-location-subject requirement is type-agnostic, so a location-only
+    corruption case must still fail review validation (mirrors the TAX_EVASION
+    case below).
+    """
+    case = create_case_with_entities(
+        title="Corruption Case",
+        key_allegations=["Allegation"],
+        description="Description",
+        case_type=CaseType.CORRUPTION,
+    )
+    CaseEntityRelationship.objects.create(
+        case=case,
+        nes_id="https://jawafdehi.org/entity/location/district/kathmandu",
+        relationship_type=RelationshipType.LOCATION,
+    )
+    case.state = CaseState.IN_REVIEW
+
     with pytest.raises(ValidationError) as exc_info:
         case.validate()
-    assert "accused" in str(exc_info.value).lower()
+    assert "entity" in str(exc_info.value).lower()
 
 
 @pytest.mark.django_db
