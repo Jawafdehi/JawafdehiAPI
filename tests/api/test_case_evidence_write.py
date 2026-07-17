@@ -17,7 +17,7 @@ from cases.models import (
     RelationshipType,
 )
 from materials.jsonld import documentsource_to_jsonld
-from materials.models import Material, Visibility
+from materials.models import Material, Policy, Visibility
 from tests.conftest import create_user_with_role
 
 URL = "/api/cases/{}/"
@@ -54,6 +54,11 @@ def _store_material(source_id, visibility=Visibility.LISTED):
         source_id=source_id, title="Doc", source_type="MISC", url=None
     )
     mat = Material.from_jsonld(doc, material_type=mtype)
+    # These triggers test the CASE-GATED machinery (visibility tracks the citing
+    # case's state). Case uploads are now sourced by material_type (→ non-jawafdehi)
+    # and born PUBLIC, so pin the policy to CASE_GATED explicitly — otherwise the
+    # recompute short-circuits to LISTED and the demote/promote is never exercised.
+    mat.visibility_policy = Policy.CASE_GATED
     mat.visibility = visibility
     mat.save()
     return mat

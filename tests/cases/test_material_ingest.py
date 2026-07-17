@@ -12,7 +12,7 @@ from cases.services.material_ingest import (
     ingest_source_as_evidence,
     upsert_source_material,
 )
-from materials.models import Material, Visibility
+from materials.models import Material, Policy, Visibility
 
 
 def _case(slug="ingest-case"):
@@ -33,7 +33,9 @@ class TestUpsertSourceMaterial:
             source_type="CIAA_PRESS_RELEASE",
             source_id="source:20240115:ab12cd",
         )
-        assert iri == "https://jawafdehi.org/material/jawafdehi/20240115.ab12cd"
+        # Sourced by material_type (a CIAA press release → press_release), NOT the
+        # legacy monolithic jawafdehi bucket.
+        assert iri == "https://jawafdehi.org/material/press_release/20240115.ab12cd"
         mat = Material.objects.get(iri=iri)
         assert mat.material_type == "press_release"
         assert mat.data["associatedMedia"][0]["contentUrl"] == (
@@ -106,13 +108,32 @@ class TestBindAndIngest:
         assert ingest_source_as_evidence(case, title="") is None
         assert case.material_references.count() == 0
 
-    def test_ingest_into_draft_case_does_not_leak_public(self):
-        # Regression: a Material is born LISTED; ingest must recompute from the
-        # DRAFT case's state so the evidence is not publicly searchable/crawlable.
-        case = _case("draft-leak", )
+    def test_ingest_into_draft_case_is_public_by_default(self):
+        # Case uploads are sourced by material_type (→ non-jawafdehi) and born
+        # PUBLIC, so an upload is publicly LISTED on ingest regardless of the
+        # binding case's state — a caseworker embargoes a sensitive one explicitly
+        # (see test_ingest_honors_prior_embargo).
+        case = _case("draft-pub")
         assert case.state == CaseState.DRAFT
         iri = ingest_source_as_evidence(
-            case, title="Secret charge sheet", source_id="source:20240301:secret1"
+            case, title="Press release", source_id="source:20240301:public2"
+        )
+        mat = Material.objects.get(iri=iri)
+        assert mat.visibility == Visibility.LISTED
+
+    def test_ingest_honors_prior_embargo(self):
+        # The ingest-path recompute HONORS a caseworker embargo: once an @id is set
+        # CASE_GATED, a later ingest pass maps that policy against the DRAFT case's
+        # state → PRIVATE, rather than the born-PUBLIC default.
+        case = _case("draft-embargo")
+        iri = ingest_source_as_evidence(
+            case, title="Sensitive doc", source_id="source:20240301:embargo1"
+        )
+        Material.objects.filter(pk=iri).update(visibility_policy=Policy.CASE_GATED)
+        # Re-ingest the same @id; the upsert preserves the manual policy (INSERT-only
+        # birth default) and the ingest then recomputes from the DRAFT case.
+        ingest_source_as_evidence(
+            case, title="Sensitive doc", source_id="source:20240301:embargo1"
         )
         mat = Material.objects.get(iri=iri)
         assert mat.visibility == Visibility.PRIVATE
