@@ -502,6 +502,7 @@ class CaseType(models.TextChoices):
     ILLEGAL_PROPERTY = "ILLEGAL_PROPERTY", "Illegal Property"
     EXAM_RIGGING = "EXAM_RIGGING", "Exam Rigging"
     TAX_EVASION = "TAX_EVASION", "Tax Evasion"
+    BANKING_OFFENCE = "BANKING_OFFENCE", "Banking Offence"
 
 
 # Case types that must name at least one ACCUSED entity before they can leave
