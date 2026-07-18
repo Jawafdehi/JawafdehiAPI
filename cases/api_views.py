@@ -488,6 +488,7 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             "key_allegations",
             "timeline",
             "notes",
+            "public_notes",
             "slug",
             "court_cases",
             "missing_details",
@@ -932,6 +933,9 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 # so it persists via the bulk UPDATE like the other scalars — the
                 # missing entry here is what silently dropped a patched note (BB-28).
                 "notes",
+                # Public notes (Case.public_notes TextField: attribution + edit
+                # dates) — also a scalar column; same persist path, read publicly.
+                "public_notes",
             ]
         )
 
@@ -1247,6 +1251,9 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             # trips ``CasePatchSerializer.notes`` (``allow_blank`` but not
             # ``allow_null``) and 422s an otherwise-unrelated PATCH.
             "notes": case.notes or "",
+            # Public notes (Case.public_notes TextField, NOT NULL / default="").
+            # Coerce a NULL read-back to "" for the same reason as notes above.
+            "public_notes": case.public_notes or "",
         }
 
 

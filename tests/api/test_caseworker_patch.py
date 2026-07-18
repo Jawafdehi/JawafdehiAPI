@@ -199,6 +199,86 @@ def test_patch_unrelated_field_survives_null_notes_row():
 
 
 @pytest.mark.django_db
+def test_patch_replace_public_notes_persists_on_case_without_public_notes():
+    # #4: the editor sends `replace /public_notes` (the public attribution +
+    # human-written edit-dates block). Like /notes it must resolve against an
+    # existing snapshot key, validate, and persist via the scalar write.
+    user = _contributor("prakash")
+    case = _make_case()  # public_notes defaults to ""
+    assert case.public_notes == ""
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[
+            {
+                "op": "replace",
+                "path": "/public_notes",
+                "value": "Documented by the Jawafdehi team. First published Shrawan 2082.",
+            }
+        ],
+        format="json",
+    )
+    assert response.status_code == 200, response.data
+    case.refresh_from_db()
+    assert case.public_notes == (
+        "Documented by the Jawafdehi team. First published Shrawan 2082."
+    )
+
+
+@pytest.mark.django_db
+def test_public_notes_returned_to_anonymous_but_notes_blanked():
+    # #4 core contract: unlike the internal ``notes`` (BB-04-gated to casework
+    # viewers), ``public_notes`` is returned to EVERYONE. A published case read
+    # anonymously carries the public byline verbatim while notes stays blank.
+    case = _make_case(
+        state=CaseState.PUBLISHED,
+        public_notes="Documented by the Jawafdehi research team.",
+        notes="internal-only reviewer note",
+    )
+
+    anon = APIClient()
+    response = anon.get(URL.format(case.slug))
+    assert response.status_code == 200, response.data
+    assert response.data["public_notes"] == (
+        "Documented by the Jawafdehi research team."
+    )
+    # The internal note is never leaked to the public reader.
+    assert response.data["notes"] == ""
+
+
+@pytest.mark.django_db
+def test_patch_scalar_only_leaves_existing_public_notes_untouched():
+    # A PATCH that does NOT touch /public_notes must round-trip it unchanged —
+    # the snapshot carries the current value (mirrors the /notes guarantee).
+    user = _contributor("gita")
+    case = _make_case(public_notes="Documented by the field team.")
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[{"op": "replace", "path": "/title", "value": "Retitled"}],
+        format="json",
+    )
+    assert response.status_code == 200, response.data
+    case.refresh_from_db()
+    assert case.title == "Retitled"
+    assert case.public_notes == "Documented by the field team."
+
+
+@pytest.mark.django_db
+def test_build_snapshot_coerces_null_public_notes_to_empty_string():
+    # Same NULL-read-back guard as notes: the column is NOT NULL (default=""),
+    # but a legacy/raw row reading back NULL must become "" in the snapshot, else
+    # CasePatchSerializer.public_notes (allow_blank, NOT allow_null) would 422
+    # every subsequent patch to that case.
+    case = _make_case()
+    case.public_notes = None  # simulate a NULL read-back
+    snapshot = CaseViewSet()._build_snapshot(case)
+    assert snapshot["public_notes"] == ""
+
+
+@pytest.mark.django_db
 def test_patch_replace_timeline_item_title():
     user = _contributor("sita")
     case = _make_case(

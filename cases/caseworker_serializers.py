@@ -271,6 +271,10 @@ class CaseCreateSerializer(
     timeline = TimelineItemSerializer(many=True, required=False)
     evidence = EvidenceItemSerializer(many=True, required=False)
     notes = serializers.CharField(required=False, allow_blank=True)
+    # Public notes (Case.public_notes TextField, markdown): attribution + edit
+    # dates. Same NOT-NULL/default="" contract as ``notes`` — allow_blank to
+    # clear, NOT allow_null. Returned publicly by the read serializer.
+    public_notes = serializers.CharField(required=False, allow_blank=True)
     alleged_entities = serializers.ListField(
         child=serializers.CharField(), required=False
     )
@@ -343,6 +347,9 @@ class CasePatchSerializer(CourtCaseRefsValidationMixin, serializers.Serializer):
     # ``null`` can't be stored — clear notes by sending "" (allow_blank). A literal
     # ``null`` is rejected (422) rather than silently coerced, matching the column.
     notes = serializers.CharField(required=False, allow_blank=True)
+    # Public notes (Case.public_notes) — see CaseCreateSerializer for rationale.
+    # Same NOT-NULL/default="" contract as ``notes``: allow_blank, not allow_null.
+    public_notes = serializers.CharField(required=False, allow_blank=True)
     slug = serializers.SlugField(
         max_length=50,
         required=False,

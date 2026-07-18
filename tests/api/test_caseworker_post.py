@@ -62,6 +62,30 @@ def test_post_creates_draft():
 
 
 @pytest.mark.django_db
+def test_post_stores_public_notes():
+    # #4: the public attribution/edit-dates byline is settable at creation time
+    # too (mirrors ``notes``), so a draft can carry it forward to publish.
+    user = create_user_with_role("ashok-attr", "ashok-attr@example.com", "Caseworker")
+
+    response = _authed_client(user).post(
+        URL,
+        data={
+            "title": "Byline creation",
+            "case_type": CaseType.CORRUPTION,
+            "public_notes": "Documented by the Jawafdehi research team.",
+        },
+        format="json",
+    )
+
+    assert response.status_code == 201, response.data
+    assert response.data["public_notes"] == (
+        "Documented by the Jawafdehi research team."
+    )
+    case = Case.objects.get(pk=response.data["id"])
+    assert case.public_notes == "Documented by the Jawafdehi research team."
+
+
+@pytest.mark.django_db
 def test_post_court_cases_stores_iris():
     """court_cases takes canonical @id IRIs; stored on the reference join."""
     user = create_user_with_role("ashok-court", "ashok-court@example.com", "Caseworker")

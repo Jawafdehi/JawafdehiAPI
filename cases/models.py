@@ -691,6 +691,23 @@ class Case(models.Model):
         default="",
         help_text="Internal notes about the case (markdown supported)",
     )
+    # Public counterpart to ``notes``. Unlike ``notes`` (internal, BB-04-gated on
+    # read), this IS returned to everyone — a caseworker-authored markdown block
+    # shown on the public case page for attribution AND the human-written edit
+    # history (e.g. "Documented by the Jawafdehi research team. First published
+    # Shrawan 2082; last edited Bhadra 2082."). Freeform on purpose: it stays
+    # decoupled from the staff account that pressed publish (that identity lives
+    # on CaseStateChange.actor and is never surfaced publicly) and from the
+    # machine ``created_at``/``updated_at`` timestamps. Empty string = nothing
+    # rendered.
+    public_notes = models.TextField(
+        blank=True,
+        default="",
+        help_text="Public notes shown on the case page (markdown): attribution "
+        "byline plus the human-written 'first published / last edited' line. "
+        "Editable by casework staff; independent of the internal account that "
+        "published and of the automatic timestamps. Empty = nothing shown.",
+    )
 
     # New fields for case identification and tracking
     slug = models.SlugField(
