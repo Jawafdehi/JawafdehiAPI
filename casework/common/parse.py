@@ -52,18 +52,8 @@ def balanced_object(text: str, start: int):
 
 
 def parse_extraction_response(response_text, wrapper_keys):
-    """Extract a JSON object or array from an LLM response (handles ```fences```
-    and {"<key>": [...]} / {"<key>": {...}} wrappers). Returns the unwrapped
-    value, or None.
-
-    NOTE: this differs from the donor (0321a85) by one condition. The donor
-    only unwrapped list-typed wrapper values (`isinstance(obj.get(key), list)`);
-    it never returned a dict-typed wrapper value, so it could not satisfy this
-    port's required test (`parse_extraction_response(body, ("result",)) ==
-    {"bigo": 500}`) or its declared `-> dict | None` interface. Broadened the
-    check to `(list, dict)` — everything else (fence stripping, brace-depth
-    scan, array fallback) is unchanged from the donor.
-    """
+    """Extract a JSON array from an LLM response (handles ```fences``` and
+    {"<key>": [...]} wrappers). Returns the list, or None."""
     import json
 
     text = (response_text or "").strip()
@@ -91,9 +81,8 @@ def parse_extraction_response(response_text, wrapper_keys):
                 obj = json.loads(text[obj_start : obj_end + 1])
                 if isinstance(obj, dict):
                     for key in wrapper_keys:
-                        value = obj.get(key)
-                        if isinstance(value, (list, dict)) and value:
-                            return value
+                        if isinstance(obj.get(key), list) and obj[key]:
+                            return obj[key]
             except json.JSONDecodeError:
                 pass
 

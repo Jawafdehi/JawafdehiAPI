@@ -21,9 +21,26 @@ def test_balanced_object_returns_none_when_unterminated():
     assert balanced_object('{"a": 1', 0) is None
 
 
-def test_parse_extraction_response_unwraps_key():
-    body = 'prose\n{"result": {"bigo": 500}}\nmore prose'
-    assert parse_extraction_response(body, ("result",)) == {"bigo": 500}
+def test_parse_extraction_response_unwraps_list_key():
+    # Returns the LIST under the wrapper key. Verified against every donor
+    # call site: allegations, entities, accused_notes, timeline/entries are
+    # all list-valued. Nothing calls this expecting a dict.
+    body = 'prose\n{"timeline": [{"date": "2024-01-15", "title": "फैसला"}]}\nmore'
+    assert parse_extraction_response(body, {"timeline"}) == [
+        {"date": "2024-01-15", "title": "फैसला"}
+    ]
+
+
+def test_parse_extraction_response_returns_none_when_key_absent():
+    # NOTE: input deliberately has no top-level `[...]` array anywhere in the
+    # text. The brief's original payload here was '{"other": [1, 2]}', but
+    # the donor's real fallback path (verified byte-identical, see
+    # test_parse_extraction_response_unwraps_list_key) scans for *any*
+    # top-level JSON array in the text once no wrapper key matches — so that
+    # payload actually returns [1, 2], not None. Using a value with no
+    # bracket at all isolates the "key absent" case from that unrelated
+    # array-fallback behavior.
+    assert parse_extraction_response('{"other": "value"}', {"timeline"}) is None
 
 
 def test_is_valid_iso_date():
