@@ -10,6 +10,9 @@ This REPLACES the old Jawafdehi-scoped ``cases.UnifiedSearchView`` and the NGM
 
 from __future__ import annotations
 
+import time
+import uuid
+
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import serializers, status
@@ -17,6 +20,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from .analytics import emit_search_event
 from .service import (
     ALL_SORTS,
     ALL_TYPES,
@@ -188,13 +192,19 @@ class UnifiedSearchView(APIView):
             "tags": data["tags"],
             "status": data["status"],
         }
+        active_filters = {k: v for k, v in filters.items() if v}
+        # Ephemeral per-response id: it join-keys the server-side analytics event to
+        # a future client result-click beacon (query -> shown -> clicked) WITHOUT
+        # attaching any identity. Echoed in the envelope so the SPA can send it back.
+        search_id = uuid.uuid4().hex
+        started = time.perf_counter()
         try:
             response = SearchService().search(
                 q=data["q"],
                 types=data["type"] or None,
                 lang=data["lang"],
                 sort=data["sort"],
-                filters={k: v for k, v in filters.items() if v},
+                filters=active_filters,
                 page=data["page"],
                 page_size=data["page_size"],
                 cursor=data.get("cursor"),
@@ -209,4 +219,24 @@ class UnifiedSearchView(APIView):
                 {"detail": "Search is temporarily unavailable."},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
+        took_ms = (time.perf_counter() - started) * 1000.0
+        response["search_id"] = search_id
+        # Best-effort product telemetry (never raises); see search/analytics.py.
+        emit_search_event(
+            search_id=search_id,
+            params={
+                "q": data["q"],
+                "lang": data["lang"],
+                "types": data["type"] or None,
+                "sort": data["sort"],
+                "page": data["page"],
+                "page_size": data["page_size"],
+                "filters": active_filters,
+                # Under a cursor the service ignores ``page`` (stays 1); pass it so
+                # the builder doesn't mistake a deep cursor page for the first page.
+                "cursor": data.get("cursor"),
+            },
+            response=response,
+            took_ms=took_ms,
+        )
         return Response(response)

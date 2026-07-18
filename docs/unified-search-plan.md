@@ -536,7 +536,10 @@ Genuinely remaining:
    it into `shared/jawafdehi_shared/search/` so all indexers use one implementation?
    (Pending the bilingual deep-research result, which may change the approach entirely.)
 3. **Relevance weights:** initial cross-type boost defaults (entities-first?
-   identifier-exact-first?) and who owns tuning them.
+   identifier-exact-first?) and who owns tuning them. Tuning stays DEFERRED until
+   data justifies it — the `search_query` analytics event (`search/analytics.py`,
+   see `docs/search-analytics.md`) now records the demand + zero-result + click-anchor
+   signals that will DRIVE this tuning, so it is measured rather than guessed.
 4. ~~**The "internal" role mechanics.**~~ RESOLVED — the "internal" role idea was
    dropped. Draft/in-review view is granted to the **readonly+ roles** (readonly/
    caseworker/moderator/admin) via the shared role→group map

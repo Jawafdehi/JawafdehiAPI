@@ -57,6 +57,27 @@ def test_search_api_returns_envelope():
 
 
 @pytest.mark.django_db
+def test_search_api_echoes_search_id_and_emits_analytics():
+    """Every search echoes an ephemeral ``search_id`` (the click-loop join seam)
+    and emits ONE server-side analytics event carrying that same id + the query."""
+    client = MagicMock()
+    client.search.return_value = _canned()
+    with patch("search.service.make_client", return_value=client), patch(
+        "search.views.emit_search_event"
+    ) as emit:
+        resp = APIClient().get("/api/search/", {"q": "Akhtiyar"})
+    assert resp.status_code == 200
+    search_id = resp.json()["search_id"]
+    assert search_id
+    emit.assert_called_once()
+    kwargs = emit.call_args.kwargs
+    assert kwargs["search_id"] == search_id
+    assert kwargs["params"]["q"] == "Akhtiyar"
+    assert kwargs["response"]["count"] == 1
+    assert kwargs["took_ms"] >= 0
+
+
+@pytest.mark.django_db
 def test_search_api_503_when_cluster_down():
     client = MagicMock()
     client.search.side_effect = ConnectionError("down")
