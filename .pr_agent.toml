@@ -1,0 +1,28 @@
+# Self-hosted PR-Agent — per-repo overrides. Read from the DEFAULT branch (this takes
+# effect once merged to main). Keep it minimal (overrides only): the model, LLM backend,
+# and auto-trigger behavior live in the k8s Deployment, not here.
+
+[pr_reviewer]
+# CI runs `ruff check` for style/imports/formatting, so steer the AI to substance
+# instead of duplicating the linter.
+extra_instructions = """
+Focus on: logic errors and edge cases; security/authz regressions; missing error handling;
+Django/DRF correctness (migrations, N+1 queries, transaction/atomicity, serializer & permission gaps).
+Do NOT comment on formatting, import order, or naming — ruff handles those in CI.
+"""
+require_security_review = true
+require_tests_review = true
+require_estimate_effort_to_review = true
+# The linked-ticket compliance analysis was the confusing part on #348 — turn it off.
+require_ticket_analysis_review = false
+
+[pr_code_suggestions]
+num_code_suggestions = 4
+extra_instructions = """
+Prefer a few high-impact, project-specific suggestions over many generic ones.
+Skip style/formatting (ruff-enforced) and changes under cases/migrations/.
+"""
+
+[config]
+# Don't auto-run on dependency-bump / automated PRs.
+ignore_pr_title = ["^\\[Auto\\]", "^Auto", "^Bump ", "^chore\\(deps\\)"]
