@@ -1,6 +1,5 @@
 """Read-only production snapshot for the A/B sample. NEVER writes to production."""
 import json
-import os
 import time
 import urllib.parse
 import urllib.request
