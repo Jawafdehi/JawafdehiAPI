@@ -144,3 +144,53 @@ def emit_search_event(
         logger.info("search_query", extra=event)
     except Exception:  # noqa: BLE001 — telemetry must never break the response.
         logger.warning("search analytics emit failed", exc_info=True)
+
+
+def build_click_event(
+    *,
+    search_id: str,
+    rank: int,
+    result_type: str,
+    result_id: str,
+    result_score: float | None = None,
+) -> dict[str, Any]:
+    """Build the ``search_click`` event payload (a flat, JSON-serializable dict).
+
+    The other half of the click loop: it join-keys back to a ``search_query`` event
+    by ``search_id``, so ``(query -> shown -> clicked)`` learning-to-rank judgments
+    can be reconstructed WITHOUT any user identity. ``rank`` is the clicked result's
+    1-based position in the full result order (page offset applied), ``result_type``
+    the index it came from, ``result_id`` its public IRI, and ``result_score`` the
+    relevance score it was shown with (the label side of the training signal).
+    """
+    event: dict[str, Any] = {
+        "search_id": search_id,
+        "rank": rank,
+        "result_type": result_type,
+        "result_id": result_id,
+    }
+    if result_score is not None:
+        event["result_score"] = result_score
+    return event
+
+
+def emit_search_click_event(
+    *,
+    search_id: str,
+    rank: int,
+    result_type: str,
+    result_id: str,
+    result_score: float | None = None,
+) -> None:
+    """Emit one ``search_click`` analytics event. Never raises (best-effort)."""
+    try:
+        event = build_click_event(
+            search_id=search_id,
+            rank=rank,
+            result_type=result_type,
+            result_id=result_id,
+            result_score=result_score,
+        )
+        logger.info("search_click", extra=event)
+    except Exception:  # noqa: BLE001 — telemetry must never break the response.
+        logger.warning("search click emit failed", exc_info=True)

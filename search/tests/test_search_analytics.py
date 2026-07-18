@@ -10,7 +10,13 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from search.analytics import build_search_event, emit_search_event, normalize_query
+from search.analytics import (
+    build_click_event,
+    build_search_event,
+    emit_search_click_event,
+    emit_search_event,
+    normalize_query,
+)
 
 
 def test_normalize_query_lowercases_trims_and_collapses_whitespace():
@@ -147,5 +153,43 @@ def test_emit_search_event_never_raises():
             params=_params(),
             response={"count": 0, "counts": {}, "results": []},
             took_ms=1.0,
+        )
+
+
+# ── click event (the other half of the loop) ────────────────────────────────────
+
+
+def test_build_click_event_join_keys_and_carries_no_identity():
+    event = build_click_event(
+        search_id="abc123",
+        rank=3,
+        result_type="entity",
+        result_id="https://jawafdehi.org/entity/person/x",
+        result_score=9.5,
+    )
+    # Joins back to the query by search_id; carries the clicked result + its rank.
+    assert event["search_id"] == "abc123"
+    assert event["rank"] == 3
+    assert event["result_type"] == "entity"
+    assert event["result_id"] == "https://jawafdehi.org/entity/person/x"
+    assert event["result_score"] == 9.5
+    # No identity, ever.
+    forbidden = {"user", "user_id", "ip", "session", "user_agent", "referer"}
+    assert forbidden.isdisjoint(event.keys())
+
+
+def test_build_click_event_omits_absent_score():
+    event = build_click_event(
+        search_id="x", rank=1, result_type="case", result_id="case:1"
+    )
+    assert "result_score" not in event
+
+
+def test_emit_search_click_event_never_raises():
+    with patch(
+        "search.analytics.build_click_event", side_effect=RuntimeError("boom")
+    ):
+        emit_search_click_event(
+            search_id="x", rank=1, result_type="case", result_id="case:1"
         )
 

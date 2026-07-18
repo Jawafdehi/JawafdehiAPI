@@ -34,9 +34,25 @@ One flat JSON line per query (rendered by the structlog JSON formatter; the log 
 
 No user identity — no id, IP, user-agent, session, or referer. `q_normalized` is normalized, not hashed (the query text *is* the signal), and is never attached to a person. Aggregate product telemetry, not an audit trail — route the `jawafdehi.search.analytics` stream to **short retention** (shorter than the general 365-day archive).
 
-## The click loop (next step, not yet built)
+## The click loop — `search_click`
 
-`search_id` is echoed in the response envelope so the SPA can send it back on a result click. A tiny beacon — `(search_id, rank, result_type, iri)` → a `search_click` event — closes the loop into `(query → shown → clicked)` learning-to-rank judgments, unbiased and consent-free, without ever identifying who clicked. The GA4 `select_search_result` event (rank + term, shipped) is the consent-gated mirror; the beacon is the ground truth.
+`search_id` is echoed in the search response envelope so the SPA can send it back on a result click. `POST /api/search/click` (public, unauthenticated, `SearchClickView`) records that click as a `search_click` event, join-keyed by `search_id` — closing the loop into `(query → shown → clicked)` learning-to-rank judgments, unbiased and consent-free, without ever identifying who clicked. The GA4 `select_search_result` event (rank + term) is the consent-gated mirror; this beacon is the ground truth.
+
+Transport: the SPA uses `navigator.sendBeacon`, which posts `text/plain` (a CORS-safelisted content type → no preflight, survives the click-then-navigate). The view therefore parses the raw request body directly rather than via DRF content negotiation. It is **best-effort**: it always returns `204` (a beacon cannot read the response), emits nothing on a malformed/garbage payload, and never raises.
+
+`search_click` fields:
+
+| field | meaning |
+|---|---|
+| `search_id` | the id from the search response that produced the clicked list — the join key to its `search_query` event. Not a user/session id. |
+| `rank` | 1-based position of the clicked result in the full order (page offset applied). |
+| `result_type` | `entity` / `material` / `courtcase` / `case`. |
+| `result_id` | the clicked result's public IRI (the envelope `id`). |
+| `result_score` | the relevance score it was shown with (optional) — the label side of the LTR signal. |
+
+Same logger/stream/privacy stance as `search_query` (no identity, short retention). Filter the two apart by `event:search_query` vs `event:search_click`.
+
+**Remaining:** the SPA-side `sendBeacon` call on result click (wires `search_id` from the response into the existing click handler that already fires the GA `select_search_result` event).
 
 ## Using it to tune relevance (later)
 
@@ -58,4 +74,9 @@ event:search_query has_query:true | stats by (types) count()
 
 # slow queries
 event:search_query took_ms:>500 | fields q_normalized, took_ms, result_count
+
+# clicks by rank → CTR@k shape (are people clicking rank 1, or scrolling?)
+event:search_click | stats by (rank) count() clicks | sort by (rank)
 ```
+
+Joining the two streams by `search_id` (in an offline notebook, not LogsQL) yields the `(query, shown, clicked-rank)` tuples that train a ranking model.

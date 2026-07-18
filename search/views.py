@@ -1,4 +1,5 @@
-"""The unified platform search API: ``GET /api/search/``.
+"""The unified platform search API: ``GET /api/search/`` and the click beacon
+``POST /api/search/click``.
 
 Public read. One query across entities, materials, court cases, and PUBLISHED
 cases (the index is all-public — no ACL filter). OpenSearch is a hard dependency:
@@ -10,6 +11,7 @@ This REPLACES the old Jawafdehi-scoped ``cases.UnifiedSearchView`` and the NGM
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 
@@ -20,7 +22,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .analytics import emit_search_event
+from .analytics import emit_search_click_event, emit_search_event
 from .service import (
     ALL_SORTS,
     ALL_TYPES,
@@ -240,3 +242,54 @@ class UnifiedSearchView(APIView):
             took_ms=took_ms,
         )
         return Response(response)
+
+
+class SearchClickSerializer(serializers.Serializer):
+    """Validates a result-click beacon. ``search_id`` joins back to the
+    ``search_query`` event that produced the clicked result list."""
+
+    search_id = serializers.CharField(max_length=64)
+    # 1-based position in the full result order (page offset already applied).
+    rank = serializers.IntegerField(min_value=1)
+    result_type = serializers.ChoiceField(choices=list(ALL_TYPES))
+    # The clicked result's public IRI (the envelope ``id``).
+    result_id = serializers.CharField(max_length=1024)
+    # The relevance score the result was shown with (optional — the label side of
+    # the future learning-to-rank signal).
+    result_score = serializers.FloatField(required=False)
+
+
+@extend_schema(
+    summary="Search result-click beacon",
+    description=(
+        "Fire-and-forget beacon recording that a search result was clicked, "
+        "join-keyed by 'search_id' to the query that produced it — the other half "
+        "of the click loop for future relevance tuning. Public, unauthenticated, "
+        "and best-effort: it records NO user identity and always returns 204 (a "
+        "beacon cannot read the response). Sent by the SPA via navigator.sendBeacon "
+        "(text/plain), so the body is parsed directly rather than via content "
+        "negotiation."
+    ),
+    request=SearchClickSerializer,
+    responses={204: None},
+    tags=["search"],
+)
+class SearchClickView(APIView):
+    """Ingest a search result-click beacon → one ``search_click`` analytics event."""
+
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        # sendBeacon sends text/plain (CORS-safelisted, no preflight), so read the
+        # raw body instead of request.data — DRF would 415 on a non-JSON media type.
+        try:
+            payload = json.loads(request.body or b"{}")
+        except (ValueError, TypeError):
+            payload = None
+        if isinstance(payload, dict):
+            serializer = SearchClickSerializer(data=payload)
+            if serializer.is_valid():
+                emit_search_click_event(**serializer.validated_data)
+        # Always 204: a beacon never reads the response, and a malformed/garbage
+        # click is not worth surfacing an error for on best-effort telemetry.
+        return Response(status=status.HTTP_204_NO_CONTENT)
