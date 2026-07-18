@@ -7,6 +7,19 @@ def test_balanced_object_ignores_braces_inside_strings():
     assert got == '{"evidence_quote": "बिगो रु. {१०} हजार", "bigo": 10000}'
 
 
+def test_balanced_object_survives_unbalanced_brace_inside_string():
+    # THE discriminating test. The other brace-in-string cases embed a
+    # BALANCED pair, so a naive depth counter coincidentally lands on the
+    # same closing brace and passes. Only an UNBALANCED brace inside a
+    # quoted value distinguishes the string-aware matcher from a naive
+    # scan -- verified by mutation testing on 2026-07-18, where a naive
+    # implementation passed every other test in this file.
+    text = 'noise {"evidence_quote": "only a closing } brace", "bigo": 1} trailing'
+    assert balanced_object(text, text.index("{")) == (
+        '{"evidence_quote": "only a closing } brace", "bigo": 1}'
+    )
+
+
 def test_balanced_object_handles_nesting():
     text = '{"a": {"b": {"c": 1}}}'
     assert balanced_object(text, 0) == text
