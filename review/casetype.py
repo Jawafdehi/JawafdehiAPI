@@ -81,6 +81,15 @@ _NON_CIAA_CASE_TYPE_DETAILS = {
             "Special Court; treated as a non-CIAA case."
         ),
     },
+    "BANKING_OFFENCE": {
+        "label": "Non-CIAA case (banking offence)",
+        "rationale": (
+            "Banking-offence (बैंकिङ कसुर) case — prosecuted by the Government "
+            "Attorney under the Banking Offence and Punishment Act, 2064, not a "
+            "CIAA corruption prosecution; treated as a non-CIAA case regardless "
+            "of the court forum."
+        ),
+    },
 }
 _NON_CIAA_CASE_TYPES = frozenset(_NON_CIAA_CASE_TYPE_DETAILS)
 

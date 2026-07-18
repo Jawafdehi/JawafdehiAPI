@@ -180,6 +180,38 @@ def test_corruption_at_special_court_still_ciaa_regression():
     assert res["signals"]["court_forum"] == "special"
 
 
+# --- Banking offence: the Government-Attorney track under the Banking Offence
+# and Punishment Act, 2064 — NON_CIAA regardless of forum --------------------
+
+
+def _banking_case(court_cases=None, evidence=None):
+    return {**_case(court_cases, evidence), "case_type": "BANKING_OFFENCE"}
+
+
+def test_banking_offence_with_charge_sheet_is_non_ciaa():
+    # A banking-offence prosecution with a charge sheet but no court IRI would,
+    # without the carve-out, fall through to the source-signal path and be typed
+    # CIAA (has_chargesheet). The case_type overrides that → NON_CIAA.
+    res = detect(_banking_case(evidence=[_src("अभियोग पत्र", "charge_sheet")]))
+    assert res["type"] == "NON_CIAA"
+    assert res["label"] == "Non-CIAA case (banking offence)"
+    assert res["signals"]["case_type"] == "BANKING_OFFENCE"
+
+
+def test_banking_offence_at_special_court_stays_non_ciaa():
+    # Even if filed at the Special Court alongside CIAA cases, a banking-offence
+    # case must not be promoted into a CIAA tier.
+    res = detect(
+        _banking_case(
+            court_cases=[_iri("special", "082-cr-0200")],
+            evidence=[_src("अभियोग पत्र", "charge_sheet")],
+        )
+    )
+    assert res["type"] == "NON_CIAA"
+    assert res["signals"]["court_forum"] == "special"
+    assert res["label"] == "Non-CIAA case (banking offence)"
+
+
 def test_empty_case_is_non_ciaa():
     res = detect(_case())
     assert res["type"] == "NON_CIAA"
