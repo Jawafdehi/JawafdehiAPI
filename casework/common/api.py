@@ -1,4 +1,5 @@
 """HTTP client for the Jawafdehi control plane. No ORM, ever."""
+import base64
 import json
 import urllib.parse
 import urllib.request
@@ -18,14 +19,45 @@ def build_replace_patch(field, value):
 
 
 class CaseworkApi:
-    def __init__(self, base_url, token):
+    """Control-plane HTTP client with two mutually exclusive auth modes.
+
+    ``token`` -- production default. Sends ``Authorization: Bearer <token>``,
+    decoded by ``jawafdehi_shared.auth.oidc.OIDCAuthentication`` in prod.
+
+    ``basic`` -- local-dev only. Sends ``Authorization: Basic <user:pass>``.
+    Only usable against a server run with ``DEV_AUTH=1`` (and ``DEBUG`` or
+    ``TESTING``), which additively accepts DRF's ``BasicAuthentication`` --
+    see ``config/settings.py:693-732`` and ``casework/ab/README.md``.
+
+    Bearer stays first-class: ``OIDCAuthentication`` is always first in DRF's
+    authenticator chain, so a request carrying a ``Bearer`` header is *always*
+    routed to OIDC and never falls through to the local Basic/Session
+    authenticators -- meaning Basic mode must send Basic, never Bearer, and
+    vice versa. Exactly one of ``token``/``basic`` must be given so it is not
+    possible to accidentally send both headers.
+    """
+
+    def __init__(self, base_url, token=None, *, basic=None):
         self.base_url = base_url.rstrip("/")
         if not self.base_url.endswith("/api"):
             self.base_url += "/api"
+        if (token is None) == (basic is None):
+            raise ValueError(
+                "CaseworkApi requires exactly one of `token` (Bearer, "
+                "production default) or `basic=(username, password)` "
+                "(HTTP Basic, local DEV_AUTH only) -- never both, never neither"
+            )
         self.token = token
+        self.basic = basic
 
     def _headers(self, content_type=None):
-        h = {"Authorization": f"Bearer {self.token}", "User-Agent": BROWSER_UA,
+        if self.basic is not None:
+            username, password = self.basic
+            creds = base64.b64encode(f"{username}:{password}".encode()).decode()
+            auth = f"Basic {creds}"
+        else:
+            auth = f"Bearer {self.token}"
+        h = {"Authorization": auth, "User-Agent": BROWSER_UA,
              "Accept": "application/json"}
         if content_type:
             h["Content-Type"] = content_type

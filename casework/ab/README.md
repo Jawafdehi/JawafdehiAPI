@@ -137,6 +137,50 @@ just use a different port (`48010`) and verify ownership as above. Skipping
 this check risks silently writing enrichment data into a stranger's Django
 instance during later A/B-test tasks, which would be a serious error.
 
+## Step 5: authenticate `CaseworkApi` writes locally (`DEV_AUTH`)
+
+**Why `Authorization: Bearer <anything>` does not work locally:** DRF's
+authenticator chain always tries `jawafdehi_shared.auth.oidc.OIDCAuthentication`
+FIRST (`config/settings.py:704-715`). It claims any request carrying a
+`Bearer` header for itself and immediately raises
+`AuthenticationFailed("OIDC authentication is not configured (OIDC_JWKS_URI)")`
+when `OIDC_JWKS_URI`/`OIDC_ISSUER` are unset — which is the default local
+state (no `.env` in this repo; nothing stands up a real Zitadel). Because
+`OIDCAuthentication` raises before DRF ever tries the next authenticator in
+the list, it doesn't matter what session/basic auth is configured — a
+`Bearer` header is always routed to OIDC and always 401s locally. This is not
+a bug to route around per-task; it's why `CaseworkApi` supports a second,
+explicit auth mode below.
+
+Start the server with `DEV_AUTH=1` (additive to `DEBUG`/`TESTING` per
+`config/settings.py:693-715`; never honored in production) so DRF ALSO
+accepts `SessionAuthentication`/`BasicAuthentication`:
+
+```bash
+unset DATABASE_URL
+DEV_AUTH=1 DEBUG=True uv run python manage.py runserver 0.0.0.0:48010 &
+```
+
+Then use `CaseworkApi` in **Basic** mode — never Bearer — as the `abgen`
+superuser created in Step 3 (`local-dev-only`; throwaway local-only password):
+
+```python
+from casework.common.api import CaseworkApi
+
+api = CaseworkApi(
+    "http://127.0.0.1:48010",
+    basic=("abgen", "local-dev-only"),
+)
+api.patch_field("some-slug", "bigo", 500)
+```
+
+`CaseworkApi.__init__` requires exactly one of `token=` (Bearer, the
+production default, unchanged) or `basic=(username, password)` (HTTP Basic,
+local-only) — passing both or neither raises `ValueError`, so it is not
+possible to accidentally send both headers on one request. `role`/group
+membership (Caseworker Django group, `is_superuser`) is checked identically
+in both modes — DEV_AUTH only skips JWT verification, not authorization.
+
 ## sqlite divergences from prod Postgres (`docs/testing.md:19-26`)
 
 A few behaviors differ from prod Postgres under this local sqlite stack.
