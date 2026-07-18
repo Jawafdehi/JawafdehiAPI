@@ -77,6 +77,7 @@ class _High:
     LOOKBACK_DAYS = 10 * _YEAR
     BENCH_URL = "https://supremecourt.gov.np/court/{court}/bench_list?pesi_date={pesi}"
     DETAIL_URL = "https://supremecourt.gov.np/court/{court}/cause_list_detail"
+    CASE_DETAIL_URL = "https://supremecourt.gov.np/court/{court}/case_details"
 
     def court_ids(self, fetch):
         return [c["identifier"] for c in HIGH_COURTS]
@@ -96,6 +97,10 @@ class _High:
                 bench_id=b["bench_id"], bench_no=b["bench_no"], judge_name=b["judge_name"],
             ))
         return rows
+
+    def crawl_detail(self, fetch, court_id, case_number):
+        html = fetch(self.CASE_DETAIL_URL.format(court=court_id), data={"case_no": case_number})
+        return high.parse_high_detail(html) if html else None
 
 
 # court key → spec. Special is its own compliant module.

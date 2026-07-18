@@ -71,6 +71,27 @@ class CrawlOrchestrationTests(_NgmTestCase):
         self.assertEqual(CourtCaseHearing.objects.using("ngm").filter(case_number="082-CR-0015").count(), 1)
         self.assertEqual(ScrapedDate.objects.using("ngm").filter(court_id="special").count(), 1)
 
+    def test_enrich_is_scoped_to_this_crawls_cases(self):
+        # A pre-existing non-enriched case from an earlier crawl must NOT be
+        # enriched by a later limited run that never touched it (else
+        # `--limit-dates 1 --enrich` fans out over the whole corpus).
+        from courts.models import Court
+
+        Court.objects.using("ngm").get_or_create(
+            identifier="special", defaults={"court_type": "special", "full_name_nepali": "x"}
+        )
+        CourtCase.objects.using("ngm").create(
+            court_id="special", case_number="070-CR-9999", status="pending"
+        )
+        run_crawl(special, fetch=_fake_fetch, today=date(2025, 4, 20),
+                  lookback_days=2, limit_dates=1, write=True, enrich=True)
+        self.assertEqual(
+            CourtCase.objects.using("ngm").get(case_number="082-CR-0015").status, "enriched"
+        )
+        self.assertEqual(
+            CourtCase.objects.using("ngm").get(case_number="070-CR-9999").status, "pending"
+        )
+
     def test_dry_run_writes_nothing(self):
         stats = run_crawl(special, fetch=_fake_fetch, today=date(2025, 4, 20),
                           lookback_days=2, limit_dates=1, write=False)

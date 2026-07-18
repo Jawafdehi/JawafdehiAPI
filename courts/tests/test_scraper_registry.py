@@ -14,6 +14,14 @@ def test_resolve_all_and_single_and_unknown():
         registry.resolve("bogus")
 
 
+def test_all_specs_expose_crawl_detail():
+    # Every court has a detail parser, so every registry spec must wire
+    # crawl_detail — otherwise that court's `--enrich` is silently a no-op
+    # (regression guard for the unreachable high-court enrichment).
+    for key, spec in registry.REGISTRY.items():
+        assert hasattr(spec, "crawl_detail"), f"{key} spec missing crawl_detail"
+
+
 def test_court_ids_counts():
     assert registry.REGISTRY["supreme"].court_ids(None) == ["supreme"]
     assert len(registry.REGISTRY["district"].court_ids(None)) >= 70

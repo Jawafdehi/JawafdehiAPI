@@ -47,6 +47,7 @@ def run_crawl(
     for court_id in module.court_ids(fetch):
         stats = CrawlStats(court_id=court_id)
         done = base.scraped_dates_for(court_id) if write else set()
+        touched: set[str] = set()
         for ad_date, date_bs in base.iter_bs_dates(lookback, today=today):
             if date_bs in done:
                 continue
@@ -57,6 +58,7 @@ def run_crawl(
                 counts = base.upsert_causelist(rows)
                 stats.cases += counts["cases"]
                 stats.hearings += counts["hearings"]
+                touched.update(c.case_number for c, _ in rows)
                 base.mark_scraped(court_id, date_bs, note=f"{len(rows)} rows")
             else:
                 stats.cases += len({(c.court_identifier, c.case_number) for c, _ in rows})
@@ -65,13 +67,18 @@ def run_crawl(
                 break
 
         if enrich and write and hasattr(module, "crawl_detail"):
-            stats.enriched = _enrich_pending(module, court_id, fetch)
+            stats.enriched = _enrich_pending(module, court_id, fetch, only=touched)
         results.append(stats)
     return results
 
 
-def _enrich_pending(module, court_id: str, fetch) -> int:
-    """Fetch + apply enrichment for this court's not-yet-enriched cases."""
+def _enrich_pending(module, court_id: str, fetch, *, only=None) -> int:
+    """Fetch + apply enrichment for this court's not-yet-enriched cases.
+
+    ``only`` scopes enrichment to a set of case numbers (the ones this crawl
+    touched) so a limited-lookback ``--enrich`` run never fans out over the whole
+    historical corpus. ``None`` means every non-enriched case for the court.
+    """
     from courts.models import CourtCase
 
     n = 0
@@ -81,6 +88,8 @@ def _enrich_pending(module, court_id: str, fetch) -> int:
         .exclude(status="enriched")
         .values_list("case_number", flat=True)
     )
+    if only is not None:
+        pending = pending.filter(case_number__in=only)
     for case_number in list(pending):
         enrichment = module.crawl_detail(fetch, court_id, case_number)
         if enrichment is not None and base.apply_enrichment(court_id, case_number, enrichment):

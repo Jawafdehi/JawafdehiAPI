@@ -60,6 +60,19 @@ class CauselistUpsertTests(_NgmTestCase):
         self.assertEqual(case.extra_data["enrichment_hearings"], [{"d": "2081"}])
         self.assertEqual(case.status, "enriched")
 
+    def test_relist_null_key_does_not_clobber_existing(self):
+        upsert_causelist([(_case("082-CR-0017"), _hearing("082-CR-0017"))])
+        case = CourtCase.objects.using("ngm").get(case_number="082-CR-0017")
+        case.extra_data = {"division": "रिट १", "category": "फाँट क"}
+        case.save(using="ngm")
+        # A later re-list emits division=None (weaker) — it must NOT overwrite the
+        # enriched "रिट १", but a genuinely new key is still added.
+        pc = _case("082-CR-0017", division=None, new="x")
+        upsert_causelist([(pc, _hearing("082-CR-0017", date_bs="2082-03-03"))])
+        case.refresh_from_db()
+        self.assertEqual(case.extra_data["division"], "रिट १")
+        self.assertEqual(case.extra_data["new"], "x")
+
 
 class FrontierTests(_NgmTestCase):
     def test_mark_and_read_frontier(self):
@@ -106,3 +119,17 @@ class EnrichmentTests(_NgmTestCase):
 
     def test_enrichment_missing_case_returns_false(self):
         self.assertFalse(apply_enrichment("special", "999-XX-9999", ParsedEnrichment()))
+
+    def test_empty_enrichment_does_not_mark_enriched_or_delete_parties(self):
+        # A WAF-rejection / empty detail page parses into an empty enrichment.
+        # It must NOT flip status to "enriched" nor wipe the existing party.
+        self._seed("082-CR-0030")
+        CaseEntity.objects.using("ngm").create(
+            court_id="special", case_number="082-CR-0030", side="defendant", name="क"
+        )
+        self.assertFalse(apply_enrichment("special", "082-CR-0030", ParsedEnrichment()))
+        case = CourtCase.objects.using("ngm").get(case_number="082-CR-0030")
+        self.assertEqual(case.status, "pending")  # unchanged — retried next run
+        self.assertEqual(
+            CaseEntity.objects.using("ngm").filter(case_number="082-CR-0030").count(), 1
+        )

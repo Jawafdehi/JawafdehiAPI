@@ -88,7 +88,13 @@ def upsert_causelist(rows: list[tuple[ParsedCase, ParsedHearing]], *, using: str
             .filter(court_id=pcase.court_identifier, case_number=pcase.case_number)
             .first()
         )
-        merged_extra = {**(existing.extra_data or {} if existing else {}), **pcase.extra_data}
+        # Union extra_data, but never let a re-list's null overwrite an existing
+        # (enriched) value — a new key is added even if null; an existing key is
+        # replaced only by a non-null listing value. Upholds the never-clobber rule.
+        merged_extra = dict((existing.extra_data or {}) if existing else {})
+        for key, value in (pcase.extra_data or {}).items():
+            if value is not None or key not in merged_extra:
+                merged_extra[key] = value
         listing = {
             "registration_date_bs": pcase.registration_date_bs,
             "registration_date_ad": pcase.registration_date_ad,
@@ -148,6 +154,14 @@ def apply_enrichment(
         .first()
     )
     if case is None:
+        return False
+
+    # A WAF-rejection / error / empty detail page parses into an empty
+    # ParsedEnrichment. Applying it would flip status to "enriched" (so it never
+    # retries) AND delete the existing parties — silent data loss. Require at
+    # least one usable signal; otherwise leave the row untouched and report
+    # not-enriched so the case is retried on the next run.
+    if not (enrichment.core_fields or enrichment.extra_data or enrichment.entities):
         return False
 
     core = {k: v for k, v in enrichment.core_fields.items() if k in _ENRICH_COLUMNS}
