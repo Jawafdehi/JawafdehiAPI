@@ -6,6 +6,7 @@ cluster is down (hard dependency), and 400 when ``q`` is missing.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -197,3 +198,63 @@ def test_search_api_type_all_searches_every_type():
 def test_search_api_400_on_invalid_type():
     resp = APIClient().get("/api/search/", {"q": "x", "type": "bogus"})
     assert resp.status_code == 400
+
+
+# ── POST /api/search/click (the result-click beacon) ────────────────────────────
+
+
+@pytest.mark.django_db
+def test_search_click_beacon_emits_event():
+    """A valid click beacon is accepted (204) and emits one ``search_click`` event
+    carrying the join key + clicked result."""
+    payload = {
+        "search_id": "sid-1",
+        "rank": 4,
+        "result_type": "case",
+        "result_id": "/case/some-slug",
+        "result_score": 8.1,
+    }
+    with patch("search.views.emit_search_click_event") as emit:
+        resp = APIClient().post("/api/search/click", payload, format="json")
+    assert resp.status_code == 204
+    emit.assert_called_once_with(
+        search_id="sid-1",
+        rank=4,
+        result_type="case",
+        result_id="/case/some-slug",
+        result_score=8.1,
+    )
+
+
+@pytest.mark.django_db
+def test_search_click_beacon_accepts_text_plain_body():
+    """navigator.sendBeacon posts text/plain (CORS-safelisted, no preflight); the
+    view parses the raw body rather than 415-ing on the media type."""
+    body = json.dumps(
+        {"search_id": "sid-2", "rank": 1, "result_type": "entity", "result_id": "e:1"}
+    )
+    with patch("search.views.emit_search_click_event") as emit:
+        resp = APIClient().post(
+            "/api/search/click", data=body, content_type="text/plain"
+        )
+    assert resp.status_code == 204
+    emit.assert_called_once()
+    assert emit.call_args.kwargs["search_id"] == "sid-2"
+
+
+@pytest.mark.django_db
+def test_search_click_beacon_swallows_invalid_payload():
+    """Best-effort: an invalid or garbage beacon still returns 204 and emits
+    nothing (a beacon cannot read the response, so a 400 would be pointless)."""
+    with patch("search.views.emit_search_click_event") as emit:
+        # Missing required fields.
+        r1 = APIClient().post(
+            "/api/search/click", {"rank": 1}, format="json"
+        )
+        # Not even JSON.
+        r2 = APIClient().post(
+            "/api/search/click", data="not json", content_type="text/plain"
+        )
+    assert r1.status_code == 204
+    assert r2.status_code == 204
+    emit.assert_not_called()
