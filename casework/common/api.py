@@ -47,6 +47,14 @@ class CaseworkApi:
                 "production default) or `basic=(username, password)` "
                 "(HTTP Basic, local DEV_AUTH only) -- never both, never neither"
             )
+        if basic is not None:
+            host = urllib.parse.urlparse(self.base_url).hostname
+            if host not in ("127.0.0.1", "localhost"):
+                raise ValueError(
+                    f"basic= is only permitted against loopback (127.0.0.1 or "
+                    f"localhost); refusing to send Basic auth to {base_url!r} -- "
+                    "use `token` (Bearer) for any non-local host"
+                )
         self.token = token
         self.basic = basic
 
@@ -103,8 +111,13 @@ class CaseworkApi:
     def replace_list(self, slug, path, items, timeout=60):
         """Whole-list replace for /evidence and /entities.
 
-        The server deletes every join row and recreates from exactly what is
-        sent, so callers must GET, merge, then replace the FULL list.
+        DESTRUCTIVE: the server deletes every existing join row for this
+        path and recreates from exactly the `items` given -- there is no
+        partial/append mode. Passing a partial list silently DELETES the
+        rows you omitted; there is no warning and no way to recover them
+        from this call. Callers must GET the case, merge the full desired
+        list in application code, and only then call replace_list with the
+        FULL list -- never a delta.
         """
         if path not in WHOLE_LIST_PATHS:
             raise ValueError(f"{path} is not a whole-list path")

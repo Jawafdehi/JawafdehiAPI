@@ -113,3 +113,118 @@ def test_bearer_and_basic_are_mutually_exclusive():
 def test_bearer_or_basic_is_required():
     with pytest.raises(ValueError):
         CaseworkApi(base_url="http://127.0.0.1:48010")
+
+
+def test_basic_mode_rejects_non_loopback_base_url():
+    with pytest.raises(ValueError):
+        CaseworkApi(
+            base_url="https://api.jawafdehi.org",
+            basic=("abgen", "local-dev-only"),
+        )
+
+
+def test_basic_mode_accepts_loopback_base_url():
+    # Must not raise -- basic= against 127.0.0.1/localhost is the whole point
+    # of DEV_AUTH local writes.
+    CaseworkApi(base_url="http://127.0.0.1:48010", basic=("abgen", "local-dev-only"))
+    CaseworkApi(base_url="http://localhost:48010", basic=("abgen", "local-dev-only"))
+
+
+# ---------------------------------------------------------------------------
+# replace_list -- the highest-risk method: the server deletes every join row
+# and recreates from exactly what is sent, so a partial list silently
+# destroys the omitted rows.
+# ---------------------------------------------------------------------------
+
+
+def test_replace_list_emits_single_replace_op_for_evidence(monkeypatch):
+    seen = {}
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(api, "_request", _fake_request_capturing(seen))
+
+    items = [{"material_iri": "https://jawafdehi.org/material/news/1",
+              "additional_details": ""}]
+    api.replace_list("some-slug", "evidence", items)
+
+    body = json.loads(seen["data"].decode())
+    assert body == [{"op": "replace", "path": "/evidence", "value": items}]
+
+
+def test_replace_list_emits_single_replace_op_for_entities(monkeypatch):
+    seen = {}
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(api, "_request", _fake_request_capturing(seen))
+
+    items = [{"entity_iri": "https://jawafdehi.org/entity/nes/1"}]
+    api.replace_list("some-slug", "entities", items)
+
+    body = json.loads(seen["data"].decode())
+    assert body == [{"op": "replace", "path": "/entities", "value": items}]
+
+
+def test_replace_list_rejects_non_whole_list_path():
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    with pytest.raises(ValueError):
+        api.replace_list("some-slug", "bigo", [1, 2, 3])
+
+
+# ---------------------------------------------------------------------------
+# get_case -- must hit the detail endpoint (the only one that resolves
+# `material` objects on evidence; the list endpoint returns `material: null`)
+# and URL-quote the slug.
+# ---------------------------------------------------------------------------
+
+
+def test_get_case_requests_detail_endpoint_and_quotes_slug(monkeypatch):
+    seen = {}
+
+    def fake_request(method, url, data=None, headers=None, timeout=None):
+        seen.update(method=method, url=url, data=data, headers=headers)
+
+        class R:
+            status = 200
+
+            def read(self):
+                return b'{"slug": "a slug with?special"}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        return R()
+
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(api, "_request", fake_request)
+
+    api.get_case("a slug with?special")
+
+    assert seen["method"] == "GET"
+    assert seen["url"] == "http://127.0.0.1:48010/api/cases/a%20slug%20with%3Fspecial/"
+
+
+# ---------------------------------------------------------------------------
+# iter_cases -- must follow pagination until a page has no `next`.
+# ---------------------------------------------------------------------------
+
+
+def test_iter_cases_follows_pagination(monkeypatch):
+    pages = {
+        1: {"results": [{"slug": "case-a"}, {"slug": "case-b"}], "next": "http://x/?page=2"},
+        2: {"results": [{"slug": "case-c"}], "next": None},
+    }
+    seen_pages = []
+
+    def fake_get(path, params=None, timeout=60):
+        page = params["page"]
+        seen_pages.append(page)
+        return pages[page]
+
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(api, "get", fake_get)
+
+    cases = list(api.iter_cases())
+
+    assert [c["slug"] for c in cases] == ["case-a", "case-b", "case-c"]
+    assert seen_pages == [1, 2]
