@@ -12,8 +12,11 @@ def test_recognises_special_court_iri():
 
 
 def test_rejects_retired_colon_prefix_shape():
-    # The old "special:081-CR-0098" form no longer appears; it must not be
-    # the only thing we recognise.
+    # Must assert on the ACTUAL retired shape. An earlier version of this
+    # test asserted on an empty list, which passes even under a full
+    # revert to `startswith("special:")` -- a paper tiger that reads like
+    # a guard but discriminates nothing.
+    assert not is_ciaa_special_court_case({"court_cases": ["special:081-CR-0098"]})
     assert not is_ciaa_special_court_case({"court_cases": []})
 
 
@@ -39,6 +42,14 @@ def test_explicit_slug_bypasses_state_gate():
     cases = [{"slug": "pub", "state": "PUBLISHED", "court_cases": [SPECIAL]}]
     assert select_cases(cases) == []
     assert len(select_cases(cases, slugs=("pub",))) == 1
+
+
+def test_court_case_bypass_also_skips_state_gate():
+    # The `slugs=` bypass is tested elsewhere; `court_cases=` is a separate
+    # code path and was previously uncovered.
+    cases = [{"slug": "pub", "state": "PUBLISHED", "court_cases": [SPECIAL]}]
+    assert select_cases(cases) == []
+    assert len(select_cases(cases, court_cases=("081-CR-0098",))) == 1  # uppercase input
 
 
 def test_selection_is_non_empty_for_realistic_sample():
