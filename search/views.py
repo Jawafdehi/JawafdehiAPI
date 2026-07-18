@@ -232,6 +232,9 @@ class UnifiedSearchView(APIView):
                 "page": data["page"],
                 "page_size": data["page_size"],
                 "filters": active_filters,
+                # Under a cursor the service ignores ``page`` (stays 1); pass it so
+                # the builder doesn't mistake a deep cursor page for the first page.
+                "cursor": data.get("cursor"),
             },
             response=response,
             took_ms=took_ms,

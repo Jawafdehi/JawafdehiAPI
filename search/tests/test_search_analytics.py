@@ -90,6 +90,24 @@ def test_build_event_omits_top_hit_beyond_first_page():
     assert "top_score" not in event
 
 
+def test_build_event_omits_top_hit_on_cursor_pages():
+    """A cursor-paginated deep page keeps page==1 (the service ignores page under
+    a cursor), so it must NOT be treated as the first page for the click anchor."""
+    response = {
+        "count": 99,
+        "counts": {"entity": 99},
+        "results": [{"type": "entity", "score": 3.0}],
+    }
+    event = build_search_event(
+        search_id="x",
+        params=_params(page=1, cursor="opaque-token"),
+        response=response,
+        took_ms=1.0,
+    )
+    assert "top_type" not in event
+    assert "top_score" not in event
+
+
 def test_build_event_records_active_facets_and_sorted_types():
     event = build_search_event(
         search_id="x",

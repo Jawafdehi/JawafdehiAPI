@@ -74,8 +74,11 @@ def build_search_event(
     :class:`SearchService` envelope (``count``, ``counts``, ``results``).
 
     ``types`` is emitted as a sorted list; an empty list means "all types" (no
-    filter). ``top_type``/``top_score`` are recorded only for the FIRST page with
-    at least one hit — they anchor click-through analysis to the best answer shown.
+    filter). ``top_type``/``top_score`` are recorded only for the TRUE first page
+    with at least one hit (offset ``page==1`` AND no ``cursor``) — they anchor
+    click-through analysis to the best answer shown, and a cursor-paginated deep
+    page keeps ``page==1`` (the service ignores ``page`` under a cursor), so it
+    must be excluded or the anchor would misattribute to a deep page.
     """
     q_normalized = normalize_query(params.get("q"))
     has_query = bool(q_normalized)
@@ -106,7 +109,9 @@ def build_search_event(
         "took_ms": round(took_ms, 1),
     }
 
-    if page == 1 and results:
+    # Only the TRUE first page anchors the click-through analysis. A cursor page
+    # keeps page==1 (the service ignores page under a cursor), so exclude it.
+    if page == 1 and not params.get("cursor") and results:
         top = results[0]
         event["top_type"] = top.get("type")
         event["top_score"] = top.get("score")
