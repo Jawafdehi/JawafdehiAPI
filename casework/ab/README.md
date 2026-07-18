@@ -49,7 +49,7 @@ db_ngm.sqlite3    221,184 bytes   (ngm: courts/materials)
 
 ```bash
 unset DATABASE_URL
-uv run python -c "
+DEBUG=True uv run python -c "
 import django, os
 os.environ.setdefault('DJANGO_SETTINGS_MODULE','config.settings')
 django.setup()
@@ -73,10 +73,10 @@ DB router can be trusted.
 **Note:** this one-off script (unlike `manage.py migrate`, which is in
 `config/settings.py`'s `_BUILD_TIME_COMMANDS` allowlist) is not a recognized
 build command, so the settings module's fail-closed `SECRET_KEY` guard applies
-unless `DEBUG` or `TESTING` is set. Prefix it with `DEBUG=True` (or `TESTING=true`)
-for a local-only run, e.g. `DEBUG=True uv run python -c "..."`. This does not
-change any database target — it only satisfies the same guard that
-`manage.py runserver` (Step 4) also needs.
+unless `DEBUG` or `TESTING` is set. The block above already prefixes the
+command with `DEBUG=True` (or use `TESTING=true` instead) for exactly this
+reason. This does not change any database target — it only satisfies the same
+guard that `manage.py runserver` (Step 4) also needs.
 
 ## Step 3: Create a caseworker user for API writes
 
@@ -102,9 +102,9 @@ Expected: `user ready: abgen superuser: True`.
 
 ```bash
 unset DATABASE_URL
-DEBUG=True uv run python manage.py runserver 0.0.0.0:48000 &
+DEBUG=True uv run python manage.py runserver 0.0.0.0:48010 &
 sleep 5
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:48000/api/cases/
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:48010/api/cases/
 ```
 
 Expected: `200` or `403` (either proves the app is serving on the local three-
@@ -112,9 +112,30 @@ database sqlite stack; a connection refusal means the server never came up).
 Stop the background server (`kill %1` or the PID it printed) once you're done —
 don't leave it orphaned.
 
-If port `48000` is already bound by another process on a shared host, use any
-free local port instead (e.g. `48010`) — this changes nothing about the
-database target, only which local port you curl.
+**Port 48010 is the standard port for this runbook — do not default to
+`48000`.** On this shared host, port `48000` is persistently bound by an
+unrelated, long-running process owned by a different OS user, and this has
+already caused a real false-positive during Task 2: curling `48000` returned a
+misleading `200`, but that response came from the other user's foreign
+process, not from anything this runbook started. A `200` on any port proves
+nothing by itself about *whose* server answered.
+
+Before trusting a `200` from this (or any) port on a shared host — and
+**before running any later `--apply` write operation against that base
+URL** — confirm the responding server is actually yours:
+
+- Check that the request shows up in *your own* dev server's access log
+  (the `manage.py runserver` process above prints a `django.server` log line
+  — including the HTTP method, path, and status code — for every request it
+  serves; if your `curl` doesn't appear there, it didn't hit your server),
+  and/or
+- Check the listening PID with `ss -ltnp | grep <port>` and confirm it matches
+  the PID your `manage.py runserver` command printed/returned.
+
+Do not attempt to free `48000` or otherwise touch another user's process —
+just use a different port (`48010`) and verify ownership as above. Skipping
+this check risks silently writing enrichment data into a stranger's Django
+instance during later A/B-test tasks, which would be a serious error.
 
 ## sqlite divergences from prod Postgres (`docs/testing.md:19-26`)
 
