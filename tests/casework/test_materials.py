@@ -44,12 +44,40 @@ def test_source_text_reports_unmet_when_no_markdown(monkeypatch):
     assert any("court_order" in u for u in unmet)
 
 
-def test_source_text_empty_when_nothing_convertible(monkeypatch):
+def test_source_text_reports_fetched_but_blank_markdown(monkeypatch):
+    # The fixture MUST carry a MARKDOWN role. An earlier version used a
+    # RAW-only material, which short-circuits at `if not link` and never
+    # reaches the blank-document branch at all -- mutation testing showed
+    # that branch had zero coverage while the test appeared to cover it.
     import casework.common.materials as m
-    monkeypatch.setattr(m, "fetch_markdown", lambda link: "")
+    monkeypatch.setattr(m, "fetch_markdown", lambda link: "   ")
     case = {"slug": "c", "evidence": [
         {"material_iri": "i", "material": {"material_type": "court_order",
-         "urls": [{"link": "https://x/a.pdf", "role": "RAW"}]}}]}
+         "urls": [{"link": "https://x/a.md", "role": "MARKDOWN"}]}}]}
     text, unmet = source_text(case, api=None, types=("court_order",))
     assert text == ""
-    assert unmet
+    assert any("empty" in u for u in unmet)
+
+
+def test_source_text_reports_fetch_failure(monkeypatch):
+    import casework.common.materials as m
+
+    def _raise(link):
+        raise OSError("boom")
+
+    monkeypatch.setattr(m, "fetch_markdown", _raise)
+    case = {"slug": "c", "evidence": [
+        {"material_iri": "i", "material": {"material_type": "court_order",
+         "urls": [{"link": "https://x/a.md", "role": "MARKDOWN"}]}}]}
+    text, unmet = source_text(case, api=None, types=("court_order",))
+    assert text == ""
+    assert any("fetch failed" in u for u in unmet)
+
+
+def test_source_text_reports_unresolved_material():
+    # material:null == a LIST-endpoint payload. Must be loudly unmet, never
+    # a silent ("", []) that reads as "this case has no evidence".
+    case = {"slug": "c", "evidence": [{"material_iri": "i", "material": None}]}
+    text, unmet = source_text(case, api=None, types=("court_order",))
+    assert text == ""
+    assert any("UNRESOLVED" in u for u in unmet)

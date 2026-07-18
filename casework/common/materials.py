@@ -52,6 +52,19 @@ def source_text(case, api=None, types=None):
     it is reported as an unmet prerequisite so the run summary can show it.
     """
     chunks, unmet = [], []
+    # An evidence entry whose `material` is null means the payload came from
+    # the LIST endpoint, which never resolves materials. Without this check
+    # materials_of_type() drops those entries and source_text returns
+    # ("", []) -- indistinguishable from a genuinely evidence-free case, and
+    # exactly the silent false-parity failure this module exists to prevent.
+    unresolved = sum(
+        1 for e in (case.get("evidence") or []) if not (e.get("material") or {})
+    )
+    if unresolved:
+        unmet.append(
+            f"{unresolved} evidence entries with an UNRESOLVED material -- the "
+            "list endpoint returns material:null; use the case DETAIL endpoint"
+        )
     for material in materials_of_type(case, types):
         mtype = material.get("material_type") or "?"
         link = markdown_link(material)
