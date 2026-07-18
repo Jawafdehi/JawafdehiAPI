@@ -2,8 +2,8 @@
 
 Ported enrichers route work through two "tiers": a `premium` tier for
 extraction stages that need the strongest available model (bigo estimation,
-timeline, allegations) and a `cheap` tier for cheap/bulk classification
-(tags, entity linking). Production picks a real provider+model per tier via
+timeline, allegations, entity linking) and a `cheap` tier for cheap/bulk
+classification (tags). Production picks a real provider+model per tier via
 `REVIEW_LLM_PROVIDER_PREMIUM` / `REVIEW_LLM_PROVIDER_CHEAP`. For local/dev A-B
 runs we force BOTH tiers onto the same cheap local harness (`claude_cli` +
 `haiku`) so a difference between two runs can't be explained away by "the
@@ -13,12 +13,20 @@ change under test.
 
 import os
 
+# These values are NOT judgements about how expensive/cheap a stage "feels" --
+# they mirror the donor's actual `tier=` arguments to `invoke_text`/
+# `invoke_with_tools`, verified at donor commit 0321a85:
+#   enrich_missing_bigo.py:446      tier="premium"
+#   enrich_tags.py:1088             tier="cheap"
+#   enrich_timeline.py:518          tier="premium"
+#   enrich_allegations.py:350       tier="premium"
+#   enrich_related_entities.py:421  tier="premium"
 TIERS = {
     "bigo": "premium",
     "tags": "cheap",
     "timeline": "premium",
     "allegations": "premium",
-    "entities": "cheap",
+    "entities": "premium",
 }
 DEFAULT_TIER = "cheap"
 

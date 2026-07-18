@@ -8,9 +8,16 @@ QUIET_LOGGERS = ("httpx", "urllib3", "boto3", "botocore", "s3transfer")
 def add_common_args(parser):
     """Register the CLI flags every ported enricher shares.
 
-    `--dry-run` defaults to True and `--apply` opts into writes, matching the
-    donor management commands' safety posture: an enricher run is read-only
-    (prints what it WOULD do) unless the caller explicitly asks it to write.
+    `--dry-run` defaults to True and `--apply` opts into writes. This
+    deliberately INVERTS the donor's default: the donor's `add_common_args`
+    (`casework/common.py:376` at donor commit 0321a85) declared
+    `parser.add_argument("--dry-run", action="store_true")` with no
+    `default=True`, so the donor defaulted to `dry_run=False` -- i.e. it
+    applied writes unless the caller opted in to `--dry-run`. That posture is
+    unacceptable under this project's binding NO PRODUCTION CHANGES
+    WHATSOEVER constraint while these enrichers are being ported/tested, so
+    the default is flipped here: a bare invocation is read-only (prints what
+    it WOULD do), and the caller must explicitly pass `--apply` to write.
     """
     parser.add_argument("--slug", action="append", default=[])
     parser.add_argument("--court-case", action="append", default=[])

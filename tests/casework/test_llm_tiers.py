@@ -4,9 +4,26 @@ from casework.common.llm import TIERS, dev_env_overrides, tier_for
 
 
 def test_production_tiers_match_donor():
+    """Every ported stage's tier must match the donor's actual `tier=` argument,
+    verified at donor commit 0321a85:
+
+        enrich_missing_bigo.py:446      tier="premium"
+        enrich_tags.py:1088             tier="cheap"
+        enrich_timeline.py:518          tier="premium"
+        enrich_allegations.py:350       tier="premium"
+        enrich_related_entities.py:421  tier="premium"
+
+    All five stages are asserted here (not just a subset) so that flipping
+    any single stage's tier -- including "entities", which shipped wrong as
+    "cheap" -- is caught. A previous version of this test only asserted
+    "bigo"/"tags"/"timeline", which left "allegations" and "entities"
+    unchecked; flipping "entities" to any other tier left it green.
+    """
     assert tier_for("bigo") == "premium"
     assert tier_for("tags") == "cheap"
     assert tier_for("timeline") == "premium"
+    assert tier_for("allegations") == "premium"
+    assert tier_for("entities") == "premium"
 
 
 def test_unknown_stage_defaults_to_cheap():
