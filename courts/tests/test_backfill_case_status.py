@@ -146,6 +146,36 @@ class RunBackfillDBTests(TestCase):
         c = CourtCase.objects.using("ngm").get(case_number="082-CR-0004")
         self.assertEqual(c.verdict_date_bs, "2081-01-01")
 
+    def test_execute_bumps_updated_at_only_on_changed_rows(self):
+        # updated_at IS bumped on changed rows so `reindex_courtcases --since`
+        # finds exactly them; an unchanged row is never saved, so it's untouched.
+        _mk("082-CR-0050", "आदेश /फैसलाको किसिम")  # header → changes
+        _mk("082-CR-0051", "चालु")  # pending → no change
+        changed_before = CourtCase.objects.using("ngm").get(case_number="082-CR-0050").updated_at
+        same_before = CourtCase.objects.using("ngm").get(case_number="082-CR-0051").updated_at
+        run_backfill(execute=True)
+        self.assertGreater(
+            CourtCase.objects.using("ngm").get(case_number="082-CR-0050").updated_at, changed_before
+        )
+        self.assertEqual(
+            CourtCase.objects.using("ngm").get(case_number="082-CR-0051").updated_at, same_before
+        )
+
+    def test_muted_indexing_disconnects_then_restores_signal(self):
+        from django.db.models.signals import post_save
+
+        from courts import signals as s
+        from courts.management.commands.backfill_case_status import _muted_indexing
+
+        uid = "ngm_courtcase_search_index"
+        with _muted_indexing():
+            # already disconnected inside the context → a disconnect returns False
+            self.assertFalse(post_save.disconnect(dispatch_uid=uid, sender=CourtCase))
+        # restored on exit; put it back unconditionally before asserting
+        restored = post_save.disconnect(dispatch_uid=uid, sender=CourtCase)
+        post_save.connect(s._index_courtcase, sender=CourtCase, dispatch_uid=uid)
+        self.assertTrue(restored)
+
     def test_keyset_paginates_every_row_across_courts(self):
         for i in range(1, 4):
             _mk(f"082-CR-000{i}", "आदेश /फैसलाको किसिम", court="special")

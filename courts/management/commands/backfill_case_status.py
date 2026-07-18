@@ -30,6 +30,8 @@ SAFETY: dry-run by default. It never writes unless BOTH ``--execute`` and
 
 from __future__ import annotations
 
+from contextlib import contextmanager, nullcontext
+
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.db.models import Q
@@ -38,6 +40,39 @@ from courts import case_status as cs
 from courts.models import CourtCase
 
 NGM_DB = "ngm"
+
+
+@contextmanager
+def _muted_indexing():
+    """Suppress the per-row OpenSearch upsert + audit log during the bulk write.
+
+    Every ``CourtCase`` save otherwise schedules an ``on_commit``
+    ``search_index.index()`` (``courts.signals``) and an auditlog ``LogEntry``. At
+    100k+ changed rows that per-row churn dominates runtime and hammers
+    OpenSearch, so we mute both here and (re)index once afterward via
+    ``reindex_courtcases --since`` — the write bumps ``updated_at`` so the
+    incremental pass re-indexes exactly the rows this backfill changed. Mirrors
+    the importer's ``_signals_muted`` but scoped to the only model we touch.
+    """
+    from auditlog.context import disable_auditlog
+    from django.db.models.signals import post_delete, post_save
+
+    from courts import signals as s
+
+    specs = [
+        (post_save, CourtCase, "ngm_courtcase_search_index", s._index_courtcase),
+        (post_delete, CourtCase, "ngm_courtcase_search_delete", s._delete_courtcase),
+    ]
+    disconnected = []
+    for sig, sender, uid, func in specs:
+        if sig.disconnect(dispatch_uid=uid, sender=sender):
+            disconnected.append((sig, sender, uid, func))
+    try:
+        with disable_auditlog():
+            yield
+    finally:
+        for sig, sender, uid, func in disconnected:
+            sig.connect(func, sender=sender, dispatch_uid=uid)
 
 # Columns loaded per row (composite PK + the scraper-owned typed columns this
 # pass may touch, plus extra_data for the hearing-based verdict fallback).
@@ -84,9 +119,13 @@ def run_backfill(*, batch_size=2000, limit=None, execute=False, using=NGM_DB, on
 
     Keyset pagination on the composite natural key ``(court, case_number)`` keeps
     memory bounded over 1.6M rows. In ``execute`` mode each changed row is saved
-    with ``update_fields`` (only the columns that changed) inside a per-batch
-    transaction; ``updated_at`` is intentionally left untouched — a backfill is
-    not a fresh scrape.
+    with ``update_fields`` (only the changed columns + ``updated_at``) inside a
+    per-batch transaction, with the live OpenSearch/auditlog signals muted for the
+    whole run (see :func:`_muted_indexing`). ``updated_at`` IS bumped so a later
+    ``reindex_courtcases --since`` re-indexes exactly the changed rows; the keyset
+    is on ``(court, case_number)`` (never mutated) so it stays stable across writes.
+    Idempotent and re-runnable: extend the parser, re-run, and only newly-derivable
+    rows change.
     """
     stats = {
         "scanned": 0,
@@ -96,56 +135,57 @@ def run_backfill(*, batch_size=2000, limit=None, execute=False, using=NGM_DB, on
         "verdict_date_set": 0,
         "unmapped": 0,
     }
-    last_key = None
-    while True:
-        qs = (
-            CourtCase.objects.using(using)
-            .only(*_LOAD)
-            .order_by("court", "case_number")
-        )
-        if last_key is not None:
-            court, number = last_key
-            qs = qs.filter(
-                Q(court_id__gt=court)
-                | (Q(court_id=court) & Q(case_number__gt=number))
+    with (_muted_indexing() if execute else nullcontext()):
+        last_key = None
+        while True:
+            qs = (
+                CourtCase.objects.using(using)
+                .only(*_LOAD)
+                .order_by("court", "case_number")
             )
-        rows = list(qs[:batch_size])
-        if not rows:
-            break
+            if last_key is not None:
+                court, number = last_key
+                qs = qs.filter(
+                    Q(court_id__gt=court)
+                    | (Q(court_id=court) & Q(case_number__gt=number))
+                )
+            rows = list(qs[:batch_size])
+            if not rows:
+                break
 
-        changed: list[tuple[CourtCase, list[str]]] = []
-        for case in rows:
-            stats["scanned"] += 1
-            updates, parsed = compute_case_updates(
-                case.case_status, case.verdict_type,
-                case.verdict_date_bs, case.verdict_date_ad, _hearings_of(case),
-            )
-            if parsed.unmapped:
-                stats["unmapped"] += 1
-            if not updates:
-                continue
+            changed: list[tuple[CourtCase, list[str]]] = []
+            for case in rows:
+                stats["scanned"] += 1
+                updates, parsed = compute_case_updates(
+                    case.case_status, case.verdict_type,
+                    case.verdict_date_bs, case.verdict_date_ad, _hearings_of(case),
+                )
+                if parsed.unmapped:
+                    stats["unmapped"] += 1
+                if not updates:
+                    continue
 
-            stats["rows_changed"] += 1
-            if "case_status" in updates:
-                stats["header_cleared"] += 1
-            if "verdict_type" in updates:
-                stats["verdict_type_set"] += 1
-            if "verdict_date_bs" in updates:
-                stats["verdict_date_set"] += 1
-            for key, value in updates.items():
-                setattr(case, key, value)
-            changed.append((case, list(updates)))
+                stats["rows_changed"] += 1
+                if "case_status" in updates:
+                    stats["header_cleared"] += 1
+                if "verdict_type" in updates:
+                    stats["verdict_type_set"] += 1
+                if "verdict_date_bs" in updates:
+                    stats["verdict_date_set"] += 1
+                for key, value in updates.items():
+                    setattr(case, key, value)
+                changed.append((case, [*updates, "updated_at"]))
 
-        if execute and changed:
-            with transaction.atomic(using=using):
-                for case, fields in changed:
-                    case.save(using=using, update_fields=fields)
+            if execute and changed:
+                with transaction.atomic(using=using):
+                    for case, fields in changed:
+                        case.save(using=using, update_fields=fields)
 
-        last_key = (rows[-1].court_id, rows[-1].case_number)
-        if on_batch is not None:
-            on_batch(stats)
-        if limit and stats["scanned"] >= limit:
-            break
+            last_key = (rows[-1].court_id, rows[-1].case_number)
+            if on_batch is not None:
+                on_batch(stats)
+            if limit and stats["scanned"] >= limit:
+                break
 
     return stats
 
