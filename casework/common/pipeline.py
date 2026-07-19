@@ -87,8 +87,13 @@ STAGES = {
     # `requires_fields`/`requires_materials` gate here would skip cases the
     # donor does not skip.
     "tags": Stage(
+        # NOT ("convert", "bigo"). tags reads no material, so it has no
+        # direct dependency on convert; convert is already implied
+        # transitively via bigo, whose own requires_stages carries it.
+        # Declaring it directly invites a reader to conclude tags needs
+        # converted markdown, which is false.
         "tags", provides=("tags",),
-        requires_stages=("convert", "bigo"),
+        requires_stages=("bigo",),
     ),
     "timeline": Stage(
         "timeline", provides=("timeline",),
@@ -156,31 +161,42 @@ def unmet_prerequisites(stage, case):
     """
     unmet = []
     if stage.requires_materials:
-        # An evidence entry whose `material` is null means the payload came
-        # from the case LIST endpoint, which never resolves materials (only
-        # the DETAIL endpoint does -- see materials.py). materials_of_type()
-        # silently drops those entries, so without this check a case fetched
-        # from the wrong endpoint is indistinguishable from a case with
-        # genuinely zero bound material: both would fall through to "no
-        # bound material of type X" below, collapsing "can't tell yet" into
-        # "definitely can't". Reported separately, and worded consistently
-        # with materials.source_text's own unresolved-material message.
-        evidence = case.get("evidence") or []
-        unresolved = sum(1 for e in evidence if not (e.get("material") or {}))
-        if unresolved:
-            unmet.append(
-                f"{unresolved} evidence entries with an UNRESOLVED material -- the "
-                "list endpoint returns material:null; use the case DETAIL endpoint"
-            )
         mats = materials_of_type(case, stage.requires_materials)
-        if not mats:
-            if not unresolved:
+        if mats and any(markdown_link(m) for m in mats):
+            # SATISFIED. Return no material reason at all -- not even the
+            # unresolved-entry note below. A case can carry an unresolved
+            # entry of some OTHER type alongside a perfectly good converted
+            # material of the type this stage needs; reporting that as unmet
+            # would gate a stage that is genuinely ready. That over-gating
+            # regression shipped once already (a satisfied `bigo` reported
+            # unmet because of one unrelated `material: null` entry) and is
+            # pinned by test_satisfied_stage_ignores_an_unrelated_unresolved_entry.
+            pass
+        else:
+            # An evidence entry whose `material` is null means the payload
+            # came from the case LIST endpoint, which never resolves
+            # materials (only the DETAIL endpoint does -- see materials.py).
+            # materials_of_type() silently drops those entries, so without
+            # this check a case fetched from the wrong endpoint is
+            # indistinguishable from a case with genuinely zero bound
+            # material: both would fall through to "no bound material of
+            # type X", collapsing "can't tell yet" into "definitely can't".
+            # Worded consistently with materials.source_text's own message.
+            evidence = case.get("evidence") or []
+            unresolved = sum(1 for e in evidence if not (e.get("material") or {}))
+            if unresolved:
                 unmet.append(
-                    f"no bound material of type {'/'.join(stage.requires_materials)}")
-        elif not any(markdown_link(m) for m in mats):
-            unmet.append(
-                f"no MARKDOWN role on {'/'.join(stage.requires_materials)} "
-                f"({len(mats)} bound, all unconverted)")
+                    f"{unresolved} evidence entries with an UNRESOLVED material -- the "
+                    "list endpoint returns material:null; use the case DETAIL endpoint"
+                )
+            if not mats:
+                if not unresolved:
+                    unmet.append(
+                        f"no bound material of type {'/'.join(stage.requires_materials)}")
+            else:
+                unmet.append(
+                    f"no MARKDOWN role on {'/'.join(stage.requires_materials)} "
+                    f"({len(mats)} bound, all unconverted)")
     for f in stage.requires_fields:
         if case.get(f) in (None, "", [], {}):
             unmet.append(f"required field {f} is empty")

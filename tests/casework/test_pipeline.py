@@ -181,9 +181,33 @@ def test_bigo_declares_convert_dependency():
     assert "convert" in STAGES["bigo"].requires_stages
 
 
-def test_tags_declares_bigo_and_convert_dependencies():
-    assert "bigo" in STAGES["tags"].requires_stages
-    assert "convert" in STAGES["tags"].requires_stages
+def test_tags_declares_bigo_but_not_a_direct_convert_dependency():
+    """tags reads no material, so convert is transitive via bigo, not direct.
+
+    Asserting `"convert" in requires_stages` (as this test originally did)
+    pins in a dependency that does not exist and tells a Task 13/14 author
+    that tags needs converted markdown.
+    """
+    assert STAGES["tags"].requires_stages == ("bigo",)
+    assert "convert" in STAGES["bigo"].requires_stages  # the transitive path
+
+
+def test_satisfied_stage_ignores_an_unrelated_unresolved_entry():
+    """A ready stage must not be gated by an unrelated `material: null`.
+
+    Regression: the unresolved-material check was appended unconditionally,
+    so a case carrying one null entry alongside a perfectly good converted
+    press release reported `bigo` as unmet. Over-gating reads in a summary
+    as "nothing to do" rather than as a bug, which is the failure mode this
+    whole module exists to prevent.
+    """
+    case = {"slug": "z3", "evidence": [
+        {"material_iri": "i1", "material": None},
+        {"material_iri": "i2", "material": {
+            "material_type": "press_release",
+            "urls": [{"link": "u2", "role": "MARKDOWN"}]}},
+    ]}
+    assert unmet_prerequisites(STAGES["bigo"], case) == []
 
 
 def test_timeline_declares_convert_dependency():
