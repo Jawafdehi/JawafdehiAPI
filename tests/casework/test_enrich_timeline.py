@@ -617,17 +617,29 @@ def test_extract_timeline_prompt_includes_ngm_section_when_present():
 
 
 # --------------------------------------------------------------------------
-# _special_case_number / _get_ngm_data
+# _special_case_number / _get_ngm_data -- donor-faithful colon-prefix
+# selection, DEAD ON CURRENT DATA BY DESIGN (see module docstring, concern 2).
+#
+# Real `court_cases` values are full courtcase IRIs
+# (e.g. "https://jawafdehi.org/courtcase/special/081-cr-0091"), never the
+# donor's colon-prefixed "special:NNN-CR-NNNN" shape -- measured 0 of 109
+# colon-prefixed against the local seeded DB (2026-07-19). This section pins
+# that the NGM path is INERT against real full-IRI data, not that it "works":
+# a case whose court_cases are full IRIs must get NO NGM section, exactly
+# like the donor's own (never-fixed) behavior.
 # --------------------------------------------------------------------------
 
 
 class TestSpecialCaseNumber:
-    def test_extracts_number_from_special_courtcase_iri(self):
-        case = {"court_cases": ["https://jawafdehi.org/courtcase/special/081-cr-0098"]}
+    def test_extracts_ref_from_donor_colon_prefixed_string(self):
+        # The ONLY shape the donor's selector ever matched.
+        case = {"court_cases": ["special:081-cr-0098"]}
         assert _special_case_number(case) == "081-cr-0098"
 
-    def test_returns_none_when_no_special_segment(self):
-        case = {"court_cases": ["https://jawafdehi.org/courtcase/district/081-cr-0098"]}
+    def test_real_full_iri_court_cases_never_match_donor_selector(self):
+        # THE central pin for this revert: real court_cases are full IRIs,
+        # not colon-prefixed -- the donor's selector must NOT match them.
+        case = {"court_cases": ["https://jawafdehi.org/courtcase/special/081-cr-0098"]}
         assert _special_case_number(case) is None
 
     def test_returns_none_when_no_court_cases_at_all(self):
@@ -639,23 +651,16 @@ class TestSpecialCaseNumber:
 
 
 class _NgmStubApi:
-    def __init__(self, case_response=None, hearings_response=None,
-                 fail_case=False, fail_hearings=False):
-        self.case_response = case_response
-        self.hearings_response = hearings_response
-        self.fail_case = fail_case
-        self.fail_hearings = fail_hearings
+    def __init__(self, response=None, fail=False):
+        self.response = response
+        self.fail = fail
         self.requested_paths = []
 
     def get(self, path, params=None, timeout=60):
         self.requested_paths.append(path)
-        if path.endswith("/hearings/"):
-            if self.fail_hearings:
-                raise RuntimeError("hearings endpoint down")
-            return self.hearings_response
-        if self.fail_case:
-            raise RuntimeError("case endpoint down")
-        return self.case_response
+        if self.fail:
+            raise RuntimeError("NGM endpoint down")
+        return self.response
 
 
 class TestGetNgmData:
@@ -664,49 +669,39 @@ class TestGetNgmData:
         assert _get_ngm_data({}, api) is None
         assert api.requested_paths == []
 
-    def test_merges_case_and_hearings_from_the_composite_endpoint(self):
-        api = _NgmStubApi(
-            case_response={
-                "registration_date_ad": "2023-01-01", "case_status": "PENDING",
-                "case_number": "081-cr-0098",
-            },
-            hearings_response={"results": [
-                {"hearing_date_ad": "2024-01-15", "decision_type": "पेशी तारेख"}]},
-        )
-        case = {"court_cases": ["https://jawafdehi.org/courtcase/special/081-cr-0098"]}
-        data = _get_ngm_data(case, api)
-        assert data["registration_date_ad"] == "2023-01-01"
-        assert data["case_status"] == "PENDING"
-        assert len(data["hearings"]) == 1
-        assert "/courtcases/special/081-cr-0098/" in api.requested_paths
-        assert "/courtcases/special/081-cr-0098/hearings/" in api.requested_paths
-
-    def test_no_verdict_fields_are_fabricated(self):
-        # CourtCaseSerializer has no verdict_date_ad/verdict_judge -- confirm
-        # this port does not invent them.
-        api = _NgmStubApi(
-            case_response={"registration_date_ad": "2023-01-01"},
-            hearings_response={"results": []},
-        )
-        case = {"court_cases": ["https://jawafdehi.org/courtcase/special/081-cr-0098"]}
-        data = _get_ngm_data(case, api)
-        assert "verdict_date_ad" not in data
-        assert "verdict_judge" not in data
-
-    def test_case_fetch_failure_returns_none(self):
-        api = _NgmStubApi(fail_case=True)
+    def test_real_full_iri_case_gets_no_ngm_section_at_all(self):
+        # THE donor-faithful pin required by the revert: a case whose
+        # court_cases are full IRIs (the only shape real data ever has) must
+        # get NO NGM data -- and must not even attempt an HTTP call, since
+        # the donor's own selector never matches it either.
+        api = _NgmStubApi(response={"registration_date_ad": "2023-01-01"})
         case = {"court_cases": ["https://jawafdehi.org/courtcase/special/081-cr-0098"]}
         assert _get_ngm_data(case, api) is None
+        assert api.requested_paths == []
 
-    def test_hearings_fetch_failure_is_best_effort_not_fatal(self):
-        api = _NgmStubApi(
-            case_response={"registration_date_ad": "2023-01-01"},
-            fail_hearings=True,
-        )
-        case = {"court_cases": ["https://jawafdehi.org/courtcase/special/081-cr-0098"]}
+    def test_donor_colon_prefixed_ref_calls_the_donor_endpoint_and_returns_data(self):
+        api = _NgmStubApi(response={
+            "registration_date_ad": "2023-01-01", "case_status": "PENDING",
+        })
+        case = {"court_cases": ["special:081-cr-0098"]}
         data = _get_ngm_data(case, api)
-        assert data is not None
-        assert data["hearings"] == []
+        assert data == {"registration_date_ad": "2023-01-01", "case_status": "PENDING"}
+        assert api.requested_paths == ["/ngm/court_case/special:081-cr-0098"]
+
+    def test_query_failure_returns_none(self):
+        api = _NgmStubApi(fail=True)
+        case = {"court_cases": ["special:081-cr-0098"]}
+        assert _get_ngm_data(case, api) is None
+
+    def test_error_shaped_response_returns_none(self):
+        api = _NgmStubApi(response={"error": "not found"})
+        case = {"court_cases": ["special:081-cr-0098"]}
+        assert _get_ngm_data(case, api) is None
+
+    def test_non_dict_response_returns_none(self):
+        api = _NgmStubApi(response=["not", "a", "dict"])
+        case = {"court_cases": ["special:081-cr-0098"]}
+        assert _get_ngm_data(case, api) is None
 
 
 # --------------------------------------------------------------------------

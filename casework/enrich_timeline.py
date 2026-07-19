@@ -26,31 +26,48 @@ silently "fixed" -- see task-14c-report.md for the full writeup):
    out of scope. This port does not invent a duplicate client-side check the
    donor never had.
 
-2. NGM ENDPOINT MIGRATED. The donor's `_get_ngm_data` called
+2. NGM PATH IS DEAD ON CURRENT DATA -- PRESERVED AS-IS, NOT RESURRECTED.
+   `_get_ngm_data` is ported VERBATIM from the donor (`0321a85:enrich_timeline.py:430`):
+   it selects `case["court_cases"]` entries that are colon-prefixed strings
+   shaped `"special:NNN-CR-NNNN"`, then calls the donor's own
    `GET /ngm/court_case/{special:NNN-CR-NNNN}` -- a single flat payload
    (registration/verdict dates, case_status, embedded hearings) from the
-   pre-collapse FastAPI NGM service. That route is GONE (see `config/urls.py`:
-   "HARD CUT (2026-07-01): the former `/api/nes/` and `/api/ngm/` prefixes are
-   removed"). The current read plane is `courts.urls` at
-   `/api/courtcases/{court}/{case_number}/` (composite key) plus a separate
-   `/hearings/` sub-resource. `_get_ngm_data` here is rewired to call both.
-   Two further real differences from the donor payload, not overcome-able by
-   rewiring alone:
-     - `CourtCaseSerializer` (courts/serializers.py) has NO `verdict_date_ad`
-       or `verdict_judge` field at all -- the current schema does not model a
-       verdict date/judge on the court case row. Those keys are simply never
-       populated in `ngm_data` here; `_format_ngm_section` (ported verbatim)
-       already treats them as optional via `.get()`, so this degrades
-       silently and safely (the section is omitted) rather than crashing or
-       fabricating a verdict date.
-     - Hearings are fetched as a single page (`PlatformCursorPagination`,
-       `page_size=50`; see `jawafdehi_shared/drf/base.py`), not the donor's
-       complete list. 50 covers ordinary case hearing counts; a case with a
-       longer procedural history could have earlier hearings omitted from the
-       NGM context section. This is a best-effort context aid for anchoring
-       LLM-proposed dates, not the entries source of truth (that is
-       source_text below), so a truncated hearing list degrades the anchor's
-       completeness, not its correctness.
+   pre-collapse FastAPI NGM service.
+
+   An earlier version of this port rewired this lookup to the current
+   `/api/courtcases/{court}/{case_number}/` + `.../hearings/` composite-key
+   endpoints, reasoning that the donor's `/ngm/court_case/` route is GONE
+   (see `config/urls.py`: "HARD CUT (2026-07-01): the former `/api/nes/` and
+   `/api/ngm/` prefixes are removed"). That rewire was REVERTED (2026-07-19):
+   real `court_cases` values are full courtcase IRIs -- e.g.
+   `https://jawafdehi.org/courtcase/special/081-cr-0091` -- NEVER
+   colon-prefixed. Measured against the local seeded DB: 0 of 109
+   `court_cases` entries are colon-prefixed. So the donor's own
+   `special_ref` selection ALWAYS returns `None`, and `_get_ngm_data` ALWAYS
+   returns `None` before any HTTP call is even attempted -- this whole path
+   has been dead code since the colon-prefix IRI shape was retired, well
+   before the 2026-07-01 endpoint removal made it doubly so. This is the
+   third instance of the same colon-prefix-vs-full-IRI bug on this project:
+   the others are `enrich_tags._detect_court_context` (ported faithfully,
+   same dead selector) and `casework/common/select.py::_parts` (which
+   handles the full-IRI shape correctly and exists specifically to guard
+   against this).
+
+   Rewiring the endpoint call would have made the port emit NGM hearing
+   context that the donor's *actual* behavior on current data never
+   produces -- Task 16's port-vs-donor A/B would then measure
+   port-plus-resurrected-feature rather than the port, which defeats the
+   purpose of the benchmark. So `_get_ngm_data` and its call site are kept
+   INTACT, calling the donor's colon-prefix selector and the donor's own
+   (now-404ing) `/ngm/court_case/` endpoint, deliberately inert rather than
+   fixed. `_format_ngm_section` (ported verbatim) already treats every field
+   as optional via `.get()`, including `verdict_date_ad`/`verdict_judge` --
+   which `CourtCaseSerializer` (courts/serializers.py) does not even model --
+   so if this path were ever resurrected against the current schema it would
+   still degrade silently rather than crash or fabricate a verdict date.
+   Resurrecting NGM-anchored hearing context against the current
+   `/api/courtcases/...` read plane, if ever wanted, is upstream follow-up
+   work -- not done here, and not to be done by silently "fixing" this port.
 
 3. FOUR-WAY SOURCE PRIORITY COLLAPSED TO TWO. The donor's
    `MILESTONE_SOURCE_TYPES` ordered FOUR old `DocumentSource.source_type`
@@ -110,7 +127,7 @@ from casework.common.pipeline import (
     RunReport,
     unmet_prerequisites,
 )
-from casework.common.select import COURTCASE_SEGMENT, SPECIAL_COURT, select_cases
+from casework.common.select import select_cases
 
 log = logging.getLogger("casework.enrich_timeline")
 
@@ -457,66 +474,74 @@ def _assemble_source_text(court_text: str, press_text: str, invoke_text, usage) 
 
 
 def _special_case_number(case: dict) -> Optional[str]:
-    """Extract the special-court case number from `case["court_cases"]` IRIs.
+    """Extract the donor's colon-prefixed special-court reference from
+    `case["court_cases"]`, e.g. `"special:081-cr-0091"` -> `"081-cr-0091"`.
 
-    Adapted from the donor's `_get_ngm_data`, which scanned for a
-    "special:NNN-CR-NNNN"-shaped string (the pre-collapse court-reference
-    format). The current `court_cases` entries are full courtcase IRIs
-    (".../courtcase/special/081-cr-0098" -- see `casework.common.select`),
-    so this scans for the SPECIAL_COURT segment instead of a colon prefix.
+    Ported VERBATIM from the donor's `_get_ngm_data` (commit `0321a85`,
+    `enrich_timeline.py:432-439`), which scanned for a
+    `"special:NNN-CR-NNNN"`-shaped string -- the pre-collapse court-reference
+    format.
+
+    DEAD ON CURRENT DATA, PRESERVED DELIBERATELY -- see module docstring,
+    concern 2. Real `court_cases` entries are full courtcase IRIs (e.g.
+    `https://jawafdehi.org/courtcase/special/081-cr-0091`), never
+    colon-prefixed: measured 0 of 109 `court_cases` entries colon-prefixed
+    against the local seeded DB (2026-07-19). So this always returns `None`
+    on current data -- that is the donor's actual behavior, not a bug
+    introduced by this port, and it is not "fixed" here to match the IRI
+    shape (that would resurrect a feature the donor itself cannot produce;
+    see `_get_ngm_data` below).
     """
-    segment = f"{COURTCASE_SEGMENT}{SPECIAL_COURT}/"
-    for ref in case.get("court_cases") or []:
-        if not isinstance(ref, str):
-            continue
-        lowered = ref.lower()
-        idx = lowered.find(segment)
-        if idx == -1:
-            continue
-        tail = ref[idx + len(segment) :].strip("/")
-        number = tail.split("/")[0] if tail else ""
-        if number:
-            return number.lower()
-    return None
+    return next(
+        (
+            ref.split(":", 1)[1]
+            for ref in (case.get("court_cases") or [])
+            if isinstance(ref, str) and ref.startswith("special:")
+        ),
+        None,
+    )
 
 
 def _get_ngm_data(case: dict, api: CaseworkApi) -> Optional[dict]:
-    """Fetch NGM court-case + hearing records for the case's special-court ref.
+    """Fetch NGM hearing records for the case's special-court reference.
 
-    Rewired for the current `/api/courtcases/{court}/{case_number}/` +
-    `.../hearings/` composite-key read plane (see module docstring, concern 2)
-    -- the donor's single `/ngm/court_case/{ref}` endpoint no longer exists.
-    Best-effort: any failure returns None rather than aborting the case.
+    Ported VERBATIM from the donor (commit `0321a85`, `enrich_timeline.py:430-452`):
+    calls the donor's own single flat `GET /ngm/court_case/{special:NNN-CR-NNNN}`
+    endpoint using the colon-prefixed reference from `_special_case_number`.
+
+    DEAD ON CURRENT DATA, PRESERVED DELIBERATELY -- see module docstring,
+    concern 2 for the full writeup. Two independent reasons this path never
+    fires today, doubly-dead:
+      1. `_special_case_number` never matches (0/109 colon-prefixed,
+         measured 2026-07-19) -- `special_ref` is always `None`, so this
+         function returns `None` before any HTTP call is attempted.
+      2. Even if it matched, the donor's `/ngm/court_case/` endpoint no
+         longer exists -- removed in the 2026-07-01 hard cut (`config/urls.py`).
+    This is kept dead-but-intact -- not stubbed into a bare `return None` by
+    a different route -- so a future reader can see exactly what the donor
+    did and why it no longer does anything, and so Task 16's port-vs-donor
+    A/B measures the port against the donor's ACTUAL behavior on current
+    data rather than a resurrected feature. Best-effort regardless: any
+    failure returns None rather than aborting the case -- the donor caught
+    `requests.HTTPError` specifically; widened to `Exception` here since
+    `CaseworkApi` (urllib-based) raises `urllib.error.HTTPError`, not
+    `requests.HTTPError` (same widening rationale as `main()`'s detail-fetch
+    fallback below, and as `enrich_allegations.py`'s identical note).
     """
-    number = _special_case_number(case)
-    if not number:
+    special_ref = _special_case_number(case)
+    if not special_ref:
         return None
 
-    quoted = urllib.parse.quote(number)
+    quoted = urllib.parse.quote(f"special:{special_ref}", safe=":")
     try:
-        detail = api.get(f"/courtcases/{SPECIAL_COURT}/{quoted}/")
+        data = api.get(f"/ngm/court_case/{quoted}")
     except Exception as exc:
-        log.warning("NGM case query failed for %s: %s", number, exc)
-        return None
-    if not isinstance(detail, dict):
+        log.warning("NGM query failed for %s: %s", special_ref, exc)
         return None
 
-    hearings = []
-    try:
-        hearing_page = api.get(f"/courtcases/{SPECIAL_COURT}/{quoted}/hearings/")
-        if isinstance(hearing_page, dict):
-            hearings = hearing_page.get("results") or []
-    except Exception as exc:
-        log.warning("NGM hearings query failed for %s: %s", number, exc)
-
-    return {
-        "registration_date_ad": detail.get("registration_date_ad"),
-        "case_status": detail.get("case_status"),
-        "hearings": hearings,
-        # NOTE: no verdict_date_ad / verdict_judge -- CourtCaseSerializer does
-        # not model them (see module docstring, concern 2). _format_ngm_section
-        # treats both as optional via .get(), so this degrades silently.
-    }
+    if not isinstance(data, dict) or data.get("error"):
+        return None
+    return data
 
 
 def _format_ngm_section(ngm_data: Optional[dict]) -> str:
