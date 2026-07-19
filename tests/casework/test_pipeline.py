@@ -143,10 +143,19 @@ def test_entities_accepts_press_release_alone():
     assert unmet_prerequisites(STAGES["entities"], CASE_MD) == []
 
 
-def test_entities_requires_materials_includes_court_types():
-    from casework.common.pipeline import COURT_TYPES, PRESS_TYPES
-    assert set(COURT_TYPES) <= set(STAGES["entities"].requires_materials)
-    assert set(PRESS_TYPES) <= set(STAGES["entities"].requires_materials)
+def test_entities_requires_materials_is_exactly_press_and_court_types():
+    # Pins the LITERAL membership, not PRESS_TYPES/COURT_TYPES against
+    # themselves: `requires_materials` IS `PRESS_TYPES + COURT_TYPES`, so
+    # `set(COURT_TYPES) <= set(STAGES["entities"].requires_materials)` and
+    # `set(PRESS_TYPES) <= set(...)` compare each constant to its own
+    # definition and can never fail no matter what either constant contains
+    # -- proven by deleting "charge_sheet" from PRESS_TYPES, which left the
+    # whole suite green. "charge_sheet" is load-bearing (Task 8: 100%
+    # MARKDOWN coverage vs. 8.6% for "press_release"), so this asserts the
+    # actual expected literal strings.
+    assert set(STAGES["entities"].requires_materials) == {
+        "press_release", "ciaa_press_release", "charge_sheet", "court_order",
+    }
 
 
 def test_run_report_separates_unmet_from_skipped():
