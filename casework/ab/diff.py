@@ -226,9 +226,16 @@ def compare_field(field, a, b, g):
     }
 
 
+# Verdicts that are NOT evidence of agreement or disagreement and must stay
+# out of every rate: `no_output` (neither arm produced anything) and
+# `readback_error` (we failed to MEASURE the row at all). Counting either as
+# a comparable row would let a broken run report an agreement percentage.
+NON_COMPARABLE = ("no_output", "readback_error")
+
+
 def _rates(rows):
-    """Agreement rates over COMPARABLE rows only (no_output excluded)."""
-    comparable = [r for r in rows if r["verdict"] != "no_output"]
+    """Agreement rates over COMPARABLE rows only."""
+    comparable = [r for r in rows if r["verdict"] not in NON_COMPARABLE]
     n = len(comparable)
     agree = sum(1 for r in comparable if r["verdict"] == "all_agree")
     ab_agree = sum(1 for r in comparable if r["verdict"] in AB_AGREE)

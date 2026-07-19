@@ -113,6 +113,26 @@ def test_no_output_rows_are_excluded_from_agreement_rate():
     assert rep["counts"]["no_output"] == 2
 
 
+def test_readback_error_is_excluded_from_the_agreement_rate():
+    """A row we failed to MEASURE is not evidence of agreement either way."""
+    rows = [
+        {"slug": "a", "field": "bigo", "verdict": "all_agree"},
+        {"slug": "b", "field": "bigo", "verdict": "readback_error"},
+    ]
+    rep = three_way_report(rows)
+    assert rep["comparable"] == 1
+    assert rep["agreement_rate"] == 1.0
+    assert rep["counts"]["readback_error"] == 1
+
+
+def test_a_run_of_only_readback_errors_has_no_agreement_rate():
+    rows = [{"slug": "a", "field": "bigo", "verdict": "readback_error"}]
+    rep = three_way_report(rows)
+    assert rep["agreement_rate"] is None
+    assert rep["ab_agreement_rate"] is None
+    assert rep["comparable"] == 0
+
+
 def test_agreement_rate_is_none_when_nothing_was_comparable():
     """Both arms produced nothing across the board -> no rate, not 100%."""
     rows = [

@@ -291,6 +291,23 @@ def test_a_case_where_neither_arm_produced_anything_is_no_output():
     assert {r["verdict"] for r in rows} == {"no_output"}
 
 
+def test_readback_failure_is_flagged_not_read_as_empty_output():
+    """An arm whose values could not be read back must not be scored as
+    'produced nothing' -- that is a measurement failure, not a result."""
+    good = {"s1": {"bigo": 100, "tags": [], "timeline": [], "key_allegations": []}}
+    broken = {"s1": {"_error": "HTTP 500"}}
+    rows = build_rows(["s1"], good, broken, {}, {}, {})
+    assert all(r["verdict"] == "readback_error" for r in rows)
+    assert all(r["readback_error"] == ["B"] for r in rows)
+
+
+def test_rows_without_readback_errors_record_an_empty_flag():
+    ok = {"s1": {"bigo": 1, "tags": [], "timeline": [], "key_allegations": []}}
+    rows = build_rows(["s1"], ok, ok, {}, {}, {})
+    assert all(r["readback_error"] == [] for r in rows)
+    assert not any(r["verdict"] == "readback_error" for r in rows)
+
+
 def test_entity_rows_use_extracted_names_not_case_fields():
     rows = build_rows(["s1"], {"s1": {}}, {"s1": {}}, {},
                       {"s1": {"names": ["A"]}}, {"s1": {"names": ["A"]}})

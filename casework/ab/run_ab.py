@@ -356,11 +356,19 @@ def parse_outcomes(stdout, slugs):
 
 
 def build_rows(slugs, arm_a, arm_b, golden, entities_a, entities_b):
-    """One comparison row per case per field."""
+    """One comparison row per case per field.
+
+    A failed READBACK is flagged explicitly. Without that flag an arm whose
+    values could not be read back would look exactly like an arm that
+    produced nothing -- a measurement failure silently reported as a
+    behavioural result.
+    """
     rows = []
     for slug in slugs:
         a, b = arm_a.get(slug, {}), arm_b.get(slug, {})
         g = golden.get(slug, {})
+        readback_error = {
+            arm for arm, vals in (("A", a), ("B", b)) if "_error" in vals}
         for stage, field in COMPARE_FIELDS.items():
             if stage == "entities":
                 va = entities_a.get(slug, {}).get("names") or []
@@ -372,6 +380,10 @@ def build_rows(slugs, arm_a, arm_b, golden, entities_a, entities_b):
                                 va, vb, vg)
             row["slug"] = slug
             row["stage"] = stage
+            row["readback_error"] = sorted(readback_error)
+            if readback_error:
+                # Not a behavioural verdict: we failed to MEASURE this row.
+                row["verdict"] = "readback_error"
             rows.append(row)
     return rows
 
