@@ -11,141 +11,293 @@ against today's API and schema.
 
 **Rule followed throughout:** patch only what prevents the donor code from
 running against today's schema/endpoints. Never patch to fix a bug, improve
-output, or nudge Arm A's results toward the ported code's results. Where a
-donor check no longer matches today's data and fixing it would change *what
-gets extracted* (as opposed to merely *where in the payload* the check looks),
-the check was left broken and the resulting behavior is documented below and in
-the runnability table, per the task's Rule 3.
+output, or nudge Arm A's results toward the ported code's results — **with one
+authorized exception**: an explicit, documented input adapter that reconnects
+the donor's input pipe (see "The adapter" below). That one exception is
+classified BEHAVIOURAL and called out loudly rather than folded quietly into
+the mechanical patch count.
 
-## Patch table
+## Revision note
 
-All 10 patches below are classified **MECHANICAL**: each is a straight
-field/module/transport rename forced by schema or backend evolution since
-June 2026, with the donor's actual selection/extraction *semantics* left
-untouched. Two of them carry a caveat (marked below) because, unlike a pure
-import-path fix, they determine *which cases get selected at all* — flagged
-loudly rather than silently filed under "mechanical, nothing to see here."
+An earlier version of this document (and of the Arm A scratch tree) patched
+`entry["source"]` → `entry["material"]` / `source_type` → `material_type`
+directly inside `common.py` and four of the five enrichers, while leaving the
+`"CIAA_PRESS_RELEASE"`/`"COURT_ORDER"` literal *value* comparisons untouched.
+That patch made the field lookups succeed, but the value comparisons still
+never matched today's lowercase `material_type` vocabulary — so
+`enrich_missing_bigo`, `enrich_allegations`, `enrich_timeline`, and
+`enrich_related_entities` all completed but found **zero** usable evidence
+text for every case (verified directly, including against a case with real
+attached evidence). Independent verification confirmed this precisely: 0 of
+139 evidence entries in the sample carry a `source` key at all; the vocabulary
+changed together with the field name (the `DocumentSource` → `Material`
+rename), not just the field name alone.
 
-| # | File | Function | What changed | Why unavoidable | Class |
-|---|------|----------|--------------|------------------|-------|
-| 1 | `casework/common.py` | `bootstrap()` | `DJANGO_SETTINGS_MODULE` default `"config.settings_scripts"` → `"config.settings"` | The "R1 collapse" removed the separate DB-optional scripts settings module; `config.settings` is now the only settings module in the repo. Without this, `django.setup()` raises `ModuleNotFoundError` immediately — nothing runs. | MECHANICAL |
-| 2 | `casework/common.py` | `CaseworkApi.__init__` | Donor sent `Authorization: Token <token>` and hard-`raise`d if no token was given. Patched to also accept HTTP Basic (`JAWAFDEHI_API_BASIC_USER`/`JAWAFDEHI_API_BASIC_PASS`) when no token is supplied, falling back to Basic instead of raising. | The backend has no DRF `TokenAuthentication` at all anymore (OIDC/Zitadel only, or the local-only `DEV_AUTH` Basic/Session fallback documented in `casework/ab/README.md`). A bearer/token header has nothing to authenticate against locally; Basic against the local `abgen` superuser is the only working local credential. | MECHANICAL |
-| 3 | `casework/common.py` | `is_ciaa_special_court_case` | Also matches `.../courtcase/special/<number>` (case-insensitive), in addition to the donor's original colon-prefix `"special:..."` check (kept, not removed). | The canonical `court_cases` IRI shape changed from a colon-prefixed token to a full URL path segment. This is the *same predicate* ("does this case have a CIAA Special Court reference") re-expressed against the new encoding — no selection criterion was added, removed, or altered. **Caveat:** unlike #1/#2/#5–#10, this patch does change *which cases* `get_target_cases` yields (unpatched: zero, for every one of the 5 enrichers — verified empirically below). It changes selection, not per-case extraction; Task 16 should independently verify both arms select the same case set rather than taking this note on faith. | MECHANICAL (selection-affecting — see caveat) |
-| 4 | `casework/common.py` | `_court_number` | Also extracts the trailing path segment from a `/courtcase/<court>/<number>` IRI, in addition to the donor's original colon-suffix handling (kept). | Same IRI-shape change as #3; used by `get_target_cases`'s `--court-case` resolution path. Same caveat as #3 (only matters when `--court-case` is passed; not exercised in this task's verification, which uses no explicit slug/court-case selector). | MECHANICAL (selection-affecting — see caveat) |
-| 5 | `casework/common.py` | `content_from_evidence_entry` | `entry["source"]` → `entry["material"]`; `from sourcing import jds_client` → `from review import jds_client`; `from sourcing import converter` → `from review import converter`. | The evidence-entry field is now named `material`, not `source` (same shape: `display_name`/`material_type`/`urls`). The `sourcing` package no longer exists; `download_source_file(url) -> (bytes, content_type)` and `convert_source({"url": [...]}) -> {status, markdown, ...}` now live at `review.jds_client` / `review.converter` with **identical signatures** (verified by reading both modules) — a pure import-path move, not a logic change. | MECHANICAL |
-| 6 | `casework/common.py` | `source_content` | `entry["source"]["source_type"]` → `entry["material"]["material_type"]` (field name only — the `source_types` value set passed in by callers is untouched). | Same field rename as #5. This function is not currently called by any of the 5 ported enrichers (each does its own type filtering — see #7–#10) but is patched for consistency since the brief names it explicitly. | MECHANICAL |
-| 7 | `casework/enrich_missing_bigo.py` | `_get_source_content`, `_build_source_context_from_entry` | Same `entry["source"]`→`entry["material"]`, `source_type`→`material_type`, `sourcing.*`→`review.*` rename as #5, applied to this file's own local duplicate of the evidence-reading logic (it does not call the shared `common.py` helpers). | Same schema/module changes as #5; this file has its own copy of the logic. | MECHANICAL |
-| 8 | `casework/enrich_allegations.py` | `_get_press_release_content` | Same rename as #5 (field names only). | Same as #5. | MECHANICAL |
-| 9 | `casework/enrich_timeline.py` | `_get_source_parts` | Same rename as #5 (field names only). | Same as #5. | MECHANICAL |
-| 10 | `casework/enrich_related_entities.py` | press-release / court-order lookup loops | Same rename as #5 (field names only, two call sites). | Same as #5. | MECHANICAL |
+**Decision (made by the user, relayed by the task coordinator):** add a single,
+documented input adapter rather than leave those four enrichers structurally
+inert. The field-rename patches described in the superseded version of this
+document have been **reverted** in four of the five files (see the patch
+table below) — `enrich_allegations.py`, `enrich_timeline.py`, and
+`enrich_related_entities.py` are now **byte-identical to donor `0321a85`**;
+`enrich_missing_bigo.py` keeps only the (unrelated, still-necessary)
+`sourcing.*` → `review.*` import-path fix. The adapter is applied at a single
+choke point instead: `CaseworkApi.get_case()`.
 
-Total: **10 patches, 0 classified BEHAVIOURAL** (2 carry an explicit
-selection-affecting caveat — see #3/#4 above; this is not the same as changing
-per-case extraction results).
+## The adapter
+
+**File:** `casework/arm_a_adapter.py` (new, Arm-A-scratch-tree only).
+**Wired in at:** `casework/common.py`'s `CaseworkApi.get_case()` — the one
+method every one of the 5 enrichers' case-detail fetches converges on
+(directly, or via `get_target_cases`'s detail-fetch calls).
+
+**What it does:** for each evidence entry, if `entry["material"]["material_type"]`
+has a donor-recognised equivalent, synthesise `entry["source"] =
+{"source_type": <mapped>, "urls": entry["material"]["urls"]}` alongside the
+existing (untouched) `material` key. This restores exactly the shape and
+vocabulary the donor's `entry.get("source")` / `.get("source_type")` /
+`.get("urls")` accessors were written to read — nothing downstream of
+`get_case()` needed to change.
+
+**Mapping table** (`_MATERIAL_TO_SOURCE_TYPE` in `arm_a_adapter.py`):
+
+| `material_type` (today) | `source_type` (donor) | Rationale |
+|---|---|---|
+| `press_release` | `CIAA_PRESS_RELEASE` | Same document category; per `casework/common/pipeline.py`'s own comment, `press_release` is today's dominant (near-100%) form of what the donor called `CIAA_PRESS_RELEASE`. |
+| `ciaa_press_release` | `CIAA_PRESS_RELEASE` | Same, the less-common spelling variant. |
+| `court_order` | `COURT_ORDER` | Same document category, renamed field value only. |
+| `charge_sheet` | **unmapped — deliberately** | See below. |
+
+**Why `charge_sheet` is NOT mapped to `CIAA_PRESS_RELEASE`:** checked the
+donor's own code first, as instructed, rather than assuming. `enrich_timeline.py`'s
+`MILESTONE_SOURCE_TYPES` (line 58) treats a charge sheet as a **separate,
+higher-priority** type from `CIAA_PRESS_RELEASE`:
+```python
+MILESTONE_SOURCE_TYPES = (
+    "AG_ABHIYOG_PATRA",  # charge sheet — richest factual detail
+    "COURT_ORDER",       # granular incident chain + verdict outcome (fed before PR)
+    "CIAA_PRESS_RELEASE", # complaint / investigation / chargesheet dates
+    "COURT_FILING_OTHER",
+)
+```
+with the donor's own comment: *"the charge sheet is richer still [than
+COURT_ORDER] but is unavailable for ~all priority cases."* Folding today's
+`charge_sheet` into `CIAA_PRESS_RELEASE` would misrepresent the document type
+the donor's own logic distinguishes on — exactly the kind of "change what the
+donor sees" the adapter must not do. `charge_sheet` is therefore left
+unmapped in this task.
+
+**Open question, flagged rather than decided unilaterally:** today's
+`charge_sheet` `material_type` is plausibly the same underlying concept as the
+donor's `AG_ABHIYOG_PATRA` (both mean "the CIAA's formal charge-filing
+document"), and `enrich_timeline.py` and `enrich_description.py` (the latter
+out of scope/unported) both have donor-side logic that specifically wants
+that type. Mapping `charge_sheet` → `AG_ABHIYOG_PATRA` was outside the
+explicit scope given for this task (which named only the press-release/
+court-order mapping) and touches `enrich_timeline`'s *highest*-priority
+source type, so it was **not added**. If Task 16 wants `enrich_timeline` to
+see charge-sheet content too, that mapping needs an explicit decision, not an
+assumption — `COURT_FILING_OTHER` (also in `MILESTONE_SOURCE_TYPES`, also
+unmapped) is the same kind of open question.
+
+**What the adapter deliberately does NOT do** (see `arm_a_adapter.py`'s
+module docstring for the full statement):
+- does not populate `source.title` / `source.description` — those are
+  supplementary LLM-prompt-context metadata, never the primary document
+  text, and inventing values for fields today's `Material` object doesn't
+  carry would be manufacturing donor input rather than restoring it.
+- does not touch any prompt, truncation limit, threshold, or model tier
+  inside any enricher.
+- does not change how `urls` are selected/prioritized among roles — it
+  passes `material["urls"]` through unchanged, so the donor's own
+  MARKDOWN-role-link selection in `content_from_evidence_entry` picks the
+  identical link the port's `casework/common/materials.py::markdown_link`
+  picks for the same entry.
+
+## Classification
+
+**1 BEHAVIOURAL patch** (the adapter, at `CaseworkApi.get_case()`) — it
+changes Arm A's output from **nothing** (for 4 of 5 enrichers) to **real
+extraction**, which is unambiguously a change in what Arm A can produce. This
+is intentional and authorized, not something to obscure by counting it as
+mechanical. Every Task 16 comparison on `enrich_missing_bigo`,
+`enrich_allegations`, `enrich_timeline`, and `enrich_related_entities` now
+rests on this one patch being correct — which is exactly why the
+identical-source-text verification below exists and is load-bearing.
+
+**9 MECHANICAL patches** (unchanged in kind from the prior revision of this
+document, minus the reverted field-renames):
+
+| # | File | Function | What changed | Why unavoidable |
+|---|------|----------|--------------|------------------|
+| 1 | `casework/common.py` | `bootstrap()` | `DJANGO_SETTINGS_MODULE` default `"config.settings_scripts"` → `"config.settings"` | The "R1 collapse" removed the separate DB-optional scripts settings module; `config.settings` is the only settings module left. Without this, `django.setup()` raises `ModuleNotFoundError` immediately. |
+| 2 | `casework/common.py` | `CaseworkApi.__init__` | Donor sent `Authorization: Token <token>` and hard-raised if no token was given. Patched to also accept HTTP Basic (`JAWAFDEHI_API_BASIC_USER`/`_PASS`) when no token is supplied. | The backend has no DRF `TokenAuthentication` at all anymore (OIDC/Zitadel only, or the local-only `DEV_AUTH` Basic/Session fallback). A bearer/token header has nothing to authenticate against locally. |
+| 3 | `casework/common.py` | `is_ciaa_special_court_case` | Also matches `.../courtcase/special/<number>` (case-insensitive), alongside the donor's original colon-prefix check (kept, not removed). | Canonical `court_cases` IRI shape changed from a colon-prefixed token to a full URL path segment — the same predicate re-expressed. **Caveat:** unlike the other mechanical patches, this one changes *which cases* are selected (unpatched: zero, for all 5 enrichers, verified). Task 16 should independently verify both arms select the same case set. |
+| 4 | `casework/common.py` | `_court_number` | Also extracts the trailing path segment from a `/courtcase/<court>/<number>` IRI, alongside the donor's original colon-suffix handling (kept). | Same IRI-shape change as #3; used by `--court-case` resolution. Same caveat. |
+| 5 | `casework/common.py` | `content_from_evidence_entry` | `from sourcing import jds_client` → `from review import jds_client`; `from sourcing import converter` → `from review import converter`. **The `entry.get("source")` / `source_type` accessors are UNCHANGED donor code** — the adapter supplies `entry["source"]` upstream. | The `sourcing` package no longer exists; `download_source_file(url) -> (bytes, content_type)` and `convert_source({"url": [...]}) -> {status, markdown, ...}` now live at `review.jds_client` / `review.converter` with **identical signatures** (verified by reading both modules) — a pure import-path move. |
+| 6 | `casework/common.py` | `source_content` | No code change beyond the docstring note that its (unused by the 5 target enrichers) `entry.get("source")`/`source_type` accessors are also unchanged donor code, fed by the same adapter. | Documentation only; kept for consistency since this document previously described a patch here. |
+| 7 | `casework/enrich_missing_bigo.py` | `_get_source_content`, `_build_source_context_from_entry` | Same `sourcing.*` → `review.*` import-path fix as #5, applied locally (this file duplicates the evidence-reading logic rather than calling `common.py`'s). **`entry.get("source")`/`source_type` accessors are UNCHANGED donor code.** | Same as #5 — this file has its own copy of the import. |
+| 8 | `casework/enrich_allegations.py` | — | **No changes.** Byte-identical to donor `0321a85`. | The adapter at `CaseworkApi.get_case()` makes this file's original `entry.get("source")` code work unmodified. |
+| 9 | `casework/enrich_timeline.py`, `casework/enrich_related_entities.py` | — | **No changes.** Byte-identical to donor `0321a85`. | Same as #8. |
+
+(`enrich_tags.py` needed **no material-reading patch at all**, before or
+after the adapter — it classifies from case title/description/
+key_allegations/court_cases/bigo metadata only, never evidence content;
+confirmed by reading `_collect_case_text`/`classify_case_rules`.)
 
 ## Deliberately NOT patched (preserved donor behavior / dead code)
 
 - **`enrich_timeline._get_ngm_data`** (colon-prefix `"special:"` selector for
   the NGM lookup) — confirmed dead: 0 of the case's `court_cases` entries are
   colon-prefixed under today's full-IRI encoding, so `special_ref` is always
-  `None` and the (now-removed, 2026-07-01) `/ngm/court_case/` endpoint is never
-  called. Verified empirically: running `enrich_timeline` against a case with
-  real evidence produced no NGM-related log line or HTTP call. **Not patched**,
-  per the task brief's explicit instruction to preserve this as dead code.
+  `None` and the (now-removed, 2026-07-01) `/ngm/court_case/` endpoint is
+  never called. Re-verified after the adapter: running `enrich_timeline`
+  against a real-evidence case printed `NGM data: none` with no NGM-related
+  HTTP call in the verbose log. **Not patched**, per instruction.
 - **`enrich_tags._detect_court_context`** (identical colon-prefix bug) —
-  confirmed dead the same way: "Special Court" / "Supreme Court" tags never
-  fire. Verified empirically: three real special-court cases were rule-tagged
-  (`Education`, `Gandaki`, `CIAA`, `Corruption`, etc.) and never once produced
-  a "Special Court" tag. **Not patched.**
+  confirmed dead the same way: rule-tagging three real special-court cases
+  never produced a "Special Court" tag. **Not patched.**
 - **`enrich_related_entities.create_entity(display_name, nes_id="")`** +
   `{"entity": <int id>}` patch payload — the current
-  `EntityPatchItemSerializer` requires a canonical NES `@id` IRI, not a bare
-  integer id with an empty `nes_id`. **Not patched** (the port is
-  extraction-only for exactly this reason). **Not observed this task**: the
-  `create_entity`/patch call sits behind an `if dry_run: return` guard that
-  fires *before* it, so a `--dry-run` run (all this task performs) never
-  reaches it — the expected 400 can only be observed by Task 16's `--apply`
-  run.
-- **A third, previously unflagged dead path, discovered during this task's
-  verification**: the donor's `stype == "CIAA_PRESS_RELEASE"` /
-  `== "COURT_ORDER"` literal string comparisons — present, unchanged, in
-  `enrich_missing_bigo._get_source_content`, `enrich_allegations._get_press_release_content`,
-  `enrich_timeline._get_source_parts` (via `MILESTONE_SOURCE_TYPES`), and both
-  loops in `enrich_related_entities` — **never match today's `material_type`
-  taxonomy**, which is lowercase snake_case (`press_release`, `court_order`,
-  `news`; confirmed via the local API and via
-  `casework/common/pipeline.py`'s own `PRESS_TYPES = ("press_release",
-  "ciaa_press_release", "charge_sheet")` comment, which records this exact
-  taxonomy shift as an empirically-verified finding from the port work).
-  Verified directly: `enrich_missing_bigo --slug
-  chandra-singh-lama-embezzlement-080-cr-0067 --force --dry-run` against a
-  case whose evidence genuinely includes a `press_release` material still
-  reports "No press-release source content found" — 0 matches, every time.
-  **Not patched.** Fixing the field *name* (`source`→`material`,
-  `source_type`→`material_type`, patches #5–#10 above) was required just to
-  read the right sub-object at all; changing the *value* being compared
-  against (`"CIAA_PRESS_RELEASE"` → `"press_release"`) would be "porting a
-  June fix forward" / aligning Arm A's results with the current taxonomy,
-  which Rule 1 forbids. Left broken, per Rule 3: a missing datapoint here is
-  honest, a reconstructed one would be misleading.
+  `EntityPatchItemSerializer` requires a canonical NES `@id` IRI. **Not
+  patched** (the port is extraction-only for exactly this reason). **Still
+  not observed this task** even with the adapter: `create_entity` sits behind
+  an `if dry_run: return` guard, and this task is `--dry-run` only. With the
+  adapter, the enricher now genuinely reaches real extraction (see
+  runnability table) and prints what it *would* PATCH — 3 entities, in the
+  one real-evidence case tested — but the write itself, and its expected 400,
+  is Task 16's to observe under `--apply`.
+- **The `charge_sheet`/`AG_ABHIYOG_PATRA`/`COURT_FILING_OTHER` mapping
+  question** — see "The adapter" section above. Left unmapped, flagged for
+  an explicit decision.
 - **`casework/common.py`'s `matches_fiscal_year` and `special_court_number`**
-  retain their original colon-based logic, unpatched. Not named in the brief's
-  authorized IRI-selection category (which names only
-  `is_ciaa_special_court_case` / `_court_number`), not exercised by any of the
-  5 target enrichers' default (no `--fiscal-year`) runs in this task, and
-  `special_court_number` is only used by the out-of-scope, unported
-  `enrich_description.py` / `enrich_title.py`.
-- **`enrich_missing_bigo._build_source_context_from_entry`**'s
-  `source.get('title')` / `source.get('description')` — today's `material`
-  dict carries `display_name`, not `title`/`description`, so these always
-  render blank in the LLM prompt context. Not patched: cosmetic (doesn't block
-  execution), and moot in practice since this code path is only reached after
-  `_get_source_content` finds usable content, which (per the point above)
-  never happens under today's data.
+  retain their original colon-based logic, unpatched — not named in the
+  authorized IRI-selection category, not exercised by any of the 5 target
+  enrichers' default (no `--fiscal-year`) runs, and `special_court_number` is
+  only used by the out-of-scope, unported `enrich_description.py`/`enrich_title.py`.
+- **The donor's `len(text) > 200` adequacy gate** in
+  `content_from_evidence_entry` (accepting a MARKDOWN-derived text only if it
+  exceeds 200 chars, else falling through to RAW conversion, then `None`) —
+  untouched, pre-existing donor logic. Noted here because it is a real,
+  narrow source of potential divergence from the port's own
+  `materials.py::source_text` (which has no such gate — see next section) on
+  the rare evidence entry with very short markdown text; not a defect in the
+  adapter.
+
+## Identical-source-text verification
+
+**Property being verified:** for a given evidence entry, does Arm A (via the
+adapter) resolve the exact same underlying document text that the port's
+`casework/common/materials.py` resolves for that same entry? This is checked
+**per evidence entry**, not as an aggregate per case — the donor's own
+per-enricher functions (`enrich_allegations._get_press_release_content`,
+`enrich_related_entities`'s two loops, `enrich_missing_bigo._get_source_content`)
+only look at the *first* matching entry and stop, while the port's
+`materials.py::source_text` concatenates *all* matching entries — a
+pre-existing, out-of-scope difference in aggregation logic between donor and
+port that predates this task. Comparing per-entry isolates exactly what the
+adapter is responsible for (finding + fetching the right URL) from that
+unrelated scope difference.
+
+**Method:** loaded `casework/common/materials.py` (port) and `casework/common.py`
++ `casework/arm_a_adapter.py` (Arm A) by explicit file path in one Python
+process (bypassing the `casework` package-name collision between the
+worktree and the scratch tree), fetched real case JSON from the local API,
+and for every evidence entry whose `material_type` is `press_release` or
+`court_order`, compared:
+- port: `materials.markdown_link(material)` then `materials.fetch_markdown(link)`
+- Arm A: `arm_a_adapter.adapt_case()` on a copy of the entry, then the
+  donor's unmodified `content_from_evidence_entry(entry)`
+
+**Sample:** 6 cases (the known real-evidence case
+`chandra-singh-lama-embezzlement-080-cr-0067`, plus 5 more discovered by
+scanning local DRAFT cases for `press_release`/`court_order` material),
+covering **12 evidence entries** (6 press-release + 6 court-order).
+
+**Result: 12/12 exact text matches (byte-for-byte string equality), 0
+mismatches.**
+
+```
+chandra-singh-lama-embezzlement-080-cr-0067 [0] press_release  port=1255  arm_a=1255  MATCH
+chandra-singh-lama-embezzlement-080-cr-0067 [1] court_order    port=60174 arm_a=60174 MATCH
+case-080-cr-0216-080-cr-0216-bd100e         [0] press_release  port=1536  arm_a=1536  MATCH
+case-080-cr-0216-080-cr-0216-bd100e         [1] court_order    port=25828 arm_a=25828 MATCH
+case-080-cr-0215-080-cr-0215-a99de4         [0] press_release  port=868   arm_a=868   MATCH
+case-080-cr-0215-080-cr-0215-a99de4         [1] court_order    port=16283 arm_a=16283 MATCH
+case-080-cr-0213-080-cr-0213-259202         [0] press_release  port=895   arm_a=895   MATCH
+case-080-cr-0213-080-cr-0213-259202         [1] court_order    port=19695 arm_a=19695 MATCH
+case-080-cr-0212-080-cr-0212-0a340a         [0] press_release  port=868   arm_a=868   MATCH
+case-080-cr-0212-080-cr-0212-0a340a         [1] court_order    port=20385 arm_a=20385 MATCH
+case-080-cr-0211-080-cr-0211-e61efd         [0] press_release  port=910   arm_a=910   MATCH
+case-080-cr-0211-080-cr-0211-e61efd         [1] court_order    port=14674 arm_a=14674 MATCH
+```
+
+No mismatches means the >200-char adequacy gate (noted above) never actually
+diverged the two arms in this sample — every markdown text in the sample was
+well over 200 chars.
+
+**Data-density context:** of the 200 local DRAFT cases sampled, 78 (39%) carry
+any evidence, and 77 carry `press_release`/`court_order` material
+specifically — so real content is common, not a rare edge case, in the local
+seed.
 
 ## Per-enricher runnability (`--dry-run`, local sqlite, `http://127.0.0.1:48010`)
 
-Verified by running each script directly:
-`DEBUG=True JAWAFDEHI_API_BASIC_USER=abgen JAWAFDEHI_API_BASIC_PASS=<local-dev-only>
-PYTHONPATH=<arm_a>:<worktree> uv run --project <worktree> python casework/<script>.py
---api-base-url http://127.0.0.1:48010 --dry-run --verbose [--limit 3]`.
+Re-verified after the adapter. PID ownership of port 48010 reconfirmed
+(`gaurav`, same PID as before) prior to these runs.
 
-| Enricher | Runs to completion? | Selects cases? | Produces real output? |
+| Enricher | Runs to completion? | Finds real source text? | Produces real output? |
 |---|---|---|---|
-| `enrich_missing_bigo` | Yes | Yes (3/3 requested, non-zero — confirms the IRI patch) | No — 0/3 cases had usable press-release content (`CIAA_PRESS_RELEASE` value mismatch, see above); completes with `cases_no_content=3`, LLM extraction never invoked. |
-| `enrich_tags` | Yes | Yes (non-zero) | **Yes** — genuine rule-based tags per case (e.g. `Education`, `Gandaki`/`Madhesh`, `Local Government`, `Procurement`, `Forged Documents`, `Witness Tampering`, `CIAA`, `Corruption`), the only one of the 5 whose extraction logic is actually exercised against real local data. "Special Court"/"Supreme Court" context tags confirmed always absent (known dead code). Optional `metadata_llm` assist (tested with `--provider claude_cli --model haiku`) hit a `claude_cli` subprocess error (`rc=1`) on one case; caught per-case (`cases_llm_error`), run still completed normally — not a blocker, unrelated to any Arm A patch. |
-| `enrich_allegations` | Yes | Yes (non-zero) | No — 0 usable press-release content (same value mismatch); completes with `cases_no_content=3`. |
-| `enrich_timeline` | Yes | Yes (non-zero) | No — 0 usable source content (same value mismatch); completes with `cases_no_content`. NGM dead-path confirmed inert: no HTTP call attempted, no crash, as predicted. |
-| `enrich_related_entities` | Yes | Yes (non-zero) | No — 0 usable press-release/court-order content (same value mismatch); completes with `cases_no_content`. The entity-create 400 (expected per the current `EntityPatchItemSerializer`) is unreachable under `--dry-run` (gated behind the dry-run check before the POST) — not observed this task.
+| `enrich_missing_bigo` | Yes | **Yes** — a batch `--limit 8` run found usable content in 1/8 selected cases (the other 7 have no evidence at all in this local seed — a data-sparsity fact, not a mismatch: confirmed via direct API check); a targeted `--slug chandra-singh-lama-embezzlement-080-cr-0067 --force` run against a case with real evidence found 1,255 chars. | **Yes** (with `--provider claude_cli --model haiku`): extracted BIGO = 913,280 — matching the case's actual, already-known `bigo` value exactly. |
+| `enrich_tags` | Yes | N/A (never reads evidence content) | **Yes** — genuine rule-based tags per case (unaffected by the adapter, unchanged from the prior verification). "Special Court"/"Supreme Court" context tags confirmed always absent (known dead code, preserved). |
+| `enrich_allegations` | Yes | **Yes** — same real-evidence case: found 1,255 chars of press-release text. | **Yes**: extracted 3 real allegations from the press release. |
+| `enrich_timeline` | Yes | **Yes** — same case: found COURT_ORDER (60,174 chars, LLM-summarised to 6,197) + CIAA_PRESS_RELEASE (1,255 chars), assembled 7,509 chars. NGM path confirmed still inert (`NGM data: none`, no HTTP call). | **Yes**: extracted 10 real, dated timeline entries (2014-12-29 through 2024-06-06), including the case's actual acquittal verdict date. |
+| `enrich_related_entities` | Yes | **Yes** — a batch `--limit 3` run found press-release + court-order content in **3/3** selected cases (14,987–15,039-char prompts assembled); a targeted run on the known case found 1,255 + 60,174 chars. | **Yes**: identified 1 location entity + 2 related entities with real descriptions, reaching the `--dry-run` "would PATCH 3 entities" gate. The entity-create 400 remains unobserved (gated behind `--dry-run`, as before) — Task 16's to confirm under `--apply`. |
 
-**All five enrichers run to completion under `--dry-run` with no crash and no
-unhandled exception.** None required a behavioural patch to reach that point.
+**All five enrichers now run to completion AND produce genuine, non-trivial,
+comparable output when given a case with real evidence** (39% of local DRAFT
+cases, per the data-density note above). This is a materially different,
+better-founded position than the pre-adapter revision of this document.
 
 ## What Task 16 can and cannot validly compare
 
 - **Can compare (selection):** for all 5 enrichers, WHICH cases each arm
-  selects — the IRI-selector patch (#3/#4) is a pure encoding adaptation of
-  the identical predicate, so a same-input, same-output selection-set
-  comparison between Arm A and the port is valid. Task 16 should still verify
-  this directly (compare selected slug sets) rather than assume it from this
-  document, given the selection-affecting caveat on those two patches.
-- **Can compare (extraction, with real output):** `enrich_tags`' rule-based
-  tag classification — the only Arm A stage that produces genuine,
-  non-trivial output against today's local data. This is a fair, load-bearing
-  A/B point.
-- **Cannot validly compare (extraction quality):** `enrich_missing_bigo`,
-  `enrich_allegations`, `enrich_timeline`, and `enrich_related_entities`.
-  Arm A structurally finds **zero** source text for all four under today's
-  `material_type` taxonomy (the donor's `CIAA_PRESS_RELEASE`/`COURT_ORDER`
-  literal checks, deliberately left unpatched, never match today's lowercase
-  values). Any Task 16 "diff" on these four's *extracted values* is Port vs.
-  Nothing, not Port vs. Donor-logic — a discovery this task made beyond the
-  brief's two named blockers (NGM dead path, tags court-context dead path).
-  If Task 16 wants a genuine extraction-logic A/B for these four, it would
-  need Arm A's donor to actually see press-release/court-order text, which
-  this task's rules forbid reconstructing.
+  selects. The IRI-selector patches (#3/#4) are a pure encoding adaptation of
+  the identical predicate. Verify independently rather than assume.
+- **Can compare (extraction quality) — now valid for all 5 enrichers**,
+  contingent entirely on the adapter and the identical-source-text
+  verification above:
+  - `enrich_tags`: rule-based tag classification (unaffected by the adapter).
+  - `enrich_missing_bigo`, `enrich_allegations`, `enrich_timeline`,
+    `enrich_related_entities`: real extraction from real, byte-identical
+    source text (verified on 12 evidence entries across 6 cases). This
+    reverses the prior revision's finding that these four were structurally
+    inert — with the adapter, they are genuinely comparable.
+  - **Caveat that still narrows the comparison**: `enrich_timeline` will not
+    see any `charge_sheet`-typed evidence (the highest-priority
+    `MILESTONE_SOURCE_TYPES` entry, `AG_ABHIYOG_PATRA`) because that mapping
+    was deliberately left undecided (see "The adapter" above). If any sampled
+    case's richest source is a charge sheet rather than a court order or
+    press release, Arm A's timeline for that case will be working from a
+    strictly poorer source set than the donor would have had in June, and
+    Task 16 should treat a timeline gap on such a case as inconclusive rather
+    than a genuine port-vs-donor difference.
+  - **Second caveat**: the donor's per-enricher functions read only the
+    *first* matching evidence entry per type (`enrich_allegations`,
+    `enrich_related_entities`, `enrich_missing_bigo`'s local duplicate all
+    `break`/return early), while the port's own enrichers aggregate *all*
+    matching entries via `materials.py::source_text`. This is a pre-existing,
+    out-of-scope difference in enrichment algorithm (not caused by the
+    adapter or by this task) that Task 16 should be aware of when a case has
+    more than one evidence entry of the same type: a diff there reflects a
+    real, intentional algorithmic difference between donor and port, not an
+    Arm A defect.
 - **Cannot observe (this task):** `enrich_related_entities`'s entity-creation
-  400. Expected once Task 16 runs `--apply` and it reaches a case with real
-  content (which, per the point above, would first require the
-  `material_type`-value gap above to somehow be crossed) — record it when it
-  actually happens rather than assuming it from this document.
+  400. Now genuinely reachable in principle (the enricher reaches real
+  extraction) but still gated behind the `--dry-run` check in the donor's own
+  code — Task 16 must run `--apply` to observe it.
+- **Everything Task 16 concludes about `enrich_missing_bigo`,
+  `enrich_allegations`, `enrich_timeline`, and `enrich_related_entities` rests
+  on the adapter and the identical-source-text property above being correct.**
+  If Task 16 finds a case where Arm A's fed text does NOT match the port's
+  resolved text for the same evidence, that is a blocker for this task's
+  conclusions and should be reported, not silently worked around.
