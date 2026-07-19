@@ -1,6 +1,9 @@
 # tests/casework/test_materials.py
+import urllib.request
+
+from casework.common.api import BROWSER_UA
 from casework.common.materials import (
-    markdown_link, materials_of_type, raw_links, source_text,
+    fetch_markdown, markdown_link, materials_of_type, raw_links, source_text,
 )
 
 CASE = {
@@ -72,6 +75,39 @@ def test_source_text_reports_fetch_failure(monkeypatch):
     text, unmet = source_text(case, api=None, types=("court_order",))
     assert text == ""
     assert any("fetch failed" in u for u in unmet)
+
+
+def test_fetch_markdown_sends_browser_user_agent(monkeypatch):
+    # The upstream WAF 403s the stdlib default `Python-urllib/3.x` UA (Task 16
+    # A/B: this silently dropped 8.1% of cases' source text). Assert the
+    # actual header on the request object -- not merely that BROWSER_UA
+    # exists somewhere in the module.
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return "content".encode("utf-8")
+
+    def fake_urlopen(req, timeout=None):
+        captured["request"] = req
+        return FakeResponse()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    text = fetch_markdown("https://x/a.md")
+
+    assert text == "content"
+    req = captured["request"]
+    assert isinstance(req, urllib.request.Request)
+    ua = req.get_header("User-agent")
+    assert ua == BROWSER_UA
+    assert not (ua or "").startswith("Python-urllib")
 
 
 def test_source_text_reports_unresolved_material():

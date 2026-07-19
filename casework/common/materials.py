@@ -8,6 +8,8 @@ and `material` resolves ONLY on the case DETAIL endpoint.
 """
 import urllib.request
 
+from casework.common.api import BROWSER_UA
+
 MARKDOWN_ROLE = "MARKDOWN"
 CONVERTIBLE_ROLES = ("RAW", "ALTERNATE", "SOURCE_PAGE")
 
@@ -41,7 +43,8 @@ def materials_of_type(case, types=None):
 
 
 def fetch_markdown(link, timeout=60):
-    with urllib.request.urlopen(link, timeout=timeout) as r:
+    req = urllib.request.Request(link, headers={"User-Agent": BROWSER_UA})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read().decode("utf-8", errors="replace")
 
 
