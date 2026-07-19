@@ -161,20 +161,43 @@ class RunBackfillDBTests(TestCase):
             CourtCase.objects.using("ngm").get(case_number="082-CR-0051").updated_at, same_before
         )
 
-    def test_muted_indexing_disconnects_then_restores_signal(self):
-        from django.db.models.signals import post_save
+    def test_execute_batches_writes_by_changed_field_group(self):
+        # Regression guard for THE point of this command: the write is batched
+        # (bulk_update), NOT one UPDATE per row — a per-row .save() loop is
+        # ~14 rows/s against the ~38ms pod↔PG RTT. Rows are grouped by their
+        # changed-column set, so six rows spanning two distinct sets collapse to
+        # exactly two UPDATEs (not six).
+        from django.db import connections
+        from django.test.utils import CaptureQueriesContext
 
-        from courts import signals as s
-        from courts.management.commands.backfill_case_status import _muted_indexing
+        for i in range(1, 4):  # header-artifact rows → group ("case_status",)
+            _mk(f"082-CR-02{i:02d}", "आदेश /फैसलाको किसिम")
+        for i in range(1, 4):  # arrow-enum rows → group ("verdict_type",)
+            _mk(f"082-CR-03{i:02d}", "फैसला / अन्तिम आदेश >> डिसमिस")
+        with CaptureQueriesContext(connections["ngm"]) as ctx:
+            stats = run_backfill(execute=True)
+        self.assertEqual(stats["rows_changed"], 6)
+        updates = [
+            q["sql"] for q in ctx.captured_queries
+            if q["sql"].lstrip().upper().startswith("UPDATE")
+        ]
+        self.assertEqual(len(updates), 2, updates)
 
-        uid = "ngm_courtcase_search_index"
-        with _muted_indexing():
-            # already disconnected inside the context → a disconnect returns False
-            self.assertFalse(post_save.disconnect(dispatch_uid=uid, sender=CourtCase))
-        # restored on exit; put it back unconditionally before asserting
-        restored = post_save.disconnect(dispatch_uid=uid, sender=CourtCase)
-        post_save.connect(s._index_courtcase, sender=CourtCase, dispatch_uid=uid)
-        self.assertTrue(restored)
+    def test_changed_row_keeps_its_unchanged_verdict_columns(self):
+        # The fixed-field bulk_update rewrites verdict_type/verdict_date for a row
+        # whose ONLY real change is clearing the header artifact. Those columns
+        # must be rewritten to their existing (loaded) values, never NULLed.
+        _mk(
+            "082-CR-0200", "आदेश /फैसलाको किसिम",
+            verdict_type="CONVICTED",
+            verdict_date_bs="2081-05-05", verdict_date_ad=date(2024, 8, 20),
+        )
+        run_backfill(execute=True)
+        c = CourtCase.objects.using("ngm").get(case_number="082-CR-0200")
+        self.assertIsNone(c.case_status)  # header cleared
+        self.assertEqual(c.verdict_type, "CONVICTED")  # preserved
+        self.assertEqual(c.verdict_date_bs, "2081-05-05")  # preserved
+        self.assertEqual(c.verdict_date_ad, date(2024, 8, 20))  # preserved
 
     def test_keyset_paginates_every_row_across_courts(self):
         for i in range(1, 4):
