@@ -208,6 +208,19 @@ def test_upload_markdown_posts_a_markdown_role_multipart_to_the_file_endpoint():
     assert link == "http://127.0.0.1:48010/media/x.md"
 
 
+def test_upload_markdown_returns_none_when_no_markdown_role_in_response():
+    """`upload_markdown`'s documented contract for "the server accepted the
+    request but attached no MARKDOWN role": return None, not a URL and not a
+    raise. The caller (main()'s `writer` closure) is what must act on this --
+    exercised end to end below."""
+    api = _FakeApi(response={"associatedMedia": [
+        {"contentUrl": "http://127.0.0.1:48010/media/x.pdf",
+         "jawafdehi:linkRole": "RAW"}]})
+    link = upload_markdown(
+        api, "https://jawafdehi.org/material/ciaa/press_releases/2572", "# x")
+    assert link is None
+
+
 def test_upload_markdown_refuses_a_non_local_api():
     """Belt-and-braces against the one catastrophic failure mode: a prod write."""
     api = _FakeApi()
@@ -342,6 +355,36 @@ def test_main_apply_writes_through_upload_markdown(stub_run, capsys):
     main(["--apply"])
     assert stub_run.uploads == ["https://jawafdehi.org/material/ciaa/press_releases/1"]
     assert "APPLIED" in capsys.readouterr().out
+
+
+def test_main_does_not_report_converted_when_upload_finds_no_markdown_role(
+    monkeypatch, capsys
+):
+    """Finding 3: `upload_markdown`'s return value was discarded in main()'s
+    `writer` closure, so a server response with no MARKDOWN role still
+    reported "converted" -- a false success this branch had zero coverage
+    of. Offline only: `upload_markdown` itself is monkeypatched, no network.
+    """
+    import casework.convert as c
+
+    api = _StubApi()
+    monkeypatch.setattr(c, "extract_markdown", lambda link: "# निकाय")
+    monkeypatch.setattr(c, "build_api", lambda args: api)
+    # Simulates a real upload_markdown() call whose server response carried
+    # no MARKDOWN-role media object: returns None, exactly like the real
+    # function does in that case (see test_upload_markdown_returns_none_
+    # when_no_markdown_role_in_response above).
+    monkeypatch.setattr(c, "upload_markdown", lambda a, iri, text: None)
+
+    report = main(["--apply"])
+    statuses = {r["status"] for r in report.rows}
+    assert "converted" not in statuses
+    # The material that would have falsely reported "converted" is now
+    # visibly an error, not silently absorbed into "already"/"unmet".
+    assert any(
+        r["status"] == "error" and "no MARKDOWN-role link" in r["reason"]
+        for r in report.rows
+    )
 
 
 def test_main_does_not_run_any_other_stage(stub_run):

@@ -246,7 +246,18 @@ def main(argv=None):
                 continue
 
             def writer(_material, text, _iri=iri):
-                upload_markdown(api, _iri, text)
+                # upload_markdown returns the new MARKDOWN link, or None if
+                # the server response carried no MARKDOWN-role media object.
+                # Raise rather than swallow that: convert_material() only
+                # ever checks whether extraction produced non-empty text, so
+                # a discarded None here reported "converted" even when
+                # nothing was actually persisted server-side -- a false
+                # success with zero test coverage of this path.
+                link = upload_markdown(api, _iri, text)
+                if not link:
+                    raise RuntimeError(
+                        f"upload of {_iri} returned no MARKDOWN-role link "
+                        "(server response had no MARKDOWN media object)")
 
             try:
                 status = convert_material(material, writer=writer)
