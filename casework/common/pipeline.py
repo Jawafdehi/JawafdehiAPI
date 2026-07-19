@@ -100,8 +100,17 @@ STAGES = {
         requires_materials=PRESS_TYPES + COURT_TYPES,
         requires_stages=("convert",),
     ),
+    # provides is ("key_allegations",) ONLY. An earlier draft of the plan also
+    # listed "missing_details"; that field is real on the case API but this
+    # enricher never writes it -- the donor has zero references to it anywhere
+    # in its history, and patches exactly one field
+    # (enrich_allegations.py:303 `api.patch_field(case_slug, "key_allegations", ...)`).
+    # `provides` feeds the "already enriched, skip it" idempotency checks, so a
+    # phantom entry here would make a case look complete that this stage never
+    # touched -- silently skipping work, the same over-gating shape as the
+    # tags/entities defects.
     "allegations": Stage(
-        "allegations", provides=("key_allegations", "missing_details"),
+        "allegations", provides=("key_allegations",),
         requires_materials=PRESS_TYPES,
         requires_stages=("convert",),
     ),

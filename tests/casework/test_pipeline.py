@@ -254,3 +254,13 @@ def test_cycle_in_requires_stages_is_detected(monkeypatch):
     monkeypatch.setattr(p, "STAGES", stages)
     with pytest.raises(ValueError):
         p.order_stages(["convert", "bigo"])
+
+
+def test_allegations_provides_only_key_allegations():
+    """`missing_details` is a phantom the plan invented; the donor never writes it.
+
+    `provides` feeds "already enriched, skip it" idempotency checks, so a
+    phantom entry makes a case look complete that this stage never touched.
+    Donor patches exactly one field (enrich_allegations.py:303).
+    """
+    assert STAGES["allegations"].provides == ("key_allegations",)
