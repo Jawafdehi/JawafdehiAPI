@@ -437,6 +437,21 @@ NEITHER_CASE_UNCONVERTED = {
     ],
 }
 
+PRESS_CASE_ALREADY_POPULATED = {
+    "slug": "case-populated",
+    "title": "पहिल्यै entities भरिएको मुद्दा",
+    "state": "DRAFT",
+    "entities": [
+        {"nes_id": "https://nes.jawafdehi.org/entity/1",
+         "relationship_type": "related", "notes": "पहिल्यै बाँधिएको"},
+    ],
+    "evidence": [
+        {"material_iri": "https://jawafdehi.org/material/ciaa/press_releases/5",
+         "material": {"material_type": "press_release", "urls": [
+             {"link": "https://x/press5.md", "role": "MARKDOWN"}]}},
+    ],
+}
+
 PRESS_ONLY_EMPTY_MARKDOWN_CASE = {
     "slug": "case-empty-markdown",
     "title": "खाली मार्कडाउन भएको मुद्दा",
@@ -493,6 +508,7 @@ def patched_fetch_markdown(monkeypatch):
             "https://x/press2.md": "प्रेस विज्ञप्तिको सामग्री।",
             "https://x/court2.md": "अदालतको आदेशको सामग्री।",
             "https://x/empty.md": "",
+            "https://x/press5.md": "पहिल्यै भरिएको मुद्दाको प्रेस विज्ञप्ति।",
         }.get(link, "")
 
     monkeypatch.setattr(m, "fetch_markdown", fake_fetch)
@@ -570,6 +586,37 @@ def test_empty_markdown_after_satisfied_prerequisite_is_recorded_unmet(
     report = _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
     assert report.rows[0]["status"] == "unmet"
     assert stub.calls == []
+
+
+def test_already_populated_case_is_skipped_without_calling_llm(
+    monkeypatch, patched_fetch_markdown
+):
+    # Finding 2: of the five ported enrichers, this was the only one missing
+    # the already-populated skip -- every run re-spent a premium-tier LLM
+    # call on cases whose `entities` were already set. Assert on a
+    # call-count spy (`stub.calls`), never on a raise: main()'s per-case
+    # `except Exception` around the LLM call would otherwise swallow a stub
+    # that incorrectly DID get invoked and raised, making a "must not call
+    # the LLM" assertion pass vacuously.
+    api = _StubApi([PRESS_CASE_ALREADY_POPULATED])
+    stub = _call_tracking_stub()
+    report = _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+    assert report.rows[0]["status"] == "already"
+    assert stub.calls == []
+
+
+def test_force_reruns_an_already_populated_case_and_calls_the_llm(
+    monkeypatch, patched_fetch_markdown
+):
+    # The other half of Finding 2: --force must actually override the skip,
+    # not be a silent no-op. Assert the LLM WAS called (call-count spy), and
+    # that the case proceeds all the way to extraction.
+    api = _StubApi([PRESS_CASE_ALREADY_POPULATED])
+    stub = _call_tracking_stub(ENTITY_RESPONSE)
+    report = _run_main(
+        monkeypatch, api, invoke_text_stub=stub, argv=["--force", "--dry-run"])
+    assert len(stub.calls) == 1
+    assert report.rows[0]["status"] == "extracted-unbound"
 
 
 def test_press_only_case_reaches_the_llm(monkeypatch, patched_fetch_markdown):

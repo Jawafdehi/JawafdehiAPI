@@ -387,6 +387,8 @@ def main(argv=None):
     print(f"Found {total} matching case(s).")
     print("  NOTE: this port performs EXTRACTION ONLY -- no /entities writes are")
     print("  made, regardless of --dry-run/--apply. See module docstring for why.")
+    if args.force:
+        print("  --force: re-extracting even for cases with entities already populated")
 
     total_entities_extracted = 0
     total_accused_notes_extracted = 0
@@ -395,6 +397,17 @@ def main(argv=None):
         slug = case.get("slug") or "?"
         title = case.get("title") or ""
         print(f"\n[{idx}/{total}] {slug} — {title[:80]}")
+
+        # Donor: `get_target_cases(api, args, skip_field="entities")` (donor
+        # line 274) -- of the five ported enrichers, this was the only one
+        # missing the already-populated skip, so every run re-spent a
+        # premium-tier LLM call on cases whose `entities` were already set.
+        if case.get("entities") and not args.force:
+            report.record(
+                slug, "entities", "already",
+                f"entities already {case['entities']}")
+            print("  entities already populated — skipping (use --force to re-extract)")
+            continue
 
         try:
             detail = api.get_case(slug)
