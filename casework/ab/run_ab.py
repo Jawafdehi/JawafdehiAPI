@@ -227,6 +227,24 @@ RE_CASE_HEADER = re.compile(r"^\[(\d+)/(\d+)\]\s+(\S+)")
 # be attributed to the last case.
 RE_SUMMARY_START = re.compile(r"^(={5,}|=== |\s*Cases \w+\s+\d+|\s*\w+: \d+$)")
 
+# A stage could not run: no usable source text. These are checked BEFORE the
+# error patterns -- the port reports a WAF 403 as "... MARKDOWN fetch failed",
+# which is an infrastructure gap, not an extraction failure.
+UNMET_PATTERNS = (
+    "unmet prerequisite",
+    "no press release or court order",
+    "source content found",
+    "markdown fetch failed",
+    "no markdown role",
+)
+# A stage ran and genuinely failed.
+ERROR_PATTERNS = (
+    "llm extraction failed",
+    "extraction failed",
+    "failed to patch",
+    "failed to create",
+)
+
 
 def header_slug(match, slugs):
     """Resolve a case-header line to a slug, or None if it cannot be trusted.
@@ -352,9 +370,15 @@ def parse_outcomes(stdout, slugs):
         if slug is None or slug not in out:
             continue
         low = line.lower()
-        if "unmet prerequisite" in low or "no press release or court order" in low:
+        if any(p in low for p in UNMET_PATTERNS):
+            # A prerequisite the stage could not satisfy -- no source text
+            # available. Checked BEFORE the error patterns because the port
+            # phrases these as "... MARKDOWN fetch failed (HTTP Error 403)",
+            # and a generic "failed"/"error" match would file an
+            # INFRASTRUCTURE gap as an extraction failure, overstating the
+            # port's error rate and hiding the real cause.
             out[slug] = "unmet"
-        elif "failed" in low or "error" in low:
+        elif any(p in low for p in ERROR_PATTERNS):
             out[slug] = "error"
         elif "skipping" in low:
             out[slug] = "skipped"

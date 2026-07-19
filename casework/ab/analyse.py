@@ -138,10 +138,25 @@ def timeline_metrics_table(rows):
                    f"{'yes' if m['dates_equal_ordered'] else 'no'} |")
     djs = [r["metrics"]["date_jaccard"] for r in rs
            if r["metrics"]["date_jaccard"] is not None]
+    # A case where one arm produced NO timeline contributes a 0% date
+    # overlap that says nothing about how similarly the two arms extract --
+    # it only restates that one of them produced nothing (already counted in
+    # the outcome table). So report the overlap over cases where BOTH arms
+    # produced a timeline as well, and label which is which.
+    both = [r for r in rs if r["metrics"]["n_a"] > 0 and r["metrics"]["n_b"] > 0]
+    bjs = [r["metrics"]["date_jaccard"] for r in both
+           if r["metrics"]["date_jaccard"] is not None]
     if djs:
         out.append("")
-        out.append(f"Mean date Jaccard: **{pct(sum(djs) / len(djs))}**; "
-                   f"exact ordered date match: "
+        out.append(f"- Mean date Jaccard across all {len(rs)} comparable "
+                   f"cases: **{pct(sum(djs) / len(djs))}** — but this is "
+                   "dominated by cases where one arm produced nothing.")
+        if bjs:
+            out.append(f"- Mean date Jaccard where BOTH arms produced a "
+                       f"timeline (n={len(both)}): **{pct(sum(bjs) / len(bjs))}**"
+                       " — this is the number that reflects extraction "
+                       "agreement.")
+        out.append(f"- Exact ordered date match: "
                    f"**{sum(1 for r in rs if r['metrics']['dates_equal_ordered'])}"
                    f"/{len(rs)}**")
     return "\n".join(out)
@@ -190,6 +205,14 @@ def reviewer_table(scores):
 
 def score_all(raw, base_cases):
     """Reviewer-score both arms for every sampled case."""
+    # The reviewer's rules import Django models, so settings must be
+    # configured before the first score_case call. Scoring itself stays
+    # offline -- no DB query, no LLM (see reviewer.py).
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+    os.environ.setdefault("DEBUG", "True")
+    import django
+
+    django.setup()
     from casework.ab.reviewer import score_arms
 
     out = {}

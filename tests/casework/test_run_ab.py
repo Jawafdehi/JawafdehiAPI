@@ -163,6 +163,43 @@ def test_outcomes_distinguish_unmet_skipped_error_and_enriched():
     assert out["s4"] == "enriched"
 
 
+def test_waf_403_is_unmet_not_an_extraction_error():
+    """The port reports a blocked fetch as '... MARKDOWN fetch failed
+    (HTTP Error 403)'. Filing that as an extraction error would overstate
+    the port's error rate and hide an infrastructure cause."""
+    stdout = "\n".join([
+        "[1/1] s1",
+        "  No press-release source content found: press_release: MARKDOWN "
+        "fetch failed (HTTP Error 403: Forbidden)",
+    ])
+    assert parse_outcomes(stdout, ["s1"])["s1"] == "unmet"
+
+
+def test_missing_markdown_role_is_unmet():
+    stdout = "[1/1] s1\n  press_release: no MARKDOWN role (has 2 RAW)"
+    assert parse_outcomes(stdout, ["s1"])["s1"] == "unmet"
+
+
+def test_genuine_llm_and_patch_failures_are_still_errors():
+    for line, label in [
+        ("  LLM extraction failed: boom", "error"),
+        ("  Failed to PATCH timeline: 422 Client Error", "error"),
+    ]:
+        assert parse_outcomes(f"[1/1] s1\n{line}", ["s1"])["s1"] == label, line
+
+
+def test_a_recoverable_llm_failure_followed_by_a_write_is_enriched():
+    """enrich_tags falls back to rule-only tags when metadata_llm fails; the
+    case is still enriched and must not be counted as an error."""
+    stdout = "\n".join([
+        "[1/1] s1",
+        "  - metadata_llm failed: claude_cli failed (rc=1)",
+        "  Classified 3 tag(s) (rules)",
+        "  [UPDATED] s1",
+    ])
+    assert parse_outcomes(stdout, ["s1"])["s1"] == "enriched"
+
+
 def test_a_slug_with_no_output_line_is_not_silently_a_success():
     """A header with no following status line must not read as success."""
     out = parse_outcomes("[1/2] s1\n[2/2] s2", ["s1", "s2"])
