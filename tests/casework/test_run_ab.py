@@ -20,6 +20,7 @@ from casework.ab.run_ab import (
     header_slug,
     parse_entities,
     parse_outcomes,
+    resolve_arm_values,
     run_stage,
 )
 
@@ -178,6 +179,40 @@ def test_a_requested_slug_the_arm_never_mentioned_is_not_a_success():
     assert set(out.values()) == {"unattributed-header-mismatch"}
 
 
+def test_summary_counters_are_not_attributed_to_the_last_case():
+    """The run summary follows the last case block. Its counter lines
+    contain the word 'error'; attributing them to the last case would
+    silently misreport one case per stage."""
+    stdout = "\n".join([
+        "[1/2] s1", "  [UPDATED] s1: BIGO=100",
+        "[2/2] s2", "  [UPDATED] s2: BIGO=200",
+        "",
+        "============================================================",
+        "[DRY RUN] BIGO extraction",
+        "  Cases processed          2",
+        "  Cases llm error          0",
+    ])
+    out = parse_outcomes(stdout, ["s1", "s2"])
+    assert out["s2"] == "enriched", "summary counter leaked onto the last case"
+    assert out["s1"] == "enriched"
+
+
+def test_port_style_summary_also_terminates_attribution():
+    stdout = "\n".join([
+        "[1/1] s1", "  [UPDATED] s1",
+        "", "=== BIGO extraction (DRY RUN) ===", "  error: 1",
+    ])
+    assert parse_outcomes(stdout, ["s1"])["s1"] == "enriched"
+
+
+def test_a_real_error_before_the_summary_is_still_recorded():
+    stdout = "\n".join([
+        "[1/1] s1", "  Failed to PATCH timeline: 422 Client Error",
+        "", "============", "  Cases llm error   0",
+    ])
+    assert parse_outcomes(stdout, ["s1"])["s1"] == "error"
+
+
 def test_outcomes_ignore_lines_before_any_case_header():
     out = parse_outcomes("some banner [UPDATED] nonsense\n[1/1] s1", ["s1"])
     assert out["s1"] == "no-output-line"
@@ -289,6 +324,59 @@ def test_a_case_where_neither_arm_produced_anything_is_no_output():
     empty = {"s1": {"bigo": None, "tags": [], "timeline": [], "key_allegations": []}}
     rows = build_rows(["s1"], empty, empty, {}, {}, {})
     assert {r["verdict"] for r in rows} == {"no_output"}
+
+
+# ------------------------------------------------ the residue trap ---
+
+
+def test_a_value_the_arm_did_not_write_is_not_credited_to_it():
+    """June's shipped value is already in the field. An arm that produced
+    nothing must NOT be credited with the residue sitting there."""
+    readback = {"s1": {"bigo": 913280, "tags": ["क"], "timeline": [],
+                       "key_allegations": []}}
+    outcomes = {"bigo": {"s1": "unmet"}, "tags": {"s1": "enriched"}}
+    out = resolve_arm_values(readback, outcomes, ["s1"])
+    assert out["s1"]["bigo"] is None, "unmet stage must not claim the residue"
+    assert out["s1"]["tags"] == ["क"], "enriched stage keeps its value"
+
+
+def test_residue_cannot_manufacture_agreement_between_the_arms():
+    """Both arms fail on a case that already holds June's value. Neither
+    produced anything, so the comparison must say so -- not 'all_agree'."""
+    readback = {"s1": {"bigo": 913280, "tags": [], "timeline": [],
+                       "key_allegations": []}}
+    outcomes = {"bigo": {"s1": "unmet"}}
+    a = resolve_arm_values(readback, outcomes, ["s1"])
+    b = resolve_arm_values(readback, outcomes, ["s1"])
+    rows = build_rows(["s1"], a, b, {"s1": {"bigo": 913280}}, {}, {})
+    bigo = next(r for r in rows if r["stage"] == "bigo")
+    assert bigo["verdict"] == "no_output"
+    assert bigo["verdict"] != "all_agree"
+
+
+@pytest.mark.parametrize("status", ["unmet", "skipped", "error",
+                                    "no-output-line",
+                                    "unattributed-header-mismatch"])
+def test_only_enriched_counts_as_production(status):
+    readback = {"s1": {"bigo": 5, "tags": [], "timeline": [],
+                       "key_allegations": []}}
+    out = resolve_arm_values(readback, {"bigo": {"s1": status}}, ["s1"])
+    assert out["s1"]["bigo"] is None
+
+
+def test_enriched_value_is_preserved_exactly():
+    readback = {"s1": {"bigo": 5, "tags": ["क"], "timeline": [{"date": "d"}],
+                       "key_allegations": ["a"]}}
+    outcomes = {s: {"s1": "enriched"} for s in
+                ("bigo", "tags", "timeline", "allegations")}
+    out = resolve_arm_values(readback, outcomes, ["s1"])
+    assert out["s1"] == {"bigo": 5, "tags": ["क"],
+                         "timeline": [{"date": "d"}], "key_allegations": ["a"]}
+
+
+def test_resolve_preserves_readback_errors():
+    out = resolve_arm_values({"s1": {"_error": "HTTP 500"}}, {}, ["s1"])
+    assert "_error" in out["s1"]
 
 
 def test_readback_failure_is_flagged_not_read_as_empty_output():

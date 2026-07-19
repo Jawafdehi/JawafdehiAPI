@@ -221,6 +221,11 @@ RE_B_ENTITIES = re.compile(r"Extracted (\d+) entities, (\d+) accused note")
 RE_A_DRYRUN_ENTITY = re.compile(r"^\s+\[DRY RUN\] (location|related)\s+(.+?)(?:\s+—|$)")
 RE_A_CREATE_FAIL = re.compile(r"Failed to create entity '(.+?)'")
 RE_CASE_HEADER = re.compile(r"^\[(\d+)/(\d+)\]\s+(\S+)")
+# Start of the run summary. The donor prints a "=====" rule then
+# "[DRY RUN] <title>"; the port prints "=== <title> (DRY RUN) ===". Both end
+# per-case output, after which counter lines ("Cases llm error  0") must not
+# be attributed to the last case.
+RE_SUMMARY_START = re.compile(r"^(={5,}|=== |\s*Cases \w+\s+\d+|\s*\w+: \d+$)")
 
 
 def header_slug(match, slugs):
@@ -260,6 +265,9 @@ def parse_entities(stdout, arm, slugs=()):
             slug = header_slug(m, list(slugs))
             if slug is not None:
                 per.setdefault(slug, {"count": 0, "names": []})
+            continue
+        if RE_SUMMARY_START.match(line):
+            slug = None
             continue
         if slug is None:
             continue
@@ -334,6 +342,13 @@ def parse_outcomes(stdout, slugs):
         if m:
             slug = header_slug(m, slugs)
             continue
+        # The run SUMMARY follows the last case block and contains counter
+        # lines like "Cases llm error   0". Without this terminator those
+        # lines keep matching against the last case seen and silently mark
+        # it as an error -- misreporting one case per stage, every stage.
+        if RE_SUMMARY_START.match(line):
+            slug = None
+            continue
         if slug is None or slug not in out:
             continue
         low = line.lower()
@@ -353,6 +368,39 @@ def parse_outcomes(stdout, slugs):
 
 
 # --------------------------------------------------------------- compare ---
+
+
+def resolve_arm_values(readback, outcomes, slugs):
+    """Reduce a readback to ONLY the values the arm actually wrote.
+
+    THE RESIDUE TRAP. The sample cases already carry June's shipped values,
+    so the field is non-empty before either arm runs. A plain readback
+    therefore returns June's value for any case where the arm produced
+    NOTHING -- and comparing those readbacks would score both arms as having
+    "produced" a value they never generated, agreeing with each other and
+    with golden. That is false parity wearing a different hat: not
+    empty-vs-empty, but residue-vs-residue.
+
+    So the arm's own reported outcome is the authority on whether it
+    produced a value. Only `enriched` (the stage applied a write) counts;
+    everything else -- unmet, skipped, error, no-output-line -- yields None,
+    meaning "this arm produced nothing here", regardless of what is sitting
+    in the field.
+    """
+    out = {}
+    for slug in slugs:
+        vals = dict(readback.get(slug) or {})
+        if "_error" in vals:
+            out[slug] = vals
+            continue
+        resolved = {}
+        for stage, field in COMPARE_FIELDS.items():
+            if field is None or stage == "entities":
+                continue
+            status = (outcomes.get(stage) or {}).get(slug)
+            resolved[field] = vals.get(field) if status == "enriched" else None
+        out[slug] = resolved
+    return out
 
 
 def build_rows(slugs, arm_a, arm_b, golden, entities_a, entities_b):
@@ -403,6 +451,8 @@ def main(argv=None):
     ap.add_argument("--seed", default="task-16")
     ap.add_argument("--model", default="haiku")
     ap.add_argument("--stages", default="bigo,tags,timeline,allegations,entities")
+    ap.add_argument("--resume", action="store_true",
+                    help="continue from per-stage checkpoints in --work")
     ap.add_argument("--apply", action="store_true",
                     help="actually run the arms and write to the LOCAL db")
     args = ap.parse_args(argv)
@@ -435,15 +485,54 @@ def main(argv=None):
         start_server(args.repo, args.port, os.path.join(args.work, "server.log"))
         print(f"baseline DB snapshot written to {baseline}")
 
+    # Resume state. A killed run must not cost another hour of LLM calls, so
+    # each completed stage checkpoints the DB and each completed arm saves
+    # its readback. Resuming restores the last checkpoint for the arm and
+    # continues at the next stage, preserving the original stage ORDER (which
+    # matters: enrich_tags reads fields the other stages write).
+    state_path = os.path.join(args.work, "state.json")
+    state = json.load(open(state_path)) if (
+        args.resume and os.path.exists(state_path)) else {}
+
+    def save_state():
+        json.dump(state, open(state_path, "w"), indent=1, ensure_ascii=False)
+
     runs, results, entities = {}, {}, {}
     for arm, cwd in (("A", args.arm_a), ("B", args.repo)):
+        st = state.setdefault(arm, {"stages_done": [], "outcomes": {},
+                                    "entities": {}, "readback": None})
+        if args.resume and st.get("readback"):
+            print(f"\n=== ARM {arm}: already complete, skipping ===")
+            results[arm] = st["readback"]
+            entities[arm] = st.get("entities") or {}
+            runs[arm] = {s: {"outcomes": st["outcomes"].get(s, {}),
+                             "seconds": 0, "returncode": 0}
+                         for s in st["outcomes"]}
+            continue
+
+        done = list(st.get("stages_done") or []) if args.resume else []
+        todo = [s for s in stages if s not in done]
         print(f"\n=== ARM {arm} ({cwd}) ===")
+        if done:
+            print(f"  resuming; already done: {done}")
         stop_server(args.port)
-        restore_dbs(args.repo, baseline)
+        # Restore the last checkpoint for this arm, or the pristine baseline.
+        ckpt = os.path.join(args.work, f"ckpt_{arm}_{done[-1]}") if done else None
+        if ckpt and os.path.exists(os.path.join(ckpt, "db.sqlite3")):
+            print(f"  restoring checkpoint {os.path.basename(ckpt)}")
+            restore_dbs(args.repo, ckpt)
+        else:
+            if done:
+                raise SystemExit(
+                    f"REFUSING: arm {arm} claims stages {done} done but no "
+                    f"checkpoint exists; rerun without --resume")
+            restore_dbs(args.repo, baseline)
         start_server(args.repo, args.port, os.path.join(args.work, "server.log"))
         assert_port_is_ours(args.port)
         runs[arm] = {}
-        for stage in stages:
+        if not args.resume:
+            st["stages_done"], st["outcomes"], st["entities"] = [], {}, {}
+        for stage in todo:
             # Arm A's entities stage runs DRY so extraction can be counted
             # cleanly; its write path is exercised separately (it 400s).
             apply_writes = not (arm == "A" and stage == "entities")
@@ -478,7 +567,26 @@ def main(argv=None):
             print(f"    rc={r['returncode']} {r['seconds']}s")
             with open(os.path.join(args.work, f"arm{arm}_{stage}.log"), "w") as fh:
                 fh.write(r["stdout"] + "\n--- STDERR ---\n" + r["stderr"])
-        results[arm] = readback(args.base, slugs, auth)
+            # Checkpoint AFTER the stage so a kill costs one stage, not an arm.
+            st["outcomes"][stage] = r["outcomes"]
+            if stage == "entities":
+                st["entities"] = entities.get(arm) or {}
+            st["stages_done"] = [s for s in stages
+                                 if s in set(st["stages_done"]) | {stage}]
+            stop_server(args.port)
+            backup_dbs(args.repo, os.path.join(args.work, f"ckpt_{arm}_{stage}"))
+            start_server(args.repo, args.port,
+                         os.path.join(args.work, "server.log"))
+            save_state()
+        raw_readback = readback(args.base, slugs, auth)
+        # Credit the arm ONLY with what it actually wrote (see
+        # resolve_arm_values): the sample cases already carry June's values,
+        # so a plain readback would hand an arm credit for residue it never
+        # produced.
+        st["raw_readback"] = raw_readback
+        st["readback"] = resolve_arm_values(raw_readback, st["outcomes"], slugs)
+        results[arm] = st["readback"]
+        save_state()
 
     # leave the local DB back on the pristine baseline
     stop_server(args.port)
@@ -490,7 +598,9 @@ def main(argv=None):
     report = three_way_report(rows)
     payload = {
         "sample": sample, "rows": rows, "report": report,
-        "results": results, "entities": entities,
+        "results": results,
+        "raw_readback": {a: (state.get(a) or {}).get("raw_readback") for a in state},
+        "entities": entities,
         "outcomes": {a: {s: runs[a][s]["outcomes"] for s in runs[a]} for a in runs},
         "timings": {a: {s: runs[a][s]["seconds"] for s in runs[a]} for a in runs},
         "returncodes": {a: {s: runs[a][s]["returncode"] for s in runs[a]} for a in runs},
