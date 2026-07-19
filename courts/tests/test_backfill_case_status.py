@@ -161,24 +161,27 @@ class RunBackfillDBTests(TestCase):
             CourtCase.objects.using("ngm").get(case_number="082-CR-0051").updated_at, same_before
         )
 
-    def test_execute_batches_writes_into_one_update_per_page(self):
+    def test_execute_batches_writes_by_changed_field_group(self):
         # Regression guard for THE point of this command: the write is batched
-        # (one UPDATE per bulk_update sub-batch), NOT one UPDATE per row. A
-        # per-row .save() loop is ~14 rows/s against the ~38ms pod↔PG RTT.
-        # Five changing rows (< _WRITE_BATCH_SIZE) → a single UPDATE.
+        # (bulk_update), NOT one UPDATE per row — a per-row .save() loop is
+        # ~14 rows/s against the ~38ms pod↔PG RTT. Rows are grouped by their
+        # changed-column set, so six rows spanning two distinct sets collapse to
+        # exactly two UPDATEs (not six).
         from django.db import connections
         from django.test.utils import CaptureQueriesContext
 
-        for i in range(1, 6):
-            _mk(f"082-CR-01{i:02d}", "आदेश /फैसलाको किसिम")
+        for i in range(1, 4):  # header-artifact rows → group ("case_status",)
+            _mk(f"082-CR-02{i:02d}", "आदेश /फैसलाको किसिम")
+        for i in range(1, 4):  # arrow-enum rows → group ("verdict_type",)
+            _mk(f"082-CR-03{i:02d}", "फैसला / अन्तिम आदेश >> डिसमिस")
         with CaptureQueriesContext(connections["ngm"]) as ctx:
             stats = run_backfill(execute=True)
-        self.assertEqual(stats["rows_changed"], 5)
+        self.assertEqual(stats["rows_changed"], 6)
         updates = [
             q["sql"] for q in ctx.captured_queries
             if q["sql"].lstrip().upper().startswith("UPDATE")
         ]
-        self.assertEqual(len(updates), 1, updates)
+        self.assertEqual(len(updates), 2, updates)
 
     def test_changed_row_keeps_its_unchanged_verdict_columns(self):
         # The fixed-field bulk_update rewrites verdict_type/verdict_date for a row

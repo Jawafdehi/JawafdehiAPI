@@ -39,15 +39,6 @@ from courts.models import CourtCase
 
 NGM_DB = "ngm"
 
-# Columns rewritten (execute mode) for every CHANGED row via one ``bulk_update``.
-# The set is FIXED regardless of which column(s) actually changed on a given row:
-# an unchanged column is rewritten to its own already-loaded value — a no-op that
-# never overwrites (so DQ-03's "never clobber an existing verdict date" holds).
-# The fixed set is what lets us collapse the whole page into a single statement.
-# ``updated_at`` is included so a later ``reindex_courtcases --since`` re-indexes
-# exactly the rows this backfill changed (see ``run_backfill``).
-_WRITE_FIELDS = ["case_status", "verdict_type", "verdict_date_bs", "verdict_date_ad", "updated_at"]
-
 # ``bulk_update`` sub-batch size. Each sub-batch is one UPDATE whose body is a
 # ``CASE`` per field with one ``WHEN`` per row; a modest size bounds the statement
 # (and the per-row CASE scan on Postgres) while still collapsing thousands of
@@ -116,9 +107,13 @@ def run_backfill(*, batch_size=2000, limit=None, execute=False, using=NGM_DB, on
     rows this backfill touched; the keyset is on ``(court, case_number)`` (never
     mutated) so it stays stable across writes.
 
-    Every changed row rewrites the FIXED ``_WRITE_FIELDS`` set; a column that did
-    not change is rewritten to its already-loaded value — a no-op that never
-    overwrites (so DQ-03's "never clobber an existing verdict date" holds).
+    Rows are grouped by the columns that ACTUALLY changed and each group is
+    written with only those columns (+ ``updated_at``), so the backfill never
+    touches a column it did not derive — a concurrent scraper write on an
+    untouched column can't be clobbered by our stale read, and DQ-03's "never
+    clobber an existing verdict date" holds because an already-set date is simply
+    not in the change-set. There are only a handful of distinct change-sets, so
+    this stays a small constant number of statements per page, not one per row.
     Idempotent and re-runnable: extend the parser, re-run, and only
     newly-derivable rows change.
     """
@@ -147,7 +142,10 @@ def run_backfill(*, batch_size=2000, limit=None, execute=False, using=NGM_DB, on
         if not rows:
             break
 
-        changed: list[CourtCase] = []
+        # Rows bucketed by their exact changed-column set (e.g. ("case_status",)
+        # vs ("verdict_date_ad", "verdict_date_bs")); each bucket is one or more
+        # batched UPDATEs writing only those columns + updated_at.
+        changed: dict[tuple[str, ...], list[CourtCase]] = {}
         for case in rows:
             stats["scanned"] += 1
             updates, parsed = compute_case_updates(
@@ -169,15 +167,17 @@ def run_backfill(*, batch_size=2000, limit=None, execute=False, using=NGM_DB, on
             for key, value in updates.items():
                 setattr(case, key, value)
             case.updated_at = timezone.now()
-            changed.append(case)
+            changed.setdefault(tuple(sorted(updates)), []).append(case)
 
         if execute and changed:
-            # One UPDATE per sub-batch (bulk_update is atomic per call). The fixed
-            # _WRITE_FIELDS set means unchanged columns carry their loaded value,
-            # so the write never overwrites and the pass stays idempotent.
-            CourtCase.objects.using(using).bulk_update(
-                changed, _WRITE_FIELDS, batch_size=_WRITE_BATCH_SIZE,
-            )
+            # bulk_update is atomic per call. Grouping by changed-column set keeps
+            # the write surface minimal (only derived columns are written) while
+            # still collapsing each group into batched UPDATEs (~a handful of
+            # distinct sets → a handful of statements, never one per row).
+            for group_fields, cases in changed.items():
+                CourtCase.objects.using(using).bulk_update(
+                    cases, [*group_fields, "updated_at"], batch_size=_WRITE_BATCH_SIZE,
+                )
 
         last_key = (rows[-1].court_id, rows[-1].case_number)
         if on_batch is not None:
