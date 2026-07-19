@@ -19,10 +19,11 @@ Concretely:
   (89% excluding the cases the port cannot read), mean Jaccard 97.3%. This is
   the most trustworthy result in the report, because `tags` reads no evidence
   text and is therefore immune to every infrastructure caveat below.
-- **`bigo` agrees on 73% of comparable cases (85% excluding blocked cases)** —
-  but the two arms were **not given the same prompt** (§6.1), so this number
-  measures port-vs-donor *plus* a prompt difference, and cannot be cleanly
-  attributed to enricher logic.
+- **`bigo` agrees on 80% of comparable cases (92% excluding blocked cases)**
+  after a prompt-asymmetry defect was corrected and the stage re-run (§6.1).
+  **But do not lean on that number**: re-running Arm B with byte-identical
+  input changed its answer on 4 of 13 cases (§6.2), so the apparent
+  improvement over the first run's 73%/85% is within measurement noise.
 - **`timeline`, `allegations` and `entities` show 0% exact agreement.** This is
   expected and is **not** a finding: these fields are LLM-generated prose, and
   two runs never produce byte-identical prose. The meaningful comparisons are
@@ -33,11 +34,12 @@ Concretely:
 - **The port has a real regression** that makes it unable to read 8.1% of
   cases the donor reads fine (§5.1).
 
-**Case reviewer (the benchmark): Arm A 63.2, Arm B 65.3** across all 20;
-**61.1 vs 64.7** excluding the two cases the port cannot fetch. The port scores
+**Case reviewer (the benchmark): Arm A 62.9, Arm B 65.3** across all 20;
+**60.7 vs 64.7** excluding the two cases the port cannot fetch. The port scores
 higher on 14 of 18 cases and lower on 1. That gap is driven almost entirely by
 `timeline`, where the donor writes nothing on cases the port populates — it is
-**not** evidence that the port extracts better prose.
+**not** evidence that the port extracts better prose. (Pre-correction figures
+were 63.2/65.3 and 61.1/64.7; the bigo re-run moved them by <0.5 points.)
 
 **Would I call the port a faithful behavioural port? No — and not because the
 port is worse.** It is a *re-implementation* whose output distribution differs
@@ -61,7 +63,7 @@ as confirming it.
 The frame is *cases carrying at least one adapter-mapped material*
 (`press_release`, `ciaa_press_release`, `court_order`). This restriction is
 load-bearing, not convenience: **0 of 354 cases carry a native `source` key**,
-so Arm A sees nothing at all without the input adapter (§6.2), and that adapter
+so Arm A sees nothing at all without the input adapter (§6.3), and that adapter
 maps only those three types. Sampling outside the frame would have produced
 cases where Arm A structurally cannot extract, manufacturing empty-vs-empty
 "agreement" — the exact failure this project has been guarding against.
@@ -94,7 +96,7 @@ cases in the frame do have repeats.
 **Sample size is the main limit on this report.** 20 cases at ~2.5 hours of LLM
 time is enough to establish direction and to surface defects; it is not enough
 to put tight confidence intervals on any percentage. Treat single-case findings
-(§5.3) as leads, not rates.
+(§5.3) as leads, not rates — §6.2 shows why.
 
 ### 1.3 Both arms ran the same model
 
@@ -153,13 +155,18 @@ Every `unmet` on Arm B is the User-Agent regression (§5.1). All 3 Arm A
 
 ### 3.2 Agreement — all 20 sampled cases
 
+`bigo` rows are the CORRECTED figures from the re-run (§6.1); the first,
+confounded run gave 73.3% and 84.6%. All other stages are from the original
+run — see §6.1 for why they were not re-run. Read the `bigo` rates against
+the noise floor in §6.2.
+
 `comparable` excludes rows where **neither** arm produced output. The rate is
 over `comparable` only, so a stage where nothing happened reports `n/a`, never
 100%.
 
 | stage | cases | comparable | A==B | A==B rate | all three agree | neither produced |
 |---|---|---|---|---|---|---|
-| `bigo` | 20 | 15 | 11 | **73.3%** | 5 | 5 |
+| `bigo` | 20 | 15 | 12 | **80.0%** | 5 | 5 |
 | `tags` | 20 | 20 | 17 | **85.0%** | 0 | 0 |
 | `timeline` | 20 | 19 | 0 | 0.0% † | 0 | 1 |
 | `allegations` | 20 | 19 | 0 | 0.0% † | 0 | 1 |
@@ -174,7 +181,7 @@ unaffected either way — it reads no evidence.
 
 | stage | cases | comparable | A==B | A==B rate | all three agree | neither produced |
 |---|---|---|---|---|---|---|
-| `bigo` | 18 | 13 | 11 | **84.6%** | 5 | 5 |
+| `bigo` | 18 | 13 | 12 | **92.3%** | 5 | 5 |
 | `tags` | 18 | 18 | 16 | **88.9%** | 0 | 0 |
 | `timeline` | 18 | 18 | 0 | 0.0% † | 0 | 0 |
 | `allegations` | 18 | 17 | 0 | 0.0% † | 0 | 1 |
@@ -192,18 +199,30 @@ result. See §4 for the comparisons that do carry signal.
 
 ### 4.1 `bigo` — exact integer match
 
-11 of 13 comparable cases agree exactly (excluding blocked cases). The two
-divergences:
+**These are the CORRECTED figures**, from a re-run of both arms after the
+prompt-asymmetry defect in §6.1 was fixed. Original (confounded) figures are
+shown alongside so the size of the effect is visible.
+
+| | corrected | original (confounded) |
+|---|---|---|
+| A==B, all 20 | **12/15 comparable = 80.0%** | 11/15 = 73.3% |
+| A==B, excl. blocked | **12/13 comparable = 92.3%** | 11/13 = 84.6% |
+| neither arm produced | 5 | 5 |
+
+**The apparent improvement is not evidence that the fix improved agreement.**
+Re-running Arm B alone, with byte-identical input and unchanged code, changed
+its answer on 4 of 13 cases (§6.2). The gap between 84.6% and 92.3% is smaller
+than that noise floor.
+
+Remaining divergence (1 case, excluding blocked):
 
 | case | Arm A | Arm B | golden |
 |---|---|---|---|
-| `case-080-cr-0064-anup-mehra-land-fraud` | 50,542,000 | **505,420,000** | 50,542,000 |
-| `case-080-cr-0174-vikal-paudel-illegal-assets` | 621,918,684 | 6,221,918,684 | 6,219,188,684 |
+| `case-080-cr-0145-jeevan-shahi-procurement-fraud` | — (skipped) | 1,471,085,482 | 1,471,085,482 |
 
-On `0064` Arm B is **exactly 10× high** and Arm A matches both golden and the
-source document. On `0174` the direction reverses: Arm A is ~10× *low* and Arm
-B is nearer golden. See §5.3 — this is the paisa 10× failure class, and it is
-**not** a code regression.
+Arm B matched golden exactly; Arm A declined to extract. In the first run both
+arms returned 147,108,548 (10× lower) and *disagreed* with golden — an
+illustration of how much these values move between runs.
 
 Also note 5 cases where **neither** arm produced a bigo, 3 of which have a
 golden value. Both arms failed to reproduce June's number there; that is
@@ -211,10 +230,9 @@ reported as `no_output`, never as agreement.
 
 Four cases show both arms diverging from golden **in golden's disfavour**:
 golden carries a 10×-inflated value (e.g. `0114` golden 42,293,589 vs both arms
-4,229,358; `0145` golden 1,471,085,482 vs both arms 147,108,548). Both arms are
-right and June's shipped value is wrong — the paisa bug that donor commit
-`0321a85` was written to fix. **Do not read `both_diverge_from_golden` as a
-defect; here it is the fix working.**
+4,229,358). Both arms are right and June's shipped value is wrong — the paisa
+bug that donor commit `0321a85` was written to fix. **Do not read
+`both_diverge_from_golden` as a defect; here it is the fix working.**
 
 ### 4.2 `tags` — set comparison
 
@@ -278,8 +296,10 @@ graded against the same rule set (`assert_same_rule_basis` enforces it).
 
 | | all 20 | excl. blocked (18) |
 |---|---|---|
-| **Arm A mean overall** | 63.2 | 61.1 |
+| **Arm A mean overall** | 62.9 | 60.7 |
 | **Arm B mean overall** | **65.3** | **64.7** |
+
+*(Scored with the corrected bigo values. Pre-correction: 63.2 / 61.1 for Arm A; Arm B unchanged.)*
 | B scores higher | 14 cases | 14 cases |
 | A scores higher | 3 cases | 1 case |
 
@@ -361,24 +381,35 @@ main reason the port's reviewer score is higher.** It also means the timeline
 comparison is substantially a comparison against a partly non-functional arm —
 weigh §4.3 accordingly.
 
-### 5.3 The paisa 10× failure class survives at the LLM layer (1 case)
+### 5.3 The paisa 10× failure class is reachable at the LLM layer — INTERMITTENTLY
+
+**This finding is DOWNGRADED from the first version of this report, which
+overstated it. Recording the correction rather than quietly restating it.**
 
 Donor commit `0321a85` is *"drop paisa before parsing bigo to stop 10x
 inflation"*, and that bug shipped to production once already. I checked whether
 the port regressed it: **the paisa-stripping code is byte-identical between
-donor and port.** No code regression.
+donor and port.** No code regression — that part stands.
 
-But on `case-080-cr-0064` Arm B still returned exactly 10× the correct figure.
-The material's `display_name` states `बिगो रु.५,०५,४२,०००।–` = 50,542,000 —
-the correct value, present in Arm B's own prompt — and Arm B returned
-505,420,000 anyway. The failure is the model misreading Devanagari digit
-grouping, downstream of a parser that is doing its job.
+In the FIRST run, Arm B returned exactly 10× the correct figure on
+`case-080-cr-0064` (505,420,000 vs 50,542,000), even though the correct value
+was present in its own prompt via `display_name`. I reported that as "1 in 13
+enriched cases".
 
-**Flagging this loudly despite n=1**, because this exact failure class reached
-production before, the parser fix does not prevent it, and 1 in 13 enriched
-cases is not a reassuring rate. It warrants a targeted guard (e.g.
-cross-checking the extracted figure against `display_name`), not just the
-existing parser fix. It is **not** a port-vs-donor difference in code.
+**On the re-run, the same case with byte-identical input returned 50,542,000 —
+correct.** Same code, same prompt (`context: 809`, `source: 2,641` chars in both
+runs), same model. So the 10× outcome was **one draw from a
+non-deterministic process, not a reproducible defect**, and the "1 in 13" rate
+was not a rate at all — it was a single observation I should not have
+expressed as a frequency.
+
+**What survives, and why it still matters:** the failure did occur, on real
+data, with the parser fix intact. The parser guards against paisa digits in the
+*string it is given*; it cannot guard against the model returning a wrongly
+grouped number in the first place. So this remains a live, intermittent risk
+worth a defensive check (e.g. cross-checking the extracted figure against the
+amount stated in `display_name`), but it is **not** a port-vs-donor difference
+and **not** a defect that will reproduce on demand.
 
 ### 5.4 DONOR WRITE PATH — entity creation returns 404, not the documented 400
 
@@ -416,31 +447,96 @@ the materials they share.
 
 ## 6. Caveats that limit what these numbers mean
 
-### 6.1 The arms did not receive the same prompt
+### 6.1 The arms did not receive the same prompt — FOUND, FIXED, RE-RUN
 
-**This is the most serious limitation on the `bigo` comparison and I found it
-only while investigating §5.3.**
+**This confounded the first `bigo` run. It was caused by the adapter, not by
+either enricher — and its provenance is worth recording: the two halves were
+introduced by separate controller decisions.** Task 13 ordered
+`material.display_name` into the *port's* bigo prompt (on the measurement that
+22/221 press releases state the बिगो amount in the title itself); Task 15 then
+approved an adapter that did not carry the same field to *Arm A*. Neither
+decision is wrong alone; together they silently biased the comparison. It is a
+method defect in how the arms were set up, not a defect in the port or the
+donor.
 
-The port logs a `bigo context` block on 17 of 20 cases; the donor logs it on
-**0**. The donor's `_build_source_context_from_entry` reads
-`source.title`/`source.description` — fields the adapter **deliberately does not
-populate** (documented in `arm_a_patches.md`: synthesising them would be
-manufacturing donor input). The port's replacement, `_source_metadata`, builds
-context from the case title and `material.display_name` instead.
+The donor's `_build_source_context_from_entry`
+(`enrich_missing_bigo.py:409`) reads `source.title` and feeds it to the bigo
+prompt — so the real June donor **did** receive the document title. The Task 15
+adapter mapped `material_type -> source_type` but left `source.title` **empty**,
+while the port sends today's analog (`material.display_name`) into its own
+prompt. Net effect: **Arm A was handicapped on information the donor actually
+had.** Identical source *text* was verified (§2); identical *prompts* were not,
+and were not the case.
 
-So Arm A's bigo prompt is **source text alone**, while Arm B's is **source text
-plus ~800 characters of metadata that frequently contains the बिगो figure
-itself**. Identical source text was verified (§2); identical *prompts* were not,
-and are not the case.
+I found this only while chasing the paisa defect (§5.3) — a reminder that §2
+was necessary but not sufficient.
 
-**Consequence:** the `bigo` agreement rates (73.3% / 84.6%) measure port-vs-donor
-*plus* a prompt-content difference. They cannot be attributed to enricher logic
-alone. Arm A is also handicapped relative to what the donor actually had in June,
-when `DocumentSource.title` was populated for real. Note the direction is not
-simply "more context is better" — on `0064` the extra context contained the
-correct answer and Arm B still got it wrong.
+**Fix.** The adapter now populates `source.title` from `material.display_name`,
+the same mapping `review/jds_client.py:113` already uses. This *completes* the
+adapter's stated purpose (reconnecting the donor's input pipe) rather than
+improving Arm A; leaving it empty was the deviation. `source.description`
+remains empty, on evidence rather than assumption: today's `Material` carries
+only `display_name`/`material_type`/`urls`, so no description field exists, and
+the sole candidate (`evidence.additional_details`) is evidence-level annotation
+and is empty on 36/36 mapped entries in the sample.
 
-### 6.2 Arm A rests entirely on one BEHAVIOURAL patch
+**Prompt-delta re-verification**, comparing the two arms' assembled context
+blocks across all 20 cases after the fix:
+
+| metric | value |
+|---|---|
+| Arm A context now non-empty | **19/20** |
+| Arm A's title present verbatim in the port's context | **19/20** |
+| mean absolute delta in context length | **315 chars** |
+| max absolute delta | 2,214 chars |
+
+The residual delta is **not** the adapter any more; it is documented port design
+deviation: the port prepends a `case title:` line the donor has no analog for,
+labels the field `display_name:` rather than `title:`, inlines `material_type`,
+and aggregates *all* matching materials where the donor takes only the first.
+The single 2,214-char outlier is `case-080-cr-0123`, which has no press release
+at all — Arm A's context is empty while the port finds a `charge_sheet`, because
+the port's `PRESS_TYPES` is deliberately wider (§5.5).
+
+**Re-run scope.** `bigo` was re-run on both arms from the same baseline.
+`tags` was not re-run (it reads no material, so it cannot be affected).
+`timeline`, `allegations` and `entities` were not re-run: their byte-equality
+figures were already reported as meaningless, and their substantive comparisons
+are structural and reviewer-based. Those stages' prompts are affected by the
+same asymmetry, so **their reported numbers still carry it** — stated here
+rather than buried, and flagged in §10 as follow-up.
+
+### 6.2 The measurement has a large noise floor — LLM output is not deterministic
+
+**This is the most important limitation in the report, and it was only
+measurable because the `bigo` stage was run twice.**
+
+The `bigo` re-run changed **Arm B's own answers on 4 of 13 enriched cases
+(31%)** — with byte-identical input, unchanged code, and the same model. Arm B's
+prompt did not change at all (the adapter fix touches only Arm A); verified on
+`case-080-cr-0064`, where both runs logged identical prompt sizes
+(`context: 809`, `source: 2,641`) and returned different numbers:
+
+| case | run 1 | run 2 | golden |
+|---|---|---|---|
+| `case-080-cr-0064` | 505,420,000 | 50,542,000 | 50,542,000 |
+| `case-080-cr-0005` | 3,847,500 | 3,382,417 | 3,382,417 |
+| `case-080-cr-0145` | 147,108,548 | 1,471,085,482 | 1,471,085,482 |
+| `case-080-cr-0174` | 6,221,918,684 | 621,918,684 | 6,219,188,684 |
+
+**Consequences, which apply to every number in this report:**
+
+1. A single-run difference of a few percentage points between arms is **not
+   meaningful**. The `bigo` improvement from 84.6% to 92.3% sits inside this
+   noise band and must not be attributed to the adapter fix.
+2. Any single-case finding is one draw, not a rate — which is exactly how §5.3
+   went wrong the first time.
+3. Properly separating arm differences from sampling noise needs repeated runs
+   per arm (n≥3) and a paired test. That was out of scope here; **this report
+   establishes direction and surfaces defects, and should not be read as
+   precise measurement.**
+
+### 6.3 Arm A rests entirely on one BEHAVIOURAL patch
 
 Every Arm A extraction result depends on the input adapter that synthesises
 `entry["source"] = {"source_type": ..., "urls": ...}` from
@@ -450,7 +546,7 @@ enrichers extract nothing at all and this entire A/B would be empty-vs-empty.
 This is one deliberate, documented, authorised deviation, and it is the
 foundation under every number in §3 and §4 except `tags`.
 
-### 6.3 Three donor bugs are deliberately preserved — agreement on them is expected
+### 6.4 Three donor bugs are deliberately preserved — agreement on them is expected
 
 These appear in **both** arms by design. Agreement here is **not** evidence of
 port quality and must not be counted as such:
@@ -464,7 +560,7 @@ port quality and must not be counted as such:
 Part of the 97.3% tags Jaccard is agreement on *not* emitting court-context tags
 that neither arm can emit.
 
-### 6.4 Other limits
+### 6.5 Other limits
 
 - **`related_entities` is compared on extraction only.** The write paths are not
   comparable in principle (§5.4).
@@ -588,7 +684,8 @@ Raw results, per-stage logs and per-stage DB checkpoints are under
 |---|---|---|
 | 1 | `materials.py::fetch_markdown` sends no `User-Agent` → 403 on 8.1% of cases. One-line fix, constant already exists. | **High** |
 | 2 | Donor timeline PATCH 422s on today's API (3/20). Affects any donor-shaped payload still in use. | Medium |
-| 3 | 10× paisa inflation still reachable at the LLM layer despite an intact parser fix. Consider cross-checking against `display_name`. | Medium |
+| 3 | 10× paisa inflation reachable at the LLM layer despite an intact parser fix — observed once, did NOT reproduce on re-run. Consider cross-checking the extracted figure against `display_name`. | Medium |
 | 4 | Correct the record: donor entity creation 404s (endpoint gone), it does not 400. | Low (doc) |
-| 5 | Prompt asymmetry between arms (§6.1) — decide whether the port's richer context is intended, then re-measure `bigo`. | Medium (method) |
+| 5 | Prompt asymmetry (§6.1) is FIXED for `bigo`, which was re-run. `timeline`/`allegations`/`entities` were not re-run and their figures still carry it. | Medium (method) |
+| 7 | LLM run-to-run variance is ~31% on `bigo` values (§6.2). Any future A/B needs repeated runs per arm and a paired test to separate signal from noise. | **High (method)** |
 | 6 | Add a pid/lockfile guard to `run_ab.py --work`. | Low |

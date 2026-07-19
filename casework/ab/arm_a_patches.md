@@ -52,8 +52,10 @@ method every one of the 5 enrichers' case-detail fetches converges on
 
 **What it does:** for each evidence entry, if `entry["material"]["material_type"]`
 has a donor-recognised equivalent, synthesise `entry["source"] =
-{"source_type": <mapped>, "urls": entry["material"]["urls"]}` alongside the
-existing (untouched) `material` key. This restores exactly the shape and
+{"source_type": <mapped>, "title": <material.display_name>, "description": "",
+"urls": entry["material"]["urls"]}` alongside the existing (untouched)
+`material` key. (`title` was added in Revision 2 below — omitting it silently
+confounded the first Task 16 `bigo` comparison.) This restores exactly the shape and
 vocabulary the donor's `entry.get("source")` / `.get("source_type")` /
 `.get("urls")` accessors were written to read — nothing downstream of
 `get_case()` needed to change.
@@ -66,6 +68,15 @@ vocabulary the donor's `entry.get("source")` / `.get("source_type")` /
 | `ciaa_press_release` | `CIAA_PRESS_RELEASE` | Same, the less-common spelling variant. |
 | `court_order` | `COURT_ORDER` | Same document category, renamed field value only. |
 | `charge_sheet` | **unmapped — deliberately** | See below. |
+
+**Field mapping** (added in Revision 2, see below):
+
+| donor `source` field | source in today's schema | notes |
+|---|---|---|
+| `source_type` | `material.material_type` (mapped, table above) | |
+| `title` | `material.display_name` | Same mapping `review/jds_client.py:113` uses. Populated 36/36 in the Task 16 sample. |
+| `description` | **no analog exists** | `Material` has only `display_name`/`material_type`/`urls`. Left empty; see Revision 2. |
+| `urls` | `material.urls` (passed through unchanged) | |
 
 **Why `charge_sheet` is NOT mapped to `CIAA_PRESS_RELEASE`:** checked the
 donor's own code first, as instructed, rather than assuming. `enrich_timeline.py`'s
@@ -99,12 +110,38 @@ see charge-sheet content too, that mapping needs an explicit decision, not an
 assumption — `COURT_FILING_OTHER` (also in `MILESTONE_SOURCE_TYPES`, also
 unmapped) is the same kind of open question.
 
-**What the adapter deliberately does NOT do** (see `arm_a_adapter.py`'s
-module docstring for the full statement):
-- does not populate `source.title` / `source.description` — those are
-  supplementary LLM-prompt-context metadata, never the primary document
-  text, and inventing values for fields today's `Material` object doesn't
-  carry would be manufacturing donor input rather than restoring it.
+### Revision 2 (Task 16): `source.title` IS populated
+
+An earlier version of this document stated that the adapter "deliberately
+does not populate `source.title` / `source.description`". **For `title` that
+was wrong, and it confounded the first Task 16 `bigo` run.**
+
+The donor's `_build_source_context_from_entry`
+(`enrich_missing_bigo.py:409`) reads `source.title` and feeds it to the bigo
+prompt, so the real June donor **did** receive the document title. Leaving it
+empty did not keep Arm A neutral — it handicapped Arm A on information the
+donor actually had, while the port sends today's analog
+(`material.display_name`) into its own prompt. Populating it therefore
+*completes* the adapter's stated purpose (reconnecting the donor's input
+pipe) rather than improving Arm A; leaving it empty was the deviation.
+
+`display_name` is the established analog of `DocumentSource.title` — the
+same mapping `review/jds_client.py:113` already encodes
+(`"title": mat.get("display_name") or ""`). It is populated on 36/36 mapped
+evidence entries in the Task 16 sample, and per CIAA drafting convention it
+frequently states the बिगो amount itself.
+
+**`source.description` remains empty, and that is now an evidenced decision
+rather than an assumption.** Today's `Material` object carries exactly three
+keys — `display_name`, `material_type`, `urls` — so the schema has no
+document-description field at all. The only candidate,
+`evidence.additional_details`, is (a) evidence-level annotation about why a
+document is attached rather than a description *of* the document, which is
+why `review/jds_client.py` gives it a separate `evidence_description` slot,
+and (b) empty on 36/36 mapped entries in the sample. Synthesising a value
+would be manufacturing donor input.
+
+**What the adapter still deliberately does NOT do:**
 - does not touch any prompt, truncation limit, threshold, or model tier
   inside any enricher.
 - does not change how `urls` are selected/prioritized among roles — it
@@ -215,6 +252,15 @@ covering **12 evidence entries** (6 press-release + 6 court-order).
 
 **Result: 12/12 exact text matches (byte-for-byte string equality), 0
 mismatches.**
+
+> **Task 16 addendum — identical source text is NOT identical prompt.**
+> This verification establishes that both arms read the same document TEXT.
+> It says nothing about the rest of the assembled prompt, and Task 16 found
+> the two arms were in fact sending *different* prompts: the port adds a
+> metadata context block built from `material.display_name`, while the
+> donor's equivalent block was empty because this adapter had left
+> `source.title` unpopulated (see Revision 2 above). Any future comparison
+> must verify the identical-PROMPT property, not just identical source text.
 
 ```
 chandra-singh-lama-embezzlement-080-cr-0067 [0] press_release  port=1255  arm_a=1255  MATCH
