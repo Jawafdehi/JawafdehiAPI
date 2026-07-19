@@ -287,6 +287,25 @@ class TestEnforcePromptBudget:
         result = _enforce_prompt_budget(list(parts))
         assert len(result) <= ere.PROMPT_HARD_MAX
 
+    def test_over_budget_still_fills_the_budget_it_is_given(self):
+        # A LOWER bound, deliberately. Every other assertion here is
+        # `len(result) <= PROMPT_HARD_MAX`, which a function returning ""
+        # satisfies perfectly -- over-truncation is invisible to them. That is
+        # this branch's signature failure mode (code silently doing LESS than
+        # asked) wearing a test's clothes: the budget guard exists to fit as
+        # much source text as possible under the cap, so a guard that returns
+        # nothing has failed at its actual job while passing every check.
+        #
+        # Not reachable in today's implementation -- the final
+        # `combined[:PROMPT_HARD_MAX]` hard-slice always preserves content.
+        # This pins that property so a future refactor of the truncation
+        # arithmetic cannot quietly drop it.
+        parts = ["अ" * ere.PROMPT_HARD_MAX, "आ" * ere.PROMPT_HARD_MAX]
+        result = _enforce_prompt_budget(list(parts))
+        assert len(result) == ere.PROMPT_HARD_MAX, (
+            "input is 2x the budget, so the result should fill it exactly; "
+            "a short or empty return means the guard over-truncated")
+
 
 # --------------------------------------------------------------------------
 # _build_content_parts -- press-only / court-only / both / neither matrix
