@@ -32,6 +32,41 @@ def test_fiscal_year_matching_is_case_insensitive():
     assert not matches_fiscal_year({"court_cases": [SUPREME]}, "081")
 
 
+def test_fiscal_year_leading_zero_forms_all_select_the_same_case():
+    # The canonical IRI carries a zero-padded case number (081-cr-0098). A
+    # naive (un-normalised) prefix comparison built needle "81-" against a
+    # "081-..." case number and matched NOTHING: --fiscal-year 81 silently
+    # selected 0 cases while --fiscal-year 081 selected the same case
+    # correctly -- a landmine that looks like a clean run, not an error.
+    # Donor: casework/common.py:420, `fy = fiscal_year.lstrip("0") or "0"`.
+    case = {"court_cases": [SPECIAL]}  # .../special/081-cr-0098
+    assert matches_fiscal_year(case, "81")
+    assert matches_fiscal_year(case, "081")
+    assert matches_fiscal_year(case, "0081")
+
+
+def test_fiscal_year_all_zero_forms_fall_back_to_literal_zero():
+    # A naive `lstrip("0")` on "0" or "00" collapses to "", which would
+    # then match against ANY case number whose prefix strips to "" too --
+    # or worse, never match at all depending on how the empty string is
+    # compared. The donor's `or "0"` fallback exists precisely for this;
+    # pin it against a case whose prefix is genuinely "000" (i.e. also
+    # normalises to "0"), not against the "" trap.
+    zero_case = {"court_cases": [
+        "https://jawafdehi.org/courtcase/special/000-cr-0001"]}
+    assert matches_fiscal_year(zero_case, "0")
+    assert matches_fiscal_year(zero_case, "00")
+    assert not matches_fiscal_year({"court_cases": [SPECIAL]}, "0")
+
+
+def test_fiscal_year_no_cr_marker_never_matches():
+    # A courtcase number with no "-cr-" segment (e.g. a writ number like
+    # 075-wf-0005) must never satisfy any fiscal_year -- the donor only
+    # ever compares `-CR-` prefixes.
+    assert not matches_fiscal_year({"court_cases": [SUPREME]}, "75")
+    assert not matches_fiscal_year({"court_cases": [SUPREME]}, "075")
+
+
 def test_state_gate_allows_draft_and_in_review_only():
     assert is_enrichable_state({"state": "DRAFT"})
     assert is_enrichable_state({"state": "IN_REVIEW"})

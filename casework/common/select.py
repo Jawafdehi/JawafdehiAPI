@@ -45,11 +45,28 @@ def court_number(case):
 
 
 def matches_fiscal_year(case, fiscal_year):
-    """Case-insensitive: the canonical IRI lowercases the case number."""
+    """Case-insensitive: the canonical IRI lowercases the case number.
+
+    Both sides are normalised by stripping leading zeros (donor
+    `casework/common.py:420`, ``fy = fiscal_year.lstrip("0") or "0"``): the
+    canonical IRI carries a zero-padded case number (``081-cr-0098``), so an
+    un-normalised comparison against ``--fiscal-year 81`` selects ZERO cases
+    -- a silent, total selection failure that prints "No matching CIAA
+    case(s)" and looks like a clean run. The ``or "0"`` fallback exists for
+    an all-zero fiscal year (``"0"``/``"00"``), where a naive ``lstrip("0")``
+    would otherwise collapse to ``""``.
+    """
     if not fiscal_year:
         return True
-    needle = f"{fiscal_year.lower()}-"
-    return any(_parts(r)[1].startswith(needle) for r in _refs(case))
+    fy = fiscal_year.lower().lstrip("0") or "0"
+    for r in _refs(case):
+        _, number = _parts(r)
+        if "-cr-" not in number:
+            continue
+        prefix = number.split("-cr-")[0].lstrip("0") or "0"
+        if prefix == fy:
+            return True
+    return False
 
 
 def is_enrichable_state(case):
