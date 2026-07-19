@@ -44,19 +44,25 @@ def stage_table(rows):
     by_stage = collections.defaultdict(list)
     for r in rows:
         by_stage[r["stage"]].append(r)
-    out = ["| stage | cases | A&B both produced | A==B | A==B rate | "
-           "all three agree | neither produced |",
-           "|---|---|---|---|---|---|---|"]
+    out = ["| stage | cases | comparable | A==B | A==B rate | all three agree | "
+           "neither produced | readback error |",
+           "|---|---|---|---|---|---|---|---|"]
     for stage in ("bigo", "tags", "timeline", "allegations", "entities"):
         rs = by_stage.get(stage) or []
         if not rs:
             continue
         rep = three_way_report(rs)
+        ab = sum(1 for r in rs
+                 if r["verdict"] in ("all_agree", "both_diverge_from_golden"))
         out.append(
-            f"| `{stage}` | {rep['total']} | {rep['comparable']} | "
-            f"{sum(1 for r in rs if r['verdict'] in ('all_agree', 'both_diverge_from_golden'))} | "
+            f"| `{stage}` | {rep['total']} | {rep['comparable']} | {ab} | "
             f"{pct(rep['ab_agreement_rate'])} | "
-            f"{rep['counts'].get('all_agree', 0)} | {rep['no_output']} |")
+            f"{rep['counts'].get('all_agree', 0)} | {rep['no_output']} | "
+            f"{rep['counts'].get('readback_error', 0)} |")
+    out.append("")
+    out.append("`comparable` excludes rows where neither arm produced output and "
+               "rows we failed to read back; the rate is over `comparable` only, "
+               "so a stage where nothing happened reports `n/a`, never 100%.")
     return "\n".join(out)
 
 
@@ -213,6 +219,8 @@ def main(argv=None):
     ap.add_argument("--cases", required=True,
                     help="dir of golden case JSON (snapshot/cases)")
     ap.add_argument("--golden", default="")
+    ap.add_argument("--blocked", default="",
+                    help="comma-separated slugs the port could not fetch (UA/WAF 403)")
     ap.add_argument("--out", required=True)
     args = ap.parse_args(argv)
 
@@ -234,8 +242,29 @@ def main(argv=None):
             base_cases[slug] = json.load(open(path))
     scores = score_all(raw, base_cases)
 
+    # Cases the port physically could not read because of the missing
+    # User-Agent header (WAF 403 on s3-hosted MARKDOWN). Separating these
+    # keeps an INFRASTRUCTURE gap from being read as an extraction-quality
+    # gap -- Arm A read the identical document fine.
+    blocked = set(filter(None, (args.blocked or "").split(",")))
+    unblocked = [r for r in rows if r["slug"] not in blocked]
+
     parts = [
-        "## Per-stage agreement\n", stage_table(rows), "",
+        "## Per-stage agreement (all sampled cases)\n", stage_table(rows), "",
+    ]
+    if blocked:
+        parts += [
+            f"### Excluding the {len(blocked)} case(s) blocked by the "
+            "User-Agent defect\n",
+            "These cases are ones the PORT could not fetch source text for at "
+            "all (WAF 403), while the donor read the identical document. Their "
+            "divergence measures a missing request header, not extraction "
+            "quality, so the table below is the fairer read of enricher "
+            "behaviour. `tags` is unaffected either way -- it reads no "
+            "evidence.\n",
+            stage_table(unblocked), "",
+        ]
+    parts += [
         "## Who produced output at all\n", presence_table(rows), "",
         "## Per-arm outcomes (from each arm's own run output)\n",
         outcome_table(raw.get("outcomes") or {}), "",
