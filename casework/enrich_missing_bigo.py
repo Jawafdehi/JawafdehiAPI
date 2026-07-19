@@ -185,10 +185,18 @@ def _clamp(text: str, limit: int, label: str = "source") -> str:
 
 def _source_metadata(case: dict, types) -> str:
     """Best-effort source metadata for the prompt: case title + bound material
-    types/URLs. Replaces the donor's `_build_source_context_from_entry`, which
-    read `DocumentSource.title`/`.description` -- fields that don't exist on
-    the current `{material_iri, material: {material_type, urls}}` evidence
-    shape (see `casework.common.materials`)."""
+    display names/types/URLs. Replaces the donor's
+    `_build_source_context_from_entry`, which read `DocumentSource.title`/
+    `.description` -- fields that don't exist on the current
+    `{material_iri, material: {material_type, urls}}` evidence shape (see
+    `casework.common.materials`).
+
+    `material.display_name` is this schema's analog to the donor's
+    `source.title` (the same convention `review/jds_client.py` uses:
+    `"title": mat.get("display_name") or ""`) -- and, per the CIAA drafting
+    convention, is frequently where the बिगो amount itself is first stated
+    (e.g. "... उपर बिगो रु.९०,३९,६२०।३९ कायम"). Surface it first so it carries
+    the same weight it did in the donor's prompt."""
     lines = [f"case title: {case.get('title') or ''}"]
     for material in materials_of_type(case, types):
         urls = [
@@ -196,6 +204,7 @@ def _source_metadata(case: dict, types) -> str:
             if isinstance(u, dict) and u.get("link")
         ]
         lines.append(
+            f"display_name: {material.get('display_name') or ''}; "
             f"material_type: {material.get('material_type') or '?'}; "
             f"urls: {'; '.join(urls)}"
         )

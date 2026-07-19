@@ -266,6 +266,95 @@ def test_confidence_is_case_and_whitespace_insensitive():
 
 
 # --------------------------------------------------------------------------
+# parse_bigo_response -- confidence/context gate coverage per parse branch
+# (review finding: the gate is triplicated across the direct-JSON, fenced-JSON,
+# and balanced-object-scan branches, but only the direct-JSON branch had test
+# coverage. Mutation testing proved deleting the gate from the fenced branch
+# alone left all other tests passing.)
+# --------------------------------------------------------------------------
+
+
+def test_fenced_json_low_confidence_yields_none():
+    body = (
+        "Here is the extraction:\n```json\n"
+        '{"bigo": 500000, "confidence": "low", "evidence_quote": "बिगो रु ५ लाख"}'
+        "\n```\n"
+    )
+    assert parse_bigo_response(body) is None
+
+
+def test_fenced_json_non_bigo_quote_yields_none_even_at_high_confidence():
+    body = (
+        "Here is the extraction:\n```json\n"
+        '{"bigo": 5000000, "confidence": "high", "evidence_quote": "जम्मा आय रु ५० लाख"}'
+        "\n```\n"
+    )
+    assert parse_bigo_response(body) is None
+
+
+def test_balanced_object_scan_low_confidence_yields_none():
+    body = (
+        'Some preamble text with a stray { that is not JSON. '
+        '{"bigo": 500000, "confidence": "low", '
+        '"evidence_quote": "बिगो रु ५ लाख", "note": "trailing"}'
+    )
+    assert parse_bigo_response(body) is None
+
+
+def test_balanced_object_scan_non_bigo_quote_yields_none_even_at_high_confidence():
+    body = (
+        'Some preamble text with a stray { that is not JSON. '
+        '{"bigo": 5000000, "confidence": "high", '
+        '"evidence_quote": "जम्मा आय रु ५० लाख", "note": "trailing"}'
+    )
+    assert parse_bigo_response(body) is None
+
+
+# --------------------------------------------------------------------------
+# _source_metadata -- prompt source-context block (review finding: this must
+# surface material.display_name, the schema's analog to the donor's
+# source.title, since ~10% of press-release display_names state the बिगो
+# amount directly, e.g. "... उपर बिगो रु.९०,३९,६२०।३९ कायम")
+# --------------------------------------------------------------------------
+
+
+def test_source_metadata_includes_material_display_name():
+    case = {
+        "title": "अख्तियारले थुनामा राखेको",
+        "evidence": [
+            {"material_iri": "https://jawafdehi.org/material/ciaa/press_releases/1",
+             "material": {
+                 "material_type": "press_release",
+                 "display_name": (
+                     "चापाकोट नगरकार्यपालिकाको कार्यालय ... सिनियर अहेव बिन्दु "
+                     "कोईराला उपर बिगो रु.९०,३९,६२०।३९ कायम"
+                 ),
+                 "urls": [{"link": "https://x/1.md", "role": "MARKDOWN"}],
+             }},
+        ],
+    }
+    rendered = emb._source_metadata(case, ("press_release",))
+    assert "बिगो रु.९०,३९,६२०।३९ कायम" in rendered
+
+
+def test_source_metadata_material_without_display_name_renders_without_error():
+    case = {
+        "title": "अख्तियारले थुनामा राखेको",
+        "evidence": [
+            {"material_iri": "https://jawafdehi.org/material/ciaa/press_releases/1",
+             "material": {
+                 "material_type": "press_release",
+                 "urls": [{"link": "https://x/1.md", "role": "MARKDOWN"}],
+             }},
+        ],
+    }
+    rendered = emb._source_metadata(case, ("press_release",))
+    assert "display_name: " in rendered
+    assert "material_type: press_release" in rendered
+    assert "https://x/1.md" in rendered
+
+
+# --------------------------------------------------------------------------
 # main() -- integration over a stubbed API + LLM
 # --------------------------------------------------------------------------
 
