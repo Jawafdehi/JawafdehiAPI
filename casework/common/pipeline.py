@@ -31,6 +31,15 @@ from casework.common.materials import markdown_link, materials_of_type
 # Material types an enricher can extract source text from. Kept here (not
 # imported from an enricher module) because Task 11 has no enricher modules
 # yet -- these constants are the contract Tasks 12-14 build against.
+#
+# INTENTIONAL DEVIATION FROM THE DONOR: the donor (0321a85) gates its press
+# release stages on a single source type, `CIAA_PRESS_RELEASE`. PRESS_TYPES
+# here is deliberately wider -- it also accepts `press_release` and
+# `charge_sheet`. This is not a mistake to "correct" back to the donor: Task
+# 8 measured MARKDOWN coverage per material type and found `charge_sheet` at
+# 100% vs. `press_release` at 8.6%, so narrowing this back to the donor's
+# single type would materially shrink how many cases ever clear this
+# prerequisite. Keep it wide.
 PRESS_TYPES = ("press_release", "ciaa_press_release", "charge_sheet")
 COURT_TYPES = ("court_order",)
 
@@ -67,10 +76,18 @@ STAGES = {
         requires_materials=PRESS_TYPES,
         requires_stages=("convert",),
     ),
+    # `tags` reads no material at all (donor `enrich_tags.py` classifies
+    # purely from case fields -- title/allegations/court_cases/description;
+    # its only "evidence" occurrence is the literal tag string "evidence
+    # tamper"). `bigo` is kept as an ORDERING preference only
+    # (`requires_stages`), not a hard gate: the donor's `_detect_amount_tier`
+    # returns None (and the amount-tier tag is simply omitted) when `bigo`
+    # is None, and the LLM prompt builder guards `if bigo is not None` --
+    # the donor tags cases fine with an unknown disputed amount, so a
+    # `requires_fields`/`requires_materials` gate here would skip cases the
+    # donor does not skip.
     "tags": Stage(
         "tags", provides=("tags",),
-        requires_fields=("bigo",),
-        requires_materials=PRESS_TYPES,
         requires_stages=("convert", "bigo"),
     ),
     "timeline": Stage(
@@ -83,9 +100,15 @@ STAGES = {
         requires_materials=PRESS_TYPES,
         requires_stages=("convert",),
     ),
+    # `entities` runs on press release OR court order content -- either
+    # alone is sufficient (donor `enrich_related_entities.py::
+    # _get_content_for_case` collects both independently; the caller only
+    # skips when BOTH are absent: "No press release or court order content
+    # -- skipping"). Gating on PRESS_TYPES alone would strand every
+    # court-order-only case.
     "entities": Stage(
         "entities", provides=("entities",),
-        requires_materials=PRESS_TYPES,
+        requires_materials=PRESS_TYPES + COURT_TYPES,
         requires_stages=("convert",),
     ),
 }
@@ -133,10 +156,27 @@ def unmet_prerequisites(stage, case):
     """
     unmet = []
     if stage.requires_materials:
+        # An evidence entry whose `material` is null means the payload came
+        # from the case LIST endpoint, which never resolves materials (only
+        # the DETAIL endpoint does -- see materials.py). materials_of_type()
+        # silently drops those entries, so without this check a case fetched
+        # from the wrong endpoint is indistinguishable from a case with
+        # genuinely zero bound material: both would fall through to "no
+        # bound material of type X" below, collapsing "can't tell yet" into
+        # "definitely can't". Reported separately, and worded consistently
+        # with materials.source_text's own unresolved-material message.
+        evidence = case.get("evidence") or []
+        unresolved = sum(1 for e in evidence if not (e.get("material") or {}))
+        if unresolved:
+            unmet.append(
+                f"{unresolved} evidence entries with an UNRESOLVED material -- the "
+                "list endpoint returns material:null; use the case DETAIL endpoint"
+            )
         mats = materials_of_type(case, stage.requires_materials)
         if not mats:
-            unmet.append(
-                f"no bound material of type {'/'.join(stage.requires_materials)}")
+            if not unresolved:
+                unmet.append(
+                    f"no bound material of type {'/'.join(stage.requires_materials)}")
         elif not any(markdown_link(m) for m in mats):
             unmet.append(
                 f"no MARKDOWN role on {'/'.join(stage.requires_materials)} "

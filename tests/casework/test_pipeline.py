@@ -72,9 +72,81 @@ def test_no_bound_material_at_all_is_reported_distinctly_from_unconverted():
     assert any("no bound material" in u for u in unmet)
 
 
-def test_tags_reports_missing_bigo_dependency():
+def test_unresolved_material_is_reported_distinctly_from_no_material():
+    # A case fetched from the case LIST endpoint has evidence entries whose
+    # `material` is null (only the DETAIL endpoint resolves materials).
+    # Before the fix, materials_of_type() silently dropped these entries and
+    # unmet_prerequisites reported the exact same "no bound material of type
+    # X" string as a case with genuinely zero evidence -- collapsing "we
+    # can't tell yet" into "definitely can't", which is exactly the kind of
+    # false parity this module exists to prevent (see Task 16 concern).
+    list_case = {"slug": "x", "evidence": [{"material_iri": "i", "material": None}]}
+    empty_case = {"slug": "y", "evidence": []}
+    list_unmet = unmet_prerequisites(STAGES["bigo"], list_case)
+    empty_unmet = unmet_prerequisites(STAGES["bigo"], empty_case)
+    assert list_unmet != empty_unmet
+    assert any("UNRESOLVED" in u and "DETAIL" in u for u in list_unmet)
+    assert not any("UNRESOLVED" in u for u in empty_unmet)
+
+
+def test_unresolved_material_alongside_a_convertible_one_reports_both():
+    # A case can have BOTH an unresolved (list-endpoint) entry and a
+    # resolved-but-unconverted entry at once -- both reasons must surface,
+    # not just one.
+    case = {"slug": "z", "evidence": [
+        {"material_iri": "i1", "material": None},
+        {"material_iri": "i2", "material": {"material_type": "press_release",
+         "urls": [{"link": "u2", "role": "RAW"}]}},
+    ]}
+    unmet = unmet_prerequisites(STAGES["bigo"], case)
+    assert any("UNRESOLVED" in u for u in unmet)
+    assert any("no MARKDOWN role" in u for u in unmet)
+
+
+def test_tags_requires_no_materials():
+    # Donor enrich_tags.py never reads evidence/materials -- it classifies
+    # from case fields (title, key_allegations, court_cases, description)
+    # alone. Its only "evidence" occurrence is the literal tag string
+    # "evidence tamper", not a materials read.
+    assert STAGES["tags"].requires_materials == ()
+
+
+def test_tags_does_not_gate_on_missing_bigo_field():
+    # Donor treats bigo as optional context: _detect_amount_tier(None)
+    # returns None (the amount-tier tag is simply omitted) and the LLM
+    # prompt builder guards `if bigo is not None` -- the donor tags cases
+    # fine with an unknown disputed amount. A requires_fields hard gate
+    # would incorrectly skip every such case.
     case = dict(CASE_MD, bigo=None)
-    assert any("bigo" in u for u in unmet_prerequisites(STAGES["tags"], case))
+    assert unmet_prerequisites(STAGES["tags"], case) == []
+    assert STAGES["tags"].requires_fields == ()
+
+
+def test_tags_still_orders_after_bigo():
+    # Dropping the hard gate must not drop the ordering preference -- bigo
+    # should still run before tags when both are requested.
+    assert "bigo" in STAGES["tags"].requires_stages
+
+
+def test_entities_accepts_court_order_alone():
+    # Donor enrich_related_entities.py::_get_content_for_case collects press
+    # release and court order content independently; the caller only skips
+    # when BOTH are absent. A press-only requires_materials would strand
+    # every court-order-only case.
+    case = {"slug": "c", "evidence": [
+        {"material_iri": "i", "material": {"material_type": "court_order",
+         "urls": [{"link": "u", "role": "MARKDOWN"}]}}]}
+    assert unmet_prerequisites(STAGES["entities"], case) == []
+
+
+def test_entities_accepts_press_release_alone():
+    assert unmet_prerequisites(STAGES["entities"], CASE_MD) == []
+
+
+def test_entities_requires_materials_includes_court_types():
+    from casework.common.pipeline import COURT_TYPES, PRESS_TYPES
+    assert set(COURT_TYPES) <= set(STAGES["entities"].requires_materials)
+    assert set(PRESS_TYPES) <= set(STAGES["entities"].requires_materials)
 
 
 def test_run_report_separates_unmet_from_skipped():
