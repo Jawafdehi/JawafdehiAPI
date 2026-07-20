@@ -300,7 +300,6 @@ def main(argv=None):
         # the detail fetch and passes that same `title` to `_extract_allegations`,
         # never `detail.get("title")`.
         title = case.get("title") or ""
-        print(f"\n[{idx}/{total}] {slug} — {title[:80]}")
         log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
                   step="start", status="start", detail=f"[{idx}/{total}] {title[:80]}")
 
@@ -308,7 +307,6 @@ def main(argv=None):
             report.record(
                 slug, "allegations", "already",
                 f"key_allegations already {case['key_allegations']}")
-            print("  key_allegations already populated — skipping (use --force to re-extract)")
             log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
                       step="idempotency", status="already",
                       detail=f"key_allegations already {case['key_allegations']}")
@@ -326,7 +324,6 @@ def main(argv=None):
             detail = api.get_case(slug)
         except Exception as exc:
             detail = case
-            print(f"  (using summary instead of detail: {exc})")
             log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
                       step="fetch", status="fallback", detail=str(exc),
                       level=logging.WARNING)
@@ -335,7 +332,6 @@ def main(argv=None):
         if unmet:
             for reason in unmet:
                 report.record(slug, "allegations", "unmet", reason)
-            print(f"  Unmet prerequisite(s): {'; '.join(unmet)}")
             log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
                       step="prereq", status="unmet", detail="; ".join(unmet),
                       level=logging.WARNING)
@@ -346,13 +342,11 @@ def main(argv=None):
             reasons = text_unmet or ["no press-release source text"]
             for reason in reasons:
                 report.record(slug, "allegations", "unmet", reason)
-            print(f"  No press-release source content found: {'; '.join(reasons)}")
             log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
                       step="source", status="unmet", detail="; ".join(reasons),
                       level=logging.WARNING)
             continue
 
-        print(f"  Source content: {len(text)} chars")
         log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
                   step="source", status="ok", detail=f"{len(text)} chars")
 
@@ -370,7 +364,6 @@ def main(argv=None):
             )
         except Exception as exc:
             report.record(slug, "allegations", "error", f"LLM extraction failed: {exc}")
-            print(f"  LLM extraction failed: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
                       step="extract", status="error", detail=str(exc),
                       level=logging.ERROR)
@@ -382,22 +375,17 @@ def main(argv=None):
 
         if not allegations:
             report.record(slug, "allegations", "skipped", "LLM returned no allegations")
-            print("  LLM returned no allegations — skipping")
             log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
                       step="extract", status="skipped",
                       detail="LLM returned no allegations", level=logging.WARNING)
             continue
 
-        print(f"  Extracted {len(allegations)} allegation(s)")
-        for i, allegation in enumerate(allegations, 1):
-            print(f"    {i}. {allegation[:80]}")
         log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
                   step="extract", status="ok", detail=f"key_allegations={allegations}")
 
         if args.dry_run:
             report.record(
                 slug, "allegations", "would-enrich", f"key_allegations={allegations}")
-            print("  [DRY RUN] Would PATCH but --dry-run is set")
             log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
                       step="write", status="would-enrich",
                       detail=f"key_allegations={allegations}")
@@ -407,13 +395,11 @@ def main(argv=None):
             api.patch_field(slug, "key_allegations", allegations)
             report.record(
                 slug, "allegations", "enriched", f"key_allegations={allegations}")
-            print(f"  [UPDATED] {slug}")
             log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
                       step="write", status="enriched",
                       detail=f"key_allegations={allegations}")
         except Exception as exc:
             report.record(slug, "allegations", "error", f"PATCH failed: {exc}")
-            print(f"  Failed to PATCH key_allegations: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
                       step="write", status="error", detail=str(exc),
                       level=logging.ERROR)

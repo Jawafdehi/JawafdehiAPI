@@ -427,7 +427,6 @@ def main(argv=None):
     for idx, case in enumerate(cases, 1):
         slug = case.get("slug") or "?"
         title = case.get("title") or ""
-        print(f"\n[{idx}/{total}] {slug} — {title[:80]}")
         log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                   step="start", status="start", detail=f"[{idx}/{total}] {title[:80]}")
 
@@ -439,7 +438,6 @@ def main(argv=None):
             report.record(
                 slug, "entities", "already",
                 f"entities already {case['entities']}")
-            print("  entities already populated — skipping (use --force to re-extract)")
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                       step="idempotency", status="already",
                       detail=f"entities already {case['entities']}")
@@ -449,7 +447,6 @@ def main(argv=None):
             detail = api.get_case(slug)
         except Exception as exc:
             detail = case
-            print(f"  (using summary instead of detail: {exc})")
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                       step="fetch", status="fallback", detail=str(exc),
                       level=logging.WARNING)
@@ -458,7 +455,6 @@ def main(argv=None):
         if unmet:
             for reason in unmet:
                 report.record(slug, "entities", "unmet", reason)
-            print(f"  Unmet prerequisite(s): {'; '.join(unmet)}")
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                       step="prereq", status="unmet", detail="; ".join(unmet),
                       level=logging.WARNING)
@@ -477,29 +473,24 @@ def main(argv=None):
                 "no press release or court order content"]
             for reason in reasons:
                 report.record(slug, "entities", "unmet", reason)
-            print("  No press release or court order content — skipping")
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                       step="source", status="unmet", detail="; ".join(reasons),
                       level=logging.WARNING)
             continue
 
         if press_text:
-            print(f"  Press release: {len(press_text)} chars")
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                       step="source", status="ok", detail=f"press release {len(press_text)} chars")
         if court_text:
-            print(f"  Court order: {len(court_text)} chars")
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                       step="source", status="ok", detail=f"court order {len(court_text)} chars")
 
         user_prompt = _enforce_prompt_budget(content_parts)
-        print(f"  Prompt size: {len(user_prompt)} chars")
         log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                   step="prompt", status="ok", detail=f"{len(user_prompt)} chars")
 
         if not user_prompt.strip():
             report.record(slug, "entities", "skipped", "empty prompt after truncation")
-            print("  Empty prompt after truncation — skipping")
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                       step="prompt", status="skipped",
                       detail="empty prompt after truncation", level=logging.WARNING)
@@ -515,7 +506,6 @@ def main(argv=None):
             )
         except Exception as exc:
             report.record(slug, "entities", "error", f"LLM extraction failed: {exc}")
-            print(f"  LLM extraction failed: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                       step="extract", status="error", detail=str(exc),
                       level=logging.ERROR)
@@ -536,7 +526,6 @@ def main(argv=None):
         if not valid_items and not accused_notes:
             report.record(
                 slug, "entities", "skipped", "LLM returned no entities or accused notes")
-            print("  LLM returned no entities or accused notes — skipping")
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                       step="extract", status="skipped",
                       detail="LLM returned no entities or accused notes",
@@ -546,12 +535,6 @@ def main(argv=None):
         total_entities_extracted += len(valid_items)
         total_accused_notes_extracted += len(accused_notes)
 
-        print(
-            f"  Extracted {len(valid_items)} entities, {len(accused_notes)} accused "
-            "note(s) — NOT bound (nes_id resolution unavailable, see module docstring)")
-        for item in valid_items[:5]:
-            rel_type = item.get("relationship_type", "")
-            print(f"    {rel_type:8s}  {(item.get('entity_name') or '')[:60]}")
         log_event(
             logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
             step="extract", status="ok",

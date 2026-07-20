@@ -1113,13 +1113,11 @@ def main(argv=None):
     for idx, case in enumerate(cases, 1):
         slug = case.get("slug") or "?"
         title = (case.get("title") or "")[:80]
-        print(f"\n[{idx}/{total}] {slug} — {title}")
         log_event(logger, paths["events"], run_id=run_id, stage="tags", slug=slug,
                   step="start", status="start", detail=f"[{idx}/{total}] {title}")
 
         if case.get("tags") and not args.force:
             report.record(slug, "tags", "already", f"tags already {case['tags']}")
-            print("  tags already populated — skipping (use --force to re-tag)")
             log_event(logger, paths["events"], run_id=run_id, stage="tags", slug=slug,
                       step="idempotency", status="already",
                       detail=f"tags already {case['tags']}")
@@ -1134,7 +1132,6 @@ def main(argv=None):
         if unmet:
             for reason in unmet:
                 report.record(slug, "tags", "unmet", reason)
-            print(f"  Unmet prerequisite(s): {'; '.join(unmet)}")
             log_event(logger, paths["events"], run_id=run_id, stage="tags", slug=slug,
                       step="prereq", status="unmet", detail="; ".join(unmet),
                       level=logging.WARNING)
@@ -1174,7 +1171,6 @@ def main(argv=None):
                 # `stats["cases_llm_error"]` is tracked independently of
                 # `stats["cases_enriched"]`.
                 report.record(slug, "tags", "llm-error", f"metadata_llm failed: {exc}")
-                print(f"  - metadata_llm failed: {str(exc)[:120]}")
                 log_event(logger, paths["events"], run_id=run_id, stage="tags", slug=slug,
                           step="extract", status="llm-error", detail=str(exc)[:200],
                           level=logging.WARNING)
@@ -1185,17 +1181,11 @@ def main(argv=None):
 
         all_tags = merge_tags(rule_tags, llm_tags)
 
-        print(f"  Classified {len(all_tags)} tag(s) ({tier})")
-        for i, tag in enumerate(all_tags[:5], 1):
-            print(f"    {i}. {tag}")
-        if len(all_tags) > 5:
-            print(f"    ... and {len(all_tags) - 5} more")
         log_event(logger, paths["events"], run_id=run_id, stage="tags", slug=slug,
                   step="extract", status="ok", detail=f"tags={all_tags} tier={tier}")
 
         if args.dry_run:
             report.record(slug, "tags", "would-enrich", f"tags={all_tags} tier={tier}")
-            print("  [DRY RUN] Would PATCH but --dry-run is set")
             log_event(logger, paths["events"], run_id=run_id, stage="tags", slug=slug,
                       step="write", status="would-enrich",
                       detail=f"tags={all_tags} tier={tier}")
@@ -1204,13 +1194,11 @@ def main(argv=None):
         try:
             api.patch_field(slug, "tags", all_tags)
             report.record(slug, "tags", "enriched", f"tags={all_tags} tier={tier}")
-            print(f"  [UPDATED] {slug}")
             log_event(logger, paths["events"], run_id=run_id, stage="tags", slug=slug,
                       step="write", status="enriched",
                       detail=f"tags={all_tags} tier={tier}")
         except Exception as exc:
             report.record(slug, "tags", "error", f"PATCH failed: {exc}")
-            print(f"  Failed to PATCH tags: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="tags", slug=slug,
                       step="write", status="error", detail=str(exc),
                       level=logging.ERROR)

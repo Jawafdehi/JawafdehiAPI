@@ -429,13 +429,11 @@ def main(argv=None):
     for idx, case in enumerate(cases, 1):
         slug = case.get("slug") or "?"
         title = (case.get("title") or "")[:80]
-        print(f"\n[{idx}/{total}] {slug} — {title}")
         log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
                   step="start", status="start", detail=f"[{idx}/{total}] {title}")
 
         if case.get("bigo") and not args.force:
             report.record(slug, "bigo", "already", f"bigo already {case['bigo']}")
-            print("  BIGO already populated — skipping (use --force to re-extract)")
             log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
                       step="idempotency", status="already",
                       detail=f"bigo already {case['bigo']}")
@@ -445,7 +443,6 @@ def main(argv=None):
             detail = api.get_case(slug)
         except Exception as exc:
             report.record(slug, "bigo", "error", f"case fetch failed: {exc}")
-            print(f"  Failed to fetch case detail: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
                       step="fetch", status="error", detail=str(exc),
                       level=logging.ERROR)
@@ -457,7 +454,6 @@ def main(argv=None):
         if unmet:
             for reason in unmet:
                 report.record(slug, "bigo", "unmet", reason)
-            print(f"  Unmet prerequisite(s): {'; '.join(unmet)}")
             log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
                       step="prereq", status="unmet", detail="; ".join(unmet),
                       level=logging.WARNING)
@@ -468,13 +464,11 @@ def main(argv=None):
             reasons = text_unmet or ["no press-release source text"]
             for reason in reasons:
                 report.record(slug, "bigo", "unmet", reason)
-            print(f"  No press-release source content found: {'; '.join(reasons)}")
             log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
                       step="source", status="unmet", detail="; ".join(reasons),
                       level=logging.WARNING)
             continue
 
-        print(f"  Source content: {len(text)} chars")
         log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
                   step="source", status="ok", detail=f"{len(text)} chars")
 
@@ -482,7 +476,6 @@ def main(argv=None):
             bigo = _extract_bigo(text, detail, invoke_text, usage)
         except Exception as exc:
             report.record(slug, "bigo", "error", f"LLM extraction failed: {exc}")
-            print(f"  LLM extraction failed: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
                       step="extract", status="error", detail=str(exc),
                       level=logging.ERROR)
@@ -494,20 +487,17 @@ def main(argv=None):
 
         if bigo is None:
             report.record(slug, "bigo", "skipped", "LLM could not extract a reliable BIGO")
-            print("  LLM could not extract a reliable BIGO — skipping")
             log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
                       step="extract", status="skipped",
                       detail="LLM could not extract a reliable BIGO",
                       level=logging.WARNING)
             continue
 
-        print(f"  Extracted BIGO: {bigo}")
         log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
                   step="extract", status="ok", detail=str(bigo))
 
         if args.dry_run:
             report.record(slug, "bigo", "would-enrich", f"bigo={bigo}")
-            print("  [DRY RUN] Would PATCH but --dry-run is set")
             log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
                       step="write", status="would-enrich", detail=f"bigo={bigo}")
             continue
@@ -515,12 +505,10 @@ def main(argv=None):
         try:
             api.patch_field(slug, "bigo", bigo)
             report.record(slug, "bigo", "enriched", f"bigo={bigo}")
-            print(f"  [UPDATED] {slug}: BIGO={bigo}")
             log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
                       step="write", status="enriched", detail=f"bigo={bigo}")
         except Exception as exc:
             report.record(slug, "bigo", "error", f"PATCH failed: {exc}")
-            print(f"  Failed to PATCH BIGO: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
                       step="write", status="error", detail=str(exc),
                       level=logging.ERROR)

@@ -109,6 +109,7 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -769,14 +770,12 @@ def main(argv=None):
         # donor's `_process_case` reads `title = case.get("title", "")` before
         # the detail fetch and passes that same `title` on, never `detail.get("title")`.
         title = case.get("title") or ""
-        print(f"\n[{idx}/{total}] {slug} — {title[:80]}")
         log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
                   step="start", status="start", detail=f"[{idx}/{total}] {title[:80]}")
 
         if case.get("timeline") and not args.force:
             report.record(
                 slug, "timeline", "already", f"timeline already {case['timeline']}")
-            print("  timeline already populated — skipping (use --force to re-extract)")
             log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
                       step="idempotency", status="already",
                       detail=f"timeline already {case['timeline']}")
@@ -792,7 +791,6 @@ def main(argv=None):
             detail = api.get_case(slug)
         except Exception as exc:
             detail = case
-            print(f"  (using summary instead of detail: {exc})")
             log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
                       step="fetch", status="fallback", detail=str(exc),
                       level=logging.WARNING)
@@ -801,7 +799,6 @@ def main(argv=None):
         if unmet:
             for reason in unmet:
                 report.record(slug, "timeline", "unmet", reason)
-            print(f"  Unmet prerequisite(s): {'; '.join(unmet)}")
             log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
                       step="prereq", status="unmet", detail="; ".join(unmet),
                       level=logging.WARNING)
@@ -816,7 +813,6 @@ def main(argv=None):
                 "no press-release or court-order source text"]
             for reason in reasons:
                 report.record(slug, "timeline", "unmet", reason)
-            print(f"  No source content found: {'; '.join(reasons)}")
             log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
                       step="source", status="unmet", detail="; ".join(reasons),
                       level=logging.WARNING)
@@ -826,17 +822,14 @@ def main(argv=None):
             _assemble_source_text(court_text, press_text, invoke_text, usage)
             if (court_text or press_text) else ""
         )
-        print(f"  Source content: {len(combined_source_text)} chars assembled")
         log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
                   step="source", status="ok",
                   detail=f"{len(combined_source_text)} chars assembled")
         if ngm_data:
             hearings = ngm_data.get("hearings") or []
-            print(f"  NGM data: {len(hearings)} hearing(s)")
             log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
                       step="ngm", status="ok", detail=f"{len(hearings)} hearing(s)")
         else:
-            print("  NGM data: none")
             log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
                       step="ngm", status="none", detail="no NGM data")
 
@@ -850,7 +843,6 @@ def main(argv=None):
             )
         except Exception as exc:
             report.record(slug, "timeline", "error", f"LLM extraction failed: {exc}")
-            print(f"  LLM extraction failed: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
                       step="extract", status="error", detail=str(exc),
                       level=logging.ERROR)
@@ -862,38 +854,36 @@ def main(argv=None):
 
         if not entries:
             report.record(slug, "timeline", "skipped", "LLM returned no timeline entries")
-            print("  LLM returned no timeline entries — skipping")
             log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
                       step="extract", status="skipped",
                       detail="LLM returned no timeline entries", level=logging.WARNING)
             continue
 
-        print(f"  Extracted {len(entries)} entry(s)")
-        for i, entry in enumerate(entries, 1):
-            span = f" → {entry['end_date']}" if entry.get("end_date") else ""
-            print(
-                f"    {i}. {entry.get('date', '?')}{span} — {entry.get('title', '?')[:80]}"
-            )
+        # Match the fidelity of the other enrichers (bigo/allegations/tags all
+        # persist the full extracted value to the events JSONL, not just a
+        # count): a compact JSON dump of the entries themselves, so the events
+        # trail is a complete record of what was (or would be) written, not
+        # just "N entries".
+        entries_json = json.dumps(entries, ensure_ascii=False)
         log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
-                  step="extract", status="ok", detail=f"{len(entries)} entries")
+                  step="extract", status="ok",
+                  detail=f"{len(entries)} entries: {entries_json}")
 
         if args.dry_run:
             report.record(slug, "timeline", "would-enrich", f"{len(entries)} entries")
-            print("  [DRY RUN] Would PATCH but --dry-run is set")
             log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
                       step="write", status="would-enrich",
-                      detail=f"{len(entries)} entries")
+                      detail=f"{len(entries)} entries: {entries_json}")
             continue
 
         try:
             api.patch_field(slug, "timeline", entries)
             report.record(slug, "timeline", "enriched", f"{len(entries)} entries")
-            print(f"  [UPDATED] {slug}")
             log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
-                      step="write", status="enriched", detail=f"{len(entries)} entries")
+                      step="write", status="enriched",
+                      detail=f"{len(entries)} entries: {entries_json}")
         except Exception as exc:
             report.record(slug, "timeline", "error", f"PATCH failed: {exc}")
-            print(f"  Failed to PATCH timeline: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
                       step="write", status="error", detail=str(exc),
                       level=logging.ERROR)
