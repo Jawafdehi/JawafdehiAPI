@@ -226,7 +226,10 @@ def test_upload_markdown_returns_none_when_no_markdown_role_in_response():
 def test_upload_markdown_refuses_a_non_local_api():
     """Belt-and-braces against the one catastrophic failure mode: a prod write."""
     api = _FakeApi()
-    api.base_url = "https://api.jawafdehi.org/api"
+    # Non-loopback fixture uses a guaranteed-unroutable host, never the real
+    # api.jawafdehi.org -- a fixture that names the live host is a footgun even
+    # when (as here) it cannot fire a request.
+    api.base_url = "https://example.invalid/api"
     with pytest.raises(ValueError, match="loopback"):
         upload_markdown(api, "https://jawafdehi.org/material/ciaa/x/1", "# x")
 
