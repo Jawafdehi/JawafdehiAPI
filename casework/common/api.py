@@ -7,6 +7,9 @@ import urllib.parse
 import urllib.request
 
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost")
+# Methods that mutate server state. GET/HEAD (reads) are never guarded --
+# only these go through the write-guard in `_request`.
+WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 # Module logger for every HTTP call this client makes. NEVER log the
 # Authorization header, the bearer token, or Basic credentials through this
@@ -85,7 +88,18 @@ class CaseworkApi:
         return h
 
     def _request(self, method, url, data=None, headers=None, timeout=60):
-        """The single method all HTTP goes through.
+        """The single method all HTTP goes through -- and the true write-guard
+        choke point.
+
+        Before anything else: if `method` is a write method (POST/PUT/PATCH/
+        DELETE) AND the target host is not in `LOOPBACK_HOSTS` AND
+        `allow_remote_writes` was not set, refuse -- raise `RuntimeError`
+        BEFORE `urllib.request.urlopen` is ever called, so no request is
+        attempted. GET/HEAD (reads) are never guarded. `_patch` carries its
+        own copy of this same check (defense in depth; redundant once this
+        one exists), but THIS is the check that also covers writes that don't
+        go through `_patch` -- e.g. `convert.py`'s `upload_markdown`, which
+        POSTs directly via `_request`.
 
         Logs method, PATH ONLY (never the full URL -- query strings can carry
         sensitive values) plus status and elapsed time. Reads (GET) log at
@@ -93,7 +107,19 @@ class CaseworkApi:
         carries the `Authorization` header) is NEVER passed to the logger --
         do not "helpfully" add it to a log line, even on the exception path.
         """
-        path = urllib.parse.urlsplit(url).path
+        split = urllib.parse.urlsplit(url)
+        if (
+            method in WRITE_METHODS
+            and split.hostname not in LOOPBACK_HOSTS
+            and not self.allow_remote_writes
+        ):
+            raise RuntimeError(
+                f"refusing to write to non-loopback base_url {self.base_url!r} "
+                f"(host={split.hostname!r}); pass allow_remote_writes=True to "
+                "CaseworkApi (wired from the CLI via --allow-remote-writes) to "
+                "opt in -- reads are unaffected by this guard"
+            )
+        path = split.path
         level = logging.DEBUG if method == "GET" else logging.INFO
         req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
         start = time.monotonic()
@@ -132,9 +158,14 @@ class CaseworkApi:
         return self.get("/cases/" + urllib.parse.quote(slug) + "/", timeout=timeout)
 
     def _patch(self, slug, ops, timeout=60):
-        """The single choke point for every write (`patch_field`, `replace_list`).
+        """The choke point for FIELD writes (`patch_field`, `replace_list`) --
+        NOT "every write": `convert.py`'s `upload_markdown` writes via a
+        direct `_request("POST", ...)` call that never passes through here.
 
-        Write-guard: refuses to fire a PATCH at any non-loopback host unless
+        The authoritative write-guard now lives in `_request` (see its
+        docstring) and covers POST too, closing that gap. The check below is
+        a redundant copy of the same guard, kept for defense in depth -- it
+        refuses to fire a PATCH at any non-loopback host unless
         `allow_remote_writes=True` was passed to `__init__`. Reads (`get`,
         `iter_cases`, `get_case`) do NOT go through this method and are never
         guarded -- reads against production are allowed.
