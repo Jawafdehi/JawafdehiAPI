@@ -46,6 +46,10 @@ def test_parse_stated_count_no_signal():
         ("(079-C1-0427) अपराधिक उपद्रव", "अपराधिक उपद्रव"),
         ("०७९-CP-२३४२ लेनदेन", "लेनदेन"),  # Devanagari-digit case number
         ("अपराधिक उपद्रव (079-C1-0427)", "अपराधिक उपद्रव"),
+        # A separator (comma) before a trailing token is consumed whole — no
+        # dangling "लेनदेन," left behind.
+        ("लेनदेन, 080-cp-1852", "लेनदेन"),
+        ("भुल सुधार; 074-CP-1181", "भुल सुधार"),
     ],
 )
 def test_normalize_case_type_strips_case_numbers(raw, expected):

@@ -130,8 +130,12 @@ _CASE_NUMBER_TOKEN = r"[\d०-९]{2,4}-[A-Za-z][A-Za-z\d०-९]{0,4}(?:-[\d०
 _LEADING_CASE_NUMBER = re.compile(
     r"^\(?\s*(?:" + _CASE_NUMBER_TOKEN + r")\s*\)?[\s,.:;/।\-]*"
 )
+# Mirror the leading pattern's separator class BEFORE the token, so a token
+# preceded by a comma/danda/slash (e.g. "लेनदेन, 080-cp-1852") is consumed whole
+# and never leaves a dangling separator. The token itself is still the strict
+# NNN-XX-NNNN shape, so statute labels ending in "(दफा 241)" are unaffected.
 _TRAILING_CASE_NUMBER = re.compile(
-    r"\s*[(（]?\s*(?:" + _CASE_NUMBER_TOKEN + r")\s*[)）]?\s*$"
+    r"[\s,.:;/।\-]*[(（]?\s*(?:" + _CASE_NUMBER_TOKEN + r")\s*[)）]?\s*$"
 )
 # भ्रष्टाचार ( X ) — the "corruption ( offense )" wrapper; capture the inner offense.
 _BHRASHTACHAR_WRAPPER = re.compile(r"^भ्रष्टाचार\s*\(\s*(.+?)\s*\)\s*$")

@@ -604,11 +604,18 @@ class CourtCaseImporter:
         canonical = normalize_case_type(case.case_type)
         if not canonical or canonical == case.case_type:
             return
-        extra = dict(case.extra_data or {})
-        dq = dict(extra.get("_dq") or {})
-        dq.setdefault("case_type_raw", case.case_type)
-        extra["_dq"] = dq
-        self._update_case(case, case_type=canonical, extra_data=extra)
+        # Archive the raw value for reversibility. Only merge into a dict-shaped
+        # (or absent) extra_data — a non-dict/non-None value is malformed, so skip
+        # the archive rather than crash the row on dict(<non-dict>), matching
+        # _recover_high_court_fields' isinstance guard.
+        if case.extra_data is None or isinstance(case.extra_data, dict):
+            extra = dict(case.extra_data or {})
+            dq = dict(extra.get("_dq") or {})
+            dq.setdefault("case_type_raw", case.case_type)
+            extra["_dq"] = dq
+            self._update_case(case, case_type=canonical, extra_data=extra)
+        else:
+            self._update_case(case, case_type=canonical)
         self.res.dq_case_type_normalized += 1
 
     @staticmethod

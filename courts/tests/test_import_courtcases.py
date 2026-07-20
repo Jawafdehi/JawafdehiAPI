@@ -191,6 +191,21 @@ class CopyModeLoadTests(_NgmTestCase):
         self.assertEqual(res.dq_case_type_normalized, 0)
         self.assertNotIn("_dq", case.extra_data or {})
 
+    def test_case_type_normalized_with_non_dict_extra_data(self):
+        # A malformed (non-dict) extra_data must not crash the row: case_type is
+        # still normalised, the raw archive is skipped, and extra_data is untouched.
+        row = _src_row(
+            case="081-CR-0302", case_type="080-cp-1852 लेनदेन", extra_data=["junk"]
+        )
+        res = _copy([row]).run()
+        case = CourtCase.objects.using("ngm").get(
+            court_id="supreme", case_number="081-CR-0302"
+        )
+        self.assertEqual(case.case_type, "लेनदेन")
+        self.assertEqual(case.extra_data, ["junk"])
+        self.assertEqual(res.failed, 0)
+        self.assertEqual(res.dq_case_type_normalized, 1)
+
     def test_verdict_sentinel_not_surfaced(self):
         row = _src_row(case="081-CR-0042", verdict_date_bs="**** ** **")
         res = _copy([row]).run()
