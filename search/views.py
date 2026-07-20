@@ -15,6 +15,7 @@ import json
 import time
 import uuid
 
+import sentry_sdk
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import serializers, status
@@ -216,7 +217,17 @@ class UnifiedSearchView(APIView):
             return Response(
                 {"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST
             )
-        except SearchUnavailable:
+        except SearchUnavailable as exc:
+            # This is a *handled* 503, so neither the Django integration (which only
+            # reports unhandled exceptions) nor the service's warning-level log
+            # (below Sentry's ERROR event_level) would surface a search-backend
+            # outage. Report it explicitly — with the chained transport error — so
+            # these 503s are visible and alertable in Sentry. The request/transaction
+            # context is inherited from the current scope; ``before_send`` keeps it
+            # (a real request has real filenames, not <string>/<stdin>/<console>).
+            with sentry_sdk.new_scope() as scope:
+                scope.set_tag("search_unavailable", True)
+                sentry_sdk.capture_exception(exc)
             return Response(
                 {"detail": "Search is temporarily unavailable."},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
