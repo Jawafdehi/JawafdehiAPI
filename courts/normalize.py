@@ -154,17 +154,26 @@ def normalize_case_type(case_type: str | None) -> str | None:
     Reversible and safe to run in place over the whole corpus: it unwraps the
     ``भ्रष्टाचार ( X )`` wrapper and strips a leading/trailing STRUCTURED
     case-number token (``NNN-XX-NNNN``), and NOTHING else. Statute citations,
-    section references and free-text descriptions are preserved verbatim. If
-    cleaning would strip the last Devanagari letter (a value that is ONLY a case
-    number), the original is returned unchanged, so a value is never emptied.
+    section references and free-text descriptions are preserved verbatim.
+
+    Matching runs on a whitespace-collapsed, quote-stripped copy (so the tokens
+    match regardless of incidental spacing/quotes), but a value is only reported
+    as CHANGED when a structural transform actually fires. A value that differs
+    from the input by whitespace or surrounding quotes ALONE is returned verbatim
+    — so the importer never rewrites (and re-archives / re-counts) it for
+    cosmetics. If cleaning would strip the last Devanagari letter (a value that is
+    ONLY a case number), the original is returned unchanged, so a value is never
+    emptied.
     """
     if not case_type:
         return case_type
-    original = _WHITESPACE.sub(" ", case_type).strip().strip("\"'")
-    if not original:
-        return original
+    # Whitespace/quote-collapsed working copy — used ONLY for matching, not
+    # returned unless a structural transform below actually changes it.
+    collapsed = _WHITESPACE.sub(" ", case_type).strip().strip("\"'")
+    if not collapsed:
+        return case_type
 
-    s = original
+    s = collapsed
     wrapper = _BHRASHTACHAR_WRAPPER.match(s)
     if wrapper and _has_devanagari_letter(wrapper.group(1)):
         s = wrapper.group(1).strip()
@@ -177,8 +186,9 @@ def normalize_case_type(case_type: str | None) -> str | None:
     if candidate != s and _has_devanagari_letter(candidate):
         s = candidate
 
-    # Whitespace only — the token regexes already consume adjacent separators, and
-    # stripping punctuation here would break balanced parens in statute labels
-    # like "चोरी गरेको (दफा 241)".
     s = s.strip()
-    return s if _has_devanagari_letter(s) else original
+    cleaned = s if _has_devanagari_letter(s) else collapsed
+
+    # Persist only a STRUCTURAL change; a whitespace/quote/Unicode-form-only diff
+    # returns the raw input so the importer sees no change.
+    return cleaned if cleaned != collapsed else case_type

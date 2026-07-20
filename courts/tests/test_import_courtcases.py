@@ -290,6 +290,32 @@ class InplaceModeTests(_NgmTestCase):
         ent = CaseEntity.objects.using("ngm").get(name="Shyam")
         self.assertEqual(ent.nes_id, "entity:person/shyam")
 
+    def test_inplace_case_type_normalization_is_idempotent(self):
+        court = Court.objects.using("ngm").create(
+            identifier="supreme", court_type="supreme", full_name_nepali="स"
+        )
+        CourtCase.objects.using("ngm").create(
+            court=court, case_number="081-CR-0400", status="enriched",
+            case_type="080-cp-1852 लेनदेन",
+        )
+        cfg = dict(mode=ImportMode.INPLACE, courts=["supreme"])
+        first = CourtCaseImporter(ImportConfig(**cfg)).run()
+        self.assertEqual(first.dq_case_type_normalized, 1)
+        case = CourtCase.objects.using("ngm").get(
+            court_id="supreme", case_number="081-CR-0400"
+        )
+        self.assertEqual(case.case_type, "लेनदेन")
+        self.assertEqual(case.extra_data["_dq"]["case_type_raw"], "080-cp-1852 लेनदेन")
+
+        # Second pass: already canonical → no rewrite, no re-archive, not re-counted.
+        second = CourtCaseImporter(ImportConfig(**cfg)).run()
+        self.assertEqual(second.dq_case_type_normalized, 0)
+        case = CourtCase.objects.using("ngm").get(
+            court_id="supreme", case_number="081-CR-0400"
+        )
+        self.assertEqual(case.case_type, "लेनदेन")
+        self.assertEqual(case.extra_data["_dq"]["case_type_raw"], "080-cp-1852 लेनदेन")
+
 
 class SignalAndReindexTests(_NgmTestCase):
     def test_signals_muted_then_restored(self):

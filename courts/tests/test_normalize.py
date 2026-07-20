@@ -85,6 +85,22 @@ def test_normalize_case_type_is_idempotent():
         assert normalize_case_type(once) == once
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "चेक  अनादर",  # internal double space
+        " चेक अनादर ",  # leading/trailing whitespace
+        '"लेनदेन"',  # surrounding quotes
+        "  080-c1-0199  ",  # pure case number with padding
+    ],
+)
+def test_normalize_case_type_cosmetic_only_returns_input_verbatim(value):
+    # Whitespace / surrounding quotes are NOT structural noise: with no
+    # case-number token or wrapper to strip, the raw input is returned unchanged,
+    # so the importer does not rewrite / re-archive / re-count it for cosmetics.
+    assert normalize_case_type(value) == value
+
+
 @pytest.mark.parametrize("value", ["", None])
 def test_normalize_case_type_empty(value):
     assert normalize_case_type(value) == value
