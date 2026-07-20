@@ -88,6 +88,25 @@ def test_search_api_503_when_cluster_down():
 
 
 @pytest.mark.django_db
+def test_search_api_503_reports_to_sentry():
+    """A search-backend outage returns a *handled* 503, so it must be reported to
+    Sentry explicitly (the Django integration only sees unhandled exceptions, and
+    the service logs the transport error at warning level, below Sentry's ERROR
+    event threshold). Without this, search outages are invisible in Sentry."""
+    client = MagicMock()
+    client.search.side_effect = ConnectionError("down")
+    with patch("search.service.make_client", return_value=client), patch(
+        "search.views.sentry_sdk.capture_exception"
+    ) as capture:
+        resp = APIClient().get("/api/search/", {"q": "x"})
+    assert resp.status_code == 503
+    capture.assert_called_once()
+    # The captured exception chains back to the underlying transport error.
+    captured = capture.call_args.args[0]
+    assert isinstance(captured.__cause__, ConnectionError)
+
+
+@pytest.mark.django_db
 def test_search_api_allows_empty_q_as_browse():
     """``q`` is optional: no query term is a browse (match-all), not a 400."""
     client = MagicMock()
