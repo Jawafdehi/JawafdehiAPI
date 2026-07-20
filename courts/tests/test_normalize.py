@@ -50,6 +50,9 @@ def test_parse_stated_count_no_signal():
         # dangling "लेनदेन," left behind.
         ("लेनदेन, 080-cp-1852", "लेनदेन"),
         ("भुल सुधार; 074-CP-1181", "भुल सुधार"),
+        # Combined noise (leading case number AND भ्रष्टाचार wrapper): stripping the
+        # number re-exposes the wrapper, so both are resolved in a single call.
+        ("080-cp-1852 भ्रष्टाचार ( रकम हिनामिना )", "रकम हिनामिना"),
     ],
 )
 def test_normalize_case_type_strips_case_numbers(raw, expected):
@@ -80,7 +83,12 @@ def test_normalize_case_type_preserves_meaningful_values(value):
 
 
 def test_normalize_case_type_is_idempotent():
-    for raw in ("भ्रष्टाचार ( रकम हिनामिना )", "080-cp-1852 लेनदेन", "चोरी गरेको (दफा 241)"):
+    for raw in (
+        "भ्रष्टाचार ( रकम हिनामिना )",
+        "080-cp-1852 लेनदेन",
+        "चोरी गरेको (दफा 241)",
+        "080-cp-1852 भ्रष्टाचार ( रकम हिनामिना )",  # combined noise
+    ):
         once = normalize_case_type(raw)
         assert normalize_case_type(once) == once
 

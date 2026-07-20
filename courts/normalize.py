@@ -174,17 +174,28 @@ def normalize_case_type(case_type: str | None) -> str | None:
         return case_type
 
     s = collapsed
-    wrapper = _BHRASHTACHAR_WRAPPER.match(s)
-    if wrapper and _has_devanagari_letter(wrapper.group(1)):
-        s = wrapper.group(1).strip()
+    # Apply the strips repeatedly until the value stops changing, so a value
+    # carrying MORE THAN ONE kind of noise (e.g. a leading case number AND a
+    # भ्रष्टाचार(X) wrapper, where stripping the number first re-exposes the
+    # wrapper) is fully normalised in ONE call and the result is a fixed point
+    # (idempotent). Each pass can only shrink s, so this always converges; the cap
+    # is a belt-and-suspenders guard, not a real bound.
+    for _ in range(5):
+        before = s
+        wrapper = _BHRASHTACHAR_WRAPPER.match(s)
+        if wrapper and _has_devanagari_letter(wrapper.group(1)):
+            s = wrapper.group(1).strip()
 
-    candidate = _LEADING_CASE_NUMBER.sub("", s, count=1).strip()
-    if candidate != s and _has_devanagari_letter(candidate):
-        s = candidate
+        candidate = _LEADING_CASE_NUMBER.sub("", s, count=1).strip()
+        if candidate != s and _has_devanagari_letter(candidate):
+            s = candidate
 
-    candidate = _TRAILING_CASE_NUMBER.sub("", s, count=1).strip()
-    if candidate != s and _has_devanagari_letter(candidate):
-        s = candidate
+        candidate = _TRAILING_CASE_NUMBER.sub("", s, count=1).strip()
+        if candidate != s and _has_devanagari_letter(candidate):
+            s = candidate
+
+        if s == before:
+            break
 
     s = s.strip()
     cleaned = s if _has_devanagari_letter(s) else collapsed

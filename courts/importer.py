@@ -610,7 +610,10 @@ class CourtCaseImporter:
         # _recover_high_court_fields' isinstance guard.
         if case.extra_data is None or isinstance(case.extra_data, dict):
             extra = dict(case.extra_data or {})
-            dq = dict(extra.get("_dq") or {})
+            # Guard the nested _dq shape too — a malformed non-dict _dq would
+            # otherwise crash the row on dict(<non-dict>).
+            existing_dq = extra.get("_dq")
+            dq = dict(existing_dq) if isinstance(existing_dq, dict) else {}
             dq.setdefault("case_type_raw", case.case_type)
             extra["_dq"] = dq
             self._update_case(case, case_type=canonical, extra_data=extra)
