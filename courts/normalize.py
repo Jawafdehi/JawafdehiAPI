@@ -153,8 +153,10 @@ def normalize_case_type(case_type: str | None) -> str | None:
 
     Reversible and safe to run in place over the whole corpus: it unwraps the
     ``भ्रष्टाचार ( X )`` wrapper and strips a leading/trailing STRUCTURED
-    case-number token (``NNN-XX-NNNN``), and NOTHING else. Statute citations,
-    section references and free-text descriptions are preserved verbatim.
+    case-number token (``NNN-XX-NNNN``) — dropping an opening paren left orphaned
+    when that token sat inside a parenthetical alongside real text — and NOTHING
+    else. Statute citations, section references and free-text descriptions are
+    preserved verbatim.
 
     Matching runs on a whitespace-collapsed, quote-stripped copy (so the tokens
     match regardless of incidental spacing/quotes), but a value is only reported
@@ -193,6 +195,20 @@ def normalize_case_type(case_type: str | None) -> str | None:
         candidate = _TRAILING_CASE_NUMBER.sub("", s, count=1).strip()
         if candidate != s and _has_devanagari_letter(candidate):
             s = candidate
+
+        # A structured case number can sit INSIDE a parenthetical that also holds
+        # real descriptive text, e.g. "हाजिर गराई पाउ ( ज्यान मार्ने उद्योग, 079-C1-0213)".
+        # Stripping the trailing ", 079-C1-0213)" removes the CLOSING paren but leaves
+        # the opening "(" dangling. Drop that now-orphaned opening paren (keeping the
+        # description) so we never emit an unbalanced "(". Guarded on ``s != before``
+        # so it fires ONLY as a consequence of a strip this pass — a value's own
+        # pre-existing unbalanced parens are never rebalanced when nothing else changed.
+        if s != before and (s.count("(") + s.count("（")) > (s.count(")") + s.count("）")):
+            idx = max(s.rfind("("), s.rfind("（"))
+            if idx != -1 and ")" not in s[idx:] and "）" not in s[idx:]:
+                candidate = _WHITESPACE.sub(" ", s[:idx] + " " + s[idx + 1:]).strip()
+                if _has_devanagari_letter(candidate):
+                    s = candidate
 
         if s == before:
             break
