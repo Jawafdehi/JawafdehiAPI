@@ -113,3 +113,93 @@ def is_verdict_sentinel(value: object) -> bool:
         return True
     stripped = str(value).replace("*", "").replace(" ", "").replace("-", "")
     return stripped == ""
+
+
+# ── case_type canonicalisation ───────────────────────────────────────────────
+# case_type is scraped free text (the मुद्दाको किसिम cause-list / detail cell), so
+# clerks paste case numbers, dates and whole sentences into it. The cleaner below
+# is deliberately HIGH-PRECISION: it removes only the unambiguous structural noise
+# and preserves the label — crucially the statute citations (``चोरी गरेको (दफा 241)``)
+# and section references (``१५५ बमोजिम``) that are the MOST useful case_type values
+# and merely happen to contain digits. Aggressive rewriting of those would destroy
+# real information, so it is intentionally NOT done here.
+
+# A STRUCTURED court case-number token, e.g. "080-C1-0199", "०७९-CP-२३४२". The
+# letter segment (C1/CP/CR/WO/OA/FN…) is Latin even when the digits are Devanagari.
+_CASE_NUMBER_TOKEN = r"[\d०-९]{2,4}-[A-Za-z][A-Za-z\d०-९]{0,4}(?:-[\d०-९]{1,6})?"
+_LEADING_CASE_NUMBER = re.compile(
+    r"^\(?\s*(?:" + _CASE_NUMBER_TOKEN + r")\s*\)?[\s,.:;/।\-]*"
+)
+# Mirror the leading pattern's separator class BEFORE the token, so a token
+# preceded by a comma/danda/slash (e.g. "लेनदेन, 080-cp-1852") is consumed whole
+# and never leaves a dangling separator. The token itself is still the strict
+# NNN-XX-NNNN shape, so statute labels ending in "(दफा 241)" are unaffected.
+_TRAILING_CASE_NUMBER = re.compile(
+    r"[\s,.:;/।\-]*[(（]?\s*(?:" + _CASE_NUMBER_TOKEN + r")\s*[)）]?\s*$"
+)
+# भ्रष्टाचार ( X ) — the "corruption ( offense )" wrapper; capture the inner offense.
+_BHRASHTACHAR_WRAPPER = re.compile(r"^भ्रष्टाचार\s*\(\s*(.+?)\s*\)\s*$")
+# Any Devanagari vowel/consonant (excludes the digit block ०-९ at U+0966–U+096F).
+_DEVANAGARI_LETTER = re.compile(r"[ऄ-ह]")
+_WHITESPACE = re.compile(r"\s+")
+
+
+def _has_devanagari_letter(text: str) -> bool:
+    return bool(_DEVANAGARI_LETTER.search(text or ""))
+
+
+def normalize_case_type(case_type: str | None) -> str | None:
+    """Canonicalise a scraped ``case_type`` toward its semantic charge/matter label.
+
+    Reversible and safe to run in place over the whole corpus: it unwraps the
+    ``भ्रष्टाचार ( X )`` wrapper and strips a leading/trailing STRUCTURED
+    case-number token (``NNN-XX-NNNN``), and NOTHING else. Statute citations,
+    section references and free-text descriptions are preserved verbatim.
+
+    Matching runs on a whitespace-collapsed, quote-stripped copy (so the tokens
+    match regardless of incidental spacing/quotes), but a value is only reported
+    as CHANGED when a structural transform actually fires. A value that differs
+    from the input by whitespace or surrounding quotes ALONE is returned verbatim
+    — so the importer never rewrites (and re-archives / re-counts) it for
+    cosmetics. If cleaning would strip the last Devanagari letter (a value that is
+    ONLY a case number), the original is returned unchanged, so a value is never
+    emptied.
+    """
+    if not case_type:
+        return case_type
+    # Whitespace/quote-collapsed working copy — used ONLY for matching, not
+    # returned unless a structural transform below actually changes it.
+    collapsed = _WHITESPACE.sub(" ", case_type).strip().strip("\"'")
+    if not collapsed:
+        return case_type
+
+    s = collapsed
+    # Apply the strips repeatedly until the value stops changing, so a value
+    # carrying MORE THAN ONE kind of noise (e.g. a leading case number AND a
+    # भ्रष्टाचार(X) wrapper, where stripping the number first re-exposes the
+    # wrapper) is fully normalised in ONE call and the result is a fixed point
+    # (idempotent). Each pass can only shrink s, so this always converges; the cap
+    # is a belt-and-suspenders guard, not a real bound.
+    for _ in range(5):
+        before = s
+        wrapper = _BHRASHTACHAR_WRAPPER.match(s)
+        if wrapper and _has_devanagari_letter(wrapper.group(1)):
+            s = wrapper.group(1).strip()
+
+        candidate = _LEADING_CASE_NUMBER.sub("", s, count=1).strip()
+        if candidate != s and _has_devanagari_letter(candidate):
+            s = candidate
+
+        candidate = _TRAILING_CASE_NUMBER.sub("", s, count=1).strip()
+        if candidate != s and _has_devanagari_letter(candidate):
+            s = candidate
+
+        if s == before:
+            break
+
+    s = s.strip()
+    cleaned = s if _has_devanagari_letter(s) else collapsed
+
+    # Persist only a STRUCTURAL change; a whitespace/quote/Unicode-form-only diff
+    # returns the raw input so the importer sees no change.
+    return cleaned if cleaned != collapsed else case_type

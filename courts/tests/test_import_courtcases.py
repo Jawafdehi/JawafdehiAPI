@@ -167,6 +167,62 @@ class CopyModeLoadTests(_NgmTestCase):
         self.assertEqual(case.case_status, "फैसला")
         self.assertEqual(res.dq_hc_recovered, 1)
 
+    def test_case_type_normalized_and_raw_archived(self):
+        # A leading case-number token is stripped in place; the raw value is kept
+        # under extra_data._dq for reversibility, and the guard is counted.
+        row = _src_row(case="081-CR-0300", case_type="080-cp-1852 लेनदेन")
+        res = _copy([row]).run()
+        case = CourtCase.objects.using("ngm").get(
+            court_id="supreme", case_number="081-CR-0300"
+        )
+        self.assertEqual(case.case_type, "लेनदेन")
+        self.assertEqual(case.extra_data["_dq"]["case_type_raw"], "080-cp-1852 लेनदेन")
+        self.assertEqual(res.dq_case_type_normalized, 1)
+
+    def test_case_type_statute_label_preserved(self):
+        # A charge label with its statute section is meaningful, not noise — it
+        # must pass through untouched (no rewrite, no raw archived, not counted).
+        row = _src_row(case="081-CR-0301", case_type="चोरी गरेको (दफा 241)")
+        res = _copy([row]).run()
+        case = CourtCase.objects.using("ngm").get(
+            court_id="supreme", case_number="081-CR-0301"
+        )
+        self.assertEqual(case.case_type, "चोरी गरेको (दफा 241)")
+        self.assertEqual(res.dq_case_type_normalized, 0)
+        self.assertNotIn("_dq", case.extra_data or {})
+
+    def test_case_type_normalized_with_non_dict_extra_data(self):
+        # A malformed (non-dict) extra_data must not crash the row: case_type is
+        # still normalised, the raw archive is skipped, and extra_data is untouched.
+        row = _src_row(
+            case="081-CR-0302", case_type="080-cp-1852 लेनदेन", extra_data=["junk"]
+        )
+        res = _copy([row]).run()
+        case = CourtCase.objects.using("ngm").get(
+            court_id="supreme", case_number="081-CR-0302"
+        )
+        self.assertEqual(case.case_type, "लेनदेन")
+        self.assertEqual(case.extra_data, ["junk"])
+        self.assertEqual(res.failed, 0)
+        self.assertEqual(res.dq_case_type_normalized, 1)
+
+    def test_case_type_normalized_with_non_dict_dq(self):
+        # A malformed non-dict _dq must not crash the row: it is replaced with a
+        # proper dict carrying the archived raw value.
+        row = _src_row(
+            case="081-CR-0303", case_type="080-cp-1852 लेनदेन",
+            extra_data={"_dq": "junk", "keep": 1},
+        )
+        res = _copy([row]).run()
+        case = CourtCase.objects.using("ngm").get(
+            court_id="supreme", case_number="081-CR-0303"
+        )
+        self.assertEqual(case.case_type, "लेनदेन")
+        self.assertEqual(case.extra_data["_dq"]["case_type_raw"], "080-cp-1852 लेनदेन")
+        self.assertEqual(case.extra_data["keep"], 1)  # other keys preserved
+        self.assertEqual(res.failed, 0)
+        self.assertEqual(res.dq_case_type_normalized, 1)
+
     def test_verdict_sentinel_not_surfaced(self):
         row = _src_row(case="081-CR-0042", verdict_date_bs="**** ** **")
         res = _copy([row]).run()
@@ -250,6 +306,32 @@ class InplaceModeTests(_NgmTestCase):
         # … but NOTHING is persisted (read-only: no UPDATE issued).
         ent = CaseEntity.objects.using("ngm").get(name="Shyam")
         self.assertEqual(ent.nes_id, "entity:person/shyam")
+
+    def test_inplace_case_type_normalization_is_idempotent(self):
+        court = Court.objects.using("ngm").create(
+            identifier="supreme", court_type="supreme", full_name_nepali="स"
+        )
+        CourtCase.objects.using("ngm").create(
+            court=court, case_number="081-CR-0400", status="enriched",
+            case_type="080-cp-1852 लेनदेन",
+        )
+        cfg = dict(mode=ImportMode.INPLACE, courts=["supreme"])
+        first = CourtCaseImporter(ImportConfig(**cfg)).run()
+        self.assertEqual(first.dq_case_type_normalized, 1)
+        case = CourtCase.objects.using("ngm").get(
+            court_id="supreme", case_number="081-CR-0400"
+        )
+        self.assertEqual(case.case_type, "लेनदेन")
+        self.assertEqual(case.extra_data["_dq"]["case_type_raw"], "080-cp-1852 लेनदेन")
+
+        # Second pass: already canonical → no rewrite, no re-archive, not re-counted.
+        second = CourtCaseImporter(ImportConfig(**cfg)).run()
+        self.assertEqual(second.dq_case_type_normalized, 0)
+        case = CourtCase.objects.using("ngm").get(
+            court_id="supreme", case_number="081-CR-0400"
+        )
+        self.assertEqual(case.case_type, "लेनदेन")
+        self.assertEqual(case.extra_data["_dq"]["case_type_raw"], "080-cp-1852 लेनदेन")
 
 
 class SignalAndReindexTests(_NgmTestCase):
