@@ -85,6 +85,16 @@ class FrontierTests(_NgmTestCase):
         self.assertEqual(scraped_dates_for("special"), {"2082-01-05"})
         self.assertEqual(ScrapedDate.objects.using("ngm").count(), 1)
 
+    def test_mark_scraped_creates_court_for_empty_causelist(self):
+        # A crawled date with an EMPTY cause-list still gets marked scraped; the
+        # court FK must not fail just because no cases were written and the court
+        # is not yet in the DB. Regression: district courts with empty days threw
+        # IntegrityError (FOREIGN KEY constraint failed) on a fresh/unseeded DB.
+        self.assertFalse(Court.objects.using("ngm").filter(identifier="achhamdc").exists())
+        mark_scraped("achhamdc", "2082-01-06")
+        self.assertTrue(Court.objects.using("ngm").filter(identifier="achhamdc").exists())
+        self.assertEqual(scraped_dates_for("achhamdc"), {"2082-01-06"})
+
 
 class EnrichmentTests(_NgmTestCase):
     def _seed(self, cn="082-CR-0020"):

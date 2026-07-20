@@ -60,6 +60,11 @@ def scraped_dates_for(court_id: str, *, using: str = NGM_DB) -> set[str]:
 
 
 def mark_scraped(court_id: str, date_bs: str, note: str | None = None, *, using: str = NGM_DB) -> None:
+    # Marking a date scraped for a court implies the court exists. Ensure it here
+    # so a date with an EMPTY cause-list (no cases → upsert_causelist never ran
+    # _ensure_court) doesn't fail the ScrapedDate → Court FK. Real courts already
+    # exist (bulk-COPY'd); this only creates a stub for a court not yet in the DB.
+    _ensure_court(court_id, using=using)
     ScrapedDate.objects.using(using).get_or_create(
         court_id=court_id, date_bs=date_bs, defaults={"note": note}
     )
