@@ -51,6 +51,33 @@ configure_structlog()
 
 _sentry_dsn = os.getenv("SENTRY_DSN")
 _sentry_environment = os.getenv("SENTRY_ENVIRONMENT", "production")
+
+# Filenames the interpreter assigns to code that has no source file: `manage.py
+# shell -c "..."` and any exec()/eval() compile to "<string>", the interactive
+# shell REPL to "<console>", piped stdin to "<stdin>". Real app code — HTTP
+# request handlers, mgmt-command bodies, tasks — always has a real filename, so a
+# stack that passes through any of these came from an operator one-off or a
+# health-check probe, never the running service.
+_EXEC_PSEUDO_FILENAMES = {"<string>", "<stdin>", "<console>"}
+
+
+def _drop_exec_originated_events(event, _hint):
+    """Sentry ``before_send``: drop events raised from exec'd / interactive code.
+
+    This kills the dominant source of API Sentry noise: exceptions from ad-hoc
+    ``manage.py shell -c "..."`` sessions and the CronJob pre-flight readiness
+    probes (e.g. reindex-cases' ``shell -c "... assert make_client().ping()"``,
+    which fires an ``AssertionError`` on every cold start until deps are
+    reachable). Any event whose stack passes through a ``<string>``/``<stdin>``/
+    ``<console>`` frame is such noise; everything with a real filename is kept.
+    """
+    for value in (event.get("exception") or {}).get("values") or []:
+        for frame in (value.get("stacktrace") or {}).get("frames") or []:
+            if frame.get("filename") in _EXEC_PSEUDO_FILENAMES:
+                return None
+    return event
+
+
 # Belt-and-suspenders: never ship events from local / dev runs even if a DSN
 # leaked into a developer's .env. Prod sets SENTRY_ENVIRONMENT=production.
 if _sentry_dsn and _sentry_environment.strip().lower() not in {
@@ -65,6 +92,7 @@ if _sentry_dsn and _sentry_environment.strip().lower() not in {
         traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "1.0")),
         send_default_pii=False,
         environment=_sentry_environment,
+        before_send=_drop_exec_originated_events,
     )
 
 
