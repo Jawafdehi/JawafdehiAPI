@@ -167,6 +167,30 @@ class CopyModeLoadTests(_NgmTestCase):
         self.assertEqual(case.case_status, "फैसला")
         self.assertEqual(res.dq_hc_recovered, 1)
 
+    def test_case_type_normalized_and_raw_archived(self):
+        # A leading case-number token is stripped in place; the raw value is kept
+        # under extra_data._dq for reversibility, and the guard is counted.
+        row = _src_row(case="081-CR-0300", case_type="080-cp-1852 लेनदेन")
+        res = _copy([row]).run()
+        case = CourtCase.objects.using("ngm").get(
+            court_id="supreme", case_number="081-CR-0300"
+        )
+        self.assertEqual(case.case_type, "लेनदेन")
+        self.assertEqual(case.extra_data["_dq"]["case_type_raw"], "080-cp-1852 लेनदेन")
+        self.assertEqual(res.dq_case_type_normalized, 1)
+
+    def test_case_type_statute_label_preserved(self):
+        # A charge label with its statute section is meaningful, not noise — it
+        # must pass through untouched (no rewrite, no raw archived, not counted).
+        row = _src_row(case="081-CR-0301", case_type="चोरी गरेको (दफा 241)")
+        res = _copy([row]).run()
+        case = CourtCase.objects.using("ngm").get(
+            court_id="supreme", case_number="081-CR-0301"
+        )
+        self.assertEqual(case.case_type, "चोरी गरेको (दफा 241)")
+        self.assertEqual(res.dq_case_type_normalized, 0)
+        self.assertNotIn("_dq", case.extra_data or {})
+
     def test_verdict_sentinel_not_surfaced(self):
         row = _src_row(case="081-CR-0042", verdict_date_bs="**** ** **")
         res = _copy([row]).run()

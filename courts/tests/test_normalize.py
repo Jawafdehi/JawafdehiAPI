@@ -1,6 +1,8 @@
 """Unit tests for ``courts.normalize`` helpers."""
 
-from courts.normalize import parse_stated_defendant_count
+import pytest
+
+from courts.normalize import normalize_case_type, parse_stated_defendant_count
 
 
 def test_parse_stated_count_ascii_and_devanagari():
@@ -31,3 +33,54 @@ def test_parse_stated_count_no_signal():
     assert parse_stated_defendant_count("प्रमुख प्रतिवादी") == (None, False)
     assert parse_stated_defendant_count("") == (None, False)
     assert parse_stated_defendant_count(None) == (None, False)
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        # भ्रष्टाचार ( X ) wrapper -> inner offense.
+        ("भ्रष्टाचार ( रकम हिनामिना )", "रकम हिनामिना"),
+        # Leading/trailing structured case-number token stripped, label kept.
+        ("080-cp-1852 लेनदेन", "लेनदेन"),
+        ("074-CP-1181, भुल वा त्रुटि शंशोधन", "भुल वा त्रुटि शंशोधन"),
+        ("(079-C1-0427) अपराधिक उपद्रव", "अपराधिक उपद्रव"),
+        ("०७९-CP-२३४२ लेनदेन", "लेनदेन"),  # Devanagari-digit case number
+        ("अपराधिक उपद्रव (079-C1-0427)", "अपराधिक उपद्रव"),
+    ],
+)
+def test_normalize_case_type_strips_case_numbers(raw, expected):
+    assert normalize_case_type(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        # Statute citations are the MOST useful case_type values — never touched,
+        # even though they contain digits and parentheses.
+        "चोरी गरेको (दफा 241)",
+        "जबरजस्ती करणी गरेको (दफा 219)",
+        "अंशबण्डा गरिपाऊँ (दफा २०५), (२१५)",
+        "मु.फौ.सं. को दफा 155 बमोजिमको निवेदन",
+        # Section references and clean labels pass through.
+        "१५५ को सुविधा पाउँ",
+        "155 बमोजिमको निवेदन",
+        "चेक अनादर",
+        # A value that is ONLY a case number has no label to keep -> unchanged
+        # (never emptied to something misleading).
+        "080-c1-0199",
+        "3942",
+    ],
+)
+def test_normalize_case_type_preserves_meaningful_values(value):
+    assert normalize_case_type(value) == value
+
+
+def test_normalize_case_type_is_idempotent():
+    for raw in ("भ्रष्टाचार ( रकम हिनामिना )", "080-cp-1852 लेनदेन", "चोरी गरेको (दफा 241)"):
+        once = normalize_case_type(raw)
+        assert normalize_case_type(once) == once
+
+
+@pytest.mark.parametrize("value", ["", None])
+def test_normalize_case_type_empty(value):
+    assert normalize_case_type(value) == value

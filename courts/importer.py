@@ -41,7 +41,11 @@ from django.utils import timezone
 from jawafdehi_shared.entities.ids import build_courtcase_iri
 from courts import search_index
 from courts.models import CaseEntity, Court, CourtCase, CourtCaseHearing
-from courts.normalize import best_effort_normalize, is_verdict_sentinel
+from courts.normalize import (
+    best_effort_normalize,
+    is_verdict_sentinel,
+    normalize_case_type,
+)
 from materials.jsonld import (
     MaterialType,
     case_order_sources,
@@ -114,6 +118,7 @@ class ImportResult:
     dq_verdict_nulled: int = 0
     dq_hc_recovered: int = 0
     dq_special_flagged: int = 0
+    dq_case_type_normalized: int = 0
     skipped: int = 0
     failed: int = 0
     errors: list[dict[str, Any]] = field(default_factory=list)
@@ -126,6 +131,7 @@ class ImportResult:
             "dq_verdict_nulled": self.dq_verdict_nulled,
             "dq_hc_recovered": self.dq_hc_recovered,
             "dq_special_flagged": self.dq_special_flagged,
+            "dq_case_type_normalized": self.dq_case_type_normalized,
             "skipped": self.skipped,
             "failed": self.failed,
             "errors": list(self.errors),
@@ -544,6 +550,11 @@ class CourtCaseImporter:
         if self._court_type(case, row) == "high":
             self._recover_high_court_fields(case)
 
+        # (4) case_type free-text noise — canonicalise in place (conservative;
+        # preserves statute/section labels), archiving the raw value once. Runs
+        # after (3) so a just-recovered high-court case_type is normalised too.
+        self._normalize_case_type(case)
+
     def _flag_special_defendants(self, case: CourtCase, row: Any) -> None:
         if self._read_only and not isinstance(row, CourtCase):
             has_defendant = any(
@@ -581,6 +592,24 @@ class CourtCaseImporter:
             return
         self._update_case(case, **updates)
         self.res.dq_hc_recovered += 1
+
+    def _normalize_case_type(self, case: CourtCase) -> None:
+        """Canonicalise ``case_type`` in place (structural noise only), archiving
+        the raw value under ``extra_data._dq.case_type_raw`` so the rewrite is
+        reversible. Conservative by design — statute citations and section
+        references are preserved (see ``courts.normalize.normalize_case_type``).
+        Idempotent: a re-run finds the value already canonical and does nothing."""
+        if not case.case_type:
+            return
+        canonical = normalize_case_type(case.case_type)
+        if not canonical or canonical == case.case_type:
+            return
+        extra = dict(case.extra_data or {})
+        dq = dict(extra.get("_dq") or {})
+        dq.setdefault("case_type_raw", case.case_type)
+        extra["_dq"] = dq
+        self._update_case(case, case_type=canonical, extra_data=extra)
+        self.res.dq_case_type_normalized += 1
 
     @staticmethod
     def _court_type(case: CourtCase, row: Any) -> str | None:
