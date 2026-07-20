@@ -1,6 +1,7 @@
 import base64
 import json
 import logging
+import urllib.error
 import urllib.request
 
 import pytest
@@ -120,7 +121,7 @@ def test_bearer_or_basic_is_required():
 def test_basic_mode_rejects_non_loopback_base_url():
     with pytest.raises(ValueError):
         CaseworkApi(
-            base_url="https://api.jawafdehi.org",
+            base_url="https://example.invalid",
             basic=("abgen", "local-dev-only"),
         )
 
@@ -268,17 +269,17 @@ def _failing_urlopen(*a, **k):
 
 def test_patch_field_raises_for_non_loopback_without_opt_in(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", _failing_urlopen)
-    api = CaseworkApi(base_url="https://api.jawafdehi.org", token="t")
+    api = CaseworkApi(base_url="https://example.invalid", token="t")
 
-    with pytest.raises(RuntimeError, match="api.jawafdehi.org"):
+    with pytest.raises(RuntimeError, match="example.invalid"):
         api.patch_field("some-slug", "bigo", 500)
 
 
 def test_replace_list_raises_for_non_loopback_without_opt_in(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", _failing_urlopen)
-    api = CaseworkApi(base_url="https://api.jawafdehi.org", token="t")
+    api = CaseworkApi(base_url="https://example.invalid", token="t")
 
-    with pytest.raises(RuntimeError, match="api.jawafdehi.org"):
+    with pytest.raises(RuntimeError, match="example.invalid"):
         api.replace_list("some-slug", "evidence", [])
 
 
@@ -286,7 +287,7 @@ def test_patch_field_allowed_for_non_loopback_with_opt_in(monkeypatch):
     calls = []
     monkeypatch.setattr(urllib.request, "urlopen", _urlopen_spy(calls))
     api = CaseworkApi(
-        base_url="https://api.jawafdehi.org", token="t", allow_remote_writes=True
+        base_url="https://example.invalid", token="t", allow_remote_writes=True
     )
 
     api.patch_field("some-slug", "bigo", 500)  # must not raise
@@ -309,9 +310,57 @@ def test_get_is_never_guarded_against_non_loopback(monkeypatch):
     monkeypatch.setattr(
         urllib.request, "urlopen", _urlopen_spy(calls, body=b'{"slug": "x"}')
     )
-    api = CaseworkApi(base_url="https://api.jawafdehi.org", token="t")
+    api = CaseworkApi(base_url="https://example.invalid", token="t")
 
     api.get_case("some-slug")  # must not raise -- reads are unguarded
+
+    assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Write-guard at the TRUE choke point -- `_request` itself.
+#
+# `_patch` claiming to be "the single choke point for every write" was false:
+# `convert.py:188` writes via `api._request("POST", ...)` directly, bypassing
+# `_patch` and its guard entirely. The guard now lives in `_request`, so it
+# covers POST (and any future write path) as well as PATCH. These tests call
+# `_request` directly -- not through `patch_field`/`replace_list` -- to prove
+# the guard fires at that layer specifically, independent of `_patch`'s own
+# (now redundant) copy of the same check.
+# ---------------------------------------------------------------------------
+
+
+def test_request_post_raises_for_non_loopback_without_opt_in(monkeypatch):
+    monkeypatch.setattr(urllib.request, "urlopen", _failing_urlopen)
+    api = CaseworkApi(base_url="https://example.invalid", token="t")
+
+    with pytest.raises(RuntimeError, match="example.invalid"):
+        api._request("POST", "https://example.invalid/api/materials/x/y/file",
+                     data=b"{}", headers=api._headers())
+
+
+def test_request_post_allowed_for_non_loopback_with_opt_in(monkeypatch):
+    calls = []
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_spy(calls))
+    api = CaseworkApi(
+        base_url="https://example.invalid", token="t", allow_remote_writes=True
+    )
+
+    with api._request("POST", "https://example.invalid/api/materials/x/y/file",
+                      data=b"{}", headers=api._headers()):
+        pass
+
+    assert len(calls) == 1
+
+
+def test_request_get_is_never_guarded_against_non_loopback(monkeypatch):
+    calls = []
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_spy(calls))
+    api = CaseworkApi(base_url="https://example.invalid", token="t")
+
+    with api._request("GET", "https://example.invalid/api/cases/",
+                      headers=api._headers()):
+        pass  # must not raise -- reads are unguarded, even at this layer
 
     assert len(calls) == 1
 
@@ -393,3 +442,41 @@ def test_no_auth_material_ever_reaches_the_logs(monkeypatch, caplog):
     assert "Bearer" not in all_text
     assert "Basic " not in all_text
     assert len(calls) == 4
+
+
+def test_no_auth_material_reaches_the_logs_on_the_exception_path(monkeypatch, caplog):
+    """Same hard requirement as above, but for the branch the previous test
+    never touches: `_request`'s `except Exception as exc: ... logger.warning(
+    ..., exc, ...)` line. `str(URLError)`/`str(HTTPError)` carries no auth or
+    URL query by construction, but that was reasoning, not a test -- this
+    exercises the exception path directly and greps every captured record.
+    """
+    token = "sekrit-bearer-token-should-never-leak-on-error"
+    basic_user, basic_pass = "abgen", "sekrit-basic-password-should-never-leak-on-error"
+    basic_creds = base64.b64encode(f"{basic_user}:{basic_pass}".encode()).decode()
+
+    def raising_urlopen(req, timeout=None):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", raising_urlopen)
+
+    bearer_api = CaseworkApi(base_url="http://127.0.0.1:48010", token=token)
+    basic_api = CaseworkApi(
+        base_url="http://127.0.0.1:48010", basic=(basic_user, basic_pass)
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="casework.api"):
+        for api in (bearer_api, basic_api):
+            with pytest.raises(urllib.error.URLError):
+                api.get("/cases/")
+            with pytest.raises(urllib.error.URLError):
+                api.patch_field("some-slug", "bigo", 500)
+
+    all_text = "\n".join(
+        r.getMessage() for r in caplog.records if r.name == "casework.api"
+    )
+    assert all_text  # sanity: the exception path did log something
+    assert token not in all_text
+    assert basic_creds not in all_text
+    assert "Bearer" not in all_text
+    assert "Basic " not in all_text

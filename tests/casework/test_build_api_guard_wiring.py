@@ -60,7 +60,7 @@ class TestBuildApiGuardWiring:
 
     def test_token_branch_true_reaches_caseworkapi(self, module):
         args = _args(
-            api_base_url="https://api.jawafdehi.org",
+            api_base_url="https://example.invalid",
             api_token="secret-token", allow_remote_writes=True,
         )
         api = module.build_api(args)
@@ -68,7 +68,7 @@ class TestBuildApiGuardWiring:
 
     def test_token_branch_false_reaches_caseworkapi(self, module):
         args = _args(
-            api_base_url="https://api.jawafdehi.org",
+            api_base_url="https://example.invalid",
             api_token="secret-token", allow_remote_writes=False,
         )
         api = module.build_api(args)
