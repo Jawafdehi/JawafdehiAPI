@@ -53,6 +53,14 @@ def test_parse_stated_count_no_signal():
         # Combined noise (leading case number AND भ्रष्टाचार wrapper): stripping the
         # number re-exposes the wrapper, so both are resolved in a single call.
         ("080-cp-1852 भ्रष्टाचार ( रकम हिनामिना )", "रकम हिनामिना"),
+        # A case number sits INSIDE a parenthetical alongside real text: the trailing
+        # ", TOKEN)" is stripped AND the now-orphaned opening "(" is dropped, so no
+        # unbalanced paren is left behind while the description is preserved.
+        ("हाजिर गराई पाउ ( ज्यान मार्ने उद्योग, 079-C1-0213)", "हाजिर गराई पाउ ज्यान मार्ने उद्योग"),
+        ("हाजिर गराई पाउ ( ज्यान मार्ने उद्योग, 079-C1-0229)", "हाजिर गराई पाउ ज्यान मार्ने उद्योग"),
+        # A BALANCED inner paren (here from the भ्रष्टाचार wrapper unwrap) is preserved
+        # verbatim — only a genuinely orphaned opening paren is removed.
+        ("भ्रष्टाचार ( रिसवत(घुस) )", "रिसवत(घुस)"),
     ],
 )
 def test_normalize_case_type_strips_case_numbers(raw, expected):
@@ -76,6 +84,10 @@ def test_normalize_case_type_strips_case_numbers(raw, expected):
         # (never emptied to something misleading).
         "080-c1-0199",
         "3942",
+        # A value carrying its OWN unbalanced paren but NO case-number token is left
+        # verbatim: the orphan-paren cleanup only fires as a consequence of a strip,
+        # so a value nothing else touched is never rebalanced.
+        "जाँच बुझ ( अपुरो विवरण",
     ],
 )
 def test_normalize_case_type_preserves_meaningful_values(value):
@@ -88,6 +100,7 @@ def test_normalize_case_type_is_idempotent():
         "080-cp-1852 लेनदेन",
         "चोरी गरेको (दफा 241)",
         "080-cp-1852 भ्रष्टाचार ( रकम हिनामिना )",  # combined noise
+        "हाजिर गराई पाउ ( ज्यान मार्ने उद्योग, 079-C1-0213)",  # dangling-paren cleanup
     ):
         once = normalize_case_type(raw)
         assert normalize_case_type(once) == once
