@@ -29,10 +29,19 @@ import logging
 import os
 import re
 import sys
+import time
 from typing import Optional
 
 from casework.common.api import CaseworkApi
-from casework.common.cli import add_common_args, print_summary, setup_logging
+from casework.common.cli import (
+    add_common_args,
+    configure_run_logging,
+    log_event,
+    log_run_footer,
+    log_run_header,
+    print_summary,
+    setup_logging,
+)
 from casework.common.llm import bootstrap, tier_for
 from casework.common.materials import materials_of_type, source_text
 from casework.common.parse import balanced_object
@@ -347,11 +356,15 @@ def _extract_bigo(source_text_, case, invoke_text, usage) -> Optional[int]:
 def build_api(args):
     """Construct the client. Basic (local DEV_AUTH) unless a token is given."""
     if args.api_token:
-        return CaseworkApi(args.api_base_url, token=args.api_token)
+        return CaseworkApi(
+            args.api_base_url, token=args.api_token,
+            allow_remote_writes=args.allow_remote_writes,
+        )
     return CaseworkApi(
         args.api_base_url,
         basic=(os.getenv("CASEWORK_API_USER", "abgen"),
                os.getenv("CASEWORK_API_PASSWORD", "local-dev-only")),
+        allow_remote_writes=args.allow_remote_writes,
     )
 
 
@@ -365,6 +378,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     setup_logging(args.verbose)
+    logger, run_id, paths = configure_run_logging("bigo", verbose=args.verbose)
+    start_time = time.monotonic()
 
     # Bootstrap Django + LLM (MUST come before importing llm.invoke)
     try:
@@ -391,9 +406,18 @@ def main(argv=None):
         cases = cases[: args.limit]
 
     total = len(cases)
+    log_run_header(
+        logger, stage="bigo", base_url=args.api_base_url, dry_run=args.dry_run,
+        provider=args.provider, model=args.model, n_selected=total,
+        run_id=run_id, paths=paths,
+    )
     if total == 0:
         print("No matching CIAA case(s) to process.", file=sys.stderr)
         print_summary(report.summary(), args.dry_run, "BIGO extraction")
+        log_run_footer(
+            logger, stage="bigo", stats=report.summary(),
+            duration_s=time.monotonic() - start_time,
+        )
         return report
 
     print(f"Found {total} matching case(s).")
@@ -404,11 +428,17 @@ def main(argv=None):
 
     for idx, case in enumerate(cases, 1):
         slug = case.get("slug") or "?"
-        print(f"\n[{idx}/{total}] {slug} — {(case.get('title') or '')[:80]}")
+        title = (case.get("title") or "")[:80]
+        print(f"\n[{idx}/{total}] {slug} — {title}")
+        log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
+                  step="start", status="start", detail=f"[{idx}/{total}] {title}")
 
         if case.get("bigo") and not args.force:
             report.record(slug, "bigo", "already", f"bigo already {case['bigo']}")
             print("  BIGO already populated — skipping (use --force to re-extract)")
+            log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
+                      step="idempotency", status="already",
+                      detail=f"bigo already {case['bigo']}")
             continue
 
         try:
@@ -416,6 +446,9 @@ def main(argv=None):
         except Exception as exc:
             report.record(slug, "bigo", "error", f"case fetch failed: {exc}")
             print(f"  Failed to fetch case detail: {exc}")
+            log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
+                      step="fetch", status="error", detail=str(exc),
+                      level=logging.ERROR)
             continue
 
         # Cheap prerequisite check before paying for a markdown fetch: no
@@ -425,6 +458,9 @@ def main(argv=None):
             for reason in unmet:
                 report.record(slug, "bigo", "unmet", reason)
             print(f"  Unmet prerequisite(s): {'; '.join(unmet)}")
+            log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
+                      step="prereq", status="unmet", detail="; ".join(unmet),
+                      level=logging.WARNING)
             continue
 
         text, text_unmet = source_text(detail, types=PRESS_TYPES)
@@ -433,15 +469,23 @@ def main(argv=None):
             for reason in reasons:
                 report.record(slug, "bigo", "unmet", reason)
             print(f"  No press-release source content found: {'; '.join(reasons)}")
+            log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
+                      step="source", status="unmet", detail="; ".join(reasons),
+                      level=logging.WARNING)
             continue
 
         print(f"  Source content: {len(text)} chars")
+        log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
+                  step="source", status="ok", detail=f"{len(text)} chars")
 
         try:
             bigo = _extract_bigo(text, detail, invoke_text, usage)
         except Exception as exc:
             report.record(slug, "bigo", "error", f"LLM extraction failed: {exc}")
             print(f"  LLM extraction failed: {exc}")
+            log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
+                      step="extract", status="error", detail=str(exc),
+                      level=logging.ERROR)
             if args.verbose:
                 import traceback
 
@@ -451,22 +495,35 @@ def main(argv=None):
         if bigo is None:
             report.record(slug, "bigo", "skipped", "LLM could not extract a reliable BIGO")
             print("  LLM could not extract a reliable BIGO — skipping")
+            log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
+                      step="extract", status="skipped",
+                      detail="LLM could not extract a reliable BIGO",
+                      level=logging.WARNING)
             continue
 
         print(f"  Extracted BIGO: {bigo}")
+        log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
+                  step="extract", status="ok", detail=str(bigo))
 
         if args.dry_run:
             report.record(slug, "bigo", "would-enrich", f"bigo={bigo}")
             print("  [DRY RUN] Would PATCH but --dry-run is set")
+            log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
+                      step="write", status="would-enrich", detail=f"bigo={bigo}")
             continue
 
         try:
             api.patch_field(slug, "bigo", bigo)
             report.record(slug, "bigo", "enriched", f"bigo={bigo}")
             print(f"  [UPDATED] {slug}: BIGO={bigo}")
+            log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
+                      step="write", status="enriched", detail=f"bigo={bigo}")
         except Exception as exc:
             report.record(slug, "bigo", "error", f"PATCH failed: {exc}")
             print(f"  Failed to PATCH BIGO: {exc}")
+            log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
+                      step="write", status="error", detail=str(exc),
+                      level=logging.ERROR)
 
     stats = report.summary()
     print_summary(stats, args.dry_run, "BIGO extraction")
@@ -476,9 +533,16 @@ def main(argv=None):
         for reason, count in unmet_reasons.most_common():
             print(f"    {count} x {reason}")
 
+    usage_summary = ""
     if usage.calls > 0:
+        usage_summary = render_usage_table(usage.as_dict()["by_provider"], title="bigo usage")
         print()
-        print(render_usage_table(usage.as_dict()["by_provider"], title="bigo usage"))
+        print(usage_summary)
+
+    log_run_footer(
+        logger, stage="bigo", stats=stats,
+        duration_s=time.monotonic() - start_time, usage_summary=usage_summary,
+    )
 
     return report
 

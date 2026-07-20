@@ -31,6 +31,7 @@ transcription).
 """
 import ast
 import json
+import logging
 import subprocess
 import sys
 import types
@@ -762,3 +763,43 @@ def test_summary_surfaces_zero_bound_count_unconditionally(
     assert "TOTAL entities bound to cases: 0" in out
     assert "TOTAL entities extracted across all cases: 2" in out
     assert "TOTAL accused notes extracted: 1" in out
+
+
+# --------------------------------------------------------------------------
+# Task PP2 -- run-logging events file (see test_enrich_missing_bigo.py's
+# identical block for the rationale; `conftest.py`'s autouse
+# `_isolate_casework_run_logs` fixture keeps these out of the real repo
+# `work/enricher-runs/`). This module is EXTRACTION ONLY -- there is no
+# `write` step to check; `start`/`extract` are this file's ceiling.
+# --------------------------------------------------------------------------
+
+
+def _events_path():
+    logger = logging.getLogger("casework.entities")
+    return logger._casework_run_paths["events"]
+
+
+def _read_events(path):
+    return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines()]
+
+
+def test_events_file_covers_start_and_extract_happy_path(
+    monkeypatch, patched_fetch_markdown, tmp_path
+):
+    api = _StubApi([PRESS_ONLY_CASE])
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: ENTITY_RESPONSE,
+              argv=["--apply"])
+
+    rows = _read_events(_events_path())
+    assert rows
+
+    required_keys = {"ts", "run_id", "stage", "slug", "step", "status", "detail", "elapsed_ms"}
+    for row in rows:
+        assert required_keys <= set(row.keys())
+        assert row["stage"] == "entities"
+
+    steps_and_statuses = {(r["step"], r["status"]) for r in rows}
+    assert ("start", "start") in steps_and_statuses
+    assert ("extract", "ok") in steps_and_statuses
+    # Never a write event -- this module never patches anything.
+    assert not any(r["step"] == "write" for r in rows)

@@ -49,10 +49,19 @@ import logging
 import os
 import re
 import sys
+import time
 from typing import Optional
 
 from casework.common.api import CaseworkApi
-from casework.common.cli import add_common_args, print_summary, setup_logging
+from casework.common.cli import (
+    add_common_args,
+    configure_run_logging,
+    log_event,
+    log_run_footer,
+    log_run_header,
+    print_summary,
+    setup_logging,
+)
 from casework.common.llm import bootstrap, tier_for
 from casework.common.pipeline import STAGES, RunReport, unmet_prerequisites
 from casework.common.select import select_cases
@@ -1024,11 +1033,15 @@ def parse_llm_response(response: str) -> list:
 def build_api(args):
     """Construct the client. Basic (local DEV_AUTH) unless a token is given."""
     if args.api_token:
-        return CaseworkApi(args.api_base_url, token=args.api_token)
+        return CaseworkApi(
+            args.api_base_url, token=args.api_token,
+            allow_remote_writes=args.allow_remote_writes,
+        )
     return CaseworkApi(
         args.api_base_url,
         basic=(os.getenv("CASEWORK_API_USER", "abgen"),
                os.getenv("CASEWORK_API_PASSWORD", "local-dev-only")),
+        allow_remote_writes=args.allow_remote_writes,
     )
 
 
@@ -1047,6 +1060,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     setup_logging(args.verbose)
+    logger, run_id, paths = configure_run_logging("tags", verbose=args.verbose)
+    start_time = time.monotonic()
 
     # Bootstrap Django + LLM (MUST come before importing llm.invoke)
     try:
@@ -1073,9 +1088,18 @@ def main(argv=None):
         cases = cases[: args.limit]
 
     total = len(cases)
+    log_run_header(
+        logger, stage="tags", base_url=args.api_base_url, dry_run=args.dry_run,
+        provider=args.provider, model=args.model, n_selected=total,
+        run_id=run_id, paths=paths,
+    )
     if total == 0:
         print("No matching CIAA case(s) to process.", file=sys.stderr)
         print_summary(report.summary(), args.dry_run, "Tag classification")
+        log_run_footer(
+            logger, stage="tags", stats=report.summary(),
+            duration_s=time.monotonic() - start_time,
+        )
         return report
 
     print(f"Found {total} matching case(s).")
@@ -1088,11 +1112,17 @@ def main(argv=None):
 
     for idx, case in enumerate(cases, 1):
         slug = case.get("slug") or "?"
-        print(f"\n[{idx}/{total}] {slug} — {(case.get('title') or '')[:80]}")
+        title = (case.get("title") or "")[:80]
+        print(f"\n[{idx}/{total}] {slug} — {title}")
+        log_event(logger, paths["events"], run_id=run_id, stage="tags", slug=slug,
+                  step="start", status="start", detail=f"[{idx}/{total}] {title}")
 
         if case.get("tags") and not args.force:
             report.record(slug, "tags", "already", f"tags already {case['tags']}")
             print("  tags already populated — skipping (use --force to re-tag)")
+            log_event(logger, paths["events"], run_id=run_id, stage="tags", slug=slug,
+                      step="idempotency", status="already",
+                      detail=f"tags already {case['tags']}")
             continue
 
         # tags reads no material (see module docstring) -- STAGE's
@@ -1105,6 +1135,9 @@ def main(argv=None):
             for reason in unmet:
                 report.record(slug, "tags", "unmet", reason)
             print(f"  Unmet prerequisite(s): {'; '.join(unmet)}")
+            log_event(logger, paths["events"], run_id=run_id, stage="tags", slug=slug,
+                      step="prereq", status="unmet", detail="; ".join(unmet),
+                      level=logging.WARNING)
             continue
 
         rule_tags = classify_case_rules(case)
@@ -1142,6 +1175,9 @@ def main(argv=None):
                 # `stats["cases_enriched"]`.
                 report.record(slug, "tags", "llm-error", f"metadata_llm failed: {exc}")
                 print(f"  - metadata_llm failed: {str(exc)[:120]}")
+                log_event(logger, paths["events"], run_id=run_id, stage="tags", slug=slug,
+                          step="extract", status="llm-error", detail=str(exc)[:200],
+                          level=logging.WARNING)
                 if args.verbose:
                     import traceback
 
@@ -1154,19 +1190,30 @@ def main(argv=None):
             print(f"    {i}. {tag}")
         if len(all_tags) > 5:
             print(f"    ... and {len(all_tags) - 5} more")
+        log_event(logger, paths["events"], run_id=run_id, stage="tags", slug=slug,
+                  step="extract", status="ok", detail=f"tags={all_tags} tier={tier}")
 
         if args.dry_run:
             report.record(slug, "tags", "would-enrich", f"tags={all_tags} tier={tier}")
             print("  [DRY RUN] Would PATCH but --dry-run is set")
+            log_event(logger, paths["events"], run_id=run_id, stage="tags", slug=slug,
+                      step="write", status="would-enrich",
+                      detail=f"tags={all_tags} tier={tier}")
             continue
 
         try:
             api.patch_field(slug, "tags", all_tags)
             report.record(slug, "tags", "enriched", f"tags={all_tags} tier={tier}")
             print(f"  [UPDATED] {slug}")
+            log_event(logger, paths["events"], run_id=run_id, stage="tags", slug=slug,
+                      step="write", status="enriched",
+                      detail=f"tags={all_tags} tier={tier}")
         except Exception as exc:
             report.record(slug, "tags", "error", f"PATCH failed: {exc}")
             print(f"  Failed to PATCH tags: {exc}")
+            log_event(logger, paths["events"], run_id=run_id, stage="tags", slug=slug,
+                      step="write", status="error", detail=str(exc),
+                      level=logging.ERROR)
 
     stats = report.summary()
     print_summary(stats, args.dry_run, "Tag classification")
@@ -1176,9 +1223,16 @@ def main(argv=None):
         for reason, count in unmet_reasons.most_common():
             print(f"    {count} x {reason}")
 
+    usage_summary = ""
     if usage.calls > 0:
+        usage_summary = render_usage_table(usage.as_dict()["by_provider"], title="tags usage")
         print()
-        print(render_usage_table(usage.as_dict()["by_provider"], title="tags usage"))
+        print(usage_summary)
+
+    log_run_footer(
+        logger, stage="tags", stats=stats,
+        duration_s=time.monotonic() - start_time, usage_summary=usage_summary,
+    )
 
     return report
 

@@ -13,6 +13,8 @@ test that pins the behaviour the name claims:
 """
 import io
 import json
+import logging
+from pathlib import Path
 
 import pytest
 
@@ -395,3 +397,48 @@ def test_main_does_not_run_any_other_stage(stub_run):
     assert stub_run.uploads  # it did its own work...
     # ...and nothing else got invoked: the stub api exposes only the two read
     # methods convert needs, so any downstream stage call would AttributeError.
+
+
+# --------------------------------------------------------------------------
+# Task PP2 -- run-logging events file (see test_enrich_missing_bigo.py's
+# identical block for the rationale; `conftest.py`'s autouse
+# `_isolate_casework_run_logs` fixture keeps these out of the real repo
+# `work/enricher-runs/`). `convert` has no LLM `extract` step of its own --
+# its per-material outcome IS the `convert` step.
+# --------------------------------------------------------------------------
+
+
+def _events_path():
+    logger = logging.getLogger("casework.convert")
+    return logger._casework_run_paths["events"]
+
+
+def _read_events(path):
+    return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines()]
+
+
+def test_events_file_covers_start_and_converted_on_apply(stub_run, tmp_path):
+    main(["--apply"])
+
+    rows = _read_events(_events_path())
+    assert rows
+
+    required_keys = {"ts", "run_id", "stage", "slug", "step", "status", "detail", "elapsed_ms"}
+    for row in rows:
+        assert required_keys <= set(row.keys())
+        assert row["stage"] == "convert"
+
+    steps_and_statuses = {(r["step"], r["status"]) for r in rows}
+    assert ("start", "start") in steps_and_statuses
+    assert ("convert", "converted") in steps_and_statuses
+    assert ("convert", "already") in steps_and_statuses
+    assert ("convert", "unmet") in steps_and_statuses
+
+
+def test_events_file_records_would_convert_under_dry_run(stub_run, tmp_path):
+    main([])  # default is dry-run
+
+    rows = _read_events(_events_path())
+    steps_and_statuses = {(r["step"], r["status"]) for r in rows}
+    assert ("convert", "would-convert") in steps_and_statuses
+    assert ("convert", "converted") not in steps_and_statuses

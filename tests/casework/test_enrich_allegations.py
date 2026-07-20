@@ -25,6 +25,7 @@ equality -- a drifted clause changes LLM behavior with zero other test failures.
 """
 import ast
 import json
+import logging
 import subprocess
 import sys
 import types
@@ -587,3 +588,54 @@ def test_bigo_display_falls_back_to_placeholder_when_absent(
     api = _StubApi([PRESS_CASE_LLM_DECLINES])
     _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--apply"])
     assert "उल्लेख छैन" in seen["content"]
+
+
+# --------------------------------------------------------------------------
+# Task PP2 -- run-logging events file (see test_enrich_missing_bigo.py's
+# identical block for the rationale; `conftest.py`'s autouse
+# `_isolate_casework_run_logs` fixture keeps these out of the real repo
+# `work/enricher-runs/`).
+# --------------------------------------------------------------------------
+
+
+def _events_path():
+    logger = logging.getLogger("casework.allegations")
+    return logger._casework_run_paths["events"]
+
+
+def _read_events(path):
+    return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines()]
+
+
+def test_events_file_covers_start_extract_write_on_apply_happy_path(
+    monkeypatch, patched_fetch_markdown, tmp_path
+):
+    response = json.dumps({"allegations": ["आरोप एक।"]})
+    api = _StubApi([PRESS_CASE_READY])
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: response, argv=["--apply"])
+
+    rows = _read_events(_events_path())
+    assert rows
+
+    required_keys = {"ts", "run_id", "stage", "slug", "step", "status", "detail", "elapsed_ms"}
+    for row in rows:
+        assert required_keys <= set(row.keys())
+        assert row["stage"] == "allegations"
+
+    steps_and_statuses = {(r["step"], r["status"]) for r in rows}
+    assert ("start", "start") in steps_and_statuses
+    assert ("extract", "ok") in steps_and_statuses
+    assert ("write", "enriched") in steps_and_statuses
+
+
+def test_events_file_records_would_enrich_under_dry_run(
+    monkeypatch, patched_fetch_markdown, tmp_path
+):
+    response = json.dumps({"allegations": ["आरोप एक।"]})
+    api = _StubApi([PRESS_CASE_READY])
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: response, argv=["--dry-run"])
+
+    rows = _read_events(_events_path())
+    steps_and_statuses = {(r["step"], r["status"]) for r in rows}
+    assert ("write", "would-enrich") in steps_and_statuses
+    assert ("write", "enriched") not in steps_and_statuses

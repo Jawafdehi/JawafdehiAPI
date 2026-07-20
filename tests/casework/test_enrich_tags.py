@@ -19,6 +19,7 @@ without failing any test that only spot-checks a few tag names.
 """
 import ast
 import json
+import logging
 import subprocess
 import sys
 import types
@@ -679,3 +680,54 @@ def test_case_with_no_evidence_at_all_is_still_processed_no_unmet(monkeypatch):
     statuses = {r["status"] for r in report.rows}
     assert "unmet" not in statuses
     assert "enriched" in statuses
+
+
+# --------------------------------------------------------------------------
+# Task PP2 -- run-logging events file (see test_enrich_missing_bigo.py's
+# identical block for the rationale; `conftest.py`'s autouse
+# `_isolate_casework_run_logs` fixture keeps these out of the real repo
+# `work/enricher-runs/`).
+# --------------------------------------------------------------------------
+
+
+def _events_path():
+    logger = logging.getLogger("casework.tags")
+    return logger._casework_run_paths["events"]
+
+
+def _read_events(path):
+    return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines()]
+
+
+def test_events_file_covers_start_extract_write_on_apply_happy_path(monkeypatch, tmp_path):
+    response = json.dumps(["CIAA", "Corruption", "Health"])
+    _run_main(
+        monkeypatch, [CASE_NEEDS_LLM_TOPUP],
+        invoke_text_stub=lambda **kw: response, argv=["--apply"],
+    )
+
+    rows = _read_events(_events_path())
+    assert rows
+
+    required_keys = {"ts", "run_id", "stage", "slug", "step", "status", "detail", "elapsed_ms"}
+    for row in rows:
+        assert required_keys <= set(row.keys())
+        assert row["stage"] == "tags"
+
+    steps_and_statuses = {(r["step"], r["status"]) for r in rows}
+    assert ("start", "start") in steps_and_statuses
+    assert ("extract", "ok") in steps_and_statuses
+    assert ("write", "enriched") in steps_and_statuses
+
+
+def test_events_file_records_would_enrich_under_dry_run(monkeypatch, tmp_path):
+    response = json.dumps(["CIAA", "Corruption", "Health"])
+    _run_main(
+        monkeypatch, [CASE_NEEDS_LLM_TOPUP],
+        invoke_text_stub=lambda **kw: response, argv=["--dry-run"],
+    )
+
+    rows = _read_events(_events_path())
+    steps_and_statuses = {(r["step"], r["status"]) for r in rows}
+    assert ("write", "would-enrich") in steps_and_statuses
+    assert ("write", "enriched") not in steps_and_statuses

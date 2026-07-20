@@ -28,13 +28,22 @@ import logging
 import mimetypes
 import os
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
 
 from casework.common.api import CaseworkApi
-from casework.common.cli import add_common_args, print_summary, setup_logging
+from casework.common.cli import (
+    add_common_args,
+    configure_run_logging,
+    log_event,
+    log_run_footer,
+    log_run_header,
+    print_summary,
+    setup_logging,
+)
 from casework.common.materials import markdown_link, raw_links
 from casework.common.pipeline import COURT_TYPES, PRESS_TYPES, RunReport
 
@@ -191,11 +200,15 @@ def upload_markdown(api, material_iri, text, timeout=120):
 def build_api(args):
     """Construct the client. Basic (local DEV_AUTH) unless a token is given."""
     if args.api_token:
-        return CaseworkApi(args.api_base_url, token=args.api_token)
+        return CaseworkApi(
+            args.api_base_url, token=args.api_token,
+            allow_remote_writes=args.allow_remote_writes,
+        )
     return CaseworkApi(
         args.api_base_url,
         basic=(os.getenv("CASEWORK_API_USER", "abgen"),
                os.getenv("CASEWORK_API_PASSWORD", "local-dev-only")),
+        allow_remote_writes=args.allow_remote_writes,
     )
 
 
@@ -206,6 +219,8 @@ def main(argv=None):
                         help=f"defaults to {'/'.join(DEFAULT_TYPES)}")
     args = parser.parse_args(argv)
     setup_logging(args.verbose)
+    logger, run_id, paths = configure_run_logging("convert", verbose=args.verbose)
+    start_time = time.monotonic()
 
     types = tuple(args.material_type) or DEFAULT_TYPES
     api = build_api(args)
@@ -215,14 +230,25 @@ def main(argv=None):
     if args.limit:
         slugs = slugs[:args.limit]
 
+    log_run_header(
+        logger, stage="convert", base_url=args.api_base_url, dry_run=args.dry_run,
+        provider=args.provider, model=args.model, n_selected=len(slugs),
+        run_id=run_id, paths=paths,
+    )
+
     seen = set()
     for slug in slugs:
         if not slug:
             continue
+        log_event(logger, paths["events"], run_id=run_id, stage="convert", slug=slug,
+                  step="start", status="start", detail="")
         try:
             case = api.get_case(slug)
         except Exception as exc:  # noqa: BLE001
             report.record(slug, "convert", "error", f"case fetch failed: {exc}")
+            log_event(logger, paths["events"], run_id=run_id, stage="convert", slug=slug,
+                      step="fetch", status="error", detail=f"case fetch failed: {exc}",
+                      level=logging.ERROR)
             continue
         for entry in case.get("evidence") or []:
             iri = entry.get("material_iri")
@@ -237,12 +263,19 @@ def main(argv=None):
             seen.add(iri)
             if markdown_link(material):
                 report.record(slug, "convert", "already", iri)
+                log_event(logger, paths["events"], run_id=run_id, stage="convert", slug=slug,
+                          step="convert", status="already", detail=iri)
                 continue
             if not raw_links(material):
                 report.record(slug, "convert", "unmet", UNMET_NO_LINK)
+                log_event(logger, paths["events"], run_id=run_id, stage="convert", slug=slug,
+                          step="convert", status="unmet", detail=UNMET_NO_LINK,
+                          level=logging.WARNING)
                 continue
             if args.dry_run:
                 report.record(slug, "convert", "would-convert", iri)
+                log_event(logger, paths["events"], run_id=run_id, stage="convert", slug=slug,
+                          step="convert", status="would-convert", detail=iri)
                 continue
 
             def writer(_material, text, _iri=iri):
@@ -263,9 +296,15 @@ def main(argv=None):
                 status = convert_material(material, writer=writer)
             except Exception as exc:  # noqa: BLE001
                 report.record(slug, "convert", "error", f"{iri}: {exc}")
+                log_event(logger, paths["events"], run_id=run_id, stage="convert", slug=slug,
+                          step="convert", status="error", detail=f"{iri}: {exc}",
+                          level=logging.ERROR)
                 continue
-            report.record(slug, "convert", status,
-                          iri if status != "failed" else f"extraction failed: {iri}")
+            reason = iri if status != "failed" else f"extraction failed: {iri}"
+            report.record(slug, "convert", status, reason)
+            log_event(logger, paths["events"], run_id=run_id, stage="convert", slug=slug,
+                      step="convert", status=status, detail=reason,
+                      level=logging.ERROR if status == "failed" else logging.INFO)
 
     stats = report.summary()
     stats["materials_seen"] = len(seen)
@@ -278,6 +317,12 @@ def main(argv=None):
         print("  unmet reasons:")
         for reason, count in unmet.most_common():
             print(f"    {count} x {reason}")
+
+    log_run_footer(
+        logger, stage="convert", stats=stats,
+        duration_s=time.monotonic() - start_time,
+    )
+
     return report
 
 

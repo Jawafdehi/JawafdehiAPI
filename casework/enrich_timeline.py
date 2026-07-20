@@ -112,11 +112,20 @@ import argparse
 import logging
 import os
 import sys
+import time
 import urllib.parse
 from typing import Optional
 
 from casework.common.api import CaseworkApi
-from casework.common.cli import add_common_args, print_summary, setup_logging
+from casework.common.cli import (
+    add_common_args,
+    configure_run_logging,
+    log_event,
+    log_run_footer,
+    log_run_header,
+    print_summary,
+    setup_logging,
+)
 from casework.common.llm import bootstrap, tier_for
 from casework.common.materials import source_text
 from casework.common.parse import is_valid_iso_date, parse_extraction_response
@@ -683,11 +692,15 @@ def _clean_entry(item: dict) -> Optional[dict]:
 def build_api(args):
     """Construct the client. Basic (local DEV_AUTH) unless a token is given."""
     if args.api_token:
-        return CaseworkApi(args.api_base_url, token=args.api_token)
+        return CaseworkApi(
+            args.api_base_url, token=args.api_token,
+            allow_remote_writes=args.allow_remote_writes,
+        )
     return CaseworkApi(
         args.api_base_url,
         basic=(os.getenv("CASEWORK_API_USER", "abgen"),
                os.getenv("CASEWORK_API_PASSWORD", "local-dev-only")),
+        allow_remote_writes=args.allow_remote_writes,
     )
 
 
@@ -701,6 +714,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     setup_logging(args.verbose)
+    logger, run_id, paths = configure_run_logging("timeline", verbose=args.verbose)
+    start_time = time.monotonic()
 
     # Bootstrap Django + LLM (MUST come before importing llm.invoke)
     try:
@@ -727,9 +742,18 @@ def main(argv=None):
         cases = cases[: args.limit]
 
     total = len(cases)
+    log_run_header(
+        logger, stage="timeline", base_url=args.api_base_url, dry_run=args.dry_run,
+        provider=args.provider, model=args.model, n_selected=total,
+        run_id=run_id, paths=paths,
+    )
     if total == 0:
         print("No matching CIAA case(s) to process.", file=sys.stderr)
         print_summary(report.summary(), args.dry_run, "Timeline extraction")
+        log_run_footer(
+            logger, stage="timeline", stats=report.summary(),
+            duration_s=time.monotonic() - start_time,
+        )
         return report
 
     print(f"Found {total} matching case(s).")
@@ -746,11 +770,16 @@ def main(argv=None):
         # the detail fetch and passes that same `title` on, never `detail.get("title")`.
         title = case.get("title") or ""
         print(f"\n[{idx}/{total}] {slug} — {title[:80]}")
+        log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
+                  step="start", status="start", detail=f"[{idx}/{total}] {title[:80]}")
 
         if case.get("timeline") and not args.force:
             report.record(
                 slug, "timeline", "already", f"timeline already {case['timeline']}")
             print("  timeline already populated — skipping (use --force to re-extract)")
+            log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
+                      step="idempotency", status="already",
+                      detail=f"timeline already {case['timeline']}")
             continue
 
         # Donor-preserved fallback: a detail-fetch failure does not abort the
@@ -764,12 +793,18 @@ def main(argv=None):
         except Exception as exc:
             detail = case
             print(f"  (using summary instead of detail: {exc})")
+            log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
+                      step="fetch", status="fallback", detail=str(exc),
+                      level=logging.WARNING)
 
         unmet = unmet_prerequisites(STAGE, detail)
         if unmet:
             for reason in unmet:
                 report.record(slug, "timeline", "unmet", reason)
             print(f"  Unmet prerequisite(s): {'; '.join(unmet)}")
+            log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
+                      step="prereq", status="unmet", detail="; ".join(unmet),
+                      level=logging.WARNING)
             continue
 
         court_text, court_unmet = source_text(detail, types=COURT_TYPES)
@@ -782,6 +817,9 @@ def main(argv=None):
             for reason in reasons:
                 report.record(slug, "timeline", "unmet", reason)
             print(f"  No source content found: {'; '.join(reasons)}")
+            log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
+                      step="source", status="unmet", detail="; ".join(reasons),
+                      level=logging.WARNING)
             continue
 
         combined_source_text = (
@@ -789,11 +827,18 @@ def main(argv=None):
             if (court_text or press_text) else ""
         )
         print(f"  Source content: {len(combined_source_text)} chars assembled")
+        log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
+                  step="source", status="ok",
+                  detail=f"{len(combined_source_text)} chars assembled")
         if ngm_data:
             hearings = ngm_data.get("hearings") or []
             print(f"  NGM data: {len(hearings)} hearing(s)")
+            log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
+                      step="ngm", status="ok", detail=f"{len(hearings)} hearing(s)")
         else:
             print("  NGM data: none")
+            log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
+                      step="ngm", status="none", detail="no NGM data")
 
         try:
             entries = _extract_timeline(
@@ -806,6 +851,9 @@ def main(argv=None):
         except Exception as exc:
             report.record(slug, "timeline", "error", f"LLM extraction failed: {exc}")
             print(f"  LLM extraction failed: {exc}")
+            log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
+                      step="extract", status="error", detail=str(exc),
+                      level=logging.ERROR)
             if args.verbose:
                 import traceback
 
@@ -815,6 +863,9 @@ def main(argv=None):
         if not entries:
             report.record(slug, "timeline", "skipped", "LLM returned no timeline entries")
             print("  LLM returned no timeline entries — skipping")
+            log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
+                      step="extract", status="skipped",
+                      detail="LLM returned no timeline entries", level=logging.WARNING)
             continue
 
         print(f"  Extracted {len(entries)} entry(s)")
@@ -823,19 +874,29 @@ def main(argv=None):
             print(
                 f"    {i}. {entry.get('date', '?')}{span} — {entry.get('title', '?')[:80]}"
             )
+        log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
+                  step="extract", status="ok", detail=f"{len(entries)} entries")
 
         if args.dry_run:
             report.record(slug, "timeline", "would-enrich", f"{len(entries)} entries")
             print("  [DRY RUN] Would PATCH but --dry-run is set")
+            log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
+                      step="write", status="would-enrich",
+                      detail=f"{len(entries)} entries")
             continue
 
         try:
             api.patch_field(slug, "timeline", entries)
             report.record(slug, "timeline", "enriched", f"{len(entries)} entries")
             print(f"  [UPDATED] {slug}")
+            log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
+                      step="write", status="enriched", detail=f"{len(entries)} entries")
         except Exception as exc:
             report.record(slug, "timeline", "error", f"PATCH failed: {exc}")
             print(f"  Failed to PATCH timeline: {exc}")
+            log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
+                      step="write", status="error", detail=str(exc),
+                      level=logging.ERROR)
 
     stats = report.summary()
     print_summary(stats, args.dry_run, "Timeline extraction")
@@ -845,9 +906,17 @@ def main(argv=None):
         for reason, count in unmet_reasons.most_common():
             print(f"    {count} x {reason}")
 
+    usage_summary = ""
     if usage.calls > 0:
+        usage_summary = render_usage_table(
+            usage.as_dict()["by_provider"], title="timeline usage")
         print()
-        print(render_usage_table(usage.as_dict()["by_provider"], title="timeline usage"))
+        print(usage_summary)
+
+    log_run_footer(
+        logger, stage="timeline", stats=stats,
+        duration_s=time.monotonic() - start_time, usage_summary=usage_summary,
+    )
 
     return report
 

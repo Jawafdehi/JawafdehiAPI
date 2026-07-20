@@ -48,10 +48,19 @@ import argparse
 import logging
 import os
 import sys
+import time
 from typing import Optional
 
 from casework.common.api import CaseworkApi
-from casework.common.cli import add_common_args, print_summary, setup_logging
+from casework.common.cli import (
+    add_common_args,
+    configure_run_logging,
+    log_event,
+    log_run_footer,
+    log_run_header,
+    print_summary,
+    setup_logging,
+)
 from casework.common.llm import bootstrap, tier_for
 from casework.common.materials import source_text
 from casework.common.parse import parse_extraction_response
@@ -213,11 +222,15 @@ def _parse_allegations_response(response_text: str) -> Optional[list]:
 def build_api(args):
     """Construct the client. Basic (local DEV_AUTH) unless a token is given."""
     if args.api_token:
-        return CaseworkApi(args.api_base_url, token=args.api_token)
+        return CaseworkApi(
+            args.api_base_url, token=args.api_token,
+            allow_remote_writes=args.allow_remote_writes,
+        )
     return CaseworkApi(
         args.api_base_url,
         basic=(os.getenv("CASEWORK_API_USER", "abgen"),
                os.getenv("CASEWORK_API_PASSWORD", "local-dev-only")),
+        allow_remote_writes=args.allow_remote_writes,
     )
 
 
@@ -231,6 +244,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     setup_logging(args.verbose)
+    logger, run_id, paths = configure_run_logging("allegations", verbose=args.verbose)
+    start_time = time.monotonic()
 
     # Bootstrap Django + LLM (MUST come before importing llm.invoke)
     try:
@@ -257,9 +272,18 @@ def main(argv=None):
         cases = cases[: args.limit]
 
     total = len(cases)
+    log_run_header(
+        logger, stage="allegations", base_url=args.api_base_url, dry_run=args.dry_run,
+        provider=args.provider, model=args.model, n_selected=total,
+        run_id=run_id, paths=paths,
+    )
     if total == 0:
         print("No matching CIAA case(s) to process.", file=sys.stderr)
         print_summary(report.summary(), args.dry_run, "Allegation extraction")
+        log_run_footer(
+            logger, stage="allegations", stats=report.summary(),
+            duration_s=time.monotonic() - start_time,
+        )
         return report
 
     print(f"Found {total} matching case(s).")
@@ -277,12 +301,17 @@ def main(argv=None):
         # never `detail.get("title")`.
         title = case.get("title") or ""
         print(f"\n[{idx}/{total}] {slug} — {title[:80]}")
+        log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
+                  step="start", status="start", detail=f"[{idx}/{total}] {title[:80]}")
 
         if case.get("key_allegations") and not args.force:
             report.record(
                 slug, "allegations", "already",
                 f"key_allegations already {case['key_allegations']}")
             print("  key_allegations already populated — skipping (use --force to re-extract)")
+            log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
+                      step="idempotency", status="already",
+                      detail=f"key_allegations already {case['key_allegations']}")
             continue
 
         # Donor-preserved fallback: a detail-fetch failure does not abort the
@@ -298,12 +327,18 @@ def main(argv=None):
         except Exception as exc:
             detail = case
             print(f"  (using summary instead of detail: {exc})")
+            log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
+                      step="fetch", status="fallback", detail=str(exc),
+                      level=logging.WARNING)
 
         unmet = unmet_prerequisites(STAGE, detail)
         if unmet:
             for reason in unmet:
                 report.record(slug, "allegations", "unmet", reason)
             print(f"  Unmet prerequisite(s): {'; '.join(unmet)}")
+            log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
+                      step="prereq", status="unmet", detail="; ".join(unmet),
+                      level=logging.WARNING)
             continue
 
         text, text_unmet = source_text(detail, types=PRESS_TYPES)
@@ -312,9 +347,14 @@ def main(argv=None):
             for reason in reasons:
                 report.record(slug, "allegations", "unmet", reason)
             print(f"  No press-release source content found: {'; '.join(reasons)}")
+            log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
+                      step="source", status="unmet", detail="; ".join(reasons),
+                      level=logging.WARNING)
             continue
 
         print(f"  Source content: {len(text)} chars")
+        log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
+                  step="source", status="ok", detail=f"{len(text)} chars")
 
         # Donor-verbatim bigo display formatting.
         bigo = detail.get("bigo")
@@ -331,6 +371,9 @@ def main(argv=None):
         except Exception as exc:
             report.record(slug, "allegations", "error", f"LLM extraction failed: {exc}")
             print(f"  LLM extraction failed: {exc}")
+            log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
+                      step="extract", status="error", detail=str(exc),
+                      level=logging.ERROR)
             if args.verbose:
                 import traceback
 
@@ -340,16 +383,24 @@ def main(argv=None):
         if not allegations:
             report.record(slug, "allegations", "skipped", "LLM returned no allegations")
             print("  LLM returned no allegations — skipping")
+            log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
+                      step="extract", status="skipped",
+                      detail="LLM returned no allegations", level=logging.WARNING)
             continue
 
         print(f"  Extracted {len(allegations)} allegation(s)")
         for i, allegation in enumerate(allegations, 1):
             print(f"    {i}. {allegation[:80]}")
+        log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
+                  step="extract", status="ok", detail=f"key_allegations={allegations}")
 
         if args.dry_run:
             report.record(
                 slug, "allegations", "would-enrich", f"key_allegations={allegations}")
             print("  [DRY RUN] Would PATCH but --dry-run is set")
+            log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
+                      step="write", status="would-enrich",
+                      detail=f"key_allegations={allegations}")
             continue
 
         try:
@@ -357,9 +408,15 @@ def main(argv=None):
             report.record(
                 slug, "allegations", "enriched", f"key_allegations={allegations}")
             print(f"  [UPDATED] {slug}")
+            log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
+                      step="write", status="enriched",
+                      detail=f"key_allegations={allegations}")
         except Exception as exc:
             report.record(slug, "allegations", "error", f"PATCH failed: {exc}")
             print(f"  Failed to PATCH key_allegations: {exc}")
+            log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
+                      step="write", status="error", detail=str(exc),
+                      level=logging.ERROR)
 
     stats = report.summary()
     print_summary(stats, args.dry_run, "Allegation extraction")
@@ -369,9 +426,17 @@ def main(argv=None):
         for reason, count in unmet_reasons.most_common():
             print(f"    {count} x {reason}")
 
+    usage_summary = ""
     if usage.calls > 0:
+        usage_summary = render_usage_table(
+            usage.as_dict()["by_provider"], title="allegations usage")
         print()
-        print(render_usage_table(usage.as_dict()["by_provider"], title="allegations usage"))
+        print(usage_summary)
+
+    log_run_footer(
+        logger, stage="allegations", stats=stats,
+        duration_s=time.monotonic() - start_time, usage_summary=usage_summary,
+    )
 
     return report
 

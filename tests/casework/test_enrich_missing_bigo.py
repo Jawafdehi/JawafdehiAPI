@@ -6,8 +6,10 @@ rupee figure (a 10-100x inflation that reached production, e.g. 080-CR-0158).
 No database and no network are touched.
 """
 import json
+import logging
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -589,3 +591,62 @@ def test_llm_invoked_with_premium_tier(monkeypatch, patched_fetch_markdown):
 
     _run_main(monkeypatch, [PRESS_CASE_READY], invoke_text_stub=stub, argv=["--apply"])
     assert seen_tiers == ["premium"]
+
+
+# --------------------------------------------------------------------------
+# Task PP2 -- run-logging events file. `conftest.py`'s autouse
+# `_isolate_casework_run_logs` fixture points `CASEWORK_RUN_LOG_DIR` at
+# `tmp_path`, so the events file `main()` produces lands there, not in the
+# real repo `work/enricher-runs/`.
+# --------------------------------------------------------------------------
+
+
+def _events_path():
+    logger = logging.getLogger("casework.bigo")
+    return logger._casework_run_paths["events"]
+
+
+def _read_events(path):
+    return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines()]
+
+
+def test_events_file_covers_start_extract_write_on_apply_happy_path(
+    monkeypatch, patched_fetch_markdown, tmp_path
+):
+    response = json.dumps({
+        "bigo": 10403941, "confidence": "high",
+        "evidence_quote": "बिगो रु. १,०४,०३,९४१ कायम भएको छ",
+    })
+    _run_main(monkeypatch, [PRESS_CASE_READY], invoke_text_stub=lambda **kw: response,
+              argv=["--apply"])
+
+    rows = _read_events(_events_path())
+    assert rows, "events file must not be empty"
+
+    required_keys = {"ts", "run_id", "stage", "slug", "step", "status", "detail", "elapsed_ms"}
+    for row in rows:
+        assert required_keys <= set(row.keys())
+        assert row["slug"] == "case-ready"
+        assert row["stage"] == "bigo"
+
+    steps_and_statuses = {(r["step"], r["status"]) for r in rows}
+    assert ("start", "start") in steps_and_statuses
+    assert ("extract", "ok") in steps_and_statuses
+    assert ("write", "enriched") in steps_and_statuses
+
+
+def test_events_file_records_would_enrich_under_dry_run(
+    monkeypatch, patched_fetch_markdown, tmp_path
+):
+    response = json.dumps({
+        "bigo": 10403941, "confidence": "high",
+        "evidence_quote": "बिगो रु. १,०४,०३,९४१ कायम भएको छ",
+    })
+    _run_main(monkeypatch, [PRESS_CASE_READY], invoke_text_stub=lambda **kw: response,
+              argv=["--dry-run"])
+
+    rows = _read_events(_events_path())
+    steps_and_statuses = {(r["step"], r["status"]) for r in rows}
+    assert ("write", "would-enrich") in steps_and_statuses
+    # A dry run must never emit an "enriched" write event.
+    assert ("write", "enriched") not in steps_and_statuses

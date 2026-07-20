@@ -86,9 +86,18 @@ import argparse
 import logging
 import os
 import sys
+import time
 
 from casework.common.api import CaseworkApi
-from casework.common.cli import add_common_args, print_summary, setup_logging
+from casework.common.cli import (
+    add_common_args,
+    configure_run_logging,
+    log_event,
+    log_run_footer,
+    log_run_header,
+    print_summary,
+    setup_logging,
+)
 from casework.common.llm import bootstrap, tier_for
 from casework.common.materials import source_text
 from casework.common.parse import parse_extraction_response
@@ -328,13 +337,24 @@ def _parse_extraction_response(response_text):
 
 
 def build_api(args):
-    """Construct the client. Basic (local DEV_AUTH) unless a token is given."""
+    """Construct the client. Basic (local DEV_AUTH) unless a token is given.
+
+    `allow_remote_writes` is threaded through here for uniformity with the
+    other five ported enrichers even though this module never calls
+    `patch_field`/`replace_list` -- see module docstring (EXTRACTION ONLY).
+    Passing it is harmless: it only changes what `CaseworkApi._patch` would
+    do, and `_patch` is never reached from this file.
+    """
     if args.api_token:
-        return CaseworkApi(args.api_base_url, token=args.api_token)
+        return CaseworkApi(
+            args.api_base_url, token=args.api_token,
+            allow_remote_writes=args.allow_remote_writes,
+        )
     return CaseworkApi(
         args.api_base_url,
         basic=(os.getenv("CASEWORK_API_USER", "abgen"),
                os.getenv("CASEWORK_API_PASSWORD", "local-dev-only")),
+        allow_remote_writes=args.allow_remote_writes,
     )
 
 
@@ -353,6 +373,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     setup_logging(args.verbose)
+    logger, run_id, paths = configure_run_logging("entities", verbose=args.verbose)
+    start_time = time.monotonic()
 
     # Bootstrap Django + LLM (MUST come before importing llm.invoke)
     try:
@@ -379,9 +401,18 @@ def main(argv=None):
         cases = cases[: args.limit]
 
     total = len(cases)
+    log_run_header(
+        logger, stage="entities", base_url=args.api_base_url, dry_run=args.dry_run,
+        provider=args.provider, model=args.model, n_selected=total,
+        run_id=run_id, paths=paths,
+    )
     if total == 0:
         print("No matching CIAA case(s) to process.", file=sys.stderr)
         print_summary(report.summary(), args.dry_run, "Related-entity extraction")
+        log_run_footer(
+            logger, stage="entities", stats=report.summary(),
+            duration_s=time.monotonic() - start_time,
+        )
         return report
 
     print(f"Found {total} matching case(s).")
@@ -397,6 +428,8 @@ def main(argv=None):
         slug = case.get("slug") or "?"
         title = case.get("title") or ""
         print(f"\n[{idx}/{total}] {slug} — {title[:80]}")
+        log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                  step="start", status="start", detail=f"[{idx}/{total}] {title[:80]}")
 
         # Donor: `get_target_cases(api, args, skip_field="entities")` (donor
         # line 274) -- of the five ported enrichers, this was the only one
@@ -407,6 +440,9 @@ def main(argv=None):
                 slug, "entities", "already",
                 f"entities already {case['entities']}")
             print("  entities already populated — skipping (use --force to re-extract)")
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                      step="idempotency", status="already",
+                      detail=f"entities already {case['entities']}")
             continue
 
         try:
@@ -414,12 +450,18 @@ def main(argv=None):
         except Exception as exc:
             detail = case
             print(f"  (using summary instead of detail: {exc})")
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                      step="fetch", status="fallback", detail=str(exc),
+                      level=logging.WARNING)
 
         unmet = unmet_prerequisites(STAGE, detail)
         if unmet:
             for reason in unmet:
                 report.record(slug, "entities", "unmet", reason)
             print(f"  Unmet prerequisite(s): {'; '.join(unmet)}")
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                      step="prereq", status="unmet", detail="; ".join(unmet),
+                      level=logging.WARNING)
             continue
 
         press_text, press_unmet = source_text(detail, types=PRESS_TYPES)
@@ -436,19 +478,31 @@ def main(argv=None):
             for reason in reasons:
                 report.record(slug, "entities", "unmet", reason)
             print("  No press release or court order content — skipping")
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                      step="source", status="unmet", detail="; ".join(reasons),
+                      level=logging.WARNING)
             continue
 
         if press_text:
             print(f"  Press release: {len(press_text)} chars")
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                      step="source", status="ok", detail=f"press release {len(press_text)} chars")
         if court_text:
             print(f"  Court order: {len(court_text)} chars")
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                      step="source", status="ok", detail=f"court order {len(court_text)} chars")
 
         user_prompt = _enforce_prompt_budget(content_parts)
         print(f"  Prompt size: {len(user_prompt)} chars")
+        log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                  step="prompt", status="ok", detail=f"{len(user_prompt)} chars")
 
         if not user_prompt.strip():
             report.record(slug, "entities", "skipped", "empty prompt after truncation")
             print("  Empty prompt after truncation — skipping")
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                      step="prompt", status="skipped",
+                      detail="empty prompt after truncation", level=logging.WARNING)
             continue
 
         try:
@@ -462,6 +516,9 @@ def main(argv=None):
         except Exception as exc:
             report.record(slug, "entities", "error", f"LLM extraction failed: {exc}")
             print(f"  LLM extraction failed: {exc}")
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                      step="extract", status="error", detail=str(exc),
+                      level=logging.ERROR)
             if args.verbose:
                 import traceback
 
@@ -480,6 +537,10 @@ def main(argv=None):
             report.record(
                 slug, "entities", "skipped", "LLM returned no entities or accused notes")
             print("  LLM returned no entities or accused notes — skipping")
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                      step="extract", status="skipped",
+                      detail="LLM returned no entities or accused notes",
+                      level=logging.WARNING)
             continue
 
         total_entities_extracted += len(valid_items)
@@ -491,6 +552,12 @@ def main(argv=None):
         for item in valid_items[:5]:
             rel_type = item.get("relationship_type", "")
             print(f"    {rel_type:8s}  {(item.get('entity_name') or '')[:60]}")
+        log_event(
+            logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+            step="extract", status="ok",
+            detail=(
+                f"{len(valid_items)} entities + {len(accused_notes)} accused_notes "
+                "extracted; 0 bound"))
 
         report.record(
             slug, "entities", "extracted-unbound",
@@ -514,9 +581,17 @@ def main(argv=None):
         "  TOTAL entities bound to cases: 0 (writes are intentionally disabled -- "
         "nes_id resolution is out of scope for this port; see module docstring)")
 
+    usage_summary = ""
     if usage.calls > 0:
+        usage_summary = render_usage_table(
+            usage.as_dict()["by_provider"], title="entities usage")
         print()
-        print(render_usage_table(usage.as_dict()["by_provider"], title="entities usage"))
+        print(usage_summary)
+
+    log_run_footer(
+        logger, stage="entities", stats=stats,
+        duration_s=time.monotonic() - start_time, usage_summary=usage_summary,
+    )
 
     return report
 

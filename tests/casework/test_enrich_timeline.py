@@ -28,6 +28,7 @@ a drifted clause changes LLM behavior with zero other test failures.
 """
 import ast
 import json
+import logging
 import subprocess
 import sys
 import types
@@ -1075,3 +1076,60 @@ def test_entries_are_sorted_chronologically_before_patch(
     )
     _, _, entries = api.patched[0]
     assert [e["date"] for e in entries] == ["2020-01-01", "2024-06-01"]
+
+
+# --------------------------------------------------------------------------
+# Task PP2 -- run-logging events file (see test_enrich_missing_bigo.py's
+# identical block for the rationale; `conftest.py`'s autouse
+# `_isolate_casework_run_logs` fixture keeps these out of the real repo
+# `work/enricher-runs/`).
+# --------------------------------------------------------------------------
+
+
+def _events_path():
+    logger = logging.getLogger("casework.timeline")
+    return logger._casework_run_paths["events"]
+
+
+def _read_events(path):
+    return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines()]
+
+
+def test_events_file_covers_start_extract_write_on_apply_happy_path(
+    monkeypatch, patched_fetch_markdown, tmp_path
+):
+    response = json.dumps([{"date": "2024-01-15", "title": "क"}])
+    api = _StubApi([CASE_READY_PRESS_ONLY])
+    _run_main(
+        monkeypatch, api, invoke_text_stub=lambda **kw: "",
+        invoke_with_tools_stub=lambda **kw: response, argv=["--apply"],
+    )
+
+    rows = _read_events(_events_path())
+    assert rows
+
+    required_keys = {"ts", "run_id", "stage", "slug", "step", "status", "detail", "elapsed_ms"}
+    for row in rows:
+        assert required_keys <= set(row.keys())
+        assert row["stage"] == "timeline"
+
+    steps_and_statuses = {(r["step"], r["status"]) for r in rows}
+    assert ("start", "start") in steps_and_statuses
+    assert ("extract", "ok") in steps_and_statuses
+    assert ("write", "enriched") in steps_and_statuses
+
+
+def test_events_file_records_would_enrich_under_dry_run(
+    monkeypatch, patched_fetch_markdown, tmp_path
+):
+    response = json.dumps([{"date": "2024-01-15", "title": "क"}])
+    api = _StubApi([CASE_READY_PRESS_ONLY])
+    _run_main(
+        monkeypatch, api, invoke_text_stub=lambda **kw: "",
+        invoke_with_tools_stub=lambda **kw: response, argv=["--dry-run"],
+    )
+
+    rows = _read_events(_events_path())
+    steps_and_statuses = {(r["step"], r["status"]) for r in rows}
+    assert ("write", "would-enrich") in steps_and_statuses
+    assert ("write", "enriched") not in steps_and_statuses
