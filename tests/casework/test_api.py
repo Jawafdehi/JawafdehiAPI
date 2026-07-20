@@ -1,5 +1,7 @@
 import base64
 import json
+import logging
+import urllib.request
 
 import pytest
 
@@ -228,3 +230,166 @@ def test_iter_cases_follows_pagination(monkeypatch):
 
     assert [c["slug"] for c in cases] == ["case-a", "case-b", "case-c"]
     assert seen_pages == [1, 2]
+
+
+# ---------------------------------------------------------------------------
+# Write-guard -- `_patch` is the single choke point for `patch_field` and
+# `replace_list`. It must refuse to fire a PATCH at any non-loopback host
+# unless `allow_remote_writes=True` was explicitly passed to `__init__`.
+# Reads (`get`, `iter_cases`, `get_case`) must NEVER be guarded.
+# ---------------------------------------------------------------------------
+
+
+class _FakeHTTPResponse:
+    def __init__(self, status=200, body=b"{}"):
+        self.status = status
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _urlopen_spy(calls, status=200, body=b"{}"):
+    def _urlopen(req, timeout=None):
+        calls.append(req)
+        return _FakeHTTPResponse(status=status, body=body)
+    return _urlopen
+
+
+def _failing_urlopen(*a, **k):
+    pytest.fail("urlopen must not be called when the write-guard blocks the request")
+
+
+def test_patch_field_raises_for_non_loopback_without_opt_in(monkeypatch):
+    monkeypatch.setattr(urllib.request, "urlopen", _failing_urlopen)
+    api = CaseworkApi(base_url="https://api.jawafdehi.org", token="t")
+
+    with pytest.raises(RuntimeError, match="api.jawafdehi.org"):
+        api.patch_field("some-slug", "bigo", 500)
+
+
+def test_replace_list_raises_for_non_loopback_without_opt_in(monkeypatch):
+    monkeypatch.setattr(urllib.request, "urlopen", _failing_urlopen)
+    api = CaseworkApi(base_url="https://api.jawafdehi.org", token="t")
+
+    with pytest.raises(RuntimeError, match="api.jawafdehi.org"):
+        api.replace_list("some-slug", "evidence", [])
+
+
+def test_patch_field_allowed_for_non_loopback_with_opt_in(monkeypatch):
+    calls = []
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_spy(calls))
+    api = CaseworkApi(
+        base_url="https://api.jawafdehi.org", token="t", allow_remote_writes=True
+    )
+
+    api.patch_field("some-slug", "bigo", 500)  # must not raise
+
+    assert len(calls) == 1
+
+
+def test_patch_field_allowed_for_loopback_by_default(monkeypatch):
+    calls = []
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_spy(calls))
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+
+    api.patch_field("some-slug", "bigo", 500)  # must not raise
+
+    assert len(calls) == 1
+
+
+def test_get_is_never_guarded_against_non_loopback(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        urllib.request, "urlopen", _urlopen_spy(calls, body=b'{"slug": "x"}')
+    )
+    api = CaseworkApi(base_url="https://api.jawafdehi.org", token="t")
+
+    api.get_case("some-slug")  # must not raise -- reads are unguarded
+
+    assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Per-request logging -- `_request` is the single method all HTTP goes
+# through. GET (reads) log at DEBUG, PATCH/POST (writes) log at INFO. No
+# Authorization header, bearer token, or Basic credentials may ever reach a
+# log record.
+# ---------------------------------------------------------------------------
+
+
+def test_get_logs_at_debug_with_status_and_elapsed(monkeypatch, caplog):
+    calls = []
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        _urlopen_spy(calls, body=b'{"results": [], "next": null}'),
+    )
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="secret-token-xyz")
+
+    with caplog.at_level(logging.DEBUG, logger="casework.api"):
+        api.get("/cases/")
+
+    records = [r for r in caplog.records if r.name == "casework.api"]
+    assert any(
+        r.levelno == logging.DEBUG
+        and "HTTP GET" in r.getMessage()
+        and "-> 200" in r.getMessage()
+        for r in records
+    )
+
+
+def test_patch_logs_at_info(monkeypatch, caplog):
+    calls = []
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_spy(calls))
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="secret-token-xyz")
+
+    with caplog.at_level(logging.DEBUG, logger="casework.api"):
+        api.patch_field("some-slug", "bigo", 500)
+
+    records = [r for r in caplog.records if r.name == "casework.api"]
+    assert any(
+        r.levelno == logging.INFO and "HTTP PATCH" in r.getMessage()
+        for r in records
+    )
+
+
+def test_no_auth_material_ever_reaches_the_logs(monkeypatch, caplog):
+    """Hard requirement: no Authorization header, bearer token, or Basic
+    credentials may ever appear in a log line -- exercised across both auth
+    modes and both a read and a write.
+    """
+    calls = []
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        _urlopen_spy(calls, body=b'{"results": [], "next": null}'),
+    )
+
+    token = "sekrit-bearer-token-should-never-leak"
+    basic_user, basic_pass = "abgen", "sekrit-basic-password-should-never-leak"
+    basic_creds = base64.b64encode(f"{basic_user}:{basic_pass}".encode()).decode()
+
+    bearer_api = CaseworkApi(base_url="http://127.0.0.1:48010", token=token)
+    basic_api = CaseworkApi(
+        base_url="http://127.0.0.1:48010", basic=(basic_user, basic_pass)
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="casework.api"):
+        bearer_api.get("/cases/")
+        bearer_api.patch_field("some-slug", "bigo", 500)
+        basic_api.get("/cases/")
+        basic_api.patch_field("some-slug", "bigo", 500)
+
+    all_text = "\n".join(
+        r.getMessage() for r in caplog.records if r.name == "casework.api"
+    )
+    assert token not in all_text
+    assert basic_creds not in all_text
+    assert "Bearer" not in all_text
+    assert "Basic " not in all_text
+    assert len(calls) == 4

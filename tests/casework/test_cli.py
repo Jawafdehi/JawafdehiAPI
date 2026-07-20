@@ -1,9 +1,17 @@
 import argparse
+import json
 import logging
+import re
+from pathlib import Path
 
 from casework.common.cli import (
     QUIET_LOGGERS,
     add_common_args,
+    configure_run_logging,
+    log_event,
+    log_run_footer,
+    log_run_header,
+    new_run_id,
     print_summary,
     setup_logging,
 )
@@ -99,3 +107,274 @@ def test_print_summary_applied_banner(capsys):
     print_summary({}, dry_run=False, title="Tags")
     out = capsys.readouterr().out
     assert "=== Tags (APPLIED) ===" in out
+
+
+def test_allow_remote_writes_flag_defaults_false():
+    args = _parse([])
+    assert args.allow_remote_writes is False
+
+
+def test_allow_remote_writes_flag_parses_true():
+    args = _parse(["--allow-remote-writes"])
+    assert args.allow_remote_writes is True
+
+
+# ---------------------------------------------------------------------------
+# Shared run-logging foundation: new_run_id / configure_run_logging /
+# log_event / log_run_header / log_run_footer. PP2 depends on these exact
+# names and signatures.
+# ---------------------------------------------------------------------------
+
+
+def _cleanup_logger(stage):
+    """Undo `configure_run_logging`'s handler/filter installation so tests
+    don't leak file handles or state onto the process-global logger object
+    across test cases (the logger name is reused by module name).
+    """
+    logger = logging.getLogger(f"casework.{stage}")
+    for h in list(logger.handlers):
+        logger.removeHandler(h)
+        h.close()
+    for f in list(logger.filters):
+        logger.removeFilter(f)
+    for attr in ("_casework_run_marker", "_casework_run_paths"):
+        if hasattr(logger, attr):
+            delattr(logger, attr)
+
+
+def test_new_run_id_is_short_and_unique():
+    a, b = new_run_id(), new_run_id()
+    assert a != b
+    assert len(a) == 8
+    assert re.fullmatch(r"[0-9a-f]{8}", a)
+
+
+def test_configure_run_logging_creates_both_files_under_tmp_log_dir(tmp_path):
+    stage = "test-create-files"
+    try:
+        logger, run_id, paths = configure_run_logging(
+            stage, run_id="deadbeef", log_dir=str(tmp_path)
+        )
+        assert Path(paths["log"]).exists()
+        assert Path(paths["events"]).exists()
+        assert Path(paths["log"]).parent == tmp_path
+        assert run_id == "deadbeef"
+        assert logger.name == f"casework.{stage}"
+    finally:
+        _cleanup_logger(stage)
+
+
+def test_configure_run_logging_same_run_id_does_not_double_handlers(tmp_path):
+    stage = "test-idempotent"
+    try:
+        logger1, _, _ = configure_run_logging(
+            stage, run_id="samerun1", log_dir=str(tmp_path)
+        )
+        count_after_first = len(logger1.handlers)
+
+        logger2, _, _ = configure_run_logging(
+            stage, run_id="samerun1", log_dir=str(tmp_path)
+        )
+        count_after_second = len(logger2.handlers)
+
+        assert count_after_first == count_after_second
+        assert logger1 is logger2
+    finally:
+        _cleanup_logger(stage)
+
+
+def test_configure_run_logging_different_run_id_replaces_not_accumulates(tmp_path):
+    stage = "test-replace"
+    try:
+        logger1, _, _ = configure_run_logging(
+            stage, run_id="run-one", log_dir=str(tmp_path)
+        )
+        count_after_first = len(logger1.handlers)
+
+        logger2, _, _ = configure_run_logging(
+            stage, run_id="run-two", log_dir=str(tmp_path)
+        )
+        count_after_second = len(logger2.handlers)
+
+        assert count_after_first == count_after_second
+    finally:
+        _cleanup_logger(stage)
+
+
+def test_configure_run_logging_defaults_verbose_level(tmp_path):
+    stage = "test-verbose"
+    try:
+        logger, _, _ = configure_run_logging(
+            stage, verbose=True, run_id="v1", log_dir=str(tmp_path)
+        )
+        assert logger.level == logging.DEBUG
+    finally:
+        _cleanup_logger(stage)
+
+
+def test_configure_run_logging_uses_env_var_for_default_log_dir(monkeypatch, tmp_path):
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    stage = "test-env-log-dir"
+    try:
+        _, _, paths = configure_run_logging(stage, run_id="envrun")
+        assert Path(paths["log"]).parent == tmp_path
+    finally:
+        _cleanup_logger(stage)
+
+
+def test_configure_run_logging_falls_back_to_repo_root_work_dir(monkeypatch, tmp_path):
+    import casework.common.cli as cli_module
+
+    monkeypatch.delenv("CASEWORK_RUN_LOG_DIR", raising=False)
+    fake_default = tmp_path / "work" / "enricher-runs"
+    monkeypatch.setattr(cli_module, "_DEFAULT_LOG_DIR", fake_default)
+    stage = "test-default-log-dir"
+    try:
+        _, _, paths = configure_run_logging(stage, run_id="defaultrun")
+        assert Path(paths["log"]).parent == fake_default
+        assert fake_default.exists()
+    finally:
+        _cleanup_logger(stage)
+
+
+def test_run_log_lines_are_utc_iso_timestamped(tmp_path):
+    stage = "test-format"
+    try:
+        logger, run_id, paths = configure_run_logging(
+            stage, run_id="fmtrun1", log_dir=str(tmp_path)
+        )
+        logger.info("hello from the format test")
+        for h in logger.handlers:
+            h.flush()
+        content = Path(paths["log"]).read_text(encoding="utf-8")
+        assert re.search(
+            r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z (DEBUG|INFO|WARNING|ERROR)\s+"
+            rf"\[run={run_id} stage={stage}\] hello from the format test",
+            content,
+            re.MULTILINE,
+        )
+    finally:
+        _cleanup_logger(stage)
+
+
+def test_log_event_writes_one_parseable_json_line_with_required_keys(tmp_path):
+    events_path = tmp_path / "events.jsonl"
+    logger = logging.getLogger("test.log_event.keys")
+
+    log_event(
+        logger, str(events_path),
+        run_id="r1", stage="bigo", slug="some-case", step="fetch",
+        status="ok", detail="fetched fine", elapsed_ms=42,
+    )
+
+    lines = events_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["run_id"] == "r1"
+    assert record["stage"] == "bigo"
+    assert record["slug"] == "some-case"
+    assert record["step"] == "fetch"
+    assert record["status"] == "ok"
+    assert record["detail"] == "fetched fine"
+    assert record["elapsed_ms"] == 42
+    assert "ts" in record and record["ts"]
+
+
+def test_log_event_devanagari_survives_round_trip_not_escaped(tmp_path):
+    events_path = tmp_path / "events.jsonl"
+    logger = logging.getLogger("test.log_event.devanagari")
+    slug = "श्री-५-को-सरकारी-मुद्दा"
+    detail = "बिगो रकम पुष्टि भयो"
+
+    log_event(
+        logger, str(events_path),
+        run_id="r1", stage="bigo", slug=slug, step="fetch",
+        status="ok", detail=detail,
+    )
+
+    raw = events_path.read_text(encoding="utf-8")
+    assert "\\u" not in raw
+    assert slug in raw
+    assert detail in raw
+    record = json.loads(raw.splitlines()[0])
+    assert record["slug"] == slug
+    assert record["detail"] == detail
+
+
+def test_log_event_emits_human_readable_line_through_logger(tmp_path, caplog):
+    events_path = tmp_path / "events.jsonl"
+    logger = logging.getLogger("test.log_event.human")
+
+    with caplog.at_level(logging.INFO, logger="test.log_event.human"):
+        log_event(
+            logger, str(events_path),
+            run_id="r1", stage="bigo", slug="some-case", step="fetch",
+            status="ok", detail="fetched fine", elapsed_ms=42,
+        )
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(
+        "some-case" in m and "step=fetch" in m and "status=ok" in m
+        and "fetched fine" in m and "42ms" in m
+        for m in messages
+    )
+
+
+def test_log_run_header_is_one_info_record_with_target_mode_and_paths(caplog):
+    logger = logging.getLogger("test.log_run_header")
+    paths = {"log": "/tmp/x.log", "events": "/tmp/x.events.jsonl"}
+
+    with caplog.at_level(logging.INFO, logger="test.log_run_header"):
+        log_run_header(
+            logger, stage="bigo", base_url="http://127.0.0.1:48010",
+            dry_run=True, provider="claude_cli", model="haiku",
+            n_selected=12, run_id="abc12345", paths=paths,
+        )
+
+    info_records = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert len(info_records) == 1
+    message = info_records[0].getMessage()
+    assert "http://127.0.0.1:48010" in message
+    assert "DRY-RUN" in message
+    assert "claude_cli" in message
+    assert "haiku" in message
+    assert "12" in message
+    assert "abc12345" in message
+    assert paths["log"] in message
+    assert paths["events"] in message
+
+
+def test_log_run_header_shows_apply_when_not_dry_run(caplog):
+    logger = logging.getLogger("test.log_run_header_apply")
+    paths = {"log": "/tmp/x.log", "events": "/tmp/x.events.jsonl"}
+
+    with caplog.at_level(logging.INFO, logger="test.log_run_header_apply"):
+        log_run_header(
+            logger, stage="bigo", base_url="http://127.0.0.1:48010",
+            dry_run=False, provider="claude_cli", model="haiku",
+            n_selected=0, run_id="abc12345", paths=paths,
+        )
+
+    message = caplog.records[0].getMessage()
+    assert "APPLY" in message
+    assert "DRY-RUN" not in message
+
+
+def test_log_run_footer_is_one_info_record_with_counts_and_duration(caplog):
+    logger = logging.getLogger("test.log_run_footer")
+
+    with caplog.at_level(logging.INFO, logger="test.log_run_footer"):
+        log_run_footer(
+            logger, stage="bigo",
+            stats={"enriched": 3, "skipped": 1, "error": 0},
+            duration_s=12.345, usage_summary="tokens: 4200 in / 900 out",
+        )
+
+    info_records = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert len(info_records) == 1
+    message = info_records[0].getMessage()
+    assert "enriched=3" in message
+    assert "skipped=1" in message
+    assert "error=0" in message
+    assert "12.3" in message
+    assert "tokens: 4200 in / 900 out" in message
