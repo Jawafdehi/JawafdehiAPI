@@ -105,10 +105,20 @@ def test_build_query_caps_page_size():
 # ── index selection (type filter) ──────────────────────────────────────────────
 
 
-def test_index_selection_all_types_by_default():
+def test_index_selection_excludes_courtcase_by_default():
+    # Court cases are UNLISTED: the default search set is entity/material/case,
+    # never ngm-courtcases.
     idx = svc._index_for_types(None)
-    for name in ("nes-entities", "ngm-materials", "ngm-courtcases", "jawafdehi-cases"):
+    for name in ("nes-entities", "ngm-materials", "jawafdehi-cases"):
         assert name in idx
+    assert "ngm-courtcases" not in idx
+
+
+def test_index_selection_drops_courtcase_when_requested():
+    # An explicit type=courtcase resolves to NO searchable index (unlisted); mixed
+    # with a searchable type, only the searchable one survives.
+    assert svc._index_for_types(["courtcase"]) == ""
+    assert svc._index_for_types(["entity", "courtcase"]) == "nes-entities"
 
 
 def test_index_selection_respects_type_filter():
@@ -117,6 +127,17 @@ def test_index_selection_respects_type_filter():
     assert "jawafdehi-cases" in idx
     assert "ngm-materials" not in idx
     assert "ngm-courtcases" not in idx
+
+
+def test_search_courtcase_type_returns_empty_without_querying():
+    # Asking for only court cases yields an empty envelope and never touches the
+    # cluster (an empty index string would otherwise search every index).
+    client = MagicMock()
+    out = SearchService(client=client).search(q="081-CR-0081", types=["courtcase"])
+    assert out["results"] == []
+    assert out["count"] == 0
+    assert out["counts"] == {}
+    client.search.assert_not_called()
 
 
 # ── merge / envelope / facets ──────────────────────────────────────────────────
