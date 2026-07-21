@@ -306,7 +306,18 @@ def run(args, api=None, rows=None):
                          "status": "error", "error": str(exc)[:200], "elapsed_ms": ms})
             continue
 
-        plan = plan_case(api, case, etag, candidates_from_row(row))
+        try:
+            plan = plan_case(api, case, etag, candidates_from_row(row))
+        except Exception as exc:  # noqa: BLE001 -- one bad case must not sink the batch
+            ms = int((time.monotonic() - t0) * 1000)
+            stats["PLAN_FAILED"] = stats.get("PLAN_FAILED", 0) + 1
+            logger.warning("[%s | %s] PLAN_FAILED  %s  (%dms)", cno, slug, str(exc)[:120], ms)
+            attention.append(f"{cno} ({slug}): plan failed -- {str(exc)[:100]}")
+            _write_event(paths["events"], {"ts": _utc_iso_now(), "run_id": run_id,
+                         "stage": STAGE, "slug": slug, "court_case_no": cno,
+                         "action": "PLAN_FAILED", "final": "PLAN_FAILED",
+                         "status": "error", "error": str(exc)[:200], "elapsed_ms": ms})
+            continue
         ms = int((time.monotonic() - t0) * 1000)
         plans.append(plan)
 
