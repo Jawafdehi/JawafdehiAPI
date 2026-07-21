@@ -21,7 +21,7 @@ unrelated evidence is NOT skipped if it still lacks one of its candidates. This
 is READ-ONLY: it performs GETs only and writes a batch CSV that
 ``bind_materials.py --batch-csv`` then consumes. It never PATCHes anything.
 
-    python casework/select_batch.py --master-csv master.csv --out batch2.csv \
+    uv run python -m casework.select_batch --master-csv master.csv --out batch2.csv \
         --year 078 --year 079 --limit 50
 """
 import argparse
@@ -176,7 +176,7 @@ def main(argv=None):
                 "fetch_failed", "not_draft", "already_bound", "selected"):
         print(f"  {key}: {stats[key]}")
     print(f"\nwrote {len(selected)} case(s). Next: "
-          f"casework/bind_materials.py --batch-csv {args.out}")
+          f"uv run python -m casework.bind_materials --batch-csv {args.out}")
     return 0
 
 

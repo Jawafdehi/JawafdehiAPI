@@ -115,10 +115,10 @@ silently "fixed" -- see task-14c-report.md for the full writeup):
    below is kept anyway as a second, harmless safety net.
 
 Usage:
-    python casework/enrich_timeline.py --dry-run
-    python casework/enrich_timeline.py --slug case-0123
-    python casework/enrich_timeline.py --limit 10 --verbose
-    python casework/enrich_timeline.py --apply
+    uv run python -m casework.enrich_timeline --dry-run
+    uv run python -m casework.enrich_timeline --slug case-0123
+    uv run python -m casework.enrich_timeline --limit 10 --verbose
+    uv run python -m casework.enrich_timeline --apply
 """
 
 import argparse

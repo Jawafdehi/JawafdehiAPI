@@ -76,10 +76,10 @@ dispatcher, not silently added.
 =======================================================================================
 
 Usage:
-    python casework/enrich_related_entities.py --dry-run
-    python casework/enrich_related_entities.py --slug case-0123
-    python casework/enrich_related_entities.py --limit 10 --verbose
-    python casework/enrich_related_entities.py --apply   # still writes NOTHING
+    uv run python -m casework.enrich_related_entities --dry-run
+    uv run python -m casework.enrich_related_entities --slug case-0123
+    uv run python -m casework.enrich_related_entities --limit 10 --verbose
+    uv run python -m casework.enrich_related_entities --apply   # still writes NOTHING
 """
 
 import argparse

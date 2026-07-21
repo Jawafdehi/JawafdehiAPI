@@ -13,10 +13,10 @@ the live per-field idempotency check (which already stops batch 2 re-touching a
 populated case) is that it distinguishes *we enriched it* from *it was already
 populated*, and gives an auditable "what did we change, when" across batches.
 
-    python casework/ledger.py                       # summary + write ledger
-    python casework/ledger.py --stage timeline      # summary for one stage
-    python casework/ledger.py --status error        # list the failed cases
-    python casework/ledger.py --no-write            # print only, write nothing
+    uv run python -m casework.ledger                       # summary + write ledger
+    uv run python -m casework.ledger --stage timeline      # summary for one stage
+    uv run python -m casework.ledger --status error        # list the failed cases
+    uv run python -m casework.ledger --no-write            # print only, write nothing
 
 The written ledger is always the FULL consolidated set; --stage/--slug/--status
 filter only what is printed.

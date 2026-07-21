@@ -52,8 +52,17 @@ def add_common_args(parser):
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--dry-run", action="store_true", default=True)
     parser.add_argument("--apply", dest="dry_run", action="store_false")
-    parser.add_argument("--provider", default="claude_cli")
-    parser.add_argument("--model", default="haiku")
+    parser.add_argument(
+        "--provider", default="claude_cli",
+        help="LLM provider to route both tiers through (default claude_cli).")
+    parser.add_argument(
+        "--model", default="",
+        help="LLM model/alias to force on BOTH tiers. Empty (the default) lets "
+             "each stage use its configured tier model -- premium stages (bigo, "
+             "timeline, allegations, entities) get the premium model, tags gets "
+             "the cheap one -- falling back to the provider CLI's own default. "
+             "An earlier default of 'haiku' overrode every tier with the cheap "
+             "model; pass --model haiku explicitly to restore that for a cheap run.")
     parser.add_argument(
         "--api-base-url", default=os.environ.get("JAWAFDEHI_API_BASE"),
         help="Base URL of the case API; defaults to $JAWAFDEHI_API_BASE. If "

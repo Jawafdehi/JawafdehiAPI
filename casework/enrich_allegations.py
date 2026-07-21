@@ -38,10 +38,10 @@ DocumentSource-title/description prompt block the way the bigo donor did, so
 there is no analogous metadata-surfacing helper to port here.
 
 Usage:
-    python casework/enrich_allegations.py --dry-run
-    python casework/enrich_allegations.py --slug case-0123
-    python casework/enrich_allegations.py --limit 10 --verbose
-    python casework/enrich_allegations.py --apply
+    uv run python -m casework.enrich_allegations --dry-run
+    uv run python -m casework.enrich_allegations --slug case-0123
+    uv run python -m casework.enrich_allegations --limit 10 --verbose
+    uv run python -m casework.enrich_allegations --apply
 """
 
 import argparse

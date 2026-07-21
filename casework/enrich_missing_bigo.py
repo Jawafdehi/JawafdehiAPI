@@ -17,10 +17,10 @@ See `coerce_bigo_int`'s body/comment for the fix; it is ported verbatim from
 the donor and must not be "cleaned up".
 
 Usage:
-    python casework/enrich_missing_bigo.py --dry-run
-    python casework/enrich_missing_bigo.py --slug case-0123
-    python casework/enrich_missing_bigo.py --limit 10 --verbose
-    python casework/enrich_missing_bigo.py --apply
+    uv run python -m casework.enrich_missing_bigo --dry-run
+    uv run python -m casework.enrich_missing_bigo --slug case-0123
+    uv run python -m casework.enrich_missing_bigo --limit 10 --verbose
+    uv run python -m casework.enrich_missing_bigo --apply
 """
 
 import argparse

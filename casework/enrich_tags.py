@@ -36,11 +36,11 @@ case still gets classified and (outside `--dry-run`) PATCHed. This mirrors
 of `stats["cases_enriched"]`.
 
 Usage:
-    python casework/enrich_tags.py --dry-run
-    python casework/enrich_tags.py --slug case-0123
-    python casework/enrich_tags.py --limit 10 --verbose
-    python casework/enrich_tags.py --no-llm --dry-run
-    python casework/enrich_tags.py --apply
+    uv run python -m casework.enrich_tags --dry-run
+    uv run python -m casework.enrich_tags --slug case-0123
+    uv run python -m casework.enrich_tags --limit 10 --verbose
+    uv run python -m casework.enrich_tags --no-llm --dry-run
+    uv run python -m casework.enrich_tags --apply
 """
 
 import argparse

@@ -21,6 +21,10 @@ markdown through `django.core.files.storage` and appends a roled MediaObject to
 the material's JSON-LD, so the resulting MARKDOWN link is a real, fetchable URL
 that `materials.source_text` can GET -- which a hand-written `PUT` of a made-up
 `contentUrl` would not be.
+
+Usage:
+    uv run python -m casework.convert --dry-run
+    uv run python -m casework.convert --slug case-0123 --apply
 """
 import argparse
 import json

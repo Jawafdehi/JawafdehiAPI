@@ -23,6 +23,10 @@ edit 412s instead of being clobbered.
 Dry-run is the DEFAULT (prints the exact PATCH it WOULD send). ``--apply``
 opts into writing, and writing to any non-loopback host additionally requires
 ``--allow-remote-writes`` (enforced in CaseworkApi, not here).
+
+Usage:
+    uv run python -m casework.bind_materials --batch-csv batch2.csv --dry-run
+    uv run python -m casework.bind_materials --batch-csv batch2.csv --apply
 """
 import argparse
 import csv

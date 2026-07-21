@@ -42,6 +42,18 @@ def test_api_base_url_has_no_silent_localhost_default(monkeypatch):
     assert parser.parse_args([]).api_base_url is None
 
 
+def test_model_default_is_empty_not_haiku():
+    # Bumped off the cheap default: "" means "use each stage's configured tier
+    # model" (premium stages -> premium model), NOT force-haiku on every tier.
+    # bootstrap() with an empty model leaves the per-tier CLAUDE_CLI_MODEL_*
+    # settings in force instead of overriding them.
+    assert _parse([]).model == ""
+
+
+def test_provider_default_is_claude_cli():
+    assert _parse([]).provider == "claude_cli"
+
+
 def test_basic_auth_from_env_returns_credentials(monkeypatch):
     monkeypatch.setenv("CASEWORK_API_USER", "u")
     monkeypatch.setenv("CASEWORK_API_PASSWORD", "p")
