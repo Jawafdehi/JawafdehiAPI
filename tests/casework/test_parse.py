@@ -44,6 +44,25 @@ def test_parse_extraction_response_unwraps_list_key():
     ]
 
 
+def test_parse_extraction_response_survives_bracket_inside_quoted_value():
+    # Regression: the array scan must be JSON-string aware. A ``]`` inside a
+    # quoted value (common in Nepali evidence_quote / description text) must not
+    # be counted as the array's close, which would truncate the fragment and
+    # drop the whole payload. Bare-array fallback (no wrapper key).
+    body = 'prose\n[{"title": "जफत ] गरियो", "date": "2024-01-15"}]\ntrailing'
+    assert parse_extraction_response(body, {"timeline"}) == [
+        {"title": "जफत ] गरियो", "date": "2024-01-15"}
+    ]
+
+
+def test_parse_extraction_response_survives_bracket_inside_wrapped_value():
+    # Same, but inside the ``{"key": [...]}`` wrapper branch (object scan).
+    body = '{"timeline": [{"title": "सूची [क] देखियो", "date": "2024-01-15"}]}'
+    assert parse_extraction_response(body, {"timeline"}) == [
+        {"title": "सूची [क] देखियो", "date": "2024-01-15"}
+    ]
+
+
 def test_parse_extraction_response_returns_none_when_key_absent():
     # NOTE: input deliberately has no top-level `[...]` array anywhere in the
     # text. The brief's original payload here was '{"other": [1, 2]}', but

@@ -23,10 +23,11 @@ def is_valid_iso_date(date_str) -> bool:
         return False
 
 
-def balanced_object(text: str, start: int):
-    """Return the balanced ``{...}`` substring starting at ``start``, or None if
-    it never closes. JSON-string aware, so braces inside quoted values (e.g. an
-    evidence_quote) don't throw off the depth count — unlike a brace regex."""
+def _balanced_span(text: str, start: int, opener: str, closer: str):
+    """Return the balanced ``opener...closer`` substring starting at ``start``,
+    or None if it never closes. JSON-string aware, so an ``opener``/``closer``
+    inside a quoted value (e.g. a Nepali evidence_quote containing ``]``) does
+    not throw off the depth count — unlike a bare bracket counter."""
     depth = 0
     in_str = False
     escape = False
@@ -42,13 +43,23 @@ def balanced_object(text: str, start: int):
             continue
         if ch == '"':
             in_str = True
-        elif ch == "{":
+        elif ch == opener:
             depth += 1
-        elif ch == "}":
+        elif ch == closer:
             depth -= 1
             if depth == 0:
                 return text[start : i + 1]
     return None
+
+
+def balanced_object(text: str, start: int):
+    """Balanced ``{...}`` substring from ``start``, string-aware. See _balanced_span."""
+    return _balanced_span(text, start, "{", "}")
+
+
+def balanced_array(text: str, start: int):
+    """Balanced ``[...]`` substring from ``start``, string-aware. See _balanced_span."""
+    return _balanced_span(text, start, "[", "]")
 
 
 def parse_extraction_response(response_text, wrapper_keys):
@@ -67,18 +78,10 @@ def parse_extraction_response(response_text, wrapper_keys):
 
     obj_start = text.find("{")
     if obj_start != -1:
-        depth, obj_end = 0, -1
-        for i, ch in enumerate(text[obj_start:], obj_start):
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    obj_end = i
-                    break
-        if obj_end != -1:
+        frag = balanced_object(text, obj_start)
+        if frag is not None:
             try:
-                obj = json.loads(text[obj_start : obj_end + 1])
+                obj = json.loads(frag)
                 if isinstance(obj, dict):
                     for key in wrapper_keys:
                         if isinstance(obj.get(key), list) and obj[key]:
@@ -88,18 +91,10 @@ def parse_extraction_response(response_text, wrapper_keys):
 
     arr_start = text.find("[")
     if arr_start != -1:
-        depth, arr_end = 0, -1
-        for i, ch in enumerate(text[arr_start:], arr_start):
-            if ch == "[":
-                depth += 1
-            elif ch == "]":
-                depth -= 1
-                if depth == 0:
-                    arr_end = i
-                    break
-        if arr_end != -1:
+        frag = balanced_array(text, arr_start)
+        if frag is not None:
             try:
-                entries = json.loads(text[arr_start : arr_end + 1])
+                entries = json.loads(frag)
                 if isinstance(entries, list) and entries:
                     return entries
             except json.JSONDecodeError:
