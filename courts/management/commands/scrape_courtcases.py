@@ -14,53 +14,14 @@ also follows each case's detail page.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 
 from django.core.management.base import BaseCommand, CommandError
-from django.utils import timezone
 
 from courts.scraper import registry
+from courts.scraper.base import anchor
 from courts.scraper.crawl import run_crawl
-
-_UA = "Mozilla/5.0 (X11; Linux x86_64) Jawafdehi-courts-crawler"
-
-
-class _Fetcher:
-    """``fetch(url, data=None) -> html``: POST when ``data`` is given, else GET."""
-
-    def __init__(self, timeout: int = 60):
-        import requests
-
-        self._s = requests.Session()
-        self._s.headers.update({
-            "User-Agent": _UA,
-            "Referer": "https://supremecourt.gov.np/",
-            "Origin": "https://supremecourt.gov.np",
-        })
-        self._timeout = timeout
-
-    def __call__(self, url, data=None):
-        resp = (
-            self._s.post(url, data=data, timeout=self._timeout)
-            if data is not None
-            else self._s.get(url, timeout=self._timeout)
-        )
-        resp.raise_for_status()
-        return _decode(resp)
-
-
-def _decode(resp) -> str:
-    """Body as text, forcing UTF-8 when the portal omits the charset.
-
-    supremecourt.gov.np serves UTF-8 Devanagari but sends ``Content-Type:
-    text/html`` with NO charset, so ``requests`` falls back to ISO-8859-1 and
-    mojibakes every page (the parsers then see zero Devanagari). Honor an
-    explicit header charset when present; otherwise decode as UTF-8 —
-    ``utf-8-sig`` also strips the BOM some endpoints emit.
-    """
-    if "charset=" not in resp.headers.get("content-type", "").lower():
-        resp.encoding = "utf-8-sig"
-    return resp.text
+from courts.scraper.fetch import Fetcher
 
 
 class Command(BaseCommand):
@@ -89,7 +50,7 @@ class Command(BaseCommand):
         today = self._anchor(o["today"])
         enrich = o["enrich"]
         write = o["write"] or enrich
-        fetch = _Fetcher()
+        fetch = Fetcher()
         mode = "WRITE" if write else "DRY-RUN"
         self.stdout.write(f"scrape_courtcases [{mode}] courts={keys} today={today}")
 
@@ -108,9 +69,7 @@ class Command(BaseCommand):
 
     @staticmethod
     def _anchor(value: str | None) -> date:
-        if not value:
-            return timezone.localdate()
         try:
-            return datetime.strptime(value, "%Y-%m-%d").date()
+            return anchor(value)
         except ValueError as exc:
             raise CommandError(f"--today must be YYYY-MM-DD, got {value!r}") from exc

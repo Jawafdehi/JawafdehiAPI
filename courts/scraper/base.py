@@ -11,7 +11,7 @@ via :mod:`courts.case_status`. All writes go through here so the extra_data-unio
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from django.db import transaction
 from django.utils import timezone
@@ -28,6 +28,16 @@ _ENRICH_COLUMNS = {
     "case_status", "verdict_type", "verdict_date_bs", "verdict_date_ad",
     "verdict_judge", "case_subject", "hearing_count", "registration_number",
 }
+
+
+def anchor(value: str | None) -> date:
+    """Resolve an optional ``YYYY-MM-DD`` AD anchor date; default to today (KTM
+    localdate). Raises ``ValueError`` on a malformed string. Shared by the
+    scrape_courtcases command and the court_scrape job handler.
+    """
+    if not value:
+        return timezone.localdate()
+    return datetime.strptime(value, "%Y-%m-%d").date()
 
 
 def iter_bs_dates(lookback_days: int, *, today: date, offset_days: int = 1) -> Iterator[tuple[date, str]]:
@@ -60,6 +70,11 @@ def scraped_dates_for(court_id: str, *, using: str = NGM_DB) -> set[str]:
 
 
 def mark_scraped(court_id: str, date_bs: str, note: str | None = None, *, using: str = NGM_DB) -> None:
+    # Marking a date scraped for a court implies the court exists. Ensure it here
+    # so a date with an EMPTY cause-list (no cases → upsert_causelist never ran
+    # _ensure_court) doesn't fail the ScrapedDate → Court FK. Real courts already
+    # exist (bulk-COPY'd); this only creates a stub for a court not yet in the DB.
+    _ensure_court(court_id, using=using)
     ScrapedDate.objects.using(using).get_or_create(
         court_id=court_id, date_bs=date_bs, defaults={"note": note}
     )

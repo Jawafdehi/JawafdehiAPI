@@ -162,3 +162,22 @@ register(
         # Material is still served (metadata-searchable), and a re-upload re-runs.
     )
 )
+
+
+# --- court_scrape: crawl a court's recent cause-lists into the ngm lake -------
+#
+# Unlike the DB-free review/material kinds, court_scrape WRITES via the courts
+# ORM, so it is run by an in-process consumer with ngm DB access
+# (courts/management/commands/scrape_worker.py), not the external HTTP poller.
+# The queue still gives it lease/retry/backoff/dedup + the /api/jobs dashboard.
+# No build_payload (the payload is self-contained: court + lookback) and no
+# on_result (the crawl writes the lake itself; job.result just records stats).
+
+
+register(
+    KindSpec(
+        kind="court_scrape",
+        lease_seconds=1800,  # an incremental per-court crawl is minutes.
+        max_attempts=3,  # portal/network flakes retry with backoff, then dead-letter.
+    )
+)

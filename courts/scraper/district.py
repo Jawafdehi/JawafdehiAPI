@@ -80,7 +80,7 @@ def parse_daily_list(
                 bench_td = bench_row.find("td", align="right")
                 judge_td = bench_row.find("td", class_="judge")
                 if bench_td:
-                    current_bench = normalize_whitespace(bench_td.get_text()) or None
+                    current_bench = normalize_whitespace(bench_td.get_text())[:100] or None
                 if judge_td:
                     current_judge = normalize_whitespace(judge_td.get_text()) or None
 
@@ -153,7 +153,7 @@ def _parse_row(
         court_identifier=court_identifier,
         registration_date_bs=registration_date or None,
         registration_date_ad=bs_to_ad(registration_date),
-        case_type=normalize_whitespace(cells[3].get_text()) or None,
+        case_type=normalize_whitespace(cells[3].get_text())[:200] or None,
         plaintiff=normalize_whitespace(cells[4].get_text()) or None,
         defendant=normalize_whitespace(cells[5].get_text()) or None,
         extra_data=extra_data,
@@ -167,7 +167,7 @@ def _parse_row(
         bench=bench,
         serial_no=serial_no or None,
         judge_names=judge,
-        decision_type=normalize_whitespace(cells[9].get_text()) or None,
+        decision_type=normalize_whitespace(cells[9].get_text())[:200] or None,
         remarks=normalize_whitespace(cells[8].get_text()) or None,
     )
     return case, hearing
@@ -236,19 +236,19 @@ def _extract_detail_fields(soup: BeautifulSoup) -> dict[str, object]:
                 if not value:
                     continue
                 if label == "रजिष्ट्रेशन नं":
-                    data["registration_number"] = value
+                    data["registration_number"] = value[:100]
                 elif label == "मुद्दाको किसिम":
-                    data["case_type"] = value
+                    data["case_type"] = value[:200]
                 elif label == "मुद्दाको बिषय":
-                    data["case_subject"] = value
+                    data["case_subject"] = value  # CourtCase.case_subject is TextField
                 elif label == "मुद्दाको स्थिति":
-                    data["case_status"] = value
+                    data["case_status"] = value[:100]
                 elif label == "फैसला मिति" and value != _VERDICT_DATE_SENTINEL:
                     date_bs = normalize_date(value)
                     data["verdict_date_bs"] = date_bs
                     data["verdict_date_ad"] = bs_to_ad(date_bs)
                 elif label == "फैसला गर्ने मा. न्यायाधीश":
-                    data["verdict_judge"] = value
+                    data["verdict_judge"] = value[:500]
                 elif label == "पेशी चढेको संख्या":
                     data["hearing_count"] = value
 
@@ -258,7 +258,7 @@ def _extract_detail_fields(soup: BeautifulSoup) -> dict[str, object]:
             if "रजिष्ट्रेशन नं" in text:
                 reg_num = text.split(":")[-1].strip()
                 if reg_num:
-                    data["registration_number"] = reg_num
+                    data["registration_number"] = reg_num[:100]
     return data
 
 
@@ -306,7 +306,9 @@ def _parse_party_table(table) -> list[dict[str, object]]:
             name = cells[0].get_text(strip=True)
             address = cells[1].get_text(strip=True)
             if name:
-                parties.append({"name": name, "address": address or None})
+                parties.append(
+                    {"name": name[:500], "address": address[:500] if address else None}
+                )
     return parties
 
 
