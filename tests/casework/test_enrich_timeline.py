@@ -29,6 +29,7 @@ a drifted clause changes LLM behavior with zero other test failures.
 import ast
 import json
 import logging
+import re
 import subprocess
 import sys
 import types
@@ -291,16 +292,47 @@ class TestCleanEntryDateHandling:
         assert entry["date"] == "2024-01-15"
         assert entry["date_bs"] == "2080-10-01"
 
-    def test_malformed_bs_shape_is_kept_verbatim(self):
-        # THE central brief-vs-donor pin: the donor's _clean_entry does NOT
-        # validate date_bs's shape at all -- a slash-separated or otherwise
-        # malformed date_bs string is passed straight through unchanged.
+    # Production-hardening (2026-07-21): _clean_entry now NORMALISES date_bs /
+    # end_date_bs toward the server's shape (slash->dash, Devanagari->ASCII),
+    # because the case PATCH endpoint's TimelineItemSerializer._BS_DATE_RE
+    # (^\d{4}-\d{2}-\d{2}$) 422s the WHOLE timeline on a slash-format date_bs,
+    # and the A/B run proved haiku emits slashes on some cases. This mirrors the
+    # normalisation convert_date already applies; it does not add a rejecting
+    # regex (so the donor-source shape-validation pin above still holds).
+    _BS_SHAPE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+    def test_slash_date_bs_is_normalised_to_dash(self):
         entry = _clean_entry(
             {"date": "2024-01-15", "date_bs": "2080/10/01", "title": "फैसला"})
         assert entry is not None
-        assert entry["date_bs"] == "2080/10/01"
+        assert entry["date_bs"] == "2080-10-01"
+        # Cross-check: the normalised value now satisfies the server regex that
+        # was rejecting the slash form.
+        assert self._BS_SHAPE.match(entry["date_bs"])
 
-    def test_garbage_bs_string_is_still_kept(self):
+    def test_devanagari_date_bs_is_normalised(self):
+        entry = _clean_entry(
+            {"date": "2024-01-15", "date_bs": "२०८०/१०/०१", "title": "फैसला"})
+        assert entry["date_bs"] == "2080-10-01"
+
+    def test_slash_end_date_bs_is_normalised(self):
+        entry = _clean_entry({
+            "date": "2024-01-15", "end_date": "2024-06-01",
+            "date_bs": "2080/10/01", "end_date_bs": "2081/02/19",
+            "title": "अवधि"})
+        assert entry["date_bs"] == "2080-10-01"
+        assert entry["end_date_bs"] == "2081-02-19"
+
+    def test_already_dash_date_bs_is_unchanged(self):
+        entry = _clean_entry(
+            {"date": "2024-01-15", "date_bs": "2080-10-01", "title": "फैसला"})
+        assert entry["date_bs"] == "2080-10-01"
+
+    def test_garbage_bs_string_without_slashes_is_still_kept(self):
+        # Normalisation only touches separators/digits; true garbage (no slash,
+        # no Devanagari) is unchanged. The chosen fix is normalise-not-reject,
+        # so such a value would still 422 server-side -- acceptable: haiku emits
+        # slash/Devanagari forms, not free-text, for date_bs.
         entry = _clean_entry(
             {"date": "2024-01-15", "date_bs": "not-a-date-at-all", "title": "फैसला"})
         assert entry is not None

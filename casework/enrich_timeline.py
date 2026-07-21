@@ -26,6 +26,16 @@ silently "fixed" -- see task-14c-report.md for the full writeup):
    out of scope. This port does not invent a duplicate client-side check the
    donor never had.
 
+   UPDATE (2026-07-21, production-hardening): `_clean_entry` now NORMALISES
+   `date_bs`/`end_date_bs` (slash->dash, Devanagari->ASCII, via
+   `_normalise_bs_date`) -- NOT a rejecting regex, but the coercion the
+   `convert_date` tool already does, applied to values the model wrote
+   directly. The 5-case A/B run (rerun-report.md) proved haiku emits slash-form
+   BS dates on some cases, which 422 the whole timeline against
+   `_BS_DATE_RE`. This deliberately diverges from the verbatim donor to make
+   the write survive real model output; it does not add the shape-VALIDATION
+   the donor lacked (the donor-source pin in tests still holds).
+
 2. NGM PATH IS DEAD ON CURRENT DATA -- PRESERVED AS-IS, NOT RESURRECTED.
    `_get_ngm_data` is ported VERBATIM from the donor (`0321a85:enrich_timeline.py:430`):
    it selects `case["court_cases"]` entries that are colon-prefixed strings
@@ -295,6 +305,22 @@ Be specific (names, दफा, amounts, dates) but concise — aim for about \
 """
 
 _DEVANAGARI_TO_ASCII_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
+
+
+def _normalise_bs_date(value: str) -> str:
+    """Coerce a BS date toward the server's shape: Devanagari digits -> ASCII,
+    slash separators -> dashes -- the same normalisation `convert_date` applies.
+
+    The case PATCH endpoint's `TimelineItemSerializer._BS_DATE_RE`
+    (`^\\d{4}-\\d{2}-\\d{2}$`) rejects a slash-form `date_bs` and 422s the WHOLE
+    timeline (proven in the 2026-07-21 A/B run: haiku emits slashes on some
+    cases). When the model writes `date_bs` straight into its JSON -- bypassing
+    the `convert_date` tool -- this is the only place the slash form gets fixed
+    before the PATCH. Normalise-only, never reject: true garbage passes through
+    (and would still 422), but the model emits slash/Devanagari forms, not
+    free text, for these fields.
+    """
+    return value.translate(_DEVANAGARI_TO_ASCII_DIGITS).replace("/", "-")
 
 
 def convert_date(dates: list, mode: str) -> dict:
@@ -671,7 +697,7 @@ def _clean_entry(item: dict) -> Optional[dict]:
 
     date_bs = str(item.get("date_bs") or "").strip()
     if date_bs:
-        entry["date_bs"] = date_bs
+        entry["date_bs"] = _normalise_bs_date(date_bs)
 
     end_date = str(item.get("end_date") or "").strip()
     if end_date:
@@ -685,7 +711,7 @@ def _clean_entry(item: dict) -> Optional[dict]:
             entry["end_date"] = end_date
             end_date_bs = str(item.get("end_date_bs") or "").strip()
             if end_date_bs:
-                entry["end_date_bs"] = end_date_bs
+                entry["end_date_bs"] = _normalise_bs_date(end_date_bs)
 
     return entry
 
