@@ -187,15 +187,31 @@ class CourtCaseImporter:
         """
         from jawafdehi_shared.search.opensearch import COURTCASE_INDEX
         from jawafdehi_shared.search.reindex import reindex
+        from courts.search_visibility import (
+            court_case_public_visible,
+            published_referenced_iris,
+        )
 
-        qs = CourtCase.objects.using("ngm").select_related("court")
+        # Only the public-visible slice is indexed (same gate as the live signal +
+        # reindex_courtcases); the docket is otherwise all-public.
+        published_referenced_iris(refresh=True)
+        qs = (
+            CourtCase.objects.using("ngm")
+            .select_related("court")
+            .filter(is_deleted=False)
+        )
         if self.cfg.courts:
             qs = qs.filter(court_id__in=self.cfg.courts)
         if self.cfg.since and not rebuild:
             qs = qs.filter(updated_at__gte=self.cfg.since)
+        records = (
+            case
+            for case in qs.order_by("court_id", "case_number").iterator()
+            if court_case_public_visible(case)
+        )
         return reindex(
             index=COURTCASE_INDEX,
-            records=qs.order_by("court_id", "case_number").iterator(),
+            records=records,
             build_doc=search_index.build_doc,
             rebuild=rebuild,
         )

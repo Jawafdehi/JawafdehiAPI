@@ -14,6 +14,10 @@ from jawafdehi_shared.search.opensearch import COURTCASE_INDEX
 from jawafdehi_shared.search.reindex import reindex
 from courts import search_index
 from courts.models import CourtCase
+from courts.search_visibility import (
+    court_case_public_visible,
+    published_referenced_iris,
+)
 
 
 class Command(BaseCommand):
@@ -34,12 +38,23 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        qs = CourtCase.objects.select_related("court")
+        # The public index is the curated corruption / public-accountability slice,
+        # NOT a mirror of the 1.6M docket. Gate on court_case_public_visible (the
+        # same gate the live signal applies) plus is_deleted — mirroring
+        # reindex_materials' is_deleted+LISTED gate. Refresh the publish-link cache
+        # once up front so this bulk run sees the current PUBLISHED references.
+        published_referenced_iris(refresh=True)
+        qs = CourtCase.objects.select_related("court").filter(is_deleted=False)
         if options.get("since") and not options["rebuild"]:
             qs = qs.filter(updated_at__gte=options["since"])
+        records = (
+            case
+            for case in qs.order_by("court_id", "case_number").iterator()
+            if court_case_public_visible(case)
+        )
         result = reindex(
             index=COURTCASE_INDEX,
-            records=qs.order_by("court_id", "case_number").iterator(),
+            records=records,
             build_doc=search_index.build_doc,
             rebuild=options["rebuild"],
         )

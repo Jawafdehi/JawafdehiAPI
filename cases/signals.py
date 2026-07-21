@@ -26,12 +26,15 @@ from django.db.models.signals import post_delete, post_save, pre_delete
 from django.dispatch import receiver
 
 from . import search_index
-from .models import Case, CaseMaterialReference
+from .models import Case, CaseCourtCaseReference, CaseMaterialReference
 
 # Attribute we stash the pre-delete material-IRI snapshot on. Set in pre_delete
 # (while the row + its CaseMaterialReference children still exist) and consumed in
 # post_delete (by which point the pk is cleared and the join rows are CASCADE-gone).
 _PENDING_IRIS_ATTR = "_pending_evidence_iris"
+# Same idea for the court-case references (courts.search_visibility rule 3: a court
+# case referenced by a PUBLISHED case is a hard SHOW).
+_PENDING_COURTCASE_IRIS_ATTR = "_pending_courtcase_iris"
 
 
 @receiver(post_save, sender=Case, dispatch_uid="jawafdehi_case_search_index")
@@ -44,6 +47,11 @@ def _index_case(sender, instance, **kwargs):
     # published case's evidence stuck PRIVATE. Best-effort, post-commit.
     iris = _referenced_material_iris(instance)
     transaction.on_commit(lambda: _recompute_evidence_iris(instance, iris))
+    # A change to this case's PUBLISHED state flips the publish-link visibility of
+    # the court cases it references (courts.search_visibility rule 3) — re-index
+    # them so a just-published case surfaces its cited court cases live.
+    cc_iris = _referenced_courtcase_iris(instance)
+    transaction.on_commit(lambda: _refresh_referenced_courtcases(cc_iris))
 
 
 @receiver(pre_delete, sender=Case, dispatch_uid="jawafdehi_case_capture_evidence")
@@ -52,6 +60,8 @@ def _capture_case_evidence(sender, instance, **kwargs):
     # None and the CaseMaterialReference rows have been CASCADE-deleted, so the
     # reverse manager can no longer enumerate them (this is the F2 hard-delete leak).
     setattr(instance, _PENDING_IRIS_ATTR, _referenced_material_iris(instance))
+    # Same snapshot for the court-case references (join rows CASCADE-gone in post_delete).
+    setattr(instance, _PENDING_COURTCASE_IRIS_ATTR, _referenced_courtcase_iris(instance))
 
 
 @receiver(post_delete, sender=Case, dispatch_uid="jawafdehi_case_search_delete")
@@ -63,6 +73,10 @@ def _delete_case(sender, instance, **kwargs):
     # (the join rows are already gone here), not a live query.
     iris = getattr(instance, _PENDING_IRIS_ATTR, [])
     transaction.on_commit(lambda: _recompute_evidence_iris(instance, iris))
+    # Likewise re-evaluate the publish-link visibility of the court cases this
+    # (now-deleted) case referenced, from the pre_delete snapshot.
+    cc_iris = getattr(instance, _PENDING_COURTCASE_IRIS_ATTR, [])
+    transaction.on_commit(lambda: _refresh_referenced_courtcases(cc_iris))
 
 
 def _referenced_material_iris(case) -> list[str]:
@@ -74,6 +88,57 @@ def _referenced_material_iris(case) -> list[str]:
             "material_iri", flat=True
         )
     )
+
+
+def _referenced_courtcase_iris(case) -> list[str]:
+    """Court-case IRIs this case currently references (empty if the pk is gone)."""
+    if case.pk is None:
+        return []
+    return list(
+        CaseCourtCaseReference.objects.filter(case=case).values_list(
+            "courtcase_iri", flat=True
+        )
+    )
+
+
+def _refresh_referenced_courtcases(iris) -> None:
+    """Re-index the referenced court cases so the publish-link visibility rule
+    (``courts.search_visibility`` rule 3) is applied live: a just-published case
+    surfaces its cited court cases; an unpublished/deleted one re-hides those not
+    otherwise public.
+
+    Cross-app / cross-DB (courts → ``ngm``) and best-effort — a failure must not
+    break the case write; ``reindex_courtcases`` is the periodic backstop.
+    """
+    if not iris:
+        return
+    import logging
+
+    logger = logging.getLogger(__name__)
+    try:
+        from jawafdehi_shared.entities.ids import parse_courtcase_iri
+
+        from courts import search_index as courts_search_index
+        from courts.models import CourtCase
+        from courts.search_visibility import clear_published_cache
+    except Exception:  # noqa: BLE001 — courts/opensearch stack optional in some contexts
+        return
+    # The set of PUBLISHED-referenced court cases just changed → drop the cache so
+    # the recomputed visibility reads the new state.
+    clear_published_cache()
+    for iri in iris:
+        try:
+            ref = parse_courtcase_iri(iri)
+            # The IRI lowercases the case_number; the stored column is uppercase
+            # (normalize_case_number uppercases), so upper() round-trips it back to
+            # the natural key (index-friendly exact match).
+            obj = CourtCase.objects.filter(
+                court_id=ref.court, case_number=ref.case_number.upper()
+            ).first()
+            if obj is not None:
+                courts_search_index.index_or_evict(obj)
+        except Exception:  # noqa: BLE001 — best-effort; reindex_courtcases backstops
+            logger.exception("courtcase publish-link reindex failed for %s", iri)
 
 
 def _recompute_evidence_iris(case, iris) -> None:
