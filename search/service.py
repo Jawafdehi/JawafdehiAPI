@@ -9,8 +9,15 @@ returns a canned OpenSearch response — no live cluster required.
 Hard dependency (decision #5): if OpenSearch is unreachable the service raises
 ``SearchUnavailable`` (the view maps it to 503). There is NO in-process fallback.
 
-ACL: the index is all-public (drafts/in-review cases are never indexed), so there
-is NO visibility/ACL filter — search is fully public-read.
+ACL: the searchable indices are all-public (drafts/in-review cases are never
+indexed), so there is NO visibility/ACL filter — search is fully public-read.
+
+Court cases are UNLISTED: the ~1.6M-row ``ngm-courtcases`` index is deliberately
+NOT part of unified search (see :data:`SEARCHABLE_TYPES`). Anonymous browse/free-text
+search never surfaces a court case. A specific court case is retrievable only by its
+``(court, case_number)`` via the public detail endpoint
+``/api/courtcases/<court>/<case_number>/`` (``courts.CourtCaseViewSet``, DB-backed,
+independent of this index).
 """
 
 from __future__ import annotations
@@ -39,7 +46,16 @@ TYPE_TO_INDEX: dict[str, str] = {
     "case": CASE_INDEX,
 }
 INDEX_TO_TYPE: dict[str, str] = {v: k for k, v in TYPE_TO_INDEX.items()}
+# Every result type the service can SERIALIZE (a hit from any of these indices maps
+# to a valid envelope). ``courtcase`` stays here so a court-case doc is still
+# rendered correctly if one is ever returned (defensive), and so the per-type
+# ``by_index`` aggregation is sized for all four.
 ALL_TYPES: tuple[str, ...] = ("entity", "material", "courtcase", "case")
+# The types actually QUERIED by unified search. ``courtcase`` is EXCLUDED — court
+# cases are unlisted (see the module docstring); they are reachable only by direct
+# (court, case_number) lookup, never via search. This is the ONE place that
+# exclusion is enforced, so a court case can never leak into anon search results.
+SEARCHABLE_TYPES: tuple[str, ...] = ("entity", "material", "case")
 
 # ── Relevance weights (the ONE place to tune ranking) ───────────────────────────
 #
@@ -189,9 +205,16 @@ class SearchUnavailable(Exception):
 
 
 def _index_for_types(types: list[str] | None) -> str:
-    """Comma-joined index list for the requested ``type`` filter (all if None)."""
-    selected = types or list(ALL_TYPES)
-    return ",".join(TYPE_TO_INDEX[t] for t in selected if t in TYPE_TO_INDEX)
+    """Comma-joined index list for the requested ``type`` filter.
+
+    Defaults to all SEARCHABLE types (courtcase excluded — unlisted). A request that
+    names only non-searchable types (e.g. ``type=courtcase``) resolves to the empty
+    string; the caller MUST treat that as "no searchable indices" and return no
+    results — an empty index string would otherwise make OpenSearch search *every*
+    index and leak court cases.
+    """
+    selected = types or list(SEARCHABLE_TYPES)
+    return ",".join(TYPE_TO_INDEX[t] for t in selected if t in SEARCHABLE_TYPES)
 
 
 def _weighted_query_fields(lang: str) -> list[str]:
@@ -579,6 +602,24 @@ class SearchService:
                 "for deeper paging."
             )
 
+        index = _index_for_types(types)
+        if not index:
+            # The type filter named only unlisted/unknown types (e.g. courtcase):
+            # no searchable index → return an empty envelope WITHOUT querying (an
+            # empty index string would make OpenSearch search every index).
+            return {
+                "query": q,
+                "lang": lang,
+                "sort": sort,
+                "page": page,
+                "page_size": page_size,
+                "count": 0,
+                "counts": {},
+                "facets": {name: [] for name in FACET_FIELDS},
+                "results": [],
+                "next_cursor": None,
+            }
+
         body = build_query(
             q=q,
             types=types,
@@ -589,7 +630,6 @@ class SearchService:
             page_size=page_size,
             search_after=search_after,
         )
-        index = _index_for_types(types)
 
         client = self._get_client()
         try:
