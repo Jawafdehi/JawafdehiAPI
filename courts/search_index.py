@@ -222,20 +222,3 @@ def delete(obj: Any, *, client=None) -> None:
     iri = obj.iri
     if iri:
         delete_doc(client or make_client(), COURTCASE_INDEX, iri)
-
-
-def index_or_evict(obj: Any, *, client=None) -> None:
-    """Index ``obj`` if it is public-visible, else evict it — the single place the
-    public-visibility gate is applied on the LIVE path.
-
-    Used by ``courts.signals`` (on a CourtCase write) and by ``cases.signals`` (when
-    a Case's PUBLISHED state flips the publish-link rule for the court cases it
-    references). Bulk (re)index paths gate on ``court_case_public_visible`` at the
-    queryset instead. Both ``index``/``delete`` are best-effort, so this never
-    raises."""
-    from courts.search_visibility import court_case_public_visible
-
-    if getattr(obj, "is_deleted", False) or not court_case_public_visible(obj):
-        delete(obj, client=client)
-    else:
-        index(obj, client=client)
