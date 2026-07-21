@@ -14,6 +14,7 @@ import jsonpatch
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, connection, transaction
+from django.db.models import Exists, OuterRef
 from django.http import Http404, HttpResponse, HttpResponsePermanentRedirect
 from django.urls import reverse
 from django.utils import timezone
@@ -240,6 +241,19 @@ def _if_match_matches(request, case) -> bool:
                 required=False,
             ),
             OpenApiParameter(
+                name="entity",
+                type=OpenApiTypes.STR,
+                location=OpenApiParameter.QUERY,
+                description=(
+                    "Reverse lookup: published cases citing this NES entity by "
+                    "its canonical @id IRI (e.g. "
+                    "https://jawafdehi.org/entity/person/some-slug). "
+                    "Accused/alleged citations are ordered first, then "
+                    "reverse-chronologically."
+                ),
+                required=False,
+            ),
+            OpenApiParameter(
                 name="search",
                 type=OpenApiTypes.STR,
                 location=OpenApiParameter.QUERY,
@@ -426,13 +440,41 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 ]
                 queryset = queryset.filter(id__in=case_ids_with_tag)
 
-        return queryset.prefetch_related(
+        queryset = queryset.prefetch_related(
             "entity_relationships",
             "courtcase_references",
             # ``CaseSerializer.get_evidence`` iterates ``material_references``;
             # prefetch it so a list page doesn't fire one query per card (N+1).
             "material_references",
-        ).order_by("-created_at")
+        )
+
+        # Reverse lookup: cases citing a specific NES entity by its canonical
+        # ``@id`` IRI (``CaseEntityRelationship.nes_id``), powering the "Related
+        # cases" section on an entity's record page. List action only — retrieve
+        # addresses a single case by slug. Visibility scoping above still holds,
+        # so an anonymous caller only sees PUBLISHED citations. ``accused`` /
+        # ``alleged`` cases float to the top; reverse-chron (``-created_at``)
+        # within each tier.
+        entity_param = self.request.query_params.get("entity")
+        if self.action == "list" and entity_param:
+            accused_first = Exists(
+                CaseEntityRelationship.objects.filter(
+                    case=OuterRef("pk"),
+                    nes_id=entity_param,
+                    relationship_type__in=[
+                        RelationshipType.ACCUSED,
+                        RelationshipType.ALLEGED,
+                    ],
+                )
+            )
+            return (
+                queryset.filter(entity_relationships__nes_id=entity_param)
+                .distinct()
+                .annotate(_accused_first=accused_first)
+                .order_by("-_accused_first", "-created_at")
+            )
+
+        return queryset.order_by("-created_at")
 
     # This list is ROLE-SCOPED: an anonymous caller gets a PUBLISHED-only page,
     # but the SAME URL returns a wider DRAFT/IN_REVIEW-inclusive page to an
