@@ -157,7 +157,25 @@ class CaseworkApi:
         """Detail endpoint -- the ONLY one that resolves `material` on evidence."""
         return self.get("/cases/" + urllib.parse.quote(slug) + "/", timeout=timeout)
 
-    def _patch(self, slug, ops, timeout=60):
+    def get_case_with_etag(self, slug, timeout=60):
+        """Detail endpoint PLUS the response ETag, for optimistic-concurrency
+        read-merge-write.
+
+        Returns ``(body, etag)`` where ``etag`` is ``None`` when the server
+        sends no ETag. The binder echoes ``etag`` back as ``If-Match`` on the
+        PATCH so a concurrent edit landing between this read and that write is
+        rejected with 412 (stale) instead of silently clobbering the other
+        writer through the destructive whole-list replace (`replace_list`).
+        Like every read, this is never write-guarded.
+        """
+        url = self.base_url + "/cases/" + urllib.parse.quote(slug) + "/"
+        with self._request("GET", url, headers=self._headers(), timeout=timeout) as r:
+            body = json.loads(r.read().decode())
+            headers = getattr(r, "headers", None)
+            etag = headers.get("ETag") if headers is not None else None
+            return body, etag
+
+    def _patch(self, slug, ops, timeout=60, if_match=None):
         """The choke point for FIELD writes (`patch_field`, `replace_list`) --
         NOT "every write": `convert.py`'s `upload_markdown` writes via a
         direct `_request("POST", ...)` call that never passes through here.
@@ -180,15 +198,23 @@ class CaseworkApi:
             )
         url = self.base_url + "/cases/" + urllib.parse.quote(slug) + "/"
         body = json.dumps(ops, ensure_ascii=False).encode("utf-8")
+        headers = self._headers(PATCH_CONTENT_TYPE)
+        # Optimistic concurrency: when the caller passes the ETag it read, echo
+        # it as If-Match. Server enforcement is opt-in (it only checks If-Match
+        # when present), so this MUST be sent for a stale read to be caught --
+        # otherwise the whole-list replace overwrites whatever a concurrent
+        # writer put there. Omitted (None) -> unconditional write, as before.
+        if if_match:
+            headers["If-Match"] = if_match
         with self._request("PATCH", url, data=body,
-                           headers=self._headers(PATCH_CONTENT_TYPE), timeout=timeout) as r:
+                           headers=headers, timeout=timeout) as r:
             raw = r.read().decode()
             return json.loads(raw) if raw.strip() else {}
 
-    def patch_field(self, slug, field, value, timeout=60):
-        return self._patch(slug, build_replace_patch(field, value), timeout)
+    def patch_field(self, slug, field, value, timeout=60, if_match=None):
+        return self._patch(slug, build_replace_patch(field, value), timeout, if_match=if_match)
 
-    def replace_list(self, slug, path, items, timeout=60):
+    def replace_list(self, slug, path, items, timeout=60, if_match=None):
         """Whole-list replace for /evidence and /entities.
 
         DESTRUCTIVE: the server deletes every existing join row for this
@@ -198,7 +224,11 @@ class CaseworkApi:
         from this call. Callers must GET the case, merge the full desired
         list in application code, and only then call replace_list with the
         FULL list -- never a delta.
+
+        Pass `if_match` (the ETag from `get_case_with_etag`) to make the write
+        conditional -- a 412 then means the case changed since you read it, so
+        the merge is stale; re-read, re-merge, and retry rather than clobber.
         """
         if path not in WHOLE_LIST_PATHS:
             raise ValueError(f"{path} is not a whole-list path")
-        return self._patch(slug, build_replace_patch(path, items), timeout)
+        return self._patch(slug, build_replace_patch(path, items), timeout, if_match=if_match)

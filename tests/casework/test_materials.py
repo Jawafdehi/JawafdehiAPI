@@ -1,9 +1,11 @@
 # tests/casework/test_materials.py
+import urllib.error
 import urllib.request
 
 from casework.common.api import BROWSER_UA
 from casework.common.materials import (
-    fetch_markdown, markdown_link, materials_of_type, raw_links, source_text,
+    court_order_ident, fetch_markdown, markdown_link, material_exists,
+    material_iri, materials_of_type, press_release_ident, raw_links, source_text,
 )
 
 CASE = {
@@ -117,3 +119,98 @@ def test_source_text_reports_unresolved_material():
     text, unmet = source_text(case, api=None, types=("court_order",))
     assert text == ""
     assert any("UNRESOLVED" in u for u in unmet)
+
+
+# ---------------------------------------------------------------------------
+# Binder-facing helpers: IRI builders + the existence probe. Court-order idents
+# MUST be lowercased (uppercase -> HTTP 400); the probe classifies 200 / absent
+# / uncertain, and the caller must never bind on `None`.
+# ---------------------------------------------------------------------------
+
+
+def test_material_iri_builds_canonical_at_id():
+    assert (material_iri("ciaa_press_release", "2037")
+            == "https://jawafdehi.org/material/ciaa_press_release/2037")
+
+
+def test_press_release_ident_is_the_release_id():
+    assert press_release_ident(2037) == "2037"
+    assert press_release_ident("  2037 ") == "2037"
+
+
+def test_court_order_ident_lowercases_the_case_number():
+    # uppercase would 400 server-side; the builder must lowercase.
+    assert court_order_ident("special", "078-CR-0042") == "special.078-cr-0042"
+    assert court_order_ident("supreme", " 079-CR-0001 ") == "supreme.079-cr-0001"
+
+
+class _StubApi:
+    """Minimal stand-in for CaseworkApi.get: returns or raises per script."""
+    def __init__(self, outcome):
+        self._outcome = outcome
+        self.calls = []
+
+    def get(self, path, timeout=60):
+        self.calls.append(path)
+        if isinstance(self._outcome, Exception):
+            raise self._outcome
+        return self._outcome
+
+
+def test_material_exists_true_on_200():
+    api = _StubApi({"@id": "x"})
+    assert material_exists(api, "ciaa_press_release", "2037") is True
+    assert api.calls == ["/materials/ciaa_press_release/2037/"]
+
+
+def test_material_exists_false_on_404():
+    err = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+    assert material_exists(_StubApi(err), "court_order", "special.078-cr-9999") is False
+
+
+def test_material_exists_false_on_400():
+    err = urllib.error.HTTPError("u", 400, "Bad Request", {}, None)
+    assert material_exists(_StubApi(err), "court_order", "SPECIAL.078-CR-1") is False
+
+
+def test_material_exists_none_on_500():
+    err = urllib.error.HTTPError("u", 500, "Server Error", {}, None)
+    assert material_exists(_StubApi(err), "ag", "86115") is None
+
+
+def test_material_exists_none_on_transport_error():
+    assert material_exists(_StubApi(urllib.error.URLError("refused")), "ag", "1") is None
+
+
+def test_material_exists_percent_encodes_the_ident():
+    api = _StubApi({"ok": 1})
+    material_exists(api, "court_order", "special.078-cr-0042")
+    # dots are safe, but the ident is quoted with safe='' so slashes/space encode
+    assert api.calls[0] == "/materials/court_order/special.078-cr-0042/"
+
+
+# ---------------------------------------------------------------------------
+# probe_material -- richer than material_exists: also carries the HTTP status
+# and the probed path, for the binder's per-material audit log line.
+# ---------------------------------------------------------------------------
+
+
+def test_probe_material_carries_status_path_and_verdict_on_200():
+    from casework.common.materials import probe_material
+    pr = probe_material(_StubApi({"@id": "x"}), "ciaa_press_release", "2037")
+    assert (pr.source, pr.ident, pr.status, pr.verdict) == (
+        "ciaa_press_release", "2037", 200, True)
+    assert pr.path == "/materials/ciaa_press_release/2037/"
+
+
+def test_probe_material_reports_404_status_and_absent_verdict():
+    from casework.common.materials import probe_material
+    err = urllib.error.HTTPError("u", 404, "nf", {}, None)
+    pr = probe_material(_StubApi(err), "court_order", "special.078-cr-9999")
+    assert pr.status == 404 and pr.verdict is False
+
+
+def test_probe_material_reports_none_status_on_transport_error():
+    from casework.common.materials import probe_material
+    pr = probe_material(_StubApi(urllib.error.URLError("x")), "ag", "1")
+    assert pr.status is None and pr.verdict is None

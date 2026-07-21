@@ -208,6 +208,95 @@ def test_get_case_requests_detail_endpoint_and_quotes_slug(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# get_case_with_etag + If-Match -- optimistic concurrency for the binder's
+# read-merge-write. The ETag from the detail GET is echoed back as If-Match on
+# the PATCH, so a concurrent edit landing between the read and the write yields
+# 412 (stale) instead of silently clobbering the other writer through the
+# destructive whole-list replace.
+# ---------------------------------------------------------------------------
+
+
+class _RespWithHeaders:
+    def __init__(self, body=b"{}", status=200, headers=None):
+        self.status = status
+        self._body = body
+        self.headers = headers if headers is not None else {}
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_get_case_with_etag_returns_body_and_etag(monkeypatch):
+    seen = {}
+
+    def fake_request(method, url, data=None, headers=None, timeout=None):
+        seen.update(method=method, url=url)
+        return _RespWithHeaders(
+            body=b'{"slug": "x", "state": "DRAFT"}',
+            headers={"ETag": 'W/"abc123"'},
+        )
+
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(api, "_request", fake_request)
+
+    body, etag = api.get_case_with_etag("a slug?x")
+
+    assert seen["method"] == "GET"
+    assert seen["url"] == "http://127.0.0.1:48010/api/cases/a%20slug%3Fx/"
+    assert body["state"] == "DRAFT"
+    assert etag == 'W/"abc123"'
+
+
+def test_get_case_with_etag_tolerates_missing_etag(monkeypatch):
+    def fake_request(method, url, data=None, headers=None, timeout=None):
+        return _RespWithHeaders(body=b'{"slug": "x"}', headers={})
+
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(api, "_request", fake_request)
+
+    body, etag = api.get_case_with_etag("x")
+
+    assert body["slug"] == "x"
+    assert etag is None
+
+
+def test_replace_list_sends_if_match_header_when_given(monkeypatch):
+    seen = {}
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(api, "_request", _fake_request_capturing(seen))
+
+    api.replace_list("some-slug", "evidence", [], if_match='W/"etag-1"')
+
+    assert seen["headers"]["If-Match"] == 'W/"etag-1"'
+
+
+def test_replace_list_omits_if_match_header_by_default(monkeypatch):
+    seen = {}
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(api, "_request", _fake_request_capturing(seen))
+
+    api.replace_list("some-slug", "evidence", [])
+
+    assert "If-Match" not in seen["headers"]
+
+
+def test_patch_field_sends_if_match_header_when_given(monkeypatch):
+    seen = {}
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(api, "_request", _fake_request_capturing(seen))
+
+    api.patch_field("some-slug", "bigo", 500, if_match='W/"etag-9"')
+
+    assert seen["headers"]["If-Match"] == 'W/"etag-9"'
+
+
+# ---------------------------------------------------------------------------
 # iter_cases -- must follow pagination until a page has no `next`.
 # ---------------------------------------------------------------------------
 
