@@ -99,7 +99,42 @@ class TestBuildLedger:
         assert led[("c5", "allegations")]["status"] == "llm-error"
 
     def test_non_outcome_statuses_are_the_step_signals(self):
-        assert set(NON_OUTCOME_STATUSES) == {"ok", "start", "fallback", "none"}
+        # 'planned' joins the step signals: it is bind_materials' dry-run status,
+        # deliberately folded into no outcome (a dry run changed nothing).
+        assert set(NON_OUTCOME_STATUSES) == {
+            "ok", "start", "fallback", "none", "planned"}
+
+    def test_planned_bind_dryrun_is_not_an_outcome(self, tmp_path):
+        # bind_materials maps a dry-run WOULD_PATCH to 'planned' precisely so it
+        # stays OUT of the "what did we change, when" audit. An earlier
+        # NON_OUTCOME_STATUSES omitted it, so dry-run binds polluted the ledger.
+        _write_events(tmp_path / "bind.events.jsonl", [
+            _ev("2026-07-21T10:00:00Z", "bind", "case-8", "plan", "planned", "WOULD_PATCH"),
+        ])
+        assert ("case-8", "bind") not in build_ledger(tmp_path)
+
+    def test_applied_bind_supersedes_earlier_planned(self, tmp_path):
+        # A later real APPLY must be recorded; the earlier dry-run 'planned' was
+        # never an outcome, so 'enriched' is the ledger state.
+        _write_events(tmp_path / "a.events.jsonl", [
+            _ev("2026-07-21T10:00:00Z", "bind", "case-8", "plan", "planned", "WOULD_PATCH"),
+        ])
+        _write_events(tmp_path / "b.events.jsonl", [
+            _ev("2026-07-21T11:00:00Z", "bind", "case-8", "apply", "enriched", "APPLIED"),
+        ])
+        assert build_ledger(tmp_path)[("case-8", "bind")]["status"] == "enriched"
+
+    def test_event_missing_status_is_skipped_not_crash(self, tmp_path):
+        # A well-formed JSON line lacking "status" must be skipped, not KeyError
+        # the whole build. One decisive event alongside it still lands.
+        _write_events(tmp_path / "a.events.jsonl", [
+            {"ts": "2026-07-21T10:00:00Z", "stage": "bigo", "slug": "case-x",
+             "step": "write"},  # no "status" key at all
+            _ev("2026-07-21T10:00:01Z", "bigo", "case-y", "write", "enriched"),
+        ])
+        led = build_ledger(tmp_path)
+        assert ("case-x", "bigo") not in led
+        assert led[("case-y", "bigo")]["status"] == "enriched"
 
 
 class TestIterEvents:

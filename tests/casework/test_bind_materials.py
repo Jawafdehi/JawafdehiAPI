@@ -8,7 +8,7 @@ import urllib.error
 import pytest
 
 from casework.bind_materials import (
-    BindPlan, _ledger_status, apply_plan, candidates_from_row,
+    BindPlan, _build_api, _ledger_status, apply_plan, candidates_from_row,
     merge_evidence, missing_candidates, parse_source_ident, plan_case, run,
 )
 
@@ -250,6 +250,45 @@ def test_run_apply_writes_via_replace_list(tmp_path, monkeypatch):
     slug, path, items, if_match = api.replaced[0]
     assert (slug, path, if_match) == ("c", "evidence", "etag-1")
     assert stats.get("APPLIED") == 1
+
+
+# ---------------------------------------------------------------------------
+# Auth wiring: a bare loopback bind (no token) must authenticate via local
+# DEV_AUTH Basic, exactly like convert.py and every enricher. Before this,
+# _build_api was token-only -> CaseworkApi raised "exactly one of token/basic"
+# on every local run, and a local DEV_AUTH server rejects Bearer anyway.
+# ---------------------------------------------------------------------------
+
+
+def test_build_api_uses_basic_auth_when_no_token(monkeypatch):
+    monkeypatch.setenv("CASEWORK_API_USER", "abgen")
+    monkeypatch.setenv("CASEWORK_API_PASSWORD", "secret")
+    args = types.SimpleNamespace(
+        api_base_url="http://127.0.0.1:48010", api_token="", allow_remote_writes=False)
+    api = _build_api(args)
+    assert api.basic == ("abgen", "secret")
+    assert api.token is None
+
+
+def test_build_api_no_token_and_no_creds_fails_loud(monkeypatch):
+    monkeypatch.delenv("CASEWORK_API_USER", raising=False)
+    monkeypatch.delenv("CASEWORK_API_PASSWORD", raising=False)
+    args = types.SimpleNamespace(
+        api_base_url="http://127.0.0.1:48010", api_token="", allow_remote_writes=False)
+    with pytest.raises(SystemExit):
+        _build_api(args)
+
+
+def test_build_api_prefers_bearer_when_token_given(monkeypatch):
+    # A token must not trigger the Basic path even if creds are also present.
+    monkeypatch.setenv("CASEWORK_API_USER", "abgen")
+    monkeypatch.setenv("CASEWORK_API_PASSWORD", "secret")
+    args = types.SimpleNamespace(
+        api_base_url="https://api.jawafdehi.org", api_token="tok-123",
+        allow_remote_writes=False)
+    api = _build_api(args)
+    assert api.token == "tok-123"
+    assert api.basic is None
 
 
 def test_run_skips_published_case_even_on_apply(tmp_path, monkeypatch):

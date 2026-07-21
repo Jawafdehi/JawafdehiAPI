@@ -297,13 +297,14 @@ class TestCleanEntryDateHandling:
         assert entry["date"] == "2024-01-15"
         assert entry["date_bs"] == "2080-10-01"
 
-    # Production-hardening (2026-07-21): _clean_entry now NORMALISES date_bs /
-    # end_date_bs toward the server's shape (slash->dash, Devanagari->ASCII),
-    # because the case PATCH endpoint's TimelineItemSerializer._BS_DATE_RE
-    # (^\d{4}-\d{2}-\d{2}$) 422s the WHOLE timeline on a slash-format date_bs,
-    # and the A/B run proved haiku emits slashes on some cases. This mirrors the
-    # normalisation convert_date already applies; it does not add a rejecting
-    # regex (so the donor-source shape-validation pin above still holds).
+    # Production-hardening (2026-07-21): _clean_entry now COERCES date_bs /
+    # end_date_bs toward the server's shape (slash->dash, Devanagari->ASCII,
+    # zero-pad an unpadded YYYY-M-D) and then DROPS the field if it still fails
+    # TimelineItemSerializer._BS_DATE_RE (^\d{4}-\d{2}-\d{2}$). Because ONE bad
+    # date_bs 422s the WHOLE timeline PATCH (every entry lost), and the A/B run
+    # proved haiku emits slash/unpadded forms, forwarding an uncoercible value
+    # is not acceptable -- it must be dropped, keeping the entry's validated AD
+    # date. The AD-date validation and the donor-source pin above are unchanged.
     _BS_SHAPE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
     def test_slash_date_bs_is_normalised_to_dash(self):
@@ -333,15 +334,37 @@ class TestCleanEntryDateHandling:
             {"date": "2024-01-15", "date_bs": "2080-10-01", "title": "फैसला"})
         assert entry["date_bs"] == "2080-10-01"
 
-    def test_garbage_bs_string_without_slashes_is_still_kept(self):
-        # Normalisation only touches separators/digits; true garbage (no slash,
-        # no Devanagari) is unchanged. The chosen fix is normalise-not-reject,
-        # so such a value would still 422 server-side -- acceptable: haiku emits
-        # slash/Devanagari forms, not free-text, for date_bs.
+    def test_unpadded_date_bs_is_zero_padded(self):
+        # Single-digit month/day is the same failure class as slashes: unpadded
+        # 2080-1-5 fails ^\d{4}-\d{2}-\d{2}$ and 422s the whole timeline. Coerce.
+        entry = _clean_entry(
+            {"date": "2024-01-15", "date_bs": "2080-1-5", "title": "फैसला"})
+        assert entry["date_bs"] == "2080-01-05"
+        assert self._BS_SHAPE.match(entry["date_bs"])
+
+    def test_unpadded_slash_devanagari_date_bs_all_coerced(self):
+        entry = _clean_entry(
+            {"date": "2024-01-15", "date_bs": "२०८०/१/५", "title": "फैसला"})
+        assert entry["date_bs"] == "2080-01-05"
+
+    def test_garbage_bs_string_is_dropped_entry_kept(self):
+        # Uncoercible garbage (no slash, no Devanagari, not YYYY-M-D) is DROPPED
+        # rather than forwarded -- a single bad date_bs would otherwise 422 the
+        # ENTIRE timeline. The entry survives with its validated AD date.
         entry = _clean_entry(
             {"date": "2024-01-15", "date_bs": "not-a-date-at-all", "title": "फैसला"})
         assert entry is not None
-        assert entry["date_bs"] == "not-a-date-at-all"
+        assert entry["date"] == "2024-01-15"
+        assert "date_bs" not in entry
+
+    def test_uncoercible_end_date_bs_is_dropped_entry_kept(self):
+        entry = _clean_entry({
+            "date": "2024-01-15", "end_date": "2024-06-01",
+            "date_bs": "2080-10-01", "end_date_bs": "garbage",
+            "title": "अवधि"})
+        assert entry["date_bs"] == "2080-10-01"
+        assert entry["end_date"] == "2024-06-01"
+        assert "end_date_bs" not in entry
 
     def test_malformed_ad_date_is_rejected(self):
         assert _clean_entry({"date": "2024-13-40", "title": "पेसी"}) is None

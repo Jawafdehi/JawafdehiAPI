@@ -38,7 +38,13 @@ from casework.common.cli import _DEFAULT_LOG_DIR, _REPO_ROOT
 # result -- e.g. every convert outcome), we treat everything as an outcome
 # EXCEPT the known intermediate step signals below. A ledger must fail toward
 # inclusion, not omission.
-NON_OUTCOME_STATUSES = frozenset({"ok", "start", "fallback", "none"})
+#
+# `planned` is the one dry-run status that IS excluded: bind_materials maps a
+# dry-run WOULD_PATCH to `planned` precisely so it stays out of the "what did we
+# change, when" audit (bind_materials.py::_ledger_status). It is a non-outcome
+# by design -- a bind dry run changed nothing -- so it belongs here, not with
+# the `would-*` extraction previews that DO record a per-case verdict.
+NON_OUTCOME_STATUSES = frozenset({"ok", "start", "fallback", "none", "planned"})
 
 _DEFAULT_LEDGER = _REPO_ROOT / "work" / "enrichment-ledger.jsonl"
 
@@ -79,7 +85,12 @@ def build_ledger(log_dir=None, *, non_outcome_statuses=NON_OUTCOME_STATUSES):
     non_outcomes = set(non_outcome_statuses)
     ledger: dict = {}
     for ev in iter_events(_resolve_log_dir(log_dir)):
-        if ev.get("status") in non_outcomes:
+        status = ev.get("status")
+        # A status-less event is not an outcome. Skip it rather than index
+        # ev["status"] below -- iter_events is deliberately tolerant of
+        # malformed rows (blank/partial lines), and one well-formed JSON line
+        # that simply lacks "status" must not KeyError and sink the whole build.
+        if not status or status in non_outcomes:
             continue
         slug, stage = ev.get("slug"), ev.get("stage")
         if not slug or not stage:
@@ -91,7 +102,7 @@ def build_ledger(log_dir=None, *, non_outcome_statuses=NON_OUTCOME_STATUSES):
             ledger[key] = {
                 "slug": slug,
                 "stage": stage,
-                "status": ev["status"],
+                "status": status,
                 "ts": ev.get("ts"),
                 "run_id": ev.get("run_id"),
                 "detail": ev.get("detail", ""),

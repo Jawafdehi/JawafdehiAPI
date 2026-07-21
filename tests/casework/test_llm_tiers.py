@@ -60,3 +60,39 @@ def test_dev_override_forces_haiku_on_both_tiers():
 def test_tiers_cover_every_ported_stage():
     for stage in ("bigo", "tags", "timeline", "allegations", "entities"):
         assert stage in TIERS
+
+
+def test_bootstrap_defaults_to_prod_and_honors_provider(monkeypatch):
+    """bootstrap() defaults dev=False so the caller's provider is honoured.
+
+    An earlier default of dev=True routed EVERY call through dev_env_overrides(),
+    silently forcing claude_cli on both tiers -- so every enricher's --provider
+    flag was a no-op. This pins that the default now respects provider/model.
+    """
+    import os
+
+    import casework.common.llm as llm_mod
+
+    monkeypatch.setattr(os, "environ", dict(os.environ))
+    monkeypatch.setattr("django.setup", lambda: None)
+
+    llm_mod.bootstrap("bedrock", "some-model")  # no dev= -> must NOT force claude_cli
+
+    assert os.environ["REVIEW_LLM_PROVIDER_PREMIUM"] == "bedrock"
+    assert os.environ["REVIEW_LLM_PROVIDER_CHEAP"] == "bedrock"
+    assert os.environ["CLAUDE_CLI_MODEL_PREMIUM"] == "some-model"
+
+
+def test_bootstrap_dev_true_still_forces_claude_cli(monkeypatch):
+    """dev=True remains an explicit opt-in that overrides provider (A/B runs)."""
+    import os
+
+    import casework.common.llm as llm_mod
+
+    monkeypatch.setattr(os, "environ", dict(os.environ))
+    monkeypatch.setattr("django.setup", lambda: None)
+
+    llm_mod.bootstrap("bedrock", "", dev=True)  # explicit opt-in wins over provider
+
+    assert os.environ["REVIEW_LLM_PROVIDER_PREMIUM"] == "claude_cli"
+    assert os.environ["CLAUDE_CLI_MODEL_PREMIUM"] == "haiku"

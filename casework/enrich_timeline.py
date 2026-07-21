@@ -26,15 +26,18 @@ silently "fixed" -- see task-14c-report.md for the full writeup):
    out of scope. This port does not invent a duplicate client-side check the
    donor never had.
 
-   UPDATE (2026-07-21, production-hardening): `_clean_entry` now NORMALISES
-   `date_bs`/`end_date_bs` (slash->dash, Devanagari->ASCII, via
-   `_normalise_bs_date`) -- NOT a rejecting regex, but the coercion the
-   `convert_date` tool already does, applied to values the model wrote
-   directly. The 5-case A/B run (rerun-report.md) proved haiku emits slash-form
-   BS dates on some cases, which 422 the whole timeline against
-   `_BS_DATE_RE`. This deliberately diverges from the verbatim donor to make
-   the write survive real model output; it does not add the shape-VALIDATION
-   the donor lacked (the donor-source pin in tests still holds).
+   UPDATE (2026-07-21, production-hardening): `_clean_entry` now COERCES
+   `date_bs`/`end_date_bs` (slash->dash, Devanagari->ASCII, zero-pad an
+   unpadded YYYY-M-D, via `_normalise_bs_date`) and then, if the value STILL
+   fails the server's `^\\d{4}-\\d{2}-\\d{2}$`, drops just that one field while
+   keeping the entry. The 5-case A/B run (rerun-report.md) proved haiku emits
+   slash-form BS dates on some cases; single-digit month/day and free-text
+   remnants are the same failure class. Because ONE bad `date_bs` 422s the
+   WHOLE timeline PATCH (every entry lost), coercion alone is not enough -- an
+   uncoercible value must be dropped, not forwarded. This deliberately diverges
+   from the verbatim donor (which forwarded `date_bs` unchecked) to make the
+   write survive real model output; the AD `date`/`end_date` validation and the
+   donor-source pin in tests are unchanged.
 
 2. NGM PATH IS DEAD ON CURRENT DATA -- PRESERVED AS-IS, NOT RESURRECTED.
    `_get_ngm_data` is ported VERBATIM from the donor (`0321a85:enrich_timeline.py:430`):
@@ -121,6 +124,7 @@ Usage:
 import argparse
 import json
 import logging
+import re
 import sys
 import time
 import urllib.parse
@@ -306,21 +310,33 @@ Be specific (names, दफा, amounts, dates) but concise — aim for about \
 
 _DEVANAGARI_TO_ASCII_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
 
+# The server's own gate: cases/caseworker_serializers.py::
+# TimelineItemSerializer._BS_DATE_RE. A `date_bs` that fails this 422s the
+# ENTIRE timeline PATCH, so `_clean_entry` mirrors it here to drop a single
+# non-conforming field rather than let it sink every other entry in the case.
+_BS_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 
 def _normalise_bs_date(value: str) -> str:
     """Coerce a BS date toward the server's shape: Devanagari digits -> ASCII,
-    slash separators -> dashes -- the same normalisation `convert_date` applies.
+    slash separators -> dashes, and zero-pad an unpadded YYYY-M-D -- the same
+    normalisation `convert_date` applies.
 
-    The case PATCH endpoint's `TimelineItemSerializer._BS_DATE_RE`
-    (`^\\d{4}-\\d{2}-\\d{2}$`) rejects a slash-form `date_bs` and 422s the WHOLE
-    timeline (proven in the 2026-07-21 A/B run: haiku emits slashes on some
-    cases). When the model writes `date_bs` straight into its JSON -- bypassing
-    the `convert_date` tool -- this is the only place the slash form gets fixed
-    before the PATCH. Normalise-only, never reject: true garbage passes through
-    (and would still 422), but the model emits slash/Devanagari forms, not
-    free text, for these fields.
+    The case PATCH endpoint's `_BS_DATE_RE` (`^\\d{4}-\\d{2}-\\d{2}$`) rejects a
+    slash-form OR unpadded `date_bs` and 422s the WHOLE timeline (proven in the
+    2026-07-21 A/B run: haiku emits slashes on some cases, and single-digit
+    month/day is the same failure class). When the model writes `date_bs`
+    straight into its JSON -- bypassing the `convert_date` tool -- this is where
+    those forms get coerced before the PATCH. Coerce-only; genuine garbage is
+    returned unchanged (and `_clean_entry` then drops just that field via
+    `_BS_DATE_RE`, keeping the entry and every other entry in the case).
     """
-    return value.translate(_DEVANAGARI_TO_ASCII_DIGITS).replace("/", "-")
+    s = (value or "").translate(_DEVANAGARI_TO_ASCII_DIGITS).replace("/", "-").strip()
+    parts = s.split("-")
+    if len(parts) == 3 and all(p.isdigit() for p in parts):
+        y, m, d = parts
+        s = f"{y.zfill(4)}-{m.zfill(2)}-{d.zfill(2)}"
+    return s
 
 
 def convert_date(dates: list, mode: str) -> dict:
@@ -695,9 +711,13 @@ def _clean_entry(item: dict) -> Optional[dict]:
     if desc_val:
         entry["description"] = desc_val
 
-    date_bs = str(item.get("date_bs") or "").strip()
-    if date_bs:
-        entry["date_bs"] = _normalise_bs_date(date_bs)
+    date_bs = _normalise_bs_date(str(item.get("date_bs") or ""))
+    if date_bs and _BS_DATE_RE.match(date_bs):
+        entry["date_bs"] = date_bs
+    elif date_bs:
+        # Non-conforming even after coercion: drop just this field so it can't
+        # 422 the whole timeline. The entry keeps its validated AD `date`.
+        log.warning("Dropping non-conforming date_bs %r; keeping entry", date_bs)
 
     end_date = str(item.get("end_date") or "").strip()
     if end_date:
@@ -709,9 +729,12 @@ def _clean_entry(item: dict) -> Optional[dict]:
             )
         else:
             entry["end_date"] = end_date
-            end_date_bs = str(item.get("end_date_bs") or "").strip()
-            if end_date_bs:
-                entry["end_date_bs"] = _normalise_bs_date(end_date_bs)
+            end_date_bs = _normalise_bs_date(str(item.get("end_date_bs") or ""))
+            if end_date_bs and _BS_DATE_RE.match(end_date_bs):
+                entry["end_date_bs"] = end_date_bs
+            elif end_date_bs:
+                log.warning(
+                    "Dropping non-conforming end_date_bs %r; keeping entry", end_date_bs)
 
     return entry
 

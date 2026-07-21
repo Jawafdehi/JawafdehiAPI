@@ -33,8 +33,8 @@ from dataclasses import dataclass, field
 
 from casework.common.api import CaseworkApi
 from casework.common.cli import (
-    _utc_iso_now, add_common_args, configure_run_logging, log_run_footer,
-    log_run_header, print_summary,
+    _utc_iso_now, add_common_args, basic_auth_from_env, configure_run_logging,
+    log_run_footer, log_run_header, print_summary,
 )
 from casework.common.materials import material_iri, probe_material
 
@@ -221,8 +221,16 @@ def apply_plan(api, plan):
 
 
 def _build_api(args):
-    token = args.api_token or None
-    return CaseworkApi(base_url=args.api_base_url, token=token,
+    """Construct the client. Bearer when a token is given, else local DEV_AUTH
+    Basic (CASEWORK_API_USER/PASSWORD) -- the same wiring convert.py and every
+    enricher use. Without this Basic branch a bare loopback bind (this tool's
+    primary use) could not authenticate: a local DEV_AUTH server rejects Bearer
+    (it routes to OIDC), so token-only would raise "exactly one of token/basic"
+    on every local run."""
+    if args.api_token:
+        return CaseworkApi(base_url=args.api_base_url, token=args.api_token,
+                           allow_remote_writes=args.allow_remote_writes)
+    return CaseworkApi(base_url=args.api_base_url, basic=basic_auth_from_env(),
                        allow_remote_writes=args.allow_remote_writes)
 
 
@@ -239,13 +247,14 @@ def _source_of(iri):
 
 
 def _ledger_status(action, final):
-    """Map a bind outcome onto the ledger's OUTCOME_STATUSES vocabulary
+    """Map a bind outcome onto the ledger's status vocabulary
     (``casework/ledger.py``) so bind runs consolidate alongside the enrichers.
 
     A dry-run ``WOULD_PATCH`` changed nothing, so it maps to ``"planned"`` --
-    a NON-outcome the ledger ignores. The ledger is a record of what we
-    *changed*; only ``--apply`` (-> ``APPLIED``) is a real change. This keeps a
-    dry run truthfully invisible in the "what did we change, when" audit.
+    a status the ledger lists in ``NON_OUTCOME_STATUSES`` and therefore folds
+    into no outcome. The ledger is a record of what we *changed*; only
+    ``--apply`` (-> ``APPLIED``) is a real change. This keeps a dry run
+    truthfully invisible in the "what did we change, when" audit.
     """
     if final == "APPLIED":
         return "enriched"

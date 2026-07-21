@@ -60,7 +60,7 @@ def dev_env_overrides(model="haiku"):
     }
 
 
-def bootstrap(provider="claude_cli", model="", dev=True):
+def bootstrap(provider="claude_cli", model="", dev=False):
     """Configure Django settings + llm env BEFORE importing llm.invoke.
 
     Must run before any `from llm.invoke import invoke_text` (or anything
@@ -68,10 +68,15 @@ def bootstrap(provider="claude_cli", model="", dev=True):
     read at Django settings module-import time, not lazily.
 
     Args:
-        provider: Provider name to use when dev=False (default "claude_cli").
-        model: Model id/alias to force when dev=False and non-empty.
-        dev: When True (default), force claude_cli+haiku on both tiers via
-            dev_env_overrides() regardless of `provider`/`model`.
+        provider: Provider name to route BOTH tiers to (default "claude_cli").
+            Honoured whenever dev=False.
+        model: Model id/alias to force on both tiers when non-empty.
+        dev: When True, force claude_cli+haiku on both tiers via
+            dev_env_overrides() *regardless of* `provider`/`model` -- the
+            A/B-run override only. Defaults to False so `provider` is honoured:
+            an earlier default of True silently ignored every enricher's
+            `--provider`, pinning all runs to claude_cli. Callers that want the
+            forced-cheap A/B behaviour must now opt in with dev=True.
     """
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
     if dev:
