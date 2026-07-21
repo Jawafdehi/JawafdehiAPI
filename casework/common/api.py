@@ -39,7 +39,7 @@ class CaseworkApi:
     ``basic`` -- local-dev only. Sends ``Authorization: Basic <user:pass>``.
     Only usable against a server run with ``DEV_AUTH=1`` (and ``DEBUG`` or
     ``TESTING``), which additively accepts DRF's ``BasicAuthentication`` --
-    see ``config/settings.py:693-732`` and ``casework/ab/README.md``.
+    see ``config/settings.py:693-732``.
 
     Bearer stays first-class: ``OIDCAuthentication`` is always first in DRF's
     authenticator chain, so a request carrying a ``Bearer`` header is *always*
