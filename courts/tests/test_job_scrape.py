@@ -89,18 +89,32 @@ class HandlerTests(_NgmTestCase):
         with self.assertRaises(ValueError):
             handle_court_scrape({}, fetch=_fake_fetch)
 
+    def test_handler_heartbeats_once_per_crawled_date(self):
+        from courts.job_handlers import handle_court_scrape
+
+        stages = []
+        handle_court_scrape(_SPECIAL_PAYLOAD, on_stage=stages.append, fetch=_fake_fetch)
+        # on_stage fires per crawled date so the worker can extend the lease.
+        self.assertTrue(stages)
+        self.assertTrue(stages[0].startswith("special "))
+
 
 class EnqueueTests(_NgmTestCase):
-    def test_enqueue_all_posts_one_job_per_court_and_dedups(self):
+    def test_enqueue_all_posts_one_job_per_leaf_court_and_dedups(self):
         from courts.scraper import registry
 
         call_command("enqueue_scrape", "--court", "all")
-        n_courts = len(registry.REGISTRY)
-        self.assertEqual(Job.objects.filter(kind="court_scrape").count(), n_courts)
+        # one job per LEAF court_id across all tiers (district ~77, high ~18, ...)
+        expected = sum(len(m.court_ids(None)) for m in registry.REGISTRY.values())
+        self.assertEqual(Job.objects.filter(kind="court_scrape").count(), expected)
+        # dedup key is per leaf court: <tier>:<court_id>
+        self.assertTrue(
+            Job.objects.filter(dedup_key="court_scrape:special:special").exists()
+        )
 
         # Re-enqueuing while the jobs are still QUEUED is a no-op (dedup key).
         call_command("enqueue_scrape", "--court", "all")
-        self.assertEqual(Job.objects.filter(kind="court_scrape").count(), n_courts)
+        self.assertEqual(Job.objects.filter(kind="court_scrape").count(), expected)
 
     def test_enqueue_unknown_court_errors(self):
         from django.core.management.base import CommandError
@@ -136,8 +150,8 @@ class ScrapeWorkerTests(_NgmTestCase):
         )
 
     def test_unknown_court_fails_terminally_not_retried(self):
-        # A KeyError (unknown court) is non-retryable: the worker finalizes it
-        # FAILED on the first attempt rather than re-queuing.
+        # An unknown court is a BadCourtScrapePayload (non-retryable): the worker
+        # finalizes it FAILED on the first attempt rather than re-queuing.
         jobs_queue.enqueue(
             kind="court_scrape", payload={"court": "bogus"},
             dedup_key="court_scrape:bogus",
@@ -147,3 +161,13 @@ class ScrapeWorkerTests(_NgmTestCase):
         job = Job.objects.get(kind="court_scrape")
         self.assertEqual(job.status, Job.FAILED)
         self.assertEqual(job.attempts, 1)
+
+    def test_max_jobs_zero_finalizes_nothing(self):
+        jobs_queue.enqueue(
+            kind="court_scrape", payload=_SPECIAL_PAYLOAD,
+            dedup_key="court_scrape:special",
+        )
+        with patch("courts.job_handlers.Fetcher", lambda: _fake_fetch):
+            call_command("scrape_worker", "--apply", "--once", "--max-jobs", "0")
+        # --max-jobs 0 is a no-op-and-exit (not falsy-unlimited): job stays QUEUED.
+        self.assertEqual(Job.objects.get(kind="court_scrape").status, Job.QUEUED)

@@ -21,15 +21,16 @@ import traceback
 
 from django.core.management.base import BaseCommand
 
-from courts.job_handlers import HANDLERS
+from courts.job_handlers import HANDLERS, BadCourtScrapePayload
 from jobs import queue as jobs_queue
 from jobs.models import Job
 
 KIND = "court_scrape"
 
-#: Exceptions that will never succeed on retry (a bad/unknown court in the
-#: payload) vs. transient portal/network failures (retried with backoff).
-_NON_RETRYABLE = (ValueError, KeyError)
+#: The only non-retryable failure: a bad/unknown court in the payload (raised as
+#: BadCourtScrapePayload up-front, before any crawl). Everything else — portal
+#: flakes, parse hiccups, DB errors — is retried with backoff, then dead-lettered.
+_NON_RETRYABLE = (BadCourtScrapePayload,)
 
 
 class Command(BaseCommand):
@@ -64,7 +65,9 @@ class Command(BaseCommand):
         self.stdout.write(
             self.style.MIGRATE_HEADING(f"scrape_worker up: kind={KIND} once={once}")
         )
-        while True:
+        # `max_jobs is None` = unlimited; the `< max_jobs` guard also makes
+        # `--max-jobs 0` a no-op-and-exit rather than (falsy-zero) unlimited.
+        while max_jobs is None or finalized < max_jobs:
             job = jobs_queue.claim_next([KIND])
             if job is None:
                 if once:
@@ -73,9 +76,6 @@ class Command(BaseCommand):
                 continue
             self._run(job)
             finalized += 1
-            if max_jobs and finalized >= max_jobs:
-                self.stdout.write(f"scrape_worker: hit --max-jobs={max_jobs}.")
-                break
         self.stdout.write(
             self.style.SUCCESS(f"scrape_worker: finalized {finalized} job(s).")
         )

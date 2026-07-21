@@ -32,12 +32,19 @@ def run_crawl(
     limit_dates: int | None = None,
     write: bool = False,
     enrich: bool = False,
+    only_court_id: str | None = None,
+    on_progress=None,
 ) -> list[CrawlStats]:
     """Crawl every court the ``module`` covers. ``module`` exposes ``court_ids``,
     ``LOOKBACK_DAYS``, ``crawl_date`` and (optionally) ``crawl_detail``.
 
     Dry-run by default: fetch + parse run, but nothing is written unless
     ``write=True``. Returns per-court stats.
+
+    ``only_court_id`` restricts the crawl to that single court (the court_scrape
+    job posts one job per leaf court). ``on_progress(court_id, date_bs)`` is
+    called before each date is fetched, so a consumer can heartbeat a job lease
+    during a long crawl.
     """
     from nepali.datetime import nepalidate
 
@@ -45,12 +52,16 @@ def run_crawl(
     results: list[CrawlStats] = []
 
     for court_id in module.court_ids(fetch):
+        if only_court_id is not None and court_id != only_court_id:
+            continue
         stats = CrawlStats(court_id=court_id)
         done = base.scraped_dates_for(court_id) if write else set()
         touched: set[str] = set()
         for ad_date, date_bs in base.iter_bs_dates(lookback, today=today):
             if date_bs in done:
                 continue
+            if on_progress is not None:
+                on_progress(court_id, date_bs)
             rows = module.crawl_date(fetch, court_id, date_bs, nepalidate.from_date(ad_date))
             stats.dates += 1
             stats.per_date.append(date_bs)

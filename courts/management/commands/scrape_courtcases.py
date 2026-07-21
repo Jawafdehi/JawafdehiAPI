@@ -14,12 +14,12 @@ also follows each case's detail page.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 
 from django.core.management.base import BaseCommand, CommandError
-from django.utils import timezone
 
 from courts.scraper import registry
+from courts.scraper.base import anchor
 from courts.scraper.crawl import run_crawl
 from courts.scraper.fetch import Fetcher
 
@@ -69,9 +69,7 @@ class Command(BaseCommand):
 
     @staticmethod
     def _anchor(value: str | None) -> date:
-        if not value:
-            return timezone.localdate()
         try:
-            return datetime.strptime(value, "%Y-%m-%d").date()
+            return anchor(value)
         except ValueError as exc:
             raise CommandError(f"--today must be YYYY-MM-DD, got {value!r}") from exc
