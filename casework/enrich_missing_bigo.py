@@ -26,7 +26,6 @@ Usage:
 import argparse
 import json
 import logging
-import os
 import re
 import sys
 import time
@@ -35,6 +34,7 @@ from typing import Optional
 from casework.common.api import CaseworkApi
 from casework.common.cli import (
     add_common_args,
+    basic_auth_from_env,
     configure_run_logging,
     log_event,
     log_run_footer,
@@ -362,8 +362,7 @@ def build_api(args):
         )
     return CaseworkApi(
         args.api_base_url,
-        basic=(os.getenv("CASEWORK_API_USER", "abgen"),
-               os.getenv("CASEWORK_API_PASSWORD", "local-dev-only")),
+        basic=basic_auth_from_env(),
         allow_remote_writes=args.allow_remote_writes,
     )
 

@@ -16,6 +16,21 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_LOG_DIR = _REPO_ROOT / "work" / "enricher-runs"
 
 
+def basic_auth_from_env():
+    """(user, password) for local DEV_AUTH Basic auth, from CASEWORK_API_USER /
+    CASEWORK_API_PASSWORD. Raises if either is unset -- there is deliberately NO
+    dev-default fallback, so a missing credential fails loud instead of silently
+    authenticating as a baked-in dev account."""
+    user = os.environ.get("CASEWORK_API_USER")
+    password = os.environ.get("CASEWORK_API_PASSWORD")
+    if not (user and password):
+        raise SystemExit(
+            "API credentials required: pass --api-token (or set "
+            "JAWAFDEHI_API_TOKEN) for Bearer auth, or set CASEWORK_API_USER + "
+            "CASEWORK_API_PASSWORD for local DEV_AUTH Basic auth.")
+    return user, password
+
+
 def add_common_args(parser):
     """Register the CLI flags every ported enricher shares.
 
@@ -39,7 +54,12 @@ def add_common_args(parser):
     parser.add_argument("--apply", dest="dry_run", action="store_false")
     parser.add_argument("--provider", default="claude_cli")
     parser.add_argument("--model", default="haiku")
-    parser.add_argument("--api-base-url", default="http://127.0.0.1:48010")
+    parser.add_argument(
+        "--api-base-url", default=os.environ.get("JAWAFDEHI_API_BASE"),
+        help="Base URL of the case API; defaults to $JAWAFDEHI_API_BASE. If "
+             "neither the flag nor the env var is set, the client raises rather "
+             "than silently targeting a host. Local DEV_AUTH server: "
+             "http://127.0.0.1:48010")
     parser.add_argument("--api-token", default="")
     parser.add_argument(
         "--allow-remote-writes", action="store_true", default=False,

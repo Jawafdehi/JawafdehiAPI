@@ -50,6 +50,12 @@ class CaseworkApi:
     """
 
     def __init__(self, base_url, token=None, *, basic=None, allow_remote_writes: bool = False):
+        if not base_url:
+            raise ValueError(
+                "base_url is required: pass --api-base-url or set "
+                "JAWAFDEHI_API_BASE (e.g. https://api.jawafdehi.org for "
+                "production, http://127.0.0.1:48010 for a local DEV_AUTH server)"
+            )
         self.base_url = base_url.rstrip("/")
         if not self.base_url.endswith("/api"):
             self.base_url += "/api"

@@ -118,6 +118,15 @@ def test_bearer_or_basic_is_required():
         CaseworkApi(base_url="http://127.0.0.1:48010")
 
 
+def test_empty_base_url_raises():
+    # No silent localhost default anywhere: an unset base_url (None or "") must
+    # fail loud, not target some implicit host.
+    with pytest.raises(ValueError, match="base_url is required"):
+        CaseworkApi(base_url="", token="t")
+    with pytest.raises(ValueError, match="base_url is required"):
+        CaseworkApi(base_url=None, token="t")
+
+
 def test_basic_mode_rejects_non_loopback_base_url():
     with pytest.raises(ValueError):
         CaseworkApi(

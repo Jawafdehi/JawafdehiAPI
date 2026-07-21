@@ -4,9 +4,12 @@ import logging
 import re
 from pathlib import Path
 
+import pytest
+
 from casework.common.cli import (
     QUIET_LOGGERS,
     add_common_args,
+    basic_auth_from_env,
     configure_run_logging,
     log_event,
     log_run_footer,
@@ -21,6 +24,36 @@ def _parse(argv):
     parser = argparse.ArgumentParser()
     add_common_args(parser)
     return parser.parse_args(argv)
+
+
+def test_api_base_url_defaults_from_env(monkeypatch):
+    monkeypatch.setenv("JAWAFDEHI_API_BASE", "https://api.example.test")
+    parser = argparse.ArgumentParser()
+    add_common_args(parser)
+    assert parser.parse_args([]).api_base_url == "https://api.example.test"
+
+
+def test_api_base_url_has_no_silent_localhost_default(monkeypatch):
+    # The dev localhost default is gone: with neither flag nor env set, it is
+    # None, and CaseworkApi then raises rather than silently targeting a host.
+    monkeypatch.delenv("JAWAFDEHI_API_BASE", raising=False)
+    parser = argparse.ArgumentParser()
+    add_common_args(parser)
+    assert parser.parse_args([]).api_base_url is None
+
+
+def test_basic_auth_from_env_returns_credentials(monkeypatch):
+    monkeypatch.setenv("CASEWORK_API_USER", "u")
+    monkeypatch.setenv("CASEWORK_API_PASSWORD", "p")
+    assert basic_auth_from_env() == ("u", "p")
+
+
+def test_basic_auth_from_env_raises_when_unset(monkeypatch):
+    # No baked-in dev credential fallback -- must fail loud.
+    monkeypatch.delenv("CASEWORK_API_USER", raising=False)
+    monkeypatch.delenv("CASEWORK_API_PASSWORD", raising=False)
+    with pytest.raises(SystemExit):
+        basic_auth_from_env()
 
 
 def test_dry_run_defaults_to_true_with_no_flags():

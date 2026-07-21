@@ -48,15 +48,28 @@ class TestBuildApiGuardWiring:
     a remote deployment).
     """
 
-    def test_basic_branch_true_reaches_caseworkapi(self, module):
+    def test_basic_branch_true_reaches_caseworkapi(self, module, monkeypatch):
+        monkeypatch.setenv("CASEWORK_API_USER", "dev-user")
+        monkeypatch.setenv("CASEWORK_API_PASSWORD", "dev-pass")
         args = _args(api_base_url="http://127.0.0.1:48010", allow_remote_writes=True)
         api = module.build_api(args)
         assert api.allow_remote_writes is True
 
-    def test_basic_branch_false_reaches_caseworkapi(self, module):
+    def test_basic_branch_false_reaches_caseworkapi(self, module, monkeypatch):
+        monkeypatch.setenv("CASEWORK_API_USER", "dev-user")
+        monkeypatch.setenv("CASEWORK_API_PASSWORD", "dev-pass")
         args = _args(api_base_url="http://127.0.0.1:48010", allow_remote_writes=False)
         api = module.build_api(args)
         assert api.allow_remote_writes is False
+
+    def test_basic_branch_requires_credentials(self, module, monkeypatch):
+        # No dev-default fallback: a missing CASEWORK_API_USER/PASSWORD must fail
+        # loud (SystemExit), not silently authenticate as a baked-in dev user.
+        monkeypatch.delenv("CASEWORK_API_USER", raising=False)
+        monkeypatch.delenv("CASEWORK_API_PASSWORD", raising=False)
+        args = _args(api_base_url="http://127.0.0.1:48010")
+        with pytest.raises(SystemExit):
+            module.build_api(args)
 
     def test_token_branch_true_reaches_caseworkapi(self, module):
         args = _args(

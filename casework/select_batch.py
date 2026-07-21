@@ -26,6 +26,7 @@ is READ-ONLY: it performs GETs only and writes a batch CSV that
 """
 import argparse
 import csv
+import os
 import sys
 
 from casework.bind_materials import candidates_from_row, missing_candidates
@@ -149,7 +150,8 @@ def build_parser():
     p.add_argument("--drop", action="append", default=[], type=_parse_drop,
                    help="Quarantine rows where COL=VALUE (repeatable), e.g. "
                         "--drop match_tier=D_CONTRADICTED.")
-    p.add_argument("--api-base-url", default="http://127.0.0.1:48010")
+    p.add_argument("--api-base-url", default=os.environ.get("JAWAFDEHI_API_BASE"),
+                   help="Base URL of the case API; defaults to $JAWAFDEHI_API_BASE.")
     p.add_argument("--api-token", default="")
     return p
 
