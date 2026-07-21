@@ -18,12 +18,11 @@ from .models import CaseEntity, CourtCase
 
 @receiver(post_save, sender=CourtCase, dispatch_uid="ngm_courtcase_search_index")
 def _index_courtcase(sender, instance, **kwargs):
-    # A soft-delete is an ORM save (is_deleted=True); evict from the index rather
-    # than re-indexing a row that is no longer on the read plane.
-    if getattr(instance, "is_deleted", False):
-        transaction.on_commit(lambda: search_index.delete(instance))
-    else:
-        transaction.on_commit(lambda: search_index.index(instance))
+    # The public index is a curated slice (see search_visibility): index_or_evict
+    # upserts a public-visible case and EVICTS one that is soft-deleted or not
+    # public-visible (e.g. a case_type edit flips it to HIDE) — a row that must
+    # not appear in anon search.
+    transaction.on_commit(lambda: search_index.index_or_evict(instance))
 
 
 @receiver(post_delete, sender=CourtCase, dispatch_uid="ngm_courtcase_search_delete")
@@ -40,7 +39,7 @@ def _reindex_parent_courtcase(instance):
     except Exception:  # noqa: BLE001
         case = None
     if case is not None:
-        search_index.index(case)
+        search_index.index_or_evict(case)
 
 
 @receiver(post_save, sender=CaseEntity, dispatch_uid="ngm_caseentity_reindex")
