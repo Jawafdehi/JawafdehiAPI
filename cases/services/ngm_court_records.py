@@ -3,9 +3,9 @@
 The standalone NGM service (and the backend REST proxy that forwarded to it)
 were retired in the service consolidation. NGM's courts/cases now live as the
 ``courts`` app in this same project, routed to the ``ngm`` database
-by ``config.db_router``. So a Jawafdehi management command that needs
-court-case ground truth (e.g. ``enrich_ciaa_timeline``) reads it via the ORM
-in-process — no HTTP, no SQL proxy.
+by ``config.db_router``. So Jawafdehi code that needs court-case ground truth
+(e.g. the ``casework`` enrichers) reads it via the ORM in-process — no HTTP,
+no SQL proxy.
 
 ``get_court_case_details`` preserves the shape the old proxy returned
 (``{"case": {...}, "hearings": [...], "entities": [...]}``) so its callers and
