@@ -8,7 +8,7 @@ fold: latest decisive outcome per (slug, stage).
 import json
 
 from casework.ledger import (
-    OUTCOME_STATUSES,
+    NON_OUTCOME_STATUSES,
     build_ledger,
     iter_events,
     main,
@@ -81,9 +81,25 @@ class TestBuildLedger:
         assert led[("case-4", "bigo")]["status"] == "enriched"
         assert led[("case-4", "timeline")]["status"] == "unmet"
 
-    def test_outcome_statuses_are_the_runreport_set(self):
-        assert set(OUTCOME_STATUSES) == {
-            "enriched", "already", "unmet", "skipped", "error"}
+    def test_convert_and_dryrun_outcomes_are_not_dropped(self, tmp_path):
+        # Regression: a status whitelist silently dropped every convert outcome
+        # and all dry-run verdicts. They must appear in the ledger.
+        _write_events(tmp_path / "a.events.jsonl", [
+            _ev("2026-07-21T10:00:00Z", "convert", "c1", "convert", "converted", "iri"),
+            _ev("2026-07-21T10:00:01Z", "convert", "c2", "convert", "would-convert", "iri"),
+            _ev("2026-07-21T10:00:02Z", "convert", "c3", "convert", "failed", "iri"),
+            _ev("2026-07-21T10:00:03Z", "bigo", "c4", "write", "would-enrich", "5000000"),
+            _ev("2026-07-21T10:00:04Z", "allegations", "c5", "fetch", "llm-error"),
+        ])
+        led = build_ledger(tmp_path)
+        assert led[("c1", "convert")]["status"] == "converted"
+        assert led[("c2", "convert")]["status"] == "would-convert"
+        assert led[("c3", "convert")]["status"] == "failed"
+        assert led[("c4", "bigo")]["status"] == "would-enrich"
+        assert led[("c5", "allegations")]["status"] == "llm-error"
+
+    def test_non_outcome_statuses_are_the_step_signals(self):
+        assert set(NON_OUTCOME_STATUSES) == {"ok", "start", "fallback", "none"}
 
 
 class TestIterEvents:

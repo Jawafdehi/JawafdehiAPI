@@ -30,11 +30,15 @@ from pathlib import Path
 
 from casework.common.cli import _DEFAULT_LOG_DIR, _REPO_ROOT
 
-# The outcome statuses a RunReport records once per case-stage (see
-# casework/common/pipeline.py::RunReport). Everything else a run logs -- "start",
-# "ok" on source/prompt/extract steps -- is an intermediate step signal, NOT a
-# case-stage outcome, and is ignored by the fold.
-OUTCOME_STATUSES = ("enriched", "already", "unmet", "skipped", "error")
+# A case-stage OUTCOME is any status a RunReport records as its per-case verdict
+# (see casework/common/pipeline.py::RunReport). The vocabulary is open and
+# stage-specific -- beyond the five core verdicts there are `would-enrich` /
+# `would-convert` (dry-run), convert's `converted` / `failed`, and `llm-error`.
+# Rather than whitelist them (a too-narrow list silently DROPS a stage's real
+# result -- e.g. every convert outcome), we treat everything as an outcome
+# EXCEPT the known intermediate step signals below. A ledger must fail toward
+# inclusion, not omission.
+NON_OUTCOME_STATUSES = frozenset({"ok", "start", "fallback", "none"})
 
 _DEFAULT_LEDGER = _REPO_ROOT / "work" / "enrichment-ledger.jsonl"
 
@@ -63,18 +67,19 @@ def iter_events(log_dir):
                     continue
 
 
-def build_ledger(log_dir=None, *, outcome_statuses=OUTCOME_STATUSES):
+def build_ledger(log_dir=None, *, non_outcome_statuses=NON_OUTCOME_STATUSES):
     """Fold events into ``{(slug, stage): latest-outcome-row}``.
 
     Latest by ``ts`` (ISO-8601 UTC sorts lexicographically); ties resolve to
-    the later event encountered. Only rows whose status is in
-    ``outcome_statuses`` are considered -- a case that never reached an outcome
-    (e.g. the run crashed after "start") is absent.
+    the later event encountered. Events whose status is an intermediate step
+    signal (``non_outcome_statuses``) are skipped; every other status is treated
+    as a case-stage outcome. A case that never reached an outcome (e.g. the run
+    crashed after "start") is absent.
     """
-    outcomes = set(outcome_statuses)
+    non_outcomes = set(non_outcome_statuses)
     ledger: dict = {}
     for ev in iter_events(_resolve_log_dir(log_dir)):
-        if ev.get("status") not in outcomes:
+        if ev.get("status") in non_outcomes:
             continue
         slug, stage = ev.get("slug"), ev.get("stage")
         if not slug or not stage:
@@ -114,22 +119,15 @@ def write_ledger(ledger, path):
     return len(rows)
 
 
-_COLS = ("enriched", "already", "unmet", "skipped", "error")
-
-
 def _print_summary(ledger, *, stages=None):
     summ = stage_summary(ledger)
     keep = set(stages) if stages else None
-    header = f"{'stage':14}" + "".join(f"{c:>9}" for c in _COLS) + f"{'total':>8}"
-    print(header)
-    print("-" * len(header))
     for stage in sorted(summ):
         if keep and stage not in keep:
             continue
-        c = summ[stage]
-        total = sum(c.values())
-        print(f"{stage:14}" + "".join(f"{c.get(col, 0):>9}" for col in _COLS)
-              + f"{total:>8}")
+        counts = summ[stage]
+        parts = "  ".join(f"{status}={counts[status]}" for status in sorted(counts))
+        print(f"{stage:14} {parts}  (total {sum(counts.values())})")
 
 
 def _print_rows(ledger, *, stages=None, slugs=None, statuses=None):
