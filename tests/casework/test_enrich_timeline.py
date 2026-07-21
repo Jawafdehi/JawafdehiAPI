@@ -57,10 +57,15 @@ DONOR_COMMIT = "0321a85"
 
 
 def _donor_source(path: str = "casework/enrich_timeline.py") -> str:
-    return subprocess.run(
+    proc = subprocess.run(
         ["git", "show", f"{DONOR_COMMIT}:{path}"],
-        cwd=REPO_ROOT, capture_output=True, text=True, check=True,
-    ).stdout
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        pytest.skip(
+            f"donor commit {DONOR_COMMIT} not in local history "
+            "(shallow clone?); fidelity check needs full git history")
+    return proc.stdout
 
 
 def _literal_assign(tree: ast.AST, name: str):

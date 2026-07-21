@@ -53,10 +53,15 @@ DONOR_COMMIT = "0321a85"
 
 
 def _donor_source() -> str:
-    return subprocess.run(
+    proc = subprocess.run(
         ["git", "show", f"{DONOR_COMMIT}:casework/enrich_related_entities.py"],
-        cwd=REPO_ROOT, capture_output=True, text=True, check=True,
-    ).stdout
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        pytest.skip(
+            f"donor commit {DONOR_COMMIT} not in local history "
+            "(shallow clone?); fidelity check needs full git history")
+    return proc.stdout
 
 
 def _literal_from_value_node(value_node):
