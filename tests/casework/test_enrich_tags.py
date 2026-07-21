@@ -287,6 +287,18 @@ class TestDetectAmountTier:
     def test_arab_and_crore_tier_lakh_and_hazar_suppressed(self):
         assert et._detect_amount_tier(1_470_000_000) == "~1 Arab 47 Crore"
 
+    def test_string_bigo_is_coerced_not_crashed(self):
+        # DRF serialises a DecimalField to a string by default, so the case API
+        # can hand bigo back as "1470000000" / "5000000000.00", not an int. The
+        # "never raises" contract must hold: coerce, don't crash on `//`.
+        assert et._detect_amount_tier("1470000000") == "~1 Arab 47 Crore"
+        assert et._detect_amount_tier("5000000000.00") == et._detect_amount_tier(5_000_000_000)
+        assert et._detect_amount_tier(4.5e7) == "~4 Crore 50 Lakh"
+
+    def test_uncoercible_bigo_returns_none(self):
+        assert et._detect_amount_tier("not-a-number") is None
+        assert et._detect_amount_tier("") is None
+
 
 # --------------------------------------------------------------------------
 # validate_tags

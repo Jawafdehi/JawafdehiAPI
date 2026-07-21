@@ -831,6 +831,16 @@ def _detect_amount_tier(bigo) -> Optional[str]:
     if bigo is None:
         return None
 
+    # The case API can serve `bigo` as a string (DRF serialises a DecimalField
+    # to a string by default) or a float, not always an int. `//`/`%` on a str
+    # would raise -- contradicting this function's "never raises" contract -- so
+    # coerce first, and treat an uncoercible value as "no reliable amount" (None,
+    # i.e. simply omit the amount-tier tag) rather than crashing classification.
+    try:
+        bigo = int(float(bigo))
+    except (TypeError, ValueError):
+        return None
+
     arab = int(bigo // 1_000_000_000)
     remainder = bigo % 1_000_000_000
     crore = int(remainder // 10_000_000)
@@ -1005,8 +1015,15 @@ def build_llm_classification_prompt(case: dict) -> str:
             "Court Cases: "
             + ", ".join(c for c in case.get("court_cases") or [] if isinstance(c, str))
         )
-    if case.get("bigo") is not None:
-        lines.append(f"Bigo (Disputed Amount): NPR {case.get('bigo'):,}")
+    bigo = case.get("bigo")
+    if bigo is not None:
+        # `:,` raises on a string bigo (DRF DecimalField -> string); coerce, and
+        # silently omit the line if it is not a number rather than sink the
+        # whole prompt build (and the enrichment) for one odd payload.
+        try:
+            lines.append(f"Bigo (Disputed Amount): NPR {int(float(bigo)):,}")
+        except (TypeError, ValueError):
+            pass
     lines.append("")
     lines.append(_build_tag_selection_instructions())
     return "\n".join(lines)

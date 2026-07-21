@@ -308,11 +308,15 @@ def _build_content_parts(press_release_text, court_order_text):
     lines 385-405) into a named, unit-testable function -- the logic itself is
     unchanged: either source alone is sufficient, and the press-release
     truncation limit depends on whether a court order is ALSO present
-    (`PRESS_RELEASE_CHARS_NO_COURT` vs `PRESS_RELEASE_CHARS`)."""
+    (`PRESS_RELEASE_CHARS_NO_COURT` vs `PRESS_RELEASE_CHARS`). One divergence
+    from the verbatim donor: an EMPTY court_order_text ("") is now treated the
+    same as None (no court present), so a case with fetched-but-empty court text
+    still gets the larger no-court press budget instead of being needlessly
+    clipped to the with-court limit."""
     content_parts = []
 
     if press_release_text:
-        if court_order_text is None:
+        if not court_order_text:
             truncated = _truncate_press_release(
                 press_release_text, limit=PRESS_RELEASE_CHARS_NO_COURT
             )

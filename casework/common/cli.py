@@ -57,12 +57,14 @@ def add_common_args(parser):
         help="LLM provider to route both tiers through (default claude_cli).")
     parser.add_argument(
         "--model", default="",
-        help="LLM model/alias to force on BOTH tiers. Empty (the default) lets "
-             "each stage use its configured tier model -- premium stages (bigo, "
-             "timeline, allegations, entities) get the premium model, tags gets "
-             "the cheap one -- falling back to the provider CLI's own default. "
-             "An earlier default of 'haiku' overrode every tier with the cheap "
-             "model; pass --model haiku explicitly to restore that for a cheap run.")
+        help="LLM model/alias to force on both tiers via the claude_cli "
+             "provider's model settings (other providers use their own model "
+             "config and ignore this). Empty (the default) lets each stage use "
+             "its configured tier model -- premium stages (bigo, timeline, "
+             "allegations, entities) get the premium model, tags gets the cheap "
+             "one -- falling back to the provider CLI's own default. An earlier "
+             "default of 'haiku' overrode every tier with the cheap model; pass "
+             "--model haiku explicitly to restore that for a cheap run.")
     parser.add_argument(
         "--api-base-url", default=os.environ.get("JAWAFDEHI_API_BASE"),
         help="Base URL of the case API; defaults to $JAWAFDEHI_API_BASE. If "
@@ -241,7 +243,7 @@ def log_run_header(logger, *, stage, base_url, dry_run, provider, model,
         f"  target      : {base_url}",
         f"  mode        : {mode}",
         f"  provider    : {provider}",
-        f"  model       : {model}",
+        f"  model       : {model or '(provider default)'}",
         f"  n_selected  : {n_selected}",
         f"  run_id      : {run_id}",
         f"  log file    : {paths['log']}",

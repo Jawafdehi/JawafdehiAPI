@@ -357,6 +357,16 @@ class TestCleanEntryDateHandling:
         assert entry["date"] == "2024-01-15"
         assert "date_bs" not in entry
 
+    def test_short_year_date_bs_is_dropped_not_padded(self):
+        # A 2-digit year is an ERROR, not something to zero-pad: "80-1-5" must
+        # NOT become "0080-01-05" -- a valid-SHAPE but wrong-century date the
+        # server would accept and store. Month/day are padded, year is not, so a
+        # short year fails _BS_DATE_RE and the field is dropped (entry kept).
+        entry = _clean_entry(
+            {"date": "2024-01-15", "date_bs": "80-1-5", "title": "फैसला"})
+        assert entry is not None
+        assert "date_bs" not in entry
+
     def test_uncoercible_end_date_bs_is_dropped_entry_kept(self):
         entry = _clean_entry({
             "date": "2024-01-15", "end_date": "2024-06-01",

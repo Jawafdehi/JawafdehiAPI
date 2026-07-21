@@ -214,6 +214,17 @@ def test_apply_plan_refuses_non_would_patch(action):
         apply_plan(FakeApi(), BindPlan(slug="c", action=action))
 
 
+def test_apply_plan_fails_closed_on_missing_etag():
+    # No ETag -> If-Match absent -> replace_list would be an UNCONDITIONAL
+    # destructive whole-list replace. Refuse before any write.
+    api = FakeApi()
+    plan = BindPlan(slug="c", action="WOULD_PATCH", if_match=None,
+                    patch_items=[{"material_iri": PR, "additional_details": ""}])
+    with pytest.raises(RuntimeError, match="no ETag"):
+        apply_plan(api, plan)
+    assert api.replaced == []  # nothing written
+
+
 # ---------------------------------------------------------------------------
 # run() -- dry-run must NOT write; --apply must write via replace_list.
 # ---------------------------------------------------------------------------
@@ -299,6 +310,17 @@ def test_run_skips_published_case_even_on_apply(tmp_path, monkeypatch):
     stats, _ = run(_args(dry_run=False, tmp_path=tmp_path), api=api, rows=rows)
     assert api.replaced == []            # PUBLISHED never written, even with --apply
     assert stats.get("SKIP_STATE") == 1
+
+
+def test_run_apply_fails_closed_when_case_has_no_etag(tmp_path, monkeypatch):
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    # Server returned no ETag: apply must fail closed, not write unconditionally.
+    api = FakeApi(exists={"ciaa_press_release/2037"},
+                  cases={"c": ({"slug": "c", "state": "DRAFT", "evidence": []}, None)})
+    rows = [{"slug": "c", "press_release_material": PR}]
+    stats, _ = run(_args(dry_run=False, tmp_path=tmp_path), api=api, rows=rows)
+    assert api.replaced == []            # no unguarded destructive write
+    assert stats.get("APPLY_FAILED") == 1
 
 
 # ---------------------------------------------------------------------------

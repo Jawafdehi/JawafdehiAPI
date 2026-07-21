@@ -212,9 +212,23 @@ def apply_plan(api, plan):
     """Execute a WOULD_PATCH plan: whole-list replace of /evidence, conditional
     on the ETag captured at plan time (If-Match). A 412 means the case changed
     since we read it -- the merge is stale; the caller should re-read and retry
-    rather than force. Refuses to apply any non-WOULD_PATCH plan."""
+    rather than force. Refuses to apply any non-WOULD_PATCH plan, and fails
+    closed when no ETag was captured (see below)."""
     if plan.action != "WOULD_PATCH":
         raise ValueError(f"apply_plan called on a {plan.action} plan for {plan.slug!r}")
+    # Fail closed on a missing ETag. get_case_with_etag() returns None when the
+    # server sent no ETag; without one, If-Match is absent and replace_list()
+    # becomes an UNCONDITIONAL whole-list replace -- the exact destructive,
+    # concurrent-edit-clobbering write this module's optimistic-concurrency
+    # design exists to prevent. Refuse rather than write unguarded (consistent
+    # with ABORT_UNCERTAIN: never an unguarded destructive write). run() records
+    # the raise as APPLY_FAILED, so one such case does not sink the batch.
+    if not plan.if_match:
+        raise RuntimeError(
+            f"refusing unconditional whole-list evidence replace for {plan.slug!r}: "
+            "no ETag was captured at read time, so a concurrent edit cannot be "
+            "detected (If-Match would be absent) and the destructive replace could "
+            "silently clobber it -- investigate why the case GET returned no ETag")
     return api.replace_list(plan.slug, EVIDENCE_PATH, plan.patch_items,
                             if_match=plan.if_match)
 

@@ -335,7 +335,12 @@ def _normalise_bs_date(value: str) -> str:
     parts = s.split("-")
     if len(parts) == 3 and all(p.isdigit() for p in parts):
         y, m, d = parts
-        s = f"{y.zfill(4)}-{m.zfill(2)}-{d.zfill(2)}"
+        # Pad ONLY month/day -- they are legitimately 1-2 digits. Do NOT zfill
+        # the year: a BS year is always 4 digits, so a shorter one is an error,
+        # not something to pad. Padding "80" -> "0080" would produce a
+        # valid-SHAPE but semantically wrong year that the server accepts and
+        # writes; leaving it short makes it fail _BS_DATE_RE below and be dropped.
+        s = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
     return s
 
 
@@ -622,6 +627,8 @@ def _format_ngm_section(ngm_data: Optional[dict]) -> str:
     if hearings:
         lines.append(f"- Hearings ({len(hearings)} records):")
         for h in hearings:
+            if not isinstance(h, dict):
+                continue  # a malformed non-dict item must not crash formatting
             h_date = h.get("hearing_date_ad", "")
             h_decision = h.get("decision_type") or ""
             h_remarks = (h.get("remarks") or "")[:200]
