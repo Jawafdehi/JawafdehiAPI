@@ -214,3 +214,13 @@ def test_probe_material_reports_none_status_on_transport_error():
     from casework.common.materials import probe_material
     pr = probe_material(_StubApi(urllib.error.URLError("x")), "ag", "1")
     assert pr.status is None and pr.verdict is None
+
+
+def test_probe_material_still_probes_once_with_a_negative_retry_count():
+    # argparse accepts `--probe-retries -1`; range(-1 + 1) is EMPTY, so this
+    # used to return the None initializer and every caller's `.verdict`
+    # raised AttributeError.
+    from casework.common.materials import material_exists, probe_material
+    pr = probe_material(_StubApi({"@id": "x"}), "ag", "1", retries=-1)
+    assert pr is not None and pr.verdict is True
+    assert material_exists(_StubApi({"@id": "x"}), "ag", "1") is True

@@ -114,7 +114,11 @@ def probe_material(api, source, ident, timeout=45, *, retries=0, interval=1.0):
     """
     path = material_path(source, ident)
     result = None
-    for attempt in range(retries + 1):
+    # `max(retries, 0)`: a negative count (argparse accepts `--probe-retries -1`)
+    # would make the range EMPTY, so nothing was ever probed and this returned
+    # the `None` initializer -- breaking the documented tri-state for every
+    # caller (`material_exists` and `build_rows` both do `.verdict` on it).
+    for attempt in range(max(retries, 0) + 1):
         result = _probe_once(api, source, ident, path, timeout)
         if result.verdict is not None:
             return result

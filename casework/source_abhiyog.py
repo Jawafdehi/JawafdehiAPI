@@ -61,10 +61,17 @@ AG_SEARCH_URL = (
 #: Devanagari digit -> ASCII. Without this a case number like ०८१-CR-००९४ keeps
 #: its Devanagari digits and never matches an ASCII case number.
 _DEVA_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
-#: Case number inside a filename, before the `_<unix-ts>.<ext>` upload suffix.
-_FILE_RE = re.compile(r"^\s*([0-9]{3}-[A-Za-z]+-[0-9]+)_[0-9]+\.[A-Za-z0-9]+\s*$")
-#: Case number embedded in a Nepali description, e.g. `(०८१-CR-००९४)`.
-_DESC_RE = re.compile(r"([०-९]{3}-[A-Za-z]+-[०-९]+)")
+#: Case number inside a filename, before the OPTIONAL `_<unix-ts>` upload
+#: suffix. The timestamp is stapled on by the portal's uploader, so it is the
+#: common shape -- but making it mandatory silently dropped any filename that
+#: carries the case number without one (`081-CR-0094.pdf`).
+_FILE_RE = re.compile(
+    r"^\s*([0-9०-९]{3}-[A-Za-z]+-[0-9०-९]+)(?:_[0-9]+)?\.[A-Za-z0-9]+\s*$")
+#: Case number embedded in a Nepali description, e.g. `(०८१-CR-००९४)`. Tolerant
+#: of EITHER digit script (and a mix of the two): the description is hand-typed,
+#: so a typist using ASCII digits is common, and a Devanagari-only class scored
+#: those records "unrecoverable" when the number was sitting right there.
+_DESC_RE = re.compile(r"([0-9०-९]{3}-[A-Za-z]+-[0-9०-९]+)")
 #: A bare court_case_no cell, tolerant of either digit script.
 _CCN_RE = re.compile(r"([0-9०-९]{3}-[A-Za-z]+-[0-9०-९]+)")
 #: Canonical shape after normalisation.

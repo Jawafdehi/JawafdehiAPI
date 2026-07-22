@@ -94,6 +94,33 @@ def test_disagreement_is_flagged_not_silently_resolved():
     assert cands["description"] == "081-CR-0009"  # rejected value retained
 
 
+def test_description_with_ascii_digits_is_recovered():
+    # The description is hand-typed, so a typist using ASCII digits is common.
+    # A Devanagari-only class scored these "unrecoverable" with the number
+    # sitting right there in the field.
+    case_no, source, _, _ = extract_case_no(
+        {"file": "प्रतिवादी_1.pdf", "description": "भ्रष्टाचार गरेको (081-CR-0094)"})
+    assert (case_no, source) == ("081-CR-0094", "description")
+
+
+def test_description_with_mixed_digit_scripts_is_recovered():
+    case_no, _, _, _ = extract_case_no(
+        {"file": "x.pdf", "description": "(०८१-CR-0094)"})
+    assert case_no == "081-CR-0094"
+
+
+def test_filename_without_the_upload_timestamp_is_recovered():
+    # `_<unix-ts>` is stapled on by the portal uploader, so it is the common
+    # shape -- but requiring it dropped every filename that lacks one.
+    case_no, source, _, _ = extract_case_no({"file": "081-CR-0094.pdf"})
+    assert (case_no, source) == ("081-CR-0094", "file")
+
+
+def test_filename_with_the_timestamp_still_wins_the_same_number():
+    case_no, source, _, _ = extract_case_no({"file": "081-CR-0094_1750232440.pdf"})
+    assert (case_no, source) == ("081-CR-0094", "file")
+
+
 def test_unrecoverable_record_yields_no_case_number():
     case_no, source, cands, agree = extract_case_no(record(
         file="लक्ष्मण चालिसे_1642407863.pdf", description="बैंकिङ्ग कसुर"))

@@ -3,10 +3,12 @@ import json
 import types
 import urllib.error
 
+import pytest
+
 from casework.backfill_ag_caseno import (
-    APPLIED, CONFLICT_QUARANTINE, GET_ERROR, GONE, GUARD_FAIL,
-    SKIP_IDEMPOTENT, WOULD_APPLY, check_guards, merge_case_no, plan_one, run,
-    select_targets,
+    APPLIED, APPLY_FAILED, CONFLICT_QUARANTINE, GET_ERROR, GET_FATAL, GONE,
+    GUARD_FAIL, GUARD_MISSING, SKIP_IDEMPOTENT, WOULD_APPLY, check_guards,
+    merge_case_no, plan_one, run, select_targets, validate_map,
 )
 
 CASE_NO = "jawafdehi:caseNumber"
@@ -19,6 +21,7 @@ def doc(**over):
         "name": {"ne": "जिल्ला कालिकोट"},
         "text": {"ne": "आरोप पत्र"},
         "associatedMedia": [{"@type": "MediaObject", "contentUrl": "x.pdf"}],
+        "additionalType": "jawafdehi:ChargeSheet",
         "jawafdehi:recordId": "83475",
         "jawafdehi:officeLevel": 1,
         "jawafdehi:sourceType": "AG_ABHIYOG_PATRA",
@@ -79,7 +82,37 @@ def test_select_targets_excludes_absent_and_unrecoverable():
     rows = [row(), row(id=2, in_lake="false"), row(id=3, case_number="")]
     targets, skipped = select_targets(rows)
     assert [t["id"] for t in targets] == [83475]
-    assert skipped == {"not_in_lake": 1, "unrecoverable": 1}
+    assert skipped == {"not_in_lake": 1, "unrecoverable": 1, "lake_state_unknown": 0}
+
+
+def test_unknown_lake_state_is_not_reported_as_absent():
+    # A --no-probe map leaves in_lake blank and a throttled probe leaves
+    # "error". Counting either as not_in_lake would claim the lake was checked.
+    _, skipped = select_targets([row(in_lake=""), row(id=2, in_lake="error")])
+    assert skipped["lake_state_unknown"] == 2
+    assert skipped["not_in_lake"] == 0
+
+
+# --------------------------------------------------------------------------
+# map validation -- the writer must not trust its input
+# --------------------------------------------------------------------------
+
+def test_validate_map_rejects_a_non_list_or_empty_map():
+    for bad in ({}, [], {"a": row()}, [1], None):
+        with pytest.raises(SystemExit):
+            validate_map(bad, "map")
+
+
+def test_validate_map_rejects_a_row_missing_a_dereferenced_key():
+    # plan_one does row["material_iri"]; a KeyError mid-apply would leave the
+    # backfill half-written with no resume marker.
+    incomplete = {k: v for k, v in row().items() if k != "material_iri"}
+    with pytest.raises(SystemExit, match="material_iri"):
+        validate_map([incomplete], "map")
+
+
+def test_validate_map_accepts_a_real_map():
+    assert validate_map([row()], "map") == [row()]
 
 
 # --------------------------------------------------------------------------
@@ -87,20 +120,45 @@ def test_select_targets_excludes_absent_and_unrecoverable():
 # --------------------------------------------------------------------------
 
 def test_guards_pass_on_matching_special_office_doc():
-    ok, guards = check_guards(doc(), 83475)
-    assert ok is True
+    outcome, guards = check_guards(doc(), 83475)
+    assert outcome is None
     assert guards["officeLevel"] == 1
 
 
 def test_guards_reject_record_id_mismatch():
     # Would otherwise stamp a case number onto a DIFFERENT document.
-    ok, _ = check_guards(doc(**{"jawafdehi:recordId": "999"}), 83475)
-    assert ok is False
+    outcome, _ = check_guards(doc(**{"jawafdehi:recordId": "999"}), 83475)
+    assert outcome == GUARD_FAIL
 
 
 def test_guards_reject_non_special_office_and_wrong_source_type():
-    assert check_guards(doc(**{"jawafdehi:officeLevel": 3}), 83475)[0] is False
-    assert check_guards(doc(**{"jawafdehi:sourceType": "OTHER"}), 83475)[0] is False
+    assert check_guards(doc(**{"jawafdehi:officeLevel": 3}), 83475)[0] == GUARD_FAIL
+    assert check_guards(doc(**{"jawafdehi:sourceType": "OTHER"}), 83475)[0] == GUARD_FAIL
+
+
+def test_absent_identity_fields_are_distinguished_from_a_mismatch():
+    # `materials/sourcing/ag/shaper.py` emits NEITHER jawafdehi:recordId nor
+    # jawafdehi:officeLevel, so a doc written by the in-repo shaper carries no
+    # identity at all. That is "the stored shape changed", not "wrong record" --
+    # conflating them would report an ingest-path change as 473 bad matches.
+    shaped_by_the_repo = {k: v for k, v in doc().items()
+                          if not k.startswith("jawafdehi:record")
+                          and k != "jawafdehi:officeLevel"}
+    assert check_guards(shaped_by_the_repo, 83475)[0] == GUARD_MISSING
+
+
+def test_guards_reject_a_contradicting_additional_type():
+    # The PUT sends material_type=charge_sheet explicitly; writing it onto a doc
+    # whose own discriminator says otherwise would silently RETYPE the material.
+    outcome, _ = check_guards(doc(additionalType="jawafdehi:PressRelease"), 83475)
+    assert outcome == GUARD_FAIL
+
+
+def test_a_missing_additional_type_is_tolerated():
+    # Absence is exactly what the explicit material_type on the PUT covers --
+    # and omitting it would let the server infer `document` from DigitalDocument.
+    bare = {k: v for k, v in doc().items() if k != "additionalType"}
+    assert check_guards(bare, 83475)[0] is None
 
 
 # --------------------------------------------------------------------------
@@ -126,8 +184,15 @@ def test_merge_flags_ambiguous_and_keeps_alternate():
     merged, added = merge_case_no(
         doc(), row(ambiguous="true", alt_case_number="081-CR-0009"))
     assert merged["jawafdehi:caseNumberAmbiguous"] is True
-    assert merged["jawafdehi:caseNumberAlt"] == "081-CR-0009"
+    # A LIST -- the map's `;` join is a CSV artefact, not a JSON-LD value.
+    assert merged["jawafdehi:caseNumberAlt"] == ["081-CR-0009"]
     assert len(added) == 4
+
+
+def test_multiple_alternates_are_a_list_not_a_delimited_string():
+    merged, _ = merge_case_no(
+        doc(), row(ambiguous="true", alt_case_number="081-CR-0009;082-CR-0011"))
+    assert merged["jawafdehi:caseNumberAlt"] == ["081-CR-0009", "082-CR-0011"]
 
 
 # --------------------------------------------------------------------------
@@ -181,6 +246,23 @@ def test_404_is_not_retried():
     assert api.attempts == 1  # definitive: one shot only
 
 
+@pytest.mark.parametrize("code", [400, 401, 403, 410])
+def test_client_errors_are_not_retried(code):
+    # An expired token (401) or a missing NGM role (403) cannot improve by
+    # waiting. Retrying would sleep the whole ladder on EVERY row -- ~15s x 473
+    # rows -- before reporting what the first response already said.
+    api = FlakyApi(doc(), fail_times=99, code=code)
+    outcome = plan_one(api, row(), retries=4, interval=0)["outcome"]
+    assert outcome in (GET_FATAL, GONE)
+    assert api.attempts == 1
+
+
+def test_5xx_is_still_retried():
+    api = FlakyApi(doc(), fail_times=2, code=503)
+    assert plan_one(api, row(), retries=3, interval=0)["outcome"] == WOULD_APPLY
+    assert api.attempts == 3
+
+
 # --------------------------------------------------------------------------
 # run() -- dry-run must never write
 # --------------------------------------------------------------------------
@@ -190,7 +272,7 @@ def _args(map_path, **over):
                 put_bodies="", write_interval=0, api_token="tok",
                 api_base_url="http://127.0.0.1:48010", allow_remote_writes=False,
                 # no real backoff in tests
-                read_retries=0, read_interval=0)
+                read_retries=0, read_interval=0, max_consecutive_failures=10)
     base.update(over)
     return types.SimpleNamespace(**base)
 
@@ -239,3 +321,60 @@ def test_run_counts_skipped_rows_without_fetching_them(tmp_path, monkeypatch):
     stats = run(_args(_write_map(tmp_path, rows)))
     assert stats["skipped_not_in_lake"] == 1
     assert stats["skipped_unrecoverable"] == 1
+
+
+# --------------------------------------------------------------------------
+# circuit breaker -- a systemic fault must not walk the whole map
+# --------------------------------------------------------------------------
+
+class DeadApi:
+    """Every GET 500s -- an API that is down, or the wrong host entirely."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def get(self, path, timeout=60):
+        self.calls += 1
+        raise urllib.error.HTTPError(path, 500, "boom", {}, None)
+
+
+def test_a_streak_of_failures_aborts_instead_of_walking_the_whole_map(
+        tmp_path, monkeypatch):
+    api = DeadApi()
+    monkeypatch.setattr("casework.backfill_ag_caseno._build_api", lambda a: api)
+    rows = [row(id=i) for i in range(1, 51)]
+    stats = run(_args(_write_map(tmp_path, rows), read_retries=0,
+                      max_consecutive_failures=3))
+    assert stats["ABORTED_CONSECUTIVE_FAILURES"] == 3
+    assert api.calls == 3            # stopped at 3, not 50
+    assert stats[GET_ERROR] == 3
+
+
+def test_the_breaker_resets_on_a_success_so_isolated_failures_pass_through(
+        tmp_path, monkeypatch):
+    # 404, ok, 404 -- three rows, never 2 failures in a row.
+    api = FakeApi({"2": doc(**{"@id": "https://jawafdehi.org/material/ag/2",
+                               "jawafdehi:recordId": "2"})})
+    monkeypatch.setattr("casework.backfill_ag_caseno._build_api", lambda a: api)
+    rows = [row(id=1), row(id=2, material_iri="https://jawafdehi.org/material/ag/2"),
+            row(id=3)]
+    stats = run(_args(_write_map(tmp_path, rows), max_consecutive_failures=2))
+    assert "ABORTED_CONSECUTIVE_FAILURES" not in stats
+    assert stats[GONE] == 2 and stats[WOULD_APPLY] == 1
+
+
+def test_a_systemic_apply_failure_aborts_the_write_pass(tmp_path, monkeypatch):
+    class RefusingApi(FakeApi):
+        def put_material(self, *a, **kw):
+            raise urllib.error.HTTPError("/m", 403, "no ngm role", {}, None)
+
+    api = RefusingApi({str(i): doc(**{
+        "@id": f"https://jawafdehi.org/material/ag/{i}",
+        "jawafdehi:recordId": str(i)}) for i in range(1, 21)})
+    monkeypatch.setattr("casework.backfill_ag_caseno._build_api", lambda a: api)
+    rows = [row(id=i, material_iri=f"https://jawafdehi.org/material/ag/{i}")
+            for i in range(1, 21)]
+    stats = run(_args(_write_map(tmp_path, rows), dry_run=False,
+                      max_consecutive_failures=3))
+    assert stats["ABORTED_CONSECUTIVE_FAILURES"] == 3
+    assert stats[APPLY_FAILED] == 3  # not 20 doomed writes

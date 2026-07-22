@@ -52,7 +52,29 @@ MATERIAL_TYPE = "charge_sheet"
 EXPECTED_SOURCE_TYPE = "AG_ABHIYOG_PATRA"
 SPECIAL_OFFICE_LEVEL = 1
 
+#: The ``additionalType`` discriminator ``materials/jsonld.py`` maps to
+#: ``charge_sheet``. Checked (not assumed) because the PUT sends
+#: ``MATERIAL_TYPE`` explicitly: the server would otherwise infer the type from
+#: this very field, and a bare ``DigitalDocument`` infers to ``document``. So a
+#: doc whose discriminator CONTRADICTS charge_sheet must never be written --
+#: sending our constant would silently retype it.
+CHARGE_SHEET_ADDITIONAL_TYPE = "jawafdehi:ChargeSheet"
+
+#: Identity fields the guard needs. NOTE: `materials/sourcing/ag/shaper.py` does
+#: NOT emit either of these -- they were observed only on the production docs,
+#: which means the rows in the lake were written by an ingest path that has since
+#: diverged from the in-repo shaper. Their ABSENCE is therefore reported as
+#: GUARD_MISSING, distinct from GUARD_FAIL: an all-rows GUARD_MISSING run means
+#: the ingest path changed, NOT that the recovered map is wrong.
+_IDENTITY_KEYS = ("jawafdehi:recordId", "jawafdehi:officeLevel")
+
 MAX_BACKOFF_S = 30
+
+#: HTTP codes that will never succeed on a retry: the request or the caller's
+#: credentials are wrong, not the server's mood. Retrying them burns the entire
+#: backoff ladder on EVERY row (with the defaults, ~15s x N rows) before
+#: surfacing what the very first response already said.
+_FATAL_HTTP = (400, 401, 403, 405, 410, 501)
 
 CASE_NO_KEY = "jawafdehi:caseNumber"
 SOURCE_KEY = "jawafdehi:caseNumberSource"
@@ -66,17 +88,62 @@ APPLY_FAILED = "APPLY_FAILED"
 SKIP_IDEMPOTENT = "SKIP_IDEMPOTENT"
 CONFLICT_QUARANTINE = "CONFLICT_QUARANTINE"
 GUARD_FAIL = "GUARD_FAIL"
+GUARD_MISSING = "GUARD_MISSING"
 GONE = "GONE"
 GET_ERROR = "GET_ERROR"
+GET_FATAL = "GET_FATAL"
+
+#: Outcomes that mean the run itself is broken (bad credentials, wrong host, a
+#: dead API) rather than one odd record. A consecutive streak of these trips the
+#: circuit breaker -- see :func:`run`.
+_FAILURE_OUTCOMES = frozenset({GET_ERROR, GET_FATAL, APPLY_FAILED})
+
+#: Required on every map row; the writer refuses a map that lacks them.
+_REQUIRED_ROW_KEYS = ("id", "material_iri", "case_number", "source", "in_lake")
+
+
+def validate_map(rows, origin):
+    """The map must be a non-empty list of row objects carrying every key the
+    planner dereferences.
+
+    The read-only producer validates its input (``source_abhiyog``'s
+    ``validate_records``); the WRITER had no equivalent, which is backwards. An
+    unvalidated map fails late and unevenly: a JSON object iterates as bare keys
+    (``'str' object has no attribute 'get'``), and a hand-trimmed row raises
+    KeyError at row N -- under ``--apply`` that leaves rows 1..N-1 already
+    written with no resume marker.
+    """
+    if not isinstance(rows, list) or not rows:
+        raise SystemExit(
+            f"{origin}: expected a non-empty JSON list of map rows, got "
+            f"{type(rows).__name__} "
+            f"(len={len(rows) if hasattr(rows, '__len__') else '?'})")
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise SystemExit(f"{origin}: row {i} is {type(row).__name__}, not a JSON object")
+        missing = [k for k in _REQUIRED_ROW_KEYS if k not in row]
+        if missing:
+            raise SystemExit(f"{origin}: row {i} (id={row.get('id')!r}) is missing {missing}")
+    return rows
 
 
 def select_targets(rows):
     """Rows eligible for a write: present in the lake AND with a recovered
-    number. Everything else is reported, never written."""
-    targets, skipped = [], {"not_in_lake": 0, "unrecoverable": 0}
+    number. Everything else is reported, never written.
+
+    ``in_lake`` is tri-state, and "unknown" is NOT "absent": a map produced with
+    ``--no-probe`` leaves it blank and a throttled probe leaves it ``error``.
+    Collapsing those into ``not_in_lake`` would report a 100% no-op run as
+    "none of these materials exist", which is a different (and false) claim.
+    """
+    targets = []
+    skipped = {"not_in_lake": 0, "unrecoverable": 0, "lake_state_unknown": 0}
     for row in rows:
-        if row.get("in_lake") != "true":
+        in_lake = row.get("in_lake")
+        if in_lake == "false":
             skipped["not_in_lake"] += 1
+        elif in_lake != "true":
+            skipped["lake_state_unknown"] += 1
         elif not row.get("case_number"):
             skipped["unrecoverable"] += 1
         else:
@@ -85,20 +152,32 @@ def select_targets(rows):
 
 
 def check_guards(doc, record_id):
-    """(ok, guards) -- identity/type/level agreement between doc and map row.
+    """``(outcome_or_None, guards)`` -- identity/type agreement, doc vs map row.
 
-    Guards the blast radius of a wrong id: a mismatch means we are about to
-    stamp a case number onto some OTHER document, so it quarantines instead.
+    ``None`` means every guard passed. Otherwise GUARD_MISSING (the doc carries
+    no identity fields at all -- see ``_IDENTITY_KEYS``) or GUARD_FAIL (it
+    carries them and they disagree). Distinguishing the two matters: a mismatch
+    means we were about to stamp a case number onto some OTHER document, while
+    an absence means the shape of the stored docs changed underneath us.
+
+    ``additionalType`` is rejected only when it CONTRADICTS charge_sheet, not
+    when it is absent -- absence is what the explicit ``material_type`` on the
+    PUT exists to cover.
     """
     guards = {
-        "recordId": str(doc.get("jawafdehi:recordId") or ""),
+        "recordId": doc.get("jawafdehi:recordId"),
         "officeLevel": doc.get("jawafdehi:officeLevel"),
         "sourceType": doc.get("jawafdehi:sourceType"),
+        "additionalType": doc.get("additionalType"),
     }
-    ok = (guards["recordId"] == str(record_id)
+    if all(doc.get(k) is None for k in _IDENTITY_KEYS):
+        return GUARD_MISSING, guards
+    additional = guards["additionalType"]
+    ok = (str(guards["recordId"]) == str(record_id)
           and guards["officeLevel"] == SPECIAL_OFFICE_LEVEL
-          and guards["sourceType"] == EXPECTED_SOURCE_TYPE)
-    return ok, guards
+          and guards["sourceType"] == EXPECTED_SOURCE_TYPE
+          and (additional is None or additional == CHARGE_SHEET_ADDITIONAL_TYPE))
+    return (None if ok else GUARD_FAIL), guards
 
 
 def merge_case_no(doc, row):
@@ -113,12 +192,22 @@ def merge_case_no(doc, row):
     merged[SOURCE_KEY] = row["source"]
     added = [CASE_NO_KEY, SOURCE_KEY]
     if row.get("ambiguous") == "true":
-        # Sources disagreed. Record that, and keep the rejected candidate, so a
+        # Sources disagreed. Record that, and keep the rejected candidates, so a
         # later binding pass can try both rather than trusting one silently.
+        # A LIST, not the map's `;`-joined string: that delimiter exists only
+        # because CSV needs a scalar cell. Carrying it into the JSON-LD document
+        # would force every consumer to split on `;`, and any consumer reading
+        # the field as a single case number would match nothing.
         merged[AMBIGUOUS_KEY] = True
-        merged[ALT_KEY] = row.get("alt_case_number") or ""
+        merged[ALT_KEY] = alt_case_numbers(row)
         added += [AMBIGUOUS_KEY, ALT_KEY]
     return merged, added
+
+
+def alt_case_numbers(row):
+    """The rejected candidates for a row, as a list (the map joins them with
+    `;` for its CSV column -- see ``source_abhiyog.build_rows``)."""
+    return [a for a in (row.get("alt_case_number") or "").split(";") if a.strip()]
 
 
 def fetch_doc(api, rid, *, retries=4, interval=1.0):
@@ -128,17 +217,24 @@ def fetch_doc(api, rid, *, retries=4, interval=1.0):
     production materials API rate-limits under bursts: a straight walk of the
     map fires one GET per material back-to-back and a large share come back
     429, which -- treated as a plain error -- would silently demote those
-    materials to GET_ERROR and drop them from the backfill. A definitive 404
-    is NOT retried: that material is genuinely gone.
+    materials to GET_ERROR and drop them from the backfill.
+
+    Only a genuinely transient failure is retried. A 404 is definitive (the
+    material is gone) and ``_FATAL_HTTP`` -- a bad request or bad credentials --
+    cannot improve by waiting: retrying an expired token would sleep the full
+    ladder on every row, ~15s x 473 rows before reporting the 401 that the first
+    response already carried.
     """
     path = material_path(AG_SOURCE, ag_ident(rid))
     last = None
-    for attempt in range(retries + 1):
+    for attempt in range(max(retries, 0) + 1):
         try:
             return api.get(path), None, ""
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 return None, GONE, "material not found"
+            if exc.code in _FATAL_HTTP:
+                return None, GET_FATAL, f"HTTP {exc.code} is not retryable: {exc}"
             last = exc
             if attempt < retries:
                 raw = (exc.headers or {}).get("Retry-After")
@@ -149,7 +245,7 @@ def fetch_doc(api, rid, *, retries=4, interval=1.0):
             last = exc
             if attempt < retries:
                 time.sleep(min(interval * (2 ** attempt), MAX_BACKOFF_S))
-    return None, GET_ERROR, f"GET failed after {retries + 1} attempts: {last}"
+    return None, GET_ERROR, f"GET failed after {max(retries, 0) + 1} attempts: {last}"
 
 
 def plan_one(api, row, *, retries=4, interval=1.0):
@@ -167,11 +263,15 @@ def plan_one(api, row, *, retries=4, interval=1.0):
         plan["outcome"], plan["detail"] = outcome, detail
         return plan
 
-    ok, guards = check_guards(doc, rid)
+    guard_outcome, guards = check_guards(doc, rid)
     plan["guards"] = guards
-    if not ok:
-        plan["outcome"] = GUARD_FAIL
-        plan["detail"] = f"identity/type guard failed: {guards}"
+    if guard_outcome is not None:
+        plan["outcome"] = guard_outcome
+        plan["detail"] = (
+            f"doc carries none of {list(_IDENTITY_KEYS)} -- the stored shape "
+            f"changed; re-verify the ingest path before writing: {guards}"
+            if guard_outcome is GUARD_MISSING
+            else f"identity/type guard failed: {guards}")
         return plan
 
     current = doc.get(CASE_NO_KEY)
@@ -196,18 +296,29 @@ def plan_one(api, row, *, retries=4, interval=1.0):
 
 def run(args):
     logger, run_id, paths = configure_run_logging(STAGE, verbose=args.verbose)
-    rows = json.loads(Path(args.map).read_text(encoding="utf-8"))
+    rows = validate_map(
+        json.loads(Path(args.map).read_text(encoding="utf-8")), f"map {args.map}")
     targets, skipped = select_targets(rows)
     if args.limit:
         targets = targets[: args.limit]
 
     logger.info("map=%d in_lake+recovered=%d skipped(not_in_lake=%d, "
-                "unrecoverable=%d) mode=%s", len(rows), len(targets),
-                skipped["not_in_lake"], skipped["unrecoverable"],
+                "unrecoverable=%d, lake_state_unknown=%d) mode=%s", len(rows),
+                len(targets), skipped["not_in_lake"], skipped["unrecoverable"],
+                skipped["lake_state_unknown"],
                 "APPLY" if not args.dry_run else "DRY-RUN")
+    if skipped["lake_state_unknown"]:
+        # Not the same claim as "absent" -- say so rather than let the summary
+        # imply the lake was checked and came back empty.
+        logger.warning(
+            "%d rows have NO lake verdict (blank => produced with --no-probe; "
+            "'error' => the probe was throttled). They are skipped, but that is "
+            "'unknown', not 'absent' -- re-run source_abhiyog with probing to "
+            "resolve them.", skipped["lake_state_unknown"])
 
     stats = {"skipped_not_in_lake": skipped["not_in_lake"],
-             "skipped_unrecoverable": skipped["unrecoverable"]}
+             "skipped_unrecoverable": skipped["unrecoverable"],
+             "skipped_lake_state_unknown": skipped["lake_state_unknown"]}
     if not targets:
         # Build no client and demand no credentials for a no-op run.
         logger.info("no writable targets; nothing to do")
@@ -219,6 +330,7 @@ def run(args):
         bodies_path.parent.mkdir(parents=True, exist_ok=True)
         bodies_path.write_text("", encoding="utf-8")
 
+    consecutive_failures = 0
     for row in targets:
         plan = plan_one(api, row, retries=args.read_retries,
                         interval=args.read_interval)
@@ -245,6 +357,26 @@ def run(args):
         log_event(logger, paths["events"], run_id=run_id, stage=STAGE,
                   slug=f"ag/{plan['id']}", step="backfill",
                   status=plan["outcome"], detail=plan["detail"])
+
+        # Circuit breaker. A systemic fault -- expired token, missing NGM role,
+        # wrong host, API down -- fails identically on every row. Without this
+        # the run marches through the whole map issuing doomed requests (one
+        # --write-interval pause each) and exits 0 with a full tally of
+        # failures, which a wrapper reads as success.
+        if plan["outcome"] in _FAILURE_OUTCOMES:
+            consecutive_failures += 1
+            if (args.max_consecutive_failures
+                    and consecutive_failures >= args.max_consecutive_failures):
+                stats["ABORTED_CONSECUTIVE_FAILURES"] = consecutive_failures
+                logger.error(
+                    "ABORT: %d consecutive failures (last: %s -- %s). This looks "
+                    "systemic, not per-record; fix it and re-run (the pass is "
+                    "idempotent -- already-correct rows come back "
+                    "SKIP_IDEMPOTENT).",
+                    consecutive_failures, plan["outcome"], plan["detail"])
+                break
+        else:
+            consecutive_failures = 0
 
     return stats
 
@@ -279,6 +411,10 @@ def build_parser():
     parser.add_argument("--read-interval", type=float, default=1.0,
                         help="Base backoff seconds between GET retries "
                              "(exponential, Retry-After honoured).")
+    parser.add_argument("--max-consecutive-failures", type=int, default=10,
+                        help="Abort after this many consecutive failed rows -- "
+                             "a streak means a systemic fault (bad token, wrong "
+                             "host), not odd records. 0 disables the breaker.")
     return parser
 
 
@@ -286,7 +422,10 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     stats = run(args)
     print_summary(stats, args.dry_run, "backfill ag caseNumber")
-    return 0
+    # Nonzero ONLY when the circuit breaker tripped. The sibling verbs always
+    # return 0, but a systemic abort is precisely the case a wrapper must not
+    # read as success -- per-record outcomes stay in the summary.
+    return 1 if stats.get("ABORTED_CONSECUTIVE_FAILURES") else 0
 
 
 if __name__ == "__main__":
