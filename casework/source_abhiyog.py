@@ -36,8 +36,6 @@ import csv
 import json
 import re
 import sys
-import time
-import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -59,7 +57,6 @@ AG_SEARCH_URL = (
     "https://ag.gov.np/search-abhiyogpatra"
     "?office_type=1&office_id=2&district_office_id=&year_id=&month_id="
 )
-SPECIAL_OFFICE_LEVEL = 1
 
 #: Devanagari digit -> ASCII. Without this a case number like ०८१-CR-००९४ keeps
 #: its Devanagari digits and never matches an ASCII case number.
@@ -133,6 +130,23 @@ def fiscal_year(record):
     return str(((record.get("month") or {}).get("year") or {}).get("name") or "")
 
 
+def validate_records(data, origin):
+    """The cohort must be a non-empty list of record objects.
+
+    Applied to a CACHED snapshot as well as a freshly fetched one: a truncated
+    or hand-edited cache is otherwise trusted blindly, and a JSON object slips
+    through to iterate as bare KEYS (``'str' object has no attribute 'get'``)
+    or silently yields an empty map.
+    """
+    if not isinstance(data, list) or not data:
+        raise SystemExit(
+            f"{origin}: expected a non-empty JSON list of AG records, got "
+            f"{type(data).__name__} (len={len(data) if hasattr(data, '__len__') else '?'})")
+    if not all(isinstance(r, dict) for r in data):
+        raise SystemExit(f"{origin}: every AG record must be a JSON object")
+    return data
+
+
 def fetch_snapshot(url=AG_SEARCH_URL, timeout=120):
     """GET the Special-office cohort from ag.gov.np. External source, not the
     control plane, so it does NOT go through CaseworkApi -- but it reuses the
@@ -142,41 +156,47 @@ def fetch_snapshot(url=AG_SEARCH_URL, timeout=120):
                       "X-Requested-With": "XMLHttpRequest"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         data = json.load(r)
-    if not isinstance(data, list) or not data:
-        raise SystemExit(f"unexpected AG search response: {type(data).__name__}")
-    return data
+    return validate_records(data, "ag.gov.np search response")
 
 
-def probe_lake(api, record_id, *, retries=5, interval=1.0):
-    """in-lake verdict for one record, throttled and 429-aware.
+_VERDICT_LABEL = {True: "true", False: "false", None: "error"}
 
-    The production materials API rate-limits under bursts, and a 429 reaches
-    :func:`probe_material` as an "uncertain" (None) verdict -- indistinguishable
-    from a real 5xx. Retrying on None with a growing pause turns a throttled
-    read back into a definite answer instead of a false "unknown".
+
+def build_rows(records, api=None, *, probe=True, interval=1.0, retries=4,
+               logger=None, events_path=None, run_id="", probe_cache=None):
+    """One output row per portal record (extraction + optional lake probe).
+
+    ``probe_cache`` (id -> verdict label) is read AND written, so a re-run over
+    the same cohort re-probes only what it has no answer for -- the probe is a
+    ~1s-apart sequential walk of the whole cohort, so an uncached re-run costs
+    minutes and needlessly re-pressures the rate limiter.
     """
-    ident = ag_ident(record_id)
-    for attempt in range(retries):
-        result = probe_material(api, AG_SOURCE, ident)
-        if result.verdict is not None:
-            return result.verdict
-        time.sleep(min(interval * (2 ** attempt), 30))
-    return None
-
-
-def build_rows(records, api=None, *, probe=True, interval=1.0, logger=None,
-               events_path=None, run_id=""):
-    """One output row per portal record (extraction + optional lake probe)."""
     rows = []
+    cache = probe_cache if probe_cache is not None else {}
     for record in records:
         rid = record.get("id")
+        if rid is None or not str(rid).strip():
+            # No id means no ident, and ag_ident(None) would cheerfully build
+            # `/material/ag/None`. Drop the record rather than emit a row that
+            # looks bindable.
+            if logger:
+                logger.warning("skipping AG record with no id: %r",
+                               {k: record.get(k) for k in ("file", "name")})
+            continue
         case_no, source, candidates, agree = extract_case_no(record)
         ambiguous = agree is False
         alts = sorted(v for v in set(candidates.values()) if v != case_no)
         in_lake = ""
         if probe and api is not None:
-            verdict = probe_lake(api, rid, interval=interval)
-            in_lake = {True: "true", False: "false", None: "error"}[verdict]
+            key = str(rid)
+            if key not in cache or cache[key] == "error":
+                # Opt in to backoff: this walks the whole cohort against
+                # production, which is exactly the burst that gets throttled.
+                verdict = probe_material(api, AG_SOURCE, ag_ident(rid),
+                                         retries=retries,
+                                         interval=interval).verdict
+                cache[key] = _VERDICT_LABEL[verdict]
+            in_lake = cache[key]
         rows.append({
             "id": rid,
             "material_iri": material_iri(AG_SOURCE, ag_ident(rid)),
@@ -206,10 +226,16 @@ COLUMNS = ("id", "material_iri", "case_number", "source", "ambiguous",
 
 
 def write_outputs(rows, out_prefix):
-    """Write `<prefix>.csv` and `<prefix>.json`; returns the two paths."""
+    """Write `<prefix>.csv` and `<prefix>.json`; returns the two paths.
+
+    The extension is APPENDED, not substituted: `Path.with_suffix` would turn
+    `--out map.v2` into `map.csv`, silently collapsing `map.v1` and `map.v2`
+    onto the same pair of files.
+    """
     prefix = Path(out_prefix)
     prefix.parent.mkdir(parents=True, exist_ok=True)
-    csv_path, json_path = prefix.with_suffix(".csv"), prefix.with_suffix(".json")
+    csv_path = prefix.with_name(prefix.name + ".csv")
+    json_path = prefix.with_name(prefix.name + ".json")
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(COLUMNS), extrasaction="ignore")
         writer.writeheader()
@@ -243,7 +269,9 @@ def run(args):
     logger, run_id, paths = configure_run_logging(STAGE, verbose=args.verbose)
 
     if args.snapshot and Path(args.snapshot).exists():
-        records = json.loads(Path(args.snapshot).read_text(encoding="utf-8"))
+        records = validate_records(
+            json.loads(Path(args.snapshot).read_text(encoding="utf-8")),
+            f"cached snapshot {args.snapshot}")
         logger.info("snapshot: %d records from %s", len(records), args.snapshot)
     else:
         records = fetch_snapshot()
@@ -255,10 +283,28 @@ def run(args):
     if args.limit:
         records = records[: args.limit]
 
+    cache_path = Path(args.probe_cache) if args.probe_cache else None
+    probe_cache = {}
+    if cache_path and cache_path.exists() and not args.refresh_probes:
+        probe_cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        logger.info("probe cache: %d cached verdicts from %s",
+                    len(probe_cache), cache_path)
+
     api = None if args.no_probe else _build_api(args)
-    rows = build_rows(records, api, probe=not args.no_probe,
-                      interval=args.probe_interval, logger=logger,
-                      events_path=paths["events"], run_id=run_id)
+    try:
+        rows = build_rows(records, api, probe=not args.no_probe,
+                          interval=args.probe_interval,
+                          retries=args.probe_retries, logger=logger,
+                          events_path=paths["events"], run_id=run_id,
+                          probe_cache=probe_cache)
+    finally:
+        # Persist whatever was learned even if the walk died part-way, so an
+        # interrupted probe run does not have to start from zero.
+        if cache_path and probe_cache:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(json.dumps(probe_cache, indent=1),
+                                  encoding="utf-8")
+
     csv_path, json_path = write_outputs(rows, args.out)
     stats = summarise(rows)
     logger.info("wrote %s and %s", csv_path, json_path)
@@ -278,16 +324,29 @@ def build_parser():
                         help="Skip the lake existence probe (offline; leaves "
                              "in_lake blank).")
     parser.add_argument("--probe-interval", type=float, default=1.0,
-                        help="Base seconds between lake probes; backs off "
-                             "exponentially on a throttled/uncertain read.")
+                        help="Base backoff seconds for a throttled/uncertain "
+                             "lake probe (exponential, Retry-After honoured).")
+    parser.add_argument("--probe-retries", type=int, default=4,
+                        help="Retries for a throttled/uncertain lake probe; "
+                             "0 for a single shot.")
+    parser.add_argument("--probe-cache", default="",
+                        help="JSON path caching id -> in-lake verdict, so a "
+                             "re-run only probes what it lacks an answer for.")
+    parser.add_argument("--refresh-probes", action="store_true",
+                        help="Ignore an existing --probe-cache and re-probe.")
     return parser
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    if not args.dry_run:
+        # add_common_args gives every verb --apply; this one has no write path,
+        # so say so rather than print a misleading "DRY RUN" and move on.
+        print("note: --apply has no effect on source_abhiyog; it is read-only "
+              "and only produces the map that casework.backfill_ag_caseno "
+              "consumes.", file=sys.stderr)
     stats, _ = run(args)
-    # Always read-only: dry_run=True regardless of --apply, which this verb
-    # does not honour (it has no write path at all).
+    # Always read-only: dry_run=True regardless of --apply.
     print_summary(stats, True, "source abhiyog")
     return 0
 

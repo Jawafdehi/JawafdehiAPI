@@ -36,6 +36,7 @@ import copy
 import json
 import sys
 import time
+import urllib.error
 from pathlib import Path
 
 from casework.common.api import CaseworkApi
@@ -43,13 +44,15 @@ from casework.common.cli import (
     add_common_args, basic_auth_from_env, configure_run_logging, log_event,
     print_summary,
 )
-from casework.common.materials import ag_ident
+from casework.common.materials import ag_ident, material_path
 
 STAGE = "backfill_ag_caseno"
 AG_SOURCE = "ag"
 MATERIAL_TYPE = "charge_sheet"
 EXPECTED_SOURCE_TYPE = "AG_ABHIYOG_PATRA"
 SPECIAL_OFFICE_LEVEL = 1
+
+MAX_BACKOFF_S = 30
 
 CASE_NO_KEY = "jawafdehi:caseNumber"
 SOURCE_KEY = "jawafdehi:caseNumberSource"
@@ -118,7 +121,38 @@ def merge_case_no(doc, row):
     return merged, added
 
 
-def plan_one(api, row):
+def fetch_doc(api, rid, *, retries=4, interval=1.0):
+    """GET one material, retrying a throttled/transient read.
+
+    Returns ``(doc, outcome, detail)`` with ``doc=None`` on failure. The
+    production materials API rate-limits under bursts: a straight walk of the
+    map fires one GET per material back-to-back and a large share come back
+    429, which -- treated as a plain error -- would silently demote those
+    materials to GET_ERROR and drop them from the backfill. A definitive 404
+    is NOT retried: that material is genuinely gone.
+    """
+    path = material_path(AG_SOURCE, ag_ident(rid))
+    last = None
+    for attempt in range(retries + 1):
+        try:
+            return api.get(path), None, ""
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return None, GONE, "material not found"
+            last = exc
+            if attempt < retries:
+                raw = (exc.headers or {}).get("Retry-After")
+                wait = (float(raw) if raw and str(raw).isdigit()
+                        else min(interval * (2 ** attempt), MAX_BACKOFF_S))
+                time.sleep(min(wait, MAX_BACKOFF_S))
+        except Exception as exc:  # noqa: BLE001 - transport errors are retryable
+            last = exc
+            if attempt < retries:
+                time.sleep(min(interval * (2 ** attempt), MAX_BACKOFF_S))
+    return None, GET_ERROR, f"GET failed after {retries + 1} attempts: {last}"
+
+
+def plan_one(api, row, *, retries=4, interval=1.0):
     """GET -> guard -> merge for one row. Read-only; performs no write."""
     rid = row["id"]
     plan = {"id": rid, "iri": row["material_iri"],
@@ -128,12 +162,9 @@ def plan_one(api, row):
             "outcome": None, "guards": {}, "current_case_number": None,
             "added_keys": [], "detail": "", "merged": None}
 
-    try:
-        doc = api.get(f"/materials/{AG_SOURCE}/{ag_ident(rid)}/")
-    except Exception as exc:  # noqa: BLE001 - transport/HTTP both mean "no plan"
-        code = getattr(exc, "code", None)
-        plan["outcome"] = GONE if code == 404 else GET_ERROR
-        plan["detail"] = f"GET failed: {exc}"
+    doc, outcome, detail = fetch_doc(api, rid, retries=retries, interval=interval)
+    if doc is None:
+        plan["outcome"], plan["detail"] = outcome, detail
         return plan
 
     ok, guards = check_guards(doc, rid)
@@ -175,15 +206,22 @@ def run(args):
                 skipped["not_in_lake"], skipped["unrecoverable"],
                 "APPLY" if not args.dry_run else "DRY-RUN")
 
+    stats = {"skipped_not_in_lake": skipped["not_in_lake"],
+             "skipped_unrecoverable": skipped["unrecoverable"]}
+    if not targets:
+        # Build no client and demand no credentials for a no-op run.
+        logger.info("no writable targets; nothing to do")
+        return stats
+
     api = _build_api(args)
-    stats = {}
     bodies_path = Path(args.put_bodies) if args.put_bodies else None
     if bodies_path:
         bodies_path.parent.mkdir(parents=True, exist_ok=True)
         bodies_path.write_text("", encoding="utf-8")
 
     for row in targets:
-        plan = plan_one(api, row)
+        plan = plan_one(api, row, retries=args.read_retries,
+                        interval=args.read_interval)
 
         if plan["outcome"] == WOULD_APPLY:
             body = {"material_type": MATERIAL_TYPE, "material": plan["merged"]}
@@ -208,8 +246,6 @@ def run(args):
                   slug=f"ag/{plan['id']}", step="backfill",
                   status=plan["outcome"], detail=plan["detail"])
 
-    stats["skipped_not_in_lake"] = skipped["not_in_lake"]
-    stats["skipped_unrecoverable"] = skipped["unrecoverable"]
     return stats
 
 
@@ -236,6 +272,13 @@ def build_parser():
     parser.add_argument("--write-interval", type=float, default=0.5,
                         help="Seconds to pause after each applied write; the "
                              "materials API rate-limits under bursts.")
+    parser.add_argument("--read-retries", type=int, default=4,
+                        help="Retries for a throttled/transient material GET "
+                             "(429s are common on a long run; a 404 is never "
+                             "retried).")
+    parser.add_argument("--read-interval", type=float, default=1.0,
+                        help="Base backoff seconds between GET retries "
+                             "(exponential, Retry-After honoured).")
     return parser
 
 

@@ -2,9 +2,11 @@
 import json
 import urllib.error
 
+import pytest
+
 from casework.source_abhiyog import (
     build_rows, canonical_case_no, extract_case_no, fiscal_year, summarise,
-    write_outputs,
+    validate_records, write_outputs,
 )
 
 
@@ -125,6 +127,29 @@ def test_uncertain_probe_reports_error_not_a_false_absent():
     assert rows[0]["in_lake"] == "error"
 
 
+def test_record_without_id_is_dropped_not_emitted_as_ag_none():
+    # ag_ident(None) would build `/material/ag/None`; such a row must not exist.
+    rows = build_rows([record(id=None), record(id=5)], api=None, probe=False)
+    assert [r["id"] for r in rows] == [5]
+
+
+def test_probe_cache_is_reused_and_not_reprobed():
+    api = FakeApi(exists=["1"])
+    cache = {}
+    build_rows([record(id=1)], api, interval=0, probe_cache=cache)
+    assert cache == {"1": "true"} and len(api.calls) == 1
+    build_rows([record(id=1)], api, interval=0, probe_cache=cache)
+    assert len(api.calls) == 1  # second run served from cache
+
+
+def test_probe_cache_retries_a_previously_errored_verdict():
+    # An "error" is not an answer -- a re-run must try it again.
+    api = FakeApi(exists=["1"])
+    cache = {"1": "error"}
+    build_rows([record(id=1)], api, interval=0, probe_cache=cache)
+    assert cache["1"] == "true"
+
+
 def test_ambiguous_row_carries_the_alternate():
     rows = build_rows([record(file="080-CR-0009_1.pdf",
                               description="(०८१-CR-०००९)")],
@@ -136,6 +161,24 @@ def test_ambiguous_row_carries_the_alternate():
 # --------------------------------------------------------------------------
 # outputs
 # --------------------------------------------------------------------------
+
+def test_validate_records_rejects_a_corrupt_cache():
+    # A truncated/hand-edited snapshot must fail loudly, not iterate as keys.
+    for bad in ({}, [], {"a": {"id": 1}}, [1, 2], None):
+        with pytest.raises(SystemExit):
+            validate_records(bad, "cache")
+
+
+def test_validate_records_accepts_a_real_cohort():
+    assert validate_records([record()], "cache") == [record()]
+
+
+def test_write_outputs_appends_rather_than_replacing_a_dotted_suffix(tmp_path):
+    # `Path.with_suffix` would collapse map.v2 -> map.csv, clobbering map.v1.
+    csv_path, json_path = write_outputs([], tmp_path / "map.v2")
+    assert csv_path.name == "map.v2.csv"
+    assert json_path.name == "map.v2.json"
+
 
 def test_write_outputs_round_trips_devanagari(tmp_path):
     rows = build_rows([record()], api=None, probe=False)

@@ -54,6 +54,23 @@ class FakeApi:
         return {}
 
 
+class FlakyApi:
+    """Fails the first `fail_times` GETs with `code`, then serves `doc`.
+
+    Models the production materials API, which 429s under a sustained walk.
+    """
+
+    def __init__(self, doc, fail_times, code):
+        self._doc, self._fail_times, self._code = doc, fail_times, code
+        self.attempts = 0
+
+    def get(self, path, timeout=60):
+        self.attempts += 1
+        if self.attempts <= self._fail_times:
+            raise urllib.error.HTTPError(path, self._code, "boom", {}, None)
+        return self._doc
+
+
 # --------------------------------------------------------------------------
 # selection
 # --------------------------------------------------------------------------
@@ -143,9 +160,25 @@ def test_plan_guard_fail_produces_no_merge():
 
 
 def test_plan_reports_gone_and_transport_error_distinctly():
-    assert plan_one(FakeApi({}), row())["outcome"] == GONE
+    # A 404 is definitive and must NOT be retried; a transport error is
+    # retryable and only becomes GET_ERROR once the retries are spent.
+    assert plan_one(FakeApi({}), row(), retries=0)["outcome"] == GONE
     api = FakeApi({"83475": doc()}, error=urllib.error.URLError("boom"))
-    assert plan_one(api, row())["outcome"] == GET_ERROR
+    assert plan_one(api, row(), retries=0, interval=0)["outcome"] == GET_ERROR
+
+
+def test_throttled_get_is_retried_then_succeeds():
+    # 429 twice, then the real document -- must end in a plan, not GET_ERROR.
+    api = FlakyApi(doc(), fail_times=2, code=429)
+    plan = plan_one(api, row(), retries=3, interval=0)
+    assert plan["outcome"] == WOULD_APPLY
+    assert api.attempts == 3
+
+
+def test_404_is_not_retried():
+    api = FlakyApi(doc(), fail_times=99, code=404)
+    assert plan_one(api, row(), retries=3, interval=0)["outcome"] == GONE
+    assert api.attempts == 1  # definitive: one shot only
 
 
 # --------------------------------------------------------------------------
@@ -155,7 +188,9 @@ def test_plan_reports_gone_and_transport_error_distinctly():
 def _args(map_path, **over):
     base = dict(map=str(map_path), dry_run=True, limit=0, verbose=False,
                 put_bodies="", write_interval=0, api_token="tok",
-                api_base_url="http://127.0.0.1:48010", allow_remote_writes=False)
+                api_base_url="http://127.0.0.1:48010", allow_remote_writes=False,
+                # no real backoff in tests
+                read_retries=0, read_interval=0)
     base.update(over)
     return types.SimpleNamespace(**base)
 
