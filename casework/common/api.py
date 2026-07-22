@@ -217,6 +217,35 @@ class CaseworkApi:
             raw = r.read().decode()
             return json.loads(raw) if raw.strip() else {}
 
+    def put_material(self, source, ident, doc, material_type=None, timeout=60):
+        """``PUT /materials/<source>/<ident>/`` -- replace a material's JSON-LD.
+
+        The materials endpoint has NO partial-update verb: ``PATCH`` there sets
+        ONLY ``visibility_policy`` (``materials/views.py::_patch_visibility_policy``),
+        and this ``PUT`` funnels into ``upsert_single_source_material``, which
+        writes the ``data`` column WHOLESALE. So ``doc`` MUST be the COMPLETE
+        document -- a partial doc silently destroys ``text``/``associatedMedia``.
+        Callers therefore do a read-modify-write (GET, merge, PUT).
+
+        ``visibility_policy`` is deliberately NOT sent: the server applies an
+        explicit policy on update but leaves it untouched when omitted, so
+        omitting preserves a caseworker's manual policy across re-upsert.
+
+        ``material_type`` may be omitted -- the server infers it from the doc's
+        ``additionalType``/``@type``. Writes go through ``_request``, so the
+        non-loopback write-guard applies exactly as it does for case PATCHes.
+        """
+        url = self.base_url + f"/materials/{source}/{urllib.parse.quote(ident, safe='')}/"
+        body_doc = {"material": doc}
+        if material_type:
+            body_doc["material_type"] = material_type
+        body = json.dumps(body_doc, ensure_ascii=False).encode("utf-8")
+        with self._request("PUT", url, data=body,
+                           headers=self._headers("application/json"),
+                           timeout=timeout) as r:
+            raw = r.read().decode()
+            return json.loads(raw) if raw.strip() else {}
+
     def patch_field(self, slug, field, value, timeout=60, if_match=None):
         return self._patch(slug, build_replace_patch(field, value), timeout, if_match=if_match)
 

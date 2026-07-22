@@ -41,6 +41,19 @@ def court_order_ident(court, case_no):
     return f"{court}.{case_no.strip().lower()}"
 
 
+def ag_ident(record_id):
+    """AG अभियोगपत्र (indictment): the ident IS the AG portal record id.
+
+    `materials/sourcing/ag/shaper.py` deliberately keys the IRI on `record_id`
+    and NOT on the case number: ~969 case numbers repeat across AG offices, so
+    keying on the case number would collide distinct indictments onto one `@id`
+    and silently overwrite them on upsert. That choice is what makes case-number
+    recovery a DIRECT id join -- `/material/ag/<record_id>` round-trips straight
+    back to the portal record it was scraped from (no sha256 content-join).
+    """
+    return str(record_id).strip()
+
+
 @dataclass
 class ProbeResult:
     """Outcome of one existence probe, with enough detail to log an audit line.
