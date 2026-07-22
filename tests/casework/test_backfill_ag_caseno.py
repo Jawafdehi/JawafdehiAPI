@@ -1,5 +1,6 @@
 # tests/casework/test_backfill_ag_caseno.py
 import json
+import os
 import types
 import urllib.error
 
@@ -272,7 +273,8 @@ def _args(map_path, **over):
                 put_bodies="", write_interval=0, api_token="tok",
                 api_base_url="http://127.0.0.1:48010", allow_remote_writes=False,
                 # no real backoff in tests
-                read_retries=0, read_interval=0, max_consecutive_failures=10)
+                read_retries=0, read_interval=0, max_consecutive_failures=10,
+                lock_file="")
     base.update(over)
     return types.SimpleNamespace(**base)
 
@@ -378,3 +380,60 @@ def test_a_systemic_apply_failure_aborts_the_write_pass(tmp_path, monkeypatch):
                       max_consecutive_failures=3))
     assert stats["ABORTED_CONSECUTIVE_FAILURES"] == 3
     assert stats[APPLY_FAILED] == 3  # not 20 doomed writes
+
+
+# --------------------------------------------------------------------------
+# single-instance lock -- this verb must not race itself
+#
+# The materials endpoint has no ETag/If-Match, so two overlapping
+# GET->merge->PUT passes silently lose each other's writes. This already bit
+# once: three stray concurrent processes tripled the request rate during the
+# recovery dry-run and produced a spray of 429s that read as lake errors.
+# --------------------------------------------------------------------------
+
+def test_a_second_instance_refuses_to_start(tmp_path):
+    from casework.backfill_ag_caseno import single_instance
+    lock = tmp_path / "backfill.lock"
+    with single_instance(lock):
+        assert lock.exists()
+        with pytest.raises(SystemExit, match="holds"):
+            with single_instance(lock):
+                raise AssertionError("the second instance must not get in")
+
+
+def test_the_lock_is_released_even_when_the_run_raises(tmp_path):
+    from casework.backfill_ag_caseno import single_instance
+    lock = tmp_path / "backfill.lock"
+    with pytest.raises(ValueError):
+        with single_instance(lock):
+            raise ValueError("boom")
+    assert not lock.exists()          # a crashed run must not wedge the next one
+    with single_instance(lock):       # and the next one starts cleanly
+        assert lock.exists()
+
+
+def test_a_stale_lock_from_a_dead_process_is_reclaimed(tmp_path):
+    from casework.backfill_ag_caseno import single_instance
+    lock = tmp_path / "backfill.lock"
+    # PID 2^22 is above Linux's default pid_max: nothing owns it.
+    lock.write_text("4194304", encoding="utf-8")
+    with single_instance(lock):
+        assert lock.read_text(encoding="utf-8") == str(os.getpid())
+
+
+def test_an_unparseable_lock_is_treated_as_stale(tmp_path):
+    # A truncated/garbage lock file must not wedge the verb forever.
+    from casework.backfill_ag_caseno import single_instance
+    lock = tmp_path / "backfill.lock"
+    lock.write_text("not-a-pid", encoding="utf-8")
+    with single_instance(lock):
+        assert lock.read_text(encoding="utf-8") == str(os.getpid())
+
+
+def test_run_takes_the_lock_and_releases_it(tmp_path, monkeypatch):
+    api = FakeApi({"83475": doc()})
+    monkeypatch.setattr("casework.backfill_ag_caseno._build_api", lambda a: api)
+    lock = tmp_path / "run.lock"
+    stats = run(_args(_write_map(tmp_path, [row()]), lock_file=str(lock)))
+    assert stats[WOULD_APPLY] == 1
+    assert not lock.exists()

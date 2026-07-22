@@ -20,8 +20,17 @@ is added in memory, and the whole document goes back.
 
 Concurrency caveat: unlike the case endpoint, the materials endpoint exposes no
 ETag/If-Match, so this read-modify-write cannot be made conditional. A
-concurrent writer's change between our GET and PUT would be lost. Keep this a
-single serialized writer and do not run it alongside an AG re-ingest.
+concurrent writer's change between our GET and PUT would be lost. Two defences,
+one enforced and one not:
+
+  * against ITSELF -- enforced. An advisory single-instance lock (``--lock-file``,
+    see :func:`single_instance`) refuses to start while another run holds it.
+    This is not hypothetical: three stray concurrent processes from earlier
+    launches tripled the request rate during the recovery dry-run and produced a
+    persistent spray of 429s that read as lake errors until they were found.
+  * against an AG RE-INGEST -- not enforced. That writer is a different process
+    on a different schedule, so this remains an operational constraint: do not
+    run the two together.
 
 Dry-run is the DEFAULT (logs the exact PUT it WOULD send, writes nothing).
 ``--apply`` opts into writing, and writing to any non-loopback host
@@ -32,8 +41,10 @@ Usage:
     uv run python -m casework.backfill_ag_caseno --map ... --apply --allow-remote-writes
 """
 import argparse
+import contextlib
 import copy
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -42,7 +53,7 @@ from pathlib import Path
 from casework.common.api import CaseworkApi
 from casework.common.cli import (
     add_common_args, basic_auth_from_env, configure_run_logging, log_event,
-    print_summary,
+    nonneg_float, nonneg_int, print_summary,
 )
 from casework.common.materials import ag_ident, material_path
 
@@ -69,6 +80,13 @@ CHARGE_SHEET_ADDITIONAL_TYPE = "jawafdehi:ChargeSheet"
 _IDENTITY_KEYS = ("jawafdehi:recordId", "jawafdehi:officeLevel")
 
 MAX_BACKOFF_S = 30
+
+#: Default advisory lock. Lives beside the run logs so it shares their lifetime
+#: and is obvious to an operator looking for why a run refused to start.
+DEFAULT_LOCK_FILE = Path(
+    os.environ.get("CASEWORK_RUN_LOG_DIR")
+    or Path(__file__).resolve().parents[1] / "work" / "enricher-runs"
+) / f"{STAGE}.lock"
 
 #: HTTP codes that will never succeed on a retry: the request or the caller's
 #: credentials are wrong, not the server's mood. Retrying them burns the entire
@@ -100,6 +118,76 @@ _FAILURE_OUTCOMES = frozenset({GET_ERROR, GET_FATAL, APPLY_FAILED})
 
 #: Required on every map row; the writer refuses a map that lacks them.
 _REQUIRED_ROW_KEYS = ("id", "material_iri", "case_number", "source", "in_lake")
+
+
+@contextlib.contextmanager
+def single_instance(lock_path):
+    """Refuse to start while another backfill run holds ``lock_path``.
+
+    The GET->merge->PUT here cannot be made conditional (the materials endpoint
+    exposes no ETag/If-Match), so overlapping runs can lose each other's writes.
+    That constraint was documented but enforced only by convention -- and it has
+    already bitten once: three stray concurrent processes from earlier launches
+    tripled the request rate during the recovery dry-run and produced a
+    persistent spray of 429s that read as lake errors until the strays were
+    found and killed.
+
+    Deliberately advisory and dependency-free: an ``O_EXCL`` create carrying our
+    PID. A lock whose owner is gone is STALE and gets reclaimed (a killed run
+    must not wedge the next one), and the lock is always released, including on
+    an exception. This does not coordinate with the AG re-ingest -- that remains
+    a scheduling constraint -- it only stops this verb racing itself.
+    """
+    path = Path(lock_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    while True:
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            holder = _lock_holder(path)
+            if holder is not None and _pid_alive(holder):
+                raise SystemExit(
+                    f"another {STAGE} run (pid {holder}) holds {path}. This verb "
+                    "must not race itself: the materials endpoint has no "
+                    "If-Match, so concurrent read-modify-writes lose updates. "
+                    "Wait for it, or pass --lock-file to run against a different "
+                    "target.")
+            # Stale: the owner died without releasing. Reclaim it.
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass  # someone else reclaimed it first; retry the create
+    try:
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        yield path
+    finally:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _lock_holder(path):
+    """The PID recorded in a lock file, or None if it is unreadable/garbage."""
+    try:
+        return int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _pid_alive(pid):
+    """True if `pid` is a live process. Signal 0 performs the permission and
+    existence checks without delivering anything; EPERM means it exists but is
+    owned by someone else, which still counts as alive."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def validate_map(rows, origin):
@@ -210,6 +298,17 @@ def alt_case_numbers(row):
     return [a for a in (row.get("alt_case_number") or "").split(";") if a.strip()]
 
 
+def _backoff_s(interval, attempt):
+    """Exponential backoff, capped and clamped to >= 0.
+
+    ``time.sleep()`` raises ``ValueError`` on a negative argument, so a negative
+    ``--read-interval`` would abort the walk with a traceback partway through
+    rather than degrade. The flag is also rejected at the boundary
+    (``cli.nonneg_float``); this covers a direct caller.
+    """
+    return min(max(interval, 0) * (2 ** attempt), MAX_BACKOFF_S)
+
+
 def fetch_doc(api, rid, *, retries=4, interval=1.0):
     """GET one material, retrying a throttled/transient read.
 
@@ -239,12 +338,12 @@ def fetch_doc(api, rid, *, retries=4, interval=1.0):
             if attempt < retries:
                 raw = (exc.headers or {}).get("Retry-After")
                 wait = (float(raw) if raw and str(raw).isdigit()
-                        else min(interval * (2 ** attempt), MAX_BACKOFF_S))
-                time.sleep(min(wait, MAX_BACKOFF_S))
+                        else _backoff_s(interval, attempt))
+                time.sleep(min(max(wait, 0), MAX_BACKOFF_S))
         except Exception as exc:  # noqa: BLE001 - transport errors are retryable
             last = exc
             if attempt < retries:
-                time.sleep(min(interval * (2 ** attempt), MAX_BACKOFF_S))
+                time.sleep(_backoff_s(interval, attempt))
     return None, GET_ERROR, f"GET failed after {max(retries, 0) + 1} attempts: {last}"
 
 
@@ -295,6 +394,13 @@ def plan_one(api, row, *, retries=4, interval=1.0):
 
 
 def run(args):
+    lock = (single_instance(args.lock_file) if getattr(args, "lock_file", "")
+            else contextlib.nullcontext())
+    with lock:
+        return _run(args)
+
+
+def _run(args):
     logger, run_id, paths = configure_run_logging(STAGE, verbose=args.verbose)
     rows = validate_map(
         json.loads(Path(args.map).read_text(encoding="utf-8")), f"map {args.map}")
@@ -401,20 +507,25 @@ def build_parser():
     parser.add_argument("--put-bodies", default="",
                         help="Optional path; append the exact PUT body that "
                              "would be (or was) sent, one JSON per line.")
-    parser.add_argument("--write-interval", type=float, default=0.5,
+    parser.add_argument("--write-interval", type=nonneg_float, default=0.5,
                         help="Seconds to pause after each applied write; the "
                              "materials API rate-limits under bursts.")
-    parser.add_argument("--read-retries", type=int, default=4,
+    parser.add_argument("--read-retries", type=nonneg_int, default=4,
                         help="Retries for a throttled/transient material GET "
                              "(429s are common on a long run; a 404 is never "
                              "retried).")
-    parser.add_argument("--read-interval", type=float, default=1.0,
+    parser.add_argument("--read-interval", type=nonneg_float, default=1.0,
                         help="Base backoff seconds between GET retries "
                              "(exponential, Retry-After honoured).")
-    parser.add_argument("--max-consecutive-failures", type=int, default=10,
+    parser.add_argument("--max-consecutive-failures", type=nonneg_int, default=10,
                         help="Abort after this many consecutive failed rows -- "
                              "a streak means a systemic fault (bad token, wrong "
                              "host), not odd records. 0 disables the breaker.")
+    parser.add_argument("--lock-file", default=str(DEFAULT_LOCK_FILE),
+                        help="Advisory single-instance lock. This verb must not "
+                             "race itself -- the materials endpoint has no "
+                             "If-Match, so overlapping read-modify-writes lose "
+                             "updates. Empty string disables it.")
     return parser
 
 

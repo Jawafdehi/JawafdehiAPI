@@ -42,7 +42,7 @@ from pathlib import Path
 from casework.common.api import BROWSER_UA, CaseworkApi
 from casework.common.cli import (
     add_common_args, basic_auth_from_env, configure_run_logging, log_event,
-    print_summary,
+    nonneg_float, nonneg_int, print_summary,
 )
 from casework.common.materials import ag_ident, material_iri, probe_material
 
@@ -151,6 +151,27 @@ def validate_records(data, origin):
             f"{type(data).__name__} (len={len(data) if hasattr(data, '__len__') else '?'})")
     if not all(isinstance(r, dict) for r in data):
         raise SystemExit(f"{origin}: every AG record must be a JSON object")
+    return data
+
+
+def validate_probe_cache(data, origin):
+    """The probe cache must be a JSON object of ``id -> verdict label``.
+
+    Same reasoning as :func:`validate_records`, applied to the other file this
+    CLI reads back. ``build_rows`` ASSIGNS into the cache (``cache[key] = ...``),
+    so a cache corrupted into a JSON list raises ``TypeError: list indices must
+    be integers`` partway through the cohort walk -- after the probes already
+    spent, and with nothing written.
+    """
+    if not isinstance(data, dict):
+        raise SystemExit(
+            f"probe cache {origin}: expected a JSON object of "
+            f"id -> verdict, got {type(data).__name__}")
+    bad = [k for k, v in data.items() if v not in _VERDICT_LABEL.values()]
+    if bad:
+        raise SystemExit(
+            f"probe cache {origin}: {len(bad)} entries have a verdict outside "
+            f"{sorted(_VERDICT_LABEL.values())} (e.g. {bad[:3]})")
     return data
 
 
@@ -293,7 +314,8 @@ def run(args):
     cache_path = Path(args.probe_cache) if args.probe_cache else None
     probe_cache = {}
     if cache_path and cache_path.exists() and not args.refresh_probes:
-        probe_cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        probe_cache = validate_probe_cache(
+            json.loads(cache_path.read_text(encoding="utf-8")), cache_path)
         logger.info("probe cache: %d cached verdicts from %s",
                     len(probe_cache), cache_path)
 
@@ -330,10 +352,10 @@ def build_parser():
     parser.add_argument("--no-probe", action="store_true",
                         help="Skip the lake existence probe (offline; leaves "
                              "in_lake blank).")
-    parser.add_argument("--probe-interval", type=float, default=1.0,
+    parser.add_argument("--probe-interval", type=nonneg_float, default=1.0,
                         help="Base backoff seconds for a throttled/uncertain "
                              "lake probe (exponential, Retry-After honoured).")
-    parser.add_argument("--probe-retries", type=int, default=4,
+    parser.add_argument("--probe-retries", type=nonneg_int, default=4,
                         help="Retries for a throttled/uncertain lake probe; "
                              "0 for a single shot.")
     parser.add_argument("--probe-cache", default="",

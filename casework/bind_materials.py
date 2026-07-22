@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from casework.common.api import CaseworkApi
 from casework.common.cli import (
     _utc_iso_now, add_common_args, basic_auth_from_env, configure_run_logging,
-    log_run_footer, log_run_header, print_summary,
+    log_run_footer, log_run_header, nonneg_float, nonneg_int, print_summary,
 )
 from casework.common.materials import material_iri, probe_material
 
@@ -454,12 +454,12 @@ def build_parser():
                         help="CSV with a `slug` column and material-IRI columns.")
     parser.add_argument("--report", default="",
                         help="Optional path to write a JSON run report.")
-    parser.add_argument("--probe-retries", type=int, default=4,
+    parser.add_argument("--probe-retries", type=nonneg_int, default=4,
                         help="Retries for a throttled/uncertain material probe "
                              "(the API 429s under a sustained walk, and an "
                              "uncertain probe ABORTS the whole case). 0 for a "
                              "single shot, the pre-2026-07 behaviour.")
-    parser.add_argument("--probe-interval", type=float, default=1.0,
+    parser.add_argument("--probe-interval", type=nonneg_float, default=1.0,
                         help="Base backoff seconds between probe retries "
                              "(exponential, Retry-After honoured).")
     return parser

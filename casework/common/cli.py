@@ -1,5 +1,6 @@
 """Shared argparse, logging and reporting for casework enricher CLIs."""
 
+import argparse
 import json
 import logging
 import os
@@ -29,6 +30,33 @@ def basic_auth_from_env():
             "JAWAFDEHI_API_TOKEN) for Bearer auth, or set CASEWORK_API_USER + "
             "CASEWORK_API_PASSWORD for local DEV_AUTH Basic auth.")
     return user, password
+
+
+def nonneg_int(raw):
+    """argparse type for a count that cannot be negative.
+
+    A bare ``type=int`` accepts ``--probe-retries -1``, and a negative count
+    silently means something different from what the flag says: it empties the
+    ``range(retries + 1)`` that drives every retry loop, so nothing is attempted
+    at all. Reject it at the boundary rather than let each call site guess.
+    """
+    value = int(raw)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0, got {value}")
+    return value
+
+
+def nonneg_float(raw):
+    """argparse type for a duration that cannot be negative.
+
+    ``time.sleep()`` raises ``ValueError`` on a negative argument, so a negative
+    ``--probe-interval`` / ``--read-interval`` / ``--write-interval`` does not
+    "sleep less" -- it aborts the walk partway through with a traceback.
+    """
+    value = float(raw)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must be >= 0, got {value}")
+    return value
 
 
 def add_common_args(parser):

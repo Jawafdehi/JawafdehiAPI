@@ -143,10 +143,18 @@ def _probe_once(api, source, ident, path, timeout):
 
 
 def _backoff_s(retry_after, attempt, interval):
-    """Server-advertised Retry-After wins; else exponential, capped."""
+    """Server-advertised Retry-After wins; else exponential, capped.
+
+    Clamped to >= 0 for the same reason ``retries`` is clamped in
+    :func:`probe_material`: ``time.sleep()`` raises ``ValueError`` on a negative
+    argument, so a negative ``interval`` reaching here would abort the walk with
+    a traceback partway through rather than degrade. The CLIs also reject it at
+    the flag boundary (``cli.nonneg_float``); this is the library-level guard for
+    a direct caller.
+    """
     if retry_after is not None:
-        return min(retry_after, _MAX_BACKOFF_S)
-    return min(interval * (2 ** attempt), _MAX_BACKOFF_S)
+        return min(max(retry_after, 0), _MAX_BACKOFF_S)
+    return min(max(interval, 0) * (2 ** attempt), _MAX_BACKOFF_S)
 
 
 def material_exists(api, source, ident, timeout=45):

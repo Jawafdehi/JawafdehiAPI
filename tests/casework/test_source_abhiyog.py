@@ -226,3 +226,24 @@ def test_summarise_counts_each_bucket():
     assert stats["unrecoverable"] == 1
     assert stats["in_lake"] == 1
     assert stats["not_in_lake"] == 1
+
+
+def test_validate_probe_cache_rejects_a_corrupt_cache():
+    # build_rows ASSIGNS into the cache, so a list raises `list indices must be
+    # integers` partway through the walk -- after the probes are already spent.
+    from casework.source_abhiyog import validate_probe_cache
+    for bad in ([], ["1"], "true", 3):
+        with pytest.raises(SystemExit):
+            validate_probe_cache(bad, "cache.json")
+
+
+def test_validate_probe_cache_rejects_an_unknown_verdict_label():
+    from casework.source_abhiyog import validate_probe_cache
+    with pytest.raises(SystemExit, match="verdict"):
+        validate_probe_cache({"1": "maybe"}, "cache.json")
+
+
+def test_validate_probe_cache_accepts_every_real_verdict():
+    from casework.source_abhiyog import validate_probe_cache
+    cache = {"1": "true", "2": "false", "3": "error"}
+    assert validate_probe_cache(cache, "cache.json") == cache
