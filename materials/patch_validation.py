@@ -61,6 +61,20 @@ is_blocked_patch_path = blocked_path_predicate(PATCH_BLOCKED_PATH_PREFIXES)
 #: AG backfill sends exactly one op per record.
 MAX_PATCH_OPS = 1000
 
+#: Max declared ``Content-Length`` of a PATCH request body.
+#:
+#: The guards below both run AFTER DRF's ``JSONParser`` has read and parsed the
+#: whole stream, so neither bounds the memory the parse itself costs: one op
+#: carrying a 200 MB string is fully materialized before the document ceiling
+#: rejects it. Checking ``Content-Length`` is the only guard that can refuse a
+#: body while it is still on the wire.
+#:
+#: Sized as the document ceiling plus 1 MB of headroom, so the guard can never
+#: refuse a patch that would have produced a legal document: the largest
+#: legitimate body is a single op replacing the whole doc, i.e. the document
+#: plus a JSON-Patch envelope of a few dozen bytes.
+MAX_PATCH_BODY_BYTES = 5 * 1024 * 1024 + 1024 * 1024
+
 #: Max serialized size of the stored JSON-LD document AFTER a patch is applied.
 #:
 #: A Material's ``data`` is read on every detail hit, fed wholesale to the

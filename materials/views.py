@@ -48,6 +48,7 @@ from . import provenance
 from .models import Material, Policy
 from .patch_validation import (
     MAX_MATERIAL_DOC_BYTES,
+    MAX_PATCH_BODY_BYTES,
     MAX_PATCH_OPS,
     RESERVED_WRITE_KEYS,
     is_blocked_patch_path,
@@ -392,6 +393,36 @@ def _stored_etag(iri: str) -> str | None:
     return _version_token(row) if row is not None else None
 
 
+def _reject_oversized_body(request):
+    """413 a PATCH whose declared body exceeds :data:`MAX_PATCH_BODY_BYTES`.
+
+    Returns ``None`` when the request may proceed.
+
+    A missing or unparseable ``Content-Length`` is NOT treated as a rejection:
+    a chunked request legitimately has none, and refusing those would break a
+    valid client to defend against an attacker who can simply omit the header.
+    Such a body still meets every downstream guard (op count, and the
+    post-apply document ceiling), so the floor here is defence in depth over
+    those, not a replacement for them.
+    """
+    raw = request.META.get("CONTENT_LENGTH")
+    try:
+        declared = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if declared > MAX_PATCH_BODY_BYTES:
+        return Response(
+            {
+                "detail": (
+                    f"Patch body is {declared} bytes; the limit is "
+                    f"{MAX_PATCH_BODY_BYTES}."
+                )
+            },
+            status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+        )
+    return None
+
+
 def _read_patch_body(request):
     """Split a PATCH body into ``(raw_patch_ops, policy_body)``.
 
@@ -432,6 +463,15 @@ def _patch_material(request, iri: str) -> Response:
     denied = _require_ngm_role(request)
     if denied is not None:
         return denied
+
+    # Bound the body BEFORE reading it. Every other guard here runs downstream
+    # of DRF's JSONParser, which has already read and parsed the whole stream by
+    # the time ``request.data`` yields something to measure — measuring it then
+    # cannot un-spend the allocation, it only adds a second copy. Content-Length
+    # is the one check that can refuse the payload while it is still on the wire.
+    too_big = _reject_oversized_body(request)
+    if too_big is not None:
+        return too_big
 
     raw_ops, body = _read_patch_body(request)
     policy, error = _clean_policy(body)
