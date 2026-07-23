@@ -280,22 +280,36 @@ def test_retry_after_ignores_what_it_cannot_parse(raw):
     assert _retry_after_s(raw, now=_NOW) is None
 
 
+class _FixedDatetime(datetime):
+    """`datetime` whose `now()` is _NOW, so a date-form header is exact.
+
+    Reading the live clock here would make the assertion a tolerance band: the
+    header's `strftime` truncates sub-seconds, and any pause between building it
+    and parsing it eats into the remaining delay. A band is also a weaker
+    assertion -- it would still pass if the date were parsed slightly wrong.
+    """
+
+    @classmethod
+    def now(cls, tz=None):
+        return _NOW.astimezone(tz) if tz else _NOW
+
+
 def test_probe_material_honours_an_http_date_retry_after(monkeypatch):
     """End-to-end: the date must reach the sleep, still under the backoff cap."""
     from casework.common import materials as mod
 
-    when = (datetime.now(timezone.utc) + timedelta(seconds=12)).strftime(
-        "%a, %d %b %Y %H:%M:%S GMT")
+    when = (_NOW + timedelta(seconds=12)).strftime("%a, %d %b %Y %H:%M:%S GMT")
     err = urllib.error.HTTPError("u", 429, "slow down", {"Retry-After": when}, None)
     slept = []
+    monkeypatch.setattr(mod, "datetime", _FixedDatetime)
     monkeypatch.setattr(mod.time, "sleep", slept.append)
 
     pr = mod.probe_material(_StubApi(err), "ag", "1", retries=1, interval=1.0)
 
     assert pr.status == 429 and pr.verdict is None
-    # ~12s from the server, NOT the 1.0s local schedule it would have used
+    # Exactly the server's 12s, NOT the 1.0s local schedule it would have used
     # had the date been discarded.
-    assert len(slept) == 1 and 10 <= slept[0] <= 13, slept
+    assert slept == [12.0]
 
 
 def test_retry_after_stays_under_the_backoff_cap():
