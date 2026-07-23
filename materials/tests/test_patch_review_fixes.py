@@ -156,3 +156,60 @@ class TestPatchStillGoesThroughModelValidation:
             )
         assert resp.status_code == 200
         assert full_clean.called
+
+
+class TestWriteSizeIsBounded:
+    """A patch may not grow a row without limit.
+
+    `DATA_UPLOAD_MAX_MEMORY_SIZE` does NOT cover this path: DRF's JSONParser
+    reads the WSGI stream directly instead of going through `HttpRequest.body`,
+    where Django's check lives. Measured: a 3.6 MB body against a 2.5 MB limit
+    returned 200 and persisted. So the bound has to be explicit — this is the
+    one Material write path that had no ceiling, while the upload endpoint next
+    door is capped at `_MAX_UPLOAD_BYTES`.
+    """
+
+    def test_too_many_ops_is_413(self):
+        from materials.patch_validation import MAX_PATCH_OPS
+
+        mat = _store("rev-050")
+        ops = [
+            {"op": "add", "path": f"/k{i}", "value": i}
+            for i in range(MAX_PATCH_OPS + 1)
+        ]
+        resp = _client("cw-ops").patch(
+            f"/api/materials/?iri={mat.iri}", {"patch_ops": ops}, format="json"
+        )
+        assert resp.status_code == 413
+        mat.refresh_from_db()
+        assert "k0" not in mat.data
+
+    def test_a_patch_that_would_oversize_the_document_is_413(self):
+        from materials.patch_validation import MAX_MATERIAL_DOC_BYTES
+
+        mat = _store("rev-051")
+        resp = _client("cw-big").patch(
+            f"/api/materials/?iri={mat.iri}",
+            {
+                "patch_ops": [
+                    {"op": "add", "path": "/text",
+                     "value": "k" * (MAX_MATERIAL_DOC_BYTES + 1024)}
+                ]
+            },
+            format="json",
+        )
+        assert resp.status_code == 413
+        mat.refresh_from_db()
+        assert "text" not in mat.data
+
+    def test_a_realistic_full_text_document_still_fits(self):
+        # An AG indictment embeds its likhit-converted full text; the cap must be
+        # well clear of a genuinely large one, not merely of the tiny fixtures.
+        mat = _store("rev-052")
+        resp = _client("cw-real").patch(
+            f"/api/materials/?iri={mat.iri}",
+            {"patch_ops": [{"op": "add", "path": "/text",
+                            "value": {"ne": "क" * 400_000}}]},
+            format="json",
+        )
+        assert resp.status_code == 200

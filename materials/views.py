@@ -15,6 +15,7 @@ no stored row is materialized on the fly from the relational court tables via
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import mimetypes
 
@@ -45,7 +46,12 @@ from courts.permissions import NGM_ROLE_GROUPS, HasNgmRole
 from . import jsonld
 from . import provenance
 from .models import Material, Policy
-from .patch_validation import RESERVED_WRITE_KEYS, is_blocked_patch_path
+from .patch_validation import (
+    MAX_MATERIAL_DOC_BYTES,
+    MAX_PATCH_OPS,
+    RESERVED_WRITE_KEYS,
+    is_blocked_patch_path,
+)
 from .single_source_ingest import upsert_single_source_material
 
 LD_JSON = "application/ld+json"
@@ -441,6 +447,11 @@ def _patch_material(request, iri: str) -> Response:
     # rejects the whole patch, so no partially-applied write can reach the DB.
     patch_ops = None
     if raw_ops is not None:
+        if isinstance(raw_ops, list) and len(raw_ops) > MAX_PATCH_OPS:
+            return Response(
+                {"detail": f"A patch may carry at most {MAX_PATCH_OPS} operations."},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
         try:
             patch_ops = normalize_patch_ops(raw_ops, is_blocked=is_blocked_patch_path)
         except ValueError as exc:
@@ -495,6 +506,20 @@ def _patch_material(request, iri: str) -> Response:
                 return Response(
                     {"detail": f"Invalid JSON Patch document: {exc}"},
                     status=status.HTTP_400_BAD_REQUEST,
+                )
+            # Bound the RESULT, not the request: ops are cheap, values are not,
+            # and it is the stored row that every later read, index feed and
+            # recompute_all scan has to carry.
+            size = len(json.dumps(patched, ensure_ascii=False).encode("utf-8"))
+            if size > MAX_MATERIAL_DOC_BYTES:
+                return Response(
+                    {
+                        "detail": (
+                            f"Patched document is {size} bytes; the limit is "
+                            f"{MAX_MATERIAL_DOC_BYTES}."
+                        )
+                    },
+                    status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 )
             # A patch may not leave the stored document in a state the write plane
             # would have rejected (e.g. `remove /name`). Pin @id to the URL's IRI

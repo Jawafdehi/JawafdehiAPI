@@ -49,3 +49,23 @@ PATCH_BLOCKED_PATH_PREFIXES = frozenset(
 
 #: ``is_blocked`` predicate for :func:`jawafdehi_shared.jsonpatch_ops.normalize_patch_ops`.
 is_blocked_patch_path = blocked_path_predicate(PATCH_BLOCKED_PATH_PREFIXES)
+
+#: Max operations in one patch request.
+#:
+#: Django's ``DATA_UPLOAD_MAX_MEMORY_SIZE`` does NOT bound this path — DRF's
+#: ``JSONParser`` reads the WSGI stream directly rather than through
+#: ``HttpRequest.body``, which is where Django's check lives (measured: a 3.6 MB
+#: body against the 2.5 MB default was accepted and persisted). So PATCH was the
+#: only Material write with no ceiling, while the upload endpoint beside it is
+#: capped at ``views._MAX_UPLOAD_BYTES``. 1000 is far above any real edit — the
+#: AG backfill sends exactly one op per record.
+MAX_PATCH_OPS = 1000
+
+#: Max serialized size of the stored JSON-LD document AFTER a patch is applied.
+#:
+#: A Material's ``data`` is read on every detail hit, fed wholesale to the
+#: OpenSearch indexer on every write, and loaded in full by
+#: ``visibility.recompute_all``, so an unbounded row degrades all three. 5 MB is
+#: roughly an order of magnitude above a long indictment's embedded full text
+#: (~400 KB of Nepali), so it bounds abuse without touching real documents.
+MAX_MATERIAL_DOC_BYTES = 5 * 1024 * 1024
