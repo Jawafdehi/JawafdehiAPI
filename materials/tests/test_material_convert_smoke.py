@@ -104,6 +104,8 @@ class MaterialConvertSmokeTests(APITestCase):
 
             # 3) Run the job through the REAL queue engine, with the conversion
             #    network/OCR call mocked to return markdown. captureOnCommitCallbacks
+            #    must name `ngm` — that is where Material lives, and therefore the
+            #    connection its reindex on_commit hook is registered against.
             #    forces the Material post_save→reindex on_commit hook to actually
             #    run (APITestCase wraps each test in a rolled-back transaction, so
             #    on_commit callbacks would otherwise never fire).
@@ -115,7 +117,7 @@ class MaterialConvertSmokeTests(APITestCase):
                     "url": "https://cdn/raw.pdf",
                     "note": "",
                 },
-            ), self.captureOnCommitCallbacks(execute=True):
+            ), self.captureOnCommitCallbacks(using="ngm", execute=True):
                 done = _run_one_convert_job()
 
         # 4) Job finished cleanly.

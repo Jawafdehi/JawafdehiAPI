@@ -14,10 +14,15 @@ no stored row is materialized on the fly from the relational court tables via
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import mimetypes
 
+import jsonpatch
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import transaction
+from django.utils.cache import patch_vary_headers
 from rest_framework import status
 from rest_framework.decorators import (
     api_view,
@@ -34,12 +39,20 @@ from jawafdehi_shared.entities.ids import (
     iri_base,
 )
 from jawafdehi_shared.drf.base import PlatformCursorPagination
+from jawafdehi_shared.jsonpatch_ops import normalize_patch_ops
 from jawafdehi_shared.storage import store_file_as_link
 from courts.permissions import NGM_ROLE_GROUPS, HasNgmRole
 
 from . import jsonld
 from . import provenance
 from .models import Material, Policy
+from .patch_validation import (
+    MAX_MATERIAL_DOC_BYTES,
+    MAX_PATCH_BODY_BYTES,
+    MAX_PATCH_OPS,
+    RESERVED_WRITE_KEYS,
+    is_blocked_patch_path,
+)
 from .single_source_ingest import upsert_single_source_material
 
 LD_JSON = "application/ld+json"
@@ -55,16 +68,6 @@ _UPLOAD_ROLES = frozenset(
 #: Upload roles that carry an original document worth OCR-ing into full text.
 #: Excludes MARKDOWN (our own extraction output) + SOURCE_PAGE (HTML, not a scan).
 _CONVERTIBLE_ROLES = frozenset({"RAW", "ALTERNATE", "PERMALINK"})
-
-#: Server-owned keys that must NEVER be persisted into a Material's stored JSON-LD
-#: ``data``: the write-envelope control field ``visibility_policy`` and the
-#: authed-read annotations ``jawafdehi:visibility``/``jawafdehi:visibilityPolicy``.
-#: Stripped at the write chokepoint so a bare body — or a read-modify-write
-#: round-trip of an annotated authed GET — can't bake them into the canonical doc
-#: (which would leak the policy to anon and serve a stale visibility snapshot).
-_RESERVED_WRITE_KEYS = frozenset(
-    {"visibility_policy", "jawafdehi:visibility", "jawafdehi:visibilityPolicy"}
-)
 
 logger = logging.getLogger("materials.views")
 
@@ -180,8 +183,8 @@ def _upsert_material(
     # (a bare body's top-level visibility_policy; a round-tripped authed GET's
     # jawafdehi:visibility[Policy]). The policy itself arrives via the dedicated
     # `visibility_policy` argument, not the document.
-    if _RESERVED_WRITE_KEYS.intersection(data):
-        data = {k: v for k, v in data.items() if k not in _RESERVED_WRITE_KEYS}
+    if RESERVED_WRITE_KEYS.intersection(data):
+        data = {k: v for k, v in data.items() if k not in RESERVED_WRITE_KEYS}
     if expected_iri is not None and data.get("@id") != expected_iri:
         return None, status.HTTP_400_BAD_REQUEST, {
             "detail": f"Body @id {data.get('@id')!r} must match the URL IRI {expected_iri!r}."
@@ -216,7 +219,43 @@ def _upsert_material(
     return material.data, code, None
 
 
-def _resolve_material(iri: str, *, include_nonpublic: bool = False) -> dict | None:
+def _material_read_response(request, iri: str) -> Response:
+    """The shared GET tail for both material routes.
+
+    One SELECT serves both the body and the ``ETag``: ``_resolve_material``
+    already loaded (or proved absent) the stored row, so re-querying for the
+    version token would double every read on this public, replica-served plane
+    — and for a derived court-case IRI the second query could never return
+    anything, because the absence is what put us on the derived path.
+
+    ``Vary: Authorization`` because ONE URL serves two representations: anon gets
+    ``row.data``, an authed caseworker gets it annotated with
+    ``jawafdehi:visibility``/``jawafdehi:visibilityPolicy``. They share an entity
+    tag (the row's version is the same either way), so without Vary a shared
+    cache keyed on URL+ETag could hand the annotated body — and the material's
+    visibility policy — to an anonymous caller.
+    """
+    data, row = _resolve_material(
+        iri, include_nonpublic=_can_see_nonpublic(request), with_row=True
+    )
+    if data is None:
+        resp = Response(
+            {"detail": "Material not found."}, status=status.HTTP_404_NOT_FOUND
+        )
+        patch_vary_headers(resp, ("Authorization",))
+        return resp
+    resp = Response(data, content_type=LD_JSON)
+    if row is not None:
+        # The token a conditional PATCH is matched against, so a client can opt
+        # into optimistic concurrency without a second round-trip.
+        resp["ETag"] = _version_token(row)
+    patch_vary_headers(resp, ("Authorization",))
+    return resp
+
+
+def _resolve_material(
+    iri: str, *, include_nonpublic: bool = False, with_row: bool = False
+):
     """Return the JSON-LD doc for ``iri``: stored (live) row, else a derived
     court case. Soft-deleted rows (``is_deleted=True``) are treated as absent.
 
@@ -228,24 +267,31 @@ def _resolve_material(iri: str, *, include_nonpublic: bool = False) -> dict | No
     """
     from .models import PUBLIC_VISIBILITIES
 
+    def _out(doc, row):
+        # ``with_row`` returns the row alongside the doc so a caller needing the
+        # material's version token doesn't have to SELECT it again. Callers that
+        # only want the document keep the original single-value contract.
+        return (doc, row) if with_row else doc
+
     try:
         row = Material.objects.get(pk=iri, is_deleted=False)
     except Material.DoesNotExist:
         # No stored row: fall back to the on-the-fly court-case derivation
-        # (court cases are a public read plane in their own right).
-        return _derive_court_case_jsonld(iri)
+        # (court cases are a public read plane in their own right). There is no
+        # row, hence no version token — a derived material cannot be PATCHed.
+        return _out(_derive_court_case_jsonld(iri), None)
 
     if include_nonpublic:
         # Authed caseworker/readonly: surface the cached visibility + policy so the
         # FE editor can render + drive the control.
-        return _with_admin_visibility(row)
+        return _out(_with_admin_visibility(row), row)
     if row.visibility in PUBLIC_VISIBILITIES:
-        return row.data
+        return _out(row.data, row)
     # A PRIVATE (draft-only) stored row is treated as ABSENT for the public.
     # We must NOT fall through to _derive_court_case_jsonld here: doing so would
     # ignore the material's own visibility gate and hand an anon caller the
     # derived court-case document for an IRI the stored row marks non-public.
-    return None
+    return _out(None, None)
 
 
 def _derive_court_case_jsonld(iri: str) -> dict | None:
@@ -293,46 +339,279 @@ def _soft_delete_material(iri: str) -> bool:
     return True
 
 
-def _patch_visibility_policy(request, iri: str) -> Response:
-    """``PATCH`` a material's caseworker ``visibility_policy`` + recompute.
+# ETag / optimistic-concurrency helper. A material's ``updated_at`` is a strong
+# enough version token: every accepted write bumps ``auto_now``, so a stale token
+# reliably signals the caller patched from an out-of-date copy. Hashed to an
+# opaque quoted token so clients treat it as a cursor, not a timestamp to reason
+# about (mirrors the case endpoint's contract).
+def _version_token(row: Material) -> str:
+    """Opaque, quoted ETag-style token derived from the material's updated_at."""
+    basis = f"{row.pk}:{row.updated_at.isoformat() if row.updated_at else ''}"
+    return f'"{hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]}"'
 
-    Body ``{"visibility_policy": "PUBLIC"|"CASE_GATED"|"PRIVATE"}``. NGM-role
-    (Caseworker) gated. Sets the policy on the existing stored row, then settles
-    the cached ``visibility`` via ``recompute_material_visibility`` (which also
-    reconciles the search index through ``post_save``). Returns the updated doc
-    annotated with ``jawafdehi:visibility``/``jawafdehi:visibilityPolicy`` (200),
-    404 if no live stored row exists (derived court-case materials have no policy).
+
+def _if_match_matches(request, row: Material) -> bool:
+    """Whether the request's ``If-Match`` matches the material's current token.
+
+    Absent header → True (the precondition is opt-in; existing clients and the
+    moderation UI send none). Tolerates the ``W/`` weak-validator prefix and a
+    bare unquoted token. ``*`` matches any existing row per RFC 7232 — a caller
+    asserting only "it still exists".
+    """
+    raw = request.headers.get("If-Match", "").strip()
+    if not raw:
+        return True
+    current = _version_token(row)
+    for candidate in (t.strip() for t in raw.split(",")):
+        if candidate == "*":
+            return True
+        norm = candidate[2:].strip() if candidate.startswith("W/") else candidate
+        if norm == current or norm == current.strip('"'):
+            return True
+    return False
+
+
+def _stored_etag(iri: str) -> str | None:
+    """The current version token for a stored material, or None if there is none.
+
+    Derived (court-case) materials have no stored row and therefore no version to
+    hand out — a client cannot ``If-Match`` something it cannot PATCH either.
+
+    Pinned to ``ngm`` (the PRIMARY) rather than routed: ``/api/materials/`` is not
+    in ``config.middleware._PRIMARY_ONLY_PREFIXES``, so a safe-method read is
+    replica-eligible. A version token is a WRITE precondition — it has to be
+    minted from the same database ``_patch_material`` validates it against, or a
+    lagging replica hands out a stale token and the caller gets a 412 loop on an
+    edit nobody else touched.
+    """
+    row = (
+        Material.objects.using("ngm")
+        .filter(pk=iri, is_deleted=False)
+        .only("iri", "updated_at")
+        .first()
+    )
+    return _version_token(row) if row is not None else None
+
+
+def _reject_oversized_body(request):
+    """413 a PATCH whose declared body exceeds :data:`MAX_PATCH_BODY_BYTES`.
+
+    Returns ``None`` when the request may proceed.
+
+    A missing or unparseable ``Content-Length`` is NOT treated as a rejection:
+    a chunked request legitimately has none, and refusing those would break a
+    valid client to defend against an attacker who can simply omit the header.
+    Such a body still meets every downstream guard (op count, and the
+    post-apply document ceiling), so the floor here is defence in depth over
+    those, not a replacement for them.
+    """
+    raw = request.META.get("CONTENT_LENGTH")
+    try:
+        declared = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if declared > MAX_PATCH_BODY_BYTES:
+        return Response(
+            {
+                "detail": (
+                    f"Patch body is {declared} bytes; the limit is "
+                    f"{MAX_PATCH_BODY_BYTES}."
+                )
+            },
+            status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+        )
+    return None
+
+
+def _read_patch_body(request):
+    """Split a PATCH body into ``(raw_patch_ops, policy_body)``.
+
+    Two accepted spellings, both already in use on this platform:
+
+      * a bare RFC-6902 array — what the case endpoint takes;
+      * ``{"patch_ops": [...]}`` — what the NES entity endpoint takes, and the
+        only spelling that can also carry ``visibility_policy`` in the same
+        request.
+
+    The pre-existing ``{"visibility_policy": ...}`` body is the second form with
+    no ops, so the original contract is a strict subset of this one.
+    """
+    if isinstance(request.data, list):
+        return request.data, {}
+    body = request.data if isinstance(request.data, dict) else {}
+    return body.get("patch_ops"), body
+
+
+def _patch_material(request, iri: str) -> Response:
+    """``PATCH`` a material: field-level JSON Patch and/or the visibility policy.
+
+    NGM-role (Caseworker) gated. Body carries an RFC-6902 ``patch_ops`` list
+    applied to the stored JSON-LD, a ``visibility_policy``, or both — at least
+    one is required (a body that changes nothing stays a 400 rather than a 200 a
+    caller would misread as success).
+
+    The read-modify-write happens HERE, under ``select_for_update``, which is the
+    reason this endpoint exists: the ``PUT`` path replaces ``data`` wholesale, so
+    every client editing one key had to GET, merge and PUT with no way to detect
+    that someone else wrote in between. Callers that want to detect it anyway can
+    send ``If-Match`` with the token from a prior GET → 412 instead of a clobber.
+
+    Returns the updated doc annotated with ``jawafdehi:visibility``/
+    ``jawafdehi:visibilityPolicy`` (200) plus the new ``ETag``; 404 if no live
+    stored row exists (derived court-case materials have no stored document).
     """
     denied = _require_ngm_role(request)
     if denied is not None:
         return denied
-    body = request.data if isinstance(request.data, dict) else {}
+
+    # Bound the body BEFORE reading it. Every other guard here runs downstream
+    # of DRF's JSONParser, which has already read and parsed the whole stream by
+    # the time ``request.data`` yields something to measure — measuring it then
+    # cannot un-spend the allocation, it only adds a second copy. Content-Length
+    # is the one check that can refuse the payload while it is still on the wire.
+    too_big = _reject_oversized_body(request)
+    if too_big is not None:
+        return too_big
+
+    raw_ops, body = _read_patch_body(request)
     policy, error = _clean_policy(body)
     if error is not None:
         return error
-    if policy is None:
+    if raw_ops is None and policy is None:
         return Response(
-            {"detail": "Body must include a 'visibility_policy'."},
+            {"detail": "Body must include 'patch_ops' and/or a 'visibility_policy'."},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    row = Material.objects.filter(pk=iri, is_deleted=False).first()
-    if row is None:
-        return Response(
-            {"detail": "Material not found."}, status=status.HTTP_404_NOT_FOUND
-        )
-    # Derive the new cached visibility from the new policy and persist BOTH in one
-    # save — a synchronized write, so post_save fires exactly once with the final
-    # state (the search-index reconcile never sees a stale intermediate).
+
+    # Validate the op list BEFORE touching the row: a blocked or malformed op
+    # rejects the whole patch, so no partially-applied write can reach the DB.
+    patch_ops = None
+    if raw_ops is not None:
+        if isinstance(raw_ops, list) and len(raw_ops) > MAX_PATCH_OPS:
+            return Response(
+                {"detail": f"A patch may carry at most {MAX_PATCH_OPS} operations."},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+        try:
+            patch_ops = normalize_patch_ops(raw_ops, is_blocked=is_blocked_patch_path)
+        except ValueError as exc:
+            return Response(
+                {"detail": str(exc)}, status=status.HTTP_422_UNPROCESSABLE_ENTITY
+            )
+
     from .visibility import _referring_case_states, visibility_for_policy
 
-    new_visibility = visibility_for_policy(policy, lambda: _referring_case_states(iri))
-    if row.visibility_policy != policy or row.visibility != new_visibility:
-        row.visibility_policy = policy
-        row.visibility = new_visibility
-        row.save(update_fields=["visibility_policy", "visibility", "updated_at"])
-    return Response(
+    # ``ngm`` is where Material lives (config.db_router.ServiceDatabaseRouter);
+    # naming it explicitly keeps the atomic block on the same connection the row
+    # lock is taken on. NOTE: SQLite has ``has_select_for_update = False``, so
+    # Django SILENTLY omits FOR UPDATE there — the lock is real on Postgres
+    # (prod) but a no-op under the sqlite test gate. The concurrency tests below
+    # therefore cover the ``If-Match`` contract, not the row lock itself.
+    with transaction.atomic(using="ngm"):
+        row = (
+            Material.objects.using("ngm")
+            .select_for_update()
+            .filter(pk=iri, is_deleted=False)
+            .first()
+        )
+        if row is None:
+            return Response(
+                {"detail": "Material not found."}, status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Precondition check inside the lock — outside it, the row could change
+        # between the check and the write and the guarantee would be theatre.
+        if not _if_match_matches(request, row):
+            resp = Response(
+                {
+                    "detail": (
+                        "This material was modified since you read it. "
+                        "Re-read it before patching."
+                    )
+                },
+                status=status.HTTP_412_PRECONDITION_FAILED,
+            )
+            resp["ETag"] = _version_token(row)
+            return resp
+
+        updated_fields: list[str] = []
+
+        if patch_ops is not None:
+            try:
+                patched = jsonpatch.apply_patch(row.data, patch_ops, in_place=False)
+            except (
+                jsonpatch.JsonPatchException,
+                jsonpatch.JsonPointerException,
+            ) as exc:
+                return Response(
+                    {"detail": f"Invalid JSON Patch document: {exc}"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            # Bound the RESULT, not the request: ops are cheap, values are not,
+            # and it is the stored row that every later read, index feed and
+            # recompute_all scan has to carry.
+            size = len(json.dumps(patched, ensure_ascii=False).encode("utf-8"))
+            if size > MAX_MATERIAL_DOC_BYTES:
+                return Response(
+                    {
+                        "detail": (
+                            f"Patched document is {size} bytes; the limit is "
+                            f"{MAX_MATERIAL_DOC_BYTES}."
+                        )
+                    },
+                    status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                )
+            # A patch may not leave the stored document in a state the write plane
+            # would have rejected (e.g. `remove /name`). Pin @id to the URL's IRI
+            # as well — blocked paths already prevent repointing it, but this is
+            # the durable check, not a restatement of the same one.
+            try:
+                jsonld.validate_material_jsonld(patched, iri=iri)
+            except ValueError as exc:
+                return Response(
+                    {"detail": f"Patched material is invalid: {exc}"},
+                    status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+            if patched != row.data:
+                row.data = patched
+                updated_fields.append("data")
+                # This verb writes `data` directly instead of going through
+                # `upsert_single_source_material`, so the model-layer invariant
+                # has to be invoked explicitly or it silently stops applying on
+                # PATCH alone. `Material.clean()` re-checks that the promoted
+                # source/ident columns still agree with the doc's @id — cheap
+                # insurance that any promoted column added later cannot drift on
+                # this path while holding on every other one.
+                try:
+                    row.full_clean(validate_unique=False)
+                except DjangoValidationError as exc:
+                    return Response(
+                        {"detail": f"Patched material is invalid: {exc}"},
+                        status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    )
+
+        if policy is not None:
+            # Derive the new cached visibility from the new policy and persist BOTH
+            # in one save — a synchronized write, so post_save fires exactly once
+            # with the final state (the search-index reconcile never sees a stale
+            # intermediate). Folding the doc change into that same save keeps the
+            # indexer from seeing a half-applied PATCH too.
+            new_visibility = visibility_for_policy(
+                policy, lambda: _referring_case_states(iri)
+            )
+            if row.visibility_policy != policy or row.visibility != new_visibility:
+                row.visibility_policy = policy
+                row.visibility = new_visibility
+                updated_fields += ["visibility_policy", "visibility"]
+
+        if updated_fields:
+            row.save(update_fields=updated_fields + ["updated_at"])
+
+    resp = Response(
         _with_admin_visibility(row), status=status.HTTP_200_OK, content_type=LD_JSON
     )
+    resp["ETag"] = _version_token(row)
+    return resp
 
 
 @api_view(["GET", "PUT", "PATCH", "DELETE"])
@@ -341,9 +620,23 @@ def material_detail(request, source: str, ident: str):
     """``GET /api/materials/<source>/<ident>`` → the material JSON-LD doc.
 
     ``PUT`` replaces the material's stored JSON-LD (NGM-role gated). ``PATCH``
-    sets the caseworker ``visibility_policy`` (NGM-role gated). ``DELETE``
-    soft-deletes the stored material (NGM-role gated, 204). The GET path is
-    byte-identical to before (stored row, else on-the-fly court-case fallback).
+    edits it field-by-field and/or sets the caseworker ``visibility_policy``
+    (NGM-role gated). ``DELETE`` soft-deletes the stored material (NGM-role
+    gated, 204). The GET path is byte-identical to before (stored row, else
+    on-the-fly court-case fallback), plus an ``ETag`` when a stored row exists.
+
+    ``PATCH`` body — an RFC-6902 JSON Patch list, a policy, or both::
+
+        {"patch_ops": [{"op": "add",
+                        "path": "/jawafdehi:caseNumber",
+                        "value": "082-CR-0100"}],
+         "visibility_policy": "PUBLIC"}
+
+    A bare ``[{...}]`` array is accepted as the ops list too (the spelling the
+    case endpoint uses). ``/@id``, ``/@context``, ``/@type``, ``/additionalType``
+    and the visibility keys are not patchable (422) — see
+    ``materials.patch_validation``. Send ``If-Match`` with the ``ETag`` from a
+    prior GET to make the write conditional (412 if it changed meanwhile).
     """
     try:
         iri = build_material_iri(source, ident)
@@ -354,7 +647,7 @@ def material_detail(request, source: str, ident: str):
         )
 
     if request.method == "PATCH":
-        return _patch_visibility_policy(request, iri)
+        return _patch_material(request, iri)
 
     if request.method == "PUT":
         denied = _require_ngm_role(request)
@@ -383,10 +676,7 @@ def material_detail(request, source: str, ident: str):
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-    data = _resolve_material(iri, include_nonpublic=_can_see_nonpublic(request))
-    if data is None:
-        return Response({"detail": "Material not found."}, status=status.HTTP_404_NOT_FOUND)
-    return Response(data, content_type=LD_JSON)
+    return _material_read_response(request, iri)
 
 
 @api_view(["POST"])
@@ -575,9 +865,11 @@ def material_by_iri(request):
     ``{"material": {...}, "material_type": "..."}`` envelope (``material_type`` is
     inferred from the doc's ``additionalType``/``@type`` when absent). An optional
     top-level ``visibility_policy`` sets the caseworker policy on the write.
-    ``PATCH /api/materials/?iri=<full-iri>`` sets just the ``visibility_policy``
-    (NGM-role gated). ``DELETE /api/materials/?iri=<full-iri>`` soft-deletes the
-    material (NGM-role gated, 204).
+    ``PATCH /api/materials/?iri=<full-iri>`` applies an RFC-6902 ``patch_ops``
+    list to the stored JSON-LD and/or sets the ``visibility_policy`` (NGM-role
+    gated) — same body and same guards as the ``<source>/<ident>`` route; see
+    :func:`material_detail`. ``DELETE /api/materials/?iri=<full-iri>``
+    soft-deletes the material (NGM-role gated, 204).
     """
     if request.method == "POST":
         denied = _require_ngm_role(request)
@@ -616,7 +908,7 @@ def material_by_iri(request):
                 {"detail": "Not a valid material @id IRI."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        return _patch_visibility_policy(request, iri)
+        return _patch_material(request, iri)
 
     if request.method == "DELETE":
         denied = _require_ngm_role(request)
@@ -648,7 +940,4 @@ def material_by_iri(request):
             {"detail": "Not a valid material @id IRI."},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    data = _resolve_material(iri, include_nonpublic=_can_see_nonpublic(request))
-    if data is None:
-        return Response({"detail": "Material not found."}, status=status.HTTP_404_NOT_FOUND)
-    return Response(data, content_type=LD_JSON)
+    return _material_read_response(request, iri)
