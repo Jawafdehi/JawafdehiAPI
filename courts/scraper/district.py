@@ -117,7 +117,16 @@ def _parse_row(
     # Cell 1 carries the case number on line 1 and (when present) a parenthetical
     # secondary/original id on line 2 — split on the <br>-derived newlines.
     case_parts = cells[1].get_text(separator="\n").strip().split("\n")
-    case_number = normalize_whitespace(case_parts[0]) if case_parts else ""
+    # Transliterate Devanagari digits to ASCII up front (as serial_no/case_id below
+    # already do): a district number has a NUMERIC middle segment (082-02-0001),
+    # which best_effort_normalize cannot canonicalise (_CASE_RE wants a letter-led
+    # middle) and so returns unchanged — leaving Devanagari digits that then fail
+    # court-case IRI minting and dead-letter the whole scrape.
+    case_number = (
+        nepali_to_roman_numerals(normalize_whitespace(case_parts[0]))
+        if case_parts
+        else ""
+    )
     if not case_number:
         return None
     case_number = best_effort_normalize(case_number)

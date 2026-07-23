@@ -180,7 +180,9 @@ def _parse_row(
         court_identifier=court_identifier,
         registration_date_bs=registration_date or None,
         registration_date_ad=bs_to_ad(registration_date),
-        case_type=normalize_whitespace(cells[3].get_text()) or None,
+        # Cap to the column width (as district/special/the enrich path do): a
+        # mis-parsed cell must truncate, not dead-letter the whole court's scrape.
+        case_type=normalize_whitespace(cells[3].get_text())[:200] or None,
         plaintiff=normalize_whitespace(plaintiff_raw) or None,
         defendant=normalize_whitespace(defendant_raw) or None,
         # ``division`` (फाँट) is not a v2 court_cases column → extra_data only.

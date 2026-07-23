@@ -251,3 +251,50 @@ def test_empty_page_returns_no_rows():
         )
         == []
     )
+
+
+# A district number with a NUMERIC middle segment (082-02-0001): best_effort_normalize
+# cannot canonicalise it (_CASE_RE wants a LETTER-led middle like CR), so it returns the
+# value UNCHANGED — the parser itself must transliterate the Devanagari digits, or the
+# raw Devanagari reaches court-case IRI minting and dead-letters the whole court's scrape.
+_DAILY_LIST_NUMERIC_MIDDLE = """
+<html><body>
+  <div>
+    <table>
+      <tr><td class="judge">न्यायाधीश राम</td><td align="right">इजलास नं. १</td></tr>
+    </table>
+    <table border="1" class="record_display">
+      <tr><th>क्र.सं.</th><th>मुद्दा नं.</th><th>दर्ता मिति</th><th>मुद्दा</th><th>वादी</th>
+          <th>प्रतिवादी</th><th>दफा</th><th>प्राथमिकता</th><th>कैफियत</th><th>किसिम</th></tr>
+      <tr>
+        <td>१</td>
+        <td>०८२-०२-०००१</td>
+        <td>२०८२/०२/०१</td>
+        <td>अंश</td>
+        <td>वादी क</td>
+        <td>प्रतिवादी ख</td>
+        <td>-</td><td>-</td><td></td>
+        <td>पेशी</td>
+      </tr>
+    </table>
+  </div>
+</body></html>
+"""
+
+
+def test_parse_daily_list_numeric_middle_case_number_is_ascii():
+    """A numeric-middle district number (082-02-0001) transliterates to ASCII and mints
+    a valid court-case IRI. Regression: the raw Devanagari digits fell through
+    best_effort_normalize unchanged and dead-lettered every district court at IRI minting."""
+    from jawafdehi_shared.entities.ids import build_courtcase_iri
+
+    rows = parse_daily_list(
+        _DAILY_LIST_NUMERIC_MIDDLE, court_identifier="achham_dc", date_bs="2082-02-15"
+    )
+    assert len(rows) == 1
+    (case, _hearing) = rows[0]
+    assert case.case_number == "082-02-0001"  # ASCII, not the raw ०८२-०२-०००१
+    # the IRI minter (which rejected the Devanagari form) now accepts it
+    assert build_courtcase_iri("achham_dc", case.case_number).endswith(
+        "/courtcase/achham_dc/082-02-0001"
+    )
