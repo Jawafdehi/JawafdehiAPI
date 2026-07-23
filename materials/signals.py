@@ -6,12 +6,26 @@ upsert/delete on ``transaction.on_commit`` (plan §4.1).
 
 from __future__ import annotations
 
-from django.db import transaction
+from django.db import router, transaction
 from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 
 from . import search_index
 from .models import Material, Visibility
+
+
+def _material_db(instance) -> str:
+    """The alias the row was written on — the one whose commit we must wait for.
+
+    ``transaction.on_commit`` resolves against a specific connection, defaulting
+    to ``default``. ``Material`` lives on ``ngm``, so an unqualified ``on_commit``
+    asks the WRONG connection whether a transaction is open: inside
+    ``atomic(using="ngm")`` the ``default`` connection is still in autocommit, so
+    Django runs the callback IMMEDIATELY — indexing a document before (or instead
+    of) its row becoming durable, and doing the OpenSearch round-trip while the
+    row lock is still held.
+    """
+    return instance._state.db or router.db_for_write(Material, instance=instance)
 
 
 @receiver(post_save, sender=Material, dispatch_uid="ngm_material_search_index")
@@ -24,11 +38,11 @@ def _index_material(sender, instance, **kwargs):
     # materials default to LISTED, so their indexing is unchanged.
     listed = getattr(instance, "visibility", Visibility.LISTED) == Visibility.LISTED
     if getattr(instance, "is_deleted", False) or not listed:
-        transaction.on_commit(lambda: search_index.delete(instance))
+        transaction.on_commit(lambda: search_index.delete(instance), using=_material_db(instance))
     else:
-        transaction.on_commit(lambda: search_index.index(instance))
+        transaction.on_commit(lambda: search_index.index(instance), using=_material_db(instance))
 
 
 @receiver(post_delete, sender=Material, dispatch_uid="ngm_material_search_delete")
 def _delete_material(sender, instance, **kwargs):
-    transaction.on_commit(lambda: search_index.delete(instance))
+    transaction.on_commit(lambda: search_index.delete(instance), using=_material_db(instance))

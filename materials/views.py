@@ -21,6 +21,7 @@ import mimetypes
 import jsonpatch
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
+from django.utils.cache import patch_vary_headers
 from rest_framework import status
 from rest_framework.decorators import (
     api_view,
@@ -211,7 +212,43 @@ def _upsert_material(
     return material.data, code, None
 
 
-def _resolve_material(iri: str, *, include_nonpublic: bool = False) -> dict | None:
+def _material_read_response(request, iri: str) -> Response:
+    """The shared GET tail for both material routes.
+
+    One SELECT serves both the body and the ``ETag``: ``_resolve_material``
+    already loaded (or proved absent) the stored row, so re-querying for the
+    version token would double every read on this public, replica-served plane
+    — and for a derived court-case IRI the second query could never return
+    anything, because the absence is what put us on the derived path.
+
+    ``Vary: Authorization`` because ONE URL serves two representations: anon gets
+    ``row.data``, an authed caseworker gets it annotated with
+    ``jawafdehi:visibility``/``jawafdehi:visibilityPolicy``. They share an entity
+    tag (the row's version is the same either way), so without Vary a shared
+    cache keyed on URL+ETag could hand the annotated body — and the material's
+    visibility policy — to an anonymous caller.
+    """
+    data, row = _resolve_material(
+        iri, include_nonpublic=_can_see_nonpublic(request), with_row=True
+    )
+    if data is None:
+        resp = Response(
+            {"detail": "Material not found."}, status=status.HTTP_404_NOT_FOUND
+        )
+        patch_vary_headers(resp, ("Authorization",))
+        return resp
+    resp = Response(data, content_type=LD_JSON)
+    if row is not None:
+        # The token a conditional PATCH is matched against, so a client can opt
+        # into optimistic concurrency without a second round-trip.
+        resp["ETag"] = _version_token(row)
+    patch_vary_headers(resp, ("Authorization",))
+    return resp
+
+
+def _resolve_material(
+    iri: str, *, include_nonpublic: bool = False, with_row: bool = False
+):
     """Return the JSON-LD doc for ``iri``: stored (live) row, else a derived
     court case. Soft-deleted rows (``is_deleted=True``) are treated as absent.
 
@@ -223,24 +260,31 @@ def _resolve_material(iri: str, *, include_nonpublic: bool = False) -> dict | No
     """
     from .models import PUBLIC_VISIBILITIES
 
+    def _out(doc, row):
+        # ``with_row`` returns the row alongside the doc so a caller needing the
+        # material's version token doesn't have to SELECT it again. Callers that
+        # only want the document keep the original single-value contract.
+        return (doc, row) if with_row else doc
+
     try:
         row = Material.objects.get(pk=iri, is_deleted=False)
     except Material.DoesNotExist:
         # No stored row: fall back to the on-the-fly court-case derivation
-        # (court cases are a public read plane in their own right).
-        return _derive_court_case_jsonld(iri)
+        # (court cases are a public read plane in their own right). There is no
+        # row, hence no version token — a derived material cannot be PATCHed.
+        return _out(_derive_court_case_jsonld(iri), None)
 
     if include_nonpublic:
         # Authed caseworker/readonly: surface the cached visibility + policy so the
         # FE editor can render + drive the control.
-        return _with_admin_visibility(row)
+        return _out(_with_admin_visibility(row), row)
     if row.visibility in PUBLIC_VISIBILITIES:
-        return row.data
+        return _out(row.data, row)
     # A PRIVATE (draft-only) stored row is treated as ABSENT for the public.
     # We must NOT fall through to _derive_court_case_jsonld here: doing so would
     # ignore the material's own visibility gate and hand an anon caller the
     # derived court-case document for an IRI the stored row marks non-public.
-    return None
+    return _out(None, None)
 
 
 def _derive_court_case_jsonld(iri: str) -> dict | None:
@@ -325,9 +369,17 @@ def _stored_etag(iri: str) -> str | None:
 
     Derived (court-case) materials have no stored row and therefore no version to
     hand out — a client cannot ``If-Match`` something it cannot PATCH either.
+
+    Pinned to ``ngm`` (the PRIMARY) rather than routed: ``/api/materials/`` is not
+    in ``config.middleware._PRIMARY_ONLY_PREFIXES``, so a safe-method read is
+    replica-eligible. A version token is a WRITE precondition — it has to be
+    minted from the same database ``_patch_material`` validates it against, or a
+    lagging replica hands out a stale token and the caller gets a 412 loop on an
+    edit nobody else touched.
     """
     row = (
-        Material.objects.filter(pk=iri, is_deleted=False)
+        Material.objects.using("ngm")
+        .filter(pk=iri, is_deleted=False)
         .only("iri", "updated_at")
         .first()
     )
@@ -458,6 +510,20 @@ def _patch_material(request, iri: str) -> Response:
             if patched != row.data:
                 row.data = patched
                 updated_fields.append("data")
+                # This verb writes `data` directly instead of going through
+                # `upsert_single_source_material`, so the model-layer invariant
+                # has to be invoked explicitly or it silently stops applying on
+                # PATCH alone. `Material.clean()` re-checks that the promoted
+                # source/ident columns still agree with the doc's @id — cheap
+                # insurance that any promoted column added later cannot drift on
+                # this path while holding on every other one.
+                try:
+                    row.full_clean(validate_unique=False)
+                except DjangoValidationError as exc:
+                    return Response(
+                        {"detail": f"Patched material is invalid: {exc}"},
+                        status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    )
 
         if policy is not None:
             # Derive the new cached visibility from the new policy and persist BOTH
@@ -545,16 +611,7 @@ def material_detail(request, source: str, ident: str):
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-    data = _resolve_material(iri, include_nonpublic=_can_see_nonpublic(request))
-    if data is None:
-        return Response({"detail": "Material not found."}, status=status.HTTP_404_NOT_FOUND)
-    resp = Response(data, content_type=LD_JSON)
-    # Hand out the version token a conditional PATCH will be matched against, so
-    # a client can opt into optimistic concurrency without a second round-trip.
-    etag = _stored_etag(iri)
-    if etag:
-        resp["ETag"] = etag
-    return resp
+    return _material_read_response(request, iri)
 
 
 @api_view(["POST"])
@@ -818,13 +875,4 @@ def material_by_iri(request):
             {"detail": "Not a valid material @id IRI."},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    data = _resolve_material(iri, include_nonpublic=_can_see_nonpublic(request))
-    if data is None:
-        return Response({"detail": "Material not found."}, status=status.HTTP_404_NOT_FOUND)
-    resp = Response(data, content_type=LD_JSON)
-    # Hand out the version token a conditional PATCH will be matched against, so
-    # a client can opt into optimistic concurrency without a second round-trip.
-    etag = _stored_etag(iri)
-    if etag:
-        resp["ETag"] = etag
-    return resp
+    return _material_read_response(request, iri)

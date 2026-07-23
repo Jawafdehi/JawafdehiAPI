@@ -13,6 +13,8 @@ kind of detail that quietly regresses when a header parser is "simplified".
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
@@ -192,6 +194,15 @@ class TestIfMatchHeaderContract:
         assert mat.data["jawafdehi:caseNumber"] == "082-CR-0200"
 
 
+class _Probe:
+    """Stand-in material used only to ask a ``url_for`` lambda which route it
+    builds, so the fixture ident can be made deterministic per (route, body)."""
+
+    iri = "probe"
+    source = "probe-src"
+    ident = "probe-id"
+
+
 class TestBothRoutesAgree:
     """Two URLs address one resource; their PATCH contract must be identical."""
 
@@ -214,10 +225,12 @@ class TestBothRoutesAgree:
         ],
     )
     def test_status_codes_match_across_routes(self, url_for, body, expected):
-        mat = _store(f"c-30{abs(hash((str(body), expected))) % 10000}")
-        resp = _client(f"cw-{abs(hash((str(body), expected))) % 10000}").patch(
-            url_for(mat), body, format="json"
-        )
+        # Deterministic per (route, body): hash() is salted per interpreter, so
+        # a hashed ident/username changes every run and two parametrizations can
+        # collide onto one Material PK or username.
+        key = re.sub(r"[^a-z0-9]+", "-", f"{url_for(_Probe())}-{body}-{expected}".lower()).strip("-")[:60]
+        mat = _store(f"c-30-{key}")
+        resp = _client(f"cw-{key}"[:150]).patch(url_for(mat), body, format="json")
         assert resp.status_code == expected
 
 

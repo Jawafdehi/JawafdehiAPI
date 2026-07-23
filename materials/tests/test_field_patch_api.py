@@ -14,6 +14,8 @@ UI is a live caller — so both body shapes are exercised side by side.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
@@ -224,7 +226,10 @@ class TestBlockedPaths:
         ],
     )
     def test_blocked_path_is_422(self, path):
-        mat = _store_ag(ident=f"3{abs(hash(path)) % 100000:05d}")
+        # Ident derived from the parameter itself — hash() is salted per
+        # interpreter (PYTHONHASHSEED), so a hashed ident changes every run
+        # and can collide between parametrizations.
+        mat = _store_ag(ident="blocked-" + re.sub(r"[^a-z0-9]+", "-", path.lower()).strip("-"))
         resp = _client().patch(
             f"/api/materials/?iri={mat.iri}",
             {"patch_ops": [{"op": "replace", "path": path, "value": "x"}]},

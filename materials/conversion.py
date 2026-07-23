@@ -171,9 +171,16 @@ def apply_convert_result(job, result: dict) -> None:
     # (e.g. a re-upload upserting the same @id) can't clobber our text, or ours
     # theirs — the whole ``data`` blob is rewritten, so a naive read+save would
     # lose the other writer's fields (lost-update).
-    with transaction.atomic():
+    # `using="ngm"` is load-bearing, not decoration: `Material` routes to `ngm`,
+    # so a bare `atomic()` opens a transaction on `default` and leaves the `ngm`
+    # connection in autocommit — on Postgres `select_for_update` then raises
+    # TransactionManagementError ("cannot be used outside of a transaction"), and
+    # the sqlite gate hides it because SQLite sets has_select_for_update = False
+    # and Django skips the check entirely.
+    with transaction.atomic(using="ngm"):
         row = (
-            Material.objects.select_for_update()
+            Material.objects.using("ngm")
+            .select_for_update()
             .filter(pk=iri, is_deleted=False)
             .first()
         )
