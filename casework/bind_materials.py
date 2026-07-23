@@ -162,7 +162,12 @@ def missing_candidates(case, candidates):
 
 def plan_case(api, case, etag, candidates, required_state=REQUIRED_STATE,
               *, probe_retries=0, probe_interval=1.0):
-    """Build a BindPlan for one case. Probes each candidate via ``material_exists``.
+    """Build a BindPlan for one case. Probes each candidate via ``probe_material``.
+
+    It calls ``probe_material`` rather than the thinner ``material_exists``
+    wrapper for two reasons: the wrapper takes no retry controls (see below),
+    and the full ``ProbeResult`` carries the HTTP status and probed path that
+    the plan's per-material audit line reports.
 
     Guarantees: never plans a write for a non-DRAFT case; never includes an
     absent or uncertain material; aborts the whole case if ANY candidate is

@@ -247,3 +247,34 @@ def test_validate_probe_cache_accepts_every_real_verdict():
     from casework.source_abhiyog import validate_probe_cache
     cache = {"1": "true", "2": "false", "3": "error"}
     assert validate_probe_cache(cache, "cache.json") == cache
+
+
+# --------------------------------------------------------------------------
+# run() -- the snapshot cache is written straight after the full-cohort fetch,
+# which is the single most expensive (and rate-limited) call in the tool. It
+# must not be the thing that throws.
+# --------------------------------------------------------------------------
+
+def test_run_creates_the_snapshot_parent_directory(tmp_path, monkeypatch):
+    """`--snapshot work/ag-raw.json` on a first run must not FileNotFoundError.
+
+    `work/` is gitignored, so it does not exist in a fresh clone -- and the
+    write lands AFTER the cohort has already been fetched, so the crash
+    discards the one response we most want to keep. `write_outputs` and the
+    probe-cache write both mkdir their parent; this path was the outlier.
+    """
+    from casework import source_abhiyog as mod
+
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr(mod, "fetch_snapshot", lambda: [record()])
+
+    snapshot = tmp_path / "work" / "nested" / "ag-raw.json"
+    assert not snapshot.parent.exists()
+    args = mod.build_parser().parse_args(
+        ["--no-probe", "--out", str(tmp_path / "out" / "map"),
+         "--snapshot", str(snapshot)])
+
+    stats, rows = mod.run(args)
+
+    assert stats["records"] == 1
+    assert json.loads(snapshot.read_text(encoding="utf-8"))[0]["id"] == 83475

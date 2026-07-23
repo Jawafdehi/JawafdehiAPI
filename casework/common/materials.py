@@ -11,6 +11,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 from casework.common.api import BROWSER_UA
 
@@ -107,10 +109,13 @@ def probe_material(api, source, ident, timeout=45, *, retries=0, interval=1.0):
     ``retries`` defaults to 0 -- a single shot, i.e. exactly the historical
     behaviour -- so enabling backoff never silently changes the timing of an
     existing caller. Any caller that walks a large cohort against production
-    SHOULD opt in. NOTE: ``bind_materials`` does not yet, and it escalates an
-    uncertain probe to "abort the whole case", so a rate-limit burst there
-    aborts cases whose materials are actually present; wiring it up is a
-    deliberate behaviour change and is left to its owner.
+    SHOULD opt in, and both current ones do: ``bind_materials.plan_case`` and
+    ``source_abhiyog.build_rows`` each forward their own ``--probe-retries`` /
+    ``--probe-interval`` (CLI default 4 retries at a 1.0s base). That matters
+    most in the binder, where an uncertain probe escalates to "abort the whole
+    case" -- without retry a rate-limit burst aborts cases whose materials are
+    perfectly present. Note ``material_exists`` deliberately keeps the default:
+    it is the thin tri-state wrapper and takes no retry controls.
     """
     path = material_path(source, ident)
     result = None
@@ -127,6 +132,45 @@ def probe_material(api, source, ident, timeout=45, *, retries=0, interval=1.0):
     return result
 
 
+def _retry_after_s(raw, *, now=None):
+    """Seconds to wait per a ``Retry-After`` header, or None if unusable.
+
+    RFC 9110 10.2.3 gives the header TWO forms -- ``delta-seconds`` (an integer)
+    and an ``HTTP-date`` -- and a server may send either. Reading only digits
+    silently discards the date form, so the probe throws away the one number the
+    server actually gave it and retries on its local schedule instead. Our own
+    control plane sends the integer form (DRF's throttling), but the 429s that
+    matter can also come from an intermediary (WAF/CDN), which is exactly where
+    the date form shows up.
+
+    A date already in the past clamps to 0 rather than going negative: clock
+    skew between us and the server is normal, and ``time.sleep()`` raises on a
+    negative argument. Anything unparseable returns None -- fall back to the
+    exponential schedule; a malformed header must not become a traceback on the
+    retry path. The caller still runs the result through :func:`_backoff_s`, so
+    a server asking for an hour is capped like any other wait.
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        return float(int(text))
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(text)
+    except (TypeError, ValueError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:  # RFC 9110 says GMT; an omitted zone means the same
+        when = when.replace(tzinfo=timezone.utc)
+    reference = now or datetime.now(timezone.utc)
+    return max((when - reference).total_seconds(), 0.0)
+
+
 def _probe_once(api, source, ident, path, timeout):
     try:
         api.get(path, timeout=timeout)
@@ -135,8 +179,7 @@ def _probe_once(api, source, ident, path, timeout):
         verdict = False if exc.code in (400, 404) else None
         retry_after = None
         if exc.code == _RATE_LIMITED:
-            raw = (exc.headers or {}).get("Retry-After")
-            retry_after = float(raw) if raw and str(raw).isdigit() else None
+            retry_after = _retry_after_s((exc.headers or {}).get("Retry-After"))
         return ProbeResult(source, ident, path, exc.code, verdict, retry_after)
     except Exception:
         return ProbeResult(source, ident, path, None, None)

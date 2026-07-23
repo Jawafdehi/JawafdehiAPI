@@ -459,6 +459,20 @@ def test_nonneg_float_rejects_a_negative_duration():
         nonneg_float("-0.5")
 
 
+@pytest.mark.parametrize("raw", ["nan", "NaN", "inf", "-inf", "infinity"])
+def test_nonneg_float_rejects_non_finite_durations(raw):
+    """`float("nan") < 0` is False, so a bare >= 0 check lets NaN straight in.
+
+    It then reaches `time.sleep(nan)` -- ValueError, mid-walk, exactly the
+    failure the negative check exists to prevent. `inf` is a slower version of
+    the same bug: `_backoff_s` caps it at _MAX_BACKOFF_S, but the read/write
+    intervals sleep on it directly and would hang the run forever.
+    """
+    from casework.common.cli import nonneg_float
+    with pytest.raises(argparse.ArgumentTypeError):
+        nonneg_float(raw)
+
+
 def test_the_probe_flags_reject_negatives_end_to_end():
     # SystemExit(2) is argparse's own "bad argument" exit.
     from casework.bind_materials import build_parser as bind_parser

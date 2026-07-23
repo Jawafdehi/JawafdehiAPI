@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+import math
 import os
 import sys
 import time
@@ -47,15 +48,23 @@ def nonneg_int(raw):
 
 
 def nonneg_float(raw):
-    """argparse type for a duration that cannot be negative.
+    """argparse type for a finite duration that cannot be negative.
 
     ``time.sleep()`` raises ``ValueError`` on a negative argument, so a negative
     ``--probe-interval`` / ``--read-interval`` / ``--write-interval`` does not
     "sleep less" -- it aborts the walk partway through with a traceback.
+
+    ``float()`` also accepts ``nan`` and ``inf``, and a bare ``value < 0`` lets
+    both through: every comparison against NaN is False. NaN then reaches
+    ``time.sleep(nan)`` and raises the same ValueError the check above exists to
+    prevent, and it does so on the RETRY path -- i.e. only once the run is
+    already in trouble. ``inf`` is the slow version: ``materials._backoff_s``
+    caps it, but the read/write intervals sleep on it directly and would park
+    the walk forever.
     """
     value = float(raw)
-    if value < 0:
-        raise argparse.ArgumentTypeError(f"must be >= 0, got {value}")
+    if not math.isfinite(value) or value < 0:
+        raise argparse.ArgumentTypeError(f"must be a finite number >= 0, got {raw!r}")
     return value
 
 

@@ -1,6 +1,9 @@
 # tests/casework/test_materials.py
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from casework.common.api import BROWSER_UA
 from casework.common.materials import (
@@ -241,3 +244,61 @@ def test_probe_material_survives_a_negative_interval():
     err = urllib.error.HTTPError("u", 503, "boom", {}, None)
     pr = probe_material(_StubApi(err), "ag", "1", retries=2, interval=-1)
     assert pr.status == 503 and pr.verdict is None
+
+
+# ---------------------------------------------------------------------------
+# Retry-After has TWO wire forms (RFC 9110 10.2.3): delta-seconds and an
+# HTTP-date. Accepting only digits means a date-form 429 is silently discarded
+# and the probe falls back to its local schedule -- ignoring the one number the
+# server actually told us.
+# ---------------------------------------------------------------------------
+
+_NOW = datetime(2026, 7, 23, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def test_retry_after_reads_delta_seconds():
+    from casework.common.materials import _retry_after_s
+    assert _retry_after_s("120", now=_NOW) == 120.0
+
+
+def test_retry_after_reads_an_http_date_as_remaining_seconds():
+    from casework.common.materials import _retry_after_s
+    assert _retry_after_s("Thu, 23 Jul 2026 12:00:45 GMT", now=_NOW) == 45.0
+
+
+def test_retry_after_in_the_past_is_zero_not_a_negative_sleep():
+    """A clock skew or a slow hop can put the date behind us; sleep() would raise."""
+    from casework.common.materials import _retry_after_s
+    assert _retry_after_s("Thu, 23 Jul 2026 11:59:00 GMT", now=_NOW) == 0.0
+
+
+@pytest.mark.parametrize("raw", [None, "", "later", "Thu, 99 Xxx 2026"])
+def test_retry_after_ignores_what_it_cannot_parse(raw):
+    """Unparseable -> None, i.e. fall back to the exponential schedule. A
+    malformed header must not become an exception on the retry path."""
+    from casework.common.materials import _retry_after_s
+    assert _retry_after_s(raw, now=_NOW) is None
+
+
+def test_probe_material_honours_an_http_date_retry_after(monkeypatch):
+    """End-to-end: the date must reach the sleep, still under the backoff cap."""
+    from casework.common import materials as mod
+
+    when = (datetime.now(timezone.utc) + timedelta(seconds=12)).strftime(
+        "%a, %d %b %Y %H:%M:%S GMT")
+    err = urllib.error.HTTPError("u", 429, "slow down", {"Retry-After": when}, None)
+    slept = []
+    monkeypatch.setattr(mod.time, "sleep", slept.append)
+
+    pr = mod.probe_material(_StubApi(err), "ag", "1", retries=1, interval=1.0)
+
+    assert pr.status == 429 and pr.verdict is None
+    # ~12s from the server, NOT the 1.0s local schedule it would have used
+    # had the date been discarded.
+    assert len(slept) == 1 and 10 <= slept[0] <= 13, slept
+
+
+def test_retry_after_stays_under_the_backoff_cap():
+    """A server asking for an hour must not park the walk for an hour."""
+    from casework.common.materials import _MAX_BACKOFF_S, _backoff_s
+    assert _backoff_s(3600.0, 0, 1.0) == _MAX_BACKOFF_S

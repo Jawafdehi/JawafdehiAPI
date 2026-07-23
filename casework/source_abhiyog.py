@@ -308,7 +308,14 @@ def run(args):
         records = fetch_snapshot()
         logger.info("fetched %d records from ag.gov.np", len(records))
         if args.snapshot:
-            Path(args.snapshot).write_text(
+            # mkdir for the same reason write_outputs and the probe-cache write
+            # do: the conventional target is `work/`, which is gitignored and so
+            # absent in a fresh clone. Without this a first run raises
+            # FileNotFoundError HERE -- after the full-cohort fetch has already
+            # been spent, discarding the one response worth caching.
+            snapshot_path = Path(args.snapshot)
+            snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+            snapshot_path.write_text(
                 json.dumps(records, ensure_ascii=False, indent=1), encoding="utf-8")
 
     if args.limit:
