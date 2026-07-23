@@ -194,6 +194,46 @@ def test_plan_case_aborts_on_uncertain_never_partial():
     assert plan.uncertain == [CO]
 
 
+class ThrottledThenOkApi(FakeApi):
+    """429s the first `fail_times` probes, then answers normally.
+
+    Models the production materials API under a sustained bind walk.
+    """
+
+    def __init__(self, fail_times, **kw):
+        super().__init__(**kw)
+        self._left = fail_times
+        self.attempts = 0
+
+    def get(self, path, timeout=60):
+        self.attempts += 1
+        if self._left > 0:
+            self._left -= 1
+            raise urllib.error.HTTPError(path, 429, "slow down", {}, None)
+        return super().get(path, timeout=timeout)
+
+
+def test_throttled_probe_no_longer_falsely_aborts_the_case():
+    # Before the retry, a 429 collapsed to "uncertain" and killed the whole
+    # case even though the material is present.
+    api = ThrottledThenOkApi(2, exists={"ciaa_press_release/2037"})
+    case = {"slug": "c", "state": "DRAFT", "evidence": []}
+    plan = plan_case(api, case, "e", [("ciaa_press_release", "2037")],
+                     probe_retries=3, probe_interval=0)
+    assert plan.action == "WOULD_PATCH"
+    assert plan.uncertain == []
+    assert [i["material_iri"] for i in plan.patch_items] == [PR]
+    assert api.attempts == 3
+
+
+def test_single_shot_still_aborts_so_the_old_behaviour_is_available():
+    api = ThrottledThenOkApi(2, exists={"ciaa_press_release/2037"})
+    case = {"slug": "c", "state": "DRAFT", "evidence": []}
+    plan = plan_case(api, case, "e", [("ciaa_press_release", "2037")],
+                     probe_retries=0)
+    assert plan.action == "ABORT_UNCERTAIN"
+
+
 # ---------------------------------------------------------------------------
 # apply_plan -- guarded, conditional on If-Match.
 # ---------------------------------------------------------------------------
@@ -234,6 +274,8 @@ def _args(dry_run, tmp_path):
     return types.SimpleNamespace(
         dry_run=dry_run, verbose=False, api_base_url="http://127.0.0.1:48010",
         api_token="", allow_remote_writes=False, report="", batch_csv="",
+        # no real backoff in tests
+        probe_retries=0, probe_interval=0,
     )
 
 

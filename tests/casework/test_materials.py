@@ -214,3 +214,30 @@ def test_probe_material_reports_none_status_on_transport_error():
     from casework.common.materials import probe_material
     pr = probe_material(_StubApi(urllib.error.URLError("x")), "ag", "1")
     assert pr.status is None and pr.verdict is None
+
+
+def test_probe_material_still_probes_once_with_a_negative_retry_count():
+    # argparse accepts `--probe-retries -1`; range(-1 + 1) is EMPTY, so this
+    # used to return the None initializer and every caller's `.verdict`
+    # raised AttributeError.
+    from casework.common.materials import material_exists, probe_material
+    pr = probe_material(_StubApi({"@id": "x"}), "ag", "1", retries=-1)
+    assert pr is not None and pr.verdict is True
+    assert material_exists(_StubApi({"@id": "x"}), "ag", "1") is True
+
+
+def test_backoff_never_returns_a_negative_sleep():
+    # time.sleep() raises ValueError on a negative argument, so a negative
+    # interval would abort the walk with a traceback rather than degrade.
+    from casework.common.materials import _backoff_s
+    assert _backoff_s(None, 0, -5) == 0
+    assert _backoff_s(-3, 0, 1.0) == 0
+    assert _backoff_s(None, 3, 1.0) == 8
+
+
+def test_probe_material_survives_a_negative_interval():
+    # The uncertain path is the one that sleeps; it must not raise.
+    from casework.common.materials import probe_material
+    err = urllib.error.HTTPError("u", 503, "boom", {}, None)
+    pr = probe_material(_StubApi(err), "ag", "1", retries=2, interval=-1)
+    assert pr.status == 503 and pr.verdict is None

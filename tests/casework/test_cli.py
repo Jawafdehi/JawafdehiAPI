@@ -423,3 +423,57 @@ def test_log_run_footer_is_one_info_record_with_counts_and_duration(caplog):
     assert "error=0" in message
     assert "12.3" in message
     assert "tokens: 4200 in / 900 out" in message
+
+
+# ---------------------------------------------------------------------------
+# nonneg_int / nonneg_float -- reject at the flag boundary.
+#
+# A bare `type=int`/`type=float` accepts a negative value, and every consumer
+# then means something different by it: a negative retry count EMPTIES the
+# `range(retries + 1)` that drives the retry loops (so nothing is attempted at
+# all), and a negative interval makes `time.sleep()` raise ValueError mid-walk.
+# ---------------------------------------------------------------------------
+
+
+def test_nonneg_int_accepts_zero_and_positive():
+    from casework.common.cli import nonneg_int
+    assert nonneg_int("0") == 0
+    assert nonneg_int("4") == 4
+
+
+def test_nonneg_int_rejects_a_negative_count():
+    from casework.common.cli import nonneg_int
+    with pytest.raises(argparse.ArgumentTypeError):
+        nonneg_int("-1")
+
+
+def test_nonneg_float_accepts_zero_and_positive():
+    from casework.common.cli import nonneg_float
+    assert nonneg_float("0") == 0.0
+    assert nonneg_float("1.5") == 1.5
+
+
+def test_nonneg_float_rejects_a_negative_duration():
+    from casework.common.cli import nonneg_float
+    with pytest.raises(argparse.ArgumentTypeError):
+        nonneg_float("-0.5")
+
+
+def test_the_probe_flags_reject_negatives_end_to_end():
+    # SystemExit(2) is argparse's own "bad argument" exit.
+    from casework.bind_materials import build_parser as bind_parser
+    from casework.source_abhiyog import build_parser as source_parser
+    for parser, required, flag in (
+        (source_parser(), [], "--probe-interval"),
+        (source_parser(), [], "--probe-retries"),
+        (bind_parser(), ["--batch-csv", "b.csv"], "--probe-interval"),
+        (bind_parser(), ["--batch-csv", "b.csv"], "--probe-retries"),
+    ):
+        # Parse the SAME command line with a valid value first. Without this the
+        # SystemExit below proves nothing: argparse exits 2 for an unrecognised
+        # flag too, so a typo'd flag name would make the assertion pass while
+        # testing nothing. (It did — the version this replaces fed `--map` to a
+        # parser that has no such option.)
+        assert parser.parse_args(required + [flag, "0"]) is not None
+        with pytest.raises(SystemExit):
+            parser.parse_args(required + [flag, "-1"])

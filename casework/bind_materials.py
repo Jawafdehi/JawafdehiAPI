@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from casework.common.api import CaseworkApi
 from casework.common.cli import (
     _utc_iso_now, add_common_args, basic_auth_from_env, configure_run_logging,
-    log_run_footer, log_run_header, print_summary,
+    log_run_footer, log_run_header, nonneg_float, nonneg_int, print_summary,
 )
 from casework.common.materials import material_iri, probe_material
 
@@ -160,13 +160,23 @@ def missing_candidates(case, candidates):
     return [(s, i) for (s, i) in candidates if material_iri(s, i) not in have]
 
 
-def plan_case(api, case, etag, candidates, required_state=REQUIRED_STATE):
+def plan_case(api, case, etag, candidates, required_state=REQUIRED_STATE,
+              *, probe_retries=0, probe_interval=1.0):
     """Build a BindPlan for one case. Probes each candidate via ``material_exists``.
 
     Guarantees: never plans a write for a non-DRAFT case; never includes an
     absent or uncertain material; aborts the whole case if ANY candidate is
     uncertain (a partial list would destroy data); emits NOOP when the merge
     changes nothing so a re-run is idempotent.
+
+    ``probe_retries`` matters because "uncertain" is a HARD STOP here: the
+    production materials API answers 429 under a sustained walk, and a throttled
+    read is indistinguishable from a dead server once it collapses to the
+    uncertain verdict. Without retry a rate-limit burst mid-run aborts cases
+    whose materials are perfectly present -- a false negative that reads exactly
+    like a data problem. Retrying converts "slow down" back into a real answer.
+    The default is 0 (single shot, the historical behaviour) so a direct caller
+    is unchanged; the CLI turns it on.
     """
     slug = case.get("slug")
     state = case.get("state")
@@ -181,7 +191,8 @@ def plan_case(api, case, etag, candidates, required_state=REQUIRED_STATE):
         iri = material_iri(source, ident)
         if iri in have:
             continue  # already bound -> contributes nothing
-        pr = probe_material(api, source, ident)
+        pr = probe_material(api, source, ident, retries=probe_retries,
+                            interval=probe_interval)
         probes.append(pr)
         if pr.verdict is True:
             if iri not in add:
@@ -334,7 +345,9 @@ def run(args, api=None, rows=None):
             continue
 
         try:
-            plan = plan_case(api, case, etag, candidates_from_row(row))
+            plan = plan_case(api, case, etag, candidates_from_row(row),
+                             probe_retries=args.probe_retries,
+                             probe_interval=args.probe_interval)
         except Exception as exc:  # noqa: BLE001 -- one bad case must not sink the batch
             ms = int((time.monotonic() - t0) * 1000)
             stats["PLAN_FAILED"] = stats.get("PLAN_FAILED", 0) + 1
@@ -441,6 +454,14 @@ def build_parser():
                         help="CSV with a `slug` column and material-IRI columns.")
     parser.add_argument("--report", default="",
                         help="Optional path to write a JSON run report.")
+    parser.add_argument("--probe-retries", type=nonneg_int, default=4,
+                        help="Retries for a throttled/uncertain material probe "
+                             "(the API 429s under a sustained walk, and an "
+                             "uncertain probe ABORTS the whole case). 0 for a "
+                             "single shot, the pre-2026-07 behaviour.")
+    parser.add_argument("--probe-interval", type=nonneg_float, default=1.0,
+                        help="Base backoff seconds between probe retries "
+                             "(exponential, Retry-After honoured).")
     return parser
 
 
