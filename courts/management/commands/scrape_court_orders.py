@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import os
 import posixpath
+import random
 import time
 from datetime import date
 from urllib.parse import urlparse
@@ -43,7 +44,20 @@ from materials.jsonld import MaterialType, court_order_to_jsonld
 from materials.provenance import attach_media_object, build_provenance
 from materials.single_source_ingest import upsert_single_source_material
 
-_UA = "Mozilla/5.0 (X11; Linux x86_64) Jawafdehi-courts-crawler"
+# Browser User-Agents rotated per case — mirrors the retired spider + the June
+# rate-experiment probe (proven 0.009% 5xx over 43k cycles against this portal).
+# The /cp CAPTCHA portal is a distinct host from the cause-list crawler, so the
+# monolith's identifying UA is untested here; the browser UAs are the known-good.
+_USER_AGENTS = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+)
 
 #: File-extension → encodingFormat for the order documents the portal serves.
 _ENCODING = {
@@ -83,7 +97,7 @@ class OrdersHttpClient:
         self._session = self._requests.Session()
         self._session.headers.update(
             {
-                "User-Agent": _UA,
+                "User-Agent": random.choice(_USER_AGENTS),  # noqa: S311 (not crypto)
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9",
             }
@@ -93,13 +107,17 @@ class OrdersHttpClient:
         """GET the homepage → ``(status, court_session_cookie_value, retry_after)``."""
         try:
             resp = self._session.get(O.HOMEPAGE_URL, timeout=self._timeout)
+            return resp.status_code, self._court_session(), resp.headers.get("Retry-After")
         except Exception:
             return None, None, None
-        return (
-            resp.status_code,
-            self._session.cookies.get("court_session"),
-            resp.headers.get("Retry-After"),
-        )
+
+    def _court_session(self) -> str | None:
+        """The raw ``court_session`` cookie value, defensively (``.get`` raises
+        ``CookieConflictError`` if the jar ever holds two same-named cookies)."""
+        try:
+            return self._session.cookies.get("court_session")
+        except Exception:
+            return None
 
     def search(self, form: dict) -> tuple[int | None, str, str | None]:
         """POST the search form → ``(status, html, retry_after)``."""
@@ -201,7 +219,9 @@ class Command(BaseCommand):
             f"cases={len(cases)} today={today}"
         )
 
-        tally = {k: 0 for k in ("docs", "no_record", "too_recent", "failed", "transient")}
+        # The no-record branch resolves to failed | too_recent, so those — plus
+        # docs and transient — are the outcomes _process actually returns.
+        tally = {k: 0 for k in ("docs", "too_recent", "failed", "transient")}
         for i, case in enumerate(cases, 1):
             outcome, detail = self._process(case, client, today, write, backoff)
             tally[outcome] = tally.get(outcome, 0) + 1
@@ -303,6 +323,10 @@ class Command(BaseCommand):
         if not write:  # dry-run: report the found documents without downloading
             return "docs", f"{len(doc_urls)} file(s) [dry-run]"
 
+        # All-or-nothing: any file failing leaves the WHOLE case transient (nothing
+        # stored, re-crawlable) rather than the retired pipeline's partial capture.
+        # Keeps a case's order Material + document_sources internally consistent —
+        # a captured case always has every one of its files, never a subset.
         files = []
         for url in doc_urls:
             status, content = client.download(url)

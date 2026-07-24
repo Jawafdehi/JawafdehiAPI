@@ -320,6 +320,8 @@ class OrdersBacklogTests(TestCase):
             cls.supreme, "082-WO-0007",
             orders_too_recent=True, orders_too_recent_checked_at="2026-07-23T00:00:00",
         )
+        # transient failure short of the permanent-fail threshold → re-crawlable
+        cls.transient = mk(cls.supreme, "082-WO-0008", orders_transient_retries=2)
 
     def test_backlog_selects_and_prioritises(self):
         rows = list(O.orders_backlog_queryset(today=_TODAY))
@@ -333,6 +335,7 @@ class OrdersBacklogTests(TestCase):
         assert ("supreme", "082-WO-0005") not in keys  # failed
         assert ("kathmandudc", "082-CR-0009") not in keys  # wrong court
         assert ("supreme", "082-WO-0007") not in keys  # recheck window open
+        assert ("supreme", "082-WO-0008") in keys  # transient (not yet permanent)
         # Special/CR (priority 1) sorts ahead of Supreme/WO (priority 4).
         assert keys.index(("special", "082-CR-0001")) < keys.index(("supreme", "082-WO-0001"))
 
@@ -356,7 +359,9 @@ class OrdersCommandTests(TestCase):
     def _run(self, client, *extra):
         with patch(f"{CMD}.build_http_client", return_value=client), patch(
             f"{CMD}.store_file_as_link", side_effect=_fake_store
-        ), patch.dict("os.environ", {"ENABLE_COURT_ORDER_CAPTURE": "1"}):
+        ), patch("time.sleep"), patch.dict(
+            "os.environ", {"ENABLE_COURT_ORDER_CAPTURE": "1"}
+        ):
             call_command(
                 "scrape_court_orders", "--write", "--delay", "0",
                 "--case", "supreme:082-WO-0123", *extra,
@@ -439,3 +444,21 @@ class OrdersCommandTests(TestCase):
         case = self._reload()
         assert case.extra_data["orders_too_recent"] is True
         assert "orders_failed" not in case.extra_data
+
+    def test_download_failure_marks_transient_and_leaves_recrawlable(self):
+        # A found document that fails to download → no capture, case left
+        # re-crawlable (transient), NOT permanently failed and NOT captured.
+        client = _FakeClient(
+            homepage=(200, COOKIE, None),
+            search=(200, DOCS_HTML, None),
+            downloads={"https://supremecourt.gov.np/court/media/2081/order.pdf": (503, b"")},
+        )
+        self._run(client)
+        case = self._reload()
+        assert case.extra_data["orders_transient_retries"] == 1
+        assert "orders_failed" not in case.extra_data
+        assert "court_orders" not in case.extra_data
+        assert case.document_sources in (None, [])
+        assert not Material.objects.using("ngm").filter(
+            iri=court_order_material_iri("supreme", "082-WO-0123")
+        ).exists()
