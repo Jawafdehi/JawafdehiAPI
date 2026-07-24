@@ -38,7 +38,7 @@ def test_parse_bench_options_discovers_benches():
 
 
 def test_parse_bench_page_maps_rows_and_normalizes():
-    rows = parse_bench_page(_BENCH_PAGE, date_bs="2082-01-05", bench_type="1")
+    rows = parse_bench_page(_BENCH_PAGE, date_bs="2082-01-05", bench_label="इजलास १")
     assert len(rows) == 2
 
     (case0, hearing0) = rows[0]
@@ -61,12 +61,16 @@ def test_parse_bench_page_maps_rows_and_normalizes():
     assert hearing0.decision_type == "सफाई"
     assert hearing0.judge_names and "राम" in hearing0.judge_names
     assert hearing0.extra_data["court_number"] == "इजलास नं. १"
+    # bench_type is NOT the internal bench dropdown id; the bench label (judges)
+    # is kept in extra_data instead.
+    assert hearing0.bench_type is None
+    assert hearing0.extra_data["bench_label"] == "इजलास १"
 
 
 def test_ported_normalization_composes_with_parse():
     # The whole point of the port: parsed hearings feed the case_status
     # normalization to derive a verdict the cause-list never states directly.
-    rows = parse_bench_page(_BENCH_PAGE, date_bs="2082-01-05", bench_type="1")
+    rows = parse_bench_page(_BENCH_PAGE, date_bs="2082-01-05", bench_label="इजलास १")
     decided_hearing = rows[0][1]
     pending_hearing = rows[1][1]
 

@@ -64,8 +64,7 @@ def crawl_date(fetch, court_id, date_bs, nepali_date) -> list[tuple[ParsedCase, 
                   "bench_type": bench["value"], "yo": "1"},
         )
         rows.extend(
-            parse_bench_page(page, date_bs=date_bs, bench_type=bench["value"],
-                             bench_label=bench["label"])
+            parse_bench_page(page, date_bs=date_bs, bench_label=bench["label"])
         )
     return rows
 
@@ -99,7 +98,6 @@ def parse_bench_page(
     html: str,
     *,
     date_bs: str,
-    bench_type: str | None = None,
     bench_label: str | None = None,
 ) -> list[tuple[ParsedCase, ParsedHearing]]:
     """Parse one bench's case table (stage 2) into (case, hearing) rows."""
@@ -124,7 +122,6 @@ def parse_bench_page(
             tr.find_all("td"),
             date_bs=date_bs,
             hearing_date_ad=hearing_date_ad,
-            bench_type=bench_type,
             bench_label=bench_label,
             court_number=court_number,
             judge_names=judge_names,
@@ -157,7 +154,6 @@ def _parse_row(
     *,
     date_bs: str,
     hearing_date_ad: date | None,
-    bench_type: str | None,
     bench_label: str | None,
     court_number: str,
     judge_names: str | None,
@@ -191,7 +187,11 @@ def _parse_row(
         court_identifier=COURT_ID,
         hearing_date_bs=date_bs,
         hearing_date_ad=hearing_date_ad,
-        bench_type=bench_type,
+        # NB: bench_type is intentionally left unset. The bench <select> option
+        # VALUE is an internal per-sitting bench id (e.g. "8860"), NOT a bench TYPE
+        # (single/joint) — writing it here produced 36k numeric-junk bench_types
+        # across the special court. The bench's identity is its judges, carried in
+        # judge_names (+ the short form in extra_data.bench_label).
         serial_no=nepali_to_roman_numerals(normalize_whitespace(cells[0].get_text()))
         or None,
         judge_names=judge_names,
