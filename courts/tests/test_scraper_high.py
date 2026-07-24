@@ -208,3 +208,36 @@ def test_parse_high_detail_drops_status_artifact_and_uses_hearings():
     assert "case_status" not in enr.core_fields
     # verdict recovered from the final decisive hearing (फैसला / सफाई → acquittal)
     assert enr.core_fields["verdict_type"] == ACQUITTED
+
+
+def test_parse_bench_page_caps_overlong_case_type():
+    """An overlong/mis-parsed मुद्दा cell truncates to the column width (200) instead of
+    dead-lettering the court on a varchar(200) overflow. Regression: the High cause-list
+    left case_type uncapped while district/special/the enrich path all cap it."""
+    long_type = "क" * 250  # over CourtCase.case_type's varchar(200)
+    page = f"""
+    <html><body>
+      <h4>इजलास नं. १</h4>
+      <table class="table table-bordered table-hover">
+        <tbody>
+          <tr class="data_row">
+            <td>१</td><td>फौजदारी</td><td>२०८१/०५/१२</td><td>{long_type}</td>
+            <td>०८१-CR-०१२३</td>
+            <td>वादी क</td><td>-</td><td>-</td><td>पेशी</td>
+          </tr>
+        </tbody>
+      </table>
+    </body></html>
+    """
+    rows = parse_bench_page(
+        page,
+        court_identifier="high_patan",
+        date_bs="2081-05-12",
+        bench_id="101",
+        bench_no="१",
+        judge_name="न्या. गोपाल राई",
+    )
+    assert len(rows) == 1
+    (case, _hearing) = rows[0]
+    assert len(case.case_type) == 200
+    assert case.case_number == "081-CR-0123"  # unaffected
