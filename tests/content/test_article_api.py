@@ -1,9 +1,10 @@
 """Tests for the published-article API (`/api/cms/v2/pages/`).
 
-Focused on the case cross-links: the `related_cases` M2M and the inline
-`case` StreamField block. Both serialize a minimal case payload; the Case
-model has no `case_id` column (the slug is the public identifier), so these
-also guard against reintroducing dropped columns into the payload.
+Focused on the case cross-links: the `related_cases` inline (a ParentalKey
+through model, edited via the case chooser) and the inline `case` StreamField
+block. Both serialize a minimal case payload; the Case model has no `case_id`
+column (the slug is the public identifier), so these also guard against
+reintroducing dropped columns into the payload.
 """
 
 import datetime
@@ -11,7 +12,12 @@ import datetime
 import pytest
 
 from cases.models import Case, CaseState, CaseType
-from content.models import ArticleCategory, ArticleIndexPage, ArticlePage
+from content.models import (
+    ArticleCategory,
+    ArticleIndexPage,
+    ArticlePage,
+    ArticlePageRelatedCase,
+)
 
 PAGES_URL = "/api/cms/v2/pages/"
 JSON = {"HTTP_ACCEPT": "application/json"}
@@ -44,7 +50,7 @@ def article_with_case_links(case):
         ],
     )
     index.add_child(instance=article)
-    article.related_cases.add(case)
+    article.related_cases_through.add(ArticlePageRelatedCase(case=case))
     article.save_revision().publish()
     return article
 
