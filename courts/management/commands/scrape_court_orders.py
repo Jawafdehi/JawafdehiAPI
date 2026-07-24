@@ -120,7 +120,16 @@ class OrdersHttpClient:
             return None
 
     def search(self, form: dict) -> tuple[int | None, str, str | None]:
-        """POST the search form → ``(status, html, retry_after)``."""
+        """POST the search form → ``(status, html, retry_after)``.
+
+        The ``/cp`` result page is UTF-8 Devanagari but serves no ``charset`` in
+        its ``Content-Type``, so ``requests`` falls back to its RFC-2616 default
+        of ISO-8859-1 and ``resp.text`` mojibakes every marker (the result-page
+        marker then never matches → every case looks like ``not_results_page``).
+        The page declares ``<meta charset="utf-8">``, so decode as UTF-8 always.
+        (The retired Scrapy spider dodged this because Scrapy honours the meta
+        tag; plain ``requests.text`` does not.)
+        """
         headers = {"Origin": O.ORIGIN, "Referer": O.HOMEPAGE_URL}
         try:
             resp = self._session.post(
@@ -128,6 +137,7 @@ class OrdersHttpClient:
             )
         except Exception:
             return None, "", None
+        resp.encoding = "utf-8"
         return resp.status_code, resp.text, resp.headers.get("Retry-After")
 
     def download(self, url: str) -> tuple[int | None, bytes]:

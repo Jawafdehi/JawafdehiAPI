@@ -277,6 +277,53 @@ def _fake_store(uploaded_file, role="RAW"):
     return {"link": f"https://s3.jawafdehi.org/case_uploads/{uploaded_file.name}", "role": role}
 
 
+class _FakeRequestsResponse:
+    """A stand-in for ``requests.Response`` whose ``.text`` honours ``.encoding``
+    exactly as the real one does — so a test can prove ``search`` overrides the
+    ISO-8859-1 default before reading text."""
+
+    def __init__(self, content: bytes, *, status_code=200, encoding="ISO-8859-1"):
+        self.content = content
+        self.status_code = status_code
+        self.encoding = encoding
+        self.headers = {}
+
+    @property
+    def text(self) -> str:
+        return self.content.decode(self.encoding or "ISO-8859-1", errors="replace")
+
+
+class _FakeRequestsSession:
+    def __init__(self, response):
+        self._response = response
+        self.headers = {}
+
+    def post(self, *args, **kwargs):
+        return self._response
+
+
+class OrdersHttpClientDecodeTests(TestCase):
+    """The ``/cp`` result page is UTF-8 Devanagari served with NO ``charset`` in
+    ``Content-Type``, so ``requests`` defaults ``resp.encoding`` to ISO-8859-1 and
+    mojibakes every marker. ``search`` must force UTF-8 or the whole capture
+    misreads every case as ``not_results_page`` (the bug that shipped in #375)."""
+
+    def test_search_forces_utf8_on_charsetless_devanagari(self):
+        from courts.management.commands.scrape_court_orders import OrdersHttpClient
+
+        resp = _FakeRequestsResponse(DOCS_HTML.encode("utf-8"), encoding="ISO-8859-1")
+        client = OrdersHttpClient(timeout=1)
+        client._session = _FakeRequestsSession(resp)
+
+        status, html, _ = client.search({"regno": "x"})
+
+        self.assertEqual(status, 200)
+        # Without the UTF-8 override this marker would be latin-1 mojibake and the
+        # parse would collapse to NOT_RESULTS_PAGE.
+        self.assertIn(O.VALID_RESULTS_MARKER, html)
+        self.assertEqual(O.parse_order_results(html).status, O.DOCS)
+
+
 class OrdersBacklogTests(TestCase):
     databases = "__all__"
 
