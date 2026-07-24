@@ -9,25 +9,45 @@ def forwards_copy_links(apps, schema_editor):
     """Copy existing ``ArticlePage.related_cases`` M2M links into the through table.
 
     Runs while the old M2M field still exists (before ``RemoveField``), so no
-    related-case links are lost when the field is dropped.
+    related-case links are lost when the field is dropped. Reads only the case
+    PKs (not full Case rows), pins the migration's DB alias so routed
+    multi-DB setups stay consistent, and inserts in bounded batches.
     """
     ArticlePage = apps.get_model("content", "ArticlePage")
     ArticlePageRelatedCase = apps.get_model("content", "ArticlePageRelatedCase")
-    links = []
-    for article in ArticlePage.objects.all():
-        for case in article.related_cases.all():
-            links.append(
-                ArticlePageRelatedCase(article_page_id=article.pk, case_id=case.pk)
+    alias = schema_editor.connection.alias
+
+    rows = []
+    for article in ArticlePage.objects.using(alias).iterator():
+        for case_id in article.related_cases.values_list("pk", flat=True):
+            rows.append(
+                ArticlePageRelatedCase(article_page_id=article.pk, case_id=case_id)
             )
-    ArticlePageRelatedCase.objects.bulk_create(links, ignore_conflicts=True)
+    ArticlePageRelatedCase.objects.using(alias).bulk_create(
+        rows, batch_size=1000, ignore_conflicts=True
+    )
 
 
 def backwards_copy_links(apps, schema_editor):
-    """Restore through-table links back into the M2M field on reverse."""
+    """Restore through-table links back into the M2M field on reverse.
+
+    Groups links by article so the M2M is repopulated with one ``add()`` per
+    article (rather than a per-row ``get()`` + ``add()``), and pins the DB alias.
+    """
     ArticlePage = apps.get_model("content", "ArticlePage")
     ArticlePageRelatedCase = apps.get_model("content", "ArticlePageRelatedCase")
-    for link in ArticlePageRelatedCase.objects.all():
-        ArticlePage.objects.get(pk=link.article_page_id).related_cases.add(link.case_id)
+    alias = schema_editor.connection.alias
+
+    case_ids_by_article = {}
+    for article_id, case_id in ArticlePageRelatedCase.objects.using(alias).values_list(
+        "article_page_id", "case_id"
+    ):
+        case_ids_by_article.setdefault(article_id, []).append(case_id)
+
+    for article in ArticlePage.objects.using(alias).filter(
+        pk__in=case_ids_by_article
+    ):
+        article.related_cases.add(*case_ids_by_article[article.pk])
 
 
 class Migration(migrations.Migration):
