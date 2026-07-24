@@ -71,7 +71,7 @@ _DEFAULT_CONTRIB = frozenset(
 
 # The Wagtail CMS ("content" app + Wagtail core/images/documents/etc. and its
 # deps taggit/modelcluster) also lives on "default": its page tree FKs to the
-# same auth.User and it cross-links cases.Case (ArticlePage.related_cases), which
+# same auth.User and it cross-links cases.Case (ArticlePage.related_cases_through), which
 # is on "default" too. These fall through to "default" by _db_for_label already
 # (they're in neither NES nor NGM); listing them is documentation only, mirroring
 # _DEFAULT_CONTRIB. Do NOT route any of these to the nes/ngm DBs.
