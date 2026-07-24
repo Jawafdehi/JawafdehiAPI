@@ -73,3 +73,45 @@ def coerce_count(value: object) -> int | None:
         return None
     digits = "".join(ch for ch in nepali_to_roman_numerals(value) if ch in "0123456789")
     return int(digits) if digits else None
+
+
+#: The leading honorific token that begins every judge entry — ``मा.`` (माननीय,
+#: abbreviated) or the spelled-out ``माननीय``. Each judge on a multi-judge bench is
+#: ``मा. न्या. श्री <name>`` / ``मा. मु. न्या. …`` / ``मा.न्या. …`` / ``माननीय … न्यायाधीश …``;
+#: the honorific always opens with one of these, and no judge NAME contains ``मा.``
+#: (a bare ``मा`` + period) mid-string, so it is a safe split anchor. The mid-token
+#: parts (``न्या.``/``मु.``/``प्र.``) are deliberately NOT anchors — matching them would
+#: split inside a single honorific.
+_JUDGE_HONORIFIC_RE = re.compile(r"(\S)(मा\.|माननीय)")
+
+
+def desep_judges(text: object) -> str | None:
+    """Re-insert the separator a run-on judges cell lost, joining judges with ``, ``.
+
+    A bench's judges are listed one-per-line (``<br>``) in a single portal cell; a
+    bare ``get_text()`` with no separator glues them, so the next judge's honorific
+    sticks onto the previous judge's name (``…श्री राममा. न्या. श्री श्याम…``). Every judge
+    opens with the माननीय honorific (:data:`_JUDGE_HONORIFIC_RE`), so a comma-space is
+    inserted before any honorific glued to a preceding non-space char. Idempotent: an
+    already-separated (space/comma/newline-delimited) list is returned unchanged, and
+    the FIRST judge (honorific at string start) is never prefixed.
+    """
+    normalized = normalize_whitespace(text)
+    if not normalized:
+        return None
+    return _JUDGE_HONORIFIC_RE.sub(r"\1, \2", normalized)
+
+
+def extract_judges(cell) -> str | None:
+    """Extract a judges cell as a ``, ``-joined list, honouring ``<br>`` line breaks.
+
+    Replaces ``<br>`` with the separator BEFORE flattening (so structurally-delimited
+    benches survive) and runs :func:`desep_judges` as a backstop for cells whose
+    judges are split by sibling elements rather than ``<br>``. Returns ``None`` when the
+    cell is missing or empty.
+    """
+    if cell is None:
+        return None
+    for br in cell.find_all("br"):
+        br.replace_with(", ")
+    return desep_judges(cell.get_text())

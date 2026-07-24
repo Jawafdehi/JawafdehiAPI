@@ -36,6 +36,7 @@ from courts.normalize import best_effort_normalize
 from courts.scraper.rows import ParsedCase, ParsedEnrichment, ParsedHearing
 from courts.scraper.text import (
     coerce_count,
+    extract_judges,
     nepali_to_roman_numerals,
     normalize_date,
     normalize_whitespace,
@@ -82,7 +83,10 @@ def parse_bench_list(html: str) -> list[dict[str, str]]:
             {
                 "bench_id": match.group(1),
                 "bench_no": match.group(2),
-                "judge_name": normalize_whitespace(cells[1].get_text()),
+                # A high-court bench can seat 2-3 judges (one per <br> in this cell);
+                # extract_judges keeps them ", "-separated instead of glueing the next
+                # judge's honorific onto the previous name (the run-on DQ bug).
+                "judge_name": extract_judges(cells[1]) or "",
             }
         )
     return benches
@@ -274,7 +278,9 @@ def _parse_detail_fields(soup: BeautifulSoup) -> tuple[dict, dict]:
                 core_fields["verdict_date_bs"] = normalize_date(value)
                 core_fields["verdict_date_ad"] = bs_to_ad(normalize_date(value))
         elif label == "फैसला गर्ने न्यायाधीश":
-            core_fields["verdict_judge"] = value[:500]
+            # A multi-judge verdict panel is <br>-separated inside this <p>; keep the
+            # judges ", "-separated rather than run-on.
+            core_fields["verdict_judge"] = (extract_judges(value_elem) or value)[:500]
         elif label == "पेशी चढेको संख्या":
             # v2: hearing_count is a typed int column — coerce the scraped count.
             core_fields["hearing_count"] = coerce_count(value)
@@ -406,7 +412,7 @@ def _parse_detail_hearings(soup: BeautifulSoup) -> list[dict]:
                         "hearing_date": normalize_date(
                             normalize_whitespace(cells[0].get_text())
                         ),
-                        "judges": normalize_whitespace(cells[1].get_text()),
+                        "judges": extract_judges(cells[1]) or "",
                         "case_status": normalize_whitespace(cells[2].get_text()),
                         "decision_type": normalize_whitespace(cells[3].get_text()),
                     }

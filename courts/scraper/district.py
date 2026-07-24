@@ -35,6 +35,8 @@ from courts.normalize import best_effort_normalize
 from courts.scraper.rows import ParsedCase, ParsedEnrichment, ParsedHearing
 from courts.scraper.text import (
     coerce_count,
+    desep_judges,
+    extract_judges,
     nepali_to_roman_numerals,
     normalize_date,
     normalize_whitespace,
@@ -82,7 +84,9 @@ def parse_daily_list(
                 if bench_td:
                     current_bench = normalize_whitespace(bench_td.get_text())[:100] or None
                 if judge_td:
-                    current_judge = normalize_whitespace(judge_td.get_text()) or None
+                    # District benches are single-judge today, but keep the shared
+                    # ", "-separated extractor so a co-signed bench never runs on.
+                    current_judge = extract_judges(judge_td)
 
         for tr in table.find_all("tr"):
             if tr.find("th"):  # header row
@@ -257,7 +261,7 @@ def _extract_detail_fields(soup: BeautifulSoup) -> dict[str, object]:
                     data["verdict_date_bs"] = date_bs
                     data["verdict_date_ad"] = bs_to_ad(date_bs)
                 elif label == "फैसला गर्ने मा. न्यायाधीश":
-                    data["verdict_judge"] = value[:500]
+                    data["verdict_judge"] = (desep_judges(value) or "")[:500]
                 elif label == "पेशी चढेको संख्या":
                     data["hearing_count"] = value
 
@@ -352,7 +356,7 @@ def _parse_hearing_table(table) -> list[dict[str, str]]:
                     "date": cells[0].get_text(strip=True),
                     "type": cells[1].get_text(strip=True),
                     "division": cells[2].get_text(strip=True),
-                    "judge": cells[3].get_text(strip=True),
+                    "judge": extract_judges(cells[3]) or "",
                     "order": cells[4].get_text(strip=True),
                 }
             )
