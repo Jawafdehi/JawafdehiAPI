@@ -108,6 +108,22 @@ def test_parse_bench_list_discovers_benches():
     assert benches[0]["judge_name"] == "न्या. गोपाल राई"
 
 
+def test_parse_bench_list_separates_multi_judge_bench():
+    # A high-court bench seats 2-3 judges, one per <br>; a bare get_text() glued the
+    # next judge's honorific onto the previous name (the run-on DQ bug that affected
+    # ~1.56M hearings). They must stay ", "-separated.
+    html = """
+    <html><body>
+      <table class="table table-striped table-bordered table-hover"><tbody>
+        <tr onclick="send_data('201', '३', '20820105')"><td>३</td>
+          <td>मा. न्या. श्री राम<br>मा. न्या. श्री श्याम</td></tr>
+      </tbody></table>
+    </body></html>
+    """
+    benches = parse_bench_list(html)
+    assert benches[0]["judge_name"] == "मा. न्या. श्री राम, मा. न्या. श्री श्याम"
+
+
 def test_parse_bench_page_maps_rows_and_normalizes():
     rows = parse_bench_page(
         _BENCH_PAGE,

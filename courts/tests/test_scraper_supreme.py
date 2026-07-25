@@ -80,10 +80,10 @@ def test_cause_list_maps_rows_and_normalizes():
     assert hearing0.hearing_date_ad is not None
     assert hearing0.bench_type == "संयुक्त इजलास"
     assert hearing0.serial_no == "1"  # Devanagari serial transliterated
-    # judge_names = the "must hear" cell, br-joined with newlines.
-    assert hearing0.judge_names == "मा. न्या. राम\nमा. न्या. श्याम"
+    # judge_names = the "must hear" cell, br-joined with ", " (the shared separator).
+    assert hearing0.judge_names == "मा. न्या. राम, मा. न्या. श्याम"
     assert hearing0.extra_data["judges_cannot_hear"] == "मा. न्या. क"
-    assert hearing0.extra_data["judges_must_hear"] == "मा. न्या. राम\nमा. न्या. श्याम"
+    assert hearing0.extra_data["judges_must_hear"] == "मा. न्या. राम, मा. न्या. श्याम"
 
 
 def test_cause_list_party_fallback_without_delimiter():

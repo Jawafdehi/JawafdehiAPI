@@ -34,6 +34,8 @@ from courts.normalize import best_effort_normalize
 from courts.scraper.rows import ParsedCase, ParsedEnrichment, ParsedHearing
 from courts.scraper.text import (
     coerce_count,
+    desep_judges,
+    extract_judges,
     nepali_to_roman_numerals,
     normalize_date,
     normalize_whitespace,
@@ -159,17 +161,13 @@ def _clean_division(division: str) -> str:
 
 
 def _parse_judges(cell) -> str | None:
-    """Newline-join a judges cell, honouring its ``<br>`` line breaks."""
-    if not cell:
-        return None
-    for br in cell.find_all("br"):
-        br.replace_with("\n")
-    names = [
-        normalize_whitespace(name)
-        for name in cell.get_text().split("\n")
-        if normalize_whitespace(name)
-    ]
-    return "\n".join(names) if names else None
+    """``, ``-join a judges cell, honouring its ``<br>`` line breaks.
+
+    Thin wrapper over the shared :func:`extract_judges` so every court's multi-judge
+    bench uses the one ``, `` separator (matching the seed fixtures) instead of glueing
+    run-on names.
+    """
+    return extract_judges(cell)
 
 
 def _parse_row(
@@ -282,7 +280,8 @@ def _map_field(data: dict, label: str, value: str) -> None:
         data["verdict_type"] = value[:100]
 
     elif label in ["फैसला गर्ने मा. न्यायाधीश", "न्यायाधीश"]:
-        data["verdict_judge"] = value[:200]
+        # value is already flattened here (no cell), so de-run-on any glued honorifics.
+        data["verdict_judge"] = (desep_judges(value) or "")[:200]
 
     elif label in ["फाँट", "इजलास"]:
         data["division"] = value[:100]
@@ -376,7 +375,7 @@ def parse_hearings_and_timeline(soup: BeautifulSoup) -> dict[str, list[dict]]:
                 cells = row.find_all("td")
                 if len(cells) >= 2:
                     hearing_date = normalize_whitespace(cells[0].get_text())
-                    judges = normalize_whitespace(cells[1].get_text())
+                    judges = extract_judges(cells[1]) or ""
                     if judges and hearing_date and hearing_date not in [
                         "सुनवाइ मिती",
                         "मिती",
