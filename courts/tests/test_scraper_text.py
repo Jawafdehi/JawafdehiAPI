@@ -65,3 +65,46 @@ def test_extract_judges_honours_br_then_backstops_glue():
     )
     assert extract_judges(_cell("<td>   </td>")) is None
     assert extract_judges(None) is None
+
+
+def test_desep_judges_keeps_name_ending_in_ma_intact():
+    # THE over-split trap: a judge NAME ending in the akshara मा (रमा / …शर्मा) glued
+    # to the next honorific. The anchor is मा + a literal PERIOD (मा\.), and a name
+    # never carries a period, so only the honorific's मा. is split — the name is whole.
+    assert desep_judges("मा. न्या. श्री रमामा. न्या. श्री सीता") == (
+        "मा. न्या. श्री रमा, मा. न्या. श्री सीता"
+    )
+    assert desep_judges("मा. न्या. श्री पूर्णिमामा. न्या. श्री गंगा") == (
+        "मा. न्या. श्री पूर्णिमा, मा. न्या. श्री गंगा"
+    )
+
+
+def test_desep_judges_acting_chief_title_soup_not_split_internally():
+    # Real acting-chief title "मा.का.मु.मु.न्या." has interior periods, but only its
+    # LEADING मा. is an anchor (का./मु./न्या. are not), so a glued entry splits at the
+    # boundary and the title stays intact.
+    glued = "मा. न्या. श्री राममा.का.मु.मु.न्या. श्री श्याम"
+    assert desep_judges(glued) == "मा. न्या. श्री राम, मा.का.मु.मु.न्या. श्री श्याम"
+
+
+def test_desep_judges_quadruple_glue_and_double_application():
+    glued = "मा. न्या. एकमा. न्या. दुईमा. न्या. तीनमा. न्या. चार"
+    once = desep_judges(glued)
+    assert once == "मा. न्या. एक, मा. न्या. दुई, मा. न्या. तीन, मा. न्या. चार"
+    # Idempotent under re-application (the backfill must be safe to re-run).
+    assert desep_judges(once) == once
+
+
+def test_desep_judges_mixed_glued_and_already_spaced():
+    # First boundary already space-delimited (clean), second boundary glued.
+    mixed = "मा. न्या. श्री एक मा. न्या. श्री दुईमा. न्या. श्री तीन"
+    assert desep_judges(mixed) == (
+        "मा. न्या. श्री एक मा. न्या. श्री दुई, मा. न्या. श्री तीन"
+    )
+
+
+def test_extract_judges_self_closing_br_and_multiline():
+    # Portals emit both <br> and <br/>; both become the separator.
+    assert extract_judges(_cell("<td>मा. न्या. राम<br/>मा. न्या. श्याम</td>")) == (
+        "मा. न्या. राम, मा. न्या. श्याम"
+    )
