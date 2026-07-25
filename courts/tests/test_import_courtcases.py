@@ -262,6 +262,89 @@ class CopyModeLoadTests(_NgmTestCase):
             _copy([_src_row(case="081-CR-0002")]).run()  # target nonempty, no flag
 
 
+class VerdictJudgeDeriveTests(_NgmTestCase):
+    _VDATE = date(2024, 6, 1)
+
+    def test_derives_from_verdict_date_hearing_and_de_run_ons(self):
+        # Decided case, no verdict_judge; the verdict-date hearing carries the bench
+        # (glued, as legacy hearings are) → filled, de-run-on to ", "-separated.
+        row = _src_row(
+            case="081-CR-0091", verdict_date_ad=self._VDATE, verdict_judge=None,
+            hearings=[
+                _hearing(hearing_date_ad=date(2024, 5, 15), judge_names="मा. न्या. श्री क"),
+                _hearing(
+                    hearing_date_ad=self._VDATE, decision_type="फैसला",
+                    judge_names="मा. न्या. श्री राममा. न्या. श्री श्याम",
+                ),
+            ],
+        )
+        res = _copy([row]).run()
+        case = CourtCase.objects.using("ngm").get(case_number="081-CR-0091")
+        self.assertEqual(case.verdict_judge, "मा. न्या. श्री राम, मा. न्या. श्री श्याम")
+        self.assertTrue(case.extra_data["_dq"]["verdict_judge_derived"])
+        self.assertEqual(res.dq_verdict_judge_derived, 1)
+
+    def test_does_not_overwrite_existing_verdict_judge(self):
+        row = _src_row(
+            case="081-CR-0092", verdict_date_ad=self._VDATE,
+            verdict_judge="मा. न्या. श्री मौजुदा",
+            hearings=[_hearing(hearing_date_ad=self._VDATE, judge_names="मा. न्या. श्री अर्को")],
+        )
+        res = _copy([row]).run()
+        case = CourtCase.objects.using("ngm").get(case_number="081-CR-0092")
+        self.assertEqual(case.verdict_judge, "मा. न्या. श्री मौजुदा")
+        self.assertEqual(res.dq_verdict_judge_derived, 0)
+
+    def test_undecided_or_no_matching_hearing_leaves_null(self):
+        # Not decided (no verdict_date_ad) → skip; and decided but the only hearing
+        # with a judge is on a DIFFERENT date → nothing to derive.
+        undecided = _src_row(case="081-CR-0093", verdict_date_ad=None, verdict_judge=None,
+                             hearings=[_hearing(hearing_date_ad=self._VDATE, judge_names="मा. न्या. श्री क")])
+        no_hit = _src_row(case="081-CR-0094", verdict_date_ad=self._VDATE, verdict_judge=None,
+                          hearings=[_hearing(hearing_date_ad=date(2024, 1, 1), judge_names="मा. न्या. श्री क")])
+        res = _copy([undecided, no_hit]).run()
+        self.assertIsNone(CourtCase.objects.using("ngm").get(case_number="081-CR-0093").verdict_judge)
+        self.assertIsNone(CourtCase.objects.using("ngm").get(case_number="081-CR-0094").verdict_judge)
+        self.assertEqual(res.dq_verdict_judge_derived, 0)
+
+    def test_prefers_decisive_sitting_when_several_on_verdict_date(self):
+        row = _src_row(
+            case="081-CR-0095", verdict_date_ad=self._VDATE, verdict_judge=None,
+            hearings=[
+                _hearing(hearing_date_ad=self._VDATE, case_status="पेशी",
+                         judge_names="मा. न्या. श्री पेशी"),
+                _hearing(hearing_date_ad=self._VDATE, decision_type="फैसला",
+                         judge_names="मा. न्या. श्री फैसला"),
+            ],
+        )
+        _copy([row]).run()
+        case = CourtCase.objects.using("ngm").get(case_number="081-CR-0095")
+        self.assertEqual(case.verdict_judge, "मा. न्या. श्री फैसला")
+
+    def test_inplace_derives_from_db_hearing_and_is_idempotent(self):
+        court = Court.objects.using("ngm").create(
+            identifier="special", court_type="special", full_name_nepali="वि"
+        )
+        CourtCase.objects.using("ngm").create(
+            court=court, case_number="082-CR-0007", verdict_date_ad=self._VDATE,
+            verdict_judge=None,
+        )
+        CourtCaseHearing.objects.using("ngm").create(
+            court=court, case_number="082-CR-0007", hearing_date_ad=self._VDATE,
+            decision_type="अन्तिम आदेश", judge_names="मा. न्या. श्री एकमा. न्या. श्री दुई",
+            scraped_at=_SCRAPED,
+        )
+        cfg = dict(mode=ImportMode.INPLACE, courts=["special"])
+        first = CourtCaseImporter(ImportConfig(**cfg)).run()
+        self.assertEqual(first.dq_verdict_judge_derived, 1)
+        case = CourtCase.objects.using("ngm").get(case_number="082-CR-0007")
+        self.assertEqual(case.verdict_judge, "मा. न्या. श्री एक, मा. न्या. श्री दुई")
+        self.assertTrue(case.extra_data["_dq"]["verdict_judge_derived"])
+        # Re-run finds it populated → no further derivation.
+        second = CourtCaseImporter(ImportConfig(**cfg)).run()
+        self.assertEqual(second.dq_verdict_judge_derived, 0)
+
+
 class InplaceModeTests(_NgmTestCase):
     def test_inplace_leaves_nes_id_and_status_untouched(self):
         court = Court.objects.using("ngm").create(

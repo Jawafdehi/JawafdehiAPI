@@ -46,6 +46,7 @@ from courts.normalize import (
     is_verdict_sentinel,
     normalize_case_type,
 )
+from courts.scraper.text import desep_judges
 from materials.jsonld import (
     MaterialType,
     case_order_sources,
@@ -81,6 +82,11 @@ _COPY_HEARING_FIELDS = (
     "lawyer_names", "serial_no", "case_status", "decision_type", "remarks",
     "scraped_at", "extra_data",
 )
+
+#: Decision markers that identify the DECISIVE sitting on a verdict date — when a
+#: case has several hearings on its verdict day, the one whose decision_type /
+#: case_status names a verdict is the deciding bench (used by _derive_verdict_judge).
+_VERDICT_MARKERS = ("फैसला", "अन्तिम आदेश")
 
 
 class ImportMode(str, Enum):
@@ -119,6 +125,7 @@ class ImportResult:
     dq_hc_recovered: int = 0
     dq_special_flagged: int = 0
     dq_case_type_normalized: int = 0
+    dq_verdict_judge_derived: int = 0
     skipped: int = 0
     failed: int = 0
     errors: list[dict[str, Any]] = field(default_factory=list)
@@ -132,6 +139,7 @@ class ImportResult:
             "dq_hc_recovered": self.dq_hc_recovered,
             "dq_special_flagged": self.dq_special_flagged,
             "dq_case_type_normalized": self.dq_case_type_normalized,
+            "dq_verdict_judge_derived": self.dq_verdict_judge_derived,
             "skipped": self.skipped,
             "failed": self.failed,
             "errors": list(self.errors),
@@ -580,6 +588,12 @@ class CourtCaseImporter:
         # after (3) so a just-recovered high-court case_type is normalised too.
         self._normalize_case_type(case)
 
+        # (5) verdict_judge gap — a DECIDED case with no deciding judge: recover it
+        # from the verdict-date hearing so the gap self-heals on every import (the
+        # enrichment detail page never carries it for special court, and only
+        # inconsistently for high/district) instead of re-accumulating.
+        self._derive_verdict_judge(case, row)
+
     def _flag_special_defendants(self, case: CourtCase, row: Any) -> None:
         if self._read_only and not isinstance(row, CourtCase):
             has_defendant = any(
@@ -645,6 +659,68 @@ class CourtCaseImporter:
         else:
             self._update_case(case, case_type=canonical)
         self.res.dq_case_type_normalized += 1
+
+    def _derive_verdict_judge(self, case: CourtCase, row: Any) -> None:
+        """Fill an EMPTY ``verdict_judge`` on a decided case from its verdict-date
+        hearing, marking ``extra_data._dq.verdict_judge_derived`` (reversible).
+
+        Only fires when the case is decided (``verdict_date_ad`` set) and has no
+        judge; a case that already carries one is never overwritten. Idempotent —
+        a re-run finds ``verdict_judge`` populated and does nothing."""
+        if case.verdict_judge or not case.verdict_date_ad:
+            return
+        judge = self._verdict_date_judge(case, row)
+        if not judge:
+            return
+        if case.extra_data is None or isinstance(case.extra_data, dict):
+            extra = dict(case.extra_data or {})
+            existing_dq = extra.get("_dq")
+            dq = dict(existing_dq) if isinstance(existing_dq, dict) else {}
+            dq["verdict_judge_derived"] = True
+            extra["_dq"] = dq
+            self._update_case(case, verdict_judge=judge, extra_data=extra)
+        else:
+            self._update_case(case, verdict_judge=judge)
+        self.res.dq_verdict_judge_derived += 1
+
+    def _verdict_date_judge(self, case: CourtCase, row: Any) -> str | None:
+        """The deciding bench: ``judge_names`` on the case's verdict-date hearing,
+        preferring a decisive फैसला/अन्तिम-आदेश sitting, de-run-on and capped to 500.
+
+        Reads the in-memory ``row['hearings']`` for a COPY dict; queries the ``ngm``
+        DB for an INPLACE ``CourtCase`` (whose hearings already exist). Returns
+        ``None`` when no verdict-date hearing carries a judge."""
+        verdict_date = case.verdict_date_ad
+        if not verdict_date:
+            return None
+        if isinstance(row, dict):
+            hearings = [
+                h for h in (row.get("hearings") or [])
+                if h.get("hearing_date_ad") == verdict_date
+                and (h.get("judge_names") or "").strip()
+            ]
+        else:
+            hearings = list(
+                CourtCaseHearing.objects.using("ngm")
+                .filter(
+                    court_id=case.court_id,
+                    case_number=case.case_number,
+                    hearing_date_ad=verdict_date,
+                )
+                .exclude(judge_names__isnull=True)
+                .exclude(judge_names="")
+                .values("judge_names", "decision_type", "case_status", "id")
+            )
+        if not hearings:
+            return None
+
+        def _decisive(h: dict[str, Any]) -> bool:
+            blob = f"{h.get('decision_type') or ''} {h.get('case_status') or ''}"
+            return any(marker in blob for marker in _VERDICT_MARKERS)
+
+        hearings.sort(key=lambda h: (0 if _decisive(h) else 1, h.get("id") or 0))
+        judge = desep_judges(hearings[0].get("judge_names"))
+        return judge[:500] if judge else None
 
     @staticmethod
     def _court_type(case: CourtCase, row: Any) -> str | None:
