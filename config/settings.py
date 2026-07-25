@@ -675,6 +675,23 @@ WAGTAIL_SITE_NAME = "Jawafdehi Newsroom"
 WAGTAILADMIN_BASE_URL = os.getenv(
     "WAGTAILADMIN_BASE_URL", "https://portal.jawafdehi.org"
 )
+# ---------------------------------------------------------------------------
+# Outbound email — DISABLED.
+# ---------------------------------------------------------------------------
+# Wagtail sends notification emails synchronously on the edit screen (comment-
+# subscriber notifications and workflow/moderation transitions) and on admin
+# password reset. The platform has no mail relay, so Django's default SMTP
+# backend dialed localhost:25, raised ConnectionRefusedError, and returned a
+# 500 from the triggering save — and because the comment had already committed,
+# each retry re-inserted it as a duplicate. We don't want these notifications,
+# so route mail to the dummy backend: messages are accepted and discarded
+# without ever opening a connection. Editorial features (comments, workflow)
+# keep working; they simply don't email. The newsletter is unaffected — it
+# posts to SendPulse's REST API, not through Django's mail backend. Set
+# EMAIL_BACKEND in the environment to re-enable delivery.
+EMAIL_BACKEND = os.getenv(
+    "EMAIL_BACKEND", "django.core.mail.backends.dummy.EmailBackend"
+)
 # Headless preview: the edit-screen preview iframe 302-redirects to the public
 # SPA's article preview route (which fetches the unsaved draft from the
 # page_preview API by token), so editors see the real styled article instead of
