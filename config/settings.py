@@ -675,6 +675,32 @@ WAGTAIL_SITE_NAME = "Jawafdehi Newsroom"
 WAGTAILADMIN_BASE_URL = os.getenv(
     "WAGTAILADMIN_BASE_URL", "https://portal.jawafdehi.org"
 )
+# ---------------------------------------------------------------------------
+# Outbound email (Amazon SES over SMTP).
+# ---------------------------------------------------------------------------
+# The Wagtail edit screen sends notification emails synchronously on save:
+# workflow/moderation transitions and, notably, comment notifications to page
+# subscribers. Django's default EMAIL_HOST is "localhost:25", which has no
+# listener in the pod, so every such send raised ConnectionRefusedError and
+# 500'd the save. Point at SES SMTP (the account has production access and
+# jawafdehi.org is a verified sender domain); values come from the platform
+# env secret. Defaults below preserve Django's stock behaviour when unset so
+# this block is inert until the env is populated. EMAIL_TIMEOUT keeps a stalled
+# relay from pinning a gunicorn worker on the request path.
+EMAIL_BACKEND = os.getenv(
+    "EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend"
+)
+EMAIL_HOST = os.getenv("EMAIL_HOST", "localhost")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "25"))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = env_flag("EMAIL_USE_TLS", False)
+EMAIL_USE_SSL = env_flag("EMAIL_USE_SSL", False)
+EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "10"))
+DEFAULT_FROM_EMAIL = os.getenv(
+    "DEFAULT_FROM_EMAIL", "Jawafdehi <inquiry@jawafdehi.org>"
+)
+SERVER_EMAIL = os.getenv("SERVER_EMAIL", DEFAULT_FROM_EMAIL)
 # Headless preview: the edit-screen preview iframe 302-redirects to the public
 # SPA's article preview route (which fetches the unsaved draft from the
 # page_preview API by token), so editors see the real styled article instead of
