@@ -105,3 +105,44 @@ def test_make_client_anonymous_without_creds(monkeypatch):
 
     opensearch.make_client("http://localhost:9200")
     assert "http_auth" not in captured
+
+
+def _capture_make_client(monkeypatch):
+    """Stub opensearchpy.OpenSearch and return the dict of kwargs it's built with."""
+    import sys
+    import types
+
+    captured = {}
+
+    class FakeOpenSearch:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    fake_mod = types.ModuleType("opensearchpy")
+    fake_mod.OpenSearch = FakeOpenSearch
+    monkeypatch.setitem(sys.modules, "opensearchpy", fake_mod)
+    return captured
+
+
+def test_make_client_sets_timeout_and_retries_by_default(monkeypatch):
+    # No opensearch-py 10s default: an explicit 30s timeout + bounded retry so
+    # bulk indexing of large OCR docs doesn't trip the short read-timeout.
+    monkeypatch.delenv("OPENSEARCH_TIMEOUT", raising=False)
+    monkeypatch.delenv("OPENSEARCH_MAX_RETRIES", raising=False)
+    captured = _capture_make_client(monkeypatch)
+
+    opensearch.make_client("http://localhost:9200")
+    assert captured["timeout"] == 30.0
+    assert captured["max_retries"] == 3
+    assert captured["retry_on_timeout"] is True
+
+
+def test_make_client_timeout_and_retries_overridable_via_env(monkeypatch):
+    # Bulk/reindex jobs raise the timeout without touching the serving default.
+    monkeypatch.setenv("OPENSEARCH_TIMEOUT", "120")
+    monkeypatch.setenv("OPENSEARCH_MAX_RETRIES", "5")
+    captured = _capture_make_client(monkeypatch)
+
+    opensearch.make_client("http://localhost:9200")
+    assert captured["timeout"] == 120.0
+    assert captured["max_retries"] == 5
