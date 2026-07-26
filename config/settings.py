@@ -784,18 +784,22 @@ REST_FRAMEWORK = {
 # Throttling is fully disabled only under the test runner (TESTING) — DRF's
 # rate-limit caches make per-request unit tests flaky otherwise.
 #
-# CACHE CAVEAT (F14): DRF stores throttle counters in the ``default`` cache. That
-# cache is ``LocMemCache`` (per-process) and the container runs gunicorn with
-# multiple workers, so the "1000/hour" limit is enforced PER WORKER, not globally
-# — the effective anon ceiling is ~rate × worker_count and resets on worker
-# recycle. To make the cap truly global, point ``CACHE_URL`` at a SHARED backend
-# (Redis/Memcached); the ``CACHES['default']`` block below reads it. Until a
-# shared cache is provisioned the limit is soft (best-effort abuse dampening,
-# not a hard global quota) — documented in docs/security/threat-model.md.
+# F14 (throttle counter scope): DRF's stock throttles store counters in the
+# ``default`` cache. Backed by ``LocMemCache`` (per-process) the cap is counted PER
+# gunicorn worker, so the effective ceiling is ~rate × workers × replicas and grows
+# as you scale; backed by a shared Redis it is global but puts a cache round-trip on
+# every request — costly here because the shared Valkey can sit in the other cloud
+# (Monal↔OCI WireGuard mesh). The Synced* throttles below resolve both: they count
+# in-process on the hot path (no network, latency-neutral) and reconcile to a shared
+# Redis (``THROTTLE_SYNC_URL``) on a background timer, giving an APPROXIMATELY global
+# cap that is pod/worker-count-independent and fail-open. See
+# jawafdehi_shared/drf/throttling.py and docs/security/threat-model.md.
 if not TESTING:
     REST_FRAMEWORK["DEFAULT_THROTTLE_CLASSES"] = [
-        "rest_framework.throttling.AnonRateThrottle",
-        "rest_framework.throttling.UserRateThrottle",
+        # local count + async Redis reconciliation; fall back to DRF's stock
+        # per-process behaviour when THROTTLE_SYNC_URL is unset (dev/off-cluster).
+        "jawafdehi_shared.drf.throttling.SyncedAnonRateThrottle",
+        "jawafdehi_shared.drf.throttling.SyncedUserRateThrottle",
     ]
     REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"] = {
         "anon": os.getenv("THROTTLE_RATE_ANON", "1000/hour"),
