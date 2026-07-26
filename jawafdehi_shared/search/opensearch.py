@@ -18,6 +18,19 @@ def get_opensearch_url() -> str:
     return os.getenv("OPENSEARCH_URL", "http://localhost:9200")
 
 
+def get_opensearch_timeout() -> float:
+    """Per-request timeout (seconds) for the client, from env (OPENSEARCH_TIMEOUT).
+
+    Defaults to 30s — well above opensearch-py's own 10s default, which is too
+    short for bulk indexing of large OCR'd material docs: a full ``reindex_all``
+    of ngm-materials otherwise trips the 10s read-timeout on a batch of oversized
+    documents and fails deterministically part-way through. Bulk/reindex jobs can
+    raise this further (e.g. ``OPENSEARCH_TIMEOUT=120``) without changing the
+    serving-path default.
+    """
+    return float(os.getenv("OPENSEARCH_TIMEOUT", "30"))
+
+
 def make_client(url: str | None = None):
     """Construct an opensearch-py client. Imported lazily so the package is
     importable without the optional dependency installed (e.g. in a service that
@@ -27,12 +40,23 @@ def make_client(url: str | None = None):
     (self-hosted with the security plugin enabled), HTTP basic auth is used and
     TLS verification is left on. With no creds (dev compose, security disabled)
     the client connects anonymously.
+
+    Timeout/retries: the per-request timeout is set explicitly (see
+    ``get_opensearch_timeout``) rather than left at opensearch-py's 10s default,
+    with a small bounded retry on timeout. ``retry_on_timeout`` is safe for our
+    bulk indexers because every unified-search doc is keyed by a deterministic
+    IRI ``_id`` (see ``indexing.stream_bulk``), so a re-sent bulk is idempotent.
     """
     from opensearchpy import OpenSearch  # lazy: optional dependency
 
     user = os.getenv("OPENSEARCH_USER")
     password = os.getenv("OPENSEARCH_PASSWORD")
-    kwargs: dict[str, Any] = {"hosts": [url or get_opensearch_url()]}
+    kwargs: dict[str, Any] = {
+        "hosts": [url or get_opensearch_url()],
+        "timeout": get_opensearch_timeout(),
+        "max_retries": int(os.getenv("OPENSEARCH_MAX_RETRIES", "3")),
+        "retry_on_timeout": True,
+    }
     if user and password:
         kwargs["http_auth"] = (user, password)
     return OpenSearch(**kwargs)
