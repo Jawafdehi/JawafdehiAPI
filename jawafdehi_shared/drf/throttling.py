@@ -62,6 +62,7 @@ _synced: dict[str, int] = {}     # last global total read back from Redis
 _deadline: dict[str, float] = {}  # epoch after which a key is stale + prunable
 
 _redis = None
+_redis_broken = False  # set once if THROTTLE_SYNC_URL is malformed (permanent misconfig)
 _flusher_started = False
 
 
@@ -71,14 +72,29 @@ _flusher_started = False
 def _get_redis():
     """Lazily build a Redis client with tight timeouts (the client is only ever
     used off the hot path, but bound it so a hung Valkey can't wedge the flush
-    thread)."""
-    global _redis
+    thread).
+
+    A *malformed* URL (bad scheme) is a permanent misconfiguration: disable once
+    and log once, rather than re-raising every tick and spamming the log. A valid
+    URL to an *unreachable* host does NOT fail here (redis-py connects lazily) —
+    that surfaces as a transient error in the flush loop and is retried."""
+    global _redis, _redis_broken
+    if _redis_broken:
+        return None
     if _redis is None and _SYNC_URL:
         import redis  # hard dependency (pyproject: redis>=5.0)
 
-        _redis = redis.Redis.from_url(
-            _SYNC_URL, socket_timeout=1.0, socket_connect_timeout=1.0
-        )
+        try:
+            _redis = redis.Redis.from_url(
+                _SYNC_URL, socket_timeout=1.0, socket_connect_timeout=1.0
+            )
+        except Exception as exc:  # noqa: BLE001 — bad URL; disable sync, stay fail-open
+            _redis_broken = True
+            logger.error(
+                "throttle sync disabled: invalid THROTTLE_SYNC_URL (%r): %s — "
+                "falling back to per-worker local counts", _SYNC_URL, exc,
+            )
+            return None
     return _redis
 
 
@@ -102,9 +118,14 @@ def _flush_once(client=None) -> None:
     for rkey, delta in batch.items():
         try:
             total = client.incrby(rkey, delta)
-            # Expire well past the window so stale windows self-clean in Redis
-            # even if this worker never touches the key again.
-            client.expire(rkey, 7200)
+            # TTL scales with THIS key's own window (via its deadline) instead of
+            # a flat constant, so coarse scopes (e.g. "/day") aren't silently
+            # reset when a quiet spell exceeds the constant, while short windows
+            # still self-clean promptly. Floor keeps a sane minimum.
+            with _lock:
+                deadline = _deadline.get(rkey)
+            ttl = max(7200, int(deadline - time.time())) if deadline else 7200
+            client.expire(rkey, ttl)
             with _lock:
                 _synced[rkey] = int(total)
             processed.add(rkey)

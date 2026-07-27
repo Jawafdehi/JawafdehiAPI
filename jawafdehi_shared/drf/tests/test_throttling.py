@@ -22,6 +22,8 @@ def _isolate(monkeypatch):
     T._synced.clear()
     T._deadline.clear()
     monkeypatch.setattr(T, "_SYNC_URL", "redis://test:6379/0")
+    monkeypatch.setattr(T, "_redis", None)
+    monkeypatch.setattr(T, "_redis_broken", False)
     monkeypatch.setattr(T, "_ensure_flusher", lambda: None)
     yield
     T._pending.clear()
@@ -99,6 +101,16 @@ def test_falls_back_to_stock_when_no_sync_url(monkeypatch):
     assert called.get("stock") is True
 
 
+def test_malformed_sync_url_disables_sync_once(monkeypatch):
+    """A bad URL is a permanent misconfig: disable once (no per-tick log spam)."""
+    monkeypatch.setattr(T, "_SYNC_URL", "not-a-valid-url")
+    monkeypatch.setattr(T, "_redis", None)
+    monkeypatch.setattr(T, "_redis_broken", False)
+    assert T._get_redis() is None
+    assert T._redis_broken is True
+    assert T._get_redis() is None  # short-circuits, does not retry construction
+
+
 def test_flush_folds_pending_into_redis_and_refreshes_synced():
     t = _throttle(100)
     for _ in range(5):
@@ -152,5 +164,12 @@ def test_prune_drops_stale_windows_but_keeps_live_ones():
     rkey = f"throttle_anon_1.2.3.4:{window}"
     T._flush_once(client=FakeRedis())      # pending -> 0
     T._deadline[rkey] = time.time() - 1    # force it stale
+
+    # A live (future-deadline) key with in-flight pending must survive prune.
+    live = "throttle_anon_5.6.7.8:live"
+    T._pending[live] = 1
+    T._deadline[live] = time.time() + 3600
+
     T._prune()
     assert rkey not in T._pending and rkey not in T._synced and rkey not in T._deadline
+    assert live in T._pending and live in T._deadline
