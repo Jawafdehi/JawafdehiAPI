@@ -67,6 +67,34 @@ def test_parse_thin_page_yields_empty_record_not_error():
     assert rec.file_urls == []
 
 
+def test_parse_drops_offhost_attachment_ssrf():
+    # An injected absolute href to a non-CIAA host (e.g. cloud metadata) contains
+    # "/uploads/" but must NOT be emitted — the command would otherwise fetch it.
+    html = """
+    <div class="col-sm-8">
+      <h4><strong>t</strong></h4>
+      <a class="badge" href="https://ciaa.gov.np/uploads/ok.pdf">ok</a>
+      <a class="badge" href="http://169.254.169.254/latest/uploads/evil">evil</a>
+      <a class="badge" href="https://evil.example/uploads/x.pdf">evil2</a>
+    </div>
+    """
+    rec = parse_press_release(html, press_id=1, source_url=_URL)
+    assert rec.file_urls == ["https://ciaa.gov.np/uploads/ok.pdf"]
+
+
+def test_parse_bare_date_in_body_matches_despite_title():
+    # A title is present AND the body opens with a bare date — the date must still
+    # be recovered (the guess runs against the body, not title+body).
+    html = """
+    <div class="col-sm-8">
+      <h4><strong>कुनै शीर्षक</strong></h4>
+      <p>२०८१/०९/२८ आयोगले मुद्दा दायर गर्‍यो ।</p>
+    </div>
+    """
+    rec = parse_press_release(html, press_id=1, source_url=_URL)
+    assert rec.publication_date_bs == "2081-09-28"
+
+
 class TestGuessPublicationDate:
     def test_labelled_press_release_ascii(self):
         assert guess_publication_date("Press Release- 2072-08-15") == "2072-08-15"

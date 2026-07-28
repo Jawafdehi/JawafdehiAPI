@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
@@ -44,6 +44,13 @@ _JUNK_TEXT = frozenset({"Download", "Tweet", "डाउनलोड"})
 #: ``mailbox-attachment-name`` (inline image attachments). Only ``/uploads/`` hrefs
 #: are attachments (the site logo / nav links are excluded by that path filter).
 _ATTACHMENT_CLASSES = ("badge", "mailbox-attachment-name")
+
+#: The command downloads every attachment URL this parser emits, from inside the
+#: cluster — so a page that injected an absolute href to another host (cloud
+#: metadata, an internal service) would be an SSRF vector. The ``/uploads/``
+#: substring alone does NOT bound the host (``http://169.254.169.254/x/uploads/y``
+#: contains it), so attachments are hard-restricted to the CIAA host here.
+_ALLOWED_ATTACHMENT_HOSTS = frozenset({"ciaa.gov.np", "www.ciaa.gov.np"})
 
 # Publication-date forms seen in the corpus, tried in order against the
 # Devanagari→ASCII-digit-normalized text. All yield a Bikram Sambat YYYY-MM-DD.
@@ -83,7 +90,11 @@ def parse_press_release(html: object, *, press_id: int, source_url: str) -> Pars
     title = _extract_title(container)
     file_urls = _extract_file_urls(container, source_url)
     full_text = _extract_full_text(container)
-    publication_date_bs = guess_publication_date(f"{title}\n{full_text}")
+    # Guess against the BODY first: the bare-``^`` date form is anchored to the
+    # start of the text, and a press release usually opens with its date — folding
+    # the title in front (as the legacy spider did) would defeat that anchor. The
+    # labelled forms still match wherever they appear, so fall back to the title.
+    publication_date_bs = guess_publication_date(full_text) or guess_publication_date(title)
 
     return ParsedPressRelease(
         press_id=press_id,
@@ -105,26 +116,37 @@ def _extract_title(container) -> str:
 
 
 def _extract_file_urls(container, source_url: str) -> list[str]:
-    """Absolute attachment URLs (badges + image attachments), deduped in order."""
+    """Absolute attachment URLs (badges + image attachments), deduped in order.
+
+    Restricted to the CIAA host after resolution: a relative ``/uploads/…`` href
+    resolves onto ``source_url`` (kept), while an absolute href to any other host
+    is DROPPED so the command never fetches an attacker-supplied internal URL.
+    """
     urls: list[str] = []
     for anchor in container.find_all("a", href=True):
         if "/uploads/" not in anchor["href"]:
             continue
         classes = anchor.get("class") or []
-        if any(cls in classes for cls in _ATTACHMENT_CLASSES):
-            urls.append(urljoin(source_url, anchor["href"]))
+        if not any(cls in classes for cls in _ATTACHMENT_CLASSES):
+            continue
+        absolute = urljoin(source_url, anchor["href"])
+        if (urlparse(absolute).hostname or "").lower() in _ALLOWED_ATTACHMENT_HOSTS:
+            urls.append(absolute)
     return list(dict.fromkeys(urls))
 
 
 def _extract_full_text(container) -> str:
-    """The press-release body text, with download/social chrome removed.
+    """The press-release BODY text, with the title and download/social chrome removed.
 
-    Decomposes the badges, social embeds, and attachment icons first (attachment
-    links were already read out), then flattens the remaining text line-by-line,
-    dropping empty and pure-chrome lines. This mutates ``container`` — call it last.
+    Decomposes the header ``h4`` (its text is already captured as the title), the
+    badges, social embeds, and attachment icons (attachment links were already read
+    out), then flattens the remaining text line-by-line, dropping empty and
+    pure-chrome lines. Dropping the title keeps the body clean — search doesn't get
+    a duplicated title, and a bare date opening the body stays at position 0 for the
+    ``^``-anchored date guess. This mutates ``container`` — call it last.
     """
     for junk in container.select(
-        '[class*="fb-"], a.badge, .badge, .mailbox-attachment-icon, script, style'
+        'h4, [class*="fb-"], a.badge, .badge, .mailbox-attachment-icon, script, style'
     ):
         junk.decompose()
     lines = (

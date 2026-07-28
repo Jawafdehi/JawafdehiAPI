@@ -27,14 +27,17 @@ _PAGE_HTML = f"""
 
 
 class _FakeSource:
-    """press_id → (status, html); unknown ids 302 (missing). Downloads by URL."""
+    """press_id → (status, html); unknown ids fall back to ``default``. Downloads
+    by URL. ``default`` lets a test simulate the end-of-range (302) or a source
+    outage (None transient)."""
 
-    def __init__(self, pages, downloads=None):
+    def __init__(self, pages, downloads=None, default=(302, "")):
         self.pages = pages
         self.downloads = downloads or {}
+        self.default = default
 
     def get_press_release(self, press_id):
-        return self.pages.get(press_id, (302, ""))
+        return self.pages.get(press_id, self.default)
 
     def page_url(self, press_id):
         return f"https://ciaa.gov.np/pressrelease/{press_id}"
@@ -108,6 +111,14 @@ class CiaaCommandTests(SimpleTestCase):
         src = _FakeSource(pages={})
         mat = _FakeMaterial()
         self._run(src, mat, "--write")
+        assert mat.puts == []
+
+    def test_stops_after_consecutive_transient_no_infinite_loop(self):
+        # Every fetch is a transient (status None) — this never yields a 302 to
+        # trip the missing-stop, so the transient bound must halt the run.
+        src = _FakeSource(pages={}, default=(None, ""))
+        mat = _FakeMaterial()
+        self._run(src, mat, "--write", "--max-consecutive-transient", "3")
         assert mat.puts == []
 
     def test_limit_caps_new_ingests(self):

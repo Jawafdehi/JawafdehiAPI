@@ -216,6 +216,11 @@ class Command(BaseCommand):
             help="stop after this many consecutive 302/404s from CIAA (default 10)",
         )
         parser.add_argument(
+            "--max-consecutive-transient", type=int, default=25,
+            help="give up after this many consecutive transient failures (timeout / "
+            "5xx / non-result) so a source outage can't loop forever (default 25)",
+        )
+        parser.add_argument(
             "--force", action="store_true",
             help="re-ingest ids that already exist as materials (skip the existence check)",
         )
@@ -249,9 +254,19 @@ class Command(BaseCommand):
             "transient": 0, "put": 0, "files": 0, "failed": 0,
         }
         consecutive_missing = 0
+        consecutive_transient = 0
         press_id = o["start_id"]
 
         while consecutive_missing < o["max_consecutive_missing"]:
+            if consecutive_transient >= o["max_consecutive_transient"]:
+                # A persistent outage (every fetch times out / 5xx) never produces a
+                # 302 to trip the missing-stop, so bound it here rather than loop the
+                # id space forever.
+                self.stderr.write(
+                    f"stop: {consecutive_transient} consecutive transient failures "
+                    f"at id ~{press_id} (source likely down)"
+                )
+                break
             if o["limit"] and stats["fetched"] >= o["limit"]:
                 self.stdout.write(f"stop: reached --limit {o['limit']} new ingested")
                 break
@@ -260,6 +275,7 @@ class Command(BaseCommand):
             if not o["force"] and material.exists(CIAA_PRESS_SOURCE, str(press_id)):
                 stats["skipped"] += 1
                 consecutive_missing = 0
+                consecutive_transient = 0
                 press_id += 1
                 continue
 
@@ -267,17 +283,20 @@ class Command(BaseCommand):
             if status in _MISSING_STATUSES:
                 stats["missing"] += 1
                 consecutive_missing += 1
+                consecutive_transient = 0  # a definitive 302/404 is progress
                 press_id += 1
                 continue
             if status != 200 or not html:
                 # Transient (timeout / 5xx): don't count toward the end-of-range
-                # stop, don't advance the missing run — just move on.
+                # stop, but DO bound it (above) so an outage can't loop forever.
                 stats["transient"] += 1
+                consecutive_transient += 1
                 self.stderr.write(f"  id {press_id}: HTTP {status} (transient, skipped)")
                 press_id += 1
                 continue
 
             consecutive_missing = 0
+            consecutive_transient = 0
             stats["fetched"] += 1
             record = parse_press_release(html, press_id=press_id, source_url=source.page_url(press_id))
             self.stdout.write(
