@@ -1,7 +1,8 @@
 # `materials/sourcing/` — external-source ingestion
 
 One subpackage per external source that feeds Materials into the archive
-(`nkp/` — Nepal Law Journal precedents; `ag/` — Attorney-General indictments).
+(`nkp/` — Nepal Law Journal precedents; `ag/` — Attorney-General indictments;
+`ciaa/` — CIAA press releases, `प्रेस विज्ञप्ति`).
 
 ## Convention
 
