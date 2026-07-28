@@ -1313,6 +1313,8 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
     - `cases_ciaa`: Number of CIAA corruption cases (case_type CORRUPTION)
     - `cases_non_ciaa`: Number of cases handled outside CIAA (all other types)
     - `entities_tracked`: Number of unique entities involved in published cases
+    - `total_bigo`: Sum of the bigo (बिगो — the disputed/embezzled amount, NPR)
+      across published cases; 0 when no published case carries an amount
     - `nes`: NES (entities) coverage — total, by-prefix / by-type breakdowns,
       persons-by-sector (`persons_by_sector`, derived from the office each person
       holds), and completeness percentages (identifier / provenance / bilingual
@@ -1346,6 +1348,7 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 "cases_ciaa": {"type": "integer", "example": 88},
                 "cases_non_ciaa": {"type": "integer", "example": 39},
                 "entities_tracked": {"type": "integer", "example": 89},
+                "total_bigo": {"type": "integer", "example": 4519830000},
                 "nes": {"type": "object", "description": "NES coverage metrics"},
                 "ngm": {
                     "type": "object",

@@ -69,6 +69,7 @@ class TestStatisticsEndpoint:
         assert "cases_closed" in data
         assert "cases_ciaa" in data
         assert "cases_non_ciaa" in data
+        assert "total_bigo" in data
         assert "last_updated" in data
         # NGM court-cases-per-year aggregations for the coverage matrix.
         assert "by_year" in data["ngm"]
@@ -94,6 +95,7 @@ class TestStatisticsEndpoint:
         assert data["entities_tracked"] == 0
         assert data["cases_under_investigation"] == 0
         assert data["cases_closed"] == 0
+        assert data["total_bigo"] == 0
 
 
 @pytest.mark.django_db
@@ -307,6 +309,51 @@ class TestStatisticsCounting:
 
         assert data["cases_in_review"] == 2
         assert data["cases_under_investigation"] == 3
+
+    def test_total_bigo_sums_published_case_amounts(self, api_client):
+        """total_bigo sums the bigo (disputed/embezzled NPR) of PUBLISHED cases,
+        skips cases with no amount recorded, and ignores unpublished cases."""
+        Case.objects.create(
+            case_type=CaseType.CORRUPTION,
+            state=CaseState.PUBLISHED,
+            title="Published bigo 1",
+            bigo=10_000_000,
+        )
+        Case.objects.create(
+            case_type=CaseType.CORRUPTION,
+            state=CaseState.PUBLISHED,
+            title="Published bigo 2",
+            bigo=5_000_000,
+        )
+        # Published but no amount recorded (bigo NULL) — contributes nothing.
+        Case.objects.create(
+            case_type=CaseType.CORRUPTION,
+            state=CaseState.PUBLISHED,
+            title="Published no bigo",
+        )
+        # A large amount on an unpublished case must NOT be counted.
+        Case.objects.create(
+            case_type=CaseType.CORRUPTION,
+            state=CaseState.DRAFT,
+            title="Draft bigo",
+            bigo=999_000_000,
+        )
+
+        data = api_client.get("/api/statistics/").json()
+
+        assert data["total_bigo"] == 15_000_000
+
+    def test_total_bigo_zero_when_no_published_amounts(self, api_client):
+        """total_bigo is 0 (never None) when no published case carries a bigo."""
+        Case.objects.create(
+            case_type=CaseType.CORRUPTION,
+            state=CaseState.PUBLISHED,
+            title="Published no bigo",
+        )
+
+        data = api_client.get("/api/statistics/").json()
+
+        assert data["total_bigo"] == 0
 
 
 @pytest.mark.django_db

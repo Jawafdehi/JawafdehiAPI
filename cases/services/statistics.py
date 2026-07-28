@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 
 from django.db import connections
-from django.db.models import Count, Q
+from django.db.models import Count, Q, Sum
 from django.db.models.functions import ExtractYear
 from django.utils import timezone
 
@@ -145,6 +145,12 @@ def _case_counts() -> dict:
         # (bribery, forgery, embezzlement, ...) runs through other bodies.
         ciaa=Count("pk", filter=Q(case_type=CaseType.CORRUPTION)),
         non_ciaa=Count("pk", filter=~Q(case_type=CaseType.CORRUPTION)),
+        # Total bigo (बिगो) — the summed disputed/embezzled amount (NPR) across
+        # PUBLISHED cases only, matching the public framing of the other headline
+        # metrics (entities_tracked is likewise published-only). Sum is NULL when
+        # no published case carries an amount; the ``or 0`` below keeps the key an
+        # integer so the payload shape never varies.
+        total_bigo=Sum("bigo", filter=Q(state=CaseState.PUBLISHED)),
     )
     return {
         "published_cases": by_state["published"],
@@ -153,6 +159,7 @@ def _case_counts() -> dict:
         "cases_closed": by_state["closed"],
         "cases_ciaa": by_state["ciaa"],
         "cases_non_ciaa": by_state["non_ciaa"],
+        "total_bigo": by_state["total_bigo"] or 0,
         # Unique NES entities tracked across published cases (binds hold the
         # nes_id directly; NES owns the entity records).
         "entities_tracked": (
