@@ -9,7 +9,15 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from casework.common.select import DEFAULT_ENRICHABLE_STATE
+
 QUIET_LOGGERS = ("httpx", "urllib3", "boto3", "botocore", "s3transfer")
+
+# Env var carrying the Bearer token. This is the documented, default path --
+# see `resolve_api_token` for why the `--api-token` flag is not.
+API_TOKEN_ENV = "JAWAFDEHI_API_TOKEN"
+
+logger = logging.getLogger("casework.cli")
 
 # casework/common/cli.py -> casework/common -> casework -> <repo-root>
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -25,10 +33,39 @@ def basic_auth_from_env():
     password = os.environ.get("CASEWORK_API_PASSWORD")
     if not (user and password):
         raise SystemExit(
-            "API credentials required: pass --api-token (or set "
-            "JAWAFDEHI_API_TOKEN) for Bearer auth, or set CASEWORK_API_USER + "
-            "CASEWORK_API_PASSWORD for local DEV_AUTH Basic auth.")
+            f"API credentials required: set {API_TOKEN_ENV} for Bearer auth, or "
+            "set CASEWORK_API_USER + CASEWORK_API_PASSWORD for local DEV_AUTH "
+            "Basic auth.")
     return user, password
+
+
+def resolve_api_token(args):
+    """Bearer token for `CaseworkApi`: `$JAWAFDEHI_API_TOKEN` by default.
+
+    The env var is the documented path because argparse is not a safe place
+    to put a credential: a token passed as `--api-token <secret>` sits in
+    `/proc/<pid>/cmdline` for the whole run and is readable by *any* local
+    user with a plain `ps -af` (and lands in shell history). That was observed
+    happening for real, which is why this indirection exists at all.
+
+    The flag still works -- removing it outright would break every existing
+    runbook/wrapper mid-port -- but it wins over the env var (so an explicit
+    flag is never silently ignored, which would be its own class of bug) and
+    warns through the logger, not `print`, so the warning shares the run log
+    with everything else instead of vanishing into stdout.
+
+    Returns "" when neither source is set; callers treat that as "no Bearer
+    token" and fall back to local DEV_AUTH Basic auth.
+    """
+    flag_token = getattr(args, "api_token", "") or ""
+    if flag_token:
+        logger.warning(
+            "--api-token was passed on the command line: the bearer token is "
+            "visible in /proc/<pid>/cmdline (`ps -af`) to every local user for "
+            "the duration of this run, and is now in your shell history. Set "
+            "%s in the environment instead.", API_TOKEN_ENV)
+        return flag_token
+    return os.environ.get(API_TOKEN_ENV, "") or ""
 
 
 def add_common_args(parser):
@@ -50,6 +87,15 @@ def add_common_args(parser):
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--fiscal-year", default="")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--state", default=DEFAULT_ENRICHABLE_STATE,
+        help=f"Workflow state bulk selection gates on (default "
+             f"{DEFAULT_ENRICHABLE_STATE}). Bulk runs previously took DRAFT *and* "
+             "IN_REVIEW, silently rewriting cases a moderator already had open; "
+             "IN_REVIEW is now refused outright for bulk selection (pass an "
+             "explicit --slug/--court-case to act on one such case knowingly). "
+             "Ignored when --slug/--court-case is given -- those bypass the "
+             "state gate by design.")
     parser.add_argument("--dry-run", action="store_true", default=True)
     parser.add_argument("--apply", dest="dry_run", action="store_false")
     parser.add_argument(
@@ -71,7 +117,13 @@ def add_common_args(parser):
              "neither the flag nor the env var is set, the client raises rather "
              "than silently targeting a host. Local DEV_AUTH server: "
              "http://127.0.0.1:48010")
-    parser.add_argument("--api-token", default="")
+    parser.add_argument(
+        "--api-token", default="",
+        help=f"DISCOURAGED. Bearer token; prefer ${API_TOKEN_ENV} in the "
+             "environment, which is what every client here reads by default. A "
+             "token passed here is readable by any local user via `ps -af` for "
+             "the whole run -- see resolve_api_token(). Kept only so existing "
+             "runbooks keep working; it warns when used.")
     parser.add_argument(
         "--allow-remote-writes", action="store_true", default=False,
         help=(

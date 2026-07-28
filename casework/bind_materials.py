@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from casework.common.api import CaseworkApi
 from casework.common.cli import (
     _utc_iso_now, add_common_args, basic_auth_from_env, configure_run_logging,
-    log_run_footer, log_run_header, print_summary,
+    log_run_footer, log_run_header, print_summary, resolve_api_token,
 )
 from casework.common.materials import material_iri, probe_material
 
@@ -244,9 +244,14 @@ def _build_api(args):
     enricher use. Without this Basic branch a bare loopback bind (this tool's
     primary use) could not authenticate: a local DEV_AUTH server rejects Bearer
     (it routes to OIDC), so token-only would raise "exactly one of token/basic"
-    on every local run."""
-    if args.api_token:
-        return CaseworkApi(base_url=args.api_base_url, token=args.api_token,
+    on every local run.
+
+    The token itself comes from `resolve_api_token` ($JAWAFDEHI_API_TOKEN, or
+    the discouraged `--api-token` flag, which warns), not from `args` directly
+    -- a token on argv is readable by any local user via `ps -af`."""
+    token = resolve_api_token(args)
+    if token:
+        return CaseworkApi(base_url=args.api_base_url, token=token,
                            allow_remote_writes=args.allow_remote_writes)
     return CaseworkApi(base_url=args.api_base_url, basic=basic_auth_from_env(),
                        allow_remote_writes=args.allow_remote_writes)

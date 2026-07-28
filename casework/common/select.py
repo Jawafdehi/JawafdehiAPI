@@ -2,7 +2,24 @@
 
 COURTCASE_SEGMENT = "/courtcase/"
 SPECIAL_COURT = "special"
-ENRICHABLE_STATES = ("DRAFT", "IN_REVIEW")
+
+# Bulk enrichment is DRAFT-only. `ENRICHABLE_STATES` used to be
+# `("DRAFT", "IN_REVIEW")`, which meant every bulk run (any run not scoped by
+# an explicit --slug/--court-case) also swept in cases a human moderator
+# already had open in the review queue. Rewriting a case out from under its
+# reviewer is a scope violation for this project, so IN_REVIEW is gone from
+# the default -- and, below, is refused outright for bulk selection.
+DEFAULT_ENRICHABLE_STATE = "DRAFT"
+ENRICHABLE_STATES = (DEFAULT_ENRICHABLE_STATE,)
+
+# States bulk selection may never gate on, whatever the caller asks for.
+# A default is not a guarantee: with only the narrowed `ENRICHABLE_STATES`
+# above, `--state IN_REVIEW` (or a caller passing `states=("IN_REVIEW",)`)
+# walks straight back into the violation the DRAFT default exists to prevent.
+# The invariant is "bulk never touches IN_REVIEW", so it is enforced here --
+# in the single function every enricher's bulk selection goes through -- and
+# fails loud (ValueError) rather than quietly enriching review-queue cases.
+FORBIDDEN_BULK_STATES = frozenset({"IN_REVIEW"})
 
 
 def _refs(case):
@@ -69,19 +86,42 @@ def matches_fiscal_year(case, fiscal_year):
     return False
 
 
-def is_enrichable_state(case):
-    return case.get("state") in ENRICHABLE_STATES
+def is_enrichable_state(case, states=ENRICHABLE_STATES):
+    return case.get("state") in states
 
 
-def select_cases(cases, *, fiscal_year=None, slugs=(), court_cases=()):
-    """Explicit slugs/court-cases bypass the state gate; bulk selection does not."""
+def select_cases(cases, *, fiscal_year=None, slugs=(), court_cases=(),
+                 states=ENRICHABLE_STATES):
+    """Explicit slugs/court-cases bypass the state gate; bulk selection does not.
+
+    That bypass is deliberate and is kept: naming `--slug X` (or
+    `--court-case 081-CR-0098`) is one operator asking for one case they have
+    already looked at, and the run is still dry by default (`--apply` is the
+    only way to write). It is also the only way to re-run a single case that
+    has moved past DRAFT, which is how these enrichers are actually debugged.
+    The hazard this module guards is the *bulk* sweep, where nobody has looked
+    at the individual cases -- so the state gate, and the IN_REVIEW refusal
+    below, apply to the bulk branch only.
+
+    `states` is what the caller's `--state` resolved to (default DRAFT); it is
+    a parameter rather than a hard-coded constant so the choice is visible at
+    the call site instead of buried in this module.
+    """
     slugs, court_cases = set(slugs), {c.lower() for c in court_cases}
     if slugs or court_cases:
         return [
             c for c in cases
             if c.get("slug") in slugs or court_number(c) in court_cases
         ]
+    forbidden = sorted(FORBIDDEN_BULK_STATES.intersection(states))
+    if forbidden:
+        raise ValueError(
+            f"bulk case selection may not target state(s) {', '.join(forbidden)}: "
+            "cases in the review queue are out of scope for enrichment. Select "
+            "them one at a time with --slug/--court-case if that is really what "
+            "you mean."
+        )
     return [
         c for c in cases
-        if is_enrichable_state(c) and matches_fiscal_year(c, fiscal_year)
+        if is_enrichable_state(c, states) and matches_fiscal_year(c, fiscal_year)
     ]

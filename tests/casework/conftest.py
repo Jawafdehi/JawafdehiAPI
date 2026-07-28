@@ -17,3 +17,14 @@ def _isolate_casework_run_logs(monkeypatch, tmp_path):
     for itself.
     """
     monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+
+
+@pytest.fixture(autouse=True)
+def _unset_api_token_env(monkeypatch):
+    """`resolve_api_token` falls back to `$JAWAFDEHI_API_TOKEN`, so a developer
+    who happens to have that exported would otherwise silently flip every
+    `build_api` test from the Basic branch to the Bearer branch -- and
+    `test_basic_branch_requires_credentials` would stop raising. Tests that
+    want the env var `monkeypatch.setenv` it back for themselves.
+    """
+    monkeypatch.delenv("JAWAFDEHI_API_TOKEN", raising=False)

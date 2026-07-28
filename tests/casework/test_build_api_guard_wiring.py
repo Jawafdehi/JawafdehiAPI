@@ -86,3 +86,38 @@ class TestBuildApiGuardWiring:
         )
         api = module.build_api(args)
         assert api.allow_remote_writes is False
+
+
+@pytest.mark.parametrize("module", MODULES, ids=lambda m: m.__name__.rsplit(".", 1)[-1])
+class TestBuildApiTokenSource:
+    """Every `build_api` must take its Bearer token from `resolve_api_token`
+    (i.e. `$JAWAFDEHI_API_TOKEN`), not from `args.api_token` alone.
+
+    A token passed as `--api-token <secret>` lands in `/proc/<pid>/cmdline`,
+    where any local user can read it with `ps -af` for the whole run. These
+    tests fail if a `build_api` regresses to branching on `args.api_token`:
+    with the env var set and no flag, such a version silently takes the Basic
+    branch (or raises for missing Basic credentials) instead of Bearer.
+    """
+
+    def test_env_var_token_reaches_caseworkapi_with_no_flag(self, module, monkeypatch):
+        monkeypatch.setenv("JAWAFDEHI_API_TOKEN", "env-token")
+        api = module.build_api(_args(api_base_url="https://example.invalid"))
+        assert api.token == "env-token"
+        assert api.basic is None
+
+    def test_env_var_token_is_used_even_when_basic_creds_also_exist(
+            self, module, monkeypatch):
+        # Bearer and Basic are mutually exclusive in CaseworkApi; having local
+        # DEV_AUTH creds lying around must not shadow an explicit env token.
+        monkeypatch.setenv("JAWAFDEHI_API_TOKEN", "env-token")
+        monkeypatch.setenv("CASEWORK_API_USER", "dev-user")
+        monkeypatch.setenv("CASEWORK_API_PASSWORD", "dev-pass")
+        api = module.build_api(_args(api_base_url="https://example.invalid"))
+        assert api.token == "env-token"
+
+    def test_flag_token_still_works_for_compatibility(self, module, monkeypatch):
+        monkeypatch.delenv("JAWAFDEHI_API_TOKEN", raising=False)
+        api = module.build_api(
+            _args(api_base_url="https://example.invalid", api_token="flag-token"))
+        assert api.token == "flag-token"

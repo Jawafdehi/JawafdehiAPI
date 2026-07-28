@@ -1,6 +1,9 @@
+import pytest
+
 from casework.common.select import (
-    court_number, is_ciaa_special_court_case, is_enrichable_state,
-    matches_fiscal_year, select_cases,
+    DEFAULT_ENRICHABLE_STATE, ENRICHABLE_STATES, court_number,
+    is_ciaa_special_court_case, is_enrichable_state, matches_fiscal_year,
+    select_cases,
 )
 
 SPECIAL = "https://jawafdehi.org/courtcase/special/081-cr-0098"
@@ -67,10 +70,61 @@ def test_fiscal_year_no_cr_marker_never_matches():
     assert not matches_fiscal_year({"court_cases": [SUPREME]}, "075")
 
 
-def test_state_gate_allows_draft_and_in_review_only():
+def test_state_gate_allows_draft_only():
+    # IN_REVIEW was in ENRICHABLE_STATES and is deliberately gone: a bulk run
+    # gating on it rewrites cases a moderator already has open for review.
     assert is_enrichable_state({"state": "DRAFT"})
-    assert is_enrichable_state({"state": "IN_REVIEW"})
+    assert not is_enrichable_state({"state": "IN_REVIEW"})
     assert not is_enrichable_state({"state": "PUBLISHED"})
+
+
+def test_default_state_is_draft_and_nothing_else():
+    # Pinned as an exact tuple, not `"DRAFT" in ENRICHABLE_STATES`: the latter
+    # still passes if IN_REVIEW is added back alongside it, which is the exact
+    # regression this constant exists to prevent.
+    assert ENRICHABLE_STATES == ("DRAFT",)
+    assert DEFAULT_ENRICHABLE_STATE == "DRAFT"
+
+
+def test_bulk_selection_skips_in_review_cases():
+    cases = [
+        {"slug": "d", "state": "DRAFT", "court_cases": [SPECIAL]},
+        {"slug": "r", "state": "IN_REVIEW", "court_cases": [SPECIAL]},
+    ]
+    assert [c["slug"] for c in select_cases(cases)] == ["d"]
+
+
+def test_bulk_selection_refuses_an_explicit_in_review_state():
+    # The DRAFT default is not the guarantee -- this is. Without the refusal,
+    # `--state IN_REVIEW` (or any caller passing it) quietly re-opens exactly
+    # the hole the narrowed default closed.
+    cases = [{"slug": "r", "state": "IN_REVIEW", "court_cases": [SPECIAL]}]
+    with pytest.raises(ValueError, match="IN_REVIEW"):
+        select_cases(cases, states=("IN_REVIEW",))
+    with pytest.raises(ValueError, match="IN_REVIEW"):
+        select_cases(cases, states=("DRAFT", "IN_REVIEW"))
+
+
+def test_bulk_selection_honours_an_explicitly_requested_state():
+    # `states` is a real parameter (wired to --state), not decoration: a state
+    # that is neither the default nor forbidden must actually select.
+    cases = [
+        {"slug": "d", "state": "DRAFT", "court_cases": [SPECIAL]},
+        {"slug": "p", "state": "PUBLISHED", "court_cases": [SPECIAL]},
+    ]
+    assert [c["slug"] for c in select_cases(cases, states=("PUBLISHED",))] == ["p"]
+
+
+def test_explicit_slug_still_reaches_an_in_review_case():
+    # The bypass is retained on purpose: naming one case is an operator acting
+    # on a case they have already looked at, and the run is dry by default.
+    # Only the *bulk* sweep is barred from IN_REVIEW.
+    cases = [{"slug": "r", "state": "IN_REVIEW", "court_cases": [SPECIAL]}]
+    assert select_cases(cases) == []
+    assert len(select_cases(cases, slugs=("r",))) == 1
+    # ...and the forbidden-state refusal must not fire on the bypass path,
+    # where it would break single-case runs for no safety gain.
+    assert len(select_cases(cases, slugs=("r",), states=("IN_REVIEW",))) == 1
 
 
 def test_explicit_slug_bypasses_state_gate():

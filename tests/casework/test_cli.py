@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from casework.common.cli import (
+    API_TOKEN_ENV,
     QUIET_LOGGERS,
     add_common_args,
     basic_auth_from_env,
@@ -16,6 +17,7 @@ from casework.common.cli import (
     log_run_header,
     new_run_id,
     print_summary,
+    resolve_api_token,
     setup_logging,
 )
 
@@ -52,6 +54,82 @@ def test_model_default_is_empty_not_haiku():
 
 def test_provider_default_is_claude_cli():
     assert _parse([]).provider == "claude_cli"
+
+
+def test_state_flag_defaults_to_draft():
+    """Bulk selection gates on DRAFT unless the caller says otherwise.
+
+    The flag exists so the state a bulk run targets is visible at the call
+    site (`states=(args.state,)`) instead of being an invisible module
+    constant -- and its default is the safe one.
+    """
+    assert _parse([]).state == "DRAFT"
+
+
+def test_state_flag_accepts_an_override():
+    assert _parse(["--state", "PUBLISHED"]).state == "PUBLISHED"
+
+
+# ---------------------------------------------------------------------------
+# resolve_api_token: the Bearer token must not have to travel through argv.
+# ---------------------------------------------------------------------------
+
+
+def _token_args(api_token=""):
+    return argparse.Namespace(api_token=api_token)
+
+
+def test_resolve_api_token_reads_the_env_var(monkeypatch):
+    monkeypatch.setenv(API_TOKEN_ENV, "env-token")
+    assert resolve_api_token(_token_args()) == "env-token"
+
+
+def test_resolve_api_token_is_empty_when_neither_source_is_set(monkeypatch):
+    # "" means "no Bearer token"; callers then fall back to DEV_AUTH Basic.
+    monkeypatch.delenv(API_TOKEN_ENV, raising=False)
+    assert resolve_api_token(_token_args()) == ""
+
+
+def test_resolve_api_token_flag_wins_over_env(monkeypatch):
+    # An explicitly passed flag must never be silently ignored -- that would
+    # be its own class of bug (a run authenticating as someone else).
+    monkeypatch.setenv(API_TOKEN_ENV, "env-token")
+    assert resolve_api_token(_token_args("flag-token")) == "flag-token"
+
+
+def test_resolve_api_token_warns_when_the_token_came_from_argv(monkeypatch, caplog):
+    """A token in argv sits in /proc/<pid>/cmdline for the whole run and is
+    readable by any local user via `ps -af`. Observed for real -- so using the
+    flag must say so, at WARNING."""
+    monkeypatch.delenv(API_TOKEN_ENV, raising=False)
+    with caplog.at_level(logging.WARNING, logger="casework.cli"):
+        resolve_api_token(_token_args("flag-token"))
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "--api-token" in message
+    assert "ps -af" in message
+    assert API_TOKEN_ENV in message
+    # The secret itself must never be echoed back into the log.
+    assert "flag-token" not in message
+
+
+def test_resolve_api_token_env_path_is_silent(monkeypatch, caplog):
+    monkeypatch.setenv(API_TOKEN_ENV, "env-token")
+    with caplog.at_level(logging.WARNING, logger="casework.cli"):
+        resolve_api_token(_token_args())
+    assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+def test_resolve_api_token_warning_goes_through_the_logger_not_stdout(
+        monkeypatch, capsys):
+    """Warn via the logger, not `print`: the run log is the record of what a
+    run did, and a bare `print` bypasses it (and the run's log file)."""
+    monkeypatch.delenv(API_TOKEN_ENV, raising=False)
+    resolve_api_token(_token_args("flag-token"))
+    captured = capsys.readouterr()
+    assert captured.out == ""
 
 
 def test_basic_auth_from_env_returns_credentials(monkeypatch):

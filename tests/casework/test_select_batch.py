@@ -3,6 +3,7 @@ import csv
 
 import pytest
 
+from casework import select_batch as select_batch_module
 from casework.select_batch import (
     in_year_scope, parse_bigo, select_batch, write_batch,
 )
@@ -155,3 +156,34 @@ def test_write_batch_emits_binder_columns(tmp_path):
     assert got[0]["slug"] == "a"
     assert got[0]["press_release_iri"] == PR
     assert "extra_col" not in got[0]      # only OUTPUT_COLUMNS are written
+
+
+# ---------------------------------------------------------------------------
+# Auth wiring: the Bearer token comes from $JAWAFDEHI_API_TOKEN, not argv.
+# ---------------------------------------------------------------------------
+
+
+def test_run_takes_the_bearer_token_from_the_environment(monkeypatch, tmp_path):
+    """`run()` builds its own `CaseworkApi`; that token must be able to come
+    from the environment. Passing it as `--api-token <secret>` puts it in
+    /proc/<pid>/cmdline, readable by any local user via `ps -af` for the whole
+    run -- so the env var is the default path here too, even though this
+    driver is read-only.
+
+    `CaseworkApi` is replaced with a recorder, so no client is constructed and
+    `rows=[]` means no case is ever read: nothing leaves the machine.
+    """
+    monkeypatch.setenv("JAWAFDEHI_API_TOKEN", "env-tok")
+    built = {}
+    monkeypatch.setattr(
+        select_batch_module, "CaseworkApi",
+        lambda **kwargs: built.update(kwargs) or FakeApi({}))
+
+    args = select_batch_module.build_parser().parse_args([
+        "--master-csv", str(tmp_path / "in.csv"),
+        "--out", str(tmp_path / "out.csv"),
+        "--api-base-url", "https://example.invalid",
+    ])
+    select_batch_module.run(args, rows=[])
+
+    assert built["token"] == "env-tok"

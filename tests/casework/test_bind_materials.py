@@ -302,6 +302,21 @@ def test_build_api_prefers_bearer_when_token_given(monkeypatch):
     assert api.basic is None
 
 
+def test_build_api_takes_the_bearer_token_from_the_environment(monkeypatch):
+    # The documented path: $JAWAFDEHI_API_TOKEN, with nothing on argv. A token
+    # passed as `--api-token <secret>` is exposed in /proc/<pid>/cmdline to
+    # every local user (`ps -af`) for the whole run.
+    monkeypatch.setenv("JAWAFDEHI_API_TOKEN", "env-tok")
+    monkeypatch.setenv("CASEWORK_API_USER", "abgen")
+    monkeypatch.setenv("CASEWORK_API_PASSWORD", "secret")
+    args = types.SimpleNamespace(
+        api_base_url="https://api.jawafdehi.org", api_token="",
+        allow_remote_writes=False)
+    api = _build_api(args)
+    assert api.token == "env-tok"
+    assert api.basic is None
+
+
 def test_run_skips_published_case_even_on_apply(tmp_path, monkeypatch):
     monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
     api = FakeApi(exists={"ciaa_press_release/2037"},

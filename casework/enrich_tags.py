@@ -60,6 +60,7 @@ from casework.common.cli import (
     log_run_footer,
     log_run_header,
     print_summary,
+    resolve_api_token,
     setup_logging,
 )
 from casework.common.llm import bootstrap, tier_for
@@ -1048,10 +1049,17 @@ def parse_llm_response(response: str) -> list:
 
 
 def build_api(args):
-    """Construct the client. Basic (local DEV_AUTH) unless a token is given."""
-    if args.api_token:
+    """Construct the client. Basic (local DEV_AUTH) unless a token is given.
+
+    The Bearer token comes from `resolve_api_token` -- i.e. from
+    $JAWAFDEHI_API_TOKEN, or from the discouraged `--api-token` flag (which
+    warns) -- never straight off `args.api_token`, so a token is not required
+    to appear in this process's argv where `ps -af` exposes it.
+    """
+    token = resolve_api_token(args)
+    if token:
         return CaseworkApi(
-            args.api_base_url, token=args.api_token,
+            args.api_base_url, token=token,
             allow_remote_writes=args.allow_remote_writes,
         )
     return CaseworkApi(
@@ -1099,6 +1107,7 @@ def main(argv=None):
         fiscal_year=args.fiscal_year,
         slugs=args.slug,
         court_cases=args.court_case,
+        states=(args.state,),
     )
     if args.limit:
         cases = cases[: args.limit]

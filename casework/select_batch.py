@@ -31,6 +31,7 @@ import sys
 
 from casework.bind_materials import candidates_from_row, missing_candidates
 from casework.common.api import CaseworkApi
+from casework.common.cli import API_TOKEN_ENV, resolve_api_token
 
 # Columns copied through to the batch CSV so the binder can read them. The
 # material-IRI columns are exactly the `*_iri` names bind_materials already
@@ -152,13 +153,21 @@ def build_parser():
                         "--drop match_tier=D_CONTRADICTED.")
     p.add_argument("--api-base-url", default=os.environ.get("JAWAFDEHI_API_BASE"),
                    help="Base URL of the case API; defaults to $JAWAFDEHI_API_BASE.")
-    p.add_argument("--api-token", default="")
+    p.add_argument(
+        "--api-token", default="",
+        help=f"DISCOURAGED. Bearer token; prefer ${API_TOKEN_ENV} in the "
+             "environment. A token passed here is readable by any local user "
+             "via `ps -af` for the whole run. Kept for compatibility; warns.")
     return p
 
 
 def run(args, api=None, rows=None):
     """Load rows, select live, write the batch CSV, return ``(selected, stats)``."""
-    api = api or CaseworkApi(base_url=args.api_base_url, token=args.api_token or None)
+    # `resolve_api_token` prefers $JAWAFDEHI_API_TOKEN over the flag precisely
+    # so the credential never has to enter this process's argv, where
+    # /proc/<pid>/cmdline exposes it to every local user for the whole run.
+    api = api or CaseworkApi(base_url=args.api_base_url,
+                             token=resolve_api_token(args) or None)
     if rows is None:
         with open(args.master_csv, newline="", encoding="utf-8") as f:
             rows = list(csv.DictReader(f))
