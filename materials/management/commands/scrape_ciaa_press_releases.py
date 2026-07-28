@@ -18,9 +18,13 @@ Gaps self-heal (a missing id is re-fetched). The crawl stops after
 ``--max-consecutive-missing`` real 302/404s from CIAA (the end of the id range).
 
 Dry-run by default (fetch + parse + report, write nothing); ``--write`` posts. The
-material write endpoints are NGM-role gated, so ``--write`` needs an ``sa-ingestion``
-(Caseworker) bearer via ``INGESTION_API_TOKEN`` (the CronJob injects it from
-OpenBao) and a base URL via ``MATERIAL_API_BASE`` / ``INGESTION_API_BASE``.
+material write endpoints are NGM-role gated, so ``--write`` needs a Caseworker
+bearer (base URL via ``MATERIAL_API_BASE`` / ``INGESTION_API_BASE``). The bearer is
+resolved by ``review.oidc_client_credentials.resolve_service_bearer``: a static
+``INGESTION_API_TOKEN`` (local dev), else an OIDC client-credentials grant as the
+``sa-ingestion`` account (``INGESTION_OIDC_CLIENT_ID/SECRET``) or the shared
+``CASEWORK_OIDC_*`` service account — so the CronJob carries no static token. The
+existence GET used for resume is public, so a dry run needs no bearer.
 
     manage.py scrape_ciaa_press_releases --start-id 3400            # dry-run recon
     INGESTION_API_TOKEN=… manage.py scrape_ciaa_press_releases --write   # the CronJob run
@@ -360,10 +364,25 @@ class Command(BaseCommand):
             or os.environ.get("INGESTION_API_BASE")
             or _DEFAULT_API_BASE
         )
-        token = o["api_token"] or os.environ.get("INGESTION_API_TOKEN")
-        if require_token and not token:
-            raise CommandError(
-                "--write needs a bearer token: set INGESTION_API_TOKEN (the CronJob "
-                "injects the sa-ingestion token) or pass --api-token."
-            )
+        if require_token:
+            # Lazy import (keeps the OIDC dep off dry-run / --help).
+            from review.oidc_client_credentials import OIDCTokenError, resolve_service_bearer
+
+            try:
+                token = resolve_service_bearer(o["api_token"])
+            except OIDCTokenError as exc:
+                raise CommandError(
+                    f"--write bearer: OIDC client-credentials grant failed: {exc}"
+                ) from exc
+            if not token:
+                raise CommandError(
+                    "--write needs a bearer: set INGESTION_API_TOKEN, or the OIDC "
+                    "client-credentials env (INGESTION_OIDC_CLIENT_ID/SECRET, else the "
+                    "CASEWORK_OIDC_* service account), or pass --api-token."
+                )
+        else:
+            # Dry-run: the existence GET is public, so no token is needed and we
+            # never mint one (no reason to hit Zitadel for a read-only run). Use a
+            # static/explicit token only if one happens to be set.
+            token = o["api_token"] or os.environ.get("INGESTION_API_TOKEN")
         return build_material_client(base, token, o["timeout"])

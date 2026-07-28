@@ -23,6 +23,7 @@ See ``/damodaha-volunteer/think-big/shared/research/oidc-zitadel-integration.md`
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 
@@ -211,3 +212,51 @@ def get_access_token(force_refresh: bool = False) -> str:
 def bearer_header(force_refresh: bool = False) -> dict[str, str]:
     """Return ``{"Authorization": "Bearer <token>"}`` from the shared provider."""
     return {"Authorization": f"Bearer {get_access_token(force_refresh=force_refresh)}"}
+
+
+def resolve_service_bearer(explicit_token: str | None = None) -> str | None:
+    """Resolve the outbound Bearer for a service-account HTTP client.
+
+    Used by the scraper cron commands (``scrape_ppmo_blacklist``,
+    ``scrape_ciaa_press_releases``) which POST to the NGM-role-gated write API. In
+    priority order:
+
+    1. an explicit token (``--api-token``) or a static ``INGESTION_API_TOKEN`` env
+       — local dev / tests / a pre-minted bearer;
+    2. the dedicated **sa-ingestion** identity, when ``INGESTION_OIDC_CLIENT_ID`` +
+       ``INGESTION_OIDC_CLIENT_SECRET`` are set (client-credentials grant, scope/
+       audience default to the casework settings);
+    3. the shared **casework** service account (``CASEWORK_OIDC_*`` settings) — the
+       zero-extra-config fallback, already provisioned on the consumer image.
+
+    Returns ``None`` when nothing is configured, so the caller decides whether that
+    is fatal (a dry run needs no token; ``--write`` does). Propagates
+    ``OIDCTokenError`` when a *configured* grant fails, so a real auth error
+    surfaces instead of masquerading as "no token".
+    """
+    if explicit_token:
+        return explicit_token
+    static = os.environ.get("INGESTION_API_TOKEN")
+    if static:
+        return static
+
+    client_id = os.environ.get("INGESTION_OIDC_CLIENT_ID")
+    client_secret = os.environ.get("INGESTION_OIDC_CLIENT_SECRET")
+    if client_id and client_secret:
+        provider = ClientCredentialsTokenProvider(
+            issuer=os.environ.get("OIDC_ISSUER", "") or getattr(settings, "OIDC_ISSUER", ""),
+            client_id=client_id,
+            client_secret=client_secret,
+            scope=os.environ.get("INGESTION_OIDC_SCOPE")
+            or getattr(settings, "CASEWORK_OIDC_SCOPE", ""),
+            audience=os.environ.get("INGESTION_OIDC_AUDIENCE")
+            or getattr(settings, "CASEWORK_OIDC_AUDIENCE", ""),
+        )
+        return provider.get_token()
+
+    # Fall back to the shared casework service account, when it is configured.
+    if getattr(settings, "CASEWORK_OIDC_CLIENT_ID", "") and getattr(
+        settings, "CASEWORK_OIDC_CLIENT_SECRET", ""
+    ):
+        return get_access_token()
+    return None
