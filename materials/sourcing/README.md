@@ -1,7 +1,8 @@
 # `materials/sourcing/` — external-source ingestion
 
 One subpackage per external source that feeds Materials into the archive
-(`nkp/` — Nepal Law Journal precedents; `ag/` — Attorney-General indictments).
+(`nkp/` — Nepal Law Journal precedents; `ag/` — Attorney-General indictments;
+`ciaa/` — CIAA press releases, `प्रेस विज्ञप्ति`).
 
 ## Convention
 
@@ -19,7 +20,7 @@ Each source lives in `materials/sourcing/<source>/` and owns:
 The shaper's `(doc, material_type)` tuple is the single shape across sources — a
 generic dict shaped for `POST /api/materials/` plus the promoted-column token.
 
-## Ingestion is via the API plane — never a management command
+## Ingestion is via the API plane — never ORM-direct
 
 Sourcing pipelines are **HTTP clients** of the material API; they do not reach
 into the ORM. A pipeline `POST`s the shaped doc to `/api/materials/` (or uploads
@@ -29,3 +30,11 @@ every write funnels through the one upsert primitive
 `@id`, `created_at`-preserving, and revive-on-re-upsert. Keeping ingestion on the
 API plane respects the service boundary (the scrape→OCR→shape loop lives outside
 the Django app) and means there is exactly one write path to reason about.
+
+The rule is about the ORM, not about *where* the client lives. A recurring
+in-repo `manage.py` command (e.g. `scrape_ciaa_press_releases`) is fine **as long
+as it is only an HTTP client** — it fetches, shapes, and calls the material API
+exactly like an external pipeline; it must not import models and write rows. This
+keeps the acquisition on a CronJob against the platform's own API (one auth-gated,
+audited write path) while the source-specific scrape/shape code lives here beside
+the other sources.
