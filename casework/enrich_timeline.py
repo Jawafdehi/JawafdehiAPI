@@ -352,43 +352,26 @@ def convert_date(dates: list, mode: str) -> dict:
     verbatim from the deleted `casework/common.py` (donor commit 0321a85) --
     the donor's own tool, not a call to the jawafdehi-mcp server.
     """
-    import datetime as _dt
-
-    from nepali.datetime import nepalidate
+    from jawafdehi_shared.dates import ad_to_bs, bs_to_ad_iso
 
     if mode not in ("ad_to_bs", "bs_to_ad"):
         raise ValueError("mode must be 'ad_to_bs' or 'bs_to_ad'")
     if not isinstance(dates, list):
         raise ValueError("dates must be a list of YYYY-MM-DD strings")
 
+    # Delegate the calendar math to the single AD<->BS contract; both accept
+    # Devanagari digits + '/' separators and return None on unconvertible input.
+    convert = ad_to_bs if mode == "ad_to_bs" else bs_to_ad_iso
     results: dict = {}
     for raw in dates:
         if not isinstance(raw, str):
             results[str(raw)] = "Error: date must be a YYYY-MM-DD string"
             continue
-        normalized = (
-            raw.strip().translate(_DEVANAGARI_TO_ASCII_DIGITS).replace("/", "-")
+        converted = convert(raw)
+        results[raw] = (
+            converted if converted is not None
+            else f"Error: could not convert {raw!r} ({mode})"
         )
-        parts = normalized.split("-")
-        if len(parts) != 3:
-            results[raw] = "Error: date must be in YYYY-MM-DD format"
-            continue
-        try:
-            year, month, day = int(parts[0]), int(parts[1]), int(parts[2])
-            if mode == "ad_to_bs":
-                converted = nepalidate.from_date(_dt.date(year, month, day)).strftime(
-                    "%Y-%m-%d"
-                )
-            else:
-                converted = (
-                    nepalidate(year, month, day)
-                    .to_datetime()
-                    .date()
-                    .strftime("%Y-%m-%d")
-                )
-            results[raw] = converted
-        except Exception as exc:  # noqa: BLE001
-            results[raw] = f"Error: {exc}"
     return results
 
 
