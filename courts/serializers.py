@@ -115,9 +115,17 @@ class BlacklistedFirmSerializer(serializers.ModelSerializer):
 class BlacklistedFirmWriteSerializer(serializers.ModelSerializer):
     """Write serializer for the ``POST /ingestion/firms`` upsert.
 
-    ``firm_name`` + ``blacklist_date_bs`` are the natural key the view upserts on
-    (both required here); the rest are optional detail fields. ``id`` is excluded
-    so it never round-trips on write."""
+    ``firm_name`` + ``blacklist_date_bs`` are the natural key (both required);
+    the rest are optional detail. ``id`` is excluded so it never round-trips.
+
+    ``blacklist_date_bs`` is redeclared explicitly because the model field is
+    ``blank=True`` and the model's ``UniqueConstraint`` on the pair makes DRF
+    otherwise (a) clash ``required`` with a derived ``default`` and (b) auto-add
+    a ``UniqueTogetherValidator`` that would 400 the idempotent re-POST. The VIEW
+    owns idempotency (existing-check + IntegrityError), so serializer-level
+    uniqueness is disabled (``validators = []``)."""
+
+    blacklist_date_bs = serializers.CharField(max_length=20)
 
     class Meta:
         model = BlacklistedFirm
@@ -127,4 +135,4 @@ class BlacklistedFirmWriteSerializer(serializers.ModelSerializer):
             "effective_until_bs", "effective_until_ad",
             "duration", "reason", "recommending_office", "nes_id",
         ]
-        extra_kwargs = {"blacklist_date_bs": {"required": True, "allow_null": False}}
+        validators = []

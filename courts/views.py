@@ -24,7 +24,7 @@ from __future__ import annotations
 import time
 
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.db import connections, router, transaction
+from django.db import IntegrityError, connections, router, transaction
 from rest_framework import mixins, status, viewsets
 
 from jawafdehi_shared.drf.auditlog import AuditlogActorMixin
@@ -719,8 +719,21 @@ class IngestionFirmsView(_IngestionView):
                 instance.full_clean(validate_unique=False)
             except DjangoValidationError as exc:
                 return None, exc.message_dict
-            instance.save()
-            return "created", None
+            try:
+                # Savepoint so a unique-constraint clash rolls back just this
+                # INSERT (not the whole request) and we can fall through.
+                with transaction.atomic(using="ngm"):
+                    instance.save()
+                return "created", None
+            except IntegrityError:
+                # A concurrent request inserted the same natural key first —
+                # back-fill against the row that won instead of 500-ing.
+                existing = BlacklistedFirm.objects.filter(
+                    firm_name=data["firm_name"],
+                    blacklist_date_bs=data["blacklist_date_bs"],
+                ).first()
+                if existing is None:
+                    return None, {"detail": "conflict resolving firm natural key"}
 
         # Back-fill only the detail fields the stored row is missing.
         changed = []

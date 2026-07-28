@@ -44,10 +44,17 @@ _DEFAULT_API_BASE = "http://127.0.0.1:8080"
 
 
 class BlacklistHttpClient:
-    """Live transport for the PPMO blacklist source: GET only, TLS-verify off
-    (the old subdomain serves a bad cert — the retired spider set
-    ``DOWNLOADER_CLIENT_TLS_VERIFY=False``), never raises. A transport failure
-    returns ``status=None`` so the caller can stop the walk cleanly.
+    """Live transport for the PPMO blacklist source: GET only, never raises (a
+    transport failure returns ``status=None`` so the caller stops the walk).
+
+    ACCEPTED TLS EXCEPTION (``verify=False``, this ONE host): ``old.ppmo.gov.np``
+    serves a broken/mismatched certificate, so cert validation is disabled here
+    exactly as the retired spider did (``DOWNLOADER_CLIENT_TLS_VERIFY=False``).
+    Justification for the accepted risk: the payload is a PUBLIC government
+    blacklist (no credentials/PII), the scope is this single read-only source,
+    and a forged-row MITM is bounded downstream by the server-side ingestion
+    validation (``IngestionFirmsView``). Pinning a CA is impractical for a gov
+    host that rotates a self-signed cert; revisit if it ever serves a valid chain.
     """
 
     def __init__(self, timeout: int = 60):
@@ -177,12 +184,22 @@ class Command(BaseCommand):
 
         totals = {"created": 0, "updated": 0, "unchanged": 0, "failed": 0}
         for batch in _chunks(payloads, o["batch_size"]):
-            resp = ingestion.post_firms(batch)
+            try:
+                resp = ingestion.post_firms(batch)
+            except Exception as exc:  # noqa: BLE001 — one bad batch must not kill the run
+                totals["failed"] += len(batch)
+                self.stderr.write(
+                    f"  ingestion POST failed for a {len(batch)}-firm batch "
+                    f"(counted failed, continuing): {exc}"
+                )
+                continue
             for key in totals:
                 totals[key] += int(resp.get(key, 0) or 0)
             for result in resp.get("results", []):
                 if result.get("status") == "failed":
-                    self.stderr.write(f"  ingestion failed [{result.get('index')}]: {result.get('errors')}")
+                    self.stderr.write(
+                        f"  ingestion rejected [{result.get('index')}]: {result.get('errors')}"
+                    )
             if delay:
                 time.sleep(delay)
 
@@ -217,13 +234,23 @@ class Command(BaseCommand):
                     if delay:
                         time.sleep(delay)
                     d_status, d_html = client.get(urljoin(url, firm.detail_href))
-                    detail = P.parse_detail(d_html) if d_status == 200 else None
-                    if detail is None:
-                        # Not a real detail page (followed a non-detail link) —
-                        # don't emit a half-empty row.
-                        continue
-                    for key, value in detail.items():
-                        setattr(firm, key, value)
+                    if d_status != 200:
+                        # Transport failure (network blip / transient 5xx) — NOT a
+                        # non-detail link. Keep the firm with its list-page data
+                        # (firm_name + duration is enough for the natural-key
+                        # upsert) rather than silently dropping a real firm.
+                        self.stderr.write(
+                            f"detail fetch {d_status} for {firm.firm_name!r}; "
+                            "keeping list-page data"
+                        )
+                    else:
+                        detail = P.parse_detail(d_html)
+                        if detail is None:
+                            # 200 but no list3 table → genuinely not a detail page
+                            # (followed a pagination/other link); skip it.
+                            continue
+                        for key, value in detail.items():
+                            setattr(firm, key, value)
                 yield firm
             url = urljoin(url, next_href) if next_href else None
             if url and delay:

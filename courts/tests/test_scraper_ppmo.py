@@ -107,15 +107,16 @@ def test_to_payload_omits_none_and_isoformats_dates():
 class _FakeSource:
     """Serves the list/detail fixtures by URL shape; records every GET."""
 
-    def __init__(self, list_html, detail_html):
+    def __init__(self, list_html, detail_html, detail_status=200):
         self._list = list_html
         self._detail = detail_html
+        self._detail_status = detail_status
         self.gets = []
 
     def get(self, url):
         self.gets.append(url)
         if "id=" in url:
-            return 200, self._detail
+            return self._detail_status, (self._detail if self._detail_status == 200 else "")
         if "page=2" in url:  # terminal page ends the walk
             return 200, "<html><body>no rows</body></html>"
         return 200, self._list
@@ -162,3 +163,20 @@ class PpmoCommandClientTests(SimpleTestCase):
         ing = _FakeIngestion()
         self._run(_FakeSource(_LIST_HTML, _DETAIL_HTML), ing)  # no --write
         assert ing.batches == []
+
+    def test_detail_fetch_failure_keeps_firm_with_list_data(self):
+        ing = _FakeIngestion()
+        # detail pages 503 → the firm is kept (list-page data), not dropped.
+        self._run(_FakeSource(_LIST_HTML, _DETAIL_HTML, detail_status=503), ing, "--write")
+        posted = [item for batch in ing.batches for item in batch]
+        abc = next(p for p in posted if p["firm_name"] == "एबीसी निर्माण सेवा")
+        assert abc["blacklist_date_bs"] == "2078-05-08"  # still posted
+        assert "address" not in abc  # detail failed → no detail fields
+
+    def test_ingestion_batch_failure_is_not_fatal(self):
+        class _Raising:
+            def post_firms(self, items):
+                raise RuntimeError("boom 503")
+
+        # The command must finish (count the batch failed), not raise.
+        self._run(_FakeSource(_LIST_HTML, _DETAIL_HTML), _Raising(), "--write")
