@@ -1,26 +1,25 @@
 """Refresh the PPMO blacklist (blacklisted firms) into the platform.
 
-The recurring replacement for the retired ``ppmo_blacklist`` Scrapy spider
-(archived ``Jawafdehi/ngm``). Walks the paginated blacklist table on
-``old.ppmo.gov.np``, follows each firm's detail page for address/cause, and
-POSTs the parsed rows to the platform's REST ingestion plane
-(``POST /api/ingestion/firms/``) — the server owns the idempotent upsert,
-validation, and auditlog. This command is a thin CLIENT: it never touches the
-ORM (writes go through the control plane, same as cases/documents ingestion).
+Replaces the retired ``ppmo_blacklist`` Scrapy spider (archived ``Jawafdehi/ngm``).
+PPMO rebuilt its blacklist as a React/Yii2 SPA; the old ``old.ppmo.gov.np`` HTML
+tables are dead. This fetches the public JSON feed
+(``blacklist.ppmo.gov.np/api/info/company-list`` — every firm in one response,
+valid TLS, no auth) and POSTs the parsed rows to the platform's REST ingestion
+plane (``POST /api/ingestion/firms/``) — the server owns the idempotent upsert,
+validation, and auditlog. This command is a thin CLIENT; it never touches the ORM.
 
-Dry-run by default (scrape + parse, report counts, POST nothing); ``--write``
-posts to the ingestion API. The ingestion endpoint is NGM-role gated, so
-``--write`` needs an ``sa-ingestion`` (Caseworker) bearer token — supplied via
-``INGESTION_API_TOKEN`` (the CronJob injects it from OpenBao) — and a base URL
-via ``INGESTION_API_BASE`` (the in-cluster platform service).
+Dry-run by default (fetch + parse, report counts, POST nothing); ``--write``
+posts. The ingestion endpoint is NGM-role gated, so ``--write`` needs an
+``sa-ingestion`` (Caseworker) bearer via ``INGESTION_API_TOKEN`` (the CronJob
+injects it from OpenBao) and a base URL via ``INGESTION_API_BASE``.
 
     manage.py scrape_ppmo_blacklist                          # dry-run recon
     INGESTION_API_TOKEN=… manage.py scrape_ppmo_blacklist --write   # the CronJob run
     manage.py scrape_ppmo_blacklist --limit 20               # cap firms (smoke test)
 
-The pure parse/shape half lives in ``courts.scraper.ppmo`` (unit-tested). The
-legacy spider also wrote a per-firm JSON blob to R2 to feed the retired
-DocumentSource index — intentionally dropped (that index is being retired).
+The pure parse/shape half lives in ``courts.scraper.ppmo`` (unit-tested). Dropped
+from the legacy: the per-firm R2 JSON metadata (fed the retired DocumentSource
+index) and NES mapping (``nes_id`` stays null; firm→entity linking is separate).
 """
 
 from __future__ import annotations
@@ -29,50 +28,36 @@ import json
 import os
 import time
 import urllib.request
-from urllib.parse import urljoin
 
 from django.core.management.base import BaseCommand, CommandError
 
 from courts.scraper import ppmo as P
-
-#: Safety cap on the pagination walk (the blacklist table is only a few pages).
-_MAX_PAGES = 100
 
 #: Default ingestion base URL (local/dev). The CronJob overrides it with the
 #: in-cluster platform service via ``INGESTION_API_BASE``.
 _DEFAULT_API_BASE = "http://127.0.0.1:8080"
 
 
-class BlacklistHttpClient:
-    """Live transport for the PPMO blacklist source: GET only, never raises (a
-    transport failure returns ``status=None`` so the caller stops the walk).
-
-    ACCEPTED TLS EXCEPTION (``verify=False``, this ONE host): ``old.ppmo.gov.np``
-    serves a broken/mismatched certificate, so cert validation is disabled here
-    exactly as the retired spider did (``DOWNLOADER_CLIENT_TLS_VERIFY=False``).
-    Justification for the accepted risk: the payload is a PUBLIC government
-    blacklist (no credentials/PII), the scope is this single read-only source,
-    and a forged-row MITM is bounded downstream by the server-side ingestion
-    validation (``IngestionFirmsView``). Pinning a CA is impractical for a gov
-    host that rotates a self-signed cert; revisit if it ever serves a valid chain.
+class BlacklistApiClient:
+    """GETs the PPMO blacklist JSON feed. Valid TLS (verify on), never raises —
+    a transport failure returns ``status=None`` so the caller can stop cleanly.
     """
 
     def __init__(self, timeout: int = 60):
         import requests
-        import urllib3
 
-        # verify=False emits an InsecureRequestWarning per request; silence it
-        # once — the insecure fetch is deliberate and scoped to this one host.
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         self._session = requests.Session()
         self._session.headers.update(
-            {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Jawafdehi-ppmo-crawler"}
+            {
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Jawafdehi-ppmo-crawler",
+                "Accept": "application/json",
+            }
         )
         self._timeout = timeout
 
     def get(self, url: str) -> tuple[int | None, str]:
         try:
-            resp = self._session.get(url, timeout=self._timeout, verify=False)  # noqa: S501
+            resp = self._session.get(url, timeout=self._timeout)
         except Exception:
             return None, ""
         return resp.status_code, resp.text
@@ -102,9 +87,9 @@ class IngestionApiClient:
             return json.loads(resp.read().decode("utf-8"))
 
 
-def build_scrape_client(timeout: int) -> BlacklistHttpClient:
+def build_source_client(timeout: int) -> BlacklistApiClient:
     """Factory (a seam for tests to inject a fake source transport)."""
-    return BlacklistHttpClient(timeout=timeout)
+    return BlacklistApiClient(timeout=timeout)
 
 
 def build_ingestion_client(base_url: str, token: str, timeout: int) -> IngestionApiClient:
@@ -123,19 +108,15 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument(
             "--limit", type=int, default=0,
-            help="max firms to scan (0 = no limit; the whole table)",
-        )
-        parser.add_argument(
-            "--max-pages", type=int, default=_MAX_PAGES,
-            help=f"pagination safety cap (default {_MAX_PAGES})",
+            help="max firms to post (0 = no limit; the whole feed)",
         )
         parser.add_argument(
             "--batch-size", type=int, default=200,
             help="firms per ingestion POST (default 200)",
         )
         parser.add_argument(
-            "--delay", type=float, default=1.0,
-            help="seconds between HTTP requests (default 1.0)",
+            "--delay", type=float, default=0.5,
+            help="seconds between ingestion POSTs (default 0.5)",
         )
         parser.add_argument("--timeout", type=int, default=60, help="HTTP timeout (s)")
         parser.add_argument(
@@ -148,40 +129,26 @@ class Command(BaseCommand):
         )
         parser.add_argument(
             "--write", action="store_true",
-            help="POST to the ingestion API (default: dry-run — scrape + parse only)",
+            help="POST to the ingestion API (default: dry-run — fetch + parse only)",
         )
 
     def handle(self, *args, **o):
         write = o["write"]
-        delay = max(0.0, o["delay"])
-        scraper = build_scrape_client(o["timeout"])
-
         ingestion = self._ingestion_client(o) if write else None
 
-        mode = "WRITE" if write else "DRY-RUN"
-        self.stdout.write(f"scrape_ppmo_blacklist [{mode}] limit={o['limit'] or '∞'}")
+        firms = self._fetch_firms(o["timeout"])
+        if o["limit"]:
+            firms = firms[: o["limit"]]
+        payloads = [P.to_payload(f) for f in firms]
 
-        payloads: list[dict] = []
-        scanned = skipped = 0
-        for firm in self._walk(scraper, o["max_pages"], delay):
-            if o["limit"] and scanned >= o["limit"]:
-                break
-            scanned += 1
-            if not P.resolve_dates(firm):
-                skipped += 1
-                self.stdout.write(
-                    f"  skip (implausible BS date): {firm.firm_name!r} {firm.duration!r}"
-                )
-                continue
-            payloads.append(P.to_payload(firm))
+        mode = "WRITE" if write else "DRY-RUN"
+        self.stdout.write(f"scrape_ppmo_blacklist [{mode}] parsed={len(payloads)} firms")
 
         if not write:
-            self.stdout.write(
-                f"done [dry-run]: scanned={scanned} valid={len(payloads)} "
-                f"skipped={skipped} (nothing posted)"
-            )
+            self.stdout.write(f"done [dry-run]: {len(payloads)} firms (nothing posted)")
             return
 
+        delay = max(0.0, o["delay"])
         totals = {"created": 0, "updated": 0, "unchanged": 0, "failed": 0}
         for batch in _chunks(payloads, o["batch_size"]):
             try:
@@ -204,9 +171,20 @@ class Command(BaseCommand):
                 time.sleep(delay)
 
         self.stdout.write(
-            f"done: scanned={scanned} skipped={skipped} posted={len(payloads)} | "
+            f"done: posted={len(payloads)} | "
             + " ".join(f"{key}={value}" for key, value in totals.items())
         )
+
+    def _fetch_firms(self, timeout: int):
+        """GET the feed once and parse it into ``ParsedFirm`` rows."""
+        status, body = build_source_client(timeout).get(P.API_URL)
+        if status != 200 or not body:
+            raise CommandError(f"PPMO blacklist API returned status {status}")
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise CommandError(f"PPMO blacklist API returned non-JSON: {exc}") from exc
+        return P.parse_company_list(payload)
 
     def _ingestion_client(self, o):
         base = o["api_base"] or os.environ.get("INGESTION_API_BASE") or _DEFAULT_API_BASE
@@ -217,41 +195,3 @@ class Command(BaseCommand):
                 "(the CronJob injects the sa-ingestion token) or pass --api-token."
             )
         return build_ingestion_client(base, token, o["timeout"])
-
-    def _walk(self, client, max_pages: int, delay: float):
-        """Yield ``ParsedFirm`` across the paginated list, following detail pages."""
-        url = P.LIST_URL
-        pages = 0
-        while url and pages < max_pages:
-            pages += 1
-            status, html = client.get(url)
-            if status != 200 or not html:
-                self.stderr.write(f"list page {status} at {url}; stopping walk")
-                return
-            firms, next_href = P.parse_list(html)
-            for firm in firms:
-                if firm.detail_href:
-                    if delay:
-                        time.sleep(delay)
-                    d_status, d_html = client.get(urljoin(url, firm.detail_href))
-                    if d_status != 200:
-                        # Transport failure (network blip / transient 5xx) — NOT a
-                        # non-detail link. Keep the firm with its list-page data
-                        # (firm_name + duration is enough for the natural-key
-                        # upsert) rather than silently dropping a real firm.
-                        self.stderr.write(
-                            f"detail fetch {d_status} for {firm.firm_name!r}; "
-                            "keeping list-page data"
-                        )
-                    else:
-                        detail = P.parse_detail(d_html)
-                        if detail is None:
-                            # 200 but no list3 table → genuinely not a detail page
-                            # (followed a pagination/other link); skip it.
-                            continue
-                        for key, value in detail.items():
-                            setattr(firm, key, value)
-                yield firm
-            url = urljoin(url, next_href) if next_href else None
-            if url and delay:
-                time.sleep(delay)
