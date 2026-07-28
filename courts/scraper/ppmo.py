@@ -179,3 +179,28 @@ def resolve_dates(firm: ParsedFirm) -> bool:
 def _bs_year(date_str: str) -> int | None:
     match = _BS_DATE_RE.match((date_str or "").strip())
     return int(match.group(1)) if match else None
+
+
+def to_payload(firm: ParsedFirm) -> dict:
+    """Serialize a resolved firm to the ``/ingestion/firms`` item shape (JSON-able).
+
+    Assumes :func:`resolve_dates` has run (``blacklist_date_bs`` is set). Dates
+    become ISO strings; ``None`` detail fields are omitted so the idempotent
+    upsert never clobbers a stored value with an explicit null.
+    """
+    payload = {
+        "firm_name": firm.firm_name,
+        "blacklist_date_bs": firm.blacklist_date_bs,
+    }
+    optional = {
+        "proprietor_name": firm.proprietor_name,
+        "address": firm.address,
+        "duration": firm.duration,
+        "reason": firm.reason,
+        "recommending_office": firm.recommending_office,
+        "effective_until_bs": firm.effective_until_bs,
+        "blacklist_date_ad": firm.blacklist_date_ad.isoformat() if firm.blacklist_date_ad else None,
+        "effective_until_ad": firm.effective_until_ad.isoformat() if firm.effective_until_ad else None,
+    }
+    payload.update({key: value for key, value in optional.items() if value})
+    return payload

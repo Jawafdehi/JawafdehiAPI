@@ -40,6 +40,7 @@ from .normalize import best_effort_normalize
 from .permissions import HasNgmQueryAccess, HasNgmRole
 from .serializers import (
     BlacklistedFirmSerializer,
+    BlacklistedFirmWriteSerializer,
     CaseEntitySerializer,
     CourtCaseHearingSerializer,
     CourtCaseSerializer,
@@ -641,6 +642,100 @@ class IngestionDocumentsView(_IngestionView):
         except DjangoValidationError as exc:
             return None, exc.message_dict
         case.save(update_fields=["document_sources", "updated_at"])
+        return "updated", None
+
+
+class IngestionFirmsView(_IngestionView):
+    """``POST /ingestion/firms`` — idempotent bulk upsert of PPMO blacklisted firms.
+
+    Body: ``{"items": [{"firm_name", "blacklist_date_bs", ...detail}]}``. Each
+    item is upserted by the natural key ``(firm_name, blacklist_date_bs)`` via
+    ``BlacklistedFirmWriteSerializer`` (``full_clean`` before save, so a bad
+    ``nes_id`` is a 400). Re-running the same batch is idempotent: an existing
+    row is left as-is unless the item carries a detail field the row is MISSING,
+    in which case only those gaps are back-filled (a present value is never
+    overwritten — the retired spider's update policy). Returns per-item results +
+    ``{created, updated, unchanged, failed}`` counts.
+    """
+
+    #: Detail fields back-filled onto an existing row only when it lacks them
+    #: (the natural-key fields are never touched on update).
+    _FILL_FIELDS = (
+        "proprietor_name", "address", "blacklist_date_ad",
+        "effective_until_bs", "effective_until_ad",
+        "duration", "reason", "recommending_office", "nes_id",
+    )
+
+    def post(self, request, *args, **kwargs):
+        items = self._items(request)
+        if items is None:
+            return self._bad_items()
+
+        results: list[dict] = []
+        created = updated = unchanged = failed = 0
+        for index, raw in enumerate(items):
+            outcome, err = self._upsert_firm(raw)
+            if err is not None:
+                failed += 1
+                results.append({"index": index, "status": "failed", "errors": err})
+                continue
+            if outcome == "created":
+                created += 1
+            elif outcome == "updated":
+                updated += 1
+            else:
+                unchanged += 1
+            results.append({"index": index, "status": outcome})
+
+        return Response(
+            {
+                "created": created,
+                "updated": updated,
+                "unchanged": unchanged,
+                "failed": failed,
+                "results": results,
+            }
+        )
+
+    @classmethod
+    def _upsert_firm(cls, raw):
+        """Upsert one firm item. Returns ("created"|"updated"|"unchanged", None)
+        or (None, errors)."""
+        if not isinstance(raw, dict):
+            return None, {"detail": "Each item must be an object."}
+
+        serializer = BlacklistedFirmWriteSerializer(data=raw)
+        if not serializer.is_valid():
+            return None, serializer.errors
+        data = serializer.validated_data
+
+        existing = BlacklistedFirm.objects.filter(
+            firm_name=data["firm_name"], blacklist_date_bs=data["blacklist_date_bs"]
+        ).first()
+
+        if existing is None:
+            instance = BlacklistedFirm(**data)
+            try:
+                instance.full_clean(validate_unique=False)
+            except DjangoValidationError as exc:
+                return None, exc.message_dict
+            instance.save()
+            return "created", None
+
+        # Back-fill only the detail fields the stored row is missing.
+        changed = []
+        for attr in cls._FILL_FIELDS:
+            value = data.get(attr)
+            if value and not getattr(existing, attr):
+                setattr(existing, attr, value)
+                changed.append(attr)
+        if not changed:
+            return "unchanged", None
+        try:
+            existing.full_clean(validate_unique=False)
+        except DjangoValidationError as exc:
+            return None, exc.message_dict
+        existing.save(update_fields=[*changed, "updated_at"])
         return "updated", None
 
 

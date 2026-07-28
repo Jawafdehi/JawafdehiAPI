@@ -1,15 +1,16 @@
-"""ppmo_blacklist port: parse (list / detail / BS-date band) + the command upsert.
+"""ppmo_blacklist port: parse (list / detail / BS-date band) + the command client.
 
 The pure parse tests run without a network or DB. The command test injects a fake
-HTTP transport via ``build_http_client`` (mirrors ``test_scraper_orders.py``) and
-asserts the ``BlacklistedFirm`` upsert, detail back-fill, and date-band skip.
+source transport AND a fake ingestion client (via the ``build_*`` seams) and
+asserts the command scrapes, resolves, and POSTs the right payloads — the ORM
+upsert itself is exercised server-side in ``test_ingestion_api.py``.
 """
 
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.core.management import call_command
+from django.test import SimpleTestCase
 
-from courts.models import BlacklistedFirm
 from courts.scraper import ppmo as P
 
 CMD = "courts.management.commands.scrape_ppmo_blacklist"
@@ -89,10 +90,21 @@ def test_resolve_dates_rejects_ad_format_out_of_band():
     assert firm.blacklist_date_bs is None
 
 
-# ── command (fake transport, real ORM) ────────────────────────────────────────
+def test_to_payload_omits_none_and_isoformats_dates():
+    firm = P.ParsedFirm(firm_name="A", duration="2078-05-08")
+    P.resolve_dates(firm)
+    payload = P.to_payload(firm)
+    assert payload["firm_name"] == "A"
+    assert payload["blacklist_date_bs"] == "2078-05-08"
+    assert isinstance(payload["blacklist_date_ad"], str)  # ISO string
+    assert "address" not in payload  # None detail fields omitted
+    assert "effective_until_bs" not in payload
 
 
-class _FakeClient:
+# ── command (fake source + fake ingestion client) ─────────────────────────────
+
+
+class _FakeSource:
     """Serves the list/detail fixtures by URL shape; records every GET."""
 
     def __init__(self, list_html, detail_html):
@@ -109,46 +121,44 @@ class _FakeClient:
         return 200, self._list
 
 
-class PpmoCommandTests(TestCase):
-    databases = "__all__"
+class _FakeIngestion:
+    """Captures POSTed batches; emulates an all-created server response."""
 
-    def _run(self, client, *extra):
-        from django.core.management import call_command
+    def __init__(self):
+        self.batches = []
 
-        with patch(f"{CMD}.build_http_client", return_value=client), patch("time.sleep"):
-            call_command("scrape_ppmo_blacklist", "--write", "--delay", "0", *extra)
+    def post_firms(self, items):
+        self.batches.append(items)
+        return {"created": len(items), "updated": 0, "unchanged": 0, "failed": 0, "results": []}
 
-    def test_upserts_firms_and_skips_ad_date_row(self):
-        self._run(_FakeClient(_LIST_HTML, _DETAIL_HTML))
 
-        # Ghost Traders (AD-format date) is filtered by the BS band → 2 rows.
-        assert BlacklistedFirm.objects.using("ngm").count() == 2
+class PpmoCommandClientTests(SimpleTestCase):
+    def _run(self, source, ingestion, *extra):
+        with patch(f"{CMD}.build_scrape_client", return_value=source), patch(
+            f"{CMD}.build_ingestion_client", return_value=ingestion
+        ), patch("time.sleep"):
+            call_command(
+                "scrape_ppmo_blacklist", "--delay", "0",
+                "--api-token", "t", "--api-base", "http://api", *extra,
+            )
 
-        abc = BlacklistedFirm.objects.using("ngm").get(firm_name="एबीसी निर्माण सेवा")
-        assert abc.blacklist_date_bs == "2078-05-08"
-        assert abc.effective_until_bs == "2080-05-07"
-        assert abc.address == "काठमाडौं, नेपाल"
-        assert abc.proprietor_name == "राम बहादुर"
-        assert abc.recommending_office == "सडक डिभिजन, इलाम"
-        assert abc.blacklist_date_ad is not None  # BS→AD converted
+    def test_write_posts_resolved_firms_and_skips_ad_date(self):
+        ing = _FakeIngestion()
+        self._run(_FakeSource(_LIST_HTML, _DETAIL_HTML), ing, "--write")
 
-        xyz = BlacklistedFirm.objects.using("ngm").get(firm_name="XYZ Builders Pvt Ltd")
-        assert xyz.effective_until_bs is None
-        assert xyz.address is None  # no detail link → no detail fetched
+        posted = [item for batch in ing.batches for item in batch]
+        names = {p["firm_name"] for p in posted}
+        # Ghost Traders (AD-format date) is filtered by the BS band before POST.
+        assert names == {"एबीसी निर्माण सेवा", "XYZ Builders Pvt Ltd"}
 
-    def test_rerun_is_idempotent(self):
-        client = _FakeClient(_LIST_HTML, _DETAIL_HTML)
-        self._run(client)
-        self._run(client)
-        assert BlacklistedFirm.objects.using("ngm").count() == 2
+        abc = next(p for p in posted if p["firm_name"] == "एबीसी निर्माण सेवा")
+        assert abc["blacklist_date_bs"] == "2078-05-08"
+        assert abc["effective_until_bs"] == "2080-05-07"
+        assert abc["address"] == "काठमाडौं, नेपाल"
+        assert abc["proprietor_name"] == "राम बहादुर"
+        assert "blacklist_date_ad" in abc  # ISO string
 
-    def test_backfills_missing_detail_on_existing_row(self):
-        BlacklistedFirm.objects.using("ngm").create(
-            firm_name="एबीसी निर्माण सेवा", blacklist_date_bs="2078-05-08"
-        )
-        self._run(_FakeClient(_LIST_HTML, _DETAIL_HTML))
-        abc = BlacklistedFirm.objects.using("ngm").get(firm_name="एबीसी निर्माण सेवा")
-        assert abc.address == "काठमाडौं, नेपाल"  # back-filled, not duplicated
-        assert BlacklistedFirm.objects.using("ngm").filter(
-            firm_name="एबीसी निर्माण सेवा"
-        ).count() == 1
+    def test_dry_run_posts_nothing(self):
+        ing = _FakeIngestion()
+        self._run(_FakeSource(_LIST_HTML, _DETAIL_HTML), ing)  # no --write
+        assert ing.batches == []

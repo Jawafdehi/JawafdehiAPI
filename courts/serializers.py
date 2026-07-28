@@ -110,3 +110,21 @@ class BlacklistedFirmSerializer(serializers.ModelSerializer):
             "effective_until_bs", "effective_until_ad",
             "duration", "reason", "recommending_office", "nes_id",
         ]
+
+
+class BlacklistedFirmWriteSerializer(serializers.ModelSerializer):
+    """Write serializer for the ``POST /ingestion/firms`` upsert.
+
+    ``firm_name`` + ``blacklist_date_bs`` are the natural key the view upserts on
+    (both required here); the rest are optional detail fields. ``id`` is excluded
+    so it never round-trips on write."""
+
+    class Meta:
+        model = BlacklistedFirm
+        fields = [
+            "firm_name", "proprietor_name", "address",
+            "blacklist_date_bs", "blacklist_date_ad",
+            "effective_until_bs", "effective_until_ad",
+            "duration", "reason", "recommending_office", "nes_id",
+        ]
+        extra_kwargs = {"blacklist_date_bs": {"required": True, "allow_null": False}}
