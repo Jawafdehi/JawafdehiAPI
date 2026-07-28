@@ -83,6 +83,7 @@ urlpatterns = [
         views.IngestionDocumentsView.as_view(),
         name="ingestion-documents",
     ),
+    path("ingestion/firms/", views.IngestionFirmsView.as_view(), name="ingestion-firms"),
     *composite_case_urls,
     *router.urls,
 ]

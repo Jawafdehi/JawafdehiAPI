@@ -16,7 +16,7 @@ from django.contrib.auth.models import Group
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from courts.models import CaseEntity, Court, CourtCase
+from courts.models import BlacklistedFirm, CaseEntity, Court, CourtCase
 
 User = get_user_model()
 
@@ -263,3 +263,62 @@ class IngestionEntitiesResolveTests(_DbAPITestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+class IngestionFirmsTests(_DbAPITestCase):
+    URL = "/api/ingestion/firms/"
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = cls._make_caseworker()
+        cls.norole = cls._make_norole()
+
+    def _item(self, **overrides):
+        item = {
+            "firm_name": "एबीसी निर्माण सेवा",
+            "blacklist_date_bs": "2078-05-08",
+            "duration": "2078-05-08 to 2080-05-07",
+        }
+        item.update(overrides)
+        return item
+
+    def test_norole_is_403(self):
+        self.client.force_authenticate(user=self.norole)
+        resp = self.client.post(self.URL, {"items": [self._item()]}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_missing_natural_key_is_failed(self):
+        self.client.force_authenticate(user=self.user)
+        resp = self.client.post(
+            self.URL, {"items": [{"firm_name": "No Date Co"}]}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data["failed"], 1)
+        self.assertFalse(BlacklistedFirm.objects.filter(firm_name="No Date Co").exists())
+
+    def test_create_then_backfill_then_no_overwrite(self):
+        self.client.force_authenticate(user=self.user)
+
+        # create (no address yet)
+        resp = self.client.post(self.URL, {"items": [self._item()]}, format="json")
+        self.assertEqual(resp.data["created"], 1, resp.data)
+        firm = BlacklistedFirm.objects.get(firm_name="एबीसी निर्माण सेवा")
+        self.assertEqual(firm.blacklist_date_bs, "2078-05-08")
+        self.assertIsNone(firm.address)
+
+        # re-run with address -> back-filled (updated)
+        resp = self.client.post(
+            self.URL, {"items": [self._item(address="काठमाडौं")]}, format="json"
+        )
+        self.assertEqual(resp.data["updated"], 1)
+        firm.refresh_from_db()
+        self.assertEqual(firm.address, "काठमाडौं")
+
+        # re-run with a DIFFERENT address -> a present value is never overwritten
+        resp = self.client.post(
+            self.URL, {"items": [self._item(address="ललितपुर")]}, format="json"
+        )
+        self.assertEqual(resp.data["unchanged"], 1)
+        firm.refresh_from_db()
+        self.assertEqual(firm.address, "काठमाडौं")
+        self.assertEqual(BlacklistedFirm.objects.filter(firm_name="एबीसी निर्माण सेवा").count(), 1)

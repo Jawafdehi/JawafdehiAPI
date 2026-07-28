@@ -53,9 +53,8 @@ class _District:
         return [c["code_name"] for c in DISTRICT_COURTS]
 
     def _today_bs(self):
-        from nepali.datetime import nepalidate
-        nd = nepalidate.from_date(timezone.localdate())
-        return f"{nd.year}-{nd.month:02d}-{nd.day:02d}"
+        from jawafdehi_shared.dates import ad_to_bs
+        return ad_to_bs(timezone.localdate())
 
     def crawl_date(self, fetch, court_id, date_bs, nd):
         did = self._BY_CODE[court_id]["district_id"]

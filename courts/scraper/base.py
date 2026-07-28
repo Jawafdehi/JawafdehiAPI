@@ -46,17 +46,15 @@ def iter_bs_dates(lookback_days: int, *, today: date, offset_days: int = 1) -> I
     ``today`` is injected (never ``date.today()``) so callers/tests are
     deterministic. BS conversion uses the ``nepali`` calendar tables.
     """
-    from nepali.datetime import nepalidate
+    from jawafdehi_shared.dates import ad_to_bs
 
     end = today - timedelta(days=offset_days)
     start = end - timedelta(days=lookback_days)
     current = end
     while current >= start:
-        try:
-            nd = nepalidate.from_date(current)
-            yield current, f"{nd.year}-{nd.month:02d}-{nd.day:02d}"
-        except Exception:
-            pass
+        bs = ad_to_bs(current)
+        if bs:
+            yield current, bs
         current -= timedelta(days=1)
 
 

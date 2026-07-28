@@ -220,6 +220,15 @@ class BlacklistedFirm(models.Model):
 
     class Meta:
         db_table = "blacklisted_firms"
+        constraints = [
+            # The ingestion upsert's natural key. A DB-level guarantee (not just
+            # the view's read-then-write) so concurrent/overlapping batch writes
+            # can't insert duplicate rows for the same firm+date.
+            models.UniqueConstraint(
+                fields=["firm_name", "blacklist_date_bs"],
+                name="uniq_blacklisted_firm_name_date",
+            ),
+        ]
 
     def __str__(self) -> str:
         return self.firm_name

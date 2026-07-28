@@ -64,3 +64,33 @@ def bs_to_ad_iso(value: object) -> str | None:
     """
     ad = bs_to_ad(value)
     return ad.isoformat() if ad is not None else None
+
+
+def ad_to_bs(value: object) -> str | None:
+    """Convert a Gregorian date to a Bikram Sambat ``YYYY-MM-DD`` string.
+
+    The inverse of :func:`bs_to_ad` — for sources that publish AD dates (e.g. the
+    PPMO blacklist API) while the corpus keys on BS. Accepts a
+    :class:`datetime.date` or an ISO ``YYYY-MM-DD`` string. Best-effort and total:
+    returns ``None`` for empty/unparseable/out-of-range input or a missing
+    ``nepali`` package, and never raises.
+    """
+    if not value:
+        return None
+    try:
+        from nepali.datetime import nepalidate
+    except ImportError:  # pragma: no cover - nepali is a declared dependency
+        return None
+    try:
+        if isinstance(value, date):
+            ad = value
+        else:
+            normalized = str(value)[:10].translate(_DEVANAGARI_DIGITS).replace("/", "-")
+            parts = normalized.split("-")
+            if len(parts) != 3:
+                return None
+            ad = date(int(parts[0]), int(parts[1]), int(parts[2]))
+        bs = nepalidate.from_date(ad)
+        return f"{bs.year:04d}-{bs.month:02d}-{bs.day:02d}"
+    except Exception:  # noqa: BLE001 — conversion must never hard-fail on bad input.
+        return None
