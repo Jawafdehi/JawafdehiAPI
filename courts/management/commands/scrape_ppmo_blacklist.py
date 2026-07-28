@@ -9,9 +9,12 @@ plane (``POST /api/ingestion/firms/``) — the server owns the idempotent upsert
 validation, and auditlog. This command is a thin CLIENT; it never touches the ORM.
 
 Dry-run by default (fetch + parse, report counts, POST nothing); ``--write``
-posts. The ingestion endpoint is NGM-role gated, so ``--write`` needs an
-``sa-ingestion`` (Caseworker) bearer via ``INGESTION_API_TOKEN`` (the CronJob
-injects it from OpenBao) and a base URL via ``INGESTION_API_BASE``.
+posts. The ingestion endpoint is NGM-role gated, so ``--write`` needs a Caseworker
+bearer (base URL via ``INGESTION_API_BASE``). The bearer is resolved by
+``review.oidc_client_credentials.resolve_service_bearer``: a static
+``INGESTION_API_TOKEN`` (local dev), else an OIDC client-credentials grant as the
+``sa-ingestion`` account (``INGESTION_OIDC_CLIENT_ID/SECRET``) or the shared
+``CASEWORK_OIDC_*`` service account — so the CronJob carries no static token.
 
     manage.py scrape_ppmo_blacklist                          # dry-run recon
     INGESTION_API_TOKEN=… manage.py scrape_ppmo_blacklist --write   # the CronJob run
@@ -187,11 +190,19 @@ class Command(BaseCommand):
         return P.parse_company_list(payload)
 
     def _ingestion_client(self, o):
+        # Lazy import: keeps the (review) OIDC dep off the module-load path so a
+        # dry-run / --help never needs it, and avoids any app-import cycle.
+        from review.oidc_client_credentials import OIDCTokenError, resolve_service_bearer
+
         base = o["api_base"] or os.environ.get("INGESTION_API_BASE") or _DEFAULT_API_BASE
-        token = o["api_token"] or os.environ.get("INGESTION_API_TOKEN")
+        try:
+            token = resolve_service_bearer(o["api_token"])
+        except OIDCTokenError as exc:
+            raise CommandError(f"--write bearer: OIDC client-credentials grant failed: {exc}") from exc
         if not token:
             raise CommandError(
-                "--write needs an ingestion bearer token: set INGESTION_API_TOKEN "
-                "(the CronJob injects the sa-ingestion token) or pass --api-token."
+                "--write needs an ingestion bearer: set INGESTION_API_TOKEN, or the "
+                "OIDC client-credentials env (INGESTION_OIDC_CLIENT_ID/SECRET, else the "
+                "CASEWORK_OIDC_* service account), or pass --api-token."
             )
         return build_ingestion_client(base, token, o["timeout"])
