@@ -6,17 +6,24 @@ material API** (``POST <api-base>/api/materials/``) — sourcing goes through th
 API plane, not a direct-DB management command. The scraped ``decisions.jsonl``
 is an on-disk CACHE (dedup + resume + audit), not the write path.
 
-Run as a plain module (no management command — writes flow through HTTP):
+Run as a plain module (no management command — writes flow through HTTP). The
+CronJob invokes it directly; ``--token`` is optional in-cluster — a write run with
+no token self-mints an NGM-role Caseworker bearer from the ``sa-ingestion`` OIDC
+client-credentials env (``INGESTION_OIDC_CLIENT_ID/SECRET``), so no static token is
+baked into the cluster:
 
     python -m materials.sourcing.nkp.crawl \\
-        --api-base https://api.jawafdehi.org --token "$NGM_TOKEN" \\
-        --cache /path/to/nkp/decisions.jsonl [--year 2082] [--delay 3.0]
+        --api-base https://api.jawafdehi.org \\
+        --cache /path/to/nkp/decisions.jsonl [--year-min 2082] [--delay 3.0]
 
-    # scrape only, don't post (populate/refresh the cache):
+    # local dev with an explicit bearer (skips the OIDC mint):
+    python -m materials.sourcing.nkp.crawl --api-base … --token "$NGM_TOKEN" --cache …
+
+    # scrape only, don't post (populate/refresh the cache; needs no token/Django):
     python -m materials.sourcing.nkp.crawl --cache … --dry-run
 
     # ingest an existing cache without re-scraping the site:
-    python -m materials.sourcing.nkp.crawl --cache … --api-base … --token … --from-cache
+    python -m materials.sourcing.nkp.crawl --cache … --api-base … --from-cache
 
 Design notes learned the hard way:
 
@@ -38,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 import time
@@ -574,13 +582,50 @@ def _now_iso() -> str:
     return datetime.datetime.now(ZoneInfo("Asia/Kathmandu")).replace(tzinfo=None).isoformat()
 
 
+def _mint_bearer() -> str:
+    """Mint the NGM-role Caseworker bearer for the material API from the OIDC
+    client-credentials env (the ``sa-ingestion`` identity), so the in-cluster
+    CronJob carries NO static token.
+
+    A bare ``python -m`` run of this module does not bootstrap Django, and
+    ``resolve_service_bearer`` reads Django-settings fallbacks — so configure
+    settings first (idempotent: a no-op when already set up, e.g. under pytest).
+    Exits non-zero rather than returning an empty token, so a mint failure fails
+    the job loudly instead of POSTing unauthenticated and 403-ing every decision.
+    """
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+    import django
+
+    django.setup()
+    from review.oidc_client_credentials import OIDCTokenError, resolve_service_bearer
+
+    try:
+        token = resolve_service_bearer()
+    except OIDCTokenError as exc:
+        print(f"FATAL: could not mint the material-API bearer: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+    if not token:
+        print(
+            "FATAL: no material-API bearer. Set the OIDC client-credentials env "
+            "(INGESTION_OIDC_CLIENT_ID/SECRET, else CASEWORK_OIDC_*), or pass "
+            "--token, or run with --dry-run.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return token
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Crawl nkp.gov.np precedents and POST them to the material API."
     )
     ap.add_argument("--cache", required=True, help="decisions.jsonl cache path (appended; resume source)")
     ap.add_argument("--api-base", help="Platform base URL, e.g. https://api.jawafdehi.org (required unless --dry-run)")
-    ap.add_argument("--token", help="Bearer token for the NGM-role-gated material API")
+    ap.add_argument(
+        "--token",
+        help="Bearer for the NGM-role material API. Omit in-cluster: a Caseworker "
+        "bearer is minted from the sa-ingestion OIDC env unless --dry-run.",
+    )
     ap.add_argument("--dry-run", action="store_true", help="Scrape to the cache only; do NOT post to the API")
     ap.add_argument("--from-cache", action="store_true", help="Post the existing cache to the API without re-scraping")
     ap.add_argument("--year", help="Limit to one BS year (default: whole corpus)")
@@ -597,6 +642,11 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if not args.dry_run and not args.api_base:
         ap.error("--api-base is required unless --dry-run is set.")
+    # Self-mint the bearer for a write run with no explicit --token: the CronJob
+    # runs this module directly and holds no static token. --dry-run never posts,
+    # so it needs neither a token nor Django (stays a plain, settings-free script).
+    if not args.dry_run and not args.token:
+        args.token = _mint_bearer()
     NkpCrawler(args).crawl()
 
 
