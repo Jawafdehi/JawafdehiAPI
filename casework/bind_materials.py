@@ -441,7 +441,7 @@ def _plan_to_dict(p):
 
 def build_parser():
     parser = argparse.ArgumentParser(description="Bind lake materials to case evidence.")
-    add_common_args(parser)
+    add_common_args(parser, state_flag=False)
     parser.add_argument("--batch-csv", required=True,
                         help="CSV with a `slug` column and material-IRI columns.")
     parser.add_argument("--report", default="",

@@ -68,8 +68,19 @@ def resolve_api_token(args):
     return os.environ.get(API_TOKEN_ENV, "") or ""
 
 
-def add_common_args(parser):
+def add_common_args(parser, *, state_flag=True):
     """Register the CLI flags every ported enricher shares.
+
+    `state_flag=False` omits `--state`. Only the five enrichers route their
+    selection through `select_cases`, so only they can honour it. `convert`
+    has no state gate at all, and `bind_materials` enforces its own DRAFT-only
+    invariant against the LIVE case (`plan_case`'s `required_state`) rather
+    than against a selection filter. Offering them the flag registers an
+    argument nothing reads: `--state IN_REVIEW` on the binder would parse
+    cleanly, change nothing, and leave the operator believing they had
+    unlocked review-queue cases. Fail-safe, but a CLI that silently ignores a
+    flag is a defect -- so the two tools that cannot honour it do not
+    advertise it.
 
     `--dry-run` defaults to True and `--apply` opts into writes. This
     deliberately INVERTS the donor's default: the donor's `add_common_args`
@@ -87,15 +98,16 @@ def add_common_args(parser):
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--fiscal-year", default="")
     parser.add_argument("--force", action="store_true")
-    parser.add_argument(
-        "--state", default=DEFAULT_ENRICHABLE_STATE,
-        help=f"Workflow state bulk selection gates on (default "
-             f"{DEFAULT_ENRICHABLE_STATE}). Bulk runs previously took DRAFT *and* "
-             "IN_REVIEW, silently rewriting cases a moderator already had open; "
-             "IN_REVIEW is now refused outright for bulk selection (pass an "
-             "explicit --slug/--court-case to act on one such case knowingly). "
-             "Ignored when --slug/--court-case is given -- those bypass the "
-             "state gate by design.")
+    if state_flag:
+        parser.add_argument(
+            "--state", default=DEFAULT_ENRICHABLE_STATE,
+            help=f"Workflow state bulk selection gates on (default "
+                 f"{DEFAULT_ENRICHABLE_STATE}). Bulk runs previously took DRAFT "
+                 "*and* IN_REVIEW, silently rewriting cases a moderator already "
+                 "had open; IN_REVIEW is now refused outright for bulk selection "
+                 "(pass an explicit --slug/--court-case to act on one such case "
+                 "knowingly). Ignored when --slug/--court-case is given -- those "
+                 "bypass the state gate by design.")
     parser.add_argument("--dry-run", action="store_true", default=True)
     parser.add_argument("--apply", dest="dry_run", action="store_false")
     parser.add_argument(

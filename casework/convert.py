@@ -224,12 +224,18 @@ def build_api(args):
     )
 
 
-def main(argv=None):
+def build_parser():
+    """Split out of `main` so the CLI surface is testable without running a
+    conversion (mirrors `bind_materials.build_parser`)."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    add_common_args(parser)
+    add_common_args(parser, state_flag=False)
     parser.add_argument("--material-type", action="append", default=[],
                         help=f"defaults to {'/'.join(DEFAULT_TYPES)}")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
     setup_logging(args.verbose)
     logger, run_id, paths = configure_run_logging("convert", verbose=args.verbose)
     start_time = time.monotonic()

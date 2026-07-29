@@ -70,6 +70,42 @@ def test_state_flag_accepts_an_override():
     assert _parse(["--state", "PUBLISHED"]).state == "PUBLISHED"
 
 
+def test_state_flag_can_be_omitted_for_tools_that_cannot_honour_it():
+    """`state_flag=False` must actually remove the argument, not neuter it.
+
+    Registering a flag nothing reads is worse than not offering it: it parses
+    cleanly and silently does nothing. `bind_materials` and `convert` opt out
+    (see the two tests below); this pins the mechanism they rely on.
+    """
+    parser = argparse.ArgumentParser()
+    add_common_args(parser, state_flag=False)
+    args = parser.parse_args([])
+    assert not hasattr(args, "state")
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--state", "IN_REVIEW"])
+
+
+def test_bind_materials_does_not_advertise_state():
+    """The binder gates on the LIVE case state (plan_case's `required_state`),
+    not on a selection filter, so `--state` has nothing to act on. Accepting it
+    would let `--state IN_REVIEW` parse and leave the operator believing they
+    had unlocked review-queue cases when the DRAFT-only invariant still held.
+    """
+    from casework import bind_materials
+
+    with pytest.raises(SystemExit):
+        bind_materials.build_parser().parse_args(
+            ["--batch-csv", "x.csv", "--state", "IN_REVIEW"])
+
+
+def test_convert_does_not_advertise_state():
+    """convert has no state gate at all -- same reasoning as the binder."""
+    from casework import convert
+
+    with pytest.raises(SystemExit):
+        convert.build_parser().parse_args(["--state", "DRAFT"])
+
+
 # ---------------------------------------------------------------------------
 # resolve_api_token: the Bearer token must not have to travel through argv.
 # ---------------------------------------------------------------------------
