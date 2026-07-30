@@ -38,6 +38,7 @@ class Migration(migrations.Migration):
             options={
                 'ordering': ['-created_at'],
                 'indexes': [models.Index(fields=['status', '-created_at'], name='case_propos_status_ffc690_idx'), models.Index(fields=['case_slug', 'status'], name='case_propos_case_sl_d4311f_idx')],
+                'constraints': [models.CheckConstraint(condition=models.Q(('confidence__gte', 0.0), ('confidence__lte', 1.0)), name='case_proposal_confidence_between_0_and_1')],
             },
         ),
     ]

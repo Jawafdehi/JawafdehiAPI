@@ -5,12 +5,16 @@ superuser) so the suite doesn't depend on repo-root conftest internals. Runs on
 the sqlite unit DB via ``@pytest.mark.django_db``.
 """
 
+from unittest import mock
+
 import pytest
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
+from django.db.utils import IntegrityError
 from rest_framework.test import APIClient
 
 from case_proposals.models import CaseUpdateProposal, ProposalStatus
+from case_proposals.views import CaseUpdateProposalViewSet
 from cases.models import Case, CaseMaterialReference, CaseType
 
 LIST_URL = "/api/case-update-proposals/"
@@ -169,6 +173,12 @@ class TestEdge:
         assert r.status_code == 400
         assert "confidence" in r.data
 
+    @pytest.mark.parametrize("bad", [1.5, -0.1])
+    def test_confidence_out_of_range_rejected_by_the_db_too(self, bad):
+        """The [0, 1] bound holds for writers that never touch the serializer."""
+        with pytest.raises(IntegrityError):
+            make_proposal(confidence=bad)
+
     def test_unknown_intent_type_rejected_on_create(self):
         r = client_for("Caseworker").post(
             LIST_URL, timeline_payload(intent={"type": "frobnicate", "foo": 1}), format="json"
@@ -195,6 +205,34 @@ class TestEdge:
         assert c.post(f"{LIST_URL}{p.id}/approve/", {}, format="json").status_code == 200
         r = c.post(f"{LIST_URL}{p.id}/approve/", {}, format="json")
         assert r.status_code == 409
+
+    def test_stale_pending_instance_cannot_re_apply(self):
+        """A decided proposal is not re-applied even if the view holds a stale instance.
+
+        This is the time-of-check/time-of-use hazard behind the ``select_for_update``
+        in ``_decide``: two concurrent approvals both read the row while it is still
+        PENDING, so a status check against the *already loaded* instance passes twice
+        and the intent gets applied twice. sqlite (the unit DB) does not implement
+        row locking, so a genuine race isn't reproducible here — instead we hand the
+        view exactly what the losing request of that race would hold, a PENDING
+        in-memory instance whose committed row is already APPROVED, and assert the
+        re-read inside the transaction catches it.
+        """
+        case = make_case()
+        p = make_proposal()
+        c = client_for("Caseworker")
+        assert c.post(f"{LIST_URL}{p.id}/approve/", {}, format="json").status_code == 200
+        case.refresh_from_db()
+        assert len(case.timeline) == 1  # applied exactly once so far
+
+        stale = CaseUpdateProposal.objects.get(pk=p.pk)
+        stale.status = ProposalStatus.PENDING  # in memory only; DB row says APPROVED
+        with mock.patch.object(CaseUpdateProposalViewSet, "get_object", return_value=stale):
+            r = c.post(f"{LIST_URL}{p.id}/approve/", {}, format="json")
+
+        assert r.status_code == 409
+        case.refresh_from_db()
+        assert len(case.timeline) == 1  # NOT appended a second time
 
     def test_approve_missing_case_is_400(self):
         p = make_proposal(case_slug="does-not-exist")  # no Case row

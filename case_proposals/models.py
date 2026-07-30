@@ -86,6 +86,17 @@ class CaseUpdateProposal(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        constraints = [
+            # The serializer already rejects out-of-range confidence, but confidence is
+            # the autonomy-dial input: a future producer writing through the ORM (or the
+            # admin, or a shell) bypasses the serializer entirely and would persist a
+            # value the dial then reads as gospel. Enforce the range in the DB, where
+            # nothing can route around it.
+            models.CheckConstraint(
+                condition=models.Q(confidence__gte=0.0, confidence__lte=1.0),
+                name="case_proposal_confidence_between_0_and_1",
+            ),
+        ]
         indexes = [
             models.Index(fields=["status", "-created_at"]),
             models.Index(fields=["case_slug", "status"]),

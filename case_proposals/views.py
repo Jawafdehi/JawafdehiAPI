@@ -52,14 +52,23 @@ class CaseUpdateProposalViewSet(
         return f"caseworker:{handle}"
 
     def _decide(self, request, proposal, new_status, apply_first):
-        if proposal.status != ProposalStatus.PENDING:
-            return Response(
-                {"detail": f"Only pending proposals can be decided (is '{proposal.status}')."},
-                status=status.HTTP_409_CONFLICT,
-            )
         decision = ProposalDecisionSerializer(data=request.data)
         decision.is_valid(raise_exception=True)
         with transaction.atomic():
+            # Re-read the proposal UNDER A ROW LOCK and only then check PENDING.
+            # The pending check has to live inside the lock: checking the instance
+            # get_object() loaded is a time-of-check/time-of-use gap, and two
+            # concurrent approvals of the same proposal would both pass it and both
+            # apply the intent (a duplicated timeline entry / a twice-applied patch).
+            # Locking the Case alone does not close this — it serialises the two
+            # approvals but still lets the second one apply. Whichever request gets
+            # the lock second now sees APPROVED and 409s.
+            proposal = CaseUpdateProposal.objects.select_for_update().get(pk=proposal.pk)
+            if proposal.status != ProposalStatus.PENDING:
+                return Response(
+                    {"detail": f"Only pending proposals can be decided (is '{proposal.status}')."},
+                    status=status.HTTP_409_CONFLICT,
+                )
             if apply_first:
                 case = get_case_or_400(proposal.case_slug)
                 apply_intent(case, proposal.intent)  # raises 400 on any problem
