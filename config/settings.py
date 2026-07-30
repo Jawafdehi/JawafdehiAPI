@@ -303,6 +303,7 @@ INSTALLED_APPS = [
     # ── Jawafdehi apps (route to the `default` DB) ───────────────────────────
     "cases",
     "review",
+    "case_proposals",
     # ── Newsletter (model-less proxy to the SendPulse ESP; no DB tables) ──────
     "newsletter",
     # ── Central job queue (platform-wide; Postgres-backed, no broker) ─────────
