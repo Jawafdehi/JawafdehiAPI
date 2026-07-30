@@ -252,14 +252,21 @@ class TestEdge:
         p.refresh_from_db()
         assert p.status == ProposalStatus.PENDING  # rolled back, still pending
 
-    def test_set_status_cannot_be_applied_yet(self):
-        make_case()
-        p = make_proposal(
-            intent={"type": "set_status", "field": "status", "to": "verdict_delivered"},
-            dedup_key="status:1",
+    def test_set_status_is_no_longer_part_of_the_vocabulary(self):
+        """set_status was dropped, so it is rejected at CREATE, not staged then refused.
+
+        A Case has no legal-status field to set (only the editorial ``state``
+        workflow), so status facts belong in the timeline; raw_patch remains the
+        escape hatch. Rejecting it up front means there is no way to file a proposal
+        that could never be approved.
+        """
+        r = client_for("Caseworker").post(
+            LIST_URL,
+            timeline_payload(intent={"type": "set_status", "field": "status", "to": "convicted"}),
+            format="json",
         )
-        r = client_for("Caseworker").post(f"{LIST_URL}{p.id}/approve/", {}, format="json")
         assert r.status_code == 400
+        assert "intent" in r.data
 
     def test_readonly_cannot_approve(self):
         make_case()
@@ -268,6 +275,95 @@ class TestEdge:
         assert r.status_code == 403
         p.refresh_from_db()
         assert p.status == ProposalStatus.PENDING
+
+
+# ── edit before approve ──────────────────────────────────────────────────────
+
+def edit_url(pk):
+    return f"{LIST_URL}{pk}/intent/"
+
+
+CORRECTED = {
+    "type": "append_timeline_entry",
+    "entry": {"date": "2026-08-19", "title": "Hearing scheduled (date corrected)"},
+}
+
+
+@pytest.mark.django_db
+class TestEditIntent:
+    def test_caseworker_can_correct_a_pending_intent(self):
+        p = make_proposal()
+        r = client_for("Caseworker").patch(edit_url(p.id), {"intent": CORRECTED}, format="json")
+        assert r.status_code == 200
+        p.refresh_from_db()
+        assert p.intent == CORRECTED
+        assert p.status == ProposalStatus.PENDING  # editing is not deciding
+
+    def test_approve_applies_the_EDITED_intent(self):
+        """The whole point: what gets committed is the corrected change, not the draft."""
+        case = make_case()
+        p = make_proposal()
+        c = client_for("Caseworker")
+        assert c.patch(edit_url(p.id), {"intent": CORRECTED}, format="json").status_code == 200
+        assert c.post(f"{LIST_URL}{p.id}/approve/", {}, format="json").status_code == 200
+        case.refresh_from_db()
+        assert len(case.timeline) == 1
+        assert case.timeline[0]["title"] == "Hearing scheduled (date corrected)"
+        assert case.timeline[0]["date"] == "2026-08-19"
+
+    def test_cannot_edit_a_decided_proposal(self):
+        make_case()
+        p = make_proposal()
+        c = client_for("Caseworker")
+        assert c.post(f"{LIST_URL}{p.id}/approve/", {}, format="json").status_code == 200
+        r = c.patch(edit_url(p.id), {"intent": CORRECTED}, format="json")
+        assert r.status_code == 409
+        p.refresh_from_db()
+        assert p.intent != CORRECTED  # the record of what was applied is intact
+
+    def test_malformed_intent_rejected(self):
+        p = make_proposal()
+        r = client_for("Caseworker").patch(
+            edit_url(p.id), {"intent": {"type": "append_timeline_entry", "entry": {}}}, format="json"
+        )
+        assert r.status_code == 400
+        p.refresh_from_db()
+        assert p.intent != CORRECTED
+
+    def test_unknown_intent_type_rejected_on_edit(self):
+        p = make_proposal()
+        r = client_for("Caseworker").patch(
+            edit_url(p.id), {"intent": {"type": "set_status", "to": "x"}}, format="json"
+        )
+        assert r.status_code == 400
+
+    def test_readonly_cannot_edit(self):
+        p = make_proposal()
+        r = client_for("ReadOnly").patch(edit_url(p.id), {"intent": CORRECTED}, format="json")
+        assert r.status_code == 403
+
+    def test_jobpoller_cannot_edit(self):
+        """Automation may PRODUCE a proposal but must not rewrite one after filing."""
+        p = make_proposal()
+        r = client_for("JobPoller").patch(edit_url(p.id), {"intent": CORRECTED}, format="json")
+        assert r.status_code == 403
+        p.refresh_from_db()
+        assert p.intent != CORRECTED
+
+    def test_provenance_and_confidence_are_not_editable(self):
+        p = make_proposal()
+        r = client_for("Caseworker").patch(
+            edit_url(p.id),
+            {"intent": CORRECTED, "confidence": 0.01, "dedup_key": "hijacked", "detected_by": "x"},
+            format="json",
+        )
+        assert r.status_code == 200
+        p.refresh_from_db()
+        assert p.intent == CORRECTED
+        assert p.confidence == 0.97
+        assert p.dedup_key == "docket:x:hearing:1"
+        assert p.detected_by == "consumer:proposal-builder"
+
 
     def test_readonly_cannot_create(self):
         r = client_for("ReadOnly").post(LIST_URL, timeline_payload(), format="json")

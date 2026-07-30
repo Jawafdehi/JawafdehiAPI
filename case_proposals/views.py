@@ -12,7 +12,11 @@ from review.permissions import CanReadReview, HasContributorRole, IsContentStaff
 
 from .apply import apply_intent, get_case_or_400
 from .models import CaseUpdateProposal, ProposalStatus
-from .serializers import CaseUpdateProposalSerializer, ProposalDecisionSerializer
+from .serializers import (
+    CaseUpdateProposalSerializer,
+    ProposalDecisionSerializer,
+    ProposalIntentEditSerializer,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -22,16 +26,17 @@ class CaseUpdateProposalViewSet(
     mixins.CreateModelMixin,
     viewsets.ReadOnlyModelViewSet,
 ):
-    """List / retrieve / create case-update proposals, plus approve & reject.
+    """List / retrieve / create case-update proposals, plus edit, approve & reject.
 
     Reads are open to any casework role (ReadOnly or above). Creating a proposal
     is open to any contributor INCLUDING the JobPoller machine role, because
-    automation is the primary producer. The approve/reject DECISIONS are gated to
-    a human content-staff role (``IsContentStaff`` = superuser or Caseworker, and
-    NOT JobPoller) — the system is fully human-in-loop for now, so the automation
-    identity must not be able to approve (and thereby auto-apply) its own
-    proposals. The ``AuditlogActorMixin`` binds the approving user so the Case
-    write done on approve is attributed to them like any other edit.
+    automation is the primary producer. Editing the proposed change and the
+    approve/reject DECISIONS are gated to a human content-staff role
+    (``IsContentStaff`` = superuser or Caseworker, and NOT JobPoller) — the system
+    is fully human-in-loop for now, so the automation identity must not be able to
+    approve (and thereby auto-apply) its own proposals, nor rewrite one after
+    filing it. The ``AuditlogActorMixin`` binds the acting user so both the edit
+    and the Case write done on approve are attributed to them like any other edit.
     """
 
     queryset = CaseUpdateProposal.objects.all()
@@ -42,7 +47,7 @@ class CaseUpdateProposalViewSet(
     def get_permissions(self):
         if self.action == "create":
             return [HasContributorRole()]
-        if self.action in ("approve", "reject"):
+        if self.action in ("approve", "reject", "edit_intent"):
             return [IsContentStaff()]
         return [CanReadReview()]
 
@@ -113,3 +118,50 @@ class CaseUpdateProposalViewSet(
     @action(detail=True, methods=["post"])
     def reject(self, request, *args, **kwargs):
         return self._decide(request, self.get_object(), ProposalStatus.REJECTED, apply_first=False)
+
+    @extend_schema(
+        request=ProposalIntentEditSerializer,
+        responses={200: CaseUpdateProposalSerializer},
+        summary="Correct a pending proposal's proposed change before approving it",
+        tags=["case-update-proposals"],
+    )
+    @action(detail=True, methods=["patch"], url_path="intent")
+    def edit_intent(self, request, *args, **kwargs):
+        """Replace the ``intent`` of a PENDING proposal.
+
+        A drafted intent is often nearly right — a misread hearing date, a wrong
+        material — and the reviewer should be able to correct it rather than reject
+        and wait for a re-proposal. Only the intent changes: provenance still
+        describes where the fact came from, and ``confidence`` stays the producer's
+        signal (see ``ProposalIntentEditSerializer``).
+
+        A separate step from approve, not a field on it, so the correction lands its
+        own audit entry — "who changed the proposed change" is a distinct question
+        from "who approved it", and an edited-then-approved proposal must answer both.
+        """
+        edit = ProposalIntentEditSerializer(data=request.data)
+        edit.is_valid(raise_exception=True)
+        proposal = self.get_object()
+        with transaction.atomic():
+            # Same lock discipline as _decide: without re-reading under the lock, an
+            # edit could land on a proposal that was approved a moment ago and
+            # silently rewrite the record of what was actually applied.
+            proposal = CaseUpdateProposal.objects.select_for_update().get(pk=proposal.pk)
+            if proposal.status != ProposalStatus.PENDING:
+                return Response(
+                    {"detail": f"Only pending proposals can be edited (is '{proposal.status}')."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            before = proposal.intent
+            proposal.intent = edit.validated_data["intent"]
+            proposal.save(update_fields=["intent", "updated_at"])
+        logger.info(
+            "case_proposal.intent_edited",
+            proposal_id=proposal.pk,
+            case_slug=proposal.case_slug,
+            editor=self._reviewer_label(request),
+            actor_id=getattr(request.user, "pk", None),
+            intent_before=before,
+            intent_after=proposal.intent,
+        )
+        return Response(self.get_serializer(proposal).data)
