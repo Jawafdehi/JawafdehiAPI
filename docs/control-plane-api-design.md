@@ -117,7 +117,7 @@ This doc is **grounded in the code on `v2` as it stands today** (audited 2026-06
 | `/cases/{court}/{case_number}/{hearings,entities,documents}/` | GET | public | ✅ |
 | `/entities/`, `/firms/` | GET | public | ✅ |
 | `/firms/`, `/firms/{id}/` | POST/PUT/PATCH | `HasNgmRole` | ✅ |
-| `/query/` | POST | `HasNgmQueryAccess` (scope **or** role) | ✅ SELECT-only guard |
+| `/query/` | POST | `IsAuthenticated` (any signed-in principal; no role/scope) | ✅ SELECT-only guard |
 | `/materials/?iri=` | GET / POST | public / `HasNgmRole` | ✅ JSON-LD upsert |
 | `/materials/{source}/{ident}/` | GET / PUT | public / `HasNgmRole` | ✅ JSON-LD upsert; GET falls back to on-the-fly court-case materialization |
 | `/ingestion/cases/` | POST | `HasNgmRole` | ⛔ **501** |

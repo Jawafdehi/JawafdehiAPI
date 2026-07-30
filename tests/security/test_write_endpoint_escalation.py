@@ -25,8 +25,9 @@ pytestmark = [pytest.mark.security, pytest.mark.django_db]
 # (method, url, json-body) for each role-gated write endpoint.
 #
 # NOTE: ``/api/query/`` is deliberately NOT here — it is a SELECT-only READ
-# surface, so the org-wide ReadOnly role is admitted to it (see
-# ``test_query_plane_is_read_not_write`` below), unlike these write planes.
+# surface open to ANY authenticated principal (see
+# ``test_query_plane_is_read_not_write`` below), unlike these write planes,
+# which stay role-gated.
 WRITE_ENDPOINTS = [
     ("post", "/api/entities", {"@type": "Person", "@id": "x"}),
     ("post", "/api/courtcases/", {}),
@@ -75,28 +76,54 @@ def test_readonly_can_still_read_but_not_write_cases():
 
 @pytest.mark.django_db(databases="__all__")
 def test_query_plane_is_read_not_write():
-    """``/api/query/`` is a SELECT-only READ surface, so its role contract differs
-    from the write planes above: anon → 401, a lower-privilege authenticated role
-    (Public) → 403, but the org-wide ReadOnly read role is ADMITTED (passes the
-    auth gate). Writes still can't ride through it — the SELECT-only guard is
-    covered by courts/tests/test_query_guard_security.py."""
+    """``/api/query/`` is a SELECT-only READ surface, so its contract differs from
+    the write planes above: anon → 401, but EVERY authenticated role is admitted,
+    including the lowest-privilege ones (Public, ReadOnly). It reads rows the
+    public REST plane already serves anonymously, so there is no role to earn.
+
+    Writes still can't ride through it — the SELECT-only guard is covered by
+    courts/tests/test_query_guard_security.py, which is now the load-bearing
+    control on this surface (see test_query_plane_low_privilege_cannot_write)."""
     body = {"query": "SELECT 1"}
 
-    # Anonymous: 401 (authenticator sets WWW-Authenticate).
+    # Anonymous: 401 (authenticator sets WWW-Authenticate). Auth is still required
+    # so queries stay attributable and land on the `user` throttle, not `anon`.
     assert APIClient().post("/api/query/", body, format="json").status_code == 401
 
-    # Public (authenticated, no query role): still forbidden.
-    public = create_user_with_role("esc-pub-q", "esc-pub-q@example.com", "Public")
-    pc = APIClient()
-    pc.force_authenticate(user=public)
-    assert pc.post("/api/query/", body, format="json").status_code == 403
+    # Every authenticated role clears the gate — the response is then a normal
+    # query outcome (200, or a guard/DB 400), never an authz rejection.
+    for role in ("Public", "ReadOnly"):
+        user = create_user_with_role(f"esc-{role}-q", f"esc-{role}-q@example.com", role)
+        client = APIClient()
+        client.force_authenticate(user=user)
+        code = client.post("/api/query/", body, format="json").status_code
+        assert code not in (401, 403), (
+            f"{role} must clear the /api/query/ auth gate, got {code}"
+        )
 
-    # ReadOnly: admitted — it must clear the auth gate (NOT 401/403); the response
-    # is then a normal query outcome (200, or a guard/DB 400), never a rejection.
-    readonly = create_user_with_role("esc-ro-q", "esc-ro-q@example.com", "ReadOnly")
-    rc = APIClient()
-    rc.force_authenticate(user=readonly)
-    ro_status = rc.post("/api/query/", body, format="json").status_code
-    assert ro_status not in (401, 403), (
-        f"ReadOnly must clear the /api/query/ auth gate, got {ro_status}"
-    )
+
+@pytest.mark.django_db(databases="__all__")
+def test_query_plane_low_privilege_cannot_write():
+    """The escalation line that matters now that /api/query/ takes any signed-in
+    caller: the SELECT-only guard — not a role — is what stops the lowest-
+    privilege account turning the query plane into a write plane, or reaching
+    tables outside the allowlist. Rejections must be 400 (from the guard), and
+    must never be 2xx."""
+    user = create_user_with_role("esc-pub-qw", "esc-pub-qw@example.com", "Public")
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    for sql in (
+        "DELETE FROM court_cases",
+        "UPDATE court_cases SET case_number = 'x'",
+        "DROP TABLE court_cases",
+        "WITH x AS (DELETE FROM court_cases RETURNING *) SELECT * FROM x",
+        "SELECT * FROM auth_user",
+        "SELECT * FROM scraped_dates",
+        "SELECT * FROM pg_catalog.pg_authid",
+    ):
+        resp = client.post("/api/query/", {"query": sql}, format="json")
+        assert resp.status_code == 400, (
+            f"guard must reject {sql!r} for a low-privilege caller, "
+            f"got {resp.status_code}"
+        )

@@ -184,10 +184,13 @@ class QueryGateTests(_DbAPITestCase):
         resp = self.client.post("/api/query/", {"query": "SELECT 1"}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
-    def test_authed_without_ngm_role_is_403(self):
+    def test_authed_without_any_role_may_query(self):
+        # The SELECT plane requires authentication but NOT a role: it returns
+        # rows already public via the REST read plane, and gating it on an
+        # admin-granted role left our published analysis unreproducible.
         self.client.force_authenticate(user=self.nobody)
         resp = self.client.post("/api/query/", {"query": "SELECT 1"}, format="json")
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
     def test_non_select_is_400(self):
         self.client.force_authenticate(user=self.user)
@@ -234,13 +237,14 @@ class QueryGateTests(_DbAPITestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
-    def test_other_scope_without_role_is_403(self):
-        # An authenticated principal with neither the scope nor an NGM role -> 403.
+    def test_other_scope_without_role_may_query(self):
+        # Authentication is the whole gate now, so a principal with neither the
+        # ngm.query scope nor an NGM role is admitted just the same.
         self.client.force_authenticate(
             user=self.nobody, token={"scope": "openid profile"}
         )
         resp = self.client.post("/api/query/", {"query": "SELECT 1"}, format="json")
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
 
 class IngestionGateTests(_DbAPITestCase):

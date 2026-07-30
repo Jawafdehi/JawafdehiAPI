@@ -109,7 +109,7 @@ Superuser (R1) is allow for every row and omitted from columns.
 | See PRIVATE (draft-only) material | ❌ | ✅ (ReadOnly) · ❌ (Public) | ✅ | ✅ | ✅ | `materials._can_see_nonpublic`: any staff-ish/NGM-role/superuser principal. |
 | Write court (POST/PUT) | ❌ | ❌ | ✅ | ✅ | ✅ | `HasNgmRole` (writes). |
 | Write / upsert material | ❌ | ❌ | ✅ | ✅ | ✅ | `HasNgmRole` enforced manually in `@api_view` handlers. |
-| Gated SQL query plane | ❌ | ❌ | ✅ | ✅ | ✅ | `HasNgmQueryAccess` = `HasNgmRole` **OR** OAuth scope `ngm.query` (**cond**: scope-only tokens like MCP pass without a role). |
+| SQL SELECT plane (`POST /api/query/`) | ❌ | ✅ | ✅ | ✅ | ✅ | `IsAuthenticated` only — **no role, no scope**. Reads the same rows the public REST plane already serves anonymously; bounded by `courts.query_guard` + 500-row cap + statement timeout, not by a role. Auth is kept so queries are attributable and metered by the `user` throttle. |
 | NGM ingestion | ❌ | ❌ | ✅ | ✅ | ✅ | `HasNgmRole`. |
 
 ### 4d. Review system (`review/`)
@@ -160,9 +160,12 @@ explicitly in any centralization:
 3. **Model-permission gate on delete.** Case delete needs `cases.delete_case`
    (a Django model permission Caseworker isn't granted) **in addition to**
    `can_change_case`.
-4. **OAuth scope bypass (NGM SQL).** `HasNgmQueryAccess` accepts the
-   `ngm.query` scope on the token *instead of* a role — for scope-only machine
-   clients (MCP).
+4. **No role gate on the NGM SQL plane.** `POST /api/query/` is
+   `IsAuthenticated` only. Any signed-in principal — including one with an
+   empty role claim — may run a guarded SELECT, because the rows are already
+   public via the REST read plane and gating them behind an admin-granted role
+   made our own published research unreproducible by outside readers. The
+   control is `courts.query_guard`, not a permission class.
 5. **Service-account subject allowlist.** `/caseworker/me` gates on `sub ∈
    OIDC_SERVICE_ACCOUNT_SUBJECTS`, orthogonal to Group roles.
 6. **Superuser sync + admin `is_staff`.** `admin` role ⇒ `is_superuser`;

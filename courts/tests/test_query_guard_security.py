@@ -1,15 +1,19 @@
-"""Penetration tests for the gated raw-SQL endpoint (``POST /api/query/``).
+"""Penetration tests for the raw-SQL endpoint (``POST /api/query/``).
 
-Target: :class:`courts.views.QueryView` — a gated, SELECT-only raw-SQL surface
-over the ngm DB, guarded by :func:`courts.query_guard.validate_query`
-(SELECT-only, forbidden-keyword denylist, ``scraped_dates`` block, table
-allowlist, row cap, statement timeout) and gated by
-:class:`courts.permissions.HasNgmQueryAccess` (``ngm.query`` scope OR NGM role).
+Target: :class:`courts.views.QueryView` — a SELECT-only raw-SQL surface over the
+ngm DB, open to ANY authenticated principal (no role, no scope) and bounded by
+:func:`courts.query_guard.validate_query` (SELECT-only, forbidden-keyword
+denylist, ``scraped_dates`` block, table allowlist, row cap, statement timeout).
+
+Because the role gate is gone, ``query_guard`` is the ONLY thing standing
+between an ordinary signed-in account and the ngm DB. That makes this suite the
+load-bearing control on this surface, not a belt-and-braces extra — every
+rejection below must hold for a caller with no privileges whatsoever.
 
 These are adversarial tests: every attack asserts the endpoint REJECTS the
-input (400 from the guard, or 401/403 from the auth gate) — NEVER a
-200-with-data and NEVER a 500. A legitimate SELECT for an authorized caller is
-asserted to be ALLOWED so the guard is not merely blanket-denying.
+input (400 from the guard, or 401 when unauthenticated) — NEVER a
+200-with-data and NEVER a 500. A legitimate SELECT is asserted to be ALLOWED so
+the guard is not merely blanket-denying.
 
 The test DB is sqlite; the guard is a *string-level* policy check that runs
 BEFORE execution, so every rejection test is decided by the guard without
@@ -17,8 +21,9 @@ needing Postgres. Tests that would need Postgres-specific execution (e.g. real
 ``pg_sleep``) assert the guard-level decision instead.
 
 Auth mirrors ``courts/tests/test_api.py``: rather than mint real Zitadel JWTs,
-we ``force_authenticate`` a user whose synced Django Groups grant an NGM role,
-or attach a token dict carrying the ``ngm.query`` scope.
+we ``force_authenticate`` a user — either one whose synced Django Groups grant
+an NGM role, or ``nobody``, who has no groups at all and stands in for an
+ordinary signed-in account.
 
     DJANGO_SETTINGS_MODULE=config.settings_test TESTING=true \\
         uv run pytest -q courts/tests/test_query_guard_security.py
@@ -88,18 +93,31 @@ class _QuerySecurityBase(APITestCase):
         return self.client.post(QUERY_URL, body, format="json")
 
     def _assert_rejected(self, resp):
-        """A rejected query is a clean 400 (or 403) — never 200-with-data, never 500."""
-        self.assertIn(
+        """A rejected query is a clean 400 — never 200-with-data, never 500.
+
+        Tightened from ``400 or 403`` now that the role gate is gone: with an
+        authenticated caller there is no longer any path that legitimately
+        answers 403 here, so every rejection must come from the guard itself.
+        """
+        self.assertEqual(
             resp.status_code,
-            (status.HTTP_400_BAD_REQUEST, status.HTTP_403_FORBIDDEN),
+            status.HTTP_400_BAD_REQUEST,
             msg=f"expected rejection, got {resp.status_code}: {getattr(resp, 'data', None)}",
         )
 
 
 # ---------------------------------------------------------------------------
-# 7. Auth gate — checked BEFORE the SELECT guard.
+# 7. Auth gate — authentication required, role NOT required.
 # ---------------------------------------------------------------------------
 class TestAuthGate(_QuerySecurityBase):
+    """Authentication is required; a ROLE is not.
+
+    This plane reads the same rows the public REST plane already serves
+    anonymously, so any authenticated principal may query it. Authentication is
+    kept so every query is attributable to an identity and metered by the
+    ``user`` throttle rather than the anon one.
+    """
+
     def test_unauthenticated_is_401(self):
         resp = self.client.post(QUERY_URL, {"query": "SELECT 1"}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
@@ -109,26 +127,44 @@ class TestAuthGate(_QuerySecurityBase):
         resp = self.client.post(QUERY_URL, {"query": "SELECT 1"}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
-    def test_authenticated_without_ngm_role_or_scope_is_403(self):
+    def test_authenticated_without_any_role_or_scope_is_allowed(self):
+        # The point of the change: a signed-in principal with NO granted role
+        # (empty Zitadel role claim -> groups.set([])) can reproduce our
+        # published analysis without an admin first granting them ReadOnly.
         self.client.force_authenticate(user=self.nobody)
         resp = self.client.post(QUERY_URL, {"query": "SELECT 1"}, format="json")
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
-    def test_non_ngm_scope_without_role_is_403(self):
+    def test_non_ngm_scope_without_role_is_allowed(self):
         self.client.force_authenticate(
             user=self.nobody, token={"scope": "openid profile"}
         )
         resp = self.client.post(QUERY_URL, {"query": "SELECT 1"}, format="json")
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
-    def test_auth_gate_precedes_guard_write_still_403_not_400(self):
-        # An unauthorized caller sending a WRITE must be stopped by auth (403),
-        # never reach — nor be triaged by — the SQL guard.
+    def test_role_less_caller_sending_a_write_is_still_rejected(self):
+        # Dropping the ROLE gate must not let a write through. Auth now passes,
+        # so the SQL guard is the only thing stopping this -> 400, never 200.
         self.client.force_authenticate(user=self.nobody)
         resp = self.client.post(
             QUERY_URL, {"query": "DROP TABLE court_cases"}, format="json"
         )
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_role_less_caller_cannot_reach_blocked_tables(self):
+        # Same idea for the allowlist: the guard, not the role gate, is what
+        # keeps a role-less caller out of scraped_dates, the auth tables and the
+        # system catalogs. These were previously masked by the 403.
+        self.client.force_authenticate(user=self.nobody)
+        for sql in (
+            "SELECT * FROM scraped_dates",
+            "SELECT * FROM auth_user",
+            "SELECT * FROM pg_catalog.pg_authid",
+            "SELECT * FROM information_schema.tables",
+        ):
+            with self.subTest(sql=sql):
+                resp = self.client.post(QUERY_URL, {"query": sql}, format="json")
+                self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
 
 # ---------------------------------------------------------------------------
@@ -334,6 +370,8 @@ class TestLegitimateSelectAllowed(_QuerySecurityBase):
 
     def test_ngm_query_scope_without_role_is_allowed(self):
         # Scope-only principals (e.g. MCP service accounts) must keep working.
+        # They now pass on plain authentication rather than on the scope, but
+        # the observable contract for those clients is unchanged.
         self.client.force_authenticate(
             user=self.nobody, token={"scope": "openid ngm.query"}
         )
@@ -341,6 +379,13 @@ class TestLegitimateSelectAllowed(_QuerySecurityBase):
             QUERY_URL, {"query": "SELECT identifier FROM courts"}, format="json"
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_row_cap_is_500_per_request(self):
+        # The bulk-pull budget callers rely on: one request may return up to
+        # 500 rows, and the cap is applied by wrapping the caller's SELECT.
+        self.assertEqual(query_guard.default_max_rows(), 500)
+        capped = query_guard.apply_row_cap("SELECT identifier FROM courts", 500)
+        self.assertIn("LIMIT 500", capped)
 
     def test_columns_resembling_keywords_are_not_false_positives(self):
         # Column names that merely CONTAIN a forbidden keyword as a substring

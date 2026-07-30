@@ -56,7 +56,7 @@ ngm/                                       was services/jawafdehi/ngm (proxy app
 | `/api/courtcases` | court-case records (composite key) + hearings/parties | courts | NGM role write |
 | `/api/cases` | Jawafdehi **corruption** cases (unchanged) | cases | caseworker |
 | ~~`/api/sources`~~ | **REMOVED (ADR 2026-07-01)** — sources collapse into `/api/materials`; evidence links by `material_iri` | — | — |
-| `/api/query` | gated SELECT over court tables | courts | `HasNgmQueryAccess` |
+| `/api/query` | guarded SELECT over court tables | courts | `IsAuthenticated` (no role) |
 | `/api/ingestion/*` | batch write (make the 501s real) | courts/materials | NGM role |
 | `/api/search`, `/api/casework/*`, discovery | unchanged | search/review/discovery | mixed |
 

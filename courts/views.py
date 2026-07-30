@@ -7,9 +7,10 @@ Ports the FastAPI NGM API plane to DRF:
   firms. List endpoints use the shared ``PlatformCursorPagination`` so the wire
   shape is the platform ``{results, next}`` (the existing converted read plane's
   contract), not the FastAPI ``{items, next_cursor}``.
-- Gated SQL plane (``POST /query``): OIDC + NGM-role gated; the query_guard
-  policy (SELECT-only, allowlist, scraped_dates blocked, row cap, statement
-  timeout) is enforced in the view.
+- SQL SELECT plane (``POST /query``): any authenticated principal (no role or
+  scope needed — it reads the same rows the public REST plane already serves);
+  the query_guard policy (SELECT-only, allowlist, scraped_dates blocked, row
+  cap, statement timeout) is what actually bounds it.
 - Ingestion plane (``POST /ingestion/*``): OIDC + NGM-role gated write stubs
   (501), mirroring the FastAPI ingestion routes.
 
@@ -30,14 +31,14 @@ from rest_framework import mixins, status, viewsets
 from jawafdehi_shared.drf.auditlog import AuditlogActorMixin
 from jawafdehi_shared.entities.ids import is_valid_entity_iri
 from rest_framework.exceptions import ValidationError as DRFValidationError
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from . import query_guard, search_index
 from .models import BlacklistedFirm, CaseEntity, Court, CourtCase, CourtCaseHearing
 from .normalize import best_effort_normalize
-from .permissions import HasNgmQueryAccess, HasNgmRole
+from .permissions import HasNgmRole
 from .serializers import (
     BlacklistedFirmSerializer,
     BlacklistedFirmWriteSerializer,
@@ -270,18 +271,28 @@ class BlacklistedFirmViewSet(
 
 
 class QueryView(APIView):
-    """``POST /query`` — gated raw-SQL for power users / MCP.
+    """``POST /query`` — raw-SQL SELECT plane for any authenticated caller.
 
-    OIDC-gated on EITHER the ``ngm.query`` OAuth scope OR an NGM role (see
-    ``HasNgmQueryAccess`` — restores the FastAPI route's scope control while
-    keeping role-based access). The body is
-    ``{"query": "<SELECT ...>", "timeout_seconds"?}``. Enforces the query_guard
-    policy then runs the validated, row-capped SELECT with a per-statement
-    timeout. DB errors surface as a generic 400 (no internals leaked), matching
-    the FastAPI route.
+    Authentication only: ANY OIDC-authenticated principal may query, with no
+    role or scope requirement. The rows reachable here are the same ones the
+    public REST read plane already serves anonymously (``courtcases`` and its
+    hearings/entities sub-resources) — the SQL surface just makes them
+    practical to pull in bulk, which is what an outside reader needs to
+    independently reproduce our published analysis. Gating that behind an
+    admin-granted role made our own numbers unverifiable.
+
+    Authentication is still required so every query is attributable to an
+    identity and metered by the ``user`` throttle rather than the anon one.
+
+    What actually bounds this surface is ``query_guard`` (SELECT-only, single
+    statement, no comments, table allowlist, blocked system schemas, and a
+    denylist of DoS/file-read functions) plus the row cap and per-statement
+    timeout applied below — NOT the permission class. The body is
+    ``{"query": "<SELECT ...>", "timeout_seconds"?}``. DB errors surface as a
+    generic 400 (no internals leaked), matching the FastAPI route.
     """
 
-    permission_classes = [HasNgmQueryAccess]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         body = request.data if isinstance(request.data, dict) else {}
