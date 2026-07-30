@@ -79,6 +79,8 @@ urlpatterns = [
     path("api/", include("courts.urls")),
     path("api/", include("materials.urls")),
     path("api/", include("newsletter.urls")),
+    # Case-update proposals — before cases.urls (whose router is broad).
+    path("api/", include("case_proposals.urls")),
     path("api/", include("cases.urls")),
     path("oembed/", OEmbedView.as_view(), name="oembed"),
     path("api/caseworker/me", MeView.as_view(), name="cw-me"),
