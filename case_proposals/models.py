@@ -6,7 +6,6 @@ class ProposalStatus(models.TextChoices):
     PENDING = "pending", "Pending"
     APPROVED = "approved", "Approved"
     REJECTED = "rejected", "Rejected"
-    SUPERSEDED = "superseded", "Superseded"
 
 
 class SignalSource(models.TextChoices):
@@ -17,16 +16,12 @@ class SignalSource(models.TextChoices):
     CASEWORKER = "caseworker", "Caseworker"
 
 
-# Intent types the approve action can APPLY today. ``set_status`` is deliberately
-# absent: a Case has no legal-status field (only the editorial ``state``
-# workflow), so status facts live as timeline entries. The ``raw_patch`` escape
-# hatch covers anything the typed intents don't. See case_proposals.apply.
+# The intent vocabulary — accepted on create AND applyable on approve; there is
+# deliberately no second, wider "stageable but not applyable" set. ``set_status``
+# was dropped: a Case has no legal-status field (only the editorial ``state``
+# workflow), so status facts belong in the timeline, and ``raw_patch`` is the
+# escape hatch for anything the typed intents don't cover. See case_proposals.apply.
 SUPPORTED_INTENT_TYPES = ("append_timeline_entry", "link_material", "raw_patch")
-
-# The full vocabulary the model/UI accept on create (superset of the applyable
-# set) so a producer can stage a forward-looking intent; apply-time validation
-# is the authority on what can actually be committed.
-KNOWN_INTENT_TYPES = ("append_timeline_entry", "set_status", "link_material", "raw_patch")
 
 
 class CaseUpdateProposal(models.Model):
@@ -46,7 +41,7 @@ class CaseUpdateProposal(models.Model):
     case_title = models.CharField(max_length=200, blank=True, default="")
     source_kind = models.CharField(max_length=20, choices=SignalSource.choices)
 
-    # The tagged-union change intent (see KNOWN_INTENT_TYPES). Shape-validated by
+    # The tagged-union change intent (see SUPPORTED_INTENT_TYPES). Shape-validated by
     # the serializer on create; deeply validated + applied on approve.
     intent = models.JSONField()
 
@@ -68,8 +63,6 @@ class CaseUpdateProposal(models.Model):
     # sticky. Producers construct this deterministically (e.g.
     # "docket:<iri>:hearing:<bs-date>").
     dedup_key = models.CharField(max_length=300, unique=True, db_index=True)
-    # Id of a proposal this one supersedes (a re-listed fact), if any.
-    supersedes = models.CharField(max_length=64, blank=True, default="")
 
     # ── originating bus event (populated later by the consumer) ───────────────
     origin_subject = models.CharField(max_length=100, blank=True, default="")

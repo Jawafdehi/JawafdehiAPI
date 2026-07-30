@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import KNOWN_INTENT_TYPES, CaseUpdateProposal
+from .models import SUPPORTED_INTENT_TYPES, CaseUpdateProposal
 
 
 def validate_intent_shape(intent):
@@ -10,9 +10,9 @@ def validate_intent_shape(intent):
     if not isinstance(intent, dict):
         raise serializers.ValidationError("intent must be an object.")
     itype = intent.get("type")
-    if itype not in KNOWN_INTENT_TYPES:
+    if itype not in SUPPORTED_INTENT_TYPES:
         raise serializers.ValidationError(
-            f"Unknown intent type '{itype}'. Known: {list(KNOWN_INTENT_TYPES)}."
+            f"Unknown intent type '{itype}'. Known: {list(SUPPORTED_INTENT_TYPES)}."
         )
     if itype == "append_timeline_entry":
         entry = intent.get("entry")
@@ -20,9 +20,6 @@ def validate_intent_shape(intent):
             raise serializers.ValidationError(
                 "append_timeline_entry requires entry.date and entry.title."
             )
-    elif itype == "set_status":
-        if not intent.get("to"):
-            raise serializers.ValidationError("set_status requires `to`.")
     elif itype == "link_material":
         if not intent.get("material"):
             raise serializers.ValidationError("link_material requires `material`.")
@@ -50,7 +47,6 @@ class CaseUpdateProposalSerializer(serializers.ModelSerializer):
             "source",
             "detected_by",
             "dedup_key",
-            "supersedes",
             "origin_subject",
             "origin_msg_id",
             "subject_refs",
@@ -79,3 +75,19 @@ class ProposalDecisionSerializer(serializers.Serializer):
     """Request body for approve/reject: an optional review note."""
 
     notes = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class ProposalIntentEditSerializer(serializers.Serializer):
+    """Request body for editing a PENDING proposal's proposed change.
+
+    Only ``intent`` is editable. Provenance (``source``/``detected_by``/``dedup_key``)
+    describes where the fact CAME FROM and must keep describing that even after a
+    caseworker corrects the drafted change, so it stays immutable here; likewise
+    ``confidence``, which is the producer's signal and not the reviewer's to
+    rewrite. Validated by the same shape check as create.
+    """
+
+    intent = serializers.JSONField()
+
+    def validate_intent(self, value):
+        return validate_intent_shape(value)

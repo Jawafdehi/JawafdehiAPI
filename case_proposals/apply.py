@@ -19,7 +19,7 @@ from rest_framework.exceptions import ValidationError
 from cases.caseworker_serializers import CasePatchSerializer, TimelineItemSerializer
 from cases.models import Case, CaseMaterialReference, validate_material_iri
 
-from .models import KNOWN_INTENT_TYPES, SUPPORTED_INTENT_TYPES
+from .models import SUPPORTED_INTENT_TYPES
 
 logger = structlog.get_logger(__name__)
 
@@ -109,18 +109,9 @@ def apply_intent(case, intent):
         result = _link_material(case, intent)
     elif itype == "raw_patch":
         result = _raw_patch(case, intent)
-    elif itype in KNOWN_INTENT_TYPES:
-        # Recognized on create (a producer may stage it) but not yet applyable —
-        # be explicit so a reviewer sees "not supported yet", not a bare 400.
-        raise ValidationError(
-            {
-                "intent": (
-                    f"Intent type '{itype}' is recognized but cannot be applied yet. "
-                    f"Applyable: {', '.join(SUPPORTED_INTENT_TYPES)}."
-                )
-            }
-        )
     else:
+        # Every accepted type is applyable — the serializer and this dispatch share
+        # one vocabulary, so there is no "staged but uncommittable" middle state.
         raise ValidationError(
             {"intent": f"Unknown intent type '{itype}'. Applyable: {', '.join(SUPPORTED_INTENT_TYPES)}."}
         )
