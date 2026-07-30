@@ -73,11 +73,17 @@ place, and the residual/accepted risks.
 
 ## Residual / accepted risks (tracked, not yet closed)
 
-- **F5 — court-order material IRI hyphen/underscore fork** (MEDIUM, deferred). Two IRI minters
-  disagree on hyphen handling for a COURT_ORDER whose `document_id` lacks the `court-order` marker,
-  which can create a duplicate Material row. Fixing it re-keys already-synced rows, so it needs a
-  coordinated re-sync/migration. Pinned by a characterization test
-  (`materials/tests/test_sync_materials.py`) so the fork stays visible.
+- **F5 — court-order material IRI hyphen/underscore fork** (downgraded to LOW, 2026-07-30). Two IRI
+  minters disagree on hyphen handling: `court_order_material_iri` preserves hyphens, the generic
+  `manuscript_jsonld` shaper underscores them. The MEDIUM rating came from the *duplicate Material
+  row* vector — `sync_materials_from_index` routed a COURT_ORDER whose `document_id` lacked the
+  `court-order` marker through the generic shaper, so one order could land as two rows. That command
+  read the frozen legacy `ngm_v1` and has been REMOVED, and `manuscript_jsonld` no longer feeds any
+  Material-row writer (its only remaining consumer is the R2 published-index export). The
+  duplicate-row vector is therefore closed; what remains is a shape inconsistency in published
+  linked data. Still pinned by a characterization test
+  (`materials/tests/test_court_order_iri_fork.py`) so the divergence stays visible — unifying the
+  minters still means re-keying anything already published under the underscored form.
 - **F14 — throttle counter is per-worker** (LOW-MEDIUM). DRF throttling uses the default
   `LocMemCache`, which is per-gunicorn-worker, so the anon "1000/hour" cap is effectively
   `rate × worker_count` and resets on worker recycle. A `CACHE_URL` env seam now allows pointing the

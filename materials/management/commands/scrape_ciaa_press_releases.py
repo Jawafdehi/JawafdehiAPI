@@ -2,8 +2,9 @@
 
 Replaces the retired ``ciaa_press_releases`` Scrapy spider (archived
 ``Jawafdehi/ngm``). The old pipeline was three hops — spider → R2 files + the
-``ngm_v1`` DocumentSource index → ``sync_materials_from_index`` → Materials — but
-``ngm_v1`` is now FROZEN, so no NEW press release can reach the archive. This
+``ngm_v1`` DocumentSource index → ``sync_materials_from_index`` (both since
+retired) → Materials — but ``ngm_v1`` is now FROZEN and off-limits, so no NEW
+press release could reach the archive that way. This
 command closes that gap: it walks CIAA's sequential press-release ids, shapes each
 into Material JSON-LD (``materials.sourcing.ciaa``), and writes it through the
 material REST plane — ``PUT /api/materials/<source>/<ident>`` for the doc, then

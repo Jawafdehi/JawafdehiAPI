@@ -1,10 +1,12 @@
 """ciaa_press_releases port: the press-release → Material JSON-LD shaper (pure).
 
 The critical property is IDEMPOTENCY with the legacy sync path: the ``@id`` this
-shaper mints must equal the one ``sync_materials_from_index`` derives from the
-index document_id ``ngm:ciaa-press-release:<id>`` — otherwise the go-forward
-writer forks a duplicate row from the already-synced historical corpus. The doc
-must also validate under the material contract.
+shaper mints must equal the one the retired ``sync_materials_from_index`` command
+derived from the index document_id ``ngm:ciaa-press-release:<id>`` — otherwise the
+go-forward writer forks a duplicate row from the already-synced historical corpus.
+That command is gone, but the rows it wrote ARE the live corpus, so the IRI scheme
+asserted here is still load-bearing. The doc must also validate under the material
+contract.
 """
 
 from jawafdehi_shared.entities.ids import is_valid_material_iri

@@ -2,9 +2,9 @@
 
 The Nepali civic corpus dates everything in Bikram Sambat; the search/serving
 plane sorts and filters on Gregorian dates. Converting between the two was
-previously hand-rolled in three places (the NKP precedent shaper, the
-``sync_materials_from_index`` command, and the CIAA draft-case service), each
-with a slightly different tolerance for messy input and a different return type.
+previously hand-rolled in three places (the NKP precedent shaper, the legacy
+document-index sync, and the CIAA draft-case service), each with a slightly
+different tolerance for messy input and a different return type.
 This module is the one place that conversion lives.
 
 Design:
