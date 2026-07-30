@@ -39,6 +39,7 @@ COPY materials/ ./materials/
 COPY lakehouse/ ./lakehouse/
 COPY cases/ ./cases/
 COPY review/ ./review/
+COPY case_proposals/ ./case_proposals/
 COPY newsletter/ ./newsletter/
 COPY jobs/ ./jobs/
 COPY llm/ ./llm/
