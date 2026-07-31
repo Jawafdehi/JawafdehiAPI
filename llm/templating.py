@@ -29,10 +29,26 @@ than a crash. So the engine is configured with a sentinel
 ``string_if_invalid``, and :func:`render_prompt` refuses to return any string
 still containing it.
 
-That sentinel closes the ``{{ var }}`` case but **not** the tag case: Django
-never consults ``string_if_invalid`` for ``{% if missing %}`` (falsy) or
-``{% for x in missing %}`` (empty). A variable used *only* inside a tag must
-therefore be declared in ``required=``, which is checked before rendering.
+That sentinel closes the ``{{ var }}`` case but **not** the tag case. Django
+never consults ``string_if_invalid`` for tag arguments, and the list is longer
+than it first looks — ``{% if %}``, ``{% for %}``, ``{% firstof %}``,
+``{% regroup %}``, ``{% widthratio %}`` and any ``... as name`` form. A variable
+used *only* inside a tag must therefore be declared in ``required=``, which is
+checked before rendering.
+
+Two of those are worse than "silently falsy" and are worth naming:
+
+- ``{% with x=missing %}`` binds the alias to the sentinel *string*, which is
+  truthy and 24 characters long. So ``{% if x %}`` takes the **TRUE** branch and
+  ``{% for i in x %}`` iterates 24 times — the opposite of the failure you would
+  predict. ``required=`` cannot close this one for a dotted path
+  (``{% with x=case.language %}``), because it only checks top-level keys.
+- ``{% filter %}`` renders its body *before* applying filters, so
+  ``{% filter slugify %}{{ missing }}{% endfilter %}`` strips the NUL delimiters
+  and the check below finds nothing.
+
+Multi-line ``{# ... #}`` is **not a comment**: Django's tag regex is not
+``DOTALL``, so it renders verbatim into the prompt. Use ``{% comment %}``.
 
 One consequence of the sentinel worth knowing: ``{{ x|default:"unknown" }}``
 does not rescue an *absent* ``x`` — Django substitutes the sentinel without
@@ -47,13 +63,15 @@ import re
 from pathlib import Path
 from typing import Any, Iterable
 
+import structlog
 from django.apps import apps
+from django.conf import settings
 from django.template import Context, Engine, TemplateDoesNotExist
 
-# Deliberately no logger here. Rendering happens on the way to a model call that
-# llm.prompts already logs (name + version + size), and anything this module
-# could usefully log is the prompt text itself — which carries case content and
-# does not belong in the log stream.
+# Used only for discovery/config warnings. Rendered prompt TEXT is never logged:
+# it carries case content, and llm.prompts already logs the identifying part
+# (name + version + size) on the way to the model.
+logger = structlog.get_logger(__name__)
 
 #: Directory name, relative to an app package, holding that app's prompt
 #: templates. NOT ``prompts``: ``llm/prompts.py`` is the registry module, and a
@@ -76,17 +94,55 @@ class PromptRenderError(Exception):
     """A prompt could not be rendered into text safe to send to a model."""
 
 
+def _strip_nulls(value):
+    """Remove NUL bytes from a string value before it enters the context.
+
+    The sentinel is NUL-delimited so a template cannot collide with it — but a
+    context *value* can, and prompt context is external data (OCR'd court
+    documents, scraped pages, converted uploads). A value containing
+    ``\\x00prompt-missing:`` would trip the check below and make that record's
+    enrichment fail permanently, since the same input fails identically on every
+    retry.
+
+    Postgres already rejects NUL in ``text``/``jsonb``, so anything round-tripped
+    through the database is clean; the live window is text handled before it is
+    persisted. Non-strings are returned untouched — nested values are rendered
+    by Django, and a NUL surviving in one would still be caught rather than
+    silently passed.
+    """
+    if isinstance(value, str) and "\x00" in value:
+        return value.replace("\x00", "")
+    return value
+
+
 def prompt_template_dirs() -> list[Path]:
-    """Every installed app's ``prompt_templates/`` directory that exists.
+    """Every FIRST-PARTY app's ``prompt_templates/`` directory that exists.
 
     Discovered from the app registry rather than hardcoded, so an app owns its
     own prompts and adding one is a directory, not a settings edit.
+
+    Restricted to apps living inside ``BASE_DIR``. Template names are not
+    namespaced by app label, so without this filter any of the twenty-odd
+    third-party apps registered ahead of ours (``jazzmin``, ``wagtail.*``,
+    ``rest_framework``, …) could ship a ``prompt_templates/`` directory and
+    silently win the name. The failure mode is the exact one this registry
+    exists to prevent: :mod:`llm.prompts` would log the right prompt name and
+    version while the text actually sent came from somebody else's file.
     """
+    base = Path(settings.BASE_DIR).resolve()
     dirs = []
     for config in apps.get_app_configs():
         candidate = Path(config.path) / PROMPT_DIR_NAME
-        if candidate.is_dir():
-            dirs.append(candidate)
+        if not candidate.is_dir():
+            continue
+        if not candidate.resolve().is_relative_to(base):
+            logger.warning(
+                "prompt.third_party_templates_ignored",
+                app=config.label,
+                path=str(candidate),
+            )
+            continue
+        dirs.append(candidate)
     return dirs
 
 
@@ -140,7 +196,12 @@ def render_prompt(
             prompt — sending one to a model is worse than failing, because the
             failure would surface later as a bad record with no obvious cause.
     """
-    context = dict(context or {})
+    if isinstance(required, str):
+        # "flag" iterates as ['f','l','a','g'] and reports four absurd missing
+        # keys. An easy typo when there is only one.
+        raise TypeError(f"required must be a sequence of keys, not the string {required!r}.")
+
+    context = {key: _strip_nulls(value) for key, value in (context or {}).items()}
 
     missing_required = [key for key in required if key not in context]
     if missing_required:

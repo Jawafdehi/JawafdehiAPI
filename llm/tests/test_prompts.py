@@ -10,6 +10,7 @@ Rendering itself is covered in test_templating.py; here it only matters that a
 spec wires the right template to the right invoke parameters.
 """
 
+import dataclasses
 from unittest import mock
 
 import pytest
@@ -78,9 +79,13 @@ class TestValidation:
             _spec(**kwargs)
 
     def test_spec_is_frozen(self):
+        # FrozenInstanceError specifically: `Exception` also passes for a typo'd
+        # attribute name on any frozen dataclass, so it would keep passing while
+        # asserting nothing about `version` being a real field.
         spec = _spec()
-        with pytest.raises(Exception):
+        with pytest.raises(dataclasses.FrozenInstanceError):
             spec.version = 2
+        assert "version" in {f.name for f in dataclasses.fields(spec)}
 
     def test_a_nonexistent_template_is_not_caught_until_render(self):
         # Construction cannot check the filesystem: specs are built at import
@@ -157,13 +162,24 @@ class TestInvoke:
             _spec().invoke(usage=sentinel, case_title="X", excerpts=[])
         assert invoke.call_args.kwargs["usage"] is sentinel
 
-    def test_usage_is_not_treated_as_template_context(self):
-        # `usage` is an invoke_json concern; leaking it into the context would
-        # put a repr of an accumulator object into the prompt.
-        with mock.patch("llm.prompts.invoke_json", return_value={}) as invoke:
-            _spec().invoke(usage=object(), case_title="X", excerpts=[])
-        _system, content = invoke.call_args.args
-        assert "usage" not in content
+    def test_usage_is_not_treated_as_template_context(self, tmp_path, monkeypatch):
+        """`usage` is an invoke_json concern and must not reach the template.
+
+        Asserting ``"usage" not in content`` against the reference template was
+        vacuous — that template never mentions ``usage``, so the assertion held
+        no matter what the context contained. This renders a template that
+        *would* show it, so the test can actually fail.
+        """
+        (tmp_path / "probe.md").write_text("[{{ usage }}]", encoding="utf-8")
+        monkeypatch.setattr(templating, "prompt_template_dirs", lambda: [tmp_path])
+        templating.reset_engine()
+
+        spec = _spec(system_template="probe.md", content_template="probe.md")
+        with mock.patch("llm.prompts.invoke_json", return_value={}):
+            # `usage` binds the parameter, so the template variable is missing —
+            # which the sentinel catches. That is the proof it never arrived.
+            with pytest.raises(PromptRenderError, match="usage"):
+                spec.invoke(usage=object())
 
     def test_a_render_failure_costs_no_model_call(self):
         # The whole reason rendering is strict: fail before spending a call,
@@ -183,6 +199,36 @@ class TestInvoke:
         kwargs = log.call_args.kwargs
         assert kwargs["prompt"] == "case_proposal.intent"
         assert kwargs["version"] == 7
+
+
+class TestRequiredAppliesToBothTemplates:
+    """`required` must cover the system prompt too, not just the content.
+
+    It previously covered only the content template, which is the less dangerous
+    half: the shipped reference system prompt gates its whole output language on
+    `{% if language == "np" %}`, a tag-shaped hole the sentinel cannot detect.
+    """
+
+    def test_render_system_enforces_required(self):
+        spec = _spec(required=("language",))
+        with pytest.raises(PromptRenderError, match="language"):
+            spec.render_system()
+
+    def test_render_system_succeeds_once_declared_key_is_supplied(self):
+        spec = _spec(required=("language",))
+        assert "नेपाली भाषामा" in spec.render_system(language="np")
+
+    def test_invoke_refuses_before_calling_the_model(self):
+        spec = _spec(required=("language",))
+        with mock.patch("llm.prompts.invoke_json") as invoke:
+            with pytest.raises(PromptRenderError, match="language"):
+                spec.invoke(case_title="X", excerpts=[])
+        invoke.assert_not_called()
+
+    def test_render_still_enforces_required_for_content(self):
+        spec = _spec(required=("flag",))
+        with pytest.raises(PromptRenderError, match="flag"):
+            spec.render(case_title="X", excerpts=[])
 
 
 class TestRegisteredSpecsAreLoadable:

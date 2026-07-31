@@ -25,7 +25,9 @@ Two distinct problems, and both are worth blocking:
 
 import re
 from importlib.metadata import packages_distributions
+from pathlib import Path
 
+from django.apps import apps
 from django.conf import settings
 
 #: The distribution this project itself installs as. Packages it owns are not
@@ -34,19 +36,30 @@ OWN_DISTRIBUTION = "jawafdehi"
 
 
 def _first_party_apps():
-    """Apps whose package directory lives in this repo.
+    """Top-level package names of apps whose code lives in this repo.
 
     Defined by what is on disk rather than by a name prefix: a third-party app
     that happens to share a name with its own distribution (``auditlog`` ships
     from ``django-auditlog``, ``corsheaders`` from ``django-cors-headers``) is
     not a collision — it is the same package, correctly resolved. Only a
     directory we ship can shadow something.
+
+    Read from the app REGISTRY rather than the raw ``INSTALLED_APPS`` strings.
+    An entry may be either ``"case_events"`` or the equally standard
+    ``"case_events.apps.EventsConfig"``, and the previous string-based version
+    skipped anything containing a dot — so writing an app the dotted way removed
+    it from all three checks below at once, silently reopening exactly the hole
+    they exist to close.
     """
-    return [
-        app
-        for app in settings.INSTALLED_APPS
-        if "." not in app and (settings.BASE_DIR / app / "__init__.py").exists()
-    ]
+    base = Path(settings.BASE_DIR).resolve()
+    names = set()
+    for config in apps.get_app_configs():
+        if not Path(config.path).resolve().is_relative_to(base):
+            continue  # third-party, installed into site-packages
+        top = config.name.split(".")[0]
+        if (base / top / "__init__.py").exists():
+            names.add(top)
+    return sorted(names)
 
 
 def test_no_app_shadows_an_installed_distribution():
@@ -96,6 +109,22 @@ def test_every_first_party_app_ships_in_the_wheel():
         f"These apps are in INSTALLED_APPS but not in the wheel `packages` list: "
         f"{missing}. They would be missing from the installed package."
     )
+
+
+def test_the_app_list_is_not_empty_and_finds_dotted_appconfigs():
+    """Guard the shared input to all three checks above.
+
+    Everything here loops over ``_first_party_apps()``, so if that returns a
+    short list the checks pass vacuously. It previously dropped every app
+    declared as ``"pkg.apps.SomeConfig"``; ``case_events`` is declared that way
+    in its own AppConfig, so it is the natural canary.
+    """
+    found = _first_party_apps()
+    assert len(found) > 5, f"suspiciously few first-party apps: {found}"
+    assert "case_events" in found, found
+    # And the registry really does expose the dotted form somewhere, so this
+    # test is exercising the case it claims to.
+    assert any("." in config.name for config in apps.get_app_configs())
 
 
 def test_the_check_can_actually_detect_a_collision():
