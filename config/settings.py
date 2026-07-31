@@ -308,6 +308,8 @@ INSTALLED_APPS = [
     "newsletter",
     # ── Central job queue (platform-wide; Postgres-backed, no broker) ─────────
     "jobs",
+    # ── Case-enrichment event bus (NATS/JetStream; no models, no migrations) ──
+    "events",
     # ── Generic LLM invocation (provider registry: bedrock/proxy/CLI harnesses) ─
     "llm",
     # ── Unified search (platform-wide; queries all three domains' indices) ────
@@ -1110,3 +1112,19 @@ MEDIA_PUBLIC_BASE = os.getenv("MEDIA_PUBLIC_BASE", "http://127.0.0.1:40173")
 OPENSEARCH_URL = os.getenv("OPENSEARCH_URL", "http://localhost:9200")
 OPENSEARCH_USER = os.getenv("OPENSEARCH_USER", "")
 OPENSEARCH_PASSWORD = os.getenv("OPENSEARCH_PASSWORD", "")
+
+# ============================================================================
+# Case-enrichment event bus — NATS + JetStream
+# ============================================================================
+# OPTIONAL, and off by default. When NATS_URL is empty every publish is a logged
+# no-op and no connection is ever opened, so the platform runs unchanged with no
+# broker: dev and CI need nothing, and this code ships safely before the bus is
+# deployed. Setting it is also the whole rollback — no image change required.
+#
+# Publishing is best-effort by design: a broker outage must never fail a case
+# write, because the bus is transport and the case record is the system of
+# record. See events/bus.py.
+#
+# Credentials ride in the URL (nats://user:pass@host:4222) and are per identity,
+# not shared — the monolith publishes as itself, and consumers get their own.
+NATS_URL = os.getenv("NATS_URL", "")

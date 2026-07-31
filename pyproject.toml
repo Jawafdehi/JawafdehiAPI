@@ -45,6 +45,11 @@ dependencies = [
     # HTTP client for outbound REST calls (newsletter→SendPulse ESP; also used by
     # the cases enrichment management commands).
     "requests>=2.32",
+    # Client for the OPTIONAL case-enrichment event bus. Pure Python and small.
+    # Imported lazily inside events/bus.py, never at startup, and unused entirely
+    # when NATS_URL is unset — but it ships in the base image because the
+    # consumer Deployment runs off that image.
+    "nats-py>=2.9",
     # --- entities/materials (NES + NGM) ---
     "jsonpatch>=1.33",          # RFC-6902 PATCH /api/entities/{ref}
     # --- ngm lakehouse / object storage ---
@@ -115,6 +120,7 @@ packages = [
     "review",
     "newsletter",
     "jobs",
+    "events",
     "llm",
     "search",
     "discovery",

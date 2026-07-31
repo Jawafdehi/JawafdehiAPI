@@ -12,6 +12,7 @@ from review.permissions import CanReadReview, HasContributorRole, IsContentStaff
 
 from .apply import apply_intent, get_case_or_400
 from .models import CaseUpdateProposal, ProposalStatus
+from .publish import schedule_decision_event
 from .serializers import (
     CaseUpdateProposalSerializer,
     ProposalDecisionSerializer,
@@ -84,6 +85,12 @@ class CaseUpdateProposalViewSet(
             proposal.save(
                 update_fields=["status", "reviewer", "reviewed_at", "review_notes", "updated_at"]
             )
+            # Announce the decision on the bus once this commits. Registered
+            # INSIDE the atomic block so a rollback discards the callback with
+            # the transaction; it still fires only after a successful commit.
+            # Best-effort and a no-op without NATS_URL — an approval must never
+            # depend on a broker being reachable.
+            schedule_decision_event(proposal)
         # Audit the decision: who accepted/rejected (the acceptor) + the exact
         # proposed change. The DB LogEntry (register_audited) records the actor
         # on the status transition; this structured line makes the acceptor +
