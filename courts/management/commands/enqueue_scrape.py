@@ -35,6 +35,13 @@ class Command(BaseCommand):
                             help="follow each touched case's detail page")
         parser.add_argument("--priority", type=int, default=100,
                             help="queue priority (lower runs sooner)")
+        parser.add_argument("--sweep", action="store_true",
+                            help="enqueue REGISTER-SWEEP jobs instead of cause-list "
+                                 "ones: walk each court's docket numbering and fetch "
+                                 "the cases that never reached a hearing list")
+        parser.add_argument("--sweep-budget", type=int, default=None,
+                            help="max probes per court per run "
+                                 "(default: courts.scraper.sweep.DEFAULT_BUDGET)")
 
     def handle(self, *args, **o):
         try:
@@ -53,12 +60,22 @@ class Command(BaseCommand):
                     payload["lookback_days"] = o["lookback_days"]
                 if o["limit_dates"] is not None:
                     payload["limit_dates"] = o["limit_dates"]
+                # A sweep is the same job kind with the cause-list half off. It
+                # gets its OWN dedup namespace so it can sit alongside a court's
+                # cause-list job instead of being deduped away by it.
+                suffix = ""
+                if o["sweep"]:
+                    payload.update({"sweep": True, "causelist": False})
+                    if o["sweep_budget"] is not None:
+                        payload["sweep_budget"] = o["sweep_budget"]
+                    suffix = ":sweep"
                 job = jobs_queue.enqueue(
                     kind="court_scrape",
                     payload=payload,
-                    dedup_key=f"court_scrape:{tier}:{court_id}",
+                    dedup_key=f"court_scrape:{tier}:{court_id}{suffix}",
                     priority=o["priority"],
                 )
-                self.stdout.write(f"  {tier}/{court_id}: job {job.pk} [{job.status}]")
+                self.stdout.write(f"  {tier}/{court_id}{suffix}: job {job.pk} [{job.status}]")
                 enqueued += 1
-        self.stdout.write(f"enqueued {enqueued} court_scrape job(s).")
+        label = "register-sweep" if o["sweep"] else "cause-list"
+        self.stdout.write(f"enqueued {enqueued} {label} court_scrape job(s).")

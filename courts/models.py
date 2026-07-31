@@ -234,6 +234,45 @@ class BlacklistedFirm(models.Model):
         return self.firm_name
 
 
+class RegisterProbe(models.Model):
+    """Negative cache for the register sweep: docket numbers the court does NOT have.
+
+    The sweep walks a court's ``(year, series)`` register and probes every slot the
+    mirror is missing. Most turn out to be real cases — but some numbers were simply
+    never issued (``070-CR-0084``, ``073-CR-0005``, ``073-CR-0050`` are absent from
+    the court's own portal too). Gaps are recomputed from held rows each run, so a
+    never-issued number would be re-probed forever; this table is the only piece of
+    sweep state that cannot be derived, and it exists to stop that.
+
+    Only *absences* are recorded. A docket that IS found becomes a ``CourtCase``,
+    which is its own record. ``last_probed_at`` allows a re-check horizon — a court
+    can issue a number later than its neighbours, so "missing" is not permanent.
+    """
+
+    id = models.AutoField(primary_key=True)
+    court = models.ForeignKey(
+        Court, on_delete=models.DO_NOTHING, db_column="court_identifier",
+        related_name="register_probes",
+    )
+    case_number = models.CharField(max_length=50, db_index=True)
+    #: Times the portal has said "no such docket" — a number absent across many
+    #: runs is far more likely to be genuinely unissued than a transient miss.
+    miss_count = models.IntegerField(default=1)
+    last_probed_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "court_register_probes"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["court", "case_number"], name="uniq_register_probe"
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.court_id}:{self.case_number} (missed {self.miss_count}x)"
+
+
 class ScrapedDate(models.Model):
     """Crawl frontier: which ``(court, BS date)`` cause-lists have been fetched.
 

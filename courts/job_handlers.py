@@ -15,6 +15,7 @@ from courts.scraper import registry
 from courts.scraper.base import anchor
 from courts.scraper.crawl import run_crawl
 from courts.scraper.fetch import Fetcher
+from courts.scraper.sweep import DEFAULT_BUDGET, DEFAULT_DELAY, run_sweep
 
 
 class BadCourtScrapePayload(ValueError):
@@ -35,9 +36,10 @@ def handle_court_scrape(payload, on_stage=None, fetch=None) -> dict:
     Payload keys: ``court`` (required registry/tier key — special/district/high/
     supreme), ``court_id`` (optional leaf court to restrict to — the enqueuer
     posts one job per leaf court), ``lookback_days``, ``limit_dates``, ``enrich``,
-    ``today``. Returns aggregate + per-court stats (also stored as ``job.result``).
-    Raises ``BadCourtScrapePayload`` on a missing/unknown court or malformed
-    ``today`` (non-retryable); propagates fetch/parse/DB errors (retryable).
+    ``today``, and for the register sweep ``sweep``, ``causelist``, ``sweep_budget``,
+    ``sweep_delay``. Returns aggregate + per-court stats (also stored as
+    ``job.result``). Raises ``BadCourtScrapePayload`` on a missing/unknown court or
+    malformed ``today`` (non-retryable); propagates fetch/parse/DB errors (retryable).
 
     ``on_stage`` is called per crawled date so the consumer can heartbeat the job
     lease during a long crawl. ``fetch`` is injectable for tests; production
@@ -60,6 +62,15 @@ def handle_court_scrape(payload, on_stage=None, fetch=None) -> dict:
     enrich = bool(payload.get("enrich"))
     lookback_days = payload.get("lookback_days")
     limit_dates = payload.get("limit_dates")
+    # A sweep job is the same kind with the cause-list half switched off, so it
+    # rides the existing queue/lease/cron rather than adding a parallel pipeline.
+    causelist = payload.get("causelist", True)
+    sweep = bool(payload.get("sweep"))
+    sweep_budget = int(payload.get("sweep_budget") or DEFAULT_BUDGET)
+    # Politeness delay between probes. Overridable so a test isn't forced to spend
+    # real seconds sleeping, and so a court that tolerates more can be tuned.
+    sweep_delay = payload.get("sweep_delay")
+    sweep_delay = DEFAULT_DELAY if sweep_delay is None else float(sweep_delay)
 
     # Heartbeat the job lease per crawled date so a long single-court crawl does
     # not outlive its lease and get reaped mid-run.
@@ -72,7 +83,7 @@ def handle_court_scrape(payload, on_stage=None, fetch=None) -> dict:
     fetch = fetch or Fetcher()
     totals = {"courts": 0, "dates": 0, "cases": 0, "hearings": 0, "enriched": 0}
     per_court: list[dict] = []
-    for key in keys:
+    for key in keys if causelist else ():
         spec = registry.REGISTRY[key]
         for s in run_crawl(
             spec,
@@ -98,6 +109,46 @@ def handle_court_scrape(payload, on_stage=None, fetch=None) -> dict:
                 "hearings": s.hearings,
                 "enriched": s.enriched,
             })
+
+    if sweep:
+        # Register enumeration: the dockets that never reached a cause list and so
+        # are invisible to run_crawl. The budget is spent across every court this
+        # job covers, not granted to each of them — a tier payload with no
+        # court_id would otherwise multiply it by 77 and blow the CronJob's
+        # activeDeadlineSeconds, taking the cause-list crawl down with it.
+        sweeps: list[dict] = []
+        remaining = sweep_budget
+        skipped = 0
+        for key in keys:
+            spec = registry.REGISTRY[key]
+            targets = [court_id] if court_id else spec.court_ids(fetch)
+            for cid in targets:
+                if remaining <= 0:
+                    skipped += 1
+                    continue
+                stats = run_sweep(
+                    spec,
+                    fetch=fetch,
+                    court_id=cid,
+                    budget=remaining,
+                    delay=sweep_delay,
+                    write=True,
+                    on_progress=(
+                        (lambda c, n: on_stage(f"sweep {c} {n}"))
+                        if on_stage is not None
+                        else None
+                    ),
+                )
+                remaining -= stats.attempts
+                sweeps.append(stats.as_dict())
+        totals["swept"] = sum(s["probed"] for s in sweeps)
+        totals["created"] = sum(s["created"] for s in sweeps)
+        # Both surfaced so a capped run never reads as full coverage: candidates
+        # left inside a swept court, and courts the budget never reached at all.
+        totals["deferred"] = sum(s["deferred"] for s in sweeps)
+        totals["courts_skipped"] = skipped
+        return {**totals, "per_court": per_court, "sweeps": sweeps}
+
     return {**totals, "per_court": per_court}
 
 

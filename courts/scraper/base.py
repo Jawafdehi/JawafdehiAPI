@@ -214,6 +214,115 @@ def apply_enrichment(
     return True
 
 
+def upsert_from_detail(
+    court_id: str, case_number: str, enrichment: ParsedEnrichment, *, using: str = NGM_DB
+) -> bool:
+    """Create a case the register sweep discovered, then enrich it.
+
+    The cause-list crawler only sees cases that reached a published hearing list;
+    this is the path for the ones that never did. ``apply_enrichment`` alone can't
+    do it — it returns ``False`` when the row is absent, which is every swept case.
+
+    Returns ``False`` (writing nothing) when the parse identifies no case, or when
+    the case **already exists**. That second guard is not an optimisation: re-running
+    enrichment over a known case calls ``_replace_entities``, which drops every party
+    row and recreates it without ``nes_id`` — silently destroying entity resolution.
+    The sweep only ever adds what is missing.
+
+    ``registration_date_bs``/``_ad``/``case_type`` are set here rather than by
+    ``apply_enrichment``, which by design only writes ``_ENRICH_COLUMNS`` (the
+    cause-list owns the listing fields — but for a swept case there was no listing).
+
+    The transaction is opened on ``using`` rather than by an ``@transaction.atomic``
+    decorator, which would bind to ``NGM_DB`` at import time and leave every write
+    here — including ``_replace_entities``' delete-then-recreate — unprotected on
+    any other alias.
+    """
+    if not enrichment.identifies_a_case():
+        return False
+
+    with transaction.atomic(using=using):
+        if (
+            CourtCase.objects.using(using)
+            .filter(court_id=court_id, case_number=case_number)
+            .exists()
+        ):
+            return False
+
+        _ensure_court(court_id, using=using)
+        core = enrichment.core_fields
+        CourtCase.objects.using(using).create(
+            court_id=court_id,
+            case_number=case_number,
+            registration_date_bs=core.get("registration_date_bs"),
+            registration_date_ad=core.get("registration_date_ad"),
+            case_type=core.get("case_type"),
+            status="pending",
+            extra_data={"source": "register_sweep"},
+        )
+        apply_enrichment(court_id, case_number, enrichment, using=using)
+        materialise_detail_hearings(court_id, case_number, enrichment, using=using)
+    return True
+
+
+def materialise_detail_hearings(
+    court_id: str, case_number: str, enrichment: ParsedEnrichment, *, using: str = NGM_DB
+) -> int:
+    """Turn a detail page's hearing list into ``CourtCaseHearing`` rows.
+
+    Without this a swept case exists only in ``court_cases`` and is invisible to
+    every hearing-level query — including the deciding-hearing analysis that the
+    conviction figures rest on. ``apply_enrichment`` keeps the same list in
+    ``extra_data.enrichment_hearings``, so the JSON stays the full-fidelity record
+    and these rows are the relational projection of it.
+
+    Two deliberate limits, both recorded rather than papered over:
+
+    * **No ``serial_no``.** A detail page doesn't publish one, and inventing an
+      ordinal would fabricate court data. Rows are therefore deduped on the date
+      alone, so two hearings sharing a date collapse into one relational row (the
+      JSON still lists both).
+    * **Unconvertible dates are skipped, not sentinelled.** ``hearing_date_ad`` is
+      NOT NULL and the cause-list path falls back to ``1900-01-01``; emitting that
+      here would seed a clean column with fake dates for rows nobody asked for.
+
+    ``judge_names``/``bench`` stay null — the detail page carries neither.
+    """
+    from jawafdehi_shared.dates import bs_to_ad
+
+    rows = (enrichment.extra_data or {}).get("enrichment_hearings") or []
+    written = 0
+    for hearing in rows:
+        date_bs = (hearing or {}).get("hearing_date")
+        if not date_bs:
+            continue
+        date_ad = bs_to_ad(date_bs)
+        if date_ad is None:
+            continue
+        # exists() rather than get_or_create(): CourtCaseHearing carries no unique
+        # constraint and the cause-list path dedupes on a 4-tuple that includes
+        # serial_no, so a case can already hold two rows for one date. get_or_create
+        # would raise MultipleObjectsReturned on exactly those cases.
+        if (
+            CourtCaseHearing.objects.using(using)
+            .filter(court_id=court_id, case_number=case_number, hearing_date_bs=date_bs)
+            .exists()
+        ):
+            continue
+        CourtCaseHearing.objects.using(using).create(
+            court_id=court_id,
+            case_number=case_number,
+            hearing_date_bs=date_bs,
+            hearing_date_ad=date_ad,
+            case_status=hearing.get("case_status") or None,
+            decision_type=hearing.get("decision_type") or None,
+            scraped_at=timezone.now(),
+            extra_data={"source": "register_sweep"},
+        )
+        written += 1
+    return written
+
+
 def _replace_entities(court_id: str, case_number: str, entities, *, using: str) -> None:
     CaseEntity.objects.using(using).filter(
         court_id=court_id, case_number=case_number
