@@ -1,7 +1,15 @@
-{# A reference system prompt. Copy this pair when adding a real one.
+{% comment %}
+A reference system prompt. Copy this pair when adding a real one.
 
-   Django comment tags are stripped from the output, so notes like this one
-   cost nothing at inference time and never reach the model. #}
+Use {% comment %}, NOT {# #}: Django's tag regex is not DOTALL, so a {# #}
+comment spanning more than one line is not a comment at all — it renders
+verbatim into the prompt. Both of these templates shipped with that bug.
+
+Note the `language` variable below is referenced ONLY inside an if tag. The
+engine's missing-variable sentinel cannot see tag arguments, so a spec using
+this template MUST declare required=("language",), or omitting it silently
+yields an English prompt.
+{% endcomment %}
 You are a meticulous research assistant for Jawafdehi.org, an open civic archive
 of Nepali anti-corruption cases.
 

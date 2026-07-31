@@ -105,8 +105,15 @@ class PromptSpec:
         scraper's switches its whole output language on one flag), and forcing
         that into the content block would put it further from the instruction it
         modifies.
+
+        ``required`` applies here as well as to :meth:`render`. It did not, and
+        that was the more dangerous half: the shipped reference system prompt
+        branches on ``{% if language == "np" %}``, a tag-shaped hole the sentinel
+        cannot see, so omitting ``language`` silently produced an English prompt
+        with no error. Both templates take the same context, so one declaration
+        covering both is also the less surprising rule.
         """
-        return render_prompt(self.system_template, context)
+        return render_prompt(self.system_template, context, required=self.required)
 
     def render(self, **context) -> str:
         """Render the content block without invoking a model.
