@@ -46,7 +46,7 @@ dependencies = [
     # the cases enrichment management commands).
     "requests>=2.32",
     # Client for the OPTIONAL case-enrichment event bus. Pure Python and small.
-    # Imported lazily inside events/bus.py, never at startup, and unused entirely
+    # Imported lazily inside case_events/bus.py, never at startup, and unused entirely
     # when NATS_URL is unset — but it ships in the base image because the
     # consumer Deployment runs off that image.
     "nats-py>=2.9",
@@ -120,7 +120,7 @@ packages = [
     "review",
     "newsletter",
     "jobs",
-    "events",
+    "case_events",
     "llm",
     "search",
     "discovery",

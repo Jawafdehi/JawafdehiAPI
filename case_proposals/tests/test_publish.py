@@ -135,7 +135,7 @@ class TestApprovalIsIndependentOfTheBroker:
     ):
         make_case()
         p = make_proposal()
-        with mock.patch("events.bus.publish", side_effect=RuntimeError("broker down")):
+        with mock.patch("case_events.bus.publish", side_effect=RuntimeError("broker down")):
             with django_capture_on_commit_callbacks(execute=True):
                 r = caseworker_client().post(f"{LIST_URL}{p.id}/approve/", {}, format="json")
 
@@ -148,7 +148,7 @@ class TestApprovalIsIndependentOfTheBroker:
     def test_approve_publishes_the_approved_event(self, django_capture_on_commit_callbacks):
         make_case()
         p = make_proposal()
-        with mock.patch("events.bus.publish") as publish:
+        with mock.patch("case_events.bus.publish") as publish:
             with django_capture_on_commit_callbacks(execute=True):
                 caseworker_client().post(f"{LIST_URL}{p.id}/approve/", {}, format="json")
 
@@ -161,7 +161,7 @@ class TestApprovalIsIndependentOfTheBroker:
     def test_reject_publishes_the_rejected_event(self, django_capture_on_commit_callbacks):
         make_case()
         p = make_proposal()
-        with mock.patch("events.bus.publish") as publish:
+        with mock.patch("case_events.bus.publish") as publish:
             with django_capture_on_commit_callbacks(execute=True):
                 caseworker_client().post(
                     f"{LIST_URL}{p.id}/reject/", {"notes": "wrong person"}, format="json"
@@ -179,7 +179,7 @@ class TestApprovalIsIndependentOfTheBroker:
         # not announce a second decision.
         make_case()
         p = make_proposal(status=ProposalStatus.APPROVED)
-        with mock.patch("events.bus.publish") as publish:
+        with mock.patch("case_events.bus.publish") as publish:
             with django_capture_on_commit_callbacks(execute=True):
                 r = caseworker_client().post(f"{LIST_URL}{p.id}/approve/", {}, format="json")
 

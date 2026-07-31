@@ -309,7 +309,10 @@ INSTALLED_APPS = [
     # ── Central job queue (platform-wide; Postgres-backed, no broker) ─────────
     "jobs",
     # ── Case-enrichment event bus (NATS/JetStream; no models, no migrations) ──
-    "events",
+    # NOT "events": that name is taken by the `Events` dist (a transitive
+    # dependency of opensearch-py), and a top-level collision breaks the
+    # installed wheel even though a source checkout shadows it fine.
+    "case_events",
     # ── Generic LLM invocation (provider registry: bedrock/proxy/CLI harnesses) ─
     "llm",
     # ── Unified search (platform-wide; queries all three domains' indices) ────

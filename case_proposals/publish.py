@@ -19,8 +19,8 @@ from __future__ import annotations
 import structlog
 from django.db import transaction
 
-from events import bus, subjects
-from events.envelope import build_envelope
+from case_events import bus, subjects
+from case_events.envelope import build_envelope
 
 logger = structlog.get_logger(__name__)
 
