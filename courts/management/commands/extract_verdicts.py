@@ -90,8 +90,8 @@ class Command(BaseCommand):
         Raises RuntimeError with a short reason on any unusable case, so the
         caller can count failure kinds instead of swallowing them.
         """
-        from casework.convert import extract_markdown
         from llm import invoke, routing
+        from review.converter import convert_all
 
         urls = order_urls(case)
         if not urls:
@@ -100,12 +100,18 @@ class Command(BaseCommand):
         text = ""
         used = None
         for url in urls:
-            try:
-                text = extract_markdown(url, timeout=180)
-            except Exception as exc:  # noqa: BLE001 - one bad artefact != a dead case
-                self.stderr.write(f"    fetch failed {url}: {type(exc).__name__}: {exc}")
+            # review.converter is the in-repo converter the material_convert
+            # worker uses (see materials/job_handlers.py): likhit/MarkItDown,
+            # Devanagari OCR at a safe DPI, on-disk cache, and a hard per-source
+            # wall-clock timeout so one stalled scan can't hang the whole run.
+            # It reports failure in the result dict rather than raising, so one
+            # bad artefact costs a URL, not the case.
+            (res,) = convert_all([{"url": [url]}])
+            if res.get("conversion_status") == "error":
+                self.stderr.write(f"    convert failed {url}: {res.get('conversion_note')}")
                 continue
-            if text and text.strip():
+            text = res.get("markdown") or ""
+            if text.strip():
                 used = url
                 break
         if not used:

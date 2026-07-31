@@ -111,6 +111,87 @@ def test_every_first_party_app_ships_in_the_wheel():
     )
 
 
+def _copied_packages():
+    """Top-level package names the Dockerfile actually COPYs into the image."""
+    dockerfile = (settings.BASE_DIR / "Dockerfile").read_text()
+    return set(re.findall(r"^COPY\s+([A-Za-z_][A-Za-z0-9_]*)/\s", dockerfile, re.MULTILINE))
+
+
+def _first_party_packages():
+    """Every top-level importable package in the repo, app or not."""
+    base = Path(settings.BASE_DIR).resolve()
+    return {
+        p.name for p in base.iterdir()
+        if p.is_dir() and (p / "__init__.py").exists() and not p.name.startswith(".")
+    }
+
+
+#: `import X` / `from X import ...`, including indented (function-local) ones.
+_IMPORT = re.compile(r"^\s*(?:from|import)\s+([A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE)
+
+
+def test_shipped_code_never_imports_a_package_the_image_lacks():
+    """A COPYed package may only import other COPYed packages.
+
+    The INSTALLED_APPS checks above miss a whole class of this bug: a package
+    that is NOT a Django app (so not in the registry, so invisible to
+    ``_first_party_apps``) but IS imported by shipped code. ``casework`` is one --
+    a local-only helper package, never COPYed. When ``extract_verdicts`` imported
+    ``casework.convert`` for its document conversion, every check in this file
+    passed, CI passed, the image built, and the command failed on all 84 cases in
+    production with ``No module named 'casework'``. It had worked in development
+    for the same reason the docstring at the top of this file gives: a source
+    checkout makes every directory importable.
+
+    Function-local imports are included deliberately -- that is where the real
+    one was, and where they hide best.
+    """
+    copied = _copied_packages()
+    first_party = _first_party_packages()
+    base = Path(settings.BASE_DIR).resolve()
+
+    offenders = {}
+    for pkg in sorted(copied):
+        for py in sorted((base / pkg).rglob("*.py")):
+            if "/migrations/" in str(py) or "/tests/" in str(py):
+                continue
+            for name in set(_IMPORT.findall(py.read_text(encoding="utf-8"))):
+                if name in first_party and name not in copied:
+                    offenders.setdefault(name, []).append(str(py.relative_to(base)))
+
+    assert not offenders, (
+        "Shipped code imports first-party packages that are never COPYed into "
+        f"the image: { {k: v[:3] for k, v in offenders.items()} }. Either add "
+        "`COPY <pkg>/ ./<pkg>/` to the Dockerfile (and the wheel `packages` "
+        "list) or import something that ships."
+    )
+
+
+def test_the_import_check_reads_function_local_imports():
+    """Guard the guard: the regex must see an indented import.
+
+    The real defect was a lazy `from casework.convert import ...` inside a
+    method. A top-level-only regex would pass this file forever while missing
+    exactly the shape that caused the incident.
+    """
+    sample = "def f():\n    from casework.convert import extract_markdown\n    import llm\n"
+    assert set(_IMPORT.findall(sample)) == {"casework", "llm"}
+
+
+def test_the_import_check_has_something_to_check():
+    """Guard the guard: empty inputs would make the scan pass vacuously."""
+    copied, first_party = _copied_packages(), _first_party_packages()
+    assert len(copied) > 10, f"suspiciously few COPYed packages: {sorted(copied)}"
+    assert "courts" in copied and "review" in copied, sorted(copied)
+    # A first-party package that is deliberately NOT shipped must exist, or the
+    # check above can never fire and its passing means nothing.
+    assert first_party - copied, (
+        "Every first-party package is COPYed, so the scan cannot distinguish "
+        "shipped from unshipped. If that is now genuinely true, keep the scan "
+        "but drop this guard."
+    )
+
+
 def test_the_app_list_is_not_empty_and_finds_dotted_appconfigs():
     """Guard the shared input to all three checks above.
 
