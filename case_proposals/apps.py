@@ -27,3 +27,10 @@ class CaseProposalsConfig(AppConfig):
         from case_proposals.models import CaseUpdateProposal
 
         register_audited(CaseUpdateProposal)
+
+        # Registers case_proposal.intent in the prompt registry. Imported purely
+        # for the side effect: llm.prompts.get() RAISES for an unregistered name
+        # (deliberately — there is no sensible default prompt), so without this
+        # the intent job would fail at invoke time, on a worker, after a job had
+        # already been claimed.
+        from case_proposals import prompts  # noqa: F401
