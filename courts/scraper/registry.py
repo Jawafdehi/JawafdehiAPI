@@ -12,6 +12,8 @@ paths are unit/DB-tested; the live fetch is exercised only on a real run.
 
 from __future__ import annotations
 
+from urllib.parse import urljoin
+
 from django.utils import timezone
 
 from courts.scraper import district, high, special, supreme
@@ -36,10 +38,28 @@ class _Supreme:
         return supreme.parse_cause_list(html, date_bs=date_bs)
 
     def crawl_detail(self, fetch, court_id, case_number):
-        html = fetch(self.DETAIL_URL, data={
+        """Two-stage: search by case number, then follow the result to the page.
+
+        A ``regno`` search returns a RESULT LIST, not the detail page. Handing that
+        list to ``parse_supreme_detail`` yields an entirely empty enrichment — which
+        is why the Django enrichment path has never populated a single Supreme
+        ``hearing_count``. Stage 2 follows the row's ``…&mode=view&caseno=<id>`` link,
+        matched to ``case_number`` so a multi-row result can't enrich the wrong case.
+
+        ``None`` means the court has no such docket. A response that isn't a search
+        result at all raises ``UnexpectedPage`` rather than posing as one.
+        """
+        listing = fetch(self.DETAIL_URL, data={
             "syy": "", "smm": "", "sdd": "", "mode": "show", "list": "list",
             "regno": case_number, "tyy": "", "tmm": "", "tdd": "",
         })
+        if not listing:
+            return None
+        href = supreme.parse_search_result_link(listing, case_number)
+        if not href:
+            return None  # "Total 0 Records Found" — no such docket
+        # Joined against DETAIL_URL itself, so the two can never drift apart.
+        html = fetch(urljoin(self.DETAIL_URL, href))
         return supreme.parse_supreme_detail(html) if html else None
 
 

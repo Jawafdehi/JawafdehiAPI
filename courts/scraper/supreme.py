@@ -31,6 +31,7 @@ from courts.case_status import (
     verdict_from_hearings,
 )
 from courts.normalize import best_effort_normalize
+from courts.scraper.errors import UnexpectedPage
 from courts.scraper.rows import ParsedCase, ParsedEnrichment, ParsedHearing
 from courts.scraper.text import (
     coerce_count,
@@ -420,6 +421,56 @@ def parse_hearings_and_timeline(soup: BeautifulSoup) -> dict[str, list[dict]]:
                         data["timeline"].append(entry)
 
     return data
+
+
+#: The result list's own record count. Its presence is what proves the response is
+#: a search result at all, rather than an F5 challenge or a maintenance notice.
+_RECORDS_FOUND = re.compile(r"Total\s+(\d+)\s+Records?\s+Found", re.I)
+
+
+def parse_search_result_link(html: str, case_number: str | None = None) -> str | None:
+    """The detail-page href for ``case_number`` within a ``regno`` search result.
+
+    Searching the Supreme portal by case number does NOT return the detail page —
+    it returns a result LIST ("Total N Records Found") whose rows link to
+    ``sys.php?…&mode=view&caseno=<id>``. Feeding that list straight to
+    :func:`parse_supreme_detail` yields an entirely empty enrichment, which is why
+    the Django enrichment path has never populated a single Supreme ``hearing_count``.
+    Callers must follow this link to reach the real page.
+
+    Three outcomes, deliberately distinct:
+
+    * **href** — the row whose docket cell equals ``case_number``. The row is matched
+      rather than taken in document order: the list is N-row capable (its hrefs carry
+      a per-row ``num=<ordinal>``), and following the wrong row would enrich a case
+      with a *different* docket's parties and verdict. With ``case_number=None`` the
+      first linked row is taken.
+    * **None** — "Total 0 Records Found", or a list holding no row for this docket.
+      The court does not have it: a legitimate answer, not a failure.
+    * :class:`~courts.scraper.errors.UnexpectedPage` — no record count at all, i.e.
+      not a search result. See that class for why this must not read as ``None``.
+    """
+    if _RECORDS_FOUND.search(html or "") is None:
+        raise UnexpectedPage("supreme search response carries no record count")
+
+    want = best_effort_normalize(case_number) if case_number else None
+    soup = BeautifulSoup(html, "html.parser")
+    for row in soup.find_all("tr"):
+        href = next(
+            (
+                a["href"].strip()
+                for a in row.find_all("a", href=True)
+                if "caseno=" in a["href"] and "mode=view" in a["href"]
+            ),
+            None,
+        )
+        if href is None:
+            continue
+        if want is None:
+            return href
+        if want in [best_effort_normalize(td.get_text(strip=True)) for td in row.find_all("td")]:
+            return href
+    return None
 
 
 def parse_supreme_detail(html: str) -> ParsedEnrichment:
