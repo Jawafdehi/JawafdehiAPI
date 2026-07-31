@@ -7,11 +7,13 @@ handler's write + stats, and the worker's claim → run → finalize lifecycle
 (including retryable vs. terminal failure classification).
 """
 
+from io import StringIO
 from unittest import mock
 from unittest.mock import patch
 
 from django.core.management import call_command
 from django.test import TestCase
+from django.utils import timezone
 
 from courts.models import Court, CourtCase
 from courts.scraper import registry
@@ -227,6 +229,50 @@ class SweepJobWiringTests(_NgmTestCase):
         self.assertTrue(job.payload["sweep"])
         self.assertFalse(job.payload["causelist"])
         self.assertEqual(job.payload["sweep_budget"], 7)
+
+    def test_sweep_courts_rotates_instead_of_queueing_the_whole_fleet(self):
+        """A recurring sweep can't queue all 99 courts at once.
+
+        scrape_worker --once drains sequentially in one pod, under one
+        activeDeadlineSeconds the cause-list crawl also has to fit inside. The
+        rotation is what makes an automated sweep bounded per tick.
+        """
+        out = StringIO()
+        call_command("enqueue_scrape", "--court", "high", "--sweep",
+                     "--sweep-courts", "3", stdout=out)
+        queued = Job.objects.filter(kind="court_scrape")
+        self.assertEqual(queued.count(), 3)
+        self.assertIn("wait for a later run", out.getvalue())
+
+    def test_the_rotation_advances_to_courts_not_yet_swept(self):
+        call_command("enqueue_scrape", "--court", "high", "--sweep", "--sweep-courts", "3")
+        first = set(Job.objects.values_list("payload__court_id", flat=True))
+        # Finish them, which both frees the dedup keys and stamps the cursor.
+        Job.objects.update(status=Job.DONE, completed_at=timezone.now())
+
+        call_command("enqueue_scrape", "--court", "high", "--sweep", "--sweep-courts", "3")
+        second = set(
+            Job.objects.filter(status=Job.QUEUED).values_list("payload__court_id", flat=True)
+        )
+        self.assertEqual(len(second), 3)
+        self.assertFalse(second & first, "a second run must move on, not re-sweep the same courts")
+
+    def test_a_court_whose_sweep_never_finished_keeps_its_turn(self):
+        # Self-correcting cursor: a failed sweep leaves completed_at NULL, so the
+        # court stays at the front rather than silently losing its slot.
+        call_command("enqueue_scrape", "--court", "high", "--sweep", "--sweep-courts", "1")
+        stuck = Job.objects.get().payload["court_id"]
+        Job.objects.update(status=Job.FAILED, completed_at=None, dedup_key=None)
+
+        call_command("enqueue_scrape", "--court", "high", "--sweep", "--sweep-courts", "1")
+        retried = Job.objects.filter(status=Job.QUEUED).get().payload["court_id"]
+        self.assertEqual(retried, stuck)
+
+    def test_sweep_courts_without_sweep_is_rejected(self):
+        from django.core.management.base import CommandError
+
+        with self.assertRaises(CommandError):
+            call_command("enqueue_scrape", "--court", "high", "--sweep-courts", "3")
 
     def test_the_budget_is_shared_across_courts_not_granted_to_each(self):
         """A tier payload with no ``court_id`` sweeps every leaf court under ONE
