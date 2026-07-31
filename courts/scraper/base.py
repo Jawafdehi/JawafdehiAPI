@@ -150,7 +150,6 @@ def _fallback_date() -> date:
     return date(1900, 1, 1)
 
 
-@transaction.atomic(using=NGM_DB)
 def apply_enrichment(
     court_id: str, case_number: str, enrichment: ParsedEnrichment, *, using: str = NGM_DB
 ) -> bool:
@@ -160,6 +159,10 @@ def apply_enrichment(
     :mod:`courts.case_status`: header artifacts are dropped, and ``verdict_type`` /
     ``verdict_date_*`` are derived (from the status, else the final decisive
     hearing) when not already set. ``extra_data`` is UNIONed (never replaced).
+
+    The atomic block is opened on ``using``. As an ``@transaction.atomic(using=NGM_DB)``
+    decorator it bound to that one alias at import time, so any other alias ran the
+    save + ``_replace_entities`` delete-and-recreate with no transaction at all.
     """
     case = (
         CourtCase.objects.using(using)
@@ -169,12 +172,18 @@ def apply_enrichment(
     if case is None:
         return False
 
-    # A WAF-rejection / error / empty detail page parses into an empty
+    # A WAF-rejection / error / not-found detail page parses into an empty
     # ParsedEnrichment. Applying it would flip status to "enriched" (so it never
     # retries) AND delete the existing parties — silent data loss. Require at
     # least one usable signal; otherwise leave the row untouched and report
     # not-enriched so the case is retried on the next run.
-    if not (enrichment.core_fields or enrichment.extra_data or enrichment.entities):
+    #
+    # NB: the test is core_fields/entities only, NOT the truthiness of extra_data.
+    # The supreme/district/high parsers always emit their enrichment_hearings /
+    # enrichment_timeline keys, so an EMPTY parse still carries a truthy
+    # extra_data — an ``or extra_data`` guard passes a not-found page on three of
+    # the four courts and destroys the parties it exists to protect.
+    if not enrichment.identifies_a_case():
         return False
 
     core = {k: v for k, v in enrichment.core_fields.items() if k in _ENRICH_COLUMNS}
@@ -194,13 +203,14 @@ def apply_enrichment(
         core["verdict_date_bs"] = parsed.verdict_date_bs
         core["verdict_date_ad"] = parsed.verdict_date_ad
 
-    for key, value in core.items():
-        setattr(case, key, value)
-    case.extra_data = {**(case.extra_data or {}), **extra}
-    case.status = "enriched"
-    case.save(using=using)
+    with transaction.atomic(using=using):
+        for key, value in core.items():
+            setattr(case, key, value)
+        case.extra_data = {**(case.extra_data or {}), **extra}
+        case.status = "enriched"
+        case.save(using=using)
 
-    _replace_entities(court_id, case_number, enrichment.entities, using=using)
+        _replace_entities(court_id, case_number, enrichment.entities, using=using)
     return True
 
 
