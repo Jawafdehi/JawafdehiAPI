@@ -1,25 +1,29 @@
 # SPDX-License-Identifier: Hippocratic-3.0
-"""No first-party app may share a top-level import name with an installed dependency.
+"""Adding a Django app means editing three lists. These tests keep them in sync.
 
-This exists because of a real near-miss. An app package named ``events`` looked
-completely fine from a source checkout and passed the entire unit suite — the
-repo root precedes site-packages on ``sys.path``, so it shadowed the identically
-named ``Events`` distribution that ``opensearch-py`` pulls in transitively. In
-the Docker image the app is installed as a *wheel into site-packages*, where the
-two land in the same directory and collide. The only thing that caught it was
-the e2e job failing to run migrations.
+An app has to be named in ``INSTALLED_APPS``, in the wheel's ``packages`` list,
+and in the ``Dockerfile``'s explicit ``COPY`` block. **None of those fail at test
+time** — the unit suite runs from a source checkout where every directory is
+importable regardless — so getting one wrong produces a green build and an image
+that dies on startup.
 
-So the unit suite could not have caught it by construction, and adding more unit
-tests would not have helped. This check is the fix: it compares app names against
-what the installed distributions actually claim, which is the same question the
-wheel install asks.
+Both checks here come from one incident. A new app was added to
+``INSTALLED_APPS`` and to the wheel packages, but not to the ``Dockerfile``, so
+it was simply absent from the image. It was also named ``events``, which is a
+top-level name already shipped by the ``Events`` distribution that
+``opensearch-py`` pulls in transitively — so instead of a clean
+``ModuleNotFoundError``, ``import events`` silently resolved to the *dependency*,
+and the failure surfaced as a baffling ImportError deep in an unrelated module.
 
-Nothing here needs the collision to be *reachable* to be worth blocking. A
-first-party package sharing a name with a dependency is ambiguous even when it
-happens to resolve correctly today, because a transitive dependency can start
-shipping that name in any future lockfile bump.
+Two distinct problems, and both are worth blocking:
+
+- the missing ``COPY`` was the trigger, and :func:`test_every_first_party_app_is_copied_into_the_image` catches it;
+- the name collision was what made it hard to read, and it stays latent even
+  when everything resolves correctly today, because a transitive dependency can
+  claim a bare noun in any future lockfile bump.
 """
 
+import re
 from importlib.metadata import packages_distributions
 
 from django.conf import settings
@@ -58,6 +62,39 @@ def test_no_app_shadows_an_installed_distribution():
         f"dependency: {collisions}. That works from a source checkout (the repo "
         f"root shadows site-packages) but breaks the installed wheel, where both "
         f"land in site-packages. Rename the app."
+    )
+
+
+def test_every_first_party_app_is_copied_into_the_image():
+    """The Dockerfile's COPY list must name every first-party app.
+
+    The list is explicit rather than a single ``COPY . .`` (that would drag the
+    venv, .git and test fixtures into the image), which means it silently drifts.
+    An app missing here is absent from the image entirely — the build only fails
+    later, at ``collectstatic`` or ``migrate``, with an error that points at the
+    importer rather than at the omission.
+    """
+    dockerfile = (settings.BASE_DIR / "Dockerfile").read_text()
+    copied = set(re.findall(r"^COPY\s+([A-Za-z_][A-Za-z0-9_]*)/\s", dockerfile, re.MULTILINE))
+
+    missing = [app for app in _first_party_apps() if app not in copied]
+    assert not missing, (
+        f"These apps are in INSTALLED_APPS but are never COPYed into the image: "
+        f"{missing}. Add `COPY {missing[0]}/ ./{missing[0]}/` to the Dockerfile. "
+        f"Check the wheel `packages` list in pyproject.toml too."
+    )
+
+
+def test_every_first_party_app_ships_in_the_wheel():
+    """The same app list, third copy: hatchling's explicit ``packages``."""
+    pyproject = (settings.BASE_DIR / "pyproject.toml").read_text()
+    block = pyproject.partition("[tool.hatch.build.targets.wheel]")[2]
+    packaged = set(re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"', block.partition("]")[0]))
+
+    missing = [app for app in _first_party_apps() if app not in packaged]
+    assert not missing, (
+        f"These apps are in INSTALLED_APPS but not in the wheel `packages` list: "
+        f"{missing}. They would be missing from the installed package."
     )
 
 

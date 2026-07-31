@@ -30,6 +30,10 @@ ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy PYTHONUNBUFFERED=1
 WORKDIR /app
 
 # Copy project metadata + every app package (flat top-level layout).
+#
+# This list is explicit, so a NEW APP MUST BE ADDED HERE as well as to
+# INSTALLED_APPS and the wheel `packages` list — three places, none of which
+# fail at test time. tests/test_app_package_names.py asserts all three agree.
 COPY pyproject.toml uv.lock manage.py ./
 COPY config/ ./config/
 COPY jawafdehi_shared/ ./jawafdehi_shared/
@@ -42,6 +46,7 @@ COPY review/ ./review/
 COPY case_proposals/ ./case_proposals/
 COPY newsletter/ ./newsletter/
 COPY jobs/ ./jobs/
+COPY case_events/ ./case_events/
 COPY llm/ ./llm/
 COPY search/ ./search/
 COPY discovery/ ./discovery/
