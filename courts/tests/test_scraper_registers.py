@@ -171,3 +171,42 @@ class TestProbePriority:
     def test_duplicate_held_numbers_are_harmless(self):
         held = _numbers("076", "CR", [1, 1, 1, 3])
         assert compute_gaps(held, tail_probe=0) == ["076-CR-0002"]
+
+
+class TestSeriesFilter:
+    """A court's series are not equal in value or cost.
+
+    On the special court the 72 ``-CR-`` holes are corruption prosecutions; the
+    575 ``-OA-`` holes are mostly procedural filings or numbers never issued.
+    Sweeping one without the other is the difference between 4 minutes and an hour.
+    """
+
+    def test_restricts_the_walk_to_named_registers(self):
+        held = _numbers("076", "CR", [1, 3]) + _numbers("076", "OA", [1, 3])
+        assert compute_gaps(held, tail_probe=0, series={"CR"}) == ["076-CR-0002"]
+
+    def test_accepts_several_series(self):
+        held = _numbers("076", "CR", [1, 3]) + _numbers("076", "OA", [1, 3]) + _numbers("076", "WO", [1, 3])
+        gaps = compute_gaps(held, tail_probe=0, series={"CR", "OA"})
+        assert sorted(gaps) == ["076-CR-0002", "076-OA-0002"]
+
+    def test_is_case_insensitive(self):
+        held = _numbers("076", "CR", [1, 3])
+        assert compute_gaps(held, tail_probe=0, series={"cr"}) == ["076-CR-0002"]
+
+    def test_no_filter_means_every_series(self):
+        held = _numbers("076", "CR", [1, 3]) + _numbers("076", "OA", [1, 3])
+        assert len(compute_gaps(held, tail_probe=0)) == 2
+
+    def test_an_unknown_series_yields_nothing_rather_than_everything(self):
+        # A typo must not silently sweep the whole court.
+        held = _numbers("076", "CR", [1, 3])
+        assert compute_gaps(held, tail_probe=0, series={"NOPE"}) == []
+
+    def test_the_excluded_series_neither_leaks_nor_shifts_the_pad(self):
+        # Each register keeps its own pad width; filtering must not borrow the
+        # other series' width, and must not emit any of its numbers.
+        held = ["076-CR-0001", "076-CR-0003", "076-C1-10001", "076-C1-10003"]
+        gaps = compute_gaps(held, tail_probe=0, series={"C1"})
+        assert "076-C1-10002" in gaps
+        assert not [g for g in gaps if g.startswith("076-CR")]

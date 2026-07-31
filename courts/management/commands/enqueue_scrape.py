@@ -15,6 +15,7 @@ crawls of one court.
     manage.py enqueue_scrape --court special --lookback-days 30 --enrich
     manage.py enqueue_scrape --court special --sweep --sweep-budget 200
     manage.py enqueue_scrape --court all --sweep --sweep-courts 4 --sweep-budget 150
+    manage.py enqueue_scrape --court special --sweep --sweep-series CR --sweep-tail 100
 """
 
 from django.core.management.base import BaseCommand, CommandError
@@ -76,6 +77,16 @@ class Command(BaseCommand):
         parser.add_argument("--sweep-budget", type=int, default=None,
                             help="max probes per court per run "
                                  "(default: courts.scraper.sweep.DEFAULT_BUDGET)")
+        parser.add_argument("--sweep-series", default=None,
+                            help="restrict the sweep to named registers, comma separated "
+                                 "(e.g. CR). Series differ sharply in value and cost — on "
+                                 "the special court CR is 72 holes of corruption cases, OA "
+                                 "is 575 mostly-procedural ones")
+        parser.add_argument("--sweep-tail", type=int, default=None,
+                            help="probe this far past each register's high-water mark "
+                                 "(default: courts.scraper.registers.DEFAULT_TAIL_PROBE). "
+                                 "Raise it for a one-off backfill; the default is sized for "
+                                 "a recurring run across thousands of registers")
         parser.add_argument("--sweep-courts", type=int, default=None,
                             help="sweep only the N least-recently-swept courts, so a "
                                  "recurring run rotates through the fleet on a bounded "
@@ -114,7 +125,16 @@ class Command(BaseCommand):
                 payload.update({"sweep": True, "causelist": False})
                 if o["sweep_budget"] is not None:
                     payload["sweep_budget"] = o["sweep_budget"]
-                suffix = ":sweep"
+                if o["sweep_tail"] is not None:
+                    payload["sweep_tail"] = o["sweep_tail"]
+                if o["sweep_series"]:
+                    series = [x.strip().upper() for x in o["sweep_series"].split(",") if x.strip()]
+                    payload["sweep_series"] = series
+                    # Its own dedup namespace: a CR sweep must not be deduped away
+                    # by an in-flight all-series one, or vice versa.
+                    suffix = ":sweep:" + "+".join(series)
+                else:
+                    suffix = ":sweep"
             job = jobs_queue.enqueue(
                 kind="court_scrape",
                 payload=payload,
