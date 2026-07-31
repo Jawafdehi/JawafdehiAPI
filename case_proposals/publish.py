@@ -48,14 +48,59 @@ def _case_iri(slug: str) -> str:
         return ""
 
 
+def _producer_refs(proposal) -> list[str]:
+    """``proposal.subject_refs``, defensively reduced to a list of non-empty strings.
+
+    ``subject_refs`` is an unvalidated writable ``JSONField``, so it holds
+    whatever a producer posted — including a scalar or a nested list. Iterating
+    it blindly used to raise *inside the caller's transaction* and roll back the
+    case write; see :func:`schedule_decision_event`. Anything unusable is
+    dropped with a warning rather than propagated.
+    """
+    refs = proposal.subject_refs
+    if not refs:
+        return []
+    if not isinstance(refs, (list, tuple)):
+        logger.warning(
+            "case_proposal.subject_refs_not_a_list",
+            proposal_id=proposal.pk,
+            got=type(refs).__name__,
+        )
+        return []
+
+    clean = [ref for ref in refs if isinstance(ref, str) and ref]
+    if len(clean) != len(refs):
+        logger.warning(
+            "case_proposal.subject_refs_partially_dropped",
+            proposal_id=proposal.pk,
+            kept=len(clean),
+            given=len(refs),
+        )
+    return clean
+
+
 def build_decision_envelope(proposal) -> dict:
-    """The envelope for an approve/reject decision on ``proposal``."""
-    subject = _SUBJECT_BY_STATUS[proposal.status]
+    """The envelope for an approve/reject decision on ``proposal``.
+
+    Raises:
+        ValueError: if ``proposal.status`` is not a decision. Callers scheduling
+            an event should go through :func:`schedule_decision_event`, which
+            treats a non-decision as a no-op; reaching here with one is a bug in
+            the caller, not a message to degrade.
+    """
+    try:
+        subject = _SUBJECT_BY_STATUS[proposal.status]
+    except KeyError:
+        raise ValueError(
+            f"Proposal {proposal.pk} has status {proposal.status!r}, which is not a "
+            f"decision. Expected one of {sorted(_SUBJECT_BY_STATUS)}."
+        ) from None
+
     case_iri = _case_iri(proposal.case_slug)
 
     # The case first, then whatever the producer recorded — deduplicated and
     # order-preserving so the join key a consumer needs is at a stable position.
-    refs = [ref for ref in [case_iri, *(proposal.subject_refs or [])] if ref]
+    refs = [ref for ref in [case_iri, *_producer_refs(proposal)] if ref]
 
     return build_envelope(
         subject=subject,
@@ -98,12 +143,39 @@ def schedule_decision_event(proposal) -> None:
     # Snapshot now, publish later: on_commit runs after the transaction, and
     # reading a mutated-or-refetched instance then would risk publishing state
     # that isn't what was decided.
-    envelope = build_decision_envelope(proposal)
+    #
+    # This runs INSIDE the caller's atomic block, so it must not raise. It used
+    # not to be guarded, and that was a real defect rather than a theoretical
+    # one: a proposal created with a non-list `subject_refs` (a writable,
+    # unvalidated JSONField) raised TypeError here, 500'd the approval and rolled
+    # back the case write — with no broker configured at all. The bus is not
+    # allowed to cost us a write, and "the bus" includes describing the write.
+    try:
+        envelope = build_decision_envelope(proposal)
+    except Exception:  # noqa: BLE001 - a describable decision beats a lost write
+        logger.warning(
+            "case_proposal.envelope_failed",
+            proposal_id=proposal.pk,
+            status=proposal.status,
+            exc_info=True,
+        )
+        return
+
     subject = envelope["subject"]
 
     def _run():
         try:
-            bus.publish(subject, envelope)
+            if not bus.publish(subject, envelope):
+                # publish() returns False for a disabled bus (expected) and for a
+                # dropped message (not). Logged either way: a decision that never
+                # reached the case-domain log is exactly what a later audit would
+                # need to know about, and it is otherwise silent.
+                logger.info(
+                    "case_proposal.decision_not_published",
+                    subject=subject,
+                    proposal_id=envelope["payload"]["proposal_id"],
+                    bus_enabled=bus.enabled(),
+                )
         except Exception:  # noqa: BLE001 - the bus is never allowed to be fatal
             logger.warning(
                 "case_proposal.publish_failed",

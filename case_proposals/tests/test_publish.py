@@ -185,3 +185,145 @@ class TestApprovalIsIndependentOfTheBroker:
 
         assert r.status_code == 409
         publish.assert_not_called()
+
+    @override_settings(NATS_URL="nats://localhost:4222")
+    def test_the_publish_is_deferred_until_after_commit(
+        self, django_capture_on_commit_callbacks
+    ):
+        """Nothing may be announced while the transaction can still roll back.
+
+        Without this, replacing ``transaction.on_commit(_run)`` with a plain
+        ``_run()`` passes the whole suite — the deferral is the documented point
+        of the design and was previously pinned by nothing. ``execute=False``
+        captures the callbacks without running them, so the request completes
+        with the publish still pending.
+        """
+        make_case()
+        p = make_proposal()
+        with mock.patch("case_events.bus.publish") as publish:
+            with django_capture_on_commit_callbacks(execute=False) as callbacks:
+                r = caseworker_client().post(f"{LIST_URL}{p.id}/approve/", {}, format="json")
+
+            assert r.status_code == 200
+            publish.assert_not_called()  # still inside the transaction's lifetime
+
+            for callback in callbacks:
+                callback()
+            publish.assert_called_once()
+
+
+@pytest.mark.django_db
+class TestMalformedSubjectRefsCannotCostUsTheWrite:
+    """A producer-supplied field must never be able to roll back a case write.
+
+    ``subject_refs`` is a writable, historically unvalidated ``JSONField``. A
+    non-list value used to raise ``TypeError`` inside ``build_decision_envelope``
+    — which runs *inside* the caller's ``transaction.atomic()`` — so the
+    approval 500'd and the timeline write was rolled back, with no broker
+    configured at all. These rows can still exist from before the serializer
+    validated the field, so the publisher stays defensive too.
+    """
+
+    @override_settings(NATS_URL="")
+    @pytest.mark.parametrize(
+        "refs", [5, "a-string", {"a": 1}, [["nested"]], [None], [""], ["ok", 7]]
+    )
+    def test_approval_survives_any_shape(self, django_capture_on_commit_callbacks, refs):
+        make_case()
+        p = make_proposal()
+        # Bypass the serializer the way a pre-validation row would have.
+        CaseUpdateProposal.objects.filter(pk=p.pk).update(subject_refs=refs)
+        p.refresh_from_db()
+
+        with django_capture_on_commit_callbacks(execute=True):
+            r = caseworker_client().post(f"{LIST_URL}{p.id}/approve/", {}, format="json")
+
+        assert r.status_code == 200, f"{refs!r} broke the approval"
+        p.refresh_from_db()
+        assert p.status == ProposalStatus.APPROVED
+        # The write that actually matters really did land.
+        assert len(Case.objects.get(slug="lalita-niwas-land-scam").timeline) == 1
+
+    def test_unusable_refs_are_dropped_not_published(self):
+        p = make_proposal(status=ProposalStatus.APPROVED, subject_refs=["ok-ref", 7, None, ""])
+        refs = build_decision_envelope(p)["subject_refs"]
+        assert refs == ["https://jawafdehi.org/case/lalita-niwas-land-scam", "ok-ref"]
+
+    @override_settings(NATS_URL="")
+    def test_an_envelope_that_blows_up_entirely_still_leaves_the_write(
+        self, django_capture_on_commit_callbacks
+    ):
+        """Pins the try/except independently of the ref sanitising.
+
+        The sanitiser and the guard are two layers, so a shape-based test passes
+        with either one alone. This removes the sanitiser from the picture by
+        making envelope construction fail outright, which is the only thing that
+        fails if the guard is dropped.
+        """
+        make_case()
+        p = make_proposal()
+        with mock.patch(
+            "case_proposals.publish.build_decision_envelope",
+            side_effect=RuntimeError("envelope exploded"),
+        ):
+            with django_capture_on_commit_callbacks(execute=True):
+                r = caseworker_client().post(f"{LIST_URL}{p.id}/approve/", {}, format="json")
+
+        assert r.status_code == 200
+        p.refresh_from_db()
+        assert p.status == ProposalStatus.APPROVED
+        assert len(Case.objects.get(slug="lalita-niwas-land-scam").timeline) == 1
+
+    def test_a_non_decision_status_raises_a_named_error(self):
+        # build_decision_envelope is public and called directly by other code;
+        # a bare KeyError('pending') told the caller nothing.
+        p = make_proposal(status=ProposalStatus.PENDING)
+        with pytest.raises(ValueError, match="not a.*decision"):
+            build_decision_envelope(p)
+
+
+@pytest.mark.django_db
+class TestTheSerializerRejectsUnusableJoinKeys:
+    """Stop the bad rows at the door, since a proposal cannot be repaired later.
+
+    The viewset exposes no update and ``dedup_key`` is unique, so a proposal
+    created with an unusable ``case_slug`` or ``subject_refs`` can neither be
+    fixed nor re-filed.
+    """
+
+    def _post(self, **over):
+        payload = dict(
+            case_slug="lalita-niwas-land-scam",
+            case_title="Lalita Niwas land scam",
+            source_kind="ngm_docket",
+            intent={
+                "type": "append_timeline_entry",
+                "entry": {"date": "2026-08-12", "title": "Hearing"},
+            },
+            confidence=0.9,
+            detected_by="consumer:proposal-builder",
+            dedup_key="d-1",
+        )
+        payload.update(over)
+        return caseworker_client().post(LIST_URL, payload, format="json")
+
+    def test_a_valid_proposal_is_still_accepted(self):
+        assert self._post().status_code == 201
+
+    @pytest.mark.parametrize("refs", [5, "a-string", {"a": 1}, [["nested"]], [""], [None]])
+    def test_malformed_subject_refs_is_a_400_not_a_201(self, refs):
+        r = self._post(subject_refs=refs, dedup_key=f"d-{refs}")
+        assert r.status_code == 400
+        assert "subject_refs" in r.data
+
+    def test_subject_refs_may_be_omitted_or_empty(self):
+        assert self._post(subject_refs=[], dedup_key="d-empty").status_code == 201
+
+    @pytest.mark.parametrize("slug", ["lalita_niwas_scam", "2072-lalita-niwas"])
+    def test_a_slug_the_iri_grammar_rejects_is_a_400(self, slug):
+        # SlugField allows underscores and a leading digit; build_case_iri does
+        # not. Such a proposal would publish its decision with NO join key, and
+        # the reject path never resolves the Case so nothing would notice.
+        r = self._post(case_slug=slug, dedup_key=f"d-{slug}")
+        assert r.status_code == 400
+        assert "case_slug" in r.data
