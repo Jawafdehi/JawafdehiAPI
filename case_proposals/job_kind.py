@@ -315,6 +315,21 @@ def on_result(job, result: dict) -> None:
         intent_type=itype,
         confidence=confidence,
     )
+    # Announce it, so the notifier can tell a caseworker there is something
+    # waiting. Best-effort — a staged proposal nobody could announce is still a
+    # staged proposal, and the queue UI shows it either way.
+    #
+    # Guarded here as well as inside the publisher. The publisher already
+    # swallows a failed envelope build, but not an import error or a broken
+    # module, and an escape at this point would skip the _record() below: the
+    # proposal would exist while its job showed no trace of having staged one.
+    try:
+        from case_proposals.publish import schedule_proposed_event
+
+        schedule_proposed_event(proposal)
+    except Exception:  # noqa: BLE001 - announcing must not cost us the record
+        logger.warning("case_proposal.announce_failed", proposal_id=proposal.pk, exc_info=True)
+
     _record(job, proposal_id=proposal.pk, intent_type=itype, confidence=confidence)
 
 

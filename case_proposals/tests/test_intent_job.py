@@ -162,6 +162,38 @@ class TestStagingAProposal:
         on_result(job, good_result())
         assert CaseUpdateProposal.objects.get().case_slug == case.slug
 
+    def test_a_staged_proposal_is_announced_so_the_notifier_can_see_it(self):
+        """The bus's proposal-builder cannot announce this — the row does not
+
+        exist when it acks. So the announcement happens here, where it does.
+        """
+        with mock.patch("case_proposals.publish.schedule_proposed_event") as announce:
+            on_result(make_job(make_case()), good_result())
+        announce.assert_called_once()
+        assert announce.call_args.args[0].pk == CaseUpdateProposal.objects.get().pk
+
+    def test_a_refused_answer_announces_nothing(self):
+        with mock.patch("case_proposals.publish.schedule_proposed_event") as announce:
+            on_result(make_job(make_case()), good_result(confidence=0.1))
+        announce.assert_not_called()
+
+    def test_a_failure_to_announce_loses_neither_the_proposal_nor_its_record(self):
+        """An escape here would skip the bookkeeping below it.
+
+        The proposal would exist while its job showed no sign of having staged
+        one — the exact silent gap the recording is for.
+        """
+        job = make_job(make_case())
+        with mock.patch(
+            "case_proposals.publish.schedule_proposed_event",
+            side_effect=RuntimeError("bus module broken"),
+        ):
+            on_result(job, good_result())
+
+        proposal = CaseUpdateProposal.objects.get()
+        job.refresh_from_db()
+        assert job.result["staged"]["proposal_id"] == proposal.pk
+
     def test_nothing_is_written_to_the_case_itself(self):
         case = make_case()
         before = list(case.timeline)
