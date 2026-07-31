@@ -5,14 +5,21 @@ No DB and no model calls: every test either exercises validation or asserts on
 what would have been passed to ``invoke_json``, which is mocked. The registry is
 module-level global state, so tests that register anything clean up after
 themselves.
+
+Rendering itself is covered in test_templating.py; here it only matters that a
+spec wires the right template to the right invoke parameters.
 """
 
 from unittest import mock
 
 import pytest
 
-from llm import prompts
+from llm import prompts, templating
 from llm.prompts import PromptSpec
+from llm.templating import PromptRenderError
+
+REFERENCE_SYSTEM = "reference/system.md"
+REFERENCE_CONTENT = "reference/content.md"
 
 
 def _spec(**kw):
@@ -20,8 +27,8 @@ def _spec(**kw):
     defaults = dict(
         name="test.spec",
         version=1,
-        system="You reply with JSON.",
-        build_content=lambda **kwargs: "content",
+        system_template=REFERENCE_SYSTEM,
+        content_template=REFERENCE_CONTENT,
     )
     return PromptSpec(**{**defaults, **kw})
 
@@ -33,6 +40,13 @@ def _clean_registry():
     yield
     prompts._REGISTRY.clear()
     prompts._REGISTRY.update(before)
+
+
+@pytest.fixture(autouse=True)
+def _reset_engine():
+    templating.reset_engine()
+    yield
+    templating.reset_engine()
 
 
 class TestValidation:
@@ -54,7 +68,8 @@ class TestValidation:
         [
             ({"name": ""}, "name is required"),
             ({"version": 0}, "version must be >= 1"),
-            ({"system": "   "}, "system prompt is empty"),
+            ({"system_template": "  "}, "system_template is required"),
+            ({"content_template": ""}, "content_template is required"),
             ({"max_tokens": 0}, "max_tokens must be >= 1"),
         ],
     )
@@ -66,6 +81,13 @@ class TestValidation:
         spec = _spec()
         with pytest.raises(Exception):
             spec.version = 2
+
+    def test_a_nonexistent_template_is_not_caught_until_render(self):
+        # Construction cannot check the filesystem: specs are built at import
+        # time, before the app registry the loader dirs come from is populated.
+        spec = _spec(content_template="no/such.md")
+        with pytest.raises(PromptRenderError, match="no/such.md"):
+            spec.render(case_title="X", excerpts=[])
 
 
 class TestRegistry:
@@ -95,57 +117,89 @@ class TestRegistry:
         prompts.register(_spec(name="a.a"))
         assert prompts.known().index("a.a") < prompts.known().index("z.z")
 
+    def test_all_specs_follows_known_order(self):
+        prompts._REGISTRY.clear()
+        prompts.register(_spec(name="z.z"))
+        prompts.register(_spec(name="a.a"))
+        assert [s.name for s in prompts.all_specs()] == ["a.a", "z.z"]
+
 
 class TestInvoke:
     def test_render_does_not_call_a_model(self):
-        spec = _spec(build_content=lambda subject, **kw: f"about {subject}")
         with mock.patch("llm.prompts.invoke_json") as invoke:
-            assert spec.render(subject="a docket") == "about a docket"
+            out = _spec().render(case_title="Lalita Niwas", excerpts=[])
+        assert "CASE: Lalita Niwas" in out
         invoke.assert_not_called()
 
-    def test_invoke_passes_system_content_and_params(self):
-        spec = _spec(
-            system="SYS",
-            build_content=lambda subject, **kw: f"about {subject}",
-            tier="cheap",
-            max_tokens=321,
-        )
+    def test_invoke_passes_rendered_system_content_and_params(self):
+        spec = _spec(tier="cheap", max_tokens=321)
         with mock.patch("llm.prompts.invoke_json", return_value={"ok": True}) as invoke:
-            out = spec.invoke(subject="a docket")
+            out = spec.invoke(case_title="Lalita Niwas", excerpts=["e1"], language="en")
 
         assert out == {"ok": True}
-        args, kwargs = invoke.call_args
-        assert args == ("SYS", "about a docket")
-        assert kwargs["tier"] == "cheap"
-        assert kwargs["max_tokens"] == 321
+        system, content = invoke.call_args.args
+        assert "Reply in English." in system
+        assert "CASE: Lalita Niwas" in content
+        assert "- e1" in content
+        assert invoke.call_args.kwargs["tier"] == "cheap"
+        assert invoke.call_args.kwargs["max_tokens"] == 321
+
+    def test_both_templates_receive_the_same_context(self):
+        # One context feeds system and content, so a shared value is passed once.
+        with mock.patch("llm.prompts.invoke_json", return_value={}) as invoke:
+            _spec().invoke(case_title="X", excerpts=[], language="np")
+        system, _content = invoke.call_args.args
+        assert "नेपाली भाषामा" in system
 
     def test_invoke_forwards_usage(self):
-        spec = _spec()
         sentinel = object()
         with mock.patch("llm.prompts.invoke_json", return_value={}) as invoke:
-            spec.invoke(usage=sentinel)
+            _spec().invoke(usage=sentinel, case_title="X", excerpts=[])
         assert invoke.call_args.kwargs["usage"] is sentinel
 
-    def test_usage_is_not_passed_to_build_content(self):
-        # `usage` is an invoke_json concern; a content builder should never see it.
-        seen = {}
+    def test_usage_is_not_treated_as_template_context(self):
+        # `usage` is an invoke_json concern; leaking it into the context would
+        # put a repr of an accumulator object into the prompt.
+        with mock.patch("llm.prompts.invoke_json", return_value={}) as invoke:
+            _spec().invoke(usage=object(), case_title="X", excerpts=[])
+        _system, content = invoke.call_args.args
+        assert "usage" not in content
 
-        def build(**kwargs):
-            seen.update(kwargs)
-            return "c"
-
-        with mock.patch("llm.prompts.invoke_json", return_value={}):
-            _spec(build_content=build).invoke(usage=object(), subject="x")
-
-        assert seen == {"subject": "x"}
+    def test_a_render_failure_costs_no_model_call(self):
+        # The whole reason rendering is strict: fail before spending a call,
+        # not after producing a record from a prompt with a hole in it.
+        with mock.patch("llm.prompts.invoke_json") as invoke:
+            with pytest.raises(PromptRenderError):
+                _spec().invoke(excerpts=[])
+        invoke.assert_not_called()
 
     def test_invoke_logs_name_and_version(self):
         # "Which prompt version produced this?" must be answerable from logs.
         spec = _spec(name="case_proposal.intent", version=7)
         with mock.patch("llm.prompts.invoke_json", return_value={}):
             with mock.patch.object(prompts.logger, "info") as log:
-                spec.invoke()
+                spec.invoke(case_title="X", excerpts=[])
 
         kwargs = log.call_args.kwargs
         assert kwargs["prompt"] == "case_proposal.intent"
         assert kwargs["version"] == 7
+
+
+class TestRegisteredSpecsAreLoadable:
+    def test_every_registered_spec_has_templates_that_exist(self):
+        """Catches a spec pointing at a template that was renamed or never shipped.
+
+        **Vacuous as of this commit**, and deliberately kept anyway: nothing
+        registers a spec until the enrichment consumers land, so ``all_specs()``
+        is empty and this loop does nothing. It is a forward guard that starts
+        working the moment the first real spec is registered.
+
+        What carries the weight *today* is ``TestTheReferenceTemplates``, which
+        renders actual files off disk through the engine — that is what would
+        fail if prompt templates were excluded from the wheel or the image, the
+        same class of omission that already shipped a missing app directory once.
+        """
+        engine = templating.get_engine()
+        for spec in prompts.all_specs():
+            for template in (spec.system_template, spec.content_template):
+                engine.get_template(template)  # raises TemplateDoesNotExist

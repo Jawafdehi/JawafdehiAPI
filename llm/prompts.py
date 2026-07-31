@@ -1,33 +1,43 @@
 # SPDX-License-Identifier: Hippocratic-3.0
-"""A named, versioned registry of prompts.
+"""A named, versioned registry of prompts backed by template files.
 
 Prompts in this codebase are conventionally a module-level system constant plus
 a ``_build_*`` function that assembles the content block, handed to
 :func:`llm.invoke.invoke_json` with a tier and a token budget (see
-``review/judge.py``). That works, but it leaves the prompt anonymous: when an
+``review/judge.py``). That works, but it leaves the prompt anonymous — when an
 LLM-produced record later turns out to be wrong, "which prompt produced this,
-and has it changed since?" has no answer.
+and has it changed since?" has no answer — and it leaves the text itself buried
+in Python, where reviewing a wording change means reading a diff of an f-string.
 
-A :class:`PromptSpec` is those same three things made addressable — system text,
-a content builder, and the invoke parameters — under a name and a version. That
-is the whole scope. It is deliberately NOT a templating engine, not a
-DB-backed CMS, and not an abstraction over :mod:`llm.invoke`; ``invoke_json``
-remains the thing that talks to a model, and a spec just remembers what to pass
-it.
+A :class:`PromptSpec` is a name, a version, two template files (system and
+content) and the parameters to invoke them with. The text lives in
+``<app>/prompt_templates/`` and renders through :mod:`llm.templating`, which is
+a dedicated non-autoescaping, strict-variable engine — see that module for why
+the HTML engine would silently corrupt a prompt.
 
-Migrating ``review/judge.py`` onto this is explicitly out of scope: it predates
-the registry, works, and its prompts are assembled per-rule in ways a single
-spec doesn't model well.
+Templates hold *text*, not computation. Anything that needs Python — a
+``json.dumps``, a character cap, a settings lookup — is done by the caller and
+passed in as context. ``{% for %}`` and ``{% if %}`` are available for shaping
+that data into prose, and that is the intended limit.
+
+This is deliberately NOT a DB-backed CMS and not an abstraction over
+:mod:`llm.invoke`; ``invoke_json`` remains the thing that talks to a model, and
+a spec just remembers what to pass it.
+
+Migrating ``review/judge.py`` and the ``casework/enrich_*`` prompts onto this is
+explicitly out of scope for now: they predate the registry, they work, and
+several of their tests assert on the Python constants directly.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import structlog
 
 from llm.invoke import invoke_json
+from llm.templating import render_prompt
 
 logger = structlog.get_logger(__name__)
 
@@ -48,30 +58,38 @@ class PromptSpec:
         name: Stable dotted identifier, e.g. ``"case_proposal.intent"``. This is
             what gets logged alongside the result, so it should not change once
             anything has been produced under it.
-        version: Bump on ANY wording change. Recorded with every invocation so a
-            bad output can be traced back to the exact prompt that produced it.
-        system: The system prompt text.
-        build_content: Callable assembling the user content block. Receives the
-            keyword arguments passed to :meth:`render` / :meth:`invoke`.
+        version: Bump on ANY wording change, including edits to the template
+            files. Recorded with every invocation so a bad output can be traced
+            back to the exact prompt that produced it.
+        system_template: Path to the system-prompt template, relative to a
+            ``prompt_templates/`` directory.
+        content_template: Path to the user-content template.
         tier: ``"premium"`` or ``"cheap"``. Validated, because a wrong value
             downgrades silently rather than raising.
         max_tokens: Response budget handed to ``invoke_json``.
+        required: Context keys that must be present when rendering. Only needed
+            for variables used *exclusively* inside ``{% if %}`` / ``{% for %}``,
+            which Django resolves to falsy without flagging them as missing —
+            plain ``{{ var }}`` holes are caught automatically.
     """
 
     name: str
     version: int
-    system: str
-    build_content: Callable[..., str]
+    system_template: str
+    content_template: str
     tier: str = "premium"
     max_tokens: int = 1500
+    required: tuple[str, ...] = ()
 
     def __post_init__(self):
         if not self.name:
             raise ValueError("PromptSpec.name is required.")
         if self.version < 1:
             raise ValueError(f"{self.name}: version must be >= 1, got {self.version!r}.")
-        if not self.system.strip():
-            raise ValueError(f"{self.name}: system prompt is empty.")
+        if not self.system_template.strip():
+            raise ValueError(f"{self.name}: system_template is required.")
+        if not self.content_template.strip():
+            raise ValueError(f"{self.name}: content_template is required.")
         if self.tier not in TIERS:
             raise ValueError(
                 f"{self.name}: unknown tier {self.tier!r}. Known: {list(TIERS)}. "
@@ -80,29 +98,48 @@ class PromptSpec:
         if self.max_tokens < 1:
             raise ValueError(f"{self.name}: max_tokens must be >= 1, got {self.max_tokens!r}.")
 
-    def render(self, **kwargs) -> str:
-        """Build the content block without invoking a model.
+    def render_system(self, **context) -> str:
+        """Render the system prompt.
+
+        Takes context too: a system prompt is often parameterised (the case
+        scraper's switches its whole output language on one flag), and forcing
+        that into the content block would put it further from the instruction it
+        modifies.
+        """
+        return render_prompt(self.system_template, context)
+
+    def render(self, **context) -> str:
+        """Render the content block without invoking a model.
 
         The seam tests and prompt-review tooling hang off: it makes the exact
         text sent to the model assertable without spending a call.
         """
-        return self.build_content(**kwargs)
+        return render_prompt(self.content_template, context, required=self.required)
 
-    def invoke(self, usage=None, **kwargs) -> Any:
-        """Render the content and invoke the model, returning parsed JSON.
+    def invoke(self, usage=None, **context) -> Any:
+        """Render both templates and invoke the model, returning parsed JSON.
 
         Thin by design — ``invoke_json`` already salvages dirty/truncated output,
         and re-implementing any of that here would put two behaviours in the
         codebase where callers expect one.
 
+        Both templates get the same context, so a value needed by each is passed
+        once.
+
         Args:
             usage: Optional UsageAccumulator, forwarded to ``invoke_json``.
-            **kwargs: Passed to ``build_content``.
+            **context: Template context.
 
         Returns:
             Parsed JSON (dict or list), per ``invoke_json``.
+
+        Raises:
+            llm.templating.PromptRenderError: raised BEFORE any model call if
+                either template is missing or a variable did not resolve, so a
+                broken prompt costs nothing.
         """
-        content = self.render(**kwargs)
+        system = self.render_system(**context)
+        content = self.render(**context)
         # Logged BEFORE the call as well as after, so a spec that reliably times
         # out or blows its token budget is still attributable to a version.
         logger.info(
@@ -114,7 +151,7 @@ class PromptSpec:
             content_chars=len(content),
         )
         return invoke_json(
-            self.system,
+            system,
             content,
             max_tokens=self.max_tokens,
             tier=self.tier,
@@ -161,3 +198,8 @@ def get(name: str) -> PromptSpec:
 def known() -> list[str]:
     """Every registered prompt name, sorted."""
     return sorted(_REGISTRY)
+
+
+def all_specs() -> list[PromptSpec]:
+    """Every registered spec, ordered by name."""
+    return [_REGISTRY[name] for name in known()]
