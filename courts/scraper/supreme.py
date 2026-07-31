@@ -262,11 +262,22 @@ def _map_field(data: dict, label: str, value: str) -> None:
         if value:
             data["registration_date_ad"] = bs_to_ad(normalize_date(value))
 
-    elif label in ["मुद्दाको किसिम", "मुद्दा", "मुद्दाको बिषय"]:
-        if "case_type" not in data:
-            data["case_type"] = value[:200]
-        if "case_subject" not in data:
-            data["case_subject"] = value
+    # Two DIFFERENT labels, and the page carries both: `मुद्दाको किसिम` is the
+    # coarse class (फौजदारी / देवानी — two values across ~104k rows) and `मुद्दा`
+    # is the actual charge (कर्तव्य ज्यान, भ्रष्टाचार, …). They shared one branch
+    # with first-wins, and किसिम appears first on the page, so the charge was
+    # discarded on every Supreme case — leaving case_type='फौजदारी' corpus-wide.
+    # That is not cosmetic: courts.search_visibility maps case_type to a canonical
+    # code, and a coarse label can only ever map to OTHER_CRIMINAL, so a Supreme
+    # corruption case is indistinguishable from a homicide and stays out of the
+    # public index. The charge wins; the class is kept alongside it.
+    elif label == "मुद्दाको किसिम":
+        data["case_class"] = value[:200]
+        data.setdefault("case_type", value[:200])   # fallback: some pages omit मुद्दा
+        data.setdefault("case_subject", value)
+    elif label in ["मुद्दा", "मुद्दाको बिषय"]:
+        data["case_type"] = value[:200]
+        data["case_subject"] = value
 
     elif label in ["मुद्दाको स्थिती", "मुद्दाको स्थिति"]:
         data["case_status"] = value[:100]
@@ -495,6 +506,10 @@ def parse_supreme_detail(html: str) -> ParsedEnrichment:
     # ``division`` is a legacy Supreme field, NOT a v2 court_cases column.
     if basic.get("division"):
         extra_data["division"] = basic["division"]
+    # The coarse फौजदारी/देवानी class. It has no v2 column and must not be mistaken
+    # for the charge again (see _map_field), but it is worth keeping.
+    if basic.get("case_class"):
+        extra_data["case_class"] = basic["case_class"]
 
     core_fields: dict = {}
     for key in (

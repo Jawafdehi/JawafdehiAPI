@@ -137,3 +137,41 @@ class TestSupremeTwoStage:
 
         assert REGISTRY["supreme"].crawl_detail(fake_fetch, "supreme", "081-WO-99999") is None
         assert len(calls) == 1, "a 0-record search must not fetch a detail page"
+
+
+class TestSupremeChargeVsClass:
+    """Supreme publishes BOTH a coarse class and the actual charge.
+
+    ``मुद्दाको किसिम`` is फौजदारी/देवानी — two values across ~104k rows. ``मुद्दा``
+    is the charge (कर्तव्य ज्यान, भ्रष्टाचार, …). They shared one first-wins branch
+    and किसिम appears first on the page, so the charge was dropped on every Supreme
+    case. That left case_type='फौजदारी' corpus-wide, which courts.search_visibility
+    can only map to OTHER_CRIMINAL — so a Supreme corruption case looked exactly
+    like a homicide and could never reach the public index.
+    """
+
+    _PAGE = """
+    <table class="table-hover"><tr><td>
+      <table class="table-hover">
+        <tr><td>दर्ता नँ . :</td><td>081-CR-1641</td></tr>
+        <tr><td>मुद्दाको किसिम:</td><td>फौजदारी</td></tr>
+        <tr><td>मुद्दा:</td><td>कर्तव्य ज्यान</td></tr>
+      </table>
+    </td></tr></table>"""
+
+    def test_the_charge_wins_over_the_coarse_class(self):
+        core = supreme.parse_supreme_detail(self._PAGE).core_fields
+        assert core["case_type"] == "कर्तव्य ज्यान"
+        assert core["case_subject"] == "कर्तव्य ज्यान"
+
+    def test_the_coarse_class_is_kept_not_discarded(self):
+        assert supreme.parse_supreme_detail(self._PAGE).extra_data["case_class"] == "फौजदारी"
+
+    def test_a_page_without_a_charge_falls_back_to_the_class(self):
+        page = self._PAGE.replace("<tr><td>मुद्दा:</td><td>कर्तव्य ज्यान</td></tr>", "")
+        assert supreme.parse_supreme_detail(page).core_fields["case_type"] == "फौजदारी"
+
+    def test_a_corruption_charge_survives_to_case_type(self):
+        # The whole point: this is what the visibility gate needs to see.
+        page = self._PAGE.replace("कर्तव्य ज्यान", "भ्रष्टाचार")
+        assert supreme.parse_supreme_detail(page).core_fields["case_type"] == "भ्रष्टाचार"
