@@ -135,6 +135,38 @@ def compute_gaps(
     return [number for *_, number in ranked]
 
 
+def sequence_confidence(numbered_dates: Iterable[tuple[str, str | None]]) -> float | None:
+    """Does this court number its cases as a date-ordered counter? 0–100, or ``None``.
+
+    Everything built on register density assumes the sequence token is a counter the
+    court increments as it registers cases. If it were an opaque id instead, the
+    "holes" would be numbers that never existed and the completeness figure would be
+    fiction. This is the check, and it costs no network: sort a register by sequence
+    and the registration dates should not run backwards.
+
+    Measured against the live mirror it separates cleanly — real registers score
+    99.4–100% whether they are 99% dense (special ``076-CR``) or 0.2% dense
+    (``kathmandudc 073-PC``). So a low score is evidence the numbering is not a
+    sequence, not evidence of missing rows. Ties count as ordered; a court registers
+    several cases a day.
+
+    ``None`` when there are too few dated rows to say anything.
+    """
+    by_register: dict[RegisterKey, list[tuple[int, str]]] = defaultdict(list)
+    for case_number, date_bs in numbered_dates:
+        parsed = parse_case_number(case_number)
+        if parsed is not None and date_bs:
+            by_register[parsed.key].append((parsed.seq, date_bs))
+
+    ordered = pairs = 0
+    for rows in by_register.values():
+        rows.sort()
+        for (_, earlier), (_, later) in zip(rows, rows[1:], strict=False):
+            pairs += 1
+            ordered += later >= earlier
+    return round(100.0 * ordered / pairs, 1) if pairs else None
+
+
 def held_case_numbers(court_id: str, *, using: str = NGM_DB) -> list[str]:
     """Every case number the mirror holds for a court."""
     from courts.models import CourtCase
@@ -143,6 +175,17 @@ def held_case_numbers(court_id: str, *, using: str = NGM_DB) -> list[str]:
         CourtCase.objects.using(using)
         .filter(court_id=court_id)
         .values_list("case_number", flat=True)
+    )
+
+
+def held_with_dates(court_id: str, *, using: str = NGM_DB) -> list[tuple[str, str | None]]:
+    """``(case_number, registration_date_bs)`` for a court — input to confidence."""
+    from courts.models import CourtCase
+
+    return list(
+        CourtCase.objects.using(using)
+        .filter(court_id=court_id)
+        .values_list("case_number", "registration_date_bs")
     )
 
 
