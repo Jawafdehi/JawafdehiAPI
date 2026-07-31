@@ -2,14 +2,28 @@
 """JetStream stream topology, asserted from code rather than declared in YAML.
 
 NATS has no CRD and no declarative stream config in the server file, so the
-topology has to be created by *something*. The alternative — a one-shot ``Job``
-running ``nats stream add`` — re-runs awkwardly against existing streams and
-drifts silently once someone edits one by hand. Asserting it from application
-startup keeps the definition next to the code that depends on it, re-applies it
-on every deploy, and means a fresh or local environment needs no bootstrap step.
+topology has to be created by *something*. Keeping the definition here — beside
+the code that depends on it, in a form that re-applies idempotently — beats a
+hand-run ``nats stream add`` that drifts the moment someone edits a stream.
+
+**Who calls this matters, and it is not the publisher.** This was originally
+asserted from :meth:`case_events.bus._Bus._connect`, so every process that
+published also created streams. That hands broker-admin authority to a web
+process whose only job is to emit a message, and it defeats the per-identity
+NATS users the deployment sets up — whose whole point is that a compromised
+publisher cannot reconfigure the bus.
+
+So it is invoked by ``manage.py nats_bootstrap``, run once per deploy in the
+same place migrations already are. A publisher's NATS user then needs nothing
+beyond publish permission on its own subjects.
+
+The cost of that split, stated plainly: **the streams must exist before the
+first publish.** JetStream rejects a publish to a subject no stream claims, so
+running the bootstrap is not optional — a fresh broker without it drops every
+event, visible only as a publish failure in the logs.
 
 ``add_stream`` is upsert-like: creating a stream that already exists with the
-same config is a no-op, so this is safe to call on every process start.
+same config is a no-op, so the command is safe to re-run on every deploy.
 
 **Replicas are 1 for the pilot, deliberately.** With ``local-path`` storage the
 pod is pinned to one node, so that node's disk *is* the bus. Going to R3 is not

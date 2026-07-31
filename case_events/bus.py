@@ -172,8 +172,6 @@ class _Bus:
     async def _connect(self):
         import nats
 
-        from case_events.streams import ensure_streams
-
         nc = await nats.connect(
             settings.NATS_URL,
             name="jawafdehi-platform",
@@ -183,9 +181,13 @@ class _Bus:
             # looks healthy is worse than one that keeps trying.
             max_reconnect_attempts=-1,
         )
-        js = nc.jetstream()
-        await ensure_streams(js)
-        return nc, js
+        # Deliberately does NOT assert the stream topology. Doing that here would
+        # require every publishing process to hold JetStream stream-CREATE
+        # rights, which is broker-admin authority for something whose only job is
+        # to publish — and it would undo the point of giving each identity its
+        # own NATS user. Streams are asserted by `manage.py nats_bootstrap`; see
+        # case_events/streams.py.
+        return nc, nc.jetstream()
 
     def close(self):
         """Drain and disconnect. For tests and orderly shutdown."""
