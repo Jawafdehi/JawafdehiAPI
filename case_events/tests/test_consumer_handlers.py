@@ -246,6 +246,71 @@ class TestProposalBuilder:
 
         assert Job.objects.count() == 1
 
+    def test_a_fact_already_proposed_does_not_buy_another_model_call(self):
+        """The queue's dedup does not cover this, and the gap costs real money.
+
+        `enqueue` frees a dedup_key once its job is terminal, so a fact
+        re-observed after its job finished would enqueue a fresh job and pay for
+        another premium call — whose result on_result then discards as a
+        duplicate. Producers re-emit an overlapping window by design, so this is
+        the normal path, not an edge case.
+        """
+        from case_proposals.models import CaseUpdateProposal
+        from jobs.models import Job
+
+        case = make_case()
+        envelope = matched_envelope(case)
+        CaseUpdateProposal.objects.create(
+            case_slug=case.slug,
+            source_kind="ngm_docket",
+            intent={"type": "append_timeline_entry", "entry": {"date": "2026-03-14", "title": "t"}},
+            confidence=0.9,
+            detected_by="consumer:proposal-builder",
+            dedup_key=envelope["dedup_key"],
+        )
+
+        handlers.handle_proposal_builder(envelope, None)
+
+        assert not Job.objects.exists()
+
+    @pytest.mark.parametrize("status", ["pending", "approved", "rejected"])
+    def test_that_holds_whatever_the_caseworker_decided(self, status):
+        """An approved fact is already in the case; a rejected one was refused."""
+        from case_proposals.models import CaseUpdateProposal
+        from jobs.models import Job
+
+        case = make_case()
+        envelope = matched_envelope(case)
+        CaseUpdateProposal.objects.create(
+            case_slug=case.slug,
+            source_kind="ngm_docket",
+            intent={"type": "append_timeline_entry", "entry": {"date": "2026-03-14", "title": "t"}},
+            confidence=0.9,
+            detected_by="consumer:proposal-builder",
+            dedup_key=envelope["dedup_key"],
+            status=status,
+        )
+
+        handlers.handle_proposal_builder(envelope, None)
+        assert not Job.objects.exists()
+
+    def test_a_terminal_job_alone_does_not_block_a_retry(self):
+        """The guard is the PROPOSAL, not the job.
+
+        A job that died without staging anything (a provider outage, say) must
+        still be retryable when the fact is re-observed — otherwise one bad
+        afternoon silently drops those facts forever.
+        """
+        from jobs.models import Job
+
+        case = make_case()
+        envelope = matched_envelope(case)
+        handlers.handle_proposal_builder(envelope, None)
+        Job.objects.update(status=Job.DEAD, dedup_key=None)
+
+        handlers.handle_proposal_builder(envelope, None)
+        assert Job.objects.filter(status=Job.QUEUED).count() == 1
+
     def test_the_signals_subject_becomes_the_proposals_source_kind(self):
         from jobs.models import Job
 

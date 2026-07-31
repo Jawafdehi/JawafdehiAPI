@@ -208,6 +208,18 @@ def _matched_dedup_key(envelope: dict, case_slug: str) -> str:
 # ── proposal-builder ─────────────────────────────────────────────────────────
 
 
+def _already_proposed(dedup_key: str) -> bool:
+    """True if this fact has already been staged as a proposal, whatever its status.
+
+    Not filtered by status, deliberately: an APPROVED one means the change is
+    already in the case, and a REJECTED one is a caseworker saying no to this
+    exact fact. Re-drafting either would be a caseworker's time either way.
+    """
+    from case_proposals.models import CaseUpdateProposal
+
+    return CaseUpdateProposal.objects.filter(dedup_key=dedup_key).exists()
+
+
 def handle_proposal_builder(envelope: dict, context) -> None:
     """Enqueue an intent-generation job for one matched case, then ack.
 
@@ -231,6 +243,27 @@ def handle_proposal_builder(envelope: dict, context) -> None:
     dedup_key = envelope.get("dedup_key") or ""
     if not dedup_key:
         raise PoisonMessage(f"{subjects.CASE_MATCHED} envelope has no dedup_key to key a proposal on")
+
+    # Short-circuit BEFORE the job exists, because the queue's own dedup does not
+    # cover this case and the gap costs money.
+    #
+    # `jobs.queue.enqueue` collapses a duplicate only while the prior job is
+    # non-terminal; once it is DONE the key is freed and a fresh job is created.
+    # That is right for the queue in general and wrong here: the producers are
+    # deliberately built to re-emit an overlapping window rather than carry a
+    # watermark, so the same fact arrives again days after its job finished. Left
+    # to the queue, every re-observation would buy another premium model call
+    # whose result `on_result` then discards as a duplicate.
+    #
+    # The proposal row is the durable record of "we have already considered this
+    # fact", and it outlives the job. Checking it here is one indexed lookup.
+    if _already_proposed(dedup_key):
+        logger.info(
+            "case_events.intent_job_skipped_already_proposed",
+            case_id=case_id,
+            dedup_key=dedup_key,
+        )
+        return
 
     job = jobs_queue.enqueue(
         KIND,
