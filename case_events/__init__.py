@@ -9,7 +9,7 @@ pilot broker an acceptable trade.
 
 The one invariant worth stating up front: **publishing is best-effort and must
 never fail a write.** A broker outage degrades enrichment; it does not degrade
-the archive. See :mod:`events.bus`.
+the archive. See :mod:`case_events.bus`.
 
 Nothing here is imported at Django startup, and with ``NATS_URL`` unset every
 publish is a logged no-op — so the monolith runs unchanged with no broker at

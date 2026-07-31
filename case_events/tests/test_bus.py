@@ -13,8 +13,8 @@ from unittest import mock
 import pytest
 from django.test import override_settings
 
-from events import bus, streams, subjects
-from events.envelope import build_envelope
+from case_events import bus, streams, subjects
+from case_events.envelope import build_envelope
 
 
 class TestEnvelope:
@@ -130,7 +130,7 @@ class TestPublishMechanics:
         with mock.patch.object(bus._bus, "_ensure_started", return_value=True), \
              mock.patch.object(bus._bus, "_js") as js, \
              mock.patch.object(bus._bus, "_loop", mock.Mock()), \
-             mock.patch("events.bus.asyncio.run_coroutine_threadsafe", side_effect=fake_run):
+             mock.patch("case_events.bus.asyncio.run_coroutine_threadsafe", side_effect=fake_run):
             js.publish.side_effect = lambda *a, **kw: captured.update(kw) or mock.Mock()
             bus._bus.publish("s", {"dedup_key": "docket:x:hearing:1"})
 
@@ -147,7 +147,7 @@ class TestPublishMechanics:
         with mock.patch.object(bus._bus, "_ensure_started", return_value=True), \
              mock.patch.object(bus._bus, "_js") as js, \
              mock.patch.object(bus._bus, "_loop", mock.Mock()), \
-             mock.patch("events.bus.asyncio.run_coroutine_threadsafe", side_effect=fake_run):
+             mock.patch("case_events.bus.asyncio.run_coroutine_threadsafe", side_effect=fake_run):
             js.publish.side_effect = lambda *a, **kw: captured.update(kw) or mock.Mock()
             bus._bus.publish("s", {"dedup_key": ""})
 

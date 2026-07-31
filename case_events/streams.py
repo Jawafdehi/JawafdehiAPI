@@ -25,7 +25,7 @@ from dataclasses import dataclass
 
 import structlog
 
-from events import subjects
+from case_events import subjects
 
 logger = structlog.get_logger(__name__)
 
@@ -93,7 +93,7 @@ async def ensure_streams(js) -> list[str]:
         )
         asserted.append(spec.name)
         logger.info(
-            "events.stream_asserted",
+            "case_events.stream_asserted",
             stream=spec.name,
             subjects=list(spec.subjects),
             replicas=spec.replicas,

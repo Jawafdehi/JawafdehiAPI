@@ -87,7 +87,7 @@ class _Bus:
             # happens before any request, so in practice we start fresh in the
             # child — but only because we check.
             if self._pid is not None and self._pid != os.getpid():
-                logger.info("events.bus_reset_after_fork", inherited_pid=self._pid)
+                logger.info("case_events.bus_reset_after_fork", inherited_pid=self._pid)
                 self._reset_locked()
 
             if self._js is not None:
@@ -102,7 +102,7 @@ class _Bus:
             except Exception as exc:  # noqa: BLE001 - never propagate to a write path
                 self._last_failure_at = time.monotonic()
                 self._reset_locked()
-                logger.warning("events.connect_failed", error=str(exc))
+                logger.warning("case_events.connect_failed", error=str(exc))
                 return False
 
     def _start_locked(self):
@@ -122,12 +122,12 @@ class _Bus:
         self._loop = loop
         self._thread = thread
         self._pid = os.getpid()
-        logger.info("events.connected", url=_redact(settings.NATS_URL))
+        logger.info("case_events.connected", url=_redact(settings.NATS_URL))
 
     async def _connect(self):
         import nats
 
-        from events.streams import ensure_streams
+        from case_events.streams import ensure_streams
 
         nc = await nats.connect(
             settings.NATS_URL,
@@ -153,7 +153,7 @@ class _Bus:
             if nc is not None:
                 asyncio.run_coroutine_threadsafe(nc.drain(), loop).result(timeout=5)
         except Exception as exc:  # noqa: BLE001 - shutdown is best-effort too
-            logger.warning("events.close_failed", error=str(exc))
+            logger.warning("case_events.close_failed", error=str(exc))
         finally:
             loop.call_soon_threadsafe(loop.stop)
 
@@ -182,14 +182,14 @@ class _Bus:
                 self._js.publish(subject, body, headers=headers or None), self._loop
             )
         except Exception as exc:  # noqa: BLE001 - loop may have died under us
-            logger.warning("events.publish_failed", subject=subject, error=str(exc))
+            logger.warning("case_events.publish_failed", subject=subject, error=str(exc))
             return False
 
         if wait:
             try:
                 future.result(timeout=PUBLISH_TIMEOUT_SECONDS)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("events.publish_failed", subject=subject, error=str(exc))
+                logger.warning("case_events.publish_failed", subject=subject, error=str(exc))
                 return False
         else:
             future.add_done_callback(lambda f: _log_result(f, subject))
@@ -201,7 +201,7 @@ def _log_result(future, subject: str):
     try:
         future.result()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("events.publish_failed", subject=subject, error=str(exc))
+        logger.warning("case_events.publish_failed", subject=subject, error=str(exc))
 
 
 def _redact(url: str) -> str:
@@ -219,19 +219,19 @@ def publish(subject: str, envelope: dict[str, Any], wait: bool = False) -> bool:
     """Best-effort publish. Never raises; returns False when nothing was sent.
 
     Args:
-        subject: See :mod:`events.subjects`.
-        envelope: Built by :func:`events.envelope.build_envelope`.
+        subject: See :mod:`case_events.subjects`.
+        envelope: Built by :func:`case_events.envelope.build_envelope`.
         wait: Block for the JetStream ack (up to
             :data:`PUBLISH_TIMEOUT_SECONDS`). Leave False in a request path;
             useful in management commands and tests where you want the result.
     """
     if not enabled():
-        logger.debug("events.publish_skipped", subject=subject, reason="NATS_URL unset")
+        logger.debug("case_events.publish_skipped", subject=subject, reason="NATS_URL unset")
         return False
     try:
         return _bus.publish(subject, envelope, wait=wait)
     except Exception as exc:  # noqa: BLE001 - the whole point of this module
-        logger.warning("events.publish_failed", subject=subject, error=str(exc))
+        logger.warning("case_events.publish_failed", subject=subject, error=str(exc))
         return False
 
 

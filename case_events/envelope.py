@@ -56,7 +56,7 @@ def build_envelope(
     """Assemble one bus message.
 
     Args:
-        subject: The subject it will be published on (see :mod:`events.subjects`).
+        subject: The subject it will be published on (see :mod:`case_events.subjects`).
             Carried in the body as well as the NATS subject so a message stays
             self-describing once it has been archived, DLQ'd, or re-published
             under a different subject.
