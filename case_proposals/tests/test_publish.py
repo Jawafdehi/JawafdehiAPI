@@ -327,3 +327,100 @@ class TestTheSerializerRejectsUnusableJoinKeys:
         r = self._post(case_slug=slug, dedup_key=f"d-{slug}")
         assert r.status_code == 400
         assert "case_slug" in r.data
+
+
+@pytest.mark.django_db
+class TestTheProposedAnnouncement:
+    """``jaw.case.update.proposed`` — published where the row is created.
+
+    DESIGN.md §6.3 originally had the bus's proposal-builder consumer emit this.
+    It cannot: the builder acks as soon as it has enqueued an intent job, and no
+    proposal exists at that moment — the row appears a minute later when the
+    model answers. The consumer's message would name a proposal_id nothing could
+    resolve.
+    """
+
+    def test_the_envelope_names_the_proposed_subject(self):
+        from case_proposals.publish import build_proposed_envelope
+
+        envelope = build_proposed_envelope(make_proposal())
+        assert envelope["subject"] == "jaw.case.update.proposed"
+        assert envelope["payload"]["status"] == ProposalStatus.PENDING
+
+    def test_it_carries_no_reviewer_because_there_is_not_one_yet(self):
+        from case_proposals.publish import build_proposed_envelope
+
+        payload = build_proposed_envelope(make_proposal())["payload"]
+        assert "reviewer" not in payload
+        assert "review_notes" not in payload
+
+    def test_its_dedup_key_is_distinct_from_the_decision_on_the_same_proposal(self):
+        """Otherwise JetStream would collapse the approval into the proposal."""
+        from case_proposals.publish import build_proposed_envelope
+
+        proposal = make_proposal(status=ProposalStatus.APPROVED)
+        assert (
+            build_proposed_envelope(proposal)["dedup_key"]
+            != build_decision_envelope(proposal)["dedup_key"]
+        )
+
+    @override_settings(NATS_URL="nats://localhost:4222")
+    def test_creating_a_proposal_over_http_announces_it(self, django_capture_on_commit_callbacks):
+        make_case()
+        with mock.patch("case_events.bus.publish", return_value=True) as pub:
+            with django_capture_on_commit_callbacks(execute=True):
+                r = caseworker_client().post(
+                    LIST_URL,
+                    {
+                        "case_slug": "lalita-niwas-land-scam",
+                        "source_kind": "ngm_docket",
+                        "intent": {
+                            "type": "append_timeline_entry",
+                            "entry": {"date": "2026-08-12", "title": "Hearing scheduled"},
+                        },
+                        "confidence": 0.9,
+                        "detected_by": "caseworker:someone",
+                        "dedup_key": "docket:x:hearing:announce",
+                    },
+                    format="json",
+                )
+        assert r.status_code == 201, r.data
+        assert pub.call_args.args[0] == "jaw.case.update.proposed"
+
+    def test_a_broker_outage_cannot_cost_us_the_proposal(self, django_capture_on_commit_callbacks):
+        """Same guarantee the decision path has, asserted separately.
+
+        The publisher for `proposed` runs inside the create transaction, so an
+        unguarded failure here would 500 the create and roll the row back.
+        """
+        make_case()
+        with mock.patch("case_events.bus.publish", side_effect=RuntimeError("broker gone")):
+            with django_capture_on_commit_callbacks(execute=True):
+                r = caseworker_client().post(
+                    LIST_URL,
+                    {
+                        "case_slug": "lalita-niwas-land-scam",
+                        "source_kind": "ngm_docket",
+                        "intent": {
+                            "type": "append_timeline_entry",
+                            "entry": {"date": "2026-08-12", "title": "Hearing scheduled"},
+                        },
+                        "confidence": 0.9,
+                        "detected_by": "caseworker:someone",
+                        "dedup_key": "docket:x:hearing:outage",
+                    },
+                    format="json",
+                )
+        assert r.status_code == 201, r.data
+        assert CaseUpdateProposal.objects.filter(dedup_key="docket:x:hearing:outage").exists()
+
+    def test_an_unbuildable_envelope_still_leaves_the_proposal(self):
+        from case_proposals.publish import schedule_proposed_event
+
+        proposal = make_proposal()
+        with mock.patch(
+            "case_proposals.publish.build_proposed_envelope",
+            side_effect=RuntimeError("boom"),
+        ):
+            schedule_proposed_event(proposal)  # must not raise
+        assert CaseUpdateProposal.objects.filter(pk=proposal.pk).exists()

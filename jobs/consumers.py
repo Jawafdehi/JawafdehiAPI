@@ -181,3 +181,36 @@ register(
         max_attempts=3,  # portal/network flakes retry with backoff, then dead-letter.
     )
 )
+
+
+# --- case_proposal_intent: draft a change intent from an observed signal ------
+#
+# The bus's proposal-builder consumer enqueues one of these per matched signal
+# and acks immediately, so the model call happens out here rather than inside a
+# JetStream ack window. build_payload resolves the case snapshot server-side (so
+# the worker stays DB-free, exactly like case_review); on_result stages a PENDING
+# CaseUpdateProposal through the same serializer the HTTP create path uses.
+#
+# Unlike the kinds above, the whole spec is defined by the owning app rather than
+# assembled here: its hooks are tightly coupled to the proposal serializer and to
+# the question of what a MODEL may draft as opposed to what the system accepts,
+# and that reasoning belongs beside the model it guards.
+
+
+def _register_case_proposal_intent() -> None:
+    """Register the intent kind, tolerating an import failure.
+
+    Wrapped because this module is imported by ``jobs.registry`` at app load: an
+    ImportError raised here would take the whole queue down, and the queue must
+    keep running the kinds it already knows even if one app's spec is broken.
+    Mirrors the guard ``jobs.registry`` puts around importing this module.
+    """
+    try:
+        from case_proposals.job_kind import SPEC
+
+        register(SPEC)
+    except Exception:  # noqa: BLE001 - one bad spec must not break the queue
+        logger.exception("could not register the case_proposal_intent kind")
+
+
+_register_case_proposal_intent()

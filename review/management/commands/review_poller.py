@@ -46,12 +46,18 @@ from django.core.management.base import BaseCommand
 from review.oidc_client_credentials import OIDCTokenError, get_provider
 from review.job_handlers import HANDLERS as _REVIEW_HANDLERS
 from materials.job_handlers import HANDLERS as _MATERIAL_HANDLERS
+from case_proposals.job_handlers import HANDLERS as _PROPOSAL_HANDLERS
 
 #: Worker-side handlers this consumer can run, aggregated from the owning apps
-#: (review, materials). Each app keeps its own heavy deps in its handler module;
-#: the poller just dispatches by kind. Add a new app's HANDLERS here to make the
-#: consumer able to claim that kind.
-HANDLERS = {**_REVIEW_HANDLERS, **_MATERIAL_HANDLERS}
+#: (review, materials, case_proposals). Each app keeps its own heavy deps in its
+#: handler module; the poller just dispatches by kind. Add a new app's HANDLERS
+#: here to make the consumer able to claim that kind.
+#:
+#: Note that --kinds defaults to ALL of these, so adding one here widens what a
+#: deployment claims unless it passes --kinds explicitly. That is harmless for
+#: case_proposal_intent — nothing enqueues one until the bus's proposal-builder
+#: consumer is running — but it is worth knowing before adding the next.
+HANDLERS = {**_REVIEW_HANDLERS, **_MATERIAL_HANDLERS, **_PROPOSAL_HANDLERS}
 
 
 class PollerError(Exception):

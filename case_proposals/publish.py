@@ -130,6 +130,54 @@ def build_decision_envelope(proposal) -> dict:
     )
 
 
+def build_proposed_envelope(proposal) -> dict:
+    """The envelope announcing that a proposal now exists and awaits review.
+
+    Published from HERE, where the row is created, and not from the bus's
+    proposal-builder consumer as ``DESIGN.md`` §6.3 originally had it. The
+    builder acks the moment it has enqueued an intent job — at which point no
+    proposal exists; the row appears a minute later when the model answers. A
+    ``jaw.case.update.proposed`` emitted then would name a proposal_id nothing
+    could resolve. Announcing it where it is created is both correct and exactly
+    how the approve/reject decisions already work.
+    """
+    case_iri = _case_iri(proposal.case_slug)
+    refs = [ref for ref in [case_iri, *_producer_refs(proposal)] if ref]
+
+    return build_envelope(
+        subject=subjects.CASE_UPDATE_PROPOSED,
+        producer=PRODUCER,
+        subject_refs=list(dict.fromkeys(refs)),
+        # A proposal is created once — pk alone is unique, and no status suffix
+        # is wanted here: the whole point is that this fires exactly once, at
+        # creation, whatever happens to the row afterwards.
+        dedup_key=f"proposal:{proposal.pk}:proposed",
+        source=proposal.source,
+        occurred_at=proposal.created_at,
+        payload={
+            "proposal_id": proposal.pk,
+            "case_slug": proposal.case_slug,
+            "case_title": proposal.case_title,
+            "status": proposal.status,
+            "intent": proposal.intent,
+            "confidence": proposal.confidence,
+            "source_kind": proposal.source_kind,
+            "detected_by": proposal.detected_by,
+            "fact_dedup_key": proposal.dedup_key,
+            "origin_msg_id": proposal.origin_msg_id,
+        },
+    )
+
+
+def schedule_proposed_event(proposal) -> None:
+    """Announce a newly-created proposal once the surrounding transaction commits.
+
+    Same guarantees as :func:`schedule_decision_event`: never raises, no-ops
+    with ``NATS_URL`` unset, and cannot cost the caller its write.
+    """
+    _schedule(proposal, build_proposed_envelope, what="proposed")
+
+
 def schedule_decision_event(proposal) -> None:
     """Publish the decision once the surrounding transaction commits.
 
@@ -140,23 +188,30 @@ def schedule_decision_event(proposal) -> None:
     if proposal.status not in _SUBJECT_BY_STATUS:
         return
 
-    # Snapshot now, publish later: on_commit runs after the transaction, and
-    # reading a mutated-or-refetched instance then would risk publishing state
-    # that isn't what was decided.
-    #
-    # This runs INSIDE the caller's atomic block, so it must not raise. It used
-    # not to be guarded, and that was a real defect rather than a theoretical
-    # one: a proposal created with a non-list `subject_refs` (a writable,
-    # unvalidated JSONField) raised TypeError here, 500'd the approval and rolled
-    # back the case write — with no broker configured at all. The bus is not
-    # allowed to cost us a write, and "the bus" includes describing the write.
+    _schedule(proposal, build_decision_envelope, what=proposal.status)
+
+
+def _schedule(proposal, build, *, what: str) -> None:
+    """Build an envelope now, publish it after the transaction commits.
+
+    Snapshot now, publish later: on_commit runs after the transaction, and
+    reading a mutated-or-refetched instance then would risk publishing state
+    that isn't what was written.
+
+    This runs INSIDE the caller's atomic block, so it must not raise. It used
+    not to be guarded, and that was a real defect rather than a theoretical
+    one: a proposal created with a non-list `subject_refs` (a writable,
+    unvalidated JSONField) raised TypeError here, 500'd the approval and rolled
+    back the case write — with no broker configured at all. The bus is not
+    allowed to cost us a write, and "the bus" includes describing the write.
+    """
     try:
-        envelope = build_decision_envelope(proposal)
-    except Exception:  # noqa: BLE001 - a describable decision beats a lost write
+        envelope = build(proposal)
+    except Exception:  # noqa: BLE001 - a describable event beats a lost write
         logger.warning(
             "case_proposal.envelope_failed",
             proposal_id=proposal.pk,
-            status=proposal.status,
+            status=what,
             exc_info=True,
         )
         return
@@ -167,11 +222,11 @@ def schedule_decision_event(proposal) -> None:
         try:
             if not bus.publish(subject, envelope):
                 # publish() returns False for a disabled bus (expected) and for a
-                # dropped message (not). Logged either way: a decision that never
+                # dropped message (not). Logged either way: an event that never
                 # reached the case-domain log is exactly what a later audit would
                 # need to know about, and it is otherwise silent.
                 logger.info(
-                    "case_proposal.decision_not_published",
+                    "case_proposal.event_not_published",
                     subject=subject,
                     proposal_id=envelope["payload"]["proposal_id"],
                     bus_enabled=bus.enabled(),

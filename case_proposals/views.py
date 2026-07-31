@@ -12,7 +12,7 @@ from review.permissions import CanReadReview, HasContributorRole, IsContentStaff
 
 from .apply import apply_intent, get_case_or_400
 from .models import CaseUpdateProposal, ProposalStatus
-from .publish import schedule_decision_event
+from .publish import schedule_decision_event, schedule_proposed_event
 from .serializers import (
     CaseUpdateProposalSerializer,
     ProposalDecisionSerializer,
@@ -51,6 +51,17 @@ class CaseUpdateProposalViewSet(
         if self.action in ("approve", "reject", "edit_intent"):
             return [IsContentStaff()]
         return [CanReadReview()]
+
+    def perform_create(self, serializer):
+        """Create the proposal, then announce it on the bus.
+
+        Covers the hand-filed and directly-POSTed cases; a proposal drafted by
+        the intent job announces itself from ``case_proposals.job_kind``. Both
+        go through the same publisher, so the notifier sees one shape of message
+        regardless of who filed it.
+        """
+        proposal = serializer.save()
+        schedule_proposed_event(proposal)
 
     def _reviewer_label(self, request):
         u = request.user
