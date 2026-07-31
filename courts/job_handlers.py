@@ -15,6 +15,7 @@ from courts.scraper import registry
 from courts.scraper.base import anchor
 from courts.scraper.crawl import run_crawl
 from courts.scraper.fetch import Fetcher
+from courts.scraper.registers import DEFAULT_TAIL_PROBE
 from courts.scraper.sweep import DEFAULT_BUDGET, DEFAULT_DELAY, run_sweep
 
 
@@ -37,7 +38,7 @@ def handle_court_scrape(payload, on_stage=None, fetch=None) -> dict:
     supreme), ``court_id`` (optional leaf court to restrict to — the enqueuer
     posts one job per leaf court), ``lookback_days``, ``limit_dates``, ``enrich``,
     ``today``, and for the register sweep ``sweep``, ``causelist``, ``sweep_budget``,
-    ``sweep_delay``. Returns aggregate + per-court stats (also stored as
+    ``sweep_delay``, ``sweep_series``, ``sweep_tail``. Returns aggregate + per-court stats (also stored as
     ``job.result``). Raises ``BadCourtScrapePayload`` on a missing/unknown court or
     malformed ``today`` (non-retryable); propagates fetch/parse/DB errors (retryable).
 
@@ -66,11 +67,19 @@ def handle_court_scrape(payload, on_stage=None, fetch=None) -> dict:
     # rides the existing queue/lease/cron rather than adding a parallel pipeline.
     causelist = payload.get("causelist", True)
     sweep = bool(payload.get("sweep"))
-    sweep_budget = int(payload.get("sweep_budget") or DEFAULT_BUDGET)
+    # `or DEFAULT` would swallow an explicit 0 — and 0 is meaningful for both of
+    # these (probe nothing / no tail), so absence has to be tested for directly.
+    sweep_budget = payload.get("sweep_budget")
+    sweep_budget = DEFAULT_BUDGET if sweep_budget is None else int(sweep_budget)
     # Politeness delay between probes. Overridable so a test isn't forced to spend
     # real seconds sleeping, and so a court that tolerates more can be tuned.
     sweep_delay = payload.get("sweep_delay")
     sweep_delay = DEFAULT_DELAY if sweep_delay is None else float(sweep_delay)
+    # Narrow the walk to named registers, and let a one-off backfill probe further
+    # past each high-water mark than the recurring default can afford.
+    sweep_series = payload.get("sweep_series") or None
+    sweep_tail = payload.get("sweep_tail")
+    sweep_tail = DEFAULT_TAIL_PROBE if sweep_tail is None else int(sweep_tail)
 
     # Heartbeat the job lease per crawled date so a long single-court crawl does
     # not outlive its lease and get reaped mid-run.
@@ -132,6 +141,8 @@ def handle_court_scrape(payload, on_stage=None, fetch=None) -> dict:
                     court_id=cid,
                     budget=remaining,
                     delay=sweep_delay,
+                    tail_probe=sweep_tail,
+                    series=sweep_series,
                     write=True,
                     on_progress=(
                         (lambda c, n: on_stage(f"sweep {c} {n}"))

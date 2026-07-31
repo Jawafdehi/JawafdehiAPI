@@ -274,6 +274,35 @@ class SweepJobWiringTests(_NgmTestCase):
         with self.assertRaises(CommandError):
             call_command("enqueue_scrape", "--court", "high", "--sweep-courts", "3")
 
+    def test_series_filter_reaches_the_sweep(self):
+        """CR-only is the difference between a 4-minute backfill and an hour."""
+        from courts.job_handlers import handle_court_scrape
+
+        for series in ("CR", "OA"):
+            for seq in (1, 5):
+                CourtCase.objects.using("ngm").create(
+                    court_id="special", case_number=f"076-{series}-{seq:04d}"
+                )
+        result = handle_court_scrape(
+            {**self._SWEEP_PAYLOAD, "sweep_series": ["CR"], "sweep_tail": 0,
+             "sweep_budget": 50},
+            fetch=_fake_fetch,
+        )
+        # 3 interior holes in CR; OA's 3 are left alone. sweep_tail=0 must be
+        # honoured as zero rather than read as "unset" and defaulted.
+        self.assertEqual(result["swept"], 3)
+
+    def test_enqueue_sets_series_and_tail_and_dedups_them_apart(self):
+        call_command("enqueue_scrape", "--court", "special", "--sweep",
+                     "--sweep-series", "cr", "--sweep-tail", "100")
+        job = Job.objects.get(dedup_key="court_scrape:special:special:sweep:CR")
+        self.assertEqual(job.payload["sweep_series"], ["CR"])
+        self.assertEqual(job.payload["sweep_tail"], 100)
+
+        # An all-series sweep must not be deduped away by the CR one.
+        call_command("enqueue_scrape", "--court", "special", "--sweep")
+        self.assertTrue(Job.objects.filter(dedup_key="court_scrape:special:special:sweep").exists())
+
     def test_the_budget_is_shared_across_courts_not_granted_to_each(self):
         """A tier payload with no ``court_id`` sweeps every leaf court under ONE
         job. Per-court budgets would multiply by 77 for district and overrun the

@@ -24,18 +24,28 @@ from __future__ import annotations
 
 import re
 from collections import Counter, defaultdict
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 
 NGM_DB = "ngm"
 
 #: How far past the highest held slot to probe for a truncated register tail.
 #: Sequence density only finds *interior* holes — if a register's last N numbers
-#: were never listed, the register simply looks shorter than it is. The bound has
-#: to clear the longest run of genuinely-consecutive missing slots, or the probe
-#: stops inside a real run and declares the register finished early. The longest
-#: run observed in the special court is 9 (``082-CR-0162..0170``), so 25 leaves
-#: real headroom. Raise it, don't lower it.
+#: were never listed, the register simply looks shorter than it is, and no amount
+#: of DB analysis can see that. The bound has to clear the longest run of
+#: genuinely-consecutive missing slots or the probe stops inside a real run and
+#: declares the register finished early.
+#:
+#: 25 does NOT clear the worst run in the live mirror. ``078-OA-0005..0072`` is a
+#: **68-slot** consecutive run and every one of the six probed is a real case, so a
+#: register truncated by a run of that shape stays invisible at this setting. It is
+#: kept as the recurring default because the cost is per-register (``tail_probe`` ×
+#: 8,347 registers fleet-wide) and unbounded tail probing would spend an entire
+#: cron budget on closed registers that cannot grow. One-off backfills should raise
+#: it explicitly — ``--sweep-tail`` exists for exactly that.
+#:
+#: (An earlier note here claimed the longest observed run was 9. That was measured
+#: across ``-CR-`` only; the ``-OA-`` registers are far gappier.)
 DEFAULT_TAIL_PROBE = 25
 
 #: ``<3-digit BS year>-<series>-<sequence>``. The series is ``[A-Z0-9]+`` because
@@ -84,7 +94,10 @@ def format_case_number(key: RegisterKey, seq: int, pad: int) -> str:
 
 
 def compute_gaps(
-    case_numbers: Iterable[str], *, tail_probe: int = DEFAULT_TAIL_PROBE
+    case_numbers: Iterable[str],
+    *,
+    tail_probe: int = DEFAULT_TAIL_PROBE,
+    series: Collection[str] | None = None,
 ) -> list[str]:
     """The docket numbers a set of held case numbers implies but does not contain.
 
@@ -102,15 +115,24 @@ def compute_gaps(
        only part of a register that is never final
     3. sequence ascending, for determinism
 
+    ``series`` restricts the walk to named registers (``{"CR"}``). A court's series
+    are not equal in value or in cost: on the special court the 72 ``-CR-`` holes are
+    corruption prosecutions, while the 575 ``-OA-`` holes are mostly procedural
+    filings (वारेस अनुमति निवेदन and the like) or numbers the court never issued.
+    Sweeping one without the other is what keeps a targeted backfill to minutes.
+
     Unparseable/legacy numbers are ignored rather than raising — a court whose
     whole register predates the modern scheme simply yields no candidates.
     """
+    wanted = {s.upper() for s in series} if series else None
     seqs: dict[RegisterKey, set[int]] = defaultdict(set)
     pads: dict[RegisterKey, Counter] = defaultdict(Counter)
 
     for raw in case_numbers:
         parsed = parse_case_number(raw)
         if parsed is None:
+            continue
+        if wanted is not None and parsed.key.series not in wanted:
             continue
         seqs[parsed.key].add(parsed.seq)
         pads[parsed.key][parsed.pad] += 1
@@ -190,7 +212,13 @@ def held_with_dates(court_id: str, *, using: str = NGM_DB) -> list[tuple[str, st
 
 
 def register_gaps(
-    court_id: str, *, using: str = NGM_DB, tail_probe: int = DEFAULT_TAIL_PROBE
+    court_id: str,
+    *,
+    using: str = NGM_DB,
+    tail_probe: int = DEFAULT_TAIL_PROBE,
+    series: Collection[str] | None = None,
 ) -> list[str]:
     """:func:`compute_gaps` over everything the mirror holds for one court."""
-    return compute_gaps(held_case_numbers(court_id, using=using), tail_probe=tail_probe)
+    return compute_gaps(
+        held_case_numbers(court_id, using=using), tail_probe=tail_probe, series=series
+    )

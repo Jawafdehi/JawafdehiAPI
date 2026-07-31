@@ -145,6 +145,7 @@ def run_sweep(
     budget: int = DEFAULT_BUDGET,
     delay: float = DEFAULT_DELAY,
     tail_probe: int = DEFAULT_TAIL_PROBE,
+    series=None,
     write: bool = False,
     using: str = NGM_DB,
     on_progress=None,
@@ -154,7 +155,9 @@ def run_sweep(
 
     ``write=False`` (the default) probes and reports without touching the DB —
     the dry run. ``spec`` is a registry entry; a tier without ``crawl_detail``
-    cannot be swept and returns empty stats.
+    cannot be swept and returns empty stats. ``series`` narrows the walk to named
+    registers, which is how a targeted backfill stays proportionate: sweeping the
+    special court's ``CR`` alone is 72 probes, against 647 for every series.
     """
     stats = SweepStats(court_id=court_id)
     crawl_detail = getattr(spec, "crawl_detail", None)
@@ -164,7 +167,9 @@ def run_sweep(
     if budget <= 0:
         return stats
 
-    candidates = register_gaps(court_id, using=using, tail_probe=tail_probe)
+    candidates = register_gaps(
+        court_id, using=using, tail_probe=tail_probe, series=series
+    )
     if write:
         candidates = _prioritise(candidates, court_id, using=using)
     if not candidates:
