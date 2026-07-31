@@ -69,6 +69,7 @@ class _Bus:
         self._js = None
         self._pid: int | None = None
         self._last_failure_at: float = 0.0
+        self._starting = False
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -78,9 +79,27 @@ class _Bus:
         self._nc = None
         self._js = None
         self._pid = None
+        # Must be cleared too: a child that inherited _starting=True from a
+        # parent mid-connect would consider a start permanently in progress and
+        # never connect again.
+        self._starting = False
 
     def _ensure_started(self) -> bool:
-        """Start the loop thread and connect if needed. False if unavailable."""
+        """Start the loop thread and connect if needed. False if unavailable.
+
+        At most ONE thread ever performs the connect, and it does so **without
+        holding the lock**. Everyone else returns False immediately rather than
+        queueing behind it.
+
+        That distinction is the whole point. The connect can take the full
+        :data:`STARTUP_TIMEOUT_SECONDS`, and on a dead broker it always does:
+        ``_connect`` passes ``max_reconnect_attempts=-1``, and nats-py treats a
+        negative value as "never stop retrying" for the *initial* connect too
+        (``nats/aio/client.py``), so it never fails fast. Holding the lock across
+        that made one dead broker stall every publishing thread in the process
+        for 5 seconds at a time — precisely the behaviour this module's docstring
+        promises does not happen.
+        """
         with self._lock:
             # A forked child inherits this object's state but NOT the parent's
             # threads, so the loop it points at is gone. Under gunicorn the fork
@@ -93,36 +112,62 @@ class _Bus:
             if self._js is not None:
                 return True
 
+            if self._starting:
+                # Someone else is already paying the connect cost.
+                logger.debug("case_events.connect_in_progress")
+                return False
+
             if time.monotonic() - self._last_failure_at < CONNECT_RETRY_SECONDS:
+                # Logged, because this window used to swallow every publish for
+                # 30 seconds with no output at all — a broker blip looked
+                # identical to a healthy bus with nothing to say.
+                logger.debug("case_events.connect_suppressed", subject_hint="retry window")
                 return False
 
-            try:
-                self._start_locked()
-                return True
-            except Exception as exc:  # noqa: BLE001 - never propagate to a write path
+            self._starting = True
+
+        try:
+            started = self._start()
+        except Exception as exc:  # noqa: BLE001 - never propagate to a write path
+            with self._lock:
                 self._last_failure_at = time.monotonic()
-                self._reset_locked()
-                logger.warning("case_events.connect_failed", error=str(exc))
-                return False
+                self._starting = False
+            # str(TimeoutError()) is "", which made the one line explaining an
+            # outage read `connect_failed error=`. The type is the useful part.
+            logger.warning(
+                "case_events.connect_failed",
+                error=str(exc) or type(exc).__name__,
+                error_type=type(exc).__name__,
+            )
+            return False
 
-    def _start_locked(self):
+        with self._lock:
+            self._loop, self._thread, self._nc, self._js = started
+            self._pid = os.getpid()
+            # Clear the fail-fast window: it is a backoff against a broker that
+            # was down, and this one demonstrably is not.
+            self._last_failure_at = 0.0
+            self._starting = False
+        logger.info("case_events.connected", url=_redact(settings.NATS_URL))
+        return True
+
+    def _start(self):
+        """Connect, returning the new state. Blocking; mutates nothing on self."""
         loop = asyncio.new_event_loop()
-        thread = threading.Thread(
-            target=loop.run_forever, name="events-bus", daemon=True
-        )
+        thread = threading.Thread(target=loop.run_forever, name="events-bus", daemon=True)
         thread.start()
 
         future = asyncio.run_coroutine_threadsafe(self._connect(), loop)
         try:
-            self._nc, self._js = future.result(timeout=STARTUP_TIMEOUT_SECONDS)
+            nc, js = future.result(timeout=STARTUP_TIMEOUT_SECONDS)
         except Exception:
+            # Cancel before stopping the loop, or the abandoned _connect task is
+            # destroyed while pending and nats-py logs it as an error.
+            future.cancel()
             loop.call_soon_threadsafe(loop.stop)
             raise
 
-        self._loop = loop
-        self._thread = thread
-        self._pid = os.getpid()
-        logger.info("case_events.connected", url=_redact(settings.NATS_URL))
+        return loop, thread, nc, js
 
     async def _connect(self):
         import nats
