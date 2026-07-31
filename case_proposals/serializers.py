@@ -70,6 +70,48 @@ class CaseUpdateProposalSerializer(serializers.ModelSerializer):
     def validate_intent(self, value):
         return validate_intent_shape(value)
 
+    def validate_subject_refs(self, value):
+        """Reject anything that is not a list of non-empty strings.
+
+        ``subject_refs`` is a bare ``JSONField``, so without this it accepts a
+        scalar, a dict, or a nested list. That is not merely untidy: these are
+        ``@id`` IRIs used as the join key between a bus message and our records,
+        and a malformed value used to break the approve/reject path outright.
+
+        Enforced here rather than only at publish time because a proposal is
+        effectively unfixable once created — the viewset exposes no update, and
+        ``dedup_key`` is unique, so the same fact cannot simply be re-filed.
+        """
+        if not isinstance(value, list):
+            raise serializers.ValidationError(
+                f"subject_refs must be a list of @id IRIs, got {type(value).__name__}."
+            )
+        bad = [ref for ref in value if not isinstance(ref, str) or not ref.strip()]
+        if bad:
+            raise serializers.ValidationError(
+                f"subject_refs must contain only non-empty strings; got {bad!r}."
+            )
+        return value
+
+    def validate_case_slug(self, value):
+        """Require a slug the canonical ``@id`` grammar accepts.
+
+        ``case_slug`` is a ``SlugField``, which permits underscores and a leading
+        digit; ``build_case_iri`` does not. A proposal whose slug passes the field
+        but fails the IRI builder publishes its decision with an EMPTY
+        ``subject_refs`` — a message with no join key — and the reject path never
+        notices, because it never resolves the Case at all.
+        """
+        from jawafdehi_shared.entities.ids import build_case_iri
+
+        try:
+            build_case_iri(value)
+        except Exception as exc:
+            raise serializers.ValidationError(
+                f"case_slug {value!r} is not a valid case @id segment: {exc}"
+            ) from None
+        return value
+
 
 class ProposalDecisionSerializer(serializers.Serializer):
     """Request body for approve/reject: an optional review note."""
