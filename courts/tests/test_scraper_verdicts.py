@@ -6,10 +6,13 @@ refuses anything it cannot vouch for, and these tests pin that refusal.
 """
 
 import json
+from unittest import mock
 
 from django.test import TestCase
 from django.utils import timezone
 
+from courts.management.commands import extract_verdicts
+from courts.management.commands.extract_verdicts import Command
 from courts.models import Court, CourtCase, CourtCaseHearing
 from courts.scraper.verdicts import (
     ACQUITTAL,
@@ -19,6 +22,7 @@ from courts.scraper.verdicts import (
     backlog,
     build_hearing,
     build_prompt,
+    court_coded_verdicts,
     derived_hearing_filter,
     is_decided,
     order_urls,
@@ -238,3 +242,54 @@ class CaseHelperTests(TestCase):
             {"source_type": "PRESS_RELEASE", "url": [{"link": "https://a/pr.pdf", "role": "RAW"}]},
         ])
         self.assertEqual(order_urls(c), [])
+
+
+class EvalAnswerKeyTests(TestCase):
+    """The eval is the only evidence the written verdicts are trustworthy, so it
+    must never grade the model against the model."""
+
+    databases = "__all__"
+
+    def setUp(self):
+        self.court = Court.objects.create(identifier="special", court_type="special", full_name_nepali="विशेष अदालत")
+
+    def _hearing(self, num, *, derived, decision=FULL):
+        return CourtCaseHearing.objects.create(
+            case_number=num, court=self.court, hearing_date_bs="2076-01-01",
+            hearing_date_ad="2019-04-14", decision_type=decision, scraped_at=timezone.now(),
+            extra_data={PROVENANCE_KEY: {"derived": True}} if derived else {},
+        )
+
+    def test_the_answer_key_holds_only_what_the_court_coded(self):
+        self._hearing("076-CR-0001", derived=False)
+        self._hearing("076-CR-0002", derived=True)
+        self.assertEqual(dict(court_coded_verdicts("special")), {"076-CR-0001": FULL})
+
+    def test_a_written_verdict_never_becomes_its_own_ground_truth(self):
+        """Left unfiltered, each --write run would enlarge the key with the
+        model's own answers and accuracy would drift towards self-agreement."""
+        case = CourtCase.objects.create(
+            case_number="076-CR-0215", court=self.court, case_status="फैसला (मिती: २०७६/१२/०३)",
+        )
+        build_hearing(case, parse_response(_resp()), order_url="u", model="m", now=timezone.now()).save()
+        self.assertEqual(dict(court_coded_verdicts("special")), {})
+
+    def test_hearings_without_a_disposition_are_not_an_answer(self):
+        self._hearing("076-CR-0003", derived=False, decision=None)
+        self.assertEqual(dict(court_coded_verdicts("special")), {})
+
+
+class PolitenessGapTests(TestCase):
+    """A dry run downloads exactly as much as a write run, and a run of failures
+    downloads more per minute than a run of successes. The gap has to sit on the
+    DOWNLOAD, not on the write and not at the end of the loop."""
+
+    def test_the_gap_precedes_every_download_but_the_first(self):
+        cmd = Command()
+        cmd._downloads = 0
+        with mock.patch.object(extract_verdicts, "time") as clock:
+            cmd._gap(2.5)
+            self.assertFalse(clock.sleep.called)   # nothing to be polite about yet
+            cmd._gap(2.5)
+            cmd._gap(2.5)
+        self.assertEqual([c.args for c in clock.sleep.call_args_list], [(2.5,), (2.5,)])

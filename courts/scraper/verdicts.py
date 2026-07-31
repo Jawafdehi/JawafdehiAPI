@@ -53,7 +53,7 @@ from dataclasses import dataclass
 
 from django.db.models import Exists, OuterRef, Q
 
-from courts.case_status import parse_case_status
+from courts.case_status import DECIDED, parse_case_status
 from courts.models import CourtCase, CourtCaseHearing
 
 #: The court's three dispositions, exactly as ``decision_type`` stores them.
@@ -212,6 +212,23 @@ def has_deciding_hearing() -> Exists:
     )
 
 
+def has_order() -> Q:
+    """Q for "an order document was captured for this case".
+
+    :func:`order_urls` reads TWO stores -- ``extra_data['court_orders']`` and
+    ``document_sources`` -- so this predicate looks narrower than it is. It is
+    not: ``scrape_court_orders`` writes both together, and the mirror bears that
+    out. Special Court cases that are decided, verdictless, and hold a
+    ``COURT_ORDER`` document source but NO ``court_orders`` key: 0 (measured
+    2026-07-31). Matching on ``document_sources`` instead would mean an
+    unindexed ``jsonb_array_elements`` scan of 1.6M cases to find them.
+
+    Shared with the eval sampler on purpose -- scoring the extractor against a
+    population the writer would never see would prove nothing.
+    """
+    return Q(extra_data__has_key="court_orders")
+
+
 def backlog(court_identifier="special", case_number=None):
     """Cases marked decided, holding an order document, and carrying no verdict.
 
@@ -222,7 +239,7 @@ def backlog(court_identifier="special", case_number=None):
     if case_number:
         return qs.filter(case_number=case_number)
     return (
-        qs.filter(extra_data__has_key="court_orders")
+        qs.filter(has_order())
         .annotate(decided=has_deciding_hearing())
         .filter(decided=False)
         .exclude(Q(case_status__isnull=True) | Q(case_status=""))
@@ -232,7 +249,7 @@ def backlog(court_identifier="special", case_number=None):
 
 def is_decided(case) -> bool:
     """True when ``case_status`` says a verdict exists (via the shared parser)."""
-    return parse_case_status(case.case_status).lifecycle_status == "DECIDED"
+    return parse_case_status(case.case_status).lifecycle_status == DECIDED
 
 
 def order_urls(case) -> list[str]:
@@ -279,6 +296,24 @@ def order_urls(case) -> list[str]:
     for entry in (case.extra_data or {}).get("court_orders") or []:
         add(entry)
     return out
+
+
+def court_coded_verdicts(court_identifier="special"):
+    """``(case_number, decision_type)`` pairs for verdicts THE COURT coded.
+
+    The eval's answer key, so it must exclude the rows this module wrote.
+    Without that, every ``--write`` run would fold the model's own answers into
+    the key and the reported accuracy would drift towards self-agreement.
+
+    Returns a queryset -- the caller picks the database, as with :func:`backlog`.
+    """
+    return (
+        CourtCaseHearing.objects.filter(
+            court_id=court_identifier, decision_type__in=DECISION_TYPES
+        )
+        .exclude(derived_hearing_filter())
+        .values_list("case_number", "decision_type")
+    )
 
 
 def derived_hearing_filter() -> Q:

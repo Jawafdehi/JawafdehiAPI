@@ -29,7 +29,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils import timezone
 
-from courts.models import CourtCaseHearing
+from courts.models import CourtCase, CourtCaseHearing
 from courts.scraper.registers import NGM_DB
 from courts.scraper.verdicts import (
     DECISION_TYPES,
@@ -37,6 +37,8 @@ from courts.scraper.verdicts import (
     backlog,
     build_hearing,
     build_prompt,
+    court_coded_verdicts,
+    has_order,
     is_decided,
     order_urls,
     parse_response,
@@ -69,6 +71,19 @@ class Command(BaseCommand):
         parser.add_argument("--delay", type=float, default=DEFAULT_DELAY)
 
     # ------------------------------------------------------------------ helpers
+    def _gap(self, delay):
+        """Wait out the politeness gap, then count this download.
+
+        Called immediately before each download, because the download is the only
+        thing here that touches the court. Putting the wait on the WRITE instead
+        let a dry run -- which fetches every bit as much -- hammer the site at
+        full speed, and putting it at the end of the loop let a run of failures
+        do the same by skipping it on ``continue``.
+        """
+        if self._downloads:
+            time.sleep(delay)
+        self._downloads += 1
+
     def _extract_one(self, case, *, tier):
         """Download the order, read it, return (extraction, url, model, chars).
 
@@ -108,17 +123,13 @@ class Command(BaseCommand):
         it deliberately draws from the SAME population (has an order document,
         Special Court judgment) and just happens to know the answer.
         """
-        from courts.models import CourtCase
-
-        truth = dict(
-            CourtCaseHearing.objects.using(NGM_DB)
-            .filter(court_id=court, decision_type__in=DECISION_TYPES)
-            .values_list("case_number", "decision_type")
-        )
-        # Spread the sample across the register rather than taking one era.
+        truth = dict(court_coded_verdicts(court).using(NGM_DB))
+        # Same order-document predicate the writer uses, so the score describes
+        # the population that would actually be written. Spread across the
+        # register rather than taking one era.
         cases = list(
             CourtCase.objects.using(NGM_DB)
-            .filter(court_id=court, case_number__in=list(truth), extra_data__has_key="court_orders")
+            .filter(has_order(), court_id=court, case_number__in=list(truth))
             .order_by("case_number")
         )
         if not cases:
@@ -131,6 +142,7 @@ class Command(BaseCommand):
         confusion = {}
         for i, case in enumerate(sample, 1):
             want = truth[case.case_number]
+            self._gap(delay)
             try:
                 ex, url, _model, chars = self._extract_one(case, tier=tier)
             except Exception as exc:  # noqa: BLE001
@@ -153,7 +165,6 @@ class Command(BaseCommand):
             )
             if ex.abstained or verdict == "WRONG":
                 self.stdout.write(f"        evidence: {(ex.evidence or '')[:150]}")
-            time.sleep(delay)
 
         answered = hits + miss
         self.stdout.write("\n=== eval ===")
@@ -172,6 +183,7 @@ class Command(BaseCommand):
     # ------------------------------------------------------------------- handle
     def handle(self, *args, **opts):
         court, tier, delay = opts["court"], opts["tier"], opts["delay"]
+        self._downloads = 0
 
         if opts.get("eval"):
             return self._run_eval(court, opts["eval"], tier, delay)
@@ -187,6 +199,7 @@ class Command(BaseCommand):
                 skipped += 1
                 self.stdout.write(f"  {i:>3} {case.case_number}  skip: case_status is not decided")
                 continue
+            self._gap(delay)
             try:
                 ex, url, model, chars = self._extract_one(case, tier=tier)
             except Exception as exc:  # noqa: BLE001
@@ -214,10 +227,24 @@ class Command(BaseCommand):
             if not opts["write"]:
                 continue
 
-            # Re-check inside the transaction: hearings carry no unique
-            # constraint, so a concurrent cause-list scrape (or a second run of
-            # this command) would otherwise duplicate the row.
+            # Lock the CASE row and re-check under it. Hearings carry no unique
+            # constraint -- and can't easily: 500k+ (case, court) pairs already
+            # hold more than one row with a non-null decision_type, legitimately,
+            # from district-court cause lists. Locking the parent gives the one
+            # guarantee that is actually needed here, that two runs of this
+            # command (a retried Job, an overlapping one) cannot both decide the
+            # same case. A concurrent cause-list scrape does not take this lock,
+            # so that window stays open; it is narrow and the duplicate would be
+            # a benign repeat of the same disposition. --write therefore needs
+            # Postgres; sqlite has no SELECT FOR UPDATE and raises here.
             with transaction.atomic(using=NGM_DB):
+                (
+                    CourtCase.objects.using(NGM_DB)
+                    .select_for_update()
+                    .filter(pk=case.pk)
+                    .values_list("pk", flat=True)
+                    .first()
+                )
                 exists = (
                     CourtCaseHearing.objects.using(NGM_DB)
                     .filter(
@@ -233,7 +260,6 @@ class Command(BaseCommand):
                     continue
                 hearing.save(using=NGM_DB)
                 written += 1
-            time.sleep(delay)
 
         self.stdout.write(
             f"\n{mode} done: written={written} abstained={abstained} skipped={skipped} failed={failed}"
