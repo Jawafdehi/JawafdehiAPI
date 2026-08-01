@@ -66,7 +66,15 @@ class CaseUpdateProposal(models.Model):
 
     # ── originating bus event (populated later by the consumer) ───────────────
     origin_subject = models.CharField(max_length=100, blank=True, default="")
-    origin_msg_id = models.CharField(max_length=100, blank=True, default="")
+    # 300, matching `dedup_key`, because that is literally what goes in it: the
+    # proposal-builder sets origin_msg_id to the matched signal's dedup key. At
+    # the original 100 it was too small for the values it is given — a routine
+    # docket key ("matched:docket:<courtcase IRI>:hearing:<bs-date>:<slug>") is
+    # 108 characters — so every docket-derived proposal failed serializer
+    # validation, was recorded as "the model produced something unusable", and
+    # left no row for the duplicate check to find. The next scrape then bought
+    # another premium model call to fail the same way. Keep these two equal.
+    origin_msg_id = models.CharField(max_length=300, blank=True, default="")
     subject_refs = models.JSONField(default=list, blank=True)
 
     # ── review ────────────────────────────────────────────────────────────────

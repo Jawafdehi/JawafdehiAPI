@@ -6,6 +6,7 @@ which is also the point of the design under test — the disabled path must not
 even try.
 """
 
+import asyncio
 import json
 import threading
 import time
@@ -336,6 +337,55 @@ class TestOnlyOneThreadPaysTheConnectCost:
         with b._lock:
             b._reset_locked()
         assert b._starting is False
+
+
+class TestTheLoopIsClosedNotJustStopped:
+    """``loop.stop()`` leaves the selector and its self-pipe socketpair open.
+
+    Harmless for orderly shutdown, which happens once — but ``_start`` takes the
+    same path on every failed connect, and with a 30-second retry window a
+    sustained broker outage leaks a couple of descriptors per attempt in a
+    process that never restarts.
+    """
+
+    def test_a_failed_connect_closes_the_loop_it_abandoned(self):
+        b = bus._Bus()
+        loops = []
+        real_new_event_loop = asyncio.new_event_loop
+
+        def track():
+            loop = real_new_event_loop()
+            loops.append(loop)
+            return loop
+
+        with mock.patch.object(bus.asyncio, "new_event_loop", track):
+            with mock.patch.object(b, "_connect", side_effect=RuntimeError("no broker")):
+                assert b._ensure_started() is False
+
+        assert loops, "the failure path must still have created a loop to abandon"
+        assert all(loop.is_closed() for loop in loops)
+
+    def test_close_closes_the_loop_too(self):
+        b = bus._Bus()
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread.start()
+        b._loop, b._thread, b._nc, b._js = loop, thread, None, mock.Mock()
+
+        b.close()
+
+        assert loop.is_closed()
+
+    def test_a_thread_that_will_not_stop_leaks_rather_than_hangs(self):
+        """Shutdown must not block a request on a wedged loop thread."""
+        stuck = mock.Mock()
+        stuck.is_alive.return_value = True
+        loop = mock.Mock()
+
+        bus._shutdown_loop(loop, stuck)
+
+        loop.close.assert_not_called()  # closing a running loop raises
+        stuck.join.assert_called_once()
 
 
 class TestRedaction:

@@ -194,6 +194,78 @@ class TestMatcher:
         assert signal["payload"] == {"hearing_date": "2082-12-01"}
         assert signal["source"] == "https://example.test/docket"
 
+    def test_a_publish_the_bus_refused_raises_instead_of_acking(self):
+        """The one handler whose output IS a publish must not swallow one.
+
+        `bus.publish` is best-effort everywhere else because the message merely
+        describes work already done. Here the message is the only trace of the
+        match; dropping it and returning cleanly acks the signal, and nothing
+        downstream ever hears the fact. No retry, no DLQ, no log above DEBUG.
+        """
+        case = make_case()
+        iri = build_courtcase_iri("special", "082-CR-0154")
+        CaseCourtCaseReference.objects.create(case=case, courtcase_iri=iri, ordinal=1)
+
+        with mock.patch("case_events.bus.publish", return_value=False):
+            with pytest.raises(RuntimeError, match="could not publish"):
+                handlers.handle_matcher(signal_envelope(subject_refs=[iri]), None)
+
+    def test_it_waits_for_the_jetstream_ack(self):
+        """`wait=False` returns True for a publish the broker later rejects.
+
+        Which is exactly what happens when no stream claims the subject — the
+        "forgot to run nats_bootstrap" case — so without waiting, the check
+        above would pass every message on a broker that accepted none of them.
+        """
+        case = make_case()
+        iri = build_courtcase_iri("special", "082-CR-0154")
+        CaseCourtCaseReference.objects.create(case=case, courtcase_iri=iri, ordinal=1)
+
+        with mock.patch("case_events.bus.publish", return_value=True) as pub:
+            handlers.handle_matcher(signal_envelope(subject_refs=[iri]), None)
+
+        assert pub.call_args.kwargs.get("wait") is True
+
+    def test_a_soft_deleted_case_is_not_matched(self):
+        """CLOSED is this platform's soft delete — `Case.delete()` keeps the row.
+
+        Without the filter the deleted case still joins on its court-case
+        reference, so every re-scrape of that docket buys a premium model call
+        and puts a review item in front of a caseworker for a case somebody
+        deliberately removed.
+        """
+        case = make_case()
+        iri = build_courtcase_iri("special", "082-CR-0154")
+        CaseCourtCaseReference.objects.create(case=case, courtcase_iri=iri, ordinal=1)
+        case.delete()
+
+        with mock.patch("case_events.bus.publish") as pub:
+            handlers.handle_matcher(signal_envelope(subject_refs=[iri]), None)
+
+        assert published(pub) == []
+
+    def test_a_soft_deleted_case_named_outright_is_not_matched_either(self):
+        """The direct-@id path is a separate query and needs the same filter."""
+        case = make_case()
+        case.delete()
+
+        with mock.patch("case_events.bus.publish") as pub:
+            handlers.handle_matcher(signal_envelope(subject_refs=[build_case_iri(case.slug)]), None)
+
+        assert published(pub) == []
+
+    def test_a_draft_case_IS_matched(self):
+        """Kept deliberately: a case being built is what new facts should land on."""
+        case = make_case()
+        assert case.state == "DRAFT"
+        iri = build_courtcase_iri("special", "082-CR-0154")
+        CaseCourtCaseReference.objects.create(case=case, courtcase_iri=iri, ordinal=1)
+
+        with mock.patch("case_events.bus.publish") as pub:
+            handlers.handle_matcher(signal_envelope(subject_refs=[iri]), None)
+
+        assert len(published(pub)) == 1
+
 
 def matched_envelope(case, **overrides):
     return {
@@ -390,7 +462,7 @@ class TestNotifier:
 class TestDerive:
     def test_an_approved_change_reindexes_the_case(self):
         case = make_case()
-        with mock.patch("cases.search_index.index") as index:
+        with mock.patch("cases.search_index.index_now") as index:
             handlers.handle_derive(decision_envelope(case), None)
         index.assert_called_once()
         assert index.call_args.args[0].pk == case.pk
@@ -398,7 +470,7 @@ class TestDerive:
     def test_an_index_failure_propagates_so_it_is_retried(self):
         """The on_commit hook this backstops swallows failures; this must not."""
         case = make_case()
-        with mock.patch("cases.search_index.index", side_effect=RuntimeError("opensearch down")):
+        with mock.patch("cases.search_index.index_now", side_effect=RuntimeError("opensearch down")):
             with pytest.raises(RuntimeError):
                 handlers.handle_derive(decision_envelope(case), None)
 
@@ -422,7 +494,7 @@ class TestDerive:
         CaseSlugHistory.objects.create(slug="old-slug", case=case)
         envelope = {"payload": {"case_slug": "old-slug"}}
 
-        with mock.patch("cases.search_index.index") as index:
+        with mock.patch("cases.search_index.index_now") as index:
             handlers.handle_derive(envelope, None)
 
         assert index.call_args.args[0].pk == case.pk
@@ -434,7 +506,7 @@ class TestDerive:
         other = make_case(slug="some-other-case")
         CaseSlugHistory.objects.create(slug="contested-slug", case=other)
 
-        with mock.patch("cases.search_index.index") as index:
+        with mock.patch("cases.search_index.index_now") as index:
             handlers.handle_derive({"payload": {"case_slug": "contested-slug"}}, None)
 
         assert index.call_args.args[0].pk == live.pk
@@ -443,7 +515,7 @@ class TestDerive:
         """Closing a case is a visibility change; the index needs to hear about it."""
         case = make_case()
         case.delete()  # soft: state -> CLOSED
-        with mock.patch("cases.search_index.index") as index:
+        with mock.patch("cases.search_index.index_now") as index:
             handlers.handle_derive(decision_envelope(case), None)
         assert index.call_args.args[0].pk == case.pk
 
@@ -455,7 +527,7 @@ class TestDerive:
         """15-19s on prod; it would eat the ack window and pile up under a burst."""
         case = make_case()
         with mock.patch("cases.services.statistics.refresh_statistics") as refresh:
-            with mock.patch("cases.search_index.index"):
+            with mock.patch("cases.search_index.index_now"):
                 handlers.handle_derive(decision_envelope(case), None)
         refresh.assert_not_called()
 
@@ -470,7 +542,15 @@ class TestNoHandlerWritesACase:
         before = (case.title, list(case.timeline or []), case.state, case.updated_at)
 
         published_msgs = []
-        with mock.patch("case_events.bus.publish", side_effect=lambda s, e, **k: published_msgs.append(e)):
+
+        def record(subject, envelope, **kwargs):
+            published_msgs.append(envelope)
+            # Returns True: `bus.publish` returning False now means "this did
+            # not go", and the matcher raises on it. The old fake returned
+            # `list.append(...)` — i.e. None — which claimed a failed publish.
+            return True
+
+        with mock.patch("case_events.bus.publish", side_effect=record):
             handlers.handle_matcher(signal_envelope(subject_refs=[iri]), None)
         for envelope in published_msgs:
             handlers.handle_proposal_builder(envelope, None)
