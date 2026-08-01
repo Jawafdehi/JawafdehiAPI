@@ -49,8 +49,16 @@ PRODUCER = "producer:dockets"
 DEFAULT_WINDOW_HOURS = 48
 
 #: Hard ceiling on rows examined per kind per run. A backfill that suddenly
-#: inserts a million hearings must not turn into a million messages; it is
-#: better to emit a bounded batch, say so, and let the next run continue.
+#: inserts a million hearings must not turn into a million messages.
+#:
+#: **Hitting this loses facts permanently, and an earlier version of this
+#: comment claimed the opposite** — that the remainder "waits for the next run".
+#: It does not, and it cannot: there is no watermark, so the next run rescans the
+#: same window in the same ``created_at`` order and re-selects the same first
+#: ``limit`` rows. The tail is never reached, and once the burst ages out of the
+#: window it is gone. That is inherent to the stateless design and is an
+#: acceptable trade only because saturation is loud — see
+#: :func:`window_totals`, and the non-zero exit in ``emit_docket_signals``.
 DEFAULT_LIMIT = 5000
 
 
@@ -75,11 +83,11 @@ def hearing_signals(since, limit: int = DEFAULT_LIMIT):
     """
     from courts.models import CourtCaseHearing
 
-    rows = (
-        CourtCaseHearing.objects.filter(created_at__gte=since)
-        .select_related("court")
-        .order_by("created_at")[:limit]
-    )
+    # No select_related("court"): `court` is a FK whose db_column IS the court
+    # identifier, so `row.court_id` is already the string the IRI needs. Joining
+    # `courts` would be a wasted join on every row of a 5000-row scan to fetch a
+    # value we hold.
+    rows = CourtCaseHearing.objects.filter(created_at__gte=since).order_by("created_at")[:limit]
     for row in rows:
         iri = _courtcase_iri(row.court_id, row.case_number)
         payload = {
@@ -161,8 +169,47 @@ def scan(window_hours: int = DEFAULT_WINDOW_HOURS, limit: int = DEFAULT_LIMIT):
     yield from verdict_signals(since, limit)
 
 
-def publish_window(window_hours: int = DEFAULT_WINDOW_HOURS, limit: int = DEFAULT_LIMIT) -> dict[str, int]:
-    """Emit every signal in the window. Returns per-subject counts sent."""
+def window_totals(window_hours: int = DEFAULT_WINDOW_HOURS) -> dict[str, int]:
+    """How many rows are in the window per kind, ignoring any limit.
+
+    Two COUNT queries, so that saturation can be reported as "5000 of 8231"
+    rather than "5000". The difference matters more than it looks: with no
+    watermark, the 3231 rows this run did not reach are not deferred, they are
+    dropped, and they stay dropped once the window slides past them. An
+    operator seeing only "5000" has no way to tell a capped run from a busy one.
+    """
+    from courts.models import CourtCase, CourtCaseHearing
+
+    since = timezone.now() - timedelta(hours=window_hours)
+    return {
+        subjects.SIGNAL_DOCKET_HEARING_ADDED: CourtCaseHearing.objects.filter(
+            created_at__gte=since
+        ).count(),
+        subjects.SIGNAL_DOCKET_VERDICT_ENTERED: CourtCase.objects.filter(
+            updated_at__gte=since,
+            verdict_date_ad__isnull=False,
+            is_deleted=False,
+        )
+        .exclude(verdict_type__isnull=True)
+        .exclude(verdict_type="")
+        .count(),
+    }
+
+
+def publish_window(
+    window_hours: int = DEFAULT_WINDOW_HOURS,
+    limit: int = DEFAULT_LIMIT,
+    *,
+    wait: bool = True,
+) -> dict[str, int]:
+    """Emit every signal in the window. Returns per-subject counts sent.
+
+    ``wait`` defaults True here, unlike ``emit``: this runs in a CronJob whose
+    entire output is the counts, and a fire-and-forget publish returns True
+    before the broker has said anything — so a run against a broker that
+    rejected every message would report a clean sweep. The round trips cost a
+    scheduled job nothing worth having.
+    """
     counts: dict[str, int] = {}
     for subject, payload, refs, dedup_key, occurred_at in scan(window_hours, limit):
         sent = emit(
@@ -173,6 +220,7 @@ def publish_window(window_hours: int = DEFAULT_WINDOW_HOURS, limit: int = DEFAUL
             dedup_key=dedup_key,
             source=refs[0] if refs else "",
             occurred_at=_as_datetime(occurred_at),
+            wait=wait,
         )
         key = subject if sent else f"{subject} (not sent)"
         counts[key] = counts.get(key, 0) + 1

@@ -144,6 +144,21 @@ class TestItNeverClaimsSuccessItDidNotHave:
             r = client_as("Caseworker").post(URL, body(), format="json")
         assert r.status_code == 502
 
+    def test_it_waits_for_the_broker_before_returning_202(self):
+        """Without this the two checks above cannot fire on the case that matters.
+
+        Fire-and-forget returns True the moment the publish is scheduled, so a
+        broker that rejects the message — which is what a fresh one does for
+        every subject until `nats_bootstrap` has run — still produces a 202.
+        This endpoint is the documented acceptance test for the whole bus; a
+        green light it cannot back up is worse than no endpoint.
+        """
+        make_case()
+        with mock.patch("case_events.bus.publish", return_value=True) as pub:
+            r = client_as("Caseworker").post(URL, body(), format="json")
+        assert r.status_code == 202
+        assert pub.call_args.kwargs.get("wait") is True
+
 
 class TestNoBrokerConfigured:
     def test_it_refuses_rather_than_silently_dropping_the_note(self, settings):

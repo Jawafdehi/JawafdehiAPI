@@ -107,8 +107,11 @@ class ManualNoteView(APIView):
 
         case_iri = build_case_iri(data["case_slug"])
         actor = self._actor(request)
-        # Deterministic in the fact, not the moment: the same caseworker filing
-        # the same note about the same case twice is a duplicate, not two facts.
+        # Deterministic in the fact, not the moment: the same note about the
+        # same case is a duplicate however many times it is filed. Note that the
+        # key does NOT include the caseworker, so two people who independently
+        # notice the same thing collapse to one proposal — which is the point,
+        # and worth stating because it is not what "who filed it" would suggest.
         # Hashed because a note is long and free-form, and dedup_key is bounded.
         import hashlib
 
@@ -129,6 +132,14 @@ class ManualNoteView(APIView):
             dedup_key=dedup_key,
             source=data["source"] or "caseworker",
             occurred_at=data["occurred_at"],
+            # Wait for the broker's answer before telling a human it worked.
+            # Fire-and-forget returns True the moment the publish is scheduled,
+            # so a 202 would have been indistinguishable from a broker that
+            # rejected every message — which is exactly what a fresh one does
+            # until `nats_bootstrap` has run. This endpoint doubles as the
+            # bus's acceptance test; a green light it cannot back up is worse
+            # than no endpoint at all. Costs one round trip on a hand-typed note.
+            wait=True,
         )
 
         logger.info(

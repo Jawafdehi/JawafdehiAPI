@@ -54,6 +54,7 @@ def emit(
     source: str = "",
     raw_ref: str = "",
     occurred_at=None,
+    wait: bool = False,
 ) -> bool:
     """Publish one signal. Never raises; returns False if nothing was sent.
 
@@ -66,6 +67,17 @@ def emit(
     ``build_envelope``. A signal with no deterministic key defeats every dedup
     layer downstream, and since producers re-emit by design that is not a
     degraded message but a duplicate-proposal generator.
+
+    Args:
+        wait: Block for the JetStream ack rather than returning as soon as the
+            publish is handed to the bus thread. **A False return only means
+            anything when this is set.** Without it the return value says the
+            coroutine was scheduled, and the broker's answer — including the
+            rejection you get when no stream claims the subject, i.e. when
+            ``nats_bootstrap`` has not been run — arrives later on a callback
+            nobody reads. Any caller that reports a result to a human, or counts
+            what it sent, wants this on. A ``post_save`` receiver does not: it
+            has no one to tell and a request to keep short.
     """
     if not dedup_key:
         logger.warning("case_events.signal_without_dedup_key", subject=subject, producer=producer)
@@ -82,7 +94,7 @@ def emit(
         occurred_at=occurred_at,
     )
     try:
-        return bus.publish(subject, envelope)
+        return bus.publish(subject, envelope, wait=wait)
     except Exception:  # noqa: BLE001 - a signal is never worth failing real work
         logger.warning("case_events.signal_publish_failed", subject=subject, dedup_key=dedup_key)
         return False

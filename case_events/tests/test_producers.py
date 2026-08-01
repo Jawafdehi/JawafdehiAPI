@@ -19,6 +19,7 @@ from datetime import date, datetime, timedelta, timezone as dt_timezone
 from unittest import mock
 
 import pytest
+from django.test import override_settings
 from django.utils import timezone
 
 from case_events import subjects
@@ -260,6 +261,78 @@ class TestPublishWindow:
         with mock.patch("case_events.bus.publish") as pub:
             assert producers.emit("jaw.signal.x", producer="p", payload={}, subject_refs=[], dedup_key="") is False
         pub.assert_not_called()
+
+    def test_it_waits_for_the_jetstream_ack(self):
+        """Otherwise the "not sent" count above is decorative.
+
+        Fire-and-forget returns True as soon as the publish is scheduled, so a
+        run against a broker rejecting every message — which is what a fresh one
+        does until nats_bootstrap has run — would report a clean sweep.
+        """
+        court = make_court()
+        make_hearing(court)
+
+        with mock.patch("case_events.bus.publish", return_value=True) as pub:
+            dockets.publish_window(window_hours=24)
+
+        assert pub.call_args.kwargs.get("wait") is True
+
+
+class TestSaturationIsNotSilent:
+    """Hitting --limit drops facts permanently. It must be impossible to miss.
+
+    There is no watermark, so the next run rescans the same window in the same
+    `created_at` order and re-selects the same first `limit` rows: the tail is
+    never reached, and it is gone once the burst ages out. The command used to
+    say the remainder "waits for the next run", which is the opposite.
+    """
+
+    def test_window_totals_counts_past_the_limit(self):
+        court = make_court()
+        for i in range(4):
+            make_hearing(court, case_number=f"082-CR-{i:04d}")
+
+        totals = dockets.window_totals(window_hours=24)
+
+        assert totals[subjects.SIGNAL_DOCKET_HEARING_ADDED] == 4
+
+    def test_a_truncated_run_exits_non_zero_and_names_the_shortfall(self):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        court = make_court()
+        for i in range(4):
+            make_hearing(court, case_number=f"082-CR-{i:04d}")
+
+        with mock.patch("case_events.bus.publish", return_value=True):
+            with override_settings(NATS_URL="nats://x:4222"):
+                with pytest.raises(CommandError, match="never emitted"):
+                    call_command("emit_docket_signals", "--apply", "--window-hours", "24", "--limit", "2")
+
+    def test_an_untruncated_run_is_quiet(self):
+        court = make_court()
+        make_hearing(court)
+
+        from django.core.management import call_command
+
+        with mock.patch("case_events.bus.publish", return_value=True):
+            with override_settings(NATS_URL="nats://x:4222"):
+                call_command("emit_docket_signals", "--apply", "--window-hours", "24", "--limit", "50")
+
+    def test_the_read_only_report_says_so_too(self):
+        """Sizing the window before the cron runs is the whole point of --apply-less."""
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        court = make_court()
+        for i in range(4):
+            make_hearing(court, case_number=f"082-CR-{i:04d}")
+
+        err = StringIO()
+        call_command("emit_docket_signals", "--window-hours", "24", "--limit", "2", stderr=err)
+
+        assert "emitted 2 of 4" in err.getvalue()
 
 
 class TestMaterialProducer:
