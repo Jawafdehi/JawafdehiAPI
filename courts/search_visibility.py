@@ -101,11 +101,36 @@ def is_cr_series(case_number: str | None) -> bool:
     return bool(case_number and _CR_RE.search(case_number))
 
 
+#: Courts where a ``NNN-CR-NNNN`` number means a CIAA prosecution. The CIAA files
+#: at the Special Court; every other court's ``CR`` register is its own general
+#: criminal docket and has nothing to do with corruption.
+CR_SERIES_COURTS = frozenset({"special"})
+
+
 def in_corruption_forum(case: Any) -> bool:
-    """True if the case is in the corruption forum: Special Court or CR-series."""
-    if (getattr(case, "court_id", None) or "") == "special":
+    """True if the case is in the corruption forum: the Special Court's registers.
+
+    The ``NNN-CR-NNNN`` shape is NOT court-specific — the Supreme Court's general
+    criminal register uses it too (7,133 rows: homicide, forgery, cheque dishonour).
+    Matching on the number alone therefore swept an entire general criminal docket
+    into a public index whose stated scope is "a curated corruption /
+    public-accountability slice, NOT a docket mirror".
+
+    That stayed hidden only by accident: Supreme's case_type was the coarse
+    'फौजदारी' for every row, which maps to OTHER_CRIMINAL and is excluded as
+    procedural. Once those rows were backfilled with their real charges they mapped
+    to real codes and passed this rule — an estimated 5,093 of them, ~1,200 homicide.
+
+    Restricting the series rule to the courts where CR means CIAA costs nothing: a
+    genuine Supreme corruption appeal has case_type भ्रष्टाचार, which is in
+    SHOW_CODES and is shown on the code axis regardless of forum.
+    """
+    court_id = getattr(case, "court_id", None) or ""
+    if court_id == "special":
         return True
-    return is_cr_series(getattr(case, "case_number", None))
+    return court_id in CR_SERIES_COURTS and is_cr_series(
+        getattr(case, "case_number", None)
+    )
 
 
 def published_referenced_iris(*, refresh: bool = False) -> frozenset[str]:
