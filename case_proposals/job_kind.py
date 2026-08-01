@@ -348,7 +348,13 @@ def on_failure(job) -> None:
 
 SPEC = KindSpec(
     kind=KIND,
-    # A premium-tier call is 30–90s; the worker heartbeats and extends this.
+    # A premium-tier call is 30–90s, so 300 is generous — but it is a HARD
+    # ceiling, not a soft one, and an earlier comment here wrongly said the
+    # worker heartbeats through it. It does not: `job_handlers` calls `on_stage`
+    # exactly once, BEFORE `spec.invoke`, so nothing extends the lease while the
+    # model is thinking. A call that runs past this is reaped mid-flight and its
+    # eventual result POST 409s. Raising this is the fix if that ever shows up;
+    # heartbeating from inside the provider call is not available to us.
     lease_seconds=300,
     # Two, matching case_review's reasoning: a model that produced unusable
     # output for this input will usually do it again, and each attempt costs a

@@ -118,7 +118,7 @@ class Command(BaseCommand):
             self.stdout.write(f"    durable        {spec.durable}")
             self.stdout.write(f"    stream         {spec.stream}")
             self.stdout.write(f"    filter         {spec.filter_subject}")
-            self.stdout.write(f"    max_deliver    {spec.max_deliver} (then -> {spec.dlq_hint})")
+            self.stdout.write(f"    max_deliver    {spec.max_deliver} (then -> {spec.dlq_pattern})")
             self.stdout.write(f"    ack_wait       {spec.ack_wait_seconds}s")
             if spec.description:
                 self.stdout.write(f"    {spec.description}")

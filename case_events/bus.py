@@ -164,7 +164,7 @@ class _Bus:
             # Cancel before stopping the loop, or the abandoned _connect task is
             # destroyed while pending and nats-py logs it as an error.
             future.cancel()
-            loop.call_soon_threadsafe(loop.stop)
+            _shutdown_loop(loop, thread)
             raise
 
         return loop, thread, nc, js
@@ -192,7 +192,9 @@ class _Bus:
     def close(self):
         """Drain and disconnect. For tests and orderly shutdown."""
         with self._lock:
-            loop, nc = self._loop, self._nc
+            # Captured before the reset nulls them, thread included — the
+            # shutdown below has to join it before the loop can be closed.
+            loop, nc, thread = self._loop, self._nc, self._thread
             self._reset_locked()
         if loop is None:
             return
@@ -202,7 +204,7 @@ class _Bus:
         except Exception as exc:  # noqa: BLE001 - shutdown is best-effort too
             logger.warning("case_events.close_failed", error=str(exc))
         finally:
-            loop.call_soon_threadsafe(loop.stop)
+            _shutdown_loop(loop, thread)
 
     # ── publishing ───────────────────────────────────────────────────────────
 
@@ -241,6 +243,33 @@ class _Bus:
         else:
             future.add_done_callback(lambda f: _log_result(f, subject))
         return True
+
+
+def _shutdown_loop(loop, thread) -> None:
+    """Stop a loop, join its thread, and CLOSE it.
+
+    The close is the part that was missing. ``loop.stop()`` alone leaves the
+    loop's selector and its self-pipe socketpair open, so every abandoned loop
+    costs a couple of file descriptors permanently. That is invisible for the
+    orderly-shutdown case, which happens once — but ``_start`` takes the same
+    path on every failed connect, and with a 30-second retry window a sustained
+    broker outage leaks steadily in a process that never restarts.
+
+    The join is what makes closing safe: ``loop.close()`` on a loop still
+    running raises, and ``stop()`` only asks. A short timeout because this is
+    shutdown, and a thread that will not stop is not worth blocking a request
+    for — leaking a loop beats hanging.
+    """
+    loop.call_soon_threadsafe(loop.stop)
+    if thread is not None:
+        thread.join(timeout=2)
+        if thread.is_alive():
+            logger.warning("case_events.loop_thread_did_not_stop")
+            return
+    try:
+        loop.close()
+    except Exception as exc:  # noqa: BLE001 - shutdown is best-effort
+        logger.warning("case_events.loop_close_failed", error=str(exc))
 
 
 def _log_result(future, subject: str):

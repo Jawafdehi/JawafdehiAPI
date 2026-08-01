@@ -55,6 +55,22 @@ def _producer(name: str) -> str:
 # ── matcher ──────────────────────────────────────────────────────────────────
 
 
+def _enrichable():
+    """Cases an observed fact may be proposed against.
+
+    Excludes CLOSED, which on this platform is the soft delete: ``Case.delete()``
+    flips the state and keeps the row (accountability archive — nothing is hard
+    deleted). Without this filter a deleted case still joins on its court-case
+    references, so every scrape of that docket buys a premium model call and puts
+    a review item in front of a caseworker for a case somebody deliberately
+    removed. DRAFT and IN_REVIEW are deliberately kept: a case being built is
+    exactly the sort of thing new facts should land on.
+    """
+    from cases.models import Case, CaseState
+
+    return Case.objects.exclude(state=CaseState.CLOSED)
+
+
 def _cases_for_refs(refs: list[str]):
     """Cases joined to any of ``refs`` by an EXACT identifier match.
 
@@ -68,15 +84,14 @@ def _cases_for_refs(refs: list[str]):
     observation into dozens of proposals, none of them evidenced. Entity-based
     matching needs its own scoring, and it is not this consumer's pilot job.
     """
-    from cases.models import Case
-
     if not refs:
         return []
 
     from django.db.models import Q
 
     return list(
-        Case.objects.filter(
+        _enrichable()
+        .filter(
             Q(courtcase_references__courtcase_iri__in=refs)
             | Q(material_references__material_iri__in=refs)
         )
@@ -103,9 +118,7 @@ def _cases_named_directly(refs: list[str]):
     if not slugs:
         return []
 
-    from cases.models import Case
-
-    return list(Case.objects.filter(slug__in=slugs).only("id", "slug", "title"))
+    return list(_enrichable().filter(slug__in=slugs).only("id", "slug", "title"))
 
 
 def handle_matcher(envelope: dict, context) -> None:
@@ -115,6 +128,15 @@ def handle_matcher(envelope: dict, context) -> None:
     rather than one message listing several keeps every downstream consumer's
     unit of work a single case, which is what makes their dedup keys and their
     retries meaningful.
+
+    **A failed publish raises**, which is the one place this file departs from
+    the best-effort publishing rule the rest of the codebase follows. Everywhere
+    else the bus describes work that has already been done, so a dropped message
+    costs a log line. Here the message IS the work: if the ``jaw.case.matched``
+    does not land, the signal has been consumed and nothing downstream will ever
+    hear about it — acked, unretried, and absent from the DLQ. ``bus.publish``
+    returns False without raising for a suppressed connect and logs it at DEBUG,
+    so ignoring the return silently discards facts during any broker blip.
     """
     from case_events import bus
 
@@ -167,7 +189,12 @@ def handle_matcher(envelope: dict, context) -> None:
                 "producer": envelope.get("producer"),
             },
         }
-        bus.publish(
+        matched_key = _matched_dedup_key(envelope, case.slug)
+        # wait=True: without it a True return means "handed to the loop thread",
+        # and the JetStream ack — including the rejection you get when no stream
+        # claims the subject, i.e. when nats_bootstrap has not been run — arrives
+        # later on a callback nothing here can see.
+        sent = bus.publish(
             subjects.CASE_MATCHED,
             build_envelope(
                 subject=subjects.CASE_MATCHED,
@@ -176,13 +203,22 @@ def handle_matcher(envelope: dict, context) -> None:
                 # Derived from the SIGNAL's dedup key, not generated: re-matching
                 # a redelivered signal must collapse rather than fan out. Scoped
                 # by case so a multi-case match still produces distinct messages.
-                dedup_key=_matched_dedup_key(envelope, case.slug),
+                dedup_key=matched_key,
                 source=envelope.get("source") or "",
                 raw_ref=envelope.get("raw_ref") or "",
                 occurred_at=None,
                 payload=payload,
             ),
+            wait=True,
         )
+        if not sent:
+            # Retryable, not poison: the message is fine, the broker is not. The
+            # redelivery re-publishes the cases already done in this loop, and
+            # that is harmless — every one of them carries a deterministic
+            # dedup_key, so JetStream collapses the repeats.
+            raise RuntimeError(
+                f"could not publish {subjects.CASE_MATCHED} for {case.slug!r} ({matched_key})"
+            )
 
     logger.info(
         "case_events.matcher_matched",
@@ -371,11 +407,14 @@ def handle_derive(envelope: dict, context) -> None:
         # will not find it, so bury rather than burn four more attempts.
         raise PoisonMessage(f"no case with slug {case_slug!r} to re-index")
 
-    from cases.search_index import index
+    from cases.search_index import index_now
 
-    # Any failure here propagates: unlike the on_commit hook this backstops, a
-    # failed index write should be retried and then dead-lettered, not swallowed.
-    index(case)
+    # `index_now`, not `index`. They are the same function; `index` is wrapped in
+    # @best_effort, which logs the transport error and returns None. Calling that
+    # one made this handler unable to fail — so the retry budget and the DLQ that
+    # justify doing the re-index from the bus at all were decoration, and this
+    # consumer was the duplicated effort its docstring says it is not.
+    index_now(case)
     logger.info("case_events.derived_reindex", case_slug=case_slug, proposal_id=payload.get("proposal_id"))
 
 

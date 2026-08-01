@@ -77,13 +77,13 @@ class Disposition(str, Enum):
     DEAD_LETTER = "dead_letter"
 
 
-def decide(*, error: BaseException | None, num_delivered: int, max_deliver: int) -> Disposition:
+def decide(*, error: BaseException | None, num_delivered: int | None, max_deliver: int) -> Disposition:
     """Choose a disposition for one delivery.
 
     Args:
         error: What the handler raised, or None if it returned cleanly.
         num_delivered: JetStream's delivery count for this message, 1-based on
-            the first delivery.
+            the first delivery, or None when it could not be read.
         max_deliver: The consumer's configured delivery budget.
 
     Returns:
@@ -94,12 +94,21 @@ def decide(*, error: BaseException | None, num_delivered: int, max_deliver: int)
     advisory nobody here is listening to — so a message NAK'd on its final
     delivery is simply gone. Detecting the last delivery ourselves, and burying
     it deliberately, is the difference between a dead-letter queue and a leak.
+
+    An UNKNOWN count buries too, which reverses what this used to do. Treating
+    an unreadable delivery count as "first delivery" reads like the cautious
+    choice — retry rather than give up — but it can never satisfy the check
+    above, so such a message is NAK'd forever until JetStream drops it silently:
+    precisely the leak this function exists to prevent, reintroduced by the
+    safety default. Burying early costs a few retries we did not have to skip
+    and leaves the body on the DLQ, where a human can requeue it. The two
+    mistakes are not symmetric; only one of them is recoverable.
     """
     if error is None:
         return Disposition.ACK
     if isinstance(error, PoisonMessage):
         return Disposition.DEAD_LETTER
-    if num_delivered >= max_deliver:
+    if num_delivered is None or num_delivered >= max_deliver:
         return Disposition.DEAD_LETTER
     return Disposition.RETRY
 
@@ -141,14 +150,31 @@ class ConsumerSpec:
         return f"jaw-{self.name}"
 
     @property
-    def dlq_hint(self) -> str:
-        """Where this consumer's poison messages land, as a wildcard.
+    def dlq_pattern(self) -> str:
+        """Where this consumer's poison messages land, as a SUBSCRIBE PATTERN.
 
-        Approximate by construction: the real subject appends the message's own
-        subject, so a consumer filtering a wildcard buries to several. Shown by
-        ``run_consumers`` so the DLQ is greppable before anything has failed.
+        Not a subject, and named so it cannot be mistaken for one. The real
+        subject appends the message's own subject, so a consumer filtering a
+        wildcard buries to several — which means for ``matcher`` this evaluates
+        to ``jaw.dlq.jaw.signal.>`` and NATS rejects a publish to it. It exists
+        so ``run_consumers`` can print something greppable before anything has
+        failed; the publish target is built per message by
+        :func:`case_events.subjects.dlq_subject`.
         """
         return f"{subjects.DLQ_PREFIX}{self.filter_subject}"
+
+    @property
+    def backoff(self) -> list[int]:
+        """The redelivery backoff, trimmed to fit ``max_deliver``.
+
+        JetStream requires strictly more deliveries than backoff steps and
+        rejects the consumer at subscribe time otherwise — which means at
+        rollout, in a pod that then crashloops. Deriving the list from
+        ``max_deliver`` rather than asserting the pair makes the two impossible
+        to set inconsistently: lowering ``max_deliver`` shortens the schedule
+        instead of breaking the subscribe.
+        """
+        return list(DEFAULT_BACKOFF_SECONDS)[: max(0, self.max_deliver - 1)]
 
 
 _REGISTRY: dict[str, ConsumerSpec] = {}

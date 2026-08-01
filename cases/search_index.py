@@ -30,7 +30,10 @@ re-indexed when a referenced entity is renamed (a scheduled ``reindex_cases``
 reconcile covers this — see the plan's WS3); the write-time signals only fire on
 ``Case`` itself.
 
-Best-effort: an OpenSearch error is logged and swallowed.
+Best-effort: ``index`` / ``delete`` log and swallow an OpenSearch error, because
+they run from write-time signals where a search blip must not fail a case save.
+``index_now`` / ``delete_now`` are the same functions without the swallow, for
+callers that have a retry budget to spend on the failure.
 """
 
 from __future__ import annotations
@@ -256,22 +259,26 @@ def build_indexed_doc(case: Any) -> dict[str, Any]:
     return build_doc(case, entities=_safe_resolve_entities(case))
 
 
-@best_effort("index case")
-def index(case: Any, *, client=None) -> None:
-    """Upsert a PUBLISHED case; otherwise remove it from the index (best-effort).
+def index_now(case: Any, *, client=None) -> None:
+    """Upsert a PUBLISHED case; otherwise remove it from the index. RAISES.
 
     The case-only-published rule: publishing indexes; any non-PUBLISHED state
-    (draft/in-review/closed) deletes the doc so it never appears in search."""
+    (draft/in-review/closed) deletes the doc so it never appears in search.
+
+    The raising twin of :func:`index`, for the one caller that has somewhere to
+    put a failure. Write-time signal paths want best-effort — an OpenSearch blip
+    must not fail a case save — but a caller with a retry budget and a dead
+    letter queue (``case_events.consumers.handlers.handle_derive``) needs the
+    error, and swallowing it turns that budget into decoration."""
     cl = client or make_client()
     if should_index(case):
         upsert_doc(cl, CASE_INDEX, build_indexed_doc(case))
     else:
-        delete(case, client=cl)
+        delete_now(case, client=cl)
 
 
-@best_effort("delete case")
-def delete(case: Any, *, client=None) -> None:
-    """Delete the case's doc from ``jawafdehi-cases`` (best-effort).
+def delete_now(case: Any, *, client=None) -> None:
+    """Delete the case's doc from ``jawafdehi-cases``. RAISES.
 
     Uses the public IRI when the case is (or was) published; falls back to
     building one from the slug so a case that has just LEFT published state can
@@ -288,3 +295,11 @@ def delete(case: Any, *, client=None) -> None:
                 iri = None
     if iri:
         delete_doc(client or make_client(), CASE_INDEX, iri)
+
+
+#: The best-effort forms — what every write-time signal path wants, and the
+#: names every existing caller already imports. Derived from the raising twins
+#: rather than the other way round, so there is one implementation of the rule
+#: and the swallow is visibly a wrapper over it.
+index = best_effort("index case")(index_now)
+delete = best_effort("delete case")(delete_now)
