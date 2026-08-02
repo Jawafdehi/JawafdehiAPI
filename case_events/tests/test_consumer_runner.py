@@ -16,6 +16,7 @@ assertions on a Mock.
 from __future__ import annotations
 
 import json
+from unittest import mock
 
 import pytest
 
@@ -202,8 +203,16 @@ class TestProcessMessage:
         assert await runner.process_message(js, spec_for(lambda e, c: None), msg) is Disposition.DEAD_LETTER
         assert js.published
 
-    async def test_unreadable_metadata_retries_rather_than_burying(self):
-        """Defaulting the delivery count LOW is the recoverable mistake."""
+    async def test_unreadable_metadata_buries_rather_than_retrying_forever(self):
+        """The reverse of what this asserted before, and the reversal is the point.
+
+        Defaulting the delivery count LOW *looks* like the recoverable choice —
+        retry rather than give up. It is not: an unknown count can never satisfy
+        ``num_delivered >= max_deliver``, so the message is NAK'd until
+        JetStream silently drops it at MaxDeliver. That is the exact leak the
+        DLQ exists to prevent, arrived at by the safety default. Burying puts
+        the body somewhere a human can find it.
+        """
         js = FakeJS()
         msg = FakeMsg({"a": 1})
         del msg.metadata
@@ -211,7 +220,25 @@ class TestProcessMessage:
         def boom(envelope, ctx):
             raise RuntimeError("x")
 
-        assert await runner.process_message(js, spec_for(boom), msg) is Disposition.RETRY
+        result = await runner.process_message(js, spec_for(boom), msg)
+
+        assert result is Disposition.DEAD_LETTER
+        assert msg.settled == ["term"]
+        # And the body reached the DLQ before the terminate, as always.
+        assert js.published and js.published[0][0].startswith(subjects.DLQ_PREFIX)
+
+    async def test_an_unknown_delivery_count_is_reported_as_unknown(self):
+        """`decide` can only bury an unknown count if it is told the count is unknown.
+
+        Pinning the None rather than a plausible-looking 1: a guess here reads
+        as a real first delivery at every call site downstream, including the
+        `handler_failed` log line an operator would use to work out why a
+        message kept coming back.
+        """
+        msg = FakeMsg({"a": 1})
+        del msg.metadata
+
+        assert runner._num_delivered(msg) is None
 
     async def test_a_handler_that_blocks_does_not_run_on_the_event_loop(self):
         """Handlers use the Django ORM, which refuses to run inside a loop."""
@@ -240,6 +267,374 @@ def _loop_is_running() -> bool:
         return True
     except RuntimeError:
         return False
+
+
+class TestSettling:
+    """Talking to the broker is the part of handling a message that can fail."""
+
+    async def test_a_failed_ack_does_not_kill_the_consumer(self):
+        """Redelivery already covers a lost ack. Losing the consumer covers nothing.
+
+        The settle calls used to be the only unguarded awaits in the fetch loop,
+        so one transient ack error propagated all the way out of `run_one` and
+        that consumer was gone for the life of the pod.
+        """
+        js = FakeJS()
+        msg = FakeMsg({"a": 1})
+
+        async def boom_ack():
+            raise RuntimeError("connection reset")
+
+        msg.ack = boom_ack
+
+        result = await runner.process_message(js, spec_for(lambda e, c: None), msg)
+
+        assert result is Disposition.ACK  # the decision stands; only delivery failed
+
+    async def test_a_failed_nak_does_not_kill_the_consumer_either(self):
+        js = FakeJS()
+        msg = FakeMsg({"a": 1}, num_delivered=1)
+
+        async def boom_nak(delay=None):
+            raise RuntimeError("connection reset")
+
+        msg.nak = boom_nak
+
+        def handler(envelope, ctx):
+            raise RuntimeError("transient")
+
+        result = await runner.process_message(js, spec_for(handler, max_deliver=5), msg)
+
+        assert result is Disposition.RETRY
+
+
+class TestFetchFailures:
+    async def test_a_broker_that_never_answers_makes_the_consumer_give_up(self, monkeypatch):
+        """Warn-and-sleep-forever leaves the pod Ready and consuming nothing.
+
+        Which is the same failure the supervision below exists to convert into
+        an exit — a consumer polling a broker that stopped answering is
+        indistinguishable, from outside, from one with no work to do.
+        """
+        import asyncio
+
+        class DeadSub:
+            async def fetch(self, batch, timeout=None):
+                raise RuntimeError("nats: connection closed")
+
+        monkeypatch.setattr(runner, "subscribe", lambda js, spec: _resolved(DeadSub()))
+        # The constant, not `asyncio.sleep` — pytest-asyncio's own machinery
+        # runs on that, and replacing it process-wide wedges the loop.
+        monkeypatch.setattr(runner, "FETCH_RETRY_SLEEP_SECONDS", 0)
+
+        # wait_for, because the thing being asserted is that this TERMINATES.
+        # Without the bound, a regression that removes the ceiling does not fail
+        # the test — it hangs it, and a wedged CI job is a much worse way to
+        # learn about a bug than a red one.
+        with pytest.raises(RuntimeError, match="consecutive fetch failures"):
+            await asyncio.wait_for(
+                runner.run_one(
+                    FakeJS(),
+                    spec_for(lambda e, c: None, max_deliver=5),
+                    stop=asyncio.Event(),
+                    once=False,
+                    max_messages=None,
+                ),
+                timeout=5,
+            )
+
+    async def test_an_empty_window_is_not_a_failure(self, monkeypatch):
+        """A quiet bus is the normal case and must never count toward the ceiling."""
+        import asyncio
+
+        from nats.errors import TimeoutError as NatsTimeoutError
+
+        calls = {"n": 0}
+        stop = asyncio.Event()
+
+        class QuietSub:
+            async def fetch(self, batch, timeout=None):
+                calls["n"] += 1
+                if calls["n"] > runner.MAX_CONSECUTIVE_FETCH_FAILURES * 2:
+                    stop.set()
+                raise NatsTimeoutError()
+
+        monkeypatch.setattr(runner, "subscribe", lambda js, spec: _resolved(QuietSub()))
+
+        handled = await asyncio.wait_for(
+            runner.run_one(
+                FakeJS(),
+                spec_for(lambda e, c: None, max_deliver=5),
+                stop=stop,
+                once=False,
+                max_messages=None,
+            ),
+            timeout=5,
+        )
+
+        assert handled == 0  # it polled well past the ceiling and never gave up
+
+    async def test_a_bounded_run_that_cannot_reach_the_broker_fails(self, monkeypatch):
+        """`--once` against a dead broker must not exit zero.
+
+        Breaking out of the loop returns a count, and `run` reads any count as
+        a clean finish because `fatal` is False in bounded mode — so a
+        scheduled `run_consumers --apply --once` drain reported success having
+        drained nothing. Only the timeout branch means "the backlog is empty".
+        """
+        import asyncio
+
+        class DeadSub:
+            async def fetch(self, batch, timeout=None):
+                raise RuntimeError("nats: connection closed")
+
+        monkeypatch.setattr(runner, "subscribe", lambda js, spec: _resolved(DeadSub()))
+
+        with pytest.raises(RuntimeError, match="bounded run"):
+            await asyncio.wait_for(
+                runner.run_one(
+                    FakeJS(),
+                    spec_for(lambda e, c: None, max_deliver=5),
+                    stop=asyncio.Event(),
+                    once=True,
+                    max_messages=None,
+                ),
+                timeout=5,
+            )
+
+    async def test_a_bounded_run_on_a_quiet_bus_still_succeeds(self):
+        """The timeout branch keeps meaning "drained", which is the whole point."""
+        import asyncio
+
+        from nats.errors import TimeoutError as NatsTimeoutError
+
+        class QuietSub:
+            async def fetch(self, batch, timeout=None):
+                raise NatsTimeoutError()
+
+        with mock.patch.object(runner, "subscribe", lambda js, spec: _resolved(QuietSub())):
+            handled = await asyncio.wait_for(
+                runner.run_one(
+                    FakeJS(),
+                    spec_for(lambda e, c: None, max_deliver=5),
+                    stop=asyncio.Event(),
+                    once=True,
+                    max_messages=None,
+                ),
+                timeout=5,
+            )
+
+        assert handled == 0
+
+    async def test_a_recovered_fetch_resets_the_count(self, monkeypatch):
+        """The ceiling is CONSECUTIVE failures, not cumulative ones.
+
+        A bus that fails a fetch now and then over weeks is a working bus, and
+        it must never accumulate its way to an exit. Without the reset the
+        counter only ever climbs, so a long-lived consumer eventually kills
+        itself on a broker that is fine — and the two dedicated tests above
+        cannot tell the difference, because neither ever interleaves.
+        """
+        import asyncio
+
+        from nats.errors import TimeoutError as NatsTimeoutError
+
+        # Alternate: fail, then a quiet window, over and over. Far more rounds
+        # than the ceiling allows if the count were cumulative.
+        rounds = runner.MAX_CONSECUTIVE_FETCH_FAILURES * 3
+        calls = {"n": 0}
+        stop = asyncio.Event()
+
+        class FlakySub:
+            async def fetch(self, batch, timeout=None):
+                calls["n"] += 1
+                if calls["n"] >= rounds * 2:
+                    stop.set()
+                if calls["n"] % 2:
+                    raise RuntimeError("transient blip")
+                raise NatsTimeoutError()
+
+        monkeypatch.setattr(runner, "subscribe", lambda js, spec: _resolved(FlakySub()))
+        monkeypatch.setattr(runner, "FETCH_RETRY_SLEEP_SECONDS", 0)
+
+        handled = await asyncio.wait_for(
+            runner.run_one(
+                FakeJS(),
+                spec_for(lambda e, c: None, max_deliver=5),
+                stop=stop,
+                once=False,
+                max_messages=None,
+            ),
+            timeout=5,
+        )
+
+        assert handled == 0
+        assert calls["n"] >= rounds, "it gave up despite recovering between failures"
+
+
+async def _resolved(value):
+    return value
+
+
+class TestRun:
+    """One dead consumer must take the process down with it.
+
+    These four share a Deployment, so the process is the only thing an
+    orchestrator can observe. An earlier version gathered the tasks and reported
+    a crash afterwards — but nothing ever finishes in the continuous mode, so
+    "afterwards" never came: a matcher that died on a missing stream left the
+    other three polling and the pod Ready, consuming nothing.
+    """
+
+    async def _run(self, monkeypatch, specs, run_one, **kwargs):
+        import contextlib
+
+        class FakeNC:
+            async def drain(self):
+                return None
+
+        async def fake_connect():
+            return FakeNC(), FakeJS()
+
+        monkeypatch.setattr(runner, "connect", fake_connect)
+        monkeypatch.setattr(runner, "run_one", run_one)
+        monkeypatch.setattr(runner, "_install_signal_handlers", lambda stop: None)
+        with contextlib.suppress(Exception):
+            return await runner.run(specs, **kwargs)
+
+    async def test_a_crashed_consumer_stops_the_others_and_is_reported(self, monkeypatch):
+        import asyncio
+
+        specs = [
+            spec_for(lambda e, c: None, name="crasher", max_deliver=5),
+            spec_for(lambda e, c: None, name="survivor", max_deliver=5),
+        ]
+
+        async def run_one(js, spec, *, stop, once, max_messages):
+            if spec.name == "crasher":
+                raise RuntimeError("stream not found")
+            # The sibling: loops until told to stop, exactly like the real one.
+            while not stop.is_set():
+                await asyncio.sleep(0.01)
+            return 7
+
+        counts = await asyncio.wait_for(self._run(monkeypatch, specs, run_one), timeout=5)
+
+        assert counts["crasher"] == -1, "a crash must be reported"
+        # And the sibling actually returned, i.e. it was told to stop. Without
+        # that, this test would hang rather than fail — hence the wait_for.
+        assert counts["survivor"] == 7
+
+    async def test_a_consumer_that_returns_early_counts_as_a_crash(self, monkeypatch):
+        """A clean return in continuous mode is still a consumer that stopped.
+
+        Distinguished from a graceful SIGTERM, which also sets `stop` — that one
+        must stay a zero exit.
+        """
+        import asyncio
+
+        specs = [
+            spec_for(lambda e, c: None, name="quitter", max_deliver=5),
+            spec_for(lambda e, c: None, name="survivor", max_deliver=5),
+        ]
+
+        async def run_one(js, spec, *, stop, once, max_messages):
+            if spec.name == "quitter":
+                return 0
+            while not stop.is_set():
+                await asyncio.sleep(0.01)
+            return 3
+
+        counts = await asyncio.wait_for(self._run(monkeypatch, specs, run_one), timeout=5)
+
+        assert counts["quitter"] == -1
+
+    async def test_once_mode_lets_consumers_finish_independently(self, monkeypatch):
+        """A drain is meant to end. One finishing says nothing about the others."""
+        import asyncio
+
+        specs = [
+            spec_for(lambda e, c: None, name="a", max_deliver=5),
+            spec_for(lambda e, c: None, name="b", max_deliver=5),
+        ]
+
+        async def run_one(js, spec, *, stop, once, max_messages):
+            if spec.name == "a":
+                return 1
+            await asyncio.sleep(0.05)
+            return 2
+
+        counts = await asyncio.wait_for(
+            self._run(monkeypatch, specs, run_one, once=True), timeout=5
+        )
+
+        assert counts == {"a": 1, "b": 2}, "neither should be marked crashed"
+
+
+class TestBackoffFitsTheDeliveryBudget:
+    """JetStream rejects a consumer with as many backoff steps as deliveries.
+
+    It does so at subscribe time — during a rollout, in a pod that then
+    crashloops — so the schedule is derived from ``max_deliver`` rather than
+    asserted against it. Setting the two inconsistently is not possible.
+    """
+
+    def test_the_default_pair_leaves_room(self):
+        from case_events.consumers import DEFAULT_BACKOFF_SECONDS
+
+        spec = spec_for(lambda e, c: None, max_deliver=5)
+        assert spec.backoff == list(DEFAULT_BACKOFF_SECONDS)
+        assert len(spec.backoff) < spec.max_deliver
+
+    def test_a_small_budget_shortens_the_schedule_instead_of_breaking_it(self):
+        for max_deliver in range(1, 8):
+            spec = spec_for(lambda e, c: None, max_deliver=max_deliver)
+            assert len(spec.backoff) < max_deliver or max_deliver == 0
+
+
+class TestDeadLetterKey:
+    async def test_burying_the_same_body_twice_collapses(self):
+        """Otherwise the DLQ's depth counts delivery attempts, not failing facts.
+
+        The depth is the number an operator reacts to, so it has to mean what it
+        looks like — and a message reaches here on its final delivery, which a
+        consumer restart or a re-published copy can repeat.
+        """
+        js = FakeJS()
+        spec = spec_for(_boom, max_deliver=5)
+
+        keys = []
+        for _ in range(2):
+            msg = FakeMsg({"a": 1}, num_delivered=5)
+            await runner.process_message(js, spec, msg)
+            keys.append(js.published[-1][1]["dedup_key"])
+
+        assert keys[0] == keys[1] and keys[0]
+
+    async def test_an_unparseable_body_still_gets_a_key(self):
+        """The commonest reason to be in the DLQ is that there was no envelope to read."""
+        js = FakeJS()
+        msg = FakeMsg(raw=b"\xff\xfe not json", num_delivered=1)
+
+        await runner.process_message(js, spec_for(lambda e, c: None, max_deliver=5), msg)
+
+        assert js.published[-1][1]["dedup_key"]
+
+    async def test_two_different_bodies_do_not_collapse(self):
+        js = FakeJS()
+        spec = spec_for(_boom, max_deliver=5)
+
+        keys = []
+        for payload in ({"a": 1}, {"a": 2}):
+            msg = FakeMsg(payload, num_delivered=5)
+            await runner.process_message(js, spec, msg)
+            keys.append(js.published[-1][1]["dedup_key"])
+
+        assert keys[0] != keys[1]
+
+
+def _boom(envelope, ctx):
+    raise RuntimeError("nope")
 
 
 class TestSelect:

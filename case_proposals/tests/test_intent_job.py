@@ -22,6 +22,7 @@ from case_proposals import job_kind
 from case_proposals.job_kind import BadIntentPayload, build_payload, on_result
 from case_proposals.models import CaseUpdateProposal, ProposalStatus
 from cases.models import Case, CaseType
+from jawafdehi_shared.entities.ids import build_courtcase_iri
 from jobs.models import Job
 
 pytestmark = pytest.mark.django_db
@@ -143,6 +144,35 @@ class TestStagingAProposal:
         assert proposal.detected_by == job_kind.DETECTED_BY
         assert proposal.dedup_key == "docket:abc:hearing:2082-12-01"
         assert proposal.origin_subject == "jaw.case.matched"
+
+    def test_a_REALISTIC_docket_key_stages_rather_than_failing_validation(self):
+        """The keys in the other tests here are short, and that hid a real bug.
+
+        Production keys are not ``docket:abc:...``. A docket key embeds a full
+        court-case IRI and the matched key appends the case slug, which comes to
+        108 characters for an ordinary case — over the 100 that ``origin_msg_id``
+        used to allow. Every docket-derived proposal therefore failed serializer
+        validation, was filed as "the model produced something unusable", and
+        left no row behind, so the duplicate check found nothing and the next
+        scrape bought another premium call to fail identically.
+
+        Built from the real IRI helper rather than a literal, so the day the IRI
+        grammar or the base host gets longer, this fails here instead of in a
+        cron nobody is watching.
+        """
+        case = make_case()
+        iri = build_courtcase_iri("special", "082-CR-0154")
+        matched_key = f"matched:docket:{iri}:hearing:2082-11-20:{case.slug}"
+        assert len(matched_key) > 100, "the fixture stopped exercising the overflow"
+
+        job = make_job(case, dedup_key=matched_key, origin_msg_id=matched_key)
+        on_result(job, good_result())
+
+        proposal = CaseUpdateProposal.objects.get()
+        assert proposal.origin_msg_id == matched_key
+        # Not truncated: the value's whole job is to lead back to the message
+        # that caused the proposal, and a clipped key leads nowhere.
+        assert job.result["staged"]["proposal_id"] == proposal.pk
 
     def test_the_staged_proposal_is_recorded_on_the_job(self):
         case = make_case()

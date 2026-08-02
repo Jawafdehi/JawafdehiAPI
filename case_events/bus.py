@@ -164,7 +164,7 @@ class _Bus:
             # Cancel before stopping the loop, or the abandoned _connect task is
             # destroyed while pending and nats-py logs it as an error.
             future.cancel()
-            loop.call_soon_threadsafe(loop.stop)
+            _shutdown_loop(loop, thread)
             raise
 
         return loop, thread, nc, js
@@ -192,7 +192,9 @@ class _Bus:
     def close(self):
         """Drain and disconnect. For tests and orderly shutdown."""
         with self._lock:
-            loop, nc = self._loop, self._nc
+            # Captured before the reset nulls them, thread included — the
+            # shutdown below has to join it before the loop can be closed.
+            loop, nc, thread = self._loop, self._nc, self._thread
             self._reset_locked()
         if loop is None:
             return
@@ -202,7 +204,7 @@ class _Bus:
         except Exception as exc:  # noqa: BLE001 - shutdown is best-effort too
             logger.warning("case_events.close_failed", error=str(exc))
         finally:
-            loop.call_soon_threadsafe(loop.stop)
+            _shutdown_loop(loop, thread)
 
     # ── publishing ───────────────────────────────────────────────────────────
 
@@ -241,6 +243,66 @@ class _Bus:
         else:
             future.add_done_callback(lambda f: _log_result(f, subject))
         return True
+
+
+def _shutdown_loop(loop, thread) -> None:
+    """Stop a loop, join its thread, and CLOSE it.
+
+    The close is the part that was missing. ``loop.stop()`` alone leaves the
+    loop's selector and its self-pipe socketpair open, so every abandoned loop
+    costs a couple of file descriptors permanently. That is invisible for the
+    orderly-shutdown case, which happens once — but ``_start`` takes the same
+    path on every failed connect, and with a 30-second retry window a sustained
+    broker outage leaks steadily in a process that never restarts.
+
+    The join is what makes closing safe: ``loop.close()`` on a loop still
+    running raises, and ``stop()`` only asks. A short timeout because this is
+    shutdown, and a thread that will not stop is not worth blocking a request
+    for — leaking a loop beats hanging.
+
+    **Pending tasks are drained first, and that is not tidiness.** The timeout
+    path in ``_start`` cancels the ``_connect()`` future, but cancellation is
+    only *scheduled* — the task is still mid-flight when we stop the loop, so
+    closing it discards a task that owns a half-open TCP socket. Measured: stop
+    the loop straight after a cancel and the task is still pending, and CPython
+    prints "Task was destroyed but it is pending!" on close. Draining defeats
+    the point of closing if it is skipped, since the socket is the very thing
+    the close is meant to reclaim.
+    """
+    if thread is not None and thread.is_alive():
+        try:
+            drained = asyncio.run_coroutine_threadsafe(_drain_tasks(), loop)
+            drained.result(timeout=2)
+        except Exception as exc:  # noqa: BLE001 - shutdown is best-effort throughout
+            logger.warning("case_events.loop_drain_failed", error=str(exc) or type(exc).__name__)
+
+    loop.call_soon_threadsafe(loop.stop)
+    if thread is not None:
+        thread.join(timeout=2)
+        if thread.is_alive():
+            logger.warning("case_events.loop_thread_did_not_stop")
+            return
+    try:
+        loop.close()
+    except Exception as exc:  # noqa: BLE001 - shutdown is best-effort
+        logger.warning("case_events.loop_close_failed", error=str(exc))
+
+
+async def _drain_tasks() -> None:
+    """Cancel every other task on this loop and wait for them to finish.
+
+    Runs ON the loop, which is the only place it can see the task set. Excludes
+    itself, or it would cancel the drain mid-drain.
+    """
+    me = asyncio.current_task()
+    others = [t for t in asyncio.all_tasks() if t is not me and not t.done()]
+    if not others:
+        return
+    for task in others:
+        task.cancel()
+    # return_exceptions: a cancelled task raises CancelledError, which is the
+    # expected outcome here rather than a failure to report.
+    await asyncio.gather(*others, return_exceptions=True)
 
 
 def _log_result(future, subject: str):

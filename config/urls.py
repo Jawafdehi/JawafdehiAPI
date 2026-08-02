@@ -81,6 +81,9 @@ urlpatterns = [
     path("api/", include("newsletter.urls")),
     # Case-update proposals — before cases.urls (whose router is broad).
     path("api/", include("case_proposals.urls")),
+    # Filing a signal by hand — the one producer a human drives. Also before
+    # cases.urls, for the same reason.
+    path("api/", include("case_events.urls")),
     path("api/", include("cases.urls")),
     path("oembed/", OEmbedView.as_view(), name="oembed"),
     path("api/caseworker/me", MeView.as_view(), name="cw-me"),

@@ -16,11 +16,18 @@ not stream-admin rights. The streams themselves must already exist; assert them
 with ``manage.py nats_bootstrap``. A subscribe against a missing stream fails
 loudly here, which is the intended behaviour: a consumer with nothing to bind to
 should not sit looking healthy.
+
+**"Loudly" means the process exits, and that took a fix to become true.** The
+four consumers share one Deployment, so the only health signal an orchestrator
+can read is whether the process is alive. Any one of them ending — a crash, a
+subscribe against a missing stream, a connection that stops answering — now
+stops the others and exits non-zero. See :func:`run`.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from typing import Any
 
@@ -39,6 +46,17 @@ FETCH_TIMEOUT_SECONDS = 5.0
 
 #: Ceiling on the initial connect.
 CONNECT_TIMEOUT_SECONDS = 10
+
+#: Pause between failing fetches. A named constant rather than a literal so a
+#: test can shorten it — patching ``asyncio.sleep`` itself is not an option, as
+#: pytest-asyncio's own machinery runs on it.
+FETCH_RETRY_SLEEP_SECONDS = 1
+
+#: Consecutive failing fetches before a consumer gives up and exits. Small on
+#: purpose: nats-py reconnects underneath us, so a fetch that keeps failing this
+#: many times in a row means the connection is not coming back, and polling a
+#: broker that is not answering is indistinguishable from working.
+MAX_CONSECUTIVE_FETCH_FAILURES = 10
 
 
 class ConsumerStopped(Exception):
@@ -70,8 +88,6 @@ async def subscribe(js, spec: ConsumerSpec):
     """Create-or-attach the durable pull consumer for ``spec``."""
     from nats.js.api import AckPolicy, ConsumerConfig
 
-    from case_events.consumers import DEFAULT_BACKOFF_SECONDS
-
     return await js.pull_subscribe(
         spec.filter_subject,
         durable=spec.durable,
@@ -83,7 +99,10 @@ async def subscribe(js, spec: ConsumerSpec):
             ack_policy=AckPolicy.EXPLICIT,
             ack_wait=spec.ack_wait_seconds,
             max_deliver=spec.max_deliver,
-            backoff=list(DEFAULT_BACKOFF_SECONDS),
+            # Trimmed to max_deliver by the spec: JetStream rejects a consumer
+            # with as many backoff steps as deliveries, and it does so at
+            # subscribe time — i.e. during a rollout.
+            backoff=spec.backoff,
             filter_subject=spec.filter_subject,
         ),
     )
@@ -105,20 +124,33 @@ def parse_envelope(raw: bytes) -> dict:
     return envelope
 
 
-def _num_delivered(msg) -> int:
-    """This message's delivery count, defaulting to 1 if unavailable.
+def _num_delivered(msg) -> int | None:
+    """This message's delivery count, or None when the metadata cannot be read.
 
-    Defaulting LOW on purpose. If the metadata cannot be read, treating the
-    message as a first delivery means it gets retried rather than buried — the
-    recoverable mistake of the two.
+    None rather than a guess. :func:`case_events.consumers.decide` buries an
+    unknown count, and it can only make that call if it is told the count is
+    unknown — a plausible-looking 1 would have it retry forever instead. See
+    that function for why burying is the recoverable half of the choice.
     """
     try:
         return int(msg.metadata.num_delivered)
     except Exception:  # noqa: BLE001 - metadata is best-effort
-        return 1
+        return None
 
 
-async def dead_letter(js, spec: ConsumerSpec, msg, error: BaseException, num_delivered: int) -> bool:
+def _dlq_dedup_key(spec: ConsumerSpec, original_subject: str, body: str) -> str:
+    """A deterministic key for "this consumer buried this body".
+
+    Derived from the BODY rather than the envelope's own ``dedup_key``, because
+    the commonest reason to be in the DLQ is that the body could not be parsed
+    into an envelope at all — so the field may not exist. Hashing what we
+    actually have keeps the key available in every case, including that one.
+    """
+    digest = hashlib.sha256(body.encode("utf-8", errors="replace")).hexdigest()[:32]
+    return f"dlq:{spec.name}:{original_subject}:{digest}"
+
+
+async def dead_letter(js, spec: ConsumerSpec, msg, error: BaseException, num_delivered: int | None) -> bool:
     """Republish a poison message to the DLQ. True if it was accepted.
 
     The original subject is appended to ``jaw.dlq.`` so the message stays
@@ -135,9 +167,17 @@ async def dead_letter(js, spec: ConsumerSpec, msg, error: BaseException, num_del
     except Exception:  # noqa: BLE001
         body = "<undecodable>"
 
+    dlq_key = _dlq_dedup_key(spec, original_subject, body)
     envelope = build_envelope(
         subject=subjects.dlq_subject(original_subject),
         producer=f"consumer:{spec.name}",
+        # Keyed like every other publish on this bus. A message can reach the DLQ
+        # more than once — it is buried on its final delivery, and a consumer
+        # restart or a re-published copy can bury the same fact again — and
+        # without a key the DLQ's depth reads as a count of failing FACTS when it
+        # is really a count of attempts. The depth is the number an operator acts
+        # on, so it has to mean what it looks like.
+        dedup_key=dlq_key,
         payload={
             "consumer": spec.name,
             "original_subject": original_subject,
@@ -151,6 +191,7 @@ async def dead_letter(js, spec: ConsumerSpec, msg, error: BaseException, num_del
         await js.publish(
             subjects.dlq_subject(original_subject),
             json.dumps(envelope, ensure_ascii=False, default=str).encode("utf-8"),
+            headers={"Nats-Msg-Id": dlq_key} if dlq_key else None,
         )
         return True
     except Exception as exc:  # noqa: BLE001
@@ -162,6 +203,30 @@ async def dead_letter(js, spec: ConsumerSpec, msg, error: BaseException, num_del
             consumer=spec.name,
             original_subject=original_subject,
             error=str(exc),
+        )
+        return False
+
+
+async def _settle(spec: ConsumerSpec, msg, action: str) -> bool:
+    """Ack / nak / term the message. True if the broker took it.
+
+    Settling is the one part of handling a message that talks to the broker, so
+    it is the part that fails when the connection drops — and it used to be the
+    only unguarded await in the loop, which meant a single transient ack error
+    propagated out of the fetch loop and killed that consumer for the life of
+    the pod. Redelivery already covers a lost ack (that is what at-least-once
+    means); losing the consumer does not cover anything.
+    """
+    try:
+        await getattr(msg, action)()
+        return True
+    except Exception as exc:  # noqa: BLE001 - a settle failure is redelivery, not death
+        logger.warning(
+            "case_events.settle_failed",
+            consumer=spec.name,
+            action=action,
+            subject=getattr(msg, "subject", ""),
+            error=str(exc) or type(exc).__name__,
         )
         return False
 
@@ -185,7 +250,7 @@ async def process_message(js, spec: ConsumerSpec, msg) -> Disposition:
     disposition = decide(error=error, num_delivered=num_delivered, max_deliver=spec.max_deliver)
 
     if disposition is Disposition.ACK:
-        await msg.ack()
+        await _settle(spec, msg, "ack")
         return disposition
 
     logger.warning(
@@ -204,20 +269,20 @@ async def process_message(js, spec: ConsumerSpec, msg) -> Disposition:
         # No delay argument: the consumer's own `backoff` schedule governs when
         # it comes back, so passing one here would override the policy the
         # subscription was created with.
-        await msg.nak()
+        await _settle(spec, msg, "nak")
         return disposition
 
     if await dead_letter(js, spec, msg, error, num_delivered):
         # Terminate ONLY once the DLQ has the message. Terminating first and
         # failing to republish would be a silent loss — exactly what the DLQ
         # exists to prevent.
-        await msg.term()
+        await _settle(spec, msg, "term")
         return Disposition.DEAD_LETTER
 
     # The DLQ is unreachable. NAK instead, so the message stays on the stream
     # and someone can deal with it. It may exceed max_deliver and be dropped by
     # JetStream, but an un-acked message with a loud error beats a terminated one.
-    await msg.nak()
+    await _settle(spec, msg, "nak")
     return Disposition.RETRY
 
 
@@ -235,6 +300,7 @@ async def run_one(js, spec: ConsumerSpec, *, stop: asyncio.Event, once: bool, ma
     )
 
     handled = 0
+    consecutive_failures = 0
     while not stop.is_set():
         if max_messages is not None and handled >= max_messages:
             break
@@ -243,17 +309,42 @@ async def run_one(js, spec: ConsumerSpec, *, stop: asyncio.Event, once: bool, ma
             batch = min(batch, max_messages - handled)
         try:
             msgs = await sub.fetch(batch, timeout=FETCH_TIMEOUT_SECONDS)
+            consecutive_failures = 0
         except (NatsTimeoutError, asyncio.TimeoutError):
             # An empty window. In --once mode that is the signal that the
-            # backlog is drained; otherwise just poll again.
+            # backlog is drained; otherwise just poll again. NOT counted as a
+            # failure: on a quiet bus this is the normal case.
+            consecutive_failures = 0
             if once:
                 break
             continue
         except Exception as exc:  # noqa: BLE001
-            logger.warning("case_events.fetch_failed", consumer=spec.name, error=str(exc))
+            consecutive_failures += 1
+            logger.warning(
+                "case_events.fetch_failed",
+                consumer=spec.name,
+                error=str(exc),
+                consecutive=consecutive_failures,
+            )
             if once:
-                break
-            await asyncio.sleep(1)
+                # RAISE, not break. A bounded run that could not reach the
+                # broker drained nothing — but breaking returns a count, and
+                # `run` reads any count as a clean finish (`fatal` is False in
+                # bounded mode), so `run_consumers --apply --once` against a
+                # dead broker exited 0 and a scheduled drain looked successful.
+                # Only the timeout branch above means "the backlog is empty"; a
+                # transport error means we do not know what the backlog holds.
+                raise RuntimeError(f"{spec.name}: fetch failed in a bounded run; last: {exc}") from exc
+            if consecutive_failures >= MAX_CONSECUTIVE_FETCH_FAILURES:
+                # Give up rather than poll a broker that is not answering. The
+                # previous behaviour was to warn and sleep forever, which left
+                # the pod Ready and consuming nothing — the failure mode this
+                # whole file is arranged to avoid. Raising exits the process
+                # (see `run`), and the orchestrator restarts it.
+                raise RuntimeError(
+                    f"{spec.name}: {consecutive_failures} consecutive fetch failures; last: {exc}"
+                ) from exc
+            await asyncio.sleep(FETCH_RETRY_SLEEP_SECONDS)
             continue
 
         for msg in msgs:
@@ -264,22 +355,72 @@ async def run_one(js, spec: ConsumerSpec, *, stop: asyncio.Event, once: bool, ma
     return handled
 
 
+async def _supervise(
+    js,
+    spec: ConsumerSpec,
+    *,
+    stop: asyncio.Event,
+    once: bool,
+    max_messages: int | None,
+    fatal: bool,
+    ended_early: list[str],
+):
+    """Run one consumer, and stop its siblings when it ends unexpectedly.
+
+    ``fatal`` is set in the continuous mode, where a consumer returning at all
+    is already wrong: the loop only exits on ``stop``, so reaching here means it
+    raised or its subscription died. In ``--once`` / ``--max-messages`` mode the
+    consumers are meant to finish at their own pace and one finishing says
+    nothing about the others.
+
+    Recording the name in ``ended_early`` is what keeps a clean-but-premature
+    return distinguishable from a graceful SIGTERM, which also sets ``stop``.
+    """
+    try:
+        return await run_one(js, spec, stop=stop, once=once, max_messages=max_messages)
+    finally:
+        if fatal and not stop.is_set():
+            logger.error("case_events.consumer_ended_early", consumer=spec.name)
+            ended_early.append(spec.name)
+            stop.set()
+
+
 async def run(specs: list[ConsumerSpec], *, once: bool = False, max_messages: int | None = None) -> dict[str, int]:
     """Run every spec concurrently until stopped. Returns per-consumer counts.
 
     One connection is shared by all of them; each gets its own subscription and
-    its own task. A consumer whose loop raises takes only itself down — recorded
-    as an exception in the returned mapping's place, logged, and left for the
-    orchestrator to notice via the process exiting when all of them have.
+    its own task.
+
+    **One consumer ending takes the whole process down**, and that is the point.
+    These four run in a single Deployment, so the only thing an orchestrator can
+    observe is the process. An earlier version gathered the tasks and reported a
+    crash afterwards — but in the continuous mode nothing ever finishes, so
+    "afterwards" never arrived: a matcher that died on a missing stream left the
+    other three polling happily and the pod Ready, consuming nothing, for as
+    long as nobody looked. Stopping the siblings converts that into an exit,
+    which is the one signal a Deployment reacts to.
     """
     nc, js = await connect()
     stop = asyncio.Event()
+    fatal = not (once or max_messages is not None)
+    ended_early: list[str] = []
 
     _install_signal_handlers(stop)
 
     try:
         results = await asyncio.gather(
-            *(run_one(js, spec, stop=stop, once=once, max_messages=max_messages) for spec in specs),
+            *(
+                _supervise(
+                    js,
+                    spec,
+                    stop=stop,
+                    once=once,
+                    max_messages=max_messages,
+                    fatal=fatal,
+                    ended_early=ended_early,
+                )
+                for spec in specs
+            ),
             return_exceptions=True,
         )
     finally:
@@ -293,6 +434,11 @@ async def run(specs: list[ConsumerSpec], *, once: bool = False, max_messages: in
     for spec, result in zip(specs, results):
         if isinstance(result, BaseException):
             logger.error("case_events.consumer_crashed", consumer=spec.name, error=str(result))
+            counts[spec.name] = -1
+        elif spec.name in ended_early:
+            # Returned without raising, but before it was asked to. Same signal
+            # as a crash — a consumer that stopped consuming is a consumer that
+            # stopped consuming, and the caller turns -1 into a non-zero exit.
             counts[spec.name] = -1
         else:
             counts[spec.name] = result
