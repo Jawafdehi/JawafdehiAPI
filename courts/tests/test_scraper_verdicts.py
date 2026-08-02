@@ -293,3 +293,116 @@ class PolitenessGapTests(TestCase):
             cmd._gap(2.5)
             cmd._gap(2.5)
         self.assertEqual([c.args for c in clock.sleep.call_args_list], [(2.5,), (2.5,)])
+
+
+class BudgetEscalationTests(TestCase):
+    """A first attempt that runs out of room gets one retry at a bigger budget.
+
+    The 2026-07-31 production run lost 3 of 84 cases to `error_max_turns` on long
+    multi-defendant judgments. Escalation buys those back -- but ONLY on failure,
+    because a case answered at the escalated budget was never the case the
+    --eval run scored.
+    """
+
+    def _cmd(self):
+        cmd = Command()
+        cmd._downloads = 0
+        return cmd
+
+    def test_a_clean_first_attempt_never_escalates(self):
+        """The common path must be untouched: one call, at the scored budget."""
+        cmd = self._cmd()
+        seen = []
+        with mock.patch.object(Command, "_extract_one", autospec=True) as one:
+            one.side_effect = lambda _s, _c, tier, max_tokens: (
+                seen.append(max_tokens) or ("EX", "u", "m", 10)
+            )
+            result = cmd._extract(mock.Mock(), tier="premium")
+        self.assertEqual(result, ("EX", "u", "m", 10, False))
+        self.assertEqual(seen, [extract_verdicts.MAX_TOKENS])
+
+    def test_exhaustion_retries_once_at_the_escalated_budget(self):
+        cmd = self._cmd()
+        seen = []
+
+        def fake(_self, _case, *, tier, max_tokens):
+            seen.append(max_tokens)
+            if len(seen) == 1:
+                raise RuntimeError(
+                    "claude_cli error: Reached maximum number of turns (1)"
+                )
+            return ("EX", "u", "m", 99)
+
+        with mock.patch.object(Command, "_extract_one", autospec=True, side_effect=fake):
+            result = cmd._extract(mock.Mock(), tier="premium")
+        self.assertEqual(result, ("EX", "u", "m", 99, True))
+        self.assertEqual(
+            seen, [extract_verdicts.MAX_TOKENS, extract_verdicts.ESCALATED_MAX_TOKENS]
+        )
+
+    def test_a_non_budget_failure_is_not_retried(self):
+        """Retrying a dead document or a 403 at 4x the budget just costs 4x.
+
+        This is the guard that keeps escalation from becoming a blanket retry.
+        """
+        cmd = self._cmd()
+        calls = []
+
+        def fake(_self, _case, *, tier, max_tokens):
+            calls.append(max_tokens)
+            raise RuntimeError("no order document yielded text")
+
+        with mock.patch.object(Command, "_extract_one", autospec=True, side_effect=fake):
+            with self.assertRaises(RuntimeError):
+                cmd._extract(mock.Mock(), tier="premium")
+        self.assertEqual(calls, [extract_verdicts.MAX_TOKENS])
+
+    def test_escalation_can_still_fail_and_is_not_swallowed(self):
+        """A case too long even for the bigger budget stays a loud failure.
+
+        The whole design prefers a gap to a guess; escalation must not turn a
+        second exhaustion into a silent success.
+        """
+        cmd = self._cmd()
+        with mock.patch.object(
+            Command, "_extract_one", autospec=True,
+            side_effect=RuntimeError("error_max_turns"),
+        ) as one:
+            with self.assertRaises(RuntimeError):
+                cmd._extract(mock.Mock(), tier="premium")
+        self.assertEqual(one.call_count, 2)
+
+    def test_the_exhaustion_matcher_reads_the_real_production_message(self):
+        """Guard the guard: the matcher is a substring list, so pin it to the
+        exact string the failing production run emitted."""
+        self.assertTrue(
+            extract_verdicts._is_exhaustion(
+                RuntimeError(
+                    "claude_cli error: Reached maximum number of turns (1)\n"
+                    'Payload: {"subtype":"error_max_turns","is_error":true}'
+                )
+            )
+        )
+        self.assertFalse(
+            extract_verdicts._is_exhaustion(RuntimeError("no order url on case"))
+        )
+        self.assertFalse(
+            extract_verdicts._is_exhaustion(RuntimeError("403 organization disabled"))
+        )
+
+    def test_max_tokens_actually_reaches_the_model_call(self):
+        """Guard the plumbing: _extract_one must PASS its budget, not ignore it.
+
+        Before this change the invoke used the module constant directly, so a
+        per-call budget would have been accepted and silently dropped -- the
+        escalation would look like it worked while changing nothing.
+        """
+        cmd = self._cmd()
+        case = mock.Mock(case_number="070-CR-0001")
+        with mock.patch.object(extract_verdicts, "order_urls", return_value=["http://x/a.pdf"]), \
+             mock.patch("review.converter.convert_all",
+                        return_value=[{"conversion_status": "ok", "markdown": "फैसला"}]), \
+             mock.patch("llm.routing.provider_for_tier"), \
+             mock.patch("llm.invoke.invoke_text", return_value=_resp()) as invoke_text:
+            cmd._extract_one(case, tier="premium", max_tokens=4242)
+        self.assertEqual(invoke_text.call_args.args[2], 4242)

@@ -19,6 +19,11 @@ Dry-run by default -- ``--write`` persists.
 
 Every row written is model-derived and marked as such under
 ``extra_data['verdict_extraction']``.
+
+A case whose first attempt runs out of output tokens is retried once at
+``ESCALATED_MAX_TOKENS``; nothing else is retried, and a case that exhausts the
+escalated budget too stays a loud failure. The run reports ``escalated=N`` so
+the hard tail is visible rather than blended into the success count.
 """
 
 from __future__ import annotations
@@ -53,6 +58,28 @@ DEFAULT_DELAY = 1.0
 #: output tokens). Those failures are safe -- the case is skipped, never guessed
 #: at -- but they are lost coverage, so give reasoning real headroom.
 MAX_TOKENS = 8000
+#: Second-attempt budget, used ONLY after a first attempt died of exhaustion.
+#: The 2026-07-31 production run lost 3 of 84 cases this way, all of them long
+#: multi-defendant judgments where the reasoning alone outran 8000 tokens.
+ESCALATED_MAX_TOKENS = 32000
+#: How exhaustion presents. ``claude -p`` does not report "out of output tokens":
+#: the assistant turn simply ends unfinished, the CLI wants another turn to
+#: continue, ``--max-turns 1`` denies it, and the run aborts as
+#: ``error_max_turns`` -- "Reached maximum number of turns (1)". So the turn
+#: limit is the messenger and the token budget is the cause, which is why
+#: escalation raises the budget rather than the turn count.
+_EXHAUSTED = ("error_max_turns", "maximum number of turns", "max_tokens")
+
+
+def _is_exhaustion(exc):
+    """True if this failure looks like the model ran out of room, not out of luck.
+
+    Deliberately narrow. A convert failure, a missing document, an auth 403 or a
+    malformed response must NOT be retried at 4x the budget -- that would just
+    spend four times as much to fail the same way.
+    """
+    msg = str(exc).lower()
+    return any(s.lower() in msg for s in _EXHAUSTED)
 
 
 class Command(BaseCommand):
@@ -84,7 +111,30 @@ class Command(BaseCommand):
             time.sleep(delay)
         self._downloads += 1
 
-    def _extract_one(self, case, *, tier):
+    def _extract(self, case, *, tier):
+        """:meth:`_extract_one`, retried once at a larger budget if it ran out.
+
+        Escalation happens ONLY after a failure, and only an exhaustion-shaped
+        one. That ordering is load-bearing: every case that succeeds does so on
+        exactly the parameters the ``--eval`` run scored, so the measured
+        accuracy still describes the rows being written. A first attempt at the
+        bigger budget would be cheaper to write and would quietly invalidate
+        that -- it can only turn a failure into an answer, never change an
+        answer already given.
+
+        Returns ``(extraction, url, model, chars, escalated)``.
+        """
+        try:
+            return (*self._extract_one(case, tier=tier, max_tokens=MAX_TOKENS), False)
+        except Exception as exc:  # noqa: BLE001
+            if not _is_exhaustion(exc):
+                raise
+            self.stdout.write(
+                f"        budget exhausted at {MAX_TOKENS} tokens; retrying at {ESCALATED_MAX_TOKENS}"
+            )
+            return (*self._extract_one(case, tier=tier, max_tokens=ESCALATED_MAX_TOKENS), True)
+
+    def _extract_one(self, case, *, tier, max_tokens=MAX_TOKENS):
         """Download the order, read it, return (extraction, url, model, chars).
 
         Raises RuntimeError with a short reason on any unusable case, so the
@@ -118,7 +168,7 @@ class Command(BaseCommand):
             raise RuntimeError("no order document yielded text")
 
         model = routing.provider_for_tier(tier).model_for_tier(tier)
-        raw = invoke.invoke_text(SYSTEM_PROMPT, build_prompt(text, case.case_number), MAX_TOKENS, tier=tier)
+        raw = invoke.invoke_text(SYSTEM_PROMPT, build_prompt(text, case.case_number), max_tokens, tier=tier)
         return parse_response(raw), used, model, len(text)
 
     # --------------------------------------------------------------------- eval
@@ -144,13 +194,17 @@ class Command(BaseCommand):
         sample = cases[::step][:n]
 
         self.stdout.write(f"eval: {len(sample)} cases sampled from {len(cases)} with both an order and a known verdict\n")
-        hits = miss = abst = err = 0
+        hits = miss = abst = err = esc = 0
         confusion = {}
         for i, case in enumerate(sample, 1):
             want = truth[case.case_number]
             self._gap(delay)
             try:
-                ex, url, _model, chars = self._extract_one(case, tier=tier)
+                # Escalate here too, or the score stops describing the write
+                # path: eval would report as errors the very cases --write now
+                # recovers, understating coverage on exactly the hard tail.
+                ex, url, _model, chars, escalated = self._extract(case, tier=tier)
+                esc += escalated
             except Exception as exc:  # noqa: BLE001
                 err += 1
                 self.stdout.write(f"  {i:>3}/{len(sample)} {case.case_number}  ERROR {exc}")
@@ -178,6 +232,7 @@ class Command(BaseCommand):
         self.stdout.write(f"  wrong      {miss}")
         self.stdout.write(f"  abstained  {abst}")
         self.stdout.write(f"  errored    {err}")
+        self.stdout.write(f"  escalated  {esc}  (recovered at {ESCALATED_MAX_TOKENS} tokens)")
         if answered:
             self.stdout.write(f"  accuracy on answered: {hits / answered * 100:.1f}%  (n={answered})")
         if confusion:
@@ -199,7 +254,7 @@ class Command(BaseCommand):
         mode = "WRITE" if opts["write"] else "dry-run"
         self.stdout.write(f"{mode}: {len(cases)} case(s) from the {court} backlog\n")
 
-        written = skipped = abstained = failed = 0
+        written = skipped = abstained = failed = escalated_n = 0
         for i, case in enumerate(cases, 1):
             if not is_decided(case):
                 skipped += 1
@@ -207,7 +262,8 @@ class Command(BaseCommand):
                 continue
             self._gap(delay)
             try:
-                ex, url, model, chars = self._extract_one(case, tier=tier)
+                ex, url, model, chars, escalated = self._extract(case, tier=tier)
+                escalated_n += escalated
             except Exception as exc:  # noqa: BLE001
                 failed += 1
                 self.stdout.write(f"  {i:>3} {case.case_number}  FAILED {exc}")
@@ -269,6 +325,7 @@ class Command(BaseCommand):
 
         self.stdout.write(
             f"\n{mode} done: written={written} abstained={abstained} skipped={skipped} failed={failed}"
+            f" escalated={escalated_n}"
         )
         if not opts["write"] and written == 0:
             self.stdout.write(f"(dry-run — nothing persisted; rows would carry extra_data['{PROVENANCE_KEY}'])")
