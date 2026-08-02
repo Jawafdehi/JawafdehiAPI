@@ -16,6 +16,7 @@ assertions on a Mock.
 from __future__ import annotations
 
 import json
+from unittest import mock
 
 import pytest
 
@@ -372,6 +373,58 @@ class TestFetchFailures:
         )
 
         assert handled == 0  # it polled well past the ceiling and never gave up
+
+    async def test_a_bounded_run_that_cannot_reach_the_broker_fails(self, monkeypatch):
+        """`--once` against a dead broker must not exit zero.
+
+        Breaking out of the loop returns a count, and `run` reads any count as
+        a clean finish because `fatal` is False in bounded mode — so a
+        scheduled `run_consumers --apply --once` drain reported success having
+        drained nothing. Only the timeout branch means "the backlog is empty".
+        """
+        import asyncio
+
+        class DeadSub:
+            async def fetch(self, batch, timeout=None):
+                raise RuntimeError("nats: connection closed")
+
+        monkeypatch.setattr(runner, "subscribe", lambda js, spec: _resolved(DeadSub()))
+
+        with pytest.raises(RuntimeError, match="bounded run"):
+            await asyncio.wait_for(
+                runner.run_one(
+                    FakeJS(),
+                    spec_for(lambda e, c: None, max_deliver=5),
+                    stop=asyncio.Event(),
+                    once=True,
+                    max_messages=None,
+                ),
+                timeout=5,
+            )
+
+    async def test_a_bounded_run_on_a_quiet_bus_still_succeeds(self):
+        """The timeout branch keeps meaning "drained", which is the whole point."""
+        import asyncio
+
+        from nats.errors import TimeoutError as NatsTimeoutError
+
+        class QuietSub:
+            async def fetch(self, batch, timeout=None):
+                raise NatsTimeoutError()
+
+        with mock.patch.object(runner, "subscribe", lambda js, spec: _resolved(QuietSub())):
+            handled = await asyncio.wait_for(
+                runner.run_one(
+                    FakeJS(),
+                    spec_for(lambda e, c: None, max_deliver=5),
+                    stop=asyncio.Event(),
+                    once=True,
+                    max_messages=None,
+                ),
+                timeout=5,
+            )
+
+        assert handled == 0
 
     async def test_a_recovered_fetch_resets_the_count(self, monkeypatch):
         """The ceiling is CONSECUTIVE failures, not cumulative ones.

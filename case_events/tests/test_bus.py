@@ -376,6 +376,34 @@ class TestTheLoopIsClosedNotJustStopped:
 
         assert loop.is_closed()
 
+    def test_shutdown_finishes_the_tasks_still_running_on_the_loop(self):
+        """A cancelled connect is still mid-flight when the loop is stopped.
+
+        `future.cancel()` only SCHEDULES cancellation. Stop the loop straight
+        after and the task is still pending — holding, in the real case, a
+        half-open TCP socket — so closing discards it ("Task was destroyed but
+        it is pending!") along with the descriptor the close exists to reclaim.
+        """
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread.start()
+
+        async def never_finishes():
+            await asyncio.sleep(30)
+
+        asyncio.run_coroutine_threadsafe(never_finishes(), loop)
+
+        async def grab_others():
+            return [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+
+        pending = asyncio.run_coroutine_threadsafe(grab_others(), loop).result(timeout=2)
+        assert pending and not pending[0].done(), "fixture did not produce a live task"
+
+        bus._shutdown_loop(loop, thread)
+
+        assert loop.is_closed()
+        assert pending[0].done(), "a task was still pending when the loop was closed"
+
     def test_a_thread_that_will_not_stop_leaks_rather_than_hangs(self):
         """Shutdown must not block a request on a wedged loop thread."""
         stuck = mock.Mock()

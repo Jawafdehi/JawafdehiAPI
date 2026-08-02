@@ -327,7 +327,14 @@ async def run_one(js, spec: ConsumerSpec, *, stop: asyncio.Event, once: bool, ma
                 consecutive=consecutive_failures,
             )
             if once:
-                break
+                # RAISE, not break. A bounded run that could not reach the
+                # broker drained nothing — but breaking returns a count, and
+                # `run` reads any count as a clean finish (`fatal` is False in
+                # bounded mode), so `run_consumers --apply --once` against a
+                # dead broker exited 0 and a scheduled drain looked successful.
+                # Only the timeout branch above means "the backlog is empty"; a
+                # transport error means we do not know what the backlog holds.
+                raise RuntimeError(f"{spec.name}: fetch failed in a bounded run; last: {exc}") from exc
             if consecutive_failures >= MAX_CONSECUTIVE_FETCH_FAILURES:
                 # Give up rather than poll a broker that is not answering. The
                 # previous behaviour was to warn and sleep forever, which left

@@ -63,6 +63,13 @@ class Command(BaseCommand):
         if window <= 0:
             raise CommandError("--window-hours must be positive; a zero window emits nothing.")
 
+        if limit <= 0:
+            # A negative limit reaches the queryset slice and Django raises
+            # "Negative indexing is not supported" — a traceback where a
+            # CommandError belongs. A zero limit emits nothing and then reports
+            # the whole window as a shortfall, which reads like a catastrophe.
+            raise CommandError("--limit must be positive; a non-positive limit emits nothing.")
+
         if not options["apply"]:
             self._report(window, limit, options["show"])
             return

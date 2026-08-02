@@ -301,5 +301,20 @@ def delete_now(case: Any, *, client=None) -> None:
 #: names every existing caller already imports. Derived from the raising twins
 #: rather than the other way round, so there is one implementation of the rule
 #: and the swallow is visibly a wrapper over it.
+#:
+#: **Patching note for tests.** These are bound at import, so
+#: ``mock.patch("cases.search_index.index_now")`` does NOT intercept a caller
+#: that went through ``index`` — the wrapper closed over the original function
+#: object. Patch the name the code under test actually calls: ``index`` for the
+#: write-time signal paths, ``index_now`` for the bus consumer.
 index = best_effort("index case")(index_now)
 delete = best_effort("delete case")(delete_now)
+
+# best_effort copies __name__/__doc__ off the wrapped function, so without this
+# `index` introspects as "index_now" and carries a docstring beginning "RAISES."
+# — the opposite of what it does. Anything reading help() or a traceback frame
+# would be told the wrong contract about the more widely used of the two.
+index.__name__ = "index"
+index.__doc__ = "Upsert a PUBLISHED case, else evict it. Best-effort: logs and swallows. See index_now."
+delete.__name__ = "delete"
+delete.__doc__ = "Delete the case's doc. Best-effort: logs and swallows. See delete_now."

@@ -278,6 +278,74 @@ class TestPublishWindow:
         assert pub.call_args.kwargs.get("wait") is True
 
 
+class TestABadLakeRowDoesNotStopTheScan:
+    """`build_courtcase_iri` raises on an empty case_number, and the lake is scraped.
+
+    Letting that escape aborted the generator mid-window and dropped every
+    remaining row — and because the window is stateless and overlapping, the
+    next run would reach the same row and abort at the same point. One
+    malformed row would have stopped the producer permanently.
+    """
+
+    def test_a_hearing_with_no_case_number_is_skipped_not_fatal(self):
+        court = make_court()
+        make_hearing(court, case_number="")
+        make_hearing(court, case_number="082-CR-0154")
+
+        signals = list(dockets.hearing_signals(timezone.now() - timedelta(hours=24)))
+
+        assert len(signals) == 1, "the good row must still be emitted"
+        assert "082-cr-0154" in signals[0][2][0]
+
+    def test_a_verdict_row_with_no_case_number_is_skipped_too(self):
+        court = make_court()
+        make_case(
+            court,
+            case_number="",
+            verdict_type="सफाई",
+            verdict_date_bs="2082-11-20",
+            verdict_date_ad=date(2026, 3, 4),
+        )
+        make_case(
+            court,
+            case_number="082-CR-0999",
+            verdict_type="सफाई",
+            verdict_date_bs="2082-11-20",
+            verdict_date_ad=date(2026, 3, 4),
+        )
+
+        signals = list(dockets.verdict_signals(timezone.now() - timedelta(hours=24)))
+
+        assert len(signals) == 1
+
+    def test_the_bad_row_is_logged_rather_than_swallowed(self):
+        court = make_court()
+        make_hearing(court, case_number="")
+
+        with mock.patch.object(dockets.logger, "warning") as warn:
+            list(dockets.hearing_signals(timezone.now() - timedelta(hours=24)))
+
+        assert warn.called
+        assert warn.call_args.args[0] == "case_events.docket_row_has_no_iri"
+
+
+class TestLimitIsValidated:
+    def test_a_negative_limit_is_a_command_error_not_a_traceback(self):
+        """Django raises "Negative indexing is not supported" from the slice."""
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        with pytest.raises(CommandError, match="--limit must be positive"):
+            call_command("emit_docket_signals", "--limit", "-1")
+
+    def test_a_zero_limit_is_refused_rather_than_reporting_the_window_lost(self):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        with pytest.raises(CommandError, match="--limit must be positive"):
+            call_command("emit_docket_signals", "--limit", "0")
+
+
 class TestSaturationIsNotSilent:
     """Hitting --limit drops facts permanently. It must be impossible to miss.
 
@@ -532,13 +600,27 @@ class TestTheMaterialProducerIsActuallyConnected:
                 )
             # Captured, NOT run: nothing reached the bus inside the transaction.
             pub.assert_not_called()
-        assert callbacks, "the producer did not register an on_commit callback at all"
+        assert ours(callbacks), "the producer did not register an on_commit callback at all"
 
     def test_an_unremarkable_material_save_stays_silent_end_to_end(self):
+        """No callback is REGISTERED by us, not merely none executed.
+
+        `pub.assert_not_called()` alone proved nothing: the context manager
+        captures on_commit callbacks without running them, so the publish mock
+        could not have been called whatever the producer did. If `signal_for`
+        started returning a signal for source "nkp", the callback would be
+        registered, never executed, and this would have stayed green.
+
+        Filtered to OUR callbacks rather than asserting the list is empty:
+        `materials` registers its own search-index on_commit for every save, so
+        `callbacks == []` fails on an unrelated app's work and `assert
+        callbacks` passes on it — which is what made the sibling test above
+        vacuous in the same way until this was fixed.
+        """
         from materials.models import Material
 
         with mock.patch("case_events.bus.publish") as pub:
-            with django_capture_on_commit_callbacks_noexec(using="ngm"):
+            with django_capture_on_commit_callbacks_noexec(using="ngm") as callbacks:
                 Material.objects.create(
                     iri="https://jawafdehi.org/material/nkp/wired-3",
                     material_type="Judgment",
@@ -546,7 +628,19 @@ class TestTheMaterialProducerIsActuallyConnected:
                     ident="wired-3",
                     data={},
                 )
+
+        assert ours(callbacks) == [], "an unremarkable source must not even register an emit"
         pub.assert_not_called()
+
+
+def ours(callbacks):
+    """The captured on_commit callbacks this app registered.
+
+    `materials` schedules its own search-index callback on every Material save,
+    so an unfiltered capture list says nothing about our producer: it is never
+    empty, and it is truthy whether or not we registered anything.
+    """
+    return [cb for cb in callbacks if getattr(cb, "__module__", "").startswith("case_events.")]
 
 
 def django_capture_on_commit_callbacks_noexec(*, using):

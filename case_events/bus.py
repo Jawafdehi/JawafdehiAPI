@@ -259,7 +259,23 @@ def _shutdown_loop(loop, thread) -> None:
     running raises, and ``stop()`` only asks. A short timeout because this is
     shutdown, and a thread that will not stop is not worth blocking a request
     for — leaking a loop beats hanging.
+
+    **Pending tasks are drained first, and that is not tidiness.** The timeout
+    path in ``_start`` cancels the ``_connect()`` future, but cancellation is
+    only *scheduled* — the task is still mid-flight when we stop the loop, so
+    closing it discards a task that owns a half-open TCP socket. Measured: stop
+    the loop straight after a cancel and the task is still pending, and CPython
+    prints "Task was destroyed but it is pending!" on close. Draining defeats
+    the point of closing if it is skipped, since the socket is the very thing
+    the close is meant to reclaim.
     """
+    if thread is not None and thread.is_alive():
+        try:
+            drained = asyncio.run_coroutine_threadsafe(_drain_tasks(), loop)
+            drained.result(timeout=2)
+        except Exception as exc:  # noqa: BLE001 - shutdown is best-effort throughout
+            logger.warning("case_events.loop_drain_failed", error=str(exc) or type(exc).__name__)
+
     loop.call_soon_threadsafe(loop.stop)
     if thread is not None:
         thread.join(timeout=2)
@@ -270,6 +286,23 @@ def _shutdown_loop(loop, thread) -> None:
         loop.close()
     except Exception as exc:  # noqa: BLE001 - shutdown is best-effort
         logger.warning("case_events.loop_close_failed", error=str(exc))
+
+
+async def _drain_tasks() -> None:
+    """Cancel every other task on this loop and wait for them to finish.
+
+    Runs ON the loop, which is the only place it can see the task set. Excludes
+    itself, or it would cancel the drain mid-drain.
+    """
+    me = asyncio.current_task()
+    others = [t for t in asyncio.all_tasks() if t is not me and not t.done()]
+    if not others:
+        return
+    for task in others:
+        task.cancel()
+    # return_exceptions: a cancelled task raises CancelledError, which is the
+    # expected outcome here rather than a failure to report.
+    await asyncio.gather(*others, return_exceptions=True)
 
 
 def _log_result(future, subject: str):

@@ -62,16 +62,34 @@ DEFAULT_WINDOW_HOURS = 48
 DEFAULT_LIMIT = 5000
 
 
-def _courtcase_iri(court_id: str, case_number: str) -> str:
-    """The canonical court-case ``@id``.
+def _courtcase_iri(court_id: str, case_number: str) -> str | None:
+    """The canonical court-case ``@id``, or None if this row cannot have one.
 
     Built with the shared helper, never by hand: ``build_courtcase_iri``
     lowercases both segments, so a hand-formatted
     ``.../courtcase/special/082-CR-0154`` matches nothing the matcher holds.
+
+    **Returns None rather than propagating.** The helper raises ``ValueError``
+    for an empty or unparseable ``case_number``, and this reads a lake filled by
+    a scraper against portal HTML — ``case_number`` is a plain CharField, so a
+    blank one is a data-quality event, not an impossibility. Letting that escape
+    would abort the generator mid-scan and drop every remaining row in the
+    window; and because the window is stateless and overlapping, the next run
+    would hit the same row at the same point and abort identically. One bad row
+    would stop the producer permanently. Skipping it costs that row only.
     """
     from jawafdehi_shared.entities.ids import build_courtcase_iri
 
-    return build_courtcase_iri(court_id, case_number)
+    try:
+        return build_courtcase_iri(court_id, case_number)
+    except ValueError as exc:
+        logger.warning(
+            "case_events.docket_row_has_no_iri",
+            court=court_id,
+            case_number=case_number,
+            error=str(exc),
+        )
+        return None
 
 
 def hearing_signals(since, limit: int = DEFAULT_LIMIT):
@@ -90,6 +108,9 @@ def hearing_signals(since, limit: int = DEFAULT_LIMIT):
     rows = CourtCaseHearing.objects.filter(created_at__gte=since).order_by("created_at")[:limit]
     for row in rows:
         iri = _courtcase_iri(row.court_id, row.case_number)
+        if iri is None:
+            # Logged in the helper. Skip the row, keep the scan.
+            continue
         payload = {
             "court": row.court_id,
             "case_number": row.case_number,
@@ -138,6 +159,9 @@ def verdict_signals(since, limit: int = DEFAULT_LIMIT):
     )
     for row in rows:
         iri = _courtcase_iri(row.court_id, row.case_number)
+        if iri is None:
+            # Logged in the helper. Skip the row, keep the scan.
+            continue
         payload = {
             "court": row.court_id,
             "case_number": row.case_number,
