@@ -8,10 +8,14 @@ nothing to do with, so the false-positive tests are the point of this file.
 import pytest
 
 from casework.entity_resolver import (
+    BIND,
     MIN_BIND_SCORE,
+    NO_MATCH,
+    REVIEW,
     match_score,
     name_tokens,
     normalise_name,
+    resolve,
     token_forms,
     tokens_equal,
 )
@@ -169,3 +173,99 @@ def test_one_character_difference_in_the_surname_scores_zero():
 def test_empty_name_scores_zero():
     assert match_score("", "अनिष श्रेष्ठ") == 0.0
     assert match_score("अनिष श्रेष्ठ", "") == 0.0
+
+
+def _candidate(iri, ne=None, en=None):
+    return {"id": iri, "title": {"ne": ne, "en": en}}
+
+
+ANISH_A = _candidate(
+    "https://jawafdehi.org/entity/person/anish-shrestha-219986",
+    ne="अनिष श्रेष्‍ठ", en="Anish Shrestha",
+)
+ANISH_B = _candidate(
+    "https://jawafdehi.org/entity/person/anish-shrestha-285096",
+    ne="अनिष श्रेष्ठ", en="Anish Shrestha",
+)
+ANKUR = _candidate(
+    "https://jawafdehi.org/entity/person/amkura-khatri-2de9b3",
+    ne="अंकुर खत्री", en="Ankur Khatri",
+)
+
+
+def test_single_confident_candidate_binds():
+    decision = resolve("अंकुर खत्री", [ANKUR])
+    assert decision.verdict == BIND
+    assert decision.nes_id == "https://jawafdehi.org/entity/person/amkura-khatri-2de9b3"
+
+
+def test_two_distinct_entities_with_the_same_name_never_bind():
+    # Both of these are real prod rows, tied at BM25 182.17. Auto-binding the
+    # higher-scoring one is exactly the defamation case.
+    decision = resolve("अनिष श्रेष्ठ", [ANISH_A, ANISH_B])
+    assert decision.verdict == REVIEW
+    assert "ambiguous" in decision.reason
+    assert decision.nes_id is None
+
+
+def test_same_entity_matching_on_two_name_forms_still_binds():
+    # One id, matched via both its ne and en title — not an ambiguity.
+    decision = resolve("Anish Shrestha", [ANISH_A])
+    assert decision.verdict == BIND
+
+
+def test_name_absent_from_nes_is_no_match():
+    decision = resolve("खगेन्द्र पराजुली", [ANKUR, ANISH_A])
+    assert decision.verdict == NO_MATCH
+    assert decision.nes_id is None
+
+
+def test_generic_institutional_name_goes_to_review():
+    office = _candidate(
+        "https://jawafdehi.org/entity/organization/jilla-vana-karyalaya-f4548e",
+        ne="जिल्ला वन कार्यालय",
+    )
+    decision = resolve("जिल्ला वन कार्यालय", [office])
+    assert decision.verdict == REVIEW
+    assert "generic" in decision.reason
+
+
+def test_composite_activity_location_name_is_never_split_or_bound():
+    district = _candidate(
+        "https://jawafdehi.org/entity/location/district/mugu", ne="मुगु जिल्ला",
+    )
+    decision = resolve("जिल्ला वन कार्यालय - मुगु जिल्ला", [district])
+    assert decision.verdict in (REVIEW, NO_MATCH)
+    assert decision.nes_id is None
+
+
+def test_single_token_name_goes_to_review():
+    nepal = _candidate("https://jawafdehi.org/entity/location/nepal", en="Nepal")
+    decision = resolve("Nepal", [nepal])
+    assert decision.verdict == REVIEW
+    assert "single token" in decision.reason
+
+
+def test_malformed_iri_candidate_is_dropped_before_scoring():
+    # A non-canonical host must never reach the API. The old test fixture
+    # https://nes.jawafdehi.org/entity/1 is exactly this shape.
+    bad = _candidate("https://nes.jawafdehi.org/entity/1", ne="अंकुर खत्री")
+    decision = resolve("अंकुर खत्री", [bad])
+    assert decision.verdict == NO_MATCH
+    assert decision.candidates == ()
+
+
+def test_decision_records_every_scoring_candidate_for_the_review_file():
+    decision = resolve("अनिष श्रेष्ठ", [ANISH_A, ANISH_B])
+    assert len(decision.candidates) == 2
+    scores = [score for score, _, _ in decision.candidates]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_organisation_filed_under_person_prefix_still_binds():
+    # Prod files "Ncell Pvt. Ltd." under person/ with @type Person. There is no
+    # person/org type veto, on purpose — one would reject correct binds.
+    ncell = _candidate(
+        "https://jawafdehi.org/entity/person/ncell-pvt-ltd-11aa22", en="Ncell Pvt. Ltd.",
+    )
+    assert resolve("Ncell Pvt. Ltd.", [ncell]).verdict == BIND

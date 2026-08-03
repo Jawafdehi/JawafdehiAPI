@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from dataclasses import dataclass
 
+from jawafdehi_shared.entities.ids import is_valid_entity_iri
 from jawafdehi_shared.search.transliterate import to_roman_colloquial
 
 # Honorifics and titles carry no identity. Stripped before tokens are compared so
@@ -44,6 +46,13 @@ MIDDLE_PARTICLES = frozenset({
 GENERIC_TOKENS = frozenset({
     "कार्यालय", "समिति", "विभाग", "मन्त्रालय", "शाखा", "इकाई", "केन्द्र",
     "उपभोक्ता", "जिल्ला", "गाउँपालिका", "नगरपालिका", "प्रदेश", "आयोजना", "निर्माण",
+    # "वन" (forest): the missing third token of this constant's own worked
+    # example, "जिल्ला वन कार्यालय" -- a bare District Forest Office name is
+    # still generic (there is one per district) even though "forest" is a
+    # domain word rather than an organisational-structure word like the rest
+    # of this set. Added in Task 3 so the genericity veto actually catches
+    # the case the docstring above describes.
+    "वन",
 })
 
 # Nepali family names, frequency-ranked from real data: the 686 accused binds on
@@ -265,3 +274,109 @@ def match_score(extracted: str, candidate: str) -> float:
         - PARTICLE_PENALTY * dropped
         - EXTRA_OMISSION_PENALTY * max(0, dropped - 1),
     )
+
+
+BIND = "BIND"
+REVIEW = "REVIEW"
+NO_MATCH = "NO_MATCH"
+
+# The separator the extractor uses for the location shape "Activity - Location"
+# ("जिल्ला वन कार्यालय - मुगु जिल्ला"). Splitting it would bind the WRONG district's
+# office: bare "जिल्ला वन कार्यालय" matches a generic office entity. Never split.
+_COMPOSITE_SEPARATOR = " - "
+# A trailing id segment on an NES slug (person/khusilala-saha-865cdc): a hex
+# suffix or a plain number, never part of the name.
+_SLUG_ID_SUFFIX = re.compile(r"-(?:[0-9a-f]{4,8}|\d+)$")
+
+
+@dataclass(frozen=True)
+class Decision:
+    """What to do with one extracted name. `candidates` carries every scoring
+    candidate so the review file can reproduce the decision without re-querying.
+    """
+
+    verdict: str
+    nes_id: str | None
+    score: float
+    matched_name: str
+    reason: str
+    candidates: tuple
+
+    @property
+    def is_bind(self) -> bool:
+        return self.verdict == BIND
+
+
+def candidate_name_forms(result: dict) -> tuple[str, ...]:
+    """The name strings of one search result worth scoring against.
+
+    The Devanagari title, the English title, and the IRI slug. The slug is NES's
+    own romanisation of the name, so it matches Latin extractions that neither
+    title reaches; its trailing id segment is dropped first.
+    """
+    title = result.get("title") or {}
+    forms = [title.get("ne"), title.get("en")]
+    slug = (result.get("id") or "").rsplit("/", 1)[-1]
+    if slug:
+        forms.append(_SLUG_ID_SUFFIX.sub("", slug).replace("-", " "))
+    return tuple(form for form in forms if form and form.strip())
+
+
+def _name_vetoes(extracted: str) -> str:
+    """The reason this name can never be auto-bound, or "" if none applies.
+
+    These are properties of the extracted string alone, independent of what NES
+    holds.
+    """
+    normalised = normalise_name(extracted)
+    if _COMPOSITE_SEPARATOR in normalised:
+        return "composite 'Activity - Location' name, never split"
+    tokens = name_tokens(extracted)
+    if len(tokens) < 2:
+        return "single token is too weak an anchor"
+    if all(token[1] & GENERIC_TOKENS for token in tokens):
+        return "generic institutional name identifies no specific entity"
+    return ""
+
+
+def resolve(extracted_name: str, candidates) -> Decision:
+    """Decide what to do with one LLM-extracted name.
+
+    BIND only when exactly ONE NES entity scores at or above MIN_BIND_SCORE and
+    no veto applies. More than one qualifying entity is an ambiguity and goes to
+    review -- 12 of the 138 real extracted strings hit that, with up to 13
+    same-name entities for "संजय प्रसाद यादव".
+
+    A candidate whose @id is not a canonical entity IRI is dropped before
+    scoring, so a malformed IRI can never reach the API.
+    """
+    scored = []
+    for result in candidates or ():
+        nes_id = (result.get("id") or "").strip()
+        if not is_valid_entity_iri(nes_id):
+            continue
+        best = max(
+            ((match_score(extracted_name, form), form)
+             for form in candidate_name_forms(result)),
+            default=(0.0, ""),
+        )
+        if best[0] > 0:
+            scored.append((best[0], nes_id, best[1]))
+    scored.sort(key=lambda row: (-row[0], row[1]))
+    frozen = tuple(scored)
+
+    qualifying = {nes_id for score, nes_id, _ in scored if score >= MIN_BIND_SCORE}
+    if not qualifying:
+        return Decision(NO_MATCH, None, scored[0][0] if scored else 0.0,
+                        scored[0][2] if scored else "",
+                        "no NES entity scored at or above the bind threshold",
+                        frozen)
+    if len(qualifying) > 1:
+        return Decision(REVIEW, None, scored[0][0], scored[0][2],
+                        f"ambiguous: {len(qualifying)} distinct NES entities score "
+                        f"at or above the bind threshold", frozen)
+    veto = _name_vetoes(extracted_name)
+    if veto:
+        return Decision(REVIEW, None, scored[0][0], scored[0][2], veto, frozen)
+    score, nes_id, matched = scored[0]
+    return Decision(BIND, nes_id, score, matched, "", frozen)
