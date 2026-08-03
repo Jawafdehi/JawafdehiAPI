@@ -12,6 +12,7 @@ from casework.entity_resolver import (
     MIN_BIND_SCORE,
     NO_MATCH,
     REVIEW,
+    candidate_name_forms,
     match_score,
     name_tokens,
     normalise_name,
@@ -239,6 +240,35 @@ def test_composite_activity_location_name_is_never_split_or_bound():
     assert decision.nes_id is None
 
 
+def test_composite_name_against_its_own_exact_candidate_hits_the_composite_veto():
+    # test_composite_activity_location_name_is_never_split_or_bound passes
+    # through NO_MATCH (nothing qualifies), so it never reaches the composite
+    # veto in _name_vetoes. Score a candidate against the FULL composite
+    # string so the veto branch itself -- and its dependence on
+    # normalise_name preserving the " - " separator -- has a regression test.
+    composite = _candidate(
+        "https://jawafdehi.org/entity/organization/jilla-vana-karyalaya-mugu-a1b2c3",
+        ne="जिल्ला वन कार्यालय - मुगु जिल्ला",
+    )
+    decision = resolve("जिल्ला वन कार्यालय - मुगु जिल्ला", [composite])
+    assert decision.verdict == REVIEW
+    assert "composite" in decision.reason
+    assert decision.nes_id is None
+
+
+def test_generic_institutional_name_in_latin_script_goes_to_review():
+    # GENERIC_TOKENS must cover both scripts, like MIDDLE_PARTICLES and
+    # SURNAMES: token_forms only adds a romanisation for a non-ASCII token, so
+    # a fully-Latin institutional name never reaches a Devanagari-only set.
+    office = _candidate(
+        "https://jawafdehi.org/entity/organization/district-forest-office-aa11bb",
+        en="District Forest Office",
+    )
+    decision = resolve("District Forest Office", [office])
+    assert decision.verdict == REVIEW
+    assert "generic" in decision.reason
+
+
 def test_single_token_name_goes_to_review():
     nepal = _candidate("https://jawafdehi.org/entity/location/nepal", en="Nepal")
     decision = resolve("Nepal", [nepal])
@@ -269,3 +299,48 @@ def test_organisation_filed_under_person_prefix_still_binds():
         "https://jawafdehi.org/entity/person/ncell-pvt-ltd-11aa22", en="Ncell Pvt. Ltd.",
     )
     assert resolve("Ncell Pvt. Ltd.", [ncell]).verdict == BIND
+
+
+def test_slug_suffix_strip_still_removes_every_real_id_suffix():
+    # Every real id suffix in the prod-verified fixtures used across this file:
+    # person/anish-shrestha-219986, -285096, person/amkura-khatri-2de9b3,
+    # organization/jilla-vana-karyalaya-f4548e, person/khusilala-saha-865cdc,
+    # person/ncell-pvt-ltd-11aa22. The tightened regex must still strip all six.
+    for suffix in ("219986", "285096", "2de9b3", "f4548e", "865cdc", "11aa22"):
+        forms = candidate_name_forms(
+            {"id": f"https://jawafdehi.org/entity/person/ram-thapa-{suffix}"}
+        )
+        assert forms == ("ram thapa",)
+
+
+def test_slug_suffix_strip_does_not_eat_a_distinguishing_trailing_digit():
+    # organization/chameliya-hydropower-2 -- the "2" distinguishes project 2
+    # from project 1, it is not an id suffix. The old "\d+$" branch stripped
+    # any trailing digit run, manufacturing a synthetic "chameliya hydropower"
+    # form that scored 1.0 against "Chameliya Hydropower" and outranked both
+    # real titles.
+    forms = candidate_name_forms(
+        {"id": "https://jawafdehi.org/entity/organization/chameliya-hydropower-2"}
+    )
+    assert forms == ("chameliya hydropower 2",)
+    decision = resolve(
+        "Chameliya Hydropower",
+        [{"id": "https://jawafdehi.org/entity/organization/chameliya-hydropower-2"}],
+    )
+    assert decision.verdict != BIND
+
+
+def test_slug_suffix_strip_does_not_eat_a_letters_only_name_segment():
+    # person/ram-bahadur-baba -- "baba" is 4 characters that all happen to fall
+    # in [0-9a-f], but it is a name segment, not an id: it has no digit. The
+    # old "[0-9a-f]{4,8}$" branch stripped it anyway, manufacturing a synthetic
+    # "ram bahadur" form that scored a false 1.0 against "Ram Bahadur".
+    forms = candidate_name_forms(
+        {"id": "https://jawafdehi.org/entity/person/ram-bahadur-baba"}
+    )
+    assert forms == ("ram bahadur baba",)
+    decision = resolve(
+        "Ram Bahadur",
+        [{"id": "https://jawafdehi.org/entity/person/ram-bahadur-baba"}],
+    )
+    assert decision.verdict != BIND

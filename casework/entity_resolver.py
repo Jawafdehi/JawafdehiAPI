@@ -43,16 +43,39 @@ MIDDLE_PARTICLES = frozenset({
 # Institutional words that identify nobody on their own. A name made only of
 # these goes to review: bare "जिल्ला वन कार्यालय" matches a generic office entity
 # while the case's office is the one in Mugu.
+#
+# Both scripts, like MIDDLE_PARTICLES and SURNAMES: token_forms only adds a
+# romanisation for a NON-ASCII extracted token, so a Latin extraction like
+# "District Forest Office" or "Jilla Van Karyalaya" (the extractor emits both
+# fully-English and bilingual-transliterated institutional names) can only
+# intersect this set if the English/Latin spelling is a literal member too.
+# Devanagari + the exact to_roman_colloquial output (both the schwa-kept and
+# schwa-dropped spelling, verified per word) for the words already here, plus
+# the plain English institutional words a bilingual extraction would use.
 GENERIC_TOKENS = frozenset({
-    "कार्यालय", "समिति", "विभाग", "मन्त्रालय", "शाखा", "इकाई", "केन्द्र",
-    "उपभोक्ता", "जिल्ला", "गाउँपालिका", "नगरपालिका", "प्रदेश", "आयोजना", "निर्माण",
+    "कार्यालय", "karyalaya", "karyalay", "office",
+    "समिति", "samiti", "committee",
+    "विभाग", "vibhaga", "vibhag", "department",
+    "मन्त्रालय", "mantralaya", "mantralay", "ministry",
+    "शाखा", "shakha", "branch",
+    "इकाई", "ikai", "unit",
+    "केन्द्र", "kendra", "kendr", "centre", "center",
+    "उपभोक्ता", "upabhokta", "consumer",
+    "जिल्ला", "jilla", "district",
+    # गाउँपालिका's algorithmic romanisation ("gau~palika") is not a spelling
+    # anyone types; "gaunpalika" is the practical ASCII form.
+    "गाउँपालिका", "gaunpalika",
+    "नगरपालिका", "nagarapalika", "nagarpalika", "municipality",
+    "प्रदेश", "pradesha", "pradesh", "province",
+    "आयोजना", "ayojana", "project",
+    "निर्माण", "nirmana", "nirman", "construction",
     # "वन" (forest): the missing third token of this constant's own worked
     # example, "जिल्ला वन कार्यालय" -- a bare District Forest Office name is
     # still generic (there is one per district) even though "forest" is a
     # domain word rather than an organisational-structure word like the rest
     # of this set. Added in Task 3 so the genericity veto actually catches
     # the case the docstring above describes.
-    "वन",
+    "वन", "vana", "van", "forest",
 })
 
 # Nepali family names, frequency-ranked from real data: the 686 accused binds on
@@ -284,9 +307,15 @@ NO_MATCH = "NO_MATCH"
 # ("जिल्ला वन कार्यालय - मुगु जिल्ला"). Splitting it would bind the WRONG district's
 # office: bare "जिल्ला वन कार्यालय" matches a generic office entity. Never split.
 _COMPOSITE_SEPARATOR = " - "
-# A trailing id segment on an NES slug (person/khusilala-saha-865cdc): a hex
-# suffix or a plain number, never part of the name.
-_SLUG_ID_SUFFIX = re.compile(r"-(?:[0-9a-f]{4,8}|\d+)$")
+# A trailing id segment on an NES slug (person/khusilala-saha-865cdc): 6-8
+# lowercase hex characters with at least one digit -- every real id suffix in
+# the prod-verified fixtures is exactly this shape (219986, 285096, 2de9b3,
+# f4548e, 865cdc, 11aa22). Narrower than a bare "[0-9a-f]{4,8}|\d+", which also
+# strips a genuine trailing digit that distinguishes two entities ("...aayojana
+# 2" -> "...aayojana", collapsing project 2 into project 1) or an all-letters
+# name segment that happens to fall in [0-9a-f] ("...baba", 4 hex-range
+# letters, no digit -- not an id).
+_SLUG_ID_SUFFIX = re.compile(r"-(?=[0-9a-f]{6,8}$)(?=[0-9a-f]*\d)[0-9a-f]{6,8}$")
 
 
 @dataclass(frozen=True)
@@ -300,7 +329,7 @@ class Decision:
     score: float
     matched_name: str
     reason: str
-    candidates: tuple
+    candidates: tuple[tuple[float, str, str], ...]
 
     @property
     def is_bind(self) -> bool:
@@ -339,7 +368,7 @@ def _name_vetoes(extracted: str) -> str:
     return ""
 
 
-def resolve(extracted_name: str, candidates) -> Decision:
+def resolve(extracted_name: str, candidates: list[dict]) -> Decision:
     """Decide what to do with one LLM-extracted name.
 
     BIND only when exactly ONE NES entity scores at or above MIN_BIND_SCORE and
@@ -350,7 +379,7 @@ def resolve(extracted_name: str, candidates) -> Decision:
     A candidate whose @id is not a canonical entity IRI is dropped before
     scoring, so a malformed IRI can never reach the API.
     """
-    scored = []
+    best_by_id: dict[str, tuple[float, str, str]] = {}
     for result in candidates or ():
         nes_id = (result.get("id") or "").strip()
         if not is_valid_entity_iri(nes_id):
@@ -360,9 +389,13 @@ def resolve(extracted_name: str, candidates) -> Decision:
              for form in candidate_name_forms(result)),
             default=(0.0, ""),
         )
-        if best[0] > 0:
-            scored.append((best[0], nes_id, best[1]))
-    scored.sort(key=lambda row: (-row[0], row[1]))
+        if best[0] > 0 and best[0] > best_by_id.get(nes_id, (0.0, "", ""))[0]:
+            # Two result dicts sharing one IRI (a repeat row from the search
+            # API) must collapse to a single entry -- Task 7 writes
+            # Decision.candidates into the review file a caseworker reads, and
+            # the same entity must not be listed twice.
+            best_by_id[nes_id] = (best[0], nes_id, best[1])
+    scored = sorted(best_by_id.values(), key=lambda row: (-row[0], row[1]))
     frozen = tuple(scored)
 
     qualifying = {nes_id for score, nes_id, _ in scored if score >= MIN_BIND_SCORE}
