@@ -16,9 +16,22 @@ import time
 import structlog
 
 from llm import prompts as prompt_registry
+from llm.exhaustion import is_exhaustion
 from llm.templating import fence
 
 logger = structlog.get_logger(__name__)
+
+#: Budget for a SECOND attempt, used only after the first died of exhaustion.
+#: Mirrors `courts.extract_verdicts`, including the ordering: the first attempt
+#: always uses the spec's own budget, so the parameters an answer was produced
+#: under are the parameters the spec documents. A first attempt at the larger
+#: budget would be simpler and would quietly make the spec's `max_tokens` a
+#: fiction.
+#:
+#: One retry, not a ladder. Exhaustion means the reasoning outran the allowance,
+#: and 4x is a large enough step that a second failure is evidence about the
+#: prompt rather than the budget — worth surfacing instead of spending through.
+ESCALATED_MAX_TOKENS = 32_000
 
 #: Cap on the fenced observation. A signal payload is small by construction, but
 #: it can carry a scraped page excerpt, and a runaway one would otherwise push
@@ -82,7 +95,7 @@ def handle_case_proposal_intent(payload: dict, *, on_stage) -> dict:
 
     on_stage("prompting")
     started = time.monotonic()
-    answer = spec.invoke(**context)
+    answer, escalated = _invoke_escalating(spec, context, on_stage=on_stage)
     duration = round(time.monotonic() - started, 3)
 
     if not isinstance(answer, dict):
@@ -93,7 +106,7 @@ def handle_case_proposal_intent(payload: dict, *, on_stage) -> dict:
             "case_proposal.intent_answer_not_an_object", got=type(answer).__name__
         )
         return {"intent": None, "rationale": "", "malformed_answer": True,
-                "duration_seconds": duration}
+                "escalated": escalated, "duration_seconds": duration}
 
     return {
         "intent": answer.get("intent"),
@@ -102,8 +115,40 @@ def handle_case_proposal_intent(payload: dict, *, on_stage) -> dict:
         # Recorded on the job so a proposal that later turns out to be wrong can
         # be traced to the exact prompt text that drafted it.
         "prompt": {"name": spec.name, "version": spec.version, "tier": spec.tier},
+        # Recorded because it is a cost signal, not a curiosity: a spec that
+        # escalates routinely is a spec whose budget is wrong, and the only place
+        # that is visible is on the jobs it produced.
+        "escalated": escalated,
         "duration_seconds": duration,
     }
+
+
+def _invoke_escalating(spec, context, *, on_stage):
+    """Invoke ``spec``; on exhaustion, retry once at ``ESCALATED_MAX_TOKENS``.
+
+    Returns ``(answer, escalated)``.
+
+    Only exhaustion is retried. A malformed answer, a transport error or an auth
+    failure is re-raised untouched — retrying those at 4x the budget would spend
+    four times as much to fail identically, which is the trap
+    :func:`llm.exhaustion.is_exhaustion` exists to avoid.
+    """
+    try:
+        return spec.invoke(**context), False
+    except Exception as exc:  # noqa: BLE001 - re-raised unless it is exhaustion
+        if not is_exhaustion(exc):
+            raise
+        logger.warning(
+            "case_proposal.intent_budget_exhausted",
+            budget=spec.max_tokens,
+            retrying_at=ESCALATED_MAX_TOKENS,
+            error=str(exc)[:200],
+        )
+        # The lease is extended before paying for a second, slower call: the first
+        # attempt has already spent the ack window's slack, and a job whose lease
+        # expires mid-retry gets claimed by another poller and billed twice.
+        on_stage("prompting (escalated)")
+        return spec.invoke(max_tokens=ESCALATED_MAX_TOKENS, **context), True
 
 
 #: kind -> worker-side handler, merged into the poller's HANDLERS registry.

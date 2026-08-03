@@ -123,7 +123,7 @@ class PromptSpec:
         """
         return render_prompt(self.content_template, context, required=self.required)
 
-    def invoke(self, usage=None, **context) -> Any:
+    def invoke(self, usage=None, max_tokens=None, **context) -> Any:
         """Render both templates and invoke the model, returning parsed JSON.
 
         Thin by design — ``invoke_json`` already salvages dirty/truncated output,
@@ -135,7 +135,13 @@ class PromptSpec:
 
         Args:
             usage: Optional UsageAccumulator, forwarded to ``invoke_json``.
-            **context: Template context.
+            max_tokens: Override the spec's budget for this one call. Exists for
+                retry-at-a-larger-budget after :func:`llm.exhaustion.is_exhaustion`
+                — see ``case_proposals.job_handlers``. The spec's own value stays
+                the default so the escalation is visible at the call site rather
+                than hidden in the registry.
+            **context: Template context. Note that ``usage`` and ``max_tokens``
+                are therefore reserved names and cannot be template variables.
 
         Returns:
             Parsed JSON (dict or list), per ``invoke_json``.
@@ -145,22 +151,35 @@ class PromptSpec:
                 either template is missing or a variable did not resolve, so a
                 broken prompt costs nothing.
         """
+        if max_tokens is not None and max_tokens < 1:
+            # Same rule __post_init__ applies to the configured budget. Without it
+            # the override was the one way past that check, and a zero budget is
+            # the pathological case this whole seam exists to fix: it reaches the
+            # provider, bills a call, and cannot produce a token.
+            raise ValueError(
+                f"{self.name}: max_tokens override must be >= 1, got {max_tokens!r}."
+            )
+
         system = self.render_system(**context)
         content = self.render(**context)
+        budget = self.max_tokens if max_tokens is None else max_tokens
         # Logged BEFORE the call as well as after, so a spec that reliably times
-        # out or blows its token budget is still attributable to a version.
+        # out or blows its token budget is still attributable to a version. Logs
+        # the EFFECTIVE budget, not the spec's, or an escalated retry would be
+        # indistinguishable from the attempt that provoked it.
         logger.info(
             "prompt.invoke",
             prompt=self.name,
             version=self.version,
             tier=self.tier,
-            max_tokens=self.max_tokens,
+            max_tokens=budget,
+            escalated=budget != self.max_tokens,
             content_chars=len(content),
         )
         return invoke_json(
             system,
             content,
-            max_tokens=self.max_tokens,
+            max_tokens=budget,
             tier=self.tier,
             usage=usage,
         )

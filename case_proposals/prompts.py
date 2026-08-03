@@ -29,9 +29,25 @@ intent = register(
         # raising — so a downgrade here would surface as a slow rise in
         # unparseable results, not as an error.
         tier="premium",
-        # A drafted intent is small; the budget is for the rationale and for
-        # salvageable overrun, not for the model to think out loud.
-        max_tokens=1200,
+        # Sized for the model's REASONING, not for the answer. A drafted intent is
+        # small, and this used to say so — "the budget is for the rationale and for
+        # salvageable overrun, not for the model to think out loud", at 1200 tokens.
+        # That reasons about the API's `max_tokens`, which bounds the response and
+        # leaves thinking its own allowance. The tier this is pinned to reaches the
+        # model through the CLI provider, where the budget becomes
+        # CLAUDE_CODE_MAX_OUTPUT_TOKENS and caps reasoning and answer together.
+        #
+        # So 1200 was not a tight budget, it was an impossible one: the first
+        # production invocation spent it thinking, ended its turn unfinished, and
+        # aborted as `error_max_turns` — having billed a full premium call. Every
+        # attempt failed the same way, twice per job before it went dead.
+        #
+        # 8000 is not a guess. `courts.extract_verdicts` measured exactly this on a
+        # comparable read-and-judge prompt: 1200 failed 3 of 24 eval cases outright
+        # after spending ~4800 output tokens, and 8000 is the figure that run
+        # settled on. Overrun beyond it escalates once — see
+        # `case_proposals.job_handlers.ESCALATED_MAX_TOKENS`.
+        max_tokens=8000,
         # `language` is read only inside an {% if %}, which the missing-variable
         # sentinel cannot see. Without declaring it, omitting the key silently
         # produces an English prompt for a Nepali case.
