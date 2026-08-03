@@ -24,6 +24,11 @@ BROWSER_UA = (
 # application/json-patch+json parser, so that content type 415s.
 PATCH_CONTENT_TYPE = "application/json"
 WHOLE_LIST_PATHS = ("evidence", "entities")
+# Candidate-retrieval window for `search_entities`. 50 is the endpoint's
+# MAX_PAGE_SIZE (`search/service.py`); 4 pages = 200 candidates is well past the
+# largest same-name block seen in prod (13, for "संजय प्रसाद यादव").
+ENTITY_SEARCH_PAGE_SIZE = 50
+ENTITY_SEARCH_MAX_PAGES = 4
 
 
 def build_replace_patch(field, value):
@@ -230,6 +235,46 @@ class CaseworkApi:
             headers = getattr(r, "headers", None)
             etag = headers.get("ETag") if headers is not None else None
             return body, etag
+
+    def search_entities(self, query, *, page_size=ENTITY_SEARCH_PAGE_SIZE,
+                        pages=ENTITY_SEARCH_MAX_PAGES, timeout=60):
+        """Candidate NES entities for `query`, from the unified search endpoint.
+
+        Uses `/api/search/` (OpenSearch) and NOT `/api/entities?query=`: that
+        endpoint scores a textual query over only the first 5000 rows ordered by
+        IRI (`MAX_SEARCH_CANDIDATES` in `entities/persistence.py`), and prod NES
+        holds 162,650 `person` entities -- every result comes from the "a..."
+        slice, so recall is about 3% and an ambiguity check built on it would be
+        meaningless.
+
+        Keeps paging while the last page's LOWEST score still ties the first
+        page's top score. A block of identical-name entities truncated mid-tie
+        would hide a duplicate from the resolver's ambiguity veto and turn a
+        review into a bind. Capped at `pages` pages; the cap being reached is
+        logged, never silent.
+
+        A read, so the write-guard in `_request` never applies -- this is usable
+        against production.
+        """
+        results, top_score = [], None
+        for page in range(1, pages + 1):
+            data = self.get("/search/", {"q": query, "type": "entity",
+                                         "page_size": page_size, "page": page},
+                            timeout=timeout)
+            batch = data.get("results") or []
+            results.extend(batch)
+            if not batch:
+                break
+            scores = [r.get("score") or 0.0 for r in batch]
+            if top_score is None:
+                top_score = max(scores)
+            if min(scores) < top_score or len(batch) < page_size:
+                break
+        else:
+            logger.info(
+                "entity search for %r hit the %d-page cap (%d candidates); a "
+                "same-name tie may extend past it", query, pages, len(results))
+        return results
 
     def _patch(self, slug, ops, timeout=60, if_match=None):
         """The choke point for FIELD writes (`patch_field`, `replace_list`) --

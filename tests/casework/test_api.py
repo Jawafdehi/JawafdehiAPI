@@ -717,3 +717,96 @@ def test_no_auth_material_reaches_the_logs_on_the_exception_path(monkeypatch, ca
     assert basic_creds not in all_text
     assert "Bearer" not in all_text
     assert "Basic " not in all_text
+
+
+# ---------------------------------------------------------------------------
+# search_entities -- candidate retrieval for the resolver, over the unified
+# search endpoint (`/api/search/`, OpenSearch-backed) rather than
+# `/api/entities?query=` (which only scores the first 5000 IRI-ordered rows
+# and has ~3% recall against prod's 162,650 `person` entities). Pages while
+# the last page's lowest score still ties the first page's top score, so a
+# block of identical-name entities spanning a page boundary is never
+# truncated mid-tie -- that would hide a duplicate from the resolver's
+# ambiguity veto and turn a review into a silent bind.
+# ---------------------------------------------------------------------------
+
+
+def test_search_entities_hits_the_unified_search_endpoint(monkeypatch):
+    api = CaseworkApi("http://127.0.0.1:48010", token="t")
+    seen = []
+
+    def fake_get(path, params=None, timeout=60):
+        seen.append((path, params))
+        return {"results": [], "count": 0}
+
+    monkeypatch.setattr(api, "get", fake_get)
+    api.search_entities("अनिष श्रेष्ठ")
+
+    path, params = seen[0]
+    assert path == "/search/"
+    assert params["q"] == "अनिष श्रेष्ठ"
+    assert params["type"] == "entity"
+
+
+def test_search_entities_pages_on_to_exhaust_a_top_score_tie(monkeypatch):
+    # A block of identical-name entities must never be truncated mid-tie: a
+    # hidden duplicate would let the resolver's ambiguity veto pass and produce
+    # a bind. Pages 1 and 2 are full pages entirely at the top score, so paging
+    # must continue; page 3 drops below it, which ends the walk.
+    pages = [
+        {"results": [{"id": f"https://jawafdehi.org/entity/person/p{i}",
+                      "score": 182.17} for i in range(3)]},
+        {"results": [{"id": f"https://jawafdehi.org/entity/person/q{i}",
+                      "score": 182.17} for i in range(3)]},
+        {"results": [{"id": "https://jawafdehi.org/entity/person/r0", "score": 12.0}]},
+    ]
+    calls = []
+
+    api = CaseworkApi("http://127.0.0.1:48010", token="t")
+
+    def fake_get(path, params=None, timeout=60):
+        calls.append(params["page"])
+        return pages[params["page"] - 1]
+
+    monkeypatch.setattr(api, "get", fake_get)
+    results = api.search_entities("मदन यादव", page_size=3)
+
+    assert calls == [1, 2, 3]          # kept going while the tie held
+    assert len(results) == 7
+
+
+def test_search_entities_stops_on_a_short_page(monkeypatch):
+    # Fewer results than page_size means the result set is exhausted -- there
+    # is no page 2 worth asking for, even while the top-score tie still holds.
+    calls = []
+    api = CaseworkApi("http://127.0.0.1:48010", token="t")
+
+    def fake_get(path, params=None, timeout=60):
+        calls.append(params["page"])
+        return {"results": [{"id": "https://jawafdehi.org/entity/person/p0",
+                             "score": 182.17}]}
+
+    monkeypatch.setattr(api, "get", fake_get)
+    api.search_entities("मदन यादव", page_size=3)
+    assert calls == [1]
+
+
+def test_search_entities_stops_at_the_page_cap(monkeypatch):
+    api = CaseworkApi("http://127.0.0.1:48010", token="t")
+    calls = []
+
+    def fake_get(path, params=None, timeout=60):
+        calls.append(params["page"])
+        return {"results": [{"id": f"https://jawafdehi.org/entity/person/p{params['page']}",
+                             "score": 100.0}]}
+
+    monkeypatch.setattr(api, "get", fake_get)
+    api.search_entities("थापा", page_size=1, pages=2)
+    assert calls == [1, 2]
+
+
+def test_search_entities_is_a_read_so_the_write_guard_never_fires(monkeypatch):
+    # Non-loopback host, allow_remote_writes unset: a read must still work.
+    api = CaseworkApi("https://api.jawafdehi.org", token="t")
+    monkeypatch.setattr(api, "get", lambda path, params=None, timeout=60: {"results": []})
+    assert api.search_entities("अनिष श्रेष्ठ") == []
