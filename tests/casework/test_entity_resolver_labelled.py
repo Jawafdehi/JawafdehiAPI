@@ -35,7 +35,13 @@ from functools import lru_cache
 from pathlib import Path
 
 from casework.enrich_related_entities import plan_case_entities
-from casework.entity_resolver import BIND, REVIEW, apply_document_veto, resolve
+from casework.entity_resolver import (
+    BIND,
+    NO_MATCH,
+    REVIEW,
+    apply_document_veto,
+    resolve,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -151,12 +157,22 @@ EXPECTED_LABEL_COUNT = 142
 ECN_VETO_ROWS = (
     "टोपेन्द्र खनाल",
     "नन्दलाल दास",
-    "मिङमा ल्हमु शेर्पा",
     "याङजी शेर्पा",
     "राज बहादुर बम",
     # nec-candidate-id, an ELECTED ward head rather than a candidate. The veto
     # keyed on ecn-candidate-id alone until 2026-08-03 and let this through.
     "तेजनाथ पौडेल",
+)
+# `मिङमा ल्हमु शेर्पा` used to sit in ECN_VETO_ROWS above, and it is deliberately
+# no longer there. It no longer reaches BIND at all: the extraction spells it
+# ल्हमु where NES stores ल्हामु, and an inserted ा stopped folding when
+# romanisation was restricted to cross-script matching (see `tokens_equal`).
+# It is pinned below rather than deleted, so that the day someone widens the fold
+# again this gate says so instead of quietly regaining a bind.
+#
+# Honest cost: the document veto now has FIVE rows exercising it, not six.
+NO_LONGER_REACHES_THE_DOCUMENT_VETO = (
+    "मिङमा ल्हमु शेर्पा",
 )
 # Rows the PROVINCE veto holds: the candidate IRI asserts a province the extracted
 # name never mentions. Separate from ECN_VETO_ROWS because a different veto fires,
@@ -259,6 +275,14 @@ def test_the_gate_actually_exercises_binding():
         assert by_name[name].verdict == REVIEW, (
             f"{name!r} was not downgraded — the document veto is not firing")
         assert by_name[name].nes_id is None
+
+    # Pinned so a widened fold cannot silently turn this back into a bind.
+    for name in NO_LONGER_REACHES_THE_DOCUMENT_VETO:
+        assert name in by_name, f"{name!r} missing from the measured set"
+        assert by_name[name].verdict == NO_MATCH, (
+            f"{name!r} reached {by_name[name].verdict} -- it should not score at "
+            "all. If the matra fold was widened, re-check that कमल थापा still "
+            "cannot bind a कमला थापा entity before accepting this.")
 
     # The province veto is pure, so it must fire inside resolve() itself and name
     # the province, otherwise a caseworker cannot tell what to check.

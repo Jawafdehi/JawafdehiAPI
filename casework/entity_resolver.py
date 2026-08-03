@@ -217,9 +217,66 @@ def name_tokens(raw: str) -> tuple[tuple[str, frozenset[str]], ...]:
     return tuple(out)
 
 
+# The only Devanagari difference two spellings of one name may have: matra
+# LENGTH. Short and long i, short and long u. Deliberately NOT े/ै or ो/औ, which
+# are different vowels rather than lengths of one, and deliberately not the
+# independent vowel letters -- only the dependent signs a scribe varies.
+_MATRA_LENGTH_FOLD = str.maketrans({"ि": "ी", "ु": "ू"})
+
+
+def _matra_length_key(token: str) -> str:
+    """`token` with matra length flattened, for same-script comparison only."""
+    return token.translate(_MATRA_LENGTH_FOLD)
+
+
 def tokens_equal(a, b) -> bool:
-    """True when two `(raw, forms)` tokens name the same thing."""
-    return bool(a[1] & b[1])
+    """True when two `(raw, forms)` tokens name the same thing.
+
+    Romanisation is a CROSS-SCRIPT BRIDGE ONLY. Two Devanagari spellings that
+    differ after normalisation are different tokens, full stop -- they never meet
+    through their romanisations.
+
+    That restriction is the whole safety of this function, because
+    `to_roman_colloquial` is lossy in two ways that a form-set intersection
+    cannot see:
+
+    * It emits BOTH the schwa-kept and schwa-dropped spelling, so कमल yields
+      "kamala kamal" while कमला yields "kamala". Intersecting form-sets made a
+      masculine name equal to its feminine counterpart, and
+      `match_score("कमल थापा", "कमला थापा")` returned 0.98 -- enough to bind a
+      woman to a corruption case charging a man.
+    * Distinct consonants collapse to one Latin letter: ण and न both romanise to
+      "n", श and ष both to "sh". So गणेश met गनेश, and आशिष met आषिश, each at
+      0.98.
+
+    Neither is vowel length, which is what the fold was believed to be limited
+    to. The inconsistency was an accident of the transliteration table rather
+    than a design: श्रेष्ठ vs श्रेष्ट correctly scored 0.00 -- and has a test
+    saying so -- only because that table happens to distinguish ठ from ट.
+
+    Residual, deliberately not closed here: a LATIN extracted name still reaches
+    Devanagari through romanisation, so "Kamala Thapa" can still meet कमल थापा.
+    That is inherent to romanising at all, it is rare (extractions are
+    overwhelmingly Devanagari), and when both spellings exist in NES the
+    ambiguity veto catches it. Closing it would mean dropping cross-script
+    matching altogether.
+    """
+    a_raw, a_forms = a
+    b_raw, b_forms = b
+    if a_raw == b_raw:
+        return True
+    if not a_raw.isascii() and not b_raw.isascii():
+        # Two Devanagari spellings meet only through MATRA LENGTH -- ि/ी and
+        # ु/ू, the one variation Nepali orthography treats as free. Prod holds
+        # both निधि and निधी for one person, so refusing this outright costs a
+        # real bind for nothing.
+        #
+        # Everything else stays a difference: a consonant swap (ण/न, श/ष), and
+        # critically the ADDITION of a final ा, which is the masculine ->
+        # feminine marker. That is why कमल and कमला are still different tokens
+        # while निधि and निधी are one.
+        return _matra_length_key(a_raw) == _matra_length_key(b_raw)
+    return bool(a_forms & b_forms)
 
 
 # The single bind threshold. Set by the worked table below, NOT by how many binds
@@ -352,15 +409,10 @@ NO_MATCH = "NO_MATCH"
 # ("जिल्ला वन कार्यालय - मुगु जिल्ला"). Splitting it would bind the WRONG district's
 # office: bare "जिल्ला वन कार्यालय" matches a generic office entity. Never split.
 _COMPOSITE_SEPARATOR = " - "
-# A trailing id segment on an NES slug (person/khusilala-saha-865cdc): 6-8
-# lowercase hex characters with at least one digit -- every real id suffix in
-# the prod-verified fixtures is exactly this shape (219986, 285096, 2de9b3,
-# f4548e, 865cdc, 11aa22). Narrower than a bare "[0-9a-f]{4,8}|\d+", which also
-# strips a genuine trailing digit that distinguishes two entities ("...aayojana
-# 2" -> "...aayojana", collapsing project 2 into project 1) or an all-letters
-# name segment that happens to fall in [0-9a-f] ("...baba", 4 hex-range
-# letters, no digit -- not an id).
-_SLUG_ID_SUFFIX = re.compile(r"-(?=[0-9a-f]{6,8}$)(?=[0-9a-f]*\d)[0-9a-f]{6,8}$")
+# No slug-suffix regex lives here any more: the IRI slug is no longer scored at
+# all (see `candidate_name_forms`), because romanising a slug turned a
+# same-script comparison into a cross-script one and bound कमल थापा to a
+# कमला थापा entity at 0.96.
 
 # Nepal's seven provinces, keyed by the slug NES puts in a provincial IRI:
 # organization/government/provincial/<slug>/<body>.
@@ -443,25 +495,61 @@ class Decision:
 def candidate_name_forms(result: dict) -> tuple[str, ...]:
     """The name strings of one search result worth scoring against.
 
-    The Devanagari title, the English title, and the IRI slug with its trailing
-    id segment dropped.
+    The Devanagari title and the English title. THE IRI SLUG IS DELIBERATELY NOT
+    ONE OF THEM, and that is a safety property, not a tidiness preference.
 
-    THE SLUG FORM SCORES BUT NEVER DECIDES. Measured over all 7,882 candidate
-    rows in `tests/casework/fixtures/entity_candidates.json`: it scores above 0
-    on 53 rows and strictly beats both titles on ZERO of them, so removing it
-    changes no verdict on the labelled set. It does not reach Latin extractions
-    the titles miss -- `token_forms` already romanises Devanagari tokens on both
-    sides of the comparison, so a Latin extraction reaches `title.ne` directly.
-    It is kept because the three forms enter a `max()`, where a redundant form
-    costs nothing; it is not a safety net, since `max()` can only ever RAISE a
-    candidate's score.
+    The slug was previously included on the argument that three forms enter a
+    `max()`, so a redundant one "costs nothing" because `max()` can only RAISE a
+    score. That reasoning is backwards: raising a score past MIN_BIND_SCORE is
+    exactly how a false positive happens. It was also measured as inert -- 53 of
+    7,882 candidate rows scored above 0 through it and none strictly beat the
+    titles -- but "no LABELLED row changed" is a much weaker claim than "no name
+    can change", and a real one does:
+
+        extracted  कमल थापा                    (masculine)
+        candidate  कमला थापा  (feminine), IRI .../person/kamala-thapa-111111
+
+    Against the Devanagari title this scores 0.00, because two differing
+    Devanagari spellings never meet (see `tokens_equal`). But the slug romanises
+    to "kamala thapa", which turns a same-script comparison into a CROSS-script
+    one -- the one place romanisation is still allowed to bridge -- and it scores
+    0.96. A machine-generated slug thus reintroduced precisely the fold
+    `tokens_equal` exists to prevent.
+
+    The slug carries no information the titles lack; it is derived FROM the
+    title. So there is nothing to trade off.
     """
     title = result.get("title") or {}
     forms = [title.get("ne"), title.get("en")]
-    slug = (result.get("id") or "").rsplit("/", 1)[-1]
-    if slug:
-        forms.append(_SLUG_ID_SUFFIX.sub("", slug).replace("-", " "))
     return tuple(form for form in forms if form and form.strip())
+
+
+def comparable_name_forms(extracted_name: str, result: dict) -> tuple[str, ...]:
+    """The candidate forms worth scoring `extracted_name` against.
+
+    PREFER THE SAME SCRIPT. Comparing two Devanagari strings is lossless;
+    comparing across scripts has to go through `to_roman_colloquial`, which
+    collapses ण with न, श with ष, and a name with its feminine form. So when the
+    extraction is Devanagari and the candidate HAS a Devanagari title, that title
+    is the only form scored -- the English title is dropped, not because it is
+    wrong but because it can only add a lossy path to a comparison that already
+    has an exact one.
+
+    Concretely, without this: extracted कमल थापा against an entity titled
+    कमला थापा / "Kamala Thapa" scores 0.00 on the Devanagari title and 0.96 on
+    the English one, and `max()` takes the 0.96 -- binding a masculine name to a
+    feminine entity. NES backfills `title.en` broadly, so this was not a corner
+    case.
+
+    Cross-script scoring still happens where it is the ONLY option: a Latin
+    extraction, or a candidate with no Devanagari title. That residual is
+    documented in `tokens_equal`.
+    """
+    forms = candidate_name_forms(result)
+    if extracted_name.isascii():
+        return forms
+    same_script = tuple(form for form in forms if not form.isascii())
+    return same_script or forms
 
 
 def asserted_province(nes_id: str) -> str:
@@ -703,7 +791,7 @@ def resolve(extracted_name: str, candidates: list[dict],
             continue
         best = max(
             ((match_score(extracted_name, form), form)
-             for form in candidate_name_forms(result)),
+             for form in comparable_name_forms(extracted_name, result)),
             default=(0.0, ""),
         )
         if best[0] > 0 and best[0] > best_by_id.get(nes_id, (0.0, "", ""))[0]:

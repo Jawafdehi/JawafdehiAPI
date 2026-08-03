@@ -442,49 +442,7 @@ def test_organisation_filed_under_person_prefix_still_binds():
     assert resolve("Ncell Pvt. Ltd.", [ncell]).verdict == BIND
 
 
-def test_slug_suffix_strip_still_removes_every_real_id_suffix():
-    # Every real id suffix in the prod-verified fixtures used across this file:
-    # person/anish-shrestha-219986, -285096, person/amkura-khatri-2de9b3,
-    # organization/jilla-vana-karyalaya-f4548e, person/khusilala-saha-865cdc,
-    # person/ncell-pvt-ltd-11aa22. The tightened regex must still strip all six.
-    for suffix in ("219986", "285096", "2de9b3", "f4548e", "865cdc", "11aa22"):
-        forms = candidate_name_forms(
-            {"id": f"https://jawafdehi.org/entity/person/ram-thapa-{suffix}"}
-        )
-        assert forms == ("ram thapa",)
 
-
-def test_slug_suffix_strip_does_not_eat_a_distinguishing_trailing_digit():
-    # organization/chameliya-hydropower-2 -- the "2" distinguishes project 2
-    # from project 1, it is not an id suffix. The old "\d+$" branch stripped
-    # any trailing digit run, manufacturing a synthetic "chameliya hydropower"
-    # form that scored 1.0 against "Chameliya Hydropower" and outranked both
-    # real titles.
-    forms = candidate_name_forms(
-        {"id": "https://jawafdehi.org/entity/organization/chameliya-hydropower-2"}
-    )
-    assert forms == ("chameliya hydropower 2",)
-    decision = resolve(
-        "Chameliya Hydropower",
-        [{"id": "https://jawafdehi.org/entity/organization/chameliya-hydropower-2"}],
-    )
-    assert decision.verdict != BIND
-
-
-def test_slug_suffix_strip_does_not_eat_a_letters_only_name_segment():
-    # person/ram-bahadur-baba -- "baba" is 4 characters that all happen to fall
-    # in [0-9a-f], but it is a name segment, not an id: it has no digit. The
-    # old "[0-9a-f]{4,8}$" branch stripped it anyway, manufacturing a synthetic
-    # "ram bahadur" form that scored a false 1.0 against "Ram Bahadur".
-    forms = candidate_name_forms(
-        {"id": "https://jawafdehi.org/entity/person/ram-bahadur-baba"}
-    )
-    assert forms == ("ram bahadur baba",)
-    decision = resolve(
-        "Ram Bahadur",
-        [{"id": "https://jawafdehi.org/entity/person/ram-bahadur-baba"}],
-    )
-    assert decision.verdict != BIND
 
 
 # ---------------------------------------------------------------------------
@@ -496,11 +454,34 @@ def test_slug_suffix_strip_does_not_eat_a_letters_only_name_segment():
 # ---------------------------------------------------------------------------
 
 
-def test_vowel_length_folds_so_lhamu_variants_match():
+def test_an_inserted_matra_no_longer_folds_even_on_a_real_variant():
     # Prod: person/mingna-lhamu-sherpa-328030 stores मिङमा ल्हामु शेर्पा while the
-    # extractor emitted मिङमा ल्हमु शेर्पा. Both romanise to "lhamu".
-    assert tokens_equal(name_tokens("ल्हमु")[0], name_tokens("ल्हामु")[0])
-    assert match_score("मिङमा ल्हमु शेर्पा", "मिङमा ल्हामु शेर्पा") == pytest.approx(0.98)
+    # extractor emitted मिङमा ल्हमु शेर्पा -- genuinely one person, and this pair
+    # USED to match at 0.98 because both romanise to "lhamu".
+    #
+    # It no longer does, and that is a deliberate trade. The fold that matched
+    # these two was romanisation-based, and the same mechanism made कमल equal
+    # कमला -- a masculine name binding to a feminine entity at 0.98. Matra
+    # LENGTH still folds (निधि/निधी below); an INSERTED ा does not, because a
+    # final ा is Nepali's masculine -> feminine marker and no positional rule
+    # separating "internal ा" from "final ा" has been measured yet.
+    #
+    # So this name is now a no-match a caseworker resolves in five minutes,
+    # rather than a mechanism that can attach the wrong person to a corruption
+    # case. See `tokens_equal`.
+    assert not tokens_equal(name_tokens("ल्हमु")[0], name_tokens("ल्हामु")[0])
+    assert match_score("मिङमा ल्हमु शेर्पा", "मिङमा ल्हामु शेर्पा") == 0.0
+
+
+def test_the_fold_that_matched_lhamu_would_also_bind_a_feminine_namesake():
+    # The reason the test above gave up its bind. Both directions, so neither
+    # ordering sneaks through.
+    assert match_score("कमल थापा", "कमला थापा") == 0.0
+    assert match_score("कमला थापा", "कमल थापा") == 0.0
+    # And the consonant collapses the same mechanism allowed: ण/न and श/ष each
+    # romanise to one Latin letter.
+    assert match_score("गणेश थापा", "गनेश थापा") == 0.0
+    assert match_score("आशिष राई", "आषिश राई") == 0.0
 
 
 def test_vowel_length_fold_is_what_lets_a_real_variant_bind():
@@ -987,3 +968,15 @@ def test_an_untruncated_list_still_binds_and_no_cap_means_complete():
     # ...and omitting the cap asserts "this is the complete candidate set", so a
     # long list is not evidence of truncation on its own.
     assert resolve("राज बहादुर बम", _pad_to(_BAM_CANDIDATES, 200)).verdict == BIND
+
+
+def test_candidate_name_forms_excludes_the_iri_slug():
+    # A safety property, not tidiness. The slug romanises, so scoring it turned a
+    # Devanagari-vs-Devanagari comparison into a cross-script one -- the one place
+    # romanisation still bridges -- and bound कमल थापा to a कमला थापा entity at
+    # 0.96 even though the two TITLES score 0.00.
+    result = {"id": "https://jawafdehi.org/entity/person/kamala-thapa-111111",
+              "title": {"ne": "कमला थापा", "en": "Kamala Thapa"}}
+    assert candidate_name_forms(result) == ("कमला थापा", "Kamala Thapa")
+    assert not [f for f in candidate_name_forms(result) if "-" in f]
+    assert resolve("कमल थापा", [dict(result, score=190.0)]).verdict == NO_MATCH
