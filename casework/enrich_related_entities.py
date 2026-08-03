@@ -61,7 +61,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from casework.common.api import ENTITY_SEARCH_MAX_PAGES, ENTITY_SEARCH_PAGE_SIZE, CaseworkApi
+from casework.common.api import CaseworkApi
 from casework.common.cli import (
     add_common_args,
     basic_auth_from_env,
@@ -347,13 +347,6 @@ class EntityBindPlan:
     examined: bool = False
 
 
-# The candidate-list size at which `search_entities` gave up paging because the
-# last page's lowest score still tied the first page's top score (see its own
-# docstring). At that size we have NOT necessarily seen every tied candidate,
-# so the ambiguity veto's premise -- "every same-name entity was scored" -- does
-# not hold. Imported, not hardcoded, so this tracks `search_entities`' own cap.
-_CANDIDATE_LIST_TRUNCATION_CAP = ENTITY_SEARCH_PAGE_SIZE * ENTITY_SEARCH_MAX_PAGES
-
 
 def plan_case_entities(api, case, etag, extracted_items):
     """Resolve every extracted name for one case and build its write plan.
@@ -464,12 +457,17 @@ def plan_case_entities(api, case, etag, extracted_items):
             continue
 
         candidates = api.search_entities(name)
-        # The cap goes IN, so `resolve` applies the truncation veto itself
-        # alongside the ambiguity check it protects. Previously this module
-        # re-checked it afterwards, which meant a BIND straight out of `resolve`
-        # was not actually safe to trust without a caller topping it up.
+        # Completeness goes IN, so `resolve` applies the truncation veto itself
+        # alongside the ambiguity check it protects. `search_entities` knows
+        # whether it ran out of results or stopped early; before this it threw
+        # that away and the resolver had to guess from a row count.
+        # `search_entities` always returns a `CandidateList` carrying the real
+        # answer. The `True` default covers a caller that hands over a plain list
+        # -- a stub, or a hand-built set -- which is describing exactly the
+        # candidates it means, so taking it at its word is right rather than
+        # cautious-by-reflex. Nothing in production reaches the default.
         decision = resolve(name, candidates,
-                           candidate_cap=_CANDIDATE_LIST_TRUNCATION_CAP)
+                           candidates_complete=getattr(candidates, "complete", True))
         if decision.is_bind:
             read_error = None
             try:

@@ -683,12 +683,12 @@ def test_resolve_still_binds_on_names_alone_and_takes_no_document():
     # not just the behaviour -- a document parameter creeping in here would move
     # I/O back into the pure layer.
     #
-    # `candidate_cap` is a plain int (the size at which the caller's search
-    # stopped paging), so it does not reopen that door. The guarantee this test
-    # protects is "nothing that implies I/O", which is asserted directly below
-    # rather than relying on an exact list that any harmless addition breaks.
+    # `candidates_complete` is a plain bool (did the caller's search run out of
+    # results), so it does not reopen that door. The guarantee this test protects
+    # is "nothing that implies I/O", asserted directly below rather than by an
+    # exact list that any harmless addition breaks.
     params = list(inspect.signature(resolve).parameters)
-    assert params == ["extracted_name", "candidates", "candidate_cap"]
+    assert params == ["extracted_name", "candidates", "candidates_complete"]
     forbidden = ("document", "api", "client", "session", "fetch", "get", "url")
     assert not [p for p in params if any(word in p for word in forbidden)]
 
@@ -928,54 +928,72 @@ def test_province_forms_carry_no_redundant_romanisation():
 
 
 # ---------------------------------------------------------------------------
-# The truncation veto, now inside resolve() beside the ambiguity check it
-# protects. It used to live in the caller, which meant a BIND straight out of
-# resolve() was not safe to trust without the caller topping it up.
+# The truncation veto. It asks whether the window EDGE still sits inside the
+# winner's relevance band -- not how many rows came back. A count-based test was
+# wrong in both directions: it missed a full 50-row page that stopped early on
+# relevance (where a same-name block really can straddle the boundary) and it
+# fired on every full 200-row response whose block had genuinely ended.
 # ---------------------------------------------------------------------------
 
 
-def _pad_to(candidates, total):
-    """Extra candidates that score nothing, only to reach a raw list length.
-
-    Distinct valid IRIs with unrelated titles, so they are dropped during
-    scoring and cannot manufacture an ambiguity -- the only thing they change is
-    `len(candidates)`, which is exactly what the truncation veto reads.
-    """
-    padded = list(candidates)
-    while len(padded) < total:
-        n = len(padded)
-        padded.append({"id": f"https://jawafdehi.org/entity/person/padding-name-{n:06d}",
-                       "title": {"ne": f"असम्बन्धित नाम {n}"}, "score": 1.0})
-    return padded
+_BAM = "https://jawafdehi.org/entity/person/raj-bahadur-bam-318984"
 
 
-def test_a_truncated_candidate_list_refuses_a_bind_inside_resolve():
-    candidates = _pad_to(_BAM_CANDIDATES, 200)
-    decision = resolve("राज बहादुर बम", candidates, candidate_cap=200)
+def _bam(score):
+    return {"id": _BAM, "title": {"ne": "राज बहादुर बम"}, "score": score}
+
+
+def _filler(n, score):
+    """Rows that cannot match the name, only carry a relevance score."""
+    return [{"id": f"https://jawafdehi.org/entity/person/padding-name-{i:06d}",
+             "title": {"ne": f"असम्बन्धित नाम {i}"}, "score": score}
+            for i in range(n)]
+
+
+def test_a_window_edge_inside_the_winners_band_refuses_the_bind():
+    # Descending relevance, and the LAST row fetched still scores as high as the
+    # match -- so an equally-relevant same-name entity can sit just past the edge
+    # where the ambiguity check cannot see it. This is the straddle that a row
+    # count missed: real search stopped `संजय प्रसाद यादव` on a FULL 50-row page,
+    # far under any cap, and that name's own duplicates score 130.981 and 130.564
+    # rather than identically.
+    candidates = [_bam(130.981)] + _filler(49, 130.981)
+    decision = resolve("राज बहादुर बम", candidates, candidates_complete=False)
     assert decision.verdict == REVIEW
     assert decision.nes_id is None
-    assert "search cap" in decision.reason
+    assert "truncated mid-block" in decision.reason
 
 
-def test_the_truncation_veto_counts_the_raw_list_not_the_deduped_scores():
-    # `scored` is deduped by IRI and drops malformed ones, so it can fall below
-    # the cap on a response that genuinely hit it. Counting `scored` instead of
-    # the raw list would silently let the veto miss.
-    candidates = _pad_to(_BAM_CANDIDATES, 199)
-    candidates.append(dict(candidates[-1]))          # a repeat row: 200 raw, 199 distinct
-    assert len({c["id"] for c in candidates}) < len(candidates)
-    decision = resolve("राज बहादुर बम", candidates, candidate_cap=200)
-    assert decision.verdict == REVIEW
-    assert "search cap" in decision.reason
+def test_a_window_edge_below_the_winners_band_still_binds():
+    # The spurious-review case. `बुद्दीसागर सुवेदी` really returns 200 rows whose
+    # edge (21.579) is below its top (25.134): paging stopped because the block
+    # ended, so every tied candidate WAS seen. A count-based veto threw away every
+    # bind on a full 200-row response.
+    candidates = [_bam(25.134)] + _filler(199, 21.579)
+    assert len(candidates) == 200
+    assert resolve("राज बहादुर बम", candidates,
+                   candidates_complete=False).verdict == BIND
 
 
-def test_an_untruncated_list_still_binds_and_no_cap_means_complete():
-    # Below the cap the veto must not fire...
-    assert resolve("राज बहादुर बम", _pad_to(_BAM_CANDIDATES, 199),
-                   candidate_cap=200).verdict == BIND
-    # ...and omitting the cap asserts "this is the complete candidate set", so a
-    # long list is not evidence of truncation on its own.
-    assert resolve("राज बहादुर बम", _pad_to(_BAM_CANDIDATES, 200)).verdict == BIND
+def test_a_complete_result_set_is_never_vetoed_for_truncation():
+    # A short page means the results ran out, so there is no edge to worry about
+    # however the scores fall -- otherwise a 2-row exhaustive answer whose match
+    # ranks last would be refused for nothing.
+    candidates = [_bam(50.0), {"id": "https://jawafdehi.org/entity/person/other-1",
+                               "title": {"ne": "असम्बन्धित नाम"}, "score": 50.0}]
+    assert resolve("राज बहादुर बम", candidates,
+                   candidates_complete=True).verdict == BIND
+    # And completeness defaults to True, so a hand-built list is taken at its word.
+    assert resolve("राज बहादुर बम", candidates).verdict == BIND
+
+
+def test_an_unscored_candidate_list_does_not_crash_the_veto():
+    # Search rows always carry `score`, but a hand-built list or a stub may not.
+    # Absent scores read as 0.0, which makes edge == winner and refuses -- the
+    # cautious direction.
+    candidates = [{"id": _BAM, "title": {"ne": "राज बहादुर बम"}}]
+    assert resolve("राज बहादुर बम", candidates,
+                   candidates_complete=False).verdict == REVIEW
 
 
 def test_candidate_name_forms_excludes_the_iri_slug():

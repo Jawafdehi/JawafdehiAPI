@@ -805,8 +805,53 @@ def _unqualified_institution_veto(extracted: str, nes_id: str,
     )
 
 
+def _truncation_veto(candidates, winner_id, candidates_complete) -> str:
+    """Refuse a bind whose candidate window may have cut a same-name block.
+
+    Asks the right question, which a row count cannot: DOES THE WINDOW EDGE STILL
+    SIT INSIDE THE WINNER'S RELEVANCE BAND? Search returns rows in descending
+    relevance, so if the lowest-ranked row fetched still scores at least as high
+    as the winner, another equally-relevant row -- a same-name duplicate -- can be
+    sitting just past the edge, unseen, and the ambiguity veto never got to weigh
+    it. If the edge has already fallen below the winner, the whole band containing
+    the winner was fetched and nothing comparable can lie beyond.
+
+    Replaces a `len(candidates) >= cap` test that was wrong in both directions:
+
+    * It MISSED the real hazard. `संजय प्रसाद यादव` returns a full 50-row page and
+      stops on relevance, well under any cap -- and same-title entities do not
+      score identically (that name's own duplicates sit at 130.981 and 130.564),
+      so a block can straddle the page boundary. A count-based test saw 50 < 200
+      and allowed the bind.
+    * It FIRED spuriously. `बुद्दीसागर सुवेदी` returns exactly 200 rows whose edge
+      (21.579) is below its top (25.134), so paging stopped because the block
+      genuinely ended and every tied candidate WAS seen. Every would-be bind on a
+      full 200-row response was being lost to review noise.
+
+    `candidates_complete` gates the whole check: when search ran out of results
+    there is no window edge to worry about, however the scores fall.
+    """
+    if candidates_complete:
+        return ""
+    rows = [r for r in (candidates or ()) if isinstance(r, dict)]
+    if not rows:
+        return ""
+    edge_score = rows[-1].get("score") or 0.0
+    winner_score = next(
+        (r.get("score") or 0.0 for r in rows if (r.get("id") or "").strip() == winner_id),
+        0.0)
+    if edge_score < winner_score:
+        return ""
+    return (
+        "the candidate window may be truncated mid-block: the lowest-ranked "
+        f"result fetched still scores {edge_score:.3f} against the match's "
+        f"{winner_score:.3f}, and search returns rows in descending relevance, "
+        "so an equally-relevant same-name entity can be sitting just past the "
+        "edge where the ambiguity check could not see it")
+
+
 def resolve(extracted_name: str, candidates: list[dict],
-            candidate_cap: int | None = None) -> Decision:
+            candidates_complete: bool = True) -> Decision:
     """Decide what to do with one LLM-extracted name.
 
     BIND only when exactly ONE NES entity scores at or above MIN_BIND_SCORE and
@@ -817,16 +862,14 @@ def resolve(extracted_name: str, candidates: list[dict],
     A candidate whose @id is not a canonical entity IRI is dropped before
     scoring, so a malformed IRI can never reach the API.
 
-    `candidate_cap` is the size at which the caller's search STOPPED PAGING
-    rather than ran out of results. Pass it whenever `candidates` came from a
-    paged source: at the cap, a same-name duplicate may sit just outside the
-    window, so the ambiguity veto's premise -- "every tied candidate was
-    scored" -- does not hold, and a lone survivor is not proof of uniqueness.
-    This veto lives here, beside the ambiguity check it protects, precisely so
-    that a BIND from this function needs no external top-up to be trustworthy.
-    The cap is a parameter rather than a constant because its value belongs to
-    the HTTP client's pagination settings, which this module deliberately does
-    not import. Leaving it None means "these candidates are the complete set".
+    `candidates_complete` says whether `candidates` is the whole result set.
+    Pass False whenever the caller's search stopped early or hit its page cap
+    (`CaseworkApi.search_entities` reports this via `CandidateList.complete`):
+    the window may then have cut through a block of same-name entities, so the
+    ambiguity veto's premise -- "every tied candidate was scored" -- does not
+    hold, and `_truncation_veto` decides what that costs from the relevance score
+    at the window edge. It defaults to True because a caller passing a
+    hand-built list is describing exactly the candidates it means.
     """
     best_by_id: dict[str, tuple[float, str, str]] = {}
     for result in candidates or ():
@@ -863,15 +906,9 @@ def resolve(extracted_name: str, candidates: list[dict],
     if len(qualifying) > 1:
         return review(f"ambiguous: {len(qualifying)} distinct NES entities score "
                       "at or above the bind threshold")
-    # Counted on the RAW candidate list, not on `scored`: `scored` is deduped by
-    # IRI and drops malformed ones, so it can fall below the cap on a response
-    # that genuinely hit it -- which would silently let the veto miss.
-    if candidate_cap is not None and len(candidates or ()) >= candidate_cap:
-        return review(
-            f"candidate list hit the {candidate_cap}-result search cap: a "
-            "same-name duplicate may exist just outside the window, so the "
-            "ambiguity veto's premise (every tied candidate was seen) does "
-            "not hold here")
+    truncation = _truncation_veto(candidates, scored[0][1], candidates_complete)
+    if truncation:
+        return review(truncation)
     veto = _name_vetoes(extracted_name)
     if veto:
         return review(veto)

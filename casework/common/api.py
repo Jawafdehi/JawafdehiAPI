@@ -7,6 +7,30 @@ import urllib.parse
 import urllib.request
 
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost")
+
+
+class CandidateList(list):
+    """Search results, plus whether they are the COMPLETE result set.
+
+    A plain list cannot say why paging stopped, and the two reasons matter very
+    differently to the resolver:
+
+    * a short page means the results ran out, so the list is everything there is;
+    * stopping early on relevance, or hitting the page cap, means more rows exist
+      and this window may have cut through a block of same-name entities -- which
+      is exactly the premise the ambiguity veto needs.
+
+    `search_entities` used to compute this distinction in its for/else and then
+    throw it away, leaving the resolver to guess from `len(candidates)`. A list
+    subclass carries it without breaking any caller that just iterates or takes
+    a length.
+
+    Defaults to `complete = False`: a bare `CandidateList()` claims nothing, so
+    a caller that forgets to set it gets the cautious answer rather than a silent
+    assurance of completeness.
+    """
+
+    complete: bool = False
 # Methods that mutate server state. GET/HEAD (reads) are never guarded --
 # only these go through the write-guard in `_request`.
 WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -274,7 +298,7 @@ class CaseworkApi:
         cache_key = (query, page_size, pages)
         if cache_key in self._entity_search_cache:
             return self._entity_search_cache[cache_key]
-        results, top_score = [], None
+        results, top_score, complete = CandidateList(), None, False
         for page in range(1, pages + 1):
             data = self.get("/search/", {"q": query, "type": "entity",
                                          "page_size": page_size, "page": page},
@@ -282,16 +306,25 @@ class CaseworkApi:
             batch = data.get("results") or []
             results.extend(batch)
             if not batch:
+                complete = True          # no more rows exist
                 break
             scores = [r.get("score") or 0.0 for r in batch]
             if top_score is None:
                 top_score = max(scores)
-            if min(scores) < top_score or len(batch) < page_size:
+            if len(batch) < page_size:
+                complete = True          # a short page IS the end of the results
+                break
+            if min(scores) < top_score:
+                # Stopped early on relevance, on a FULL page -- so more rows do
+                # exist and this window may have cut through a block of
+                # same-name entities. NOT complete: the resolver decides what
+                # that costs, using the score at the window edge.
                 break
         else:
             logger.info(
                 "entity search for %r hit the %d-page cap (%d candidates); a "
                 "same-name tie may extend past it", query, pages, len(results))
+        results.complete = complete
         self._entity_search_cache[cache_key] = results
         return results
 

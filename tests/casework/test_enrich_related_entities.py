@@ -36,7 +36,7 @@ from pathlib import Path
 import pytest
 
 from casework import enrich_related_entities as ere
-from casework.common.api import ENTITY_SEARCH_MAX_PAGES, ENTITY_SEARCH_PAGE_SIZE
+from casework.common.api import CandidateList, ENTITY_SEARCH_MAX_PAGES, ENTITY_SEARCH_PAGE_SIZE
 from casework.enrich_related_entities import (
     _build_content_parts,
     _enforce_prompt_budget,
@@ -1378,19 +1378,22 @@ def test_plan_folds_the_get_entity_exception_text_into_the_review_reason():
 # --- Item 5 (important, new): a truncated candidate list must not bind ---
 
 
-def test_plan_downgrades_a_bind_to_review_when_the_candidate_list_hit_the_search_cap():
-    # `search_entities` itself documents that hitting its page cap means a
-    # same-name tie may extend past the window it returned -- so the
-    # ambiguity veto's premise (every tied candidate was seen) does not hold.
-    # A BIND built on a capped-out list must not survive.
-    cap = ENTITY_SEARCH_PAGE_SIZE * ENTITY_SEARCH_MAX_PAGES
-    filler = [
+def test_plan_downgrades_a_bind_when_search_reports_an_incomplete_window():
+    # `search_entities` reports whether it ran out of results or stopped early,
+    # via `CandidateList.complete`. When it stopped early AND the lowest-ranked
+    # row fetched still scores as high as the match, an equally-relevant same-name
+    # entity can sit just past the edge, so the ambiguity veto's premise -- every
+    # tied candidate was seen -- does not hold and the bind must not survive.
+    #
+    # Note the scores: the filler ties the match rather than sitting far below it.
+    # That is the whole condition. A row COUNT cannot express it, which is why the
+    # earlier version of this test passed a 200-long list of score-1.0 filler and
+    # proved nothing about the real hazard.
+    candidates = CandidateList([ANKUR_CANDIDATE] + [
         {"id": f"https://jawafdehi.org/entity/person/filler-{i:03d}-aaaaaa",
-         "title": {"ne": "फरक नाम"}, "score": 1.0}
-        for i in range(cap - 1)
-    ]
-    candidates = [*filler, ANKUR_CANDIDATE]
-    assert len(candidates) == cap
+         "title": {"ne": "फरक नाम"}, "score": ANKUR_CANDIDATE["score"]}
+        for i in range(49)])
+    candidates.complete = False
 
     case = {"slug": "case-truncated", "state": "DRAFT", "entities": []}
     api = _SearchStubApi([case], {"अंकुर खत्री": candidates})
@@ -1401,9 +1404,29 @@ def test_plan_downgrades_a_bind_to_review_when_the_candidate_list_hit_the_search
     assert plan.patch_items == []
     assert plan.bound == []
     assert len(plan.review) == 1
-    name, decision = plan.review[0]
+    _, decision = plan.review[0]
     assert decision.nes_id is None
-    assert "cap" in decision.reason
+    assert "truncated mid-block" in decision.reason
+
+
+def test_a_complete_window_binds_however_long_the_list_is():
+    # The inverse, and the reason the count-based test had to go: a full-length
+    # result set that search EXHAUSTED carries no truncation risk, and every bind
+    # on one was previously thrown away.
+    candidates = CandidateList([ANKUR_CANDIDATE] + [
+        {"id": f"https://jawafdehi.org/entity/person/filler-{i:03d}-aaaaaa",
+         "title": {"ne": "फरक नाम"}, "score": 1.0}
+        for i in range(199)])
+    candidates.complete = True
+    assert len(candidates) == ENTITY_SEARCH_PAGE_SIZE * ENTITY_SEARCH_MAX_PAGES
+
+    case = {"slug": "case-complete-window", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": candidates})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}])
+
+    assert plan.action == "WOULD_PATCH"
+    assert [n for n, _, _ in plan.bound] == ["अंकुर खत्री"]
 
 
 def test_plan_still_binds_when_the_candidate_list_is_one_short_of_the_cap():
