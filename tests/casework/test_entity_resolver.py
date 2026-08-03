@@ -389,9 +389,12 @@ def test_the_winners_own_longer_alternate_title_is_not_a_sibling():
 
 
 def test_qualified_siblings_dedupes_a_repeated_search_row():
-    # /api/search/ really does return one IRI twice (both "मालपोत कार्यालय, पर्सा"
-    # rows in the frozen capture). A repeat must not inflate the count the
-    # review reason prints.
+    # The frozen capture's closest real analogue is not a repeat: "मालपोत
+    # कार्यालय, पर्सा" is two DISTINCT IRIs at an identical score
+    # (location/malpot-parsa, organization/malapota-karyalaya-parsa-3fcb31,
+    # both 124.35) -- a shared title, not one IRI returned twice. A genuine
+    # repeat is constructed here instead, because one must not inflate the
+    # count the review reason prints.
     repeated = [_MALPOT_SURKHET, dict(_MALPOT_SURKHET)]
     assert qualified_siblings("मालपोत कार्यालय", repeated) == ("मालपोत कार्यालय सुर्खेत",)
 
@@ -518,7 +521,7 @@ def test_consonant_difference_still_does_not_match():
 
 
 # ---------------------------------------------------------------------------
-# is_election_candidate_record -- the ECN veto predicate. Six of the 40
+# is_election_candidate_record -- the ECN veto predicate. Six of the 39
 # first-pass binds across the labelled set were namesake ward candidates in the
 # wrong district; this is what refuses them.
 # ---------------------------------------------------------------------------

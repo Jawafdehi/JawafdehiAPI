@@ -1078,7 +1078,10 @@ class _SearchStubApi(_StubApi):
     default document that is a normal (non-election) CIAA portal entity: a
     non-empty dict with no election-record `identifier`, so the veto is a
     no-op unless a test deliberately configures otherwise -- 25 of the 40
-    frozen fixture documents look exactly like this and all 25 still BIND.
+    frozen fixture documents look exactly like this and 24 of the 25 still
+    BIND. The exception is the `मालपोत कार्यालय` bucket, which the structural
+    unqualified-institution veto (`92dc4db`) now holds at REVIEW before this
+    document is ever fetched.
     """
 
     def __init__(self, cases, search_results=None, documents=None):

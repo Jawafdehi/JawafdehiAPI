@@ -634,6 +634,19 @@ def _unqualified_institution_veto(extracted: str, nes_id: str,
     qualified name simply is not a prefix of anything.
     `भूमिसुधार कार्यालय नवलपरासी`, `जिल्ला प्राविधिक कार्यालय, मुगु` and
     `मालपोत कार्यालय, कलंकी` all have zero qualified siblings and all still bind.
+
+    THE REAL PRECONDITION is not which words sit in `GENERIC_TOKENS` -- it is
+    whether a bare bucket entity exists in NES for the veto to bind to.
+    `मालपोत कार्यालय` has one (`organization/malapota-karyalaya-44fbce`, scoring
+    144.82, above every district-qualified sibling): the real hazard, and the
+    veto now holds it. `उच्च अदालत` has none -- NES holds 7 high courts, all
+    tied at 191.74, so the ambiguity veto already refuses it, and it was never
+    at risk despite `अदालत` being absent from `GENERIC_TOKENS`. `अर्थ मन्त्रालय`
+    OVER-refuses: its exact match (`organization/government/mof`, 250.29) has a
+    sub-department sibling (`अर्थ मन्त्रालय बजेट तथा कार्यक्रम महाशाखा`), and the
+    veto cannot yet tell a locality qualifier from a sub-unit qualifier, so a
+    unique national ministry goes to REVIEW. The gap to close is distinguishing
+    those two qualifier kinds -- not adding more words to the gate.
     """
     if not names_an_institution(extracted):
         return ""
@@ -769,7 +782,7 @@ def is_election_candidate_record(document) -> bool:
     point at one. So an exact name match onto such a record is, absent
     corroboration, a DIFFERENT PERSON who happens to share the name.
 
-    That is not hypothetical. Six of the 40 first-pass binds across the labelled
+    That is not hypothetical. Six of the 39 first-pass binds across the labelled
     set in `tests/casework/fixtures/` were namesake candidates in the wrong
     district. The clearest is `नन्दलाल दास`, bound to
     `person/nandlal-das-310567` — a Ward Member candidate for Katahariya
