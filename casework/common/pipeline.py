@@ -140,6 +140,24 @@ STAGES = {
         requires_materials=PRESS_TYPES + COURT_TYPES,
         requires_stages=("convert",),
     ),
+    # `description` writes the long public narrative. It reads the charge
+    # sheet, the press release AND the verdict, so it gates on both material
+    # families -- the same PRESS+COURT pair as `timeline`/`entities`, and for
+    # the same reason: a court-order-only case is still describable, so
+    # gating on PRESS_TYPES alone would strand it.
+    #
+    # provides is ("description",) ONLY -- deliberately NOT ("description",
+    # "title"). The donor regenerated `Case.title` as a side effect of this
+    # pass; this port drops that (see `casework/enrich_description.py`'s
+    # docstring) and `title` has exactly one owner, `enrich_card`. Naming
+    # "title" here would be the phantom-`provides` mistake documented on
+    # `allegations` above: an idempotency check reading `provides` would call
+    # a case title-complete that this stage never touched.
+    "description": Stage(
+        "description", provides=("description",),
+        requires_materials=PRESS_TYPES + COURT_TYPES,
+        requires_stages=("convert",),
+    ),
 }
 
 

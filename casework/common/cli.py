@@ -158,6 +158,14 @@ def add_common_args(parser, *, batch_csv_required=False, batch_csv_help=None):
             "this is set."
         ),
     )
+    # The human-accuracy deliverable (casework/common/review.py). Written on
+    # EVERY run, dry runs included -- the dry run is the read-only path, so it
+    # is where output accuracy gets judged. Point this at the meta-repo task
+    # directory when a run's file belongs with that task's notes.
+    parser.add_argument(
+        "--review-file", default="",
+        help="Write the human review file here instead of "
+             "$CASEWORK_REVIEW_DIR / <repo>/work/reviews/<ts>-<stage>-<run>.md.")
     parser.add_argument("--verbose", action="store_true")
     return parser
 
