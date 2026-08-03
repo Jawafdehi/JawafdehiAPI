@@ -51,7 +51,8 @@ slug. Every label below rests on something else.
 | `verified: human bind on <case-slug>` | The entity is already bound to that case in prod, by a caseworker or the portal migration. `GET /api/cases/<slug>/`, anonymous | 19 |
 | `verified: human accused bind on the source case (authenticated DRAFT read 2026-08-03)` | Same class of evidence, but the source case is DRAFT, so the read needed a token. All 9 are `accused` binds on their own source case. The case is deliberately **not** named — see below | 9 |
 | `verified: prod entity doc consistent with case context` | The full entity document pins the referent — a CBS local-unit code, `gov-np-domain` or a wikidata QID — and the case's district agrees | 11 |
-| `rejected: ECN election-candidate record, not the case subject` | The document carries `ecn-candidate-id` and a 2079 candidate `hasOccupation` for a ward the case has nothing to do with. `apply_document_veto` catches all five | 5 |
+| `rejected: ECN election-candidate record, not the case subject` | The document carries `ecn-candidate-id` and a 2079 candidate `hasOccupation` for a ward the case has nothing to do with | 4 |
+| `verified: human accused bind on the source case exists and was rejected …` | Same as above, and a human *did* bind the ECN record. Considered and rejected on locality — see below | 2 |
 | `rejected: N same-name entities in prod` | Self-verifying: N real entities, one name | 10 |
 | `rejected: no NES entity with this name` | Nothing scored above zero against the frozen capture | 83 |
 | `unsettled: evidence does not decide` | Labelled conservatively — REVIEW, never BIND | 1 |
@@ -67,6 +68,44 @@ that evidence.** The audit trail is
 (gitignored, like `make_labels.py`). Which DRAFT case accuses whom is casework-only, so the
 committed provenance names the evidence class and the date, never the case. `make_labels.py`
 re-derives all 9 from that file and fails if any is not an `accused` bind on its own case.
+
+## Why two labels reject a bind a human made
+
+`राज बहादुर बम` and `सन्तोष बुढा` each have a human `accused` bind on their source case
+pointing at the ECN record, and both labels still say REVIEW. That is deliberate, ruled
+2026-08-03, and the reasoning is worth keeping because the labels otherwise read as stale.
+
+An ECN record pre-existed in a separate dataset, so a human binding one performed the same
+fallible name match the resolver does. A human doing our job badly is not evidence our job
+was done right. Checked against case locality, two of the three human ECN binds on these
+cases point at a ward in a district the case has nothing to do with — namesake errors.
+`राज बहादुर बम` is locality-coherent (same gaunpalika) but a different ward, with the role
+unstated, which is exactly the "documents do not settle it" bucket.
+
+Contrast the 9 authenticated rows above, which are *not* treated this way: those entities are
+CIAA-portal records minted alongside the case itself, so the entity exists **because** that
+case named that person. That linkage is independent of name matching; an ECN pick is not.
+
+`सन्तोष बुढा` reports for a different reason than `राज बहादुर बम`: its REVIEW comes from the
+**ambiguity veto** (2 same-name entities in prod), so it would still report even with the ECN
+veto removed. Only `राज बहादुर बम` depends on the document veto.
+
+## What the ECN veto costs
+
+| Population | Human accused binds on an ECN record | |
+|---|---|---|
+| PUBLISHED cases (passed moderation) | 2 of 655 | 0.3% |
+| Four DRAFT cases (unreviewed) | 3 of 39 | 7.7% |
+
+The 25x gap is the point. If binding a candidate record were usually right it would survive
+moderation at a similar rate; instead the unmoderated data carries most of them. Two of the
+three DRAFT ones are locality-incoherent. So the veto's cost in **correct** binds is at most
+1 in 39 (~2.6%) — not 7.7%, and not the ~10% an earlier count suggested by including
+`nec-candidate-id`.
+
+`is_election_candidate_record` keys on `ecn-candidate-id` only. NES also holds
+`nec-candidate-id` rows and the veto does not catch them; none reaches a bind in this set, so
+precision is unaffected. Flagged in the function's docstring, not silently widened.
 
 ## The six false-positive shapes
 

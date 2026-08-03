@@ -463,15 +463,38 @@ def is_election_candidate_record(document) -> bool:
     caseworker bound a DIFFERENT same-name entity on the same case, leaving the
     ECN record unbound.
 
-    THE VETO IS NOT FREE, and the cost is larger than first estimated. An
-    authenticated read of four DRAFT source cases (2026-08-03) found 4 of their
-    39 human `accused` binds — 10.3%, not the 0.3% measured on published cases —
-    pointing at ECN candidate records, `person/raj-bahadur-bam-318984` and
-    `person/santosh-budha-185035` among them. Real officials do stand for
-    election. So this veto converts some correct binds into REVIEW; that trade
-    was made deliberately, because a REVIEW costs a caseworker one look and a
-    wrong bind publicly names an innocent person. Do not read the numbers above
-    as "candidate records are never the subject".
+    THE VETO IS NOT FREE, but it is cheaper than the raw rate suggests. Two
+    measurements, on two different populations, and the gap between them is
+    itself the argument:
+
+        2 of 655 human accused binds on PUBLISHED cases target an ECN record   0.3%
+        3 of  39 human accused binds on four DRAFT cases do                    7.7%
+
+    PUBLISHED means it passed moderation; DRAFT means nobody has reviewed it. A
+    25x gap between moderated and unmoderated data is not noise — if binding a
+    candidate record were usually right it would survive moderation at a similar
+    rate. Checking the three DRAFT ones against case locality says the same
+    thing: two point at a ward in a district the case has nothing to do with,
+    i.e. they are namesake errors a reviewer would have caught. Only
+    `person/raj-bahadur-bam-318984` is locality-coherent (same gaunpalika as its
+    case, though a different ward, with the role unstated).
+
+    So the veto's cost in CORRECT binds is at most 1 in 39 (~2.6%), not 7.7% and
+    not 10%, and its benefit includes declining to repeat two apparent human
+    errors. It does the job moderation does, earlier and cheaper. What it is not
+    is a claim that candidate records are never the subject — real officials
+    stand for election, so a vetoed row is a REVIEW for a caseworker, never a
+    NO_MATCH.
+
+    KNOWN GAP: this keys on `ecn-candidate-id` only. NES also holds
+    `nec-candidate-id` records (elected-official rows, slugs shaped like
+    `person/tejnath-paudel-ward-51208-8`), and one of the 39 DRAFT human binds is
+    one. They are the same hazard and this predicate does NOT catch them. No such
+    record reaches a bind anywhere in the labelled set — 0 of the 39 frozen
+    documents carry the marker, and the only two `-ward-` candidates in the
+    capture are already held by the ambiguity veto — so the measured precision is
+    unaffected. Widening the marker set is a behaviour change and was left for a
+    ruling rather than slipped in here.
 
     Keyed on the `ecn-candidate-id` identifier alone, deliberately:
 

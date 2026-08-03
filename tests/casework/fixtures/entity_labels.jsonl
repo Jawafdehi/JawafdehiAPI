@@ -94,7 +94,7 @@
 {"extracted": "रमेश कुमार निधि", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/person/ramesa-kumara-nidhi-95d296", "provenance": "verified: human accused bind on the source case (authenticated DRAFT read 2026-08-03)"}
 {"extracted": "रविन्द्र कुमार बुढा", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
 {"extracted": "रहमतुल्लाह हलवाई", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
-{"extracted": "राज बहादुर बम", "expected_verdict": "REVIEW", "expected_nes_id": null, "provenance": "rejected: ECN election-candidate record, not the case subject"}
+{"extracted": "राज बहादुर बम", "expected_verdict": "REVIEW", "expected_nes_id": null, "provenance": "verified: human accused bind on the source case exists and was rejected -- ECN candidate record for a different ward of the same gaunpalika, role unstated in the documents (authenticated DRAFT read 2026-08-03)"}
 {"extracted": "राजेश्वर कमली", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/person/rajesvara-kamali-b16f89", "provenance": "verified: human bind on case-081-cr-0136-oxygen-plant"}
 {"extracted": "राम कृष्ण थापा मगर", "expected_verdict": "REVIEW", "expected_nes_id": null, "provenance": "rejected: 2 same-name entities in prod"}
 {"extracted": "राम जानकी दलित आधारभूत विद्यालय - सिराहा जिल्ला, नवराजपुर गाउँपालिका", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
@@ -129,7 +129,7 @@
 {"extracted": "श्रीमती उर्मिला बस्नेत", "expected_verdict": "REVIEW", "expected_nes_id": null, "provenance": "rejected: 2 same-name entities in prod"}
 {"extracted": "संजय प्रसाद यादव", "expected_verdict": "REVIEW", "expected_nes_id": null, "provenance": "rejected: 13 same-name entities in prod"}
 {"extracted": "संस्कृति, पर्यटन तथा नागरिक उड्डयन मन्त्रालय", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/organization/samskrti-paryatana-tatha-nagarika-uddaya-3683e0", "provenance": "verified: human bind on case-080-cr-0145-jeevan-shahi-procurement-fraud"}
-{"extracted": "सन्तोष बुढा", "expected_verdict": "REVIEW", "expected_nes_id": null, "provenance": "rejected: 2 same-name entities in prod"}
+{"extracted": "सन्तोष बुढा", "expected_verdict": "REVIEW", "expected_nes_id": null, "provenance": "verified: human accused bind on the source case exists and was rejected -- ECN candidate record for a ward in a different district than the case (authenticated DRAFT read 2026-08-03)"}
 {"extracted": "सभाहल तथा सार्वजनिक शौचालय निर्माण योजना - दोलखा जिल्ला, तामाकोशी गाउँपालिका", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
 {"extracted": "सरकारी जग्गा विभाजन - सोलुखुम्बु जिल्ला", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
 {"extracted": "सुवाष खड्का", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
