@@ -224,7 +224,9 @@ qualifier** proves the name is a family and not a member:
 Prefix and not subset, and the asymmetry is the whole discriminator. Nepali institution names
 append their locality, so a name other titles *end* with is a place that owns them —
 `वडा नं. 1 को कार्यालय, अदानचुली गाउँपालिका` is a child of the municipality, not another
-instance of it. A subset test refuses all seven municipality binds, recall 0.846 to 0.692.
+instance of it. A subset test refuses all seven municipality binds too — 33 correct binds down
+to 26, recall 0.846 to 0.667. Those are the same seven rows production already refuses on
+`relationship_type`, which is why the two figures coincide.
 
 Cost: `मालपोत कार्यालय` is labelled BIND and is deliberately held. Its label rests on a human
 bind for one specific case; the resolver produces that same bind for a case in any district.

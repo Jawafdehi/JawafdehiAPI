@@ -330,7 +330,8 @@ def test_a_place_that_owns_ward_offices_still_binds():
     # INSIDE अदानचुली गाउँपालिका, and every one of those titles CONTAINS the
     # municipality's name -- at the END. Those are children of the entity, not
     # other instances of it. A subset test would refuse all seven municipality
-    # binds in the labelled set (measured: recall 0.872 -> 0.692).
+    # binds in the labelled set on top of मालपोत कार्यालय (measured: 33 correct
+    # binds down to 26, recall 0.846 -> 0.667).
     palika = _candidate(
         "https://jawafdehi.org/entity/location/localunit/adanchuli-gaunpalika-60306",
         ne="अदानचुली गाउँपालिका",

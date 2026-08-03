@@ -572,8 +572,9 @@ def qualified_siblings(extracted: str, candidates: list[dict],
         instance of it.
 
     A subset test cannot tell those apart and would refuse all seven
-    municipality binds in `tests/casework/fixtures/` (measured: recall 0.872 ->
-    0.692). The prefix test refuses one row, `मालपोत कार्यालय`, and no other.
+    municipality binds in `tests/casework/fixtures/` on top of this one --
+    measured: 33 correct binds down to 26, recall 0.846 -> 0.667. The prefix test
+    refuses one row, `मालपोत कार्यालय`, and no other.
 
     Both titles are read (`title.ne` and `title.en`), deduped by IRI, and the
     winning candidate is excluded via `exclude` -- so neither a repeat search row
