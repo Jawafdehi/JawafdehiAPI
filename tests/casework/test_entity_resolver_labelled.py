@@ -60,7 +60,7 @@ def _decisions():
 # or someone deleting the five ECN rows to clear a red build -- would otherwise
 # leave both gate tests passing and printing "precision 1.000" over a set that
 # proves nothing. Change this only alongside a deliberate change to the fixture.
-EXPECTED_LABEL_COUNT = 140
+EXPECTED_LABEL_COUNT = 142
 # The five rows the document veto exists for. Named individually so removing one
 # is a test failure and not a silent improvement in the numbers. Each is the only
 # NES entity with that name, and each is an Election Commission 2079 candidate
@@ -71,6 +71,15 @@ ECN_VETO_ROWS = (
     "मिङमा ल्हमु शेर्पा",
     "याङजी शेर्पा",
     "राज बहादुर बम",
+    # nec-candidate-id, an ELECTED ward head rather than a candidate. The veto
+    # keyed on ecn-candidate-id alone until 2026-08-03 and let this through.
+    "तेजनाथ पौडेल",
+)
+# Rows the PROVINCE veto holds: the candidate IRI asserts a province the extracted
+# name never mentions. Separate from ECN_VETO_ROWS because a different veto fires,
+# and pure -- no document is consulted.
+PROVINCE_VETO_ROWS = (
+    "वन तथा वातावरण मन्त्रालय",
 )
 
 
@@ -85,11 +94,12 @@ def test_the_labelled_set_is_whole():
     extracted = {row["extracted"] for row in rows}
     assert len(extracted) == EXPECTED_LABEL_COUNT, "duplicate rows in the labelled set"
 
-    missing = [name for name in ECN_VETO_ROWS if name not in extracted]
+    missing = [name for name in ECN_VETO_ROWS + PROVINCE_VETO_ROWS
+               if name not in extracted]
     assert not missing, (
-        f"the ECN veto rows are gone from the labelled set: {missing}. These are the "
-        "five namesake election candidates the document veto exists to refuse; "
-        "without them the gate no longer tests it")
+        f"veto regression rows are gone from the labelled set: {missing}. These are "
+        "the namesake election records and province-scoped bodies the vetoes exist "
+        "to refuse; without them the gate no longer tests them")
 
     # Every row carries the four fields the gate reads, and an audit trail.
     for row in rows:
@@ -125,6 +135,16 @@ def test_the_gate_actually_exercises_binding():
         assert by_name[name].verdict == REVIEW, (
             f"{name!r} was not downgraded — the document veto is not firing")
         assert by_name[name].nes_id is None
+
+    # The province veto is pure, so it must fire inside resolve() itself and name
+    # the province, otherwise a caseworker cannot tell what to check.
+    for name in PROVINCE_VETO_ROWS:
+        assert name in by_name, f"{name!r} missing from the measured set"
+        decision = by_name[name]
+        assert decision.verdict == REVIEW, (
+            f"{name!r} was not held — the province veto is not firing")
+        assert decision.nes_id is None
+        assert "province" in decision.reason, decision.reason
 
 
 def test_zero_false_positives_across_the_labelled_set():

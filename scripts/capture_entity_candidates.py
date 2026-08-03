@@ -45,6 +45,19 @@ UA = "Mozilla/5.0 (X11; Linux x86_64) curl"
 EXTRA_SHAPES = (
     "अनिष श्रेष्ठ",   # two NES people share this name -> must review, never bind
     "अनिष श्रेष्ट",   # one character off the above -> must never bind
+    # Regression rows for the two vetoes a smoke run over unseen DRAFT cases
+    # exposed. A veto with no row in the labelled set is a fix the next refactor
+    # silently removes.
+    #
+    # The only NES entity with this title is Gandaki's ministry, and the case that
+    # produced the name is in Bara (Madhesh). Unique in NES, not unique in
+    # reality -> the province veto must hold it.
+    "वन तथा वातावरण मन्त्रालय",
+    # A `nec-candidate-id` ward-head record: Ward Chairperson of ward 8,
+    # Badhaiyatal Gaunpalika in BARDIYA, which a human bound as accused on a
+    # SOLUKHUMBU case. The election-record veto missed this marker until
+    # 2026-08-03.
+    "तेजनाथ पौडेल",
 )
 
 

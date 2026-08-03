@@ -246,6 +246,24 @@
   "hasOccupation": null,
   "identifier": null
  },
+ "https://jawafdehi.org/entity/person/tejnath-paudel-ward-51208-8": {
+  "hasOccupation": [
+   {
+    "jobTitle": {
+     "en": "Ward Chairperson",
+     "ne": "वडा अध्यक्ष"
+    },
+    "roleName": "Ward Chairperson, Ward 8 of Badhaiyatal Gaunpalika"
+   }
+  ],
+  "identifier": [
+   {
+    "@type": "PropertyValue",
+    "propertyID": "nec-candidate-id",
+    "value": "194108"
+   }
+  ]
+ },
  "https://jawafdehi.org/entity/person/topendra-khanal-204079": {
   "hasOccupation": [
    {

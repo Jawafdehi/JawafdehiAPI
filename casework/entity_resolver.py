@@ -336,6 +336,48 @@ _COMPOSITE_SEPARATOR = " - "
 # letters, no digit -- not an id).
 _SLUG_ID_SUFFIX = re.compile(r"-(?=[0-9a-f]{6,8}$)(?=[0-9a-f]*\d)[0-9a-f]{6,8}$")
 
+# Nepal's seven provinces, keyed by the slug NES puts in a provincial IRI:
+# organization/government/provincial/<slug>/<body>.
+#
+# WHY: a provincial body's stored TITLE never mentions its province. Seven
+# entities are called exactly "स्वास्थ्य मन्त्रालय", one per province, and prod holds
+# exactly one entity titled "वन तथा वातावरण मन्त्रालय" -- Gandaki's. So a Bara
+# (Madhesh) forest case extracting that bare ministry name matches at 1.00, the
+# ambiguity veto cannot fire because the name IS unique in NES, and the IRI
+# quietly asserts a province the name never claimed. A name unique in NES but not
+# unique in reality.
+#
+# DERIVED FROM PROD, not invented (2026-08-03, GET only):
+#   1. Swept /api/search/?type=entity over nine ministry/province seeds and
+#      collected every distinct `/provincial/<slug>/` segment -> exactly these 7.
+#   2. Followed each provincial ministry's `containedInPlace` to its province
+#      entity (location/province/<slug>-np0N) and read `name.ne`.
+# Both steps are reproducible; the sweep output is in the fix-round-4 report.
+#
+# The Devanagari spellings come from those province entities, PLUS curated
+# variants, because two of them cannot be taken from prod as-is:
+#   * koshi's province entity is still titled "प्रदेश १" / "Province No. 1" -- the
+#     pre-rename name -- so "कोशी" is curated, with "कोसी" as the common variant.
+#   * bagmati stores "वाग्मती" but almost everyone writes "बागमती". Both accepted.
+# The Latin forms include the IRI slug itself because to_roman_colloquial does NOT
+# reproduce it: बागमती folds to "bagamati" not "bagmati", and सुदूरपश्चिम to
+# "sudurapashcim" not "sudurpashchim". Matching the slug against the fold is the
+# approach that fails, which is why the accepted spellings are listed instead.
+PROVINCE_NAME_FORMS = {
+    "koshi": frozenset({"कोशी", "कोसी", "koshi", "kosi", "koshee"}),
+    "madhesh": frozenset({"मधेश", "मधेस", "madhesh", "madhesha", "madhes", "madhesa"}),
+    "bagmati": frozenset({"बागमती", "वाग्मती", "bagmati", "bagamati", "vagmati", "baagmati"}),
+    "gandaki": frozenset({"गण्डकी", "गंडकी", "gandaki"}),
+    "lumbini": frozenset({"लुम्बिनी", "lumbini"}),
+    "karnali": frozenset({"कर्णाली", "karnali"}),
+    "sudurpashchim": frozenset({
+        "सुदूरपश्चिम", "सुदुरपश्चिम", "sudurpashchim", "sudurapashcim", "sudurapashcima",
+        "sudurpaschim", "sudurpashchim",
+    }),
+}
+# The IRI segment that asserts a province.
+_PROVINCIAL_SEGMENT = re.compile(r"/provincial/([^/]+)/")
+
 
 @dataclass(frozen=True)
 class Decision:
@@ -368,6 +410,69 @@ def candidate_name_forms(result: dict) -> tuple[str, ...]:
     if slug:
         forms.append(_SLUG_ID_SUFFIX.sub("", slug).replace("-", " "))
     return tuple(form for form in forms if form and form.strip())
+
+
+def asserted_province(nes_id: str) -> str:
+    """The province slug a candidate IRI asserts, or "" when it asserts none.
+
+    Returns the slug WHATEVER it is, including one absent from
+    `PROVINCE_NAME_FORMS`. An unrecognised slug is a province we cannot verify,
+    not a province that is absent -- `_province_veto` fails closed on it. Nepal
+    has seven provinces and all seven are curated, so an unknown slug means NES
+    changed and a human should look.
+    """
+    match = _PROVINCIAL_SEGMENT.search(nes_id or "")
+    return match.group(1).lower() if match else ""
+
+
+def names_the_province(extracted: str, province: str) -> bool:
+    """True when the extracted name carries `province`'s name, in either script.
+
+    Uses the same token machinery as every other comparison here, so a Latin
+    extraction reaches the Devanagari spellings through `token_forms`.
+    """
+    accepted = PROVINCE_NAME_FORMS.get(province, frozenset())
+    return any(forms & accepted for _raw, forms in name_tokens(extracted))
+
+
+def _province_veto(extracted: str, nes_id: str) -> str:
+    """Reason this candidate's asserted province is unconfirmed, or "".
+
+    The twin of the election-record problem, and it needs no HTTP call: both the
+    extracted name and the candidate IRI are already in hand, so this is a pure
+    name/candidate veto in the same family as the ambiguity and genericity vetoes.
+
+    A provincial body's stored title never names its province, so binding on the
+    title alone accepts whichever province NES happens to hold. That is how
+    `वन तथा वातावरण मन्त्रालय` bound at 1.00 to
+    `organization/government/provincial/gandaki/mofesc` on case 078-CR-0005, a
+    BARA district forest case -- Bara is in Madhesh. Found by a smoke run over
+    unseen DRAFT cases, not by review.
+
+    Note how thin the alternative protection is: `स्वास्थ्य तथा जनसंख्या मन्त्रालय`
+    already reviews, but only because NES happens to hold two entities with that
+    title. Relying on duplicate count means whether we are protected is an
+    accident of the data.
+    """
+    province = asserted_province(nes_id)
+    if not province:
+        return ""
+    if province not in PROVINCE_NAME_FORMS:
+        # Fails closed, like the unreadable-document branch of the document veto:
+        # a province slug we have no spellings for is one we cannot check.
+        return (
+            f"candidate is scoped to an unrecognised province {province!r} "
+            f"({nes_id}); add its spellings to PROVINCE_NAME_FORMS before this can "
+            "bind"
+        )
+    if names_the_province(extracted, province):
+        return ""
+    return (
+        f"candidate is scoped to {province} province ({nes_id}) but the extracted "
+        f"name does not say which province. Every province has a body with this "
+        f"name and only one of them is in NES, so confirm the case is in "
+        f"{province} before binding."
+    )
 
 
 def _name_vetoes(extracted: str) -> str:
@@ -431,26 +536,77 @@ def resolve(extracted_name: str, candidates: list[dict]) -> Decision:
     if veto:
         return Decision(REVIEW, None, scored[0][0], scored[0][2], veto, frozen)
     score, nes_id, matched = scored[0]
+    # Last, because it is the only veto that depends on WHICH candidate won.
+    province_veto = _province_veto(extracted_name, nes_id)
+    if province_veto:
+        return Decision(REVIEW, None, score, matched, province_veto, frozen)
     return Decision(BIND, nes_id, score, matched, "", frozen)
 
 
-# The marker the Election Commission bulk load leaves on every candidate record.
-# A `PropertyValue` with this `propertyID` is the ONLY thing the veto keys on --
-# see `is_election_candidate_record` for why the slug and the occupation are not
-# usable substitutes.
-_ECN_PROPERTY_ID = "ecn-candidate-id"
+# The `identifier` markers the Election Commission sourcing loads leave behind.
+# A `PropertyValue` whose `propertyID` is in this set is the ONLY thing the veto
+# keys on -- see `is_election_candidate_record` for why the slug and the
+# occupation are not usable substitutes.
+#
+# Two loads, two markers, one hazard. Kept as a SET rather than a string because
+# we already got this wrong once: the veto shipped keyed on `ecn-candidate-id`
+# alone, and `nec-candidate-id` records walked straight through it. A third load
+# adding a third marker is now a one-line change with an obvious home.
+ELECTION_RECORD_MARKERS = frozenset({
+    # docs/nes/sourcing/local-candidates/RESULTS.md -- 146,275 new Person
+    # entities, every 2079 local-election candidate, winners AND losers.
+    "ecn-candidate-id",
+    # docs/nes/sourcing/ward-chairs/RESULTS.md -- ~6,743 ELECTED ward heads.
+    # The worse half of the hazard: an elected official is likelier to turn up in
+    # a CIAA case than a losing candidate, so a namesake collision here is both
+    # more probable and more plausible-looking.
+    "nec-candidate-id",
+})
+
+
+def _identifier_entries(document):
+    """The `identifier` list of a document, whatever shape it arrived in.
+
+    Defensive on purpose -- `identifier` may be absent, a single dict rather than
+    a list, or hold members that are not dicts at all.
+    """
+    if not isinstance(document, dict):
+        return ()
+    entries = document.get("identifier")
+    if entries is None:
+        return ()
+    if isinstance(entries, dict):
+        entries = [entries]
+    elif not isinstance(entries, (list, tuple)):
+        return ()
+    return tuple(e for e in entries if isinstance(e, dict))
+
+
+def _election_marker(document) -> str:
+    """Which election marker this document carries, or "" -- for the veto reason."""
+    for entry in _identifier_entries(document):
+        if entry.get("propertyID") in ELECTION_RECORD_MARKERS:
+            return str(entry["propertyID"])
+    return ""
 
 
 def is_election_candidate_record(document) -> bool:
-    """True when this NES entity document is an Election Commission candidate record.
+    """True when this NES entity document is an election candidate or ward-head record.
 
     WHY THIS EXISTS, because it looks like paranoia and a future reader will
-    otherwise delete it. A large share of NES's 162,650 `person` entities are
-    Election Commission 2079 candidate records — one row per person per contested
-    post, covering essentially every ward in Nepal. Of 655 accused person binds
-    that human caseworkers made on published Jawafdehi cases, only 2 point at
-    one. So an exact name match onto a candidate record is, absent corroboration,
-    a DIFFERENT PERSON who happens to share the name.
+    otherwise delete it. A large share of NES's 162,650 `person` entities come
+    from two Election Commission sourcing loads:
+
+        146,275  ecn-candidate-id  every 2079 local-election candidate, winners
+                                   and losers, one row per contested post
+                                   (docs/nes/sourcing/local-candidates/RESULTS.md)
+        ~6,743   nec-candidate-id  the ELECTED head of each of Nepal's wards
+                                   (docs/nes/sourcing/ward-chairs/RESULTS.md)
+
+    Between them they cover essentially every ward in Nepal. Of 655 accused
+    person binds that human caseworkers made on published Jawafdehi cases, only 2
+    point at one. So an exact name match onto such a record is, absent
+    corroboration, a DIFFERENT PERSON who happens to share the name.
 
     That is not hypothetical. Five of the 39 first-pass binds across the labelled
     set in `tests/casework/fixtures/` were namesake candidates in the wrong
@@ -486,17 +642,16 @@ def is_election_candidate_record(document) -> bool:
     stand for election, so a vetoed row is a REVIEW for a caseworker, never a
     NO_MATCH.
 
-    KNOWN GAP: this keys on `ecn-candidate-id` only. NES also holds
-    `nec-candidate-id` records (elected-official rows, slugs shaped like
-    `person/tejnath-paudel-ward-51208-8`), and one of the 39 DRAFT human binds is
-    one. They are the same hazard and this predicate does NOT catch them. No such
-    record reaches a bind anywhere in the labelled set — 0 of the 39 frozen
-    documents carry the marker, and the only two `-ward-` candidates in the
-    capture are already held by the ambiguity veto — so the measured precision is
-    unaffected. Widening the marker set is a behaviour change and was left for a
-    ruling rather than slipped in here.
+    Both markers count, and the second one was a real miss. This predicate
+    originally keyed on `ecn-candidate-id` alone, which let the ~6,743
+    `nec-candidate-id` ward-head records through. One of the 39 human DRAFT binds
+    is such a record and it is a wrong-district bind:
+    `person/tejnath-paudel-ward-51208-8` is Ward Chairperson of ward 8,
+    Badhaiyatal Gaunpalika, in BARDIYA, bound as accused on a SOLUKHUMBU
+    land-revenue case. With it counted, 3 of the 4 election-record binds a human
+    made on those cases point at the wrong district.
 
-    Keyed on the `ecn-candidate-id` identifier alone, deliberately:
+    Keyed on the `identifier` markers alone, deliberately:
 
     * The SLUG is not a proxy. `person/nandlal-das-310567` ends in its ECN id,
       but `person/mohan-bahadur-basnet-334834` — a correct human bind, the
@@ -505,22 +660,10 @@ def is_election_candidate_record(document) -> bool:
     * `hasOccupation` alone is softer: plenty of legitimately-bound officials
       have one, and the field is free-form.
 
-    Defensive about shape on purpose — `identifier` may be absent, a single dict
-    rather than a list, or hold members that are not dicts at all.
+    Defensive about shape on purpose — see `_identifier_entries`.
     """
-    if not isinstance(document, dict):
-        return False
-    identifiers = document.get("identifier")
-    if identifiers is None:
-        return False
-    if isinstance(identifiers, dict):
-        identifiers = [identifiers]
-    elif not isinstance(identifiers, (list, tuple)):
-        return False
-    return any(
-        isinstance(entry, dict) and entry.get("propertyID") == _ECN_PROPERTY_ID
-        for entry in identifiers
-    )
+    return any(entry.get("propertyID") in ELECTION_RECORD_MARKERS
+               for entry in _identifier_entries(document))
 
 
 def apply_document_veto(decision: Decision, document) -> Decision:
@@ -571,13 +714,16 @@ def apply_document_veto(decision: Decision, document) -> Decision:
         )
     if not is_election_candidate_record(document):
         return decision
+    # Name the marker that fired, so a caseworker can tell a losing candidate
+    # (`ecn-candidate-id`) from a sitting ward head (`nec-candidate-id`).
+    marker = _election_marker(document) or "an election-record identifier"
     return Decision(
         REVIEW,
         None,
         decision.score,
         decision.matched_name,
-        "Election Commission candidate record, not confirmed as the case subject: "
-        f"{decision.nes_id} carries an {_ECN_PROPERTY_ID}. Same-name candidate "
-        "records outnumber real case subjects, so this needs a human look.",
+        "Election Commission record, not confirmed as the case subject: "
+        f"{decision.nes_id} carries {marker}. Same-name election records "
+        "outnumber real case subjects, so this needs a human look.",
         decision.candidates,
     )

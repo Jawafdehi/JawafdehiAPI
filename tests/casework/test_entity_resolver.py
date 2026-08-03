@@ -11,14 +11,18 @@ import pytest
 
 from casework.entity_resolver import (
     BIND,
+    ELECTION_RECORD_MARKERS,
     MIN_BIND_SCORE,
     NO_MATCH,
+    PROVINCE_NAME_FORMS,
     REVIEW,
     apply_document_veto,
+    asserted_province,
     candidate_name_forms,
     is_election_candidate_record,
     match_score,
     name_tokens,
+    names_the_province,
     normalise_name,
     resolve,
     token_forms,
@@ -559,3 +563,184 @@ def test_resolve_still_binds_on_names_alone_and_takes_no_document():
     decision = resolve("राज बहादुर बम", _BAM_CANDIDATES)
     assert decision.verdict == BIND
     assert decision.nes_id == "https://jawafdehi.org/entity/person/raj-bahadur-bam-318984"
+
+
+# ---------------------------------------------------------------------------
+# nec-candidate-id -- the ~6,743 ELECTED ward heads
+# (docs/nes/sourcing/ward-chairs/RESULTS.md). The veto keyed on ecn-candidate-id
+# alone until 2026-08-03 and let this whole population through. An elected
+# official is likelier to appear in a CIAA case than a losing candidate, so this
+# is the worse half of the hazard.
+# ---------------------------------------------------------------------------
+
+_NEC_ID = {"@type": "PropertyValue", "propertyID": "nec-candidate-id", "value": "194108"}
+
+
+def test_nec_candidate_id_is_an_election_record():
+    # person/tejnath-paudel-ward-51208-8: Ward Chairperson of ward 8, Badhaiyatal
+    # Gaunpalika in BARDIYA, bound by a human as accused on a SOLUKHUMBU case.
+    assert is_election_candidate_record({"identifier": [_NEC_ID]}) is True
+
+
+def test_nec_marked_bind_is_downgraded_and_the_reason_names_the_marker():
+    candidates = [{"id": "https://jawafdehi.org/entity/person/tejnath-paudel-ward-51208-8",
+                   "title": {"ne": "तेजनाथ पौडेल"}}]
+    decision = resolve("तेजनाथ पौडेल", candidates)
+    assert decision.verdict == BIND
+
+    vetoed = apply_document_veto(decision, {"identifier": [_NEC_ID]})
+
+    assert vetoed.verdict == REVIEW
+    assert vetoed.nes_id is None
+    # A caseworker must be able to tell a losing candidate from a sitting ward head.
+    assert "nec-candidate-id" in vetoed.reason
+
+
+def test_both_markers_live_in_one_curated_set():
+    # A third sourcing load adding a third marker should be a one-line change.
+    assert ELECTION_RECORD_MARKERS == frozenset({"ecn-candidate-id", "nec-candidate-id"})
+
+
+# ---------------------------------------------------------------------------
+# The province veto. A provincial body's stored title never names its province:
+# seven entities are titled exactly "स्वास्थ्य मन्त्रालय", one per province. Prod
+# holds exactly ONE entity titled "वन तथा वातावरण मन्त्रालय" -- Gandaki's -- so a
+# Bara (Madhesh) forest case matched it at 1.00 and the ambiguity veto could not
+# fire, because the name really is unique in NES. Unique in NES, not unique in
+# reality. Found by a smoke run over unseen DRAFT cases.
+#
+# Pure: needs only the extracted name and the candidate IRI, both already in hand.
+# No HTTP call, and resolve()'s signature is unchanged.
+# ---------------------------------------------------------------------------
+
+_GANDAKI_MOFESC = [
+    {"id": "https://jawafdehi.org/entity/organization/government/provincial/gandaki/mofesc",
+     "title": {"ne": "वन तथा वातावरण मन्त्रालय", "en": "Ministry of Forests and Environment"}},
+]
+
+
+def test_province_scoped_candidate_is_held_when_the_name_omits_the_province():
+    decision = resolve("वन तथा वातावरण मन्त्रालय", _GANDAKI_MOFESC)
+
+    assert decision.verdict == REVIEW
+    assert decision.nes_id is None
+    # Name the province, so a caseworker sees immediately what to check.
+    assert "gandaki" in decision.reason
+    # And keep the evidence for the review file.
+    assert decision.candidates and decision.candidates[0][0] == 1.0
+
+
+def test_province_scoped_candidate_binds_only_when_both_names_carry_the_province():
+    """The allow-path, and it is narrower than it looks. Worth stating exactly.
+
+    Adding the province to the EXTRACTED name alone does not open the path -- it
+    closes it, one layer earlier. `गण्डकी` and `प्रदेश` are not middle particles, so
+    against the province-less stored title `match_score` is 0.0 and the row is
+    NO_MATCH before any veto runs. The province veto's allow-path therefore only
+    fires when the STORED title carries the province too.
+
+    In practice prod titles are bare (`provincial/gandaki/mofesc` is stored as
+    plain `वन तथा वातावरण मन्त्रालय`), so today the effective behaviour is: a
+    province-scoped candidate matched by a bare name always reviews. That is the
+    safe direction and it costs 0 of the 39 labelled binds.
+    """
+    # Province in the extracted name only -> the NAME match fails first.
+    assert match_score("गण्डकी प्रदेश वन तथा वातावरण मन्त्रालय",
+                       "वन तथा वातावरण मन्त्रालय") == 0.0
+    assert resolve("गण्डकी प्रदेश वन तथा वातावरण मन्त्रालय",
+                   _GANDAKI_MOFESC).verdict == NO_MATCH
+
+    # Province in both -> the names match AND the veto is satisfied.
+    decision = resolve(
+        "गण्डकी प्रदेश वन तथा वातावरण मन्त्रालय",
+        [{"id": "https://jawafdehi.org/entity/organization/government/provincial/gandaki/mofesc",
+          "title": {"ne": "गण्डकी प्रदेश वन तथा वातावरण मन्त्रालय"}}],
+    )
+    assert decision.verdict == BIND
+    assert decision.nes_id.endswith("/provincial/gandaki/mofesc")
+
+
+def test_names_the_province_reads_both_scripts():
+    # Reuses the same token machinery as every other comparison here, so a Latin
+    # extraction reaches the Devanagari spellings and vice versa.
+    assert names_the_province("गण्डकी प्रदेश स्वास्थ्य मन्त्रालय", "gandaki") is True
+    assert names_the_province("Gandaki Province Ministry of Health", "gandaki") is True
+    assert names_the_province("स्वास्थ्य मन्त्रालय", "gandaki") is False
+    assert names_the_province("मधेश प्रदेश स्वास्थ्य मन्त्रालय", "gandaki") is False
+    # वाग्मती is how NES stores it; बागमती is how people write it. Both accepted.
+    assert names_the_province("वाग्मती प्रदेश स्वास्थ्य मन्त्रालय", "bagmati") is True
+    assert names_the_province("बागमती प्रदेश स्वास्थ्य मन्त्रालय", "bagmati") is True
+
+
+@pytest.mark.parametrize(
+    ("iri", "expected"),
+    [
+        ("https://jawafdehi.org/entity/organization/government/provincial/gandaki/mofesc",
+         "gandaki"),
+        ("https://jawafdehi.org/entity/organization/government/provincial/madhesh/mohp",
+         "madhesh"),
+        # Not province-scoped -- these must NOT be touched.
+        ("https://jawafdehi.org/entity/organization/government/body/nid", ""),
+        ("https://jawafdehi.org/entity/location/localunit/adanchuli-gaunpalika-60306", ""),
+        ("https://jawafdehi.org/entity/person/khusilala-saha-865cdc", ""),
+        ("https://jawafdehi.org/entity/location/province/gandaki-np04", ""),
+    ],
+)
+def test_asserted_province_only_fires_on_a_provincial_segment(iri, expected):
+    assert asserted_province(iri) == expected
+
+
+def test_localunit_binds_are_untouched_by_the_province_veto():
+    # The regression that rules out the blunt fix. Vetoing every locality-scoped
+    # IRI (/provincial|/district|/localunit/) would cost 8 of the 39 labelled
+    # binds -- recall 0.872 -> 0.667 -- because for those 8 the locality IS the
+    # entity's own name.
+    decision = resolve(
+        "अदानचुली गाउँपालिका",
+        [{"id": "https://jawafdehi.org/entity/location/localunit/adanchuli-gaunpalika-60306",
+          "title": {"ne": "अदानचुली गाउँपालिका"}}],
+    )
+    assert decision.verdict == BIND
+
+
+def test_an_unrecognised_province_slug_fails_closed():
+    # Nepal has seven provinces and all seven are curated, so an unknown slug
+    # means NES changed. Unverifiable is REVIEW, never BIND -- same rule as the
+    # unreadable-document branch of the document veto.
+    decision = resolve(
+        "स्वास्थ्य मन्त्रालय",
+        [{"id": "https://jawafdehi.org/entity/organization/government/provincial/atlantis/moh",
+          "title": {"ne": "स्वास्थ्य मन्त्रालय"}}],
+    )
+    assert decision.verdict == REVIEW
+    assert "unrecognised province" in decision.reason
+
+
+def test_all_seven_provinces_are_curated():
+    # Derived from prod on 2026-08-03 by sweeping /api/search/ for
+    # /provincial/<slug>/ segments; see the fix-round-4 report for the sweep.
+    assert set(PROVINCE_NAME_FORMS) == {
+        "koshi", "madhesh", "bagmati", "gandaki", "lumbini", "karnali", "sudurpashchim",
+    }
+    # Each carries at least one Devanagari and one Latin spelling, otherwise a
+    # bilingual extraction can only match one of the two scripts.
+    for province, forms in PROVINCE_NAME_FORMS.items():
+        assert any(not f.isascii() for f in forms), province
+        assert any(f.isascii() for f in forms), province
+    # The IRI slug itself must be accepted: to_roman_colloquial does not
+    # reproduce it (बागमती folds to "bagamati", not "bagmati").
+    for province, forms in PROVINCE_NAME_FORMS.items():
+        assert province in forms, f"{province} slug spelling missing from its own forms"
+
+
+def test_province_veto_reason_is_distinct_from_the_document_veto_reasons():
+    province = resolve("वन तथा वातावरण मन्त्रालय", _GANDAKI_MOFESC)
+    ecn = apply_document_veto(
+        resolve("राज बहादुर बम", _BAM_CANDIDATES), {"identifier": [_ECN_ID]})
+    unreadable = apply_document_veto(resolve("राज बहादुर बम", _BAM_CANDIDATES), None)
+
+    reasons = {province.reason, ecn.reason, unreadable.reason}
+    assert len(reasons) == 3, "a caseworker cannot tell the three vetoes apart"
+    assert "province" in province.reason
+    assert "ecn-candidate-id" in ecn.reason
+    assert "unavailable" in unreadable.reason
