@@ -19,10 +19,16 @@ match_score("मिङमा ल्हमु शेर्पा", "मिङम�
 one-character difference, by a fold rather than by an algorithm. That is
 deliberate and kept: the same fold is what lets निधि meet the stored निधी, a real
 variant a caseworker would want bound, and `to_roman_colloquial` is the shared
-platform romanisation four indexers depend on. It caused no false positive
-across the 140-name labelled set. `test_entity_resolver.py` asserts the
-behaviour so it stays a known property instead of a surprise. Vowel length is
-the ONLY difference that folds this way.
+platform romanisation four indexers depend on.
+
+Read the next sentence before you touch the veto. Across the 140-name labelled
+set the fold caused no false positive THAT SURVIVED THE DOCUMENT VETO — not none
+at all. Its one effect beyond निधि/निधी was मिङमा ल्हमु शेर्पा matching
+person/mingna-lhamu-sherpa-328030 at 0.98, an Election Commission namesake that
+`resolve` alone binds and only `apply_document_veto` suppresses. So this fold's
+safety record is borrowed from that veto, and weakening the veto re-opens it.
+`test_entity_resolver.py` asserts the behaviour so it stays a known property
+instead of a surprise. Vowel length is the ONLY difference that folds this way.
 """
 
 from __future__ import annotations
@@ -448,12 +454,24 @@ def is_election_candidate_record(document) -> bool:
 
     That is not hypothetical. Five of the 39 first-pass binds across the labelled
     set in `tests/casework/fixtures/` were namesake candidates in the wrong
-    district. The clearest: `राज बहादुर बम` bound to
-    `person/raj-bahadur-bam-318984`, an ELECTED Ward Member for Palata
-    Gaunpalika ward 9 in Kalikot, while case 080-CR-0175 concerns an acting Chief
-    Administrative Officer — a civil-service post an elected ward member cannot
-    hold. Binding it would have publicly named an unrelated man as a corruption
-    suspect.
+    district. The clearest is `नन्दलाल दास`, bound to
+    `person/nandlal-das-310567` — a Ward Member candidate for Katahariya
+    Municipality ward 4 in RAUTAHAT, while case 080-CR-0064 names a former Germi
+    VDC secretary in NAWALPARASI, and that case's own bind list (readable in
+    prod) does not include him at all. The caseworker declined to bind him;
+    the resolver did not. A second, positive proof: for `याङजी शेर्पा` a
+    caseworker bound a DIFFERENT same-name entity on the same case, leaving the
+    ECN record unbound.
+
+    THE VETO IS NOT FREE, and the cost is larger than first estimated. An
+    authenticated read of four DRAFT source cases (2026-08-03) found 4 of their
+    39 human `accused` binds — 10.3%, not the 0.3% measured on published cases —
+    pointing at ECN candidate records, `person/raj-bahadur-bam-318984` and
+    `person/santosh-budha-185035` among them. Real officials do stand for
+    election. So this veto converts some correct binds into REVIEW; that trade
+    was made deliberately, because a REVIEW costs a caseworker one look and a
+    wrong bind publicly names an innocent person. Do not read the numbers above
+    as "candidate records are never the subject".
 
     Keyed on the `ecn-candidate-id` identifier alone, deliberately:
 
@@ -499,8 +517,36 @@ def apply_document_veto(decision: Decision, document) -> Decision:
     reads, and dropping them would leave the reviewer with nothing to judge — but
     `nes_id` becomes None, because a REVIEW that still carries an id invites the
     very bind this veto just refused.
+
+    FAILS CLOSED. An unreadable `document` — None, `{}`, a non-dict, anything but
+    a non-empty dict — downgrades the BIND too, under a DIFFERENT reason. That
+    matters because the caller hands us the result of a second HTTP read, and one
+    transient failure on it (the WAF 403 the capture script's browser UA exists
+    for, a 502, a 404 on an entity renamed between the two calls, an empty body)
+    would otherwise bind राज बहादुर बम to `person/raj-bahadur-bam-318984`, an
+    elected ward member in Kalikot — the exact wrong bind this veto was added to
+    stop, restored by one HTTP hiccup. Unverified means REVIEW, never BIND.
+    Returning REVIEW rather than raising keeps a bad read from aborting a whole
+    enrichment run: it costs a caseworker one look, not the batch.
+
+    The two reasons stay distinct so the review file can say which happened —
+    "this is an election candidate" is a judgement, "I could not check" is a
+    retry.
     """
-    if not decision.is_bind or not is_election_candidate_record(document):
+    if not decision.is_bind:
+        return decision
+    if not isinstance(document, dict) or not document:
+        return Decision(
+            REVIEW,
+            None,
+            decision.score,
+            decision.matched_name,
+            "entity document unavailable, bind not verified: could not read "
+            f"{decision.nes_id} to rule out an Election Commission candidate "
+            "record. Retry the read, or confirm the entity by hand.",
+            decision.candidates,
+        )
+    if not is_election_candidate_record(document):
         return decision
     return Decision(
         REVIEW,

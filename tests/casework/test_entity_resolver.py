@@ -5,6 +5,8 @@ Every string here is real: the extracted names come from the July A/B run logs
 prod reads. A wrong bind attaches a named person to a corruption case they had
 nothing to do with, so the false-positive tests are the point of this file.
 """
+import inspect
+
 import pytest
 
 from casework.entity_resolver import (
@@ -487,17 +489,73 @@ def test_veto_leaves_review_and_no_match_untouched_so_it_is_safe_to_call_always(
     assert apply_document_veto(no_match, {"identifier": [_ECN_ID]}) == no_match
 
 
-def test_veto_tolerates_a_missing_document():
-    # get_entity can 404 on a candidate that vanished between the two calls.
-    # Failing open here would be wrong, but raising would abort a whole run --
-    # a document we cannot read simply does not trip the veto.
+@pytest.mark.parametrize("document", [None, {}, "junk", 0, [], "", [{"identifier": []}]])
+def test_veto_fails_closed_when_the_document_cannot_be_read(document):
+    # The caller feeds this the result of a SECOND HTTP read. A WAF 403, a 502, a
+    # 404 on an entity renamed between the two calls, or an empty body must not
+    # hand back the bind. Whether raj-bahadur-bam-318984 is the right man is
+    # exactly what the unread document would have told us -- so the answer is
+    # REVIEW, not a guess in either direction.
     decision = resolve("राज बहादुर बम", _BAM_CANDIDATES)
-    assert apply_document_veto(decision, None) == decision
+    assert decision.verdict == BIND
+
+    unverified = apply_document_veto(decision, document)
+
+    assert unverified.verdict == REVIEW
+    assert unverified.nes_id is None
+    assert unverified.candidates == decision.candidates
 
 
-def test_resolve_signature_and_behaviour_are_unchanged_by_the_veto():
-    # Tasks 3 and 4 are reviewed and settled: resolve() still binds on names
-    # alone and knows nothing about documents.
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"identifier": None, "hasOccupation": None},
+        {"identifier": [], "hasOccupation": []},
+        {"identifier": [_CBS_ID]},
+    ],
+)
+def test_a_document_with_no_ecn_marker_is_readable_and_still_binds(document):
+    # The boundary that matters, and it is easy to get backwards. "No ECN
+    # identifier" is an ANSWER, not a failed read: 25 of the 39 frozen documents
+    # in tests/casework/fixtures/entity_documents.json are exactly
+    # {"identifier": null, "hasOccupation": null} -- the CIAA portal entities that
+    # human caseworkers correctly bound as accused. Treating that shape as
+    # unverified would downgrade every one of them and drop recall to near zero.
+    # Fail-closed applies to a document we could not READ, not to one that simply
+    # carries no marker.
+    decision = resolve("राज बहादुर बम", _BAM_CANDIDATES)
+    assert apply_document_veto(decision, document) == decision
+
+
+def test_unreadable_document_and_ecn_record_give_different_reasons():
+    # A caseworker reading the review file must be able to tell "this is an
+    # election candidate" (a judgement) from "I could not check" (a retry).
+    decision = resolve("राज बहादुर बम", _BAM_CANDIDATES)
+
+    unverified = apply_document_veto(decision, None)
+    vetoed = apply_document_veto(decision, {"identifier": [_ECN_ID]})
+
+    assert "unavailable" in unverified.reason
+    assert "ecn-candidate-id" not in unverified.reason
+    assert "ecn-candidate-id" in vetoed.reason
+    assert unverified.reason != vetoed.reason
+
+
+def test_veto_never_upgrades_a_review_or_no_match_even_on_a_bad_document():
+    # Fail-closed must not become fail-anything: a non-BIND stays exactly as
+    # resolve() left it, whatever the document looks like.
+    no_match = resolve("खगेन्द्र पराजुली", [])
+    assert apply_document_veto(no_match, None) == no_match
+    assert apply_document_veto(no_match, {}) == no_match
+
+
+def test_resolve_still_binds_on_names_alone_and_takes_no_document():
+    # Tasks 3 and 4 are reviewed and settled: the veto is a separate function and
+    # resolve() knows nothing about documents. Assert the signature, not just the
+    # behaviour -- a document parameter creeping in here would move I/O back into
+    # the pure layer.
+    assert list(inspect.signature(resolve).parameters) == ["extracted_name", "candidates"]
+
     decision = resolve("राज बहादुर बम", _BAM_CANDIDATES)
     assert decision.verdict == BIND
     assert decision.nes_id == "https://jawafdehi.org/entity/person/raj-bahadur-bam-318984"

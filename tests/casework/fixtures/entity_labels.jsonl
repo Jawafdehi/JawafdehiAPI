@@ -21,7 +21,7 @@
 {"extracted": "कालिका माध्यमिक विद्यालय भवन निर्माण - कालिकोट जिल्ला", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
 {"extracted": "खगेन्द्र पराजुली", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
 {"extracted": "खडैचा पुलिस चौकी - बाँके जिल्ला", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
-{"extracted": "खुसिलाल साह", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/person/khusilala-saha-865cdc", "provenance": "verified: prod entity doc consistent with case context"}
+{"extracted": "खुसिलाल साह", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/person/khusilala-saha-865cdc", "provenance": "verified: human accused bind on the source case (authenticated DRAFT read 2026-08-03)"}
 {"extracted": "गुल्बा कोरी", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
 {"extracted": "घरबाटो सिफारिस लेनदेन - कपिलवस्तु जिल्ला", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
 {"extracted": "घुरनी देवी खत्वे", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
@@ -71,14 +71,14 @@
 {"extracted": "बासुदेवप्रसाद पासी", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
 {"extracted": "बुद्दीसागर तिवारी", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
 {"extracted": "बुद्दीसागर सुवेदी", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
-{"extracted": "बुद्धमाया थापा मगर", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/person/buddhamaya-thapa-magara-75359e", "provenance": "verified: prod entity doc consistent with case context"}
+{"extracted": "बुद्धमाया थापा मगर", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/person/buddhamaya-thapa-magara-75359e", "provenance": "verified: human accused bind on the source case (authenticated DRAFT read 2026-08-03)"}
 {"extracted": "बृद्धभत्ता वितरण - सल्यान जिल्ला, शारदा नगरपालिका", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
 {"extracted": "भूमि व्यवस्थापन तथा अभिलेख विभाग, बबरमहल", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
 {"extracted": "भूमिसुधार कार्यालय नवलपरासी", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/organization/bhumisudhara-karyalaya-navalaparasi-1030dc", "provenance": "verified: human bind on case-080-cr-0064-anup-mehra-land-fraud"}
 {"extracted": "मदन यादव", "expected_verdict": "REVIEW", "expected_nes_id": null, "provenance": "rejected: 9 same-name entities in prod"}
 {"extracted": "मनोहरप्रसाद पन्थी", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
 {"extracted": "महाराजगंज नगरपालिका", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
-{"extracted": "माधव कुमार भट्ट", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/person/madhava-kumara-bhatta-810e85", "provenance": "verified: prod entity doc consistent with case context"}
+{"extracted": "माधव कुमार भट्ट", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/person/madhava-kumara-bhatta-810e85", "provenance": "verified: human accused bind on the source case (authenticated DRAFT read 2026-08-03)"}
 {"extracted": "माध्यमिक शिक्षा परिषद्, उत्तर प्रदेश, भारत", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
 {"extracted": "माध्यामिक शिक्षा परिषद्, उत्तर प्रदेश, इलाहाबाद", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
 {"extracted": "माध्यामिक शिक्षा परिषद्, उत्तर प्रदेश, भारत", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
@@ -91,7 +91,7 @@
 {"extracted": "मिङमा ल्हमु शेर्पा", "expected_verdict": "REVIEW", "expected_nes_id": null, "provenance": "rejected: ECN election-candidate record, not the case subject"}
 {"extracted": "याङजी शेर्पा", "expected_verdict": "REVIEW", "expected_nes_id": null, "provenance": "rejected: ECN election-candidate record, not the case subject"}
 {"extracted": "रबीकुमार खत्री", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/person/rabikumara-khatri-d06371", "provenance": "verified: human bind on case-080-cr-0064-anup-mehra-land-fraud"}
-{"extracted": "रमेश कुमार निधि", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/person/ramesa-kumara-nidhi-95d296", "provenance": "verified: prod entity doc consistent with case context"}
+{"extracted": "रमेश कुमार निधि", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/person/ramesa-kumara-nidhi-95d296", "provenance": "verified: human accused bind on the source case (authenticated DRAFT read 2026-08-03)"}
 {"extracted": "रविन्द्र कुमार बुढा", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
 {"extracted": "रहमतुल्लाह हलवाई", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
 {"extracted": "राज बहादुर बम", "expected_verdict": "REVIEW", "expected_nes_id": null, "provenance": "rejected: ECN election-candidate record, not the case subject"}
@@ -109,12 +109,12 @@
 {"extracted": "राष्ट्रिय बीमा प्राधिकरण", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
 {"extracted": "लक्ष्मी नारायण मुखिया", "expected_verdict": "REVIEW", "expected_nes_id": null, "provenance": "rejected: 2 same-name entities in prod"}
 {"extracted": "ल्हाक्पा गोल्जेन शेर्पा", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
-{"extracted": "वसन्ती रावल", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/person/vasanti-ravala-8aacf5", "provenance": "verified: prod entity doc consistent with case context"}
+{"extracted": "वसन्ती रावल", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/person/vasanti-ravala-8aacf5", "provenance": "verified: human accused bind on the source case (authenticated DRAFT read 2026-08-03)"}
 {"extracted": "विजय शाह", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
 {"extracted": "विशाल भण्डारी", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
-{"extracted": "विश्व मोहन प्रसाद यादव", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/person/visva-mohana-prasada-yadava-a4da26", "provenance": "verified: prod entity doc consistent with case context"}
-{"extracted": "विष्णु बहादुर रावल", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/person/visnu-bahadura-ravala-24ac8b", "provenance": "verified: prod entity doc consistent with case context"}
-{"extracted": "वीरजन भण्डारी", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/organization/virajana-bhandari-e8c7c5", "provenance": "verified: prod entity doc consistent with case context"}
+{"extracted": "विश्व मोहन प्रसाद यादव", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/person/visva-mohana-prasada-yadava-a4da26", "provenance": "verified: human accused bind on the source case (authenticated DRAFT read 2026-08-03)"}
+{"extracted": "विष्णु बहादुर रावल", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/person/visnu-bahadura-ravala-24ac8b", "provenance": "verified: human accused bind on the source case (authenticated DRAFT read 2026-08-03)"}
+{"extracted": "वीरजन भण्डारी", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/organization/virajana-bhandari-e8c7c5", "provenance": "verified: human accused bind on the source case (authenticated DRAFT read 2026-08-03)"}
 {"extracted": "शर्मिला राई", "expected_verdict": "REVIEW", "expected_nes_id": null, "provenance": "rejected: 3 same-name entities in prod"}
 {"extracted": "शारदा नगरपालिका", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/location/localunit/sharada-municipality-60907", "provenance": "verified: prod entity doc consistent with case context"}
 {"extracted": "शिक्षा विकास तथा समन्वय इकाई", "expected_verdict": "NO_MATCH", "expected_nes_id": null, "provenance": "rejected: no NES entity with this name"}
@@ -137,4 +137,4 @@
 {"extracted": "सोरु गाउँपालिका", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/location/localunit/soru-gaunpalika-60203", "provenance": "verified: prod entity doc consistent with case context"}
 {"extracted": "सोरु गाउँपालिका, मुगु", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/location/localunit/soru-gaunpalika-60203", "provenance": "verified: prod entity doc consistent with case context"}
 {"extracted": "स्वास्थ्य तथा जनसंख्या मन्त्रालय", "expected_verdict": "REVIEW", "expected_nes_id": null, "provenance": "rejected: 2 same-name entities in prod"}
-{"extracted": "हिक्मत प्याकुरेल", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/person/hikmata-pyakurela-b2ff30", "provenance": "verified: prod entity doc consistent with case context"}
+{"extracted": "हिक्मत प्याकुरेल", "expected_verdict": "BIND", "expected_nes_id": "https://jawafdehi.org/entity/person/hikmata-pyakurela-b2ff30", "provenance": "verified: human accused bind on the source case (authenticated DRAFT read 2026-08-03)"}
