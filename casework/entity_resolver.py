@@ -339,13 +339,14 @@ _SLUG_ID_SUFFIX = re.compile(r"-(?=[0-9a-f]{6,8}$)(?=[0-9a-f]*\d)[0-9a-f]{6,8}$"
 # Nepal's seven provinces, keyed by the slug NES puts in a provincial IRI:
 # organization/government/provincial/<slug>/<body>.
 #
-# WHY: a provincial body's stored TITLE never mentions its province. Seven
-# entities are called exactly "स्वास्थ्य मन्त्रालय", one per province, and prod holds
-# exactly one entity titled "वन तथा वातावरण मन्त्रालय" -- Gandaki's. So a Bara
-# (Madhesh) forest case extracting that bare ministry name matches at 1.00, the
-# ambiguity veto cannot fire because the name IS unique in NES, and the IRI
-# quietly asserts a province the name never claimed. A name unique in NES but not
-# unique in reality.
+# WHY: many provincial bodies' stored TITLES do not mention their province, and
+# prod holds exactly ONE entity titled "वन तथा वातावरण मन्त्रालय" -- Gandaki's
+# (verified 2026-08-03: 305 search hits, one exact title.ne match). So a DRAFT
+# district-forest case in Bara, which is in Madhesh province, extracted that bare
+# ministry name, matched at 1.00, and the ambiguity veto could not fire because
+# the name IS unique in NES. The IRI quietly asserts a province the name never
+# claimed: unique in NES, not unique in reality. Uniqueness is the whole argument
+# -- where a bare title IS duplicated the ambiguity veto already holds it.
 #
 # DERIVED FROM PROD, not invented (2026-08-03, GET only):
 #   1. Swept /api/search/?type=entity over nine ministry/province seeds and
@@ -363,17 +364,33 @@ _SLUG_ID_SUFFIX = re.compile(r"-(?=[0-9a-f]{6,8}$)(?=[0-9a-f]*\d)[0-9a-f]{6,8}$"
 # reproduce it: बागमती folds to "bagamati" not "bagmati", and सुदूरपश्चिम to
 # "sudurapashcim" not "sudurpashchim". Matching the slug against the fold is the
 # approach that fails, which is why the accepted spellings are listed instead.
+# THE RULE FOR THIS TABLE, because every extra spelling can only OPEN the
+# allow-path and the governing constraint says be stingy in that direction. Each
+# province gets exactly:
+#   (a) the Devanagari spelling prod stores, from its province entity's name.ne;
+#   (b) one Devanagari variant, ONLY where prod's spelling is not the one people
+#       write -- stated per entry below, never assumed;
+#   (c) the IRI slug, as the Latin form, because that is what a Latin extraction
+#       actually contains and the fold does not reproduce it.
+# Romanisations of (a)/(b) are deliberately ABSENT: they are redundant. An
+# extracted Devanagari token carries its own raw form into `token_forms`, so the
+# Devanagari entry already matches it -- adding the fold widens nothing.
+# `test_province_forms_carry_no_redundant_romanisation` enforces that.
 PROVINCE_NAME_FORMS = {
-    "koshi": frozenset({"कोशी", "कोसी", "koshi", "kosi", "koshee"}),
-    "madhesh": frozenset({"मधेश", "मधेस", "madhesh", "madhesha", "madhes", "madhesa"}),
-    "bagmati": frozenset({"बागमती", "वाग्मती", "bagmati", "bagamati", "vagmati", "baagmati"}),
+    # कोशी is curated: the province entity still stores its pre-rename name
+    # "प्रदेश १" / "Province No. 1", so prod has no usable spelling. कोसी is the
+    # common variant (श vs स) seen in Nepali prose.
+    "koshi": frozenset({"कोशी", "कोसी", "koshi"}),
+    # मधेस is the common variant of prod's मधेश, same श/स alternation.
+    "madhesh": frozenset({"मधेश", "मधेस", "madhesh"}),
+    # prod stores वाग्मती; बागमती is what almost everyone writes.
+    "bagmati": frozenset({"बागमती", "वाग्मती", "bagmati"}),
+    # गंडकी is the anusvara spelling of prod's गण्डकी.
     "gandaki": frozenset({"गण्डकी", "गंडकी", "gandaki"}),
     "lumbini": frozenset({"लुम्बिनी", "lumbini"}),
     "karnali": frozenset({"कर्णाली", "karnali"}),
-    "sudurpashchim": frozenset({
-        "सुदूरपश्चिम", "सुदुरपश्चिम", "sudurpashchim", "sudurapashcim", "sudurapashcima",
-        "sudurpaschim", "sudurpashchim",
-    }),
+    # सुदुरपश्चिम drops the ū of prod's सुदूरपश्चिम, a routine typing variant.
+    "sudurpashchim": frozenset({"सुदूरपश्चिम", "सुदुरपश्चिम", "sudurpashchim"}),
 }
 # The IRI segment that asserts a province.
 _PROVINCIAL_SEGMENT = re.compile(r"/provincial/([^/]+)/")
@@ -442,12 +459,14 @@ def _province_veto(extracted: str, nes_id: str) -> str:
     extracted name and the candidate IRI are already in hand, so this is a pure
     name/candidate veto in the same family as the ambiguity and genericity vetoes.
 
-    A provincial body's stored title never names its province, so binding on the
-    title alone accepts whichever province NES happens to hold. That is how
+    When a provincial body's stored title does not name its province, binding on
+    the title alone accepts whichever province NES happens to hold. That is how
     `वन तथा वातावरण मन्त्रालय` bound at 1.00 to
-    `organization/government/provincial/gandaki/mofesc` on case 078-CR-0005, a
-    BARA district forest case -- Bara is in Madhesh. Found by a smoke run over
-    unseen DRAFT cases, not by review.
+    `organization/government/provincial/gandaki/mofesc` for a DRAFT
+    district-forest case in Bara, which is in Madhesh province. Found by a smoke
+    run over unseen DRAFT cases, not by review. The case identifiers stay out of
+    git; the evidence is in
+    `work/2026-08-03-Fix-related_entities-enricher/`.
 
     Note how thin the alternative protection is: `स्वास्थ्य तथा जनसंख्या मन्त्रालय`
     already reviews, but only because NES happens to hold two entities with that

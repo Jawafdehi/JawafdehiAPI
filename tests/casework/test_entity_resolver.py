@@ -398,8 +398,10 @@ _CBS_ID = {"@type": "PropertyValue", "propertyID": "cbs-local-unit-code", "value
 
 
 def test_ecn_marker_in_a_list_is_detected():
-    # person/raj-bahadur-bam-318984: an elected Ward Member in Kalikot, while
-    # case 080-CR-0175 concerns an acting Chief Administrative Officer.
+    # person/raj-bahadur-bam-318984: an elected Ward Member in Kalikot, while the
+    # DRAFT case that extracted the name concerns an acting Chief Administrative
+    # Officer. Case identifiers stay out of git; see
+    # work/2026-08-03-Fix-related_entities-enricher/ for the specifics.
     assert is_election_candidate_record({"identifier": [_ECN_ID]}) is True
 
 
@@ -520,7 +522,7 @@ def test_veto_fails_closed_when_the_document_cannot_be_read(document):
 )
 def test_a_document_with_no_ecn_marker_is_readable_and_still_binds(document):
     # The boundary that matters, and it is easy to get backwards. "No ECN
-    # identifier" is an ANSWER, not a failed read: 25 of the 39 frozen documents
+    # identifier" is an ANSWER, not a failed read: 25 of the 40 frozen documents
     # in tests/casework/fixtures/entity_documents.json are exactly
     # {"identifier": null, "hasOccupation": null} -- the CIAA portal entities that
     # human caseworkers correctly bound as accused. Treating that shape as
@@ -602,12 +604,14 @@ def test_both_markers_live_in_one_curated_set():
 
 
 # ---------------------------------------------------------------------------
-# The province veto. A provincial body's stored title never names its province:
-# seven entities are titled exactly "स्वास्थ्य मन्त्रालय", one per province. Prod
-# holds exactly ONE entity titled "वन तथा वातावरण मन्त्रालय" -- Gandaki's -- so a
-# Bara (Madhesh) forest case matched it at 1.00 and the ambiguity veto could not
-# fire, because the name really is unique in NES. Unique in NES, not unique in
-# reality. Found by a smoke run over unseen DRAFT cases.
+# The province veto. Many provincial bodies' stored titles do not name their
+# province, and prod holds exactly ONE entity titled "वन तथा वातावरण मन्त्रालय" --
+# Gandaki's (verified 2026-08-03: 305 search hits, one exact title.ne match). So a
+# DRAFT district-forest case in Bara, which is in Madhesh province, matched it at
+# 1.00 and the ambiguity veto could not fire, because the name really is unique in
+# NES. Unique in NES, not unique in reality. Uniqueness is the whole argument:
+# where a bare title IS duplicated the ambiguity veto already holds it. Found by a
+# smoke run over unseen DRAFT cases.
 #
 # Pure: needs only the extracted name and the candidate IRI, both already in hand.
 # No HTTP call, and resolve()'s signature is unchanged.
@@ -639,10 +643,18 @@ def test_province_scoped_candidate_binds_only_when_both_names_carry_the_province
     NO_MATCH before any veto runs. The province veto's allow-path therefore only
     fires when the STORED title carries the province too.
 
-    In practice prod titles are bare (`provincial/gandaki/mofesc` is stored as
-    plain `वन तथा वातावरण मन्त्रालय`), so today the effective behaviour is: a
-    province-scoped candidate matched by a bare name always reviews. That is the
-    safe direction and it costs 0 of the 39 labelled binds.
+    The permissive branch is LIVE, not decoration. Three Lumbini bodies store the
+    province in both titles and all three BIND at 1.00, in Devanagari and in
+    English (verified against prod 2026-08-03):
+    `provincial/lumbini/moeap` (`आर्थिक मामिला तथा योजना मन्त्रालय, लुम्बिनी प्रदेश`),
+    `provincial/lumbini/molmac` and `provincial/lumbini/ppsc`. All three are in the
+    frozen capture. So the shape that reviews is a bare name against a bare title,
+    not "every province-scoped candidate".
+
+    The allow-path's only key is a province token the LLM happened to emit. Nothing
+    corroborates it against the case; if the extractor writes the wrong province
+    into the name, this binds the wrong province's body. It costs 0 of the 39
+    labelled binds either way.
     """
     # Province in the extracted name only -> the NAME match fails first.
     assert match_score("गण्डकी प्रदेश वन तथा वातावरण मन्त्रालय",
@@ -744,3 +756,42 @@ def test_province_veto_reason_is_distinct_from_the_document_veto_reasons():
     assert "province" in province.reason
     assert "ecn-candidate-id" in ecn.reason
     assert "unavailable" in unreadable.reason
+
+
+_LUMBINI_MOEAP = [
+    {"id": "https://jawafdehi.org/entity/organization/government/provincial/lumbini/moeap",
+     "title": {"ne": "आर्थिक मामिला तथा योजना मन्त्रालय, लुम्बिनी प्रदेश",
+               "en": "Ministry of Finance and Planning, Lumbini Province"}},
+]
+
+
+@pytest.mark.parametrize("extracted", [
+    "आर्थिक मामिला तथा योजना मन्त्रालय, लुम्बिनी प्रदेश",
+    "Ministry of Finance and Planning, Lumbini Province",
+])
+def test_the_province_allow_path_is_live_against_a_real_prod_entity(extracted):
+    # Not a hypothetical. provincial/lumbini/moeap stores the province in BOTH
+    # titles (verified against prod 2026-08-03), so the veto is satisfied through
+    # names_the_province and the row binds in either script. molmac and ppsc are
+    # the same shape. This is what stops the rule being decoration.
+    decision = resolve(extracted, _LUMBINI_MOEAP)
+    assert decision.verdict == BIND
+    assert decision.nes_id.endswith("/provincial/lumbini/moeap")
+
+
+def test_province_forms_carry_no_redundant_romanisation():
+    """Every form must earn its place: extra spellings only OPEN the allow-path.
+
+    A Devanagari entry already matches an extracted Devanagari token through its
+    own raw form, so that token's romanisation adds nothing. Anything here that is
+    the fold of a Devanagari sibling is dead weight pointing the wrong way.
+    """
+    for province, forms in PROVINCE_NAME_FORMS.items():
+        folds = {f for dev in forms if not dev.isascii()
+                 for f in token_forms(dev) if f.isascii()}
+        redundant = {f for f in forms if f.isascii() and f in folds and f != province}
+        assert not redundant, (
+            f"{province}: {sorted(redundant)} are romanisations of Devanagari forms "
+            "already in the set, so they widen the allow-path for nothing")
+        # Exactly one Latin form -- the IRI slug.
+        assert {f for f in forms if f.isascii()} == {province}, province

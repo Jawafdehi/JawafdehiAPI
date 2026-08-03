@@ -54,10 +54,15 @@ slug. Every label below rests on something else.
 | `verified: prod entity doc consistent with case context` | The full entity document pins the referent — a CBS local-unit code, `gov-np-domain` or a wikidata QID — and the case's district agrees | 11 |
 | `rejected: ECN election-candidate record, not the case subject` | The document carries `ecn-candidate-id` and a 2079 candidate `hasOccupation` for a ward the case has nothing to do with | 4 |
 | `verified: human accused bind on the source case exists and was rejected …` | Same as above, and a human *did* bind the ECN record. Considered and rejected on locality — see below | 2 |
-| `rejected: N same-name entities in prod` | Self-verifying: N real entities, one name | 10 |
+| `rejected: N same-name entities in prod` | Self-verifying: N real entities, one name | 9 |
 | `rejected: no NES entity with this name` | Nothing scored above zero against the frozen capture | 83 |
 | `unsettled: evidence does not decide` | Labelled conservatively — REVIEW, never BIND | 1 |
 | `constructed: <shape>` | Added to cover a false-positive shape the 138 lack | 2 |
+| `rejected: sole NES match is one province's ministry …` | Province veto regression row, from the smoke run | 1 |
+| `rejected: nec-candidate-id elected ward-chair record …` | Election-record veto regression row, from the smoke run | 1 |
+
+That is 142 rows. `सन्तोष बुढा` moved out of the same-name class in round 3, which is why it
+reads 9 and not 10.
 
 Seven of the twenty logged cases are readable anonymously (two PUBLISHED, five IN_REVIEW).
 Four more were read with an authenticated token on 2026-08-03, which upgraded 9 labels from
@@ -104,9 +109,11 @@ three DRAFT ones are locality-incoherent. So the veto's cost in **correct** bind
 1 in 39 (~2.6%) — not 7.7%, and not the ~10% an earlier count suggested by including
 `nec-candidate-id`.
 
-`is_election_candidate_record` keys on `ecn-candidate-id` only. NES also holds
-`nec-candidate-id` rows and the veto does not catch them; none reaches a bind in this set, so
-precision is unaffected. Flagged in the function's docstring, not silently widened.
+`is_election_candidate_record` matches a curated set of markers, **both**
+`ecn-candidate-id` and `nec-candidate-id`. It keyed on the first alone until 2026-08-03, which
+let the ~6,743 elected ward heads through; `तेजनाथ पौडेल` below is the regression row for that
+miss. A third sourcing load adding a third marker is a one-line change to
+`ELECTION_RECORD_MARKERS`.
 
 ## The two vetoes a smoke run caught
 
@@ -118,26 +125,34 @@ regression row. A veto with no row in the fixture is a fix the next refactor sil
 | `वन तथा वातावरण मन्त्रालय` | province veto (pure) | The only NES entity with this title is Gandaki's ministry; the case is in Bara, which is Madhesh |
 | `तेजनाथ पौडेल` | election-record veto (document) | `nec-candidate-id` ward-chair record for ward 8 of Badhaiyatal Gaunpalika, **Bardiya** — bound by a human on a **Solukhumbu** case |
 
-**The province hazard is the election-record hazard's twin.** A provincial body's stored title
-never names its province — seven entities are titled exactly `स्वास्थ्य मन्त्रालय`, one per
-province — so the IRI asserts a province the name never claimed. The ambiguity veto cannot
-help: prod holds exactly one entity titled `वन तथा वातावरण मन्त्रालय`, so the name really is
-unique in NES, just not in reality. Note how thin the alternative protection is —
-`स्वास्थ्य तथा जनसंख्या मन्त्रालय` already reviews, but only because NES happens to hold two of
-them. Relying on duplicate count makes protection an accident of the data.
+**The province hazard is the election-record hazard's twin.** Many provincial bodies' stored
+titles do not name their province, so the IRI asserts a province the name never claimed. The
+ambiguity veto cannot help here: prod holds exactly **one** entity titled
+`वन तथा वातावरण मन्त्रालय` — Gandaki's — so the name really is unique in NES, just not in
+reality. That uniqueness is the entire argument. Where a bare title *is* duplicated the
+ambiguity veto already holds it: `स्वास्थ्य मन्त्रालय` has 3 entities and
+`स्वास्थ्य तथा जनसंख्या मन्त्रालय` has 2, and both already review. Relying on duplicate count is
+what makes protection an accident of the data.
 
 The rule: a candidate IRI containing `/provincial/<province>/` may bind only if the extracted
 name carries that province's name in either script. All seven province slugs were derived from
 prod, not invented — see the fix-round-4 report for the sweep. An unrecognised slug fails
 closed.
 
-One honest limit, asserted in
+One limit worth knowing, asserted in
 `test_province_scoped_candidate_binds_only_when_both_names_carry_the_province`: putting the
-province in the extracted name alone does not open the allow-path, it closes the row one layer
-earlier, because `गण्डकी`/`प्रदेश` are not middle particles and the name match itself drops to
-0.0. Since prod titles are bare, today's effective behaviour is that a province-scoped
-candidate matched by a bare name always reviews. That is the safe direction and it costs
-**0 of the 39** labelled binds.
+province in the extracted name *alone* does not open the allow-path, it closes the row one
+layer earlier, because `गण्डकी`/`प्रदेश` are not middle particles and the name match itself
+drops to 0.0. The allow-path needs the **stored** title to carry the province too.
+
+Plenty do, so the branch is live rather than decoration. Three Lumbini bodies store the
+province in both titles and all three bind at 1.00 in either script —
+`provincial/lumbini/moeap`, `molmac` and `ppsc`, all present in the frozen capture. So the
+shape that reviews is a bare name against a bare title, not every province-scoped candidate.
+
+The allow-path's only key is a province token the LLM happened to emit; nothing corroborates it
+against the case, so a wrong province in the extracted name would bind the wrong province's
+body. Either way it costs **0 of the 39** labelled binds.
 
 Two blunter fixes were measured and rejected: matching the IRI's locality slug against the
 name needs an edit path (the fold gives `bagamati`, the slug says `bagmati`), and vetoing every
