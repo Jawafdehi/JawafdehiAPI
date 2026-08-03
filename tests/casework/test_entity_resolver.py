@@ -87,7 +87,60 @@ def test_two_omitted_particles_fall_below_threshold():
 
 
 def test_reordered_name_parts_still_match():
-    assert match_score("Shrestha Anish", "अनिष श्रेष्ठ") >= MIN_BIND_SCORE
+    # A verifiable swap: shrestha is a curated surname, anish is not, so the
+    # reorder is safe to read as surname-first vs given-name-first. Pinned to
+    # the exact score (2 tokens matched only through romanisation, 1.0 - 2 *
+    # 0.02 = 0.96) so a future edit to the swap rule can't silently change it.
+    score = match_score("Shrestha Anish", "अनिष श्रेष्ठ")
+    assert score == pytest.approx(0.96)
+    assert score >= MIN_BIND_SCORE
+
+
+def test_reversal_with_no_surname_anchor_scores_zero():
+    # The bug this whole rule exists for: राम and कृष्ण are both plain given
+    # names, so nothing on either side says which end is the surname. Without
+    # the curated SURNAMES check this scored a perfect 1.0 — indistinguishable
+    # from an exact match — on nothing but a coincidental permutation.
+    assert match_score("कृष्ण राम", "राम कृष्ण") == 0.0
+
+
+def test_reversal_of_two_surnames_scores_zero():
+    # थापा and मगर are both curated surnames, so a swap can't tell which end
+    # is meant to be the surname either. Failing closed here is correct: this
+    # module never guesses when a rule can't decide.
+    assert match_score("थापा मगर", "मगर थापा") == 0.0
+
+
+def test_three_token_given_name_reversal_scores_zero():
+    # राम and कृष्ण swap places but थापा -- the true surname -- stays last on
+    # both sides. The anchor check only ever looks at first-and-last, so this
+    # is the load-bearing reason the swap rule is survivable at all: the first
+    # anchors (कृष्ण vs राम) don't match straight, and swapping pairs कृष्ण
+    # against थापा, which doesn't match either. No interior reordering can
+    # sneak past the anchor gate.
+    assert match_score("कृष्ण राम थापा", "राम कृष्ण थापा") == 0.0
+
+
+def test_swapped_anchors_with_non_particle_interior_token_scores_zero():
+    # शाह is a curated surname, विजय is not, so the swap itself is allowed —
+    # both anchors pair up. But विक्रम, the interior token left in the longer
+    # name, is not a droppable particle, so the particle rule (not the anchor
+    # rule) is what stops this. Reversed form of person/bija-bikram-shaha-178948's
+    # false-positive trap.
+    assert match_score("शाह विजय", "विजय विक्रम शाह") == 0.0
+
+
+def test_swapped_anchors_with_one_character_surname_difference_scores_zero():
+    # The reordered form of the श्रेष्ट/श्रेष्ठ one-character trap: the anchor
+    # check rejects it before the surname rule is even consulted, because
+    # श्रेष्ट and श्रेष्ठ's form-sets don't intersect either straight or swapped.
+    assert match_score("श्रेष्ट अनिष", "अनिष श्रेष्ठ") == 0.0
+
+
+def test_swapped_anchors_with_missing_surname_scores_zero():
+    # Reordered form of the घुरनी देवी trap: खत्वे pairs with neither घुरनी nor
+    # देवी under the swap, so the anchor check rejects it outright.
+    assert match_score("खत्वे घुरनी", "घुरनी देवी") == 0.0
 
 
 def test_partial_match_with_different_surname_scores_zero():

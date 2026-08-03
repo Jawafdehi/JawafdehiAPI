@@ -46,6 +46,37 @@ GENERIC_TOKENS = frozenset({
     "उपभोक्ता", "जिल्ला", "गाउँपालिका", "नगरपालिका", "प्रदेश", "आयोजना", "निर्माण",
 })
 
+# Nepali family names, frequency-ranked from real data: the 686 accused binds on
+# published Jawafdehi cases plus the 138 extracted names in the resolver's
+# labelled set. Used ONLY to decide whether a two-token name may be read
+# surname-first. Curated rather than inferred because "is this token a surname"
+# has no algorithmic answer -- राम is a given name, राई is a surname, and no rule
+# separates them.
+SURNAMES = frozenset({
+    "श्रेष्ठ", "shrestha", "साह", "sah", "saha", "यादव", "yadav", "yadava",
+    "मिश्र", "mishra", "पौडेल", "poudel", "paudel", "थापा", "thapa",
+    "राई", "rai", "गिरी", "giri", "भट्टराई", "bhattarai", "धिमाल", "dhimal",
+    "लिम्बू", "limbu", "अधिकारी", "adhikari", "मण्डल", "mandal", "मंडल",
+    "बस्नेत", "basnet", "महर्जन", "maharjan", "उपाध्याय", "upadhyay",
+    "नेपाल", "nepal", "पुरी", "puri", "शर्मा", "sharma", "sharmaa",
+    "महतो", "mahto", "कोइराला", "koirala", "चौधरी", "chaudhari", "chaudhary",
+    "शाही", "shahi", "कार्की", "karki", "भट्ट", "bhatt", "bhatta",
+    "जोशी", "joshi", "शाह", "shah", "shaha", "पोखरेल", "pokharel", "pokhrel",
+    "आचार्य", "acharya", "वली", "wali", "vali", "झा", "jha", "दास", "das",
+    "माझी", "majhi", "दर्जी", "darji", "ठाकुर", "thakur", "अर्याल", "aryal",
+    "रावल", "rawal", "ravala", "सिंह", "singh", "खत्री", "khatri",
+    "मगर", "magar", "भण्डारी", "bhandari", "ढकाल", "dhakal",
+    "उप्रेती", "upreti", "चौलागाईं", "chaulagain", "पाण्डे", "pandey",
+    "घिमिरे", "ghimire", "तिम्सिना", "timsina", "रानाभाट", "ranabhat",
+    "शेर्पा", "sherpa", "तामाङ", "tamang", "गुरुङ", "gurung",
+    "बिष्ट", "bista", "bishta", "खड्का", "khadka", "कुमाल", "kumal",
+    "सुनार", "sunar", "नेपाली", "nepali", "गौतम", "gautam",
+    "रेग्मी", "regmi", "सुवेदी", "subedi", "कलवार", "kalwar",
+    "खत्वे", "khatve", "कमली", "kamali", "प्रसाई", "prasai",
+    "ज्ञवाली", "gyawali", "पराजुली", "parajuli", "बुढा", "budha",
+    "मुखिया", "mukhiya", "बम", "bam", "प्याकुरेल", "pyakurel", "खनाल", "khanal",
+})
+
 # Latin spellings the colloquial fold does not reach. to_roman_colloquial gives
 # श्रेष्ठ -> "shreshtha", but people type "Shrestha", so the two only meet through
 # a curated table. Curated and not algorithmic on purpose: an algorithm that
@@ -119,10 +150,10 @@ def tokens_equal(a, b) -> bool:
 #     identical after normalisation                        1.00  bind
 #     four tokens bridged across scripts                   0.92  bind
 #     two tokens, one omitted particle                     0.95  bind
-#     four bridged tokens, one omitted particle             0.87  bind
-#     two tokens, two omitted particles                     0.80  review
-#     four bridged tokens, two omitted particles            0.72  review
-#     anchor mismatch, or a non-particle omission           0.00  no match
+#     four bridged tokens, one omitted particle            0.87  bind
+#     two tokens, two omitted particles                    0.80  review
+#     four bridged tokens, two omitted particles           0.72  review
+#     anchor mismatch, or a non-particle omission          0.00  no match
 # Two stacked guesses is not near-certain, so it reports. Moving this constant
 # moves a name between buckets and changes nothing else about the output.
 MIN_BIND_SCORE = 0.85
@@ -141,22 +172,38 @@ def _is_particle(token) -> bool:
     return bool(token[1] & MIDDLE_PARTICLES)
 
 
+def _is_surname(token) -> bool:
+    return bool(token[1] & SURNAMES)
+
+
 def _anchors_match(left, right) -> bool:
     """Both names' first-and-last token pair must match, order notwithstanding.
 
     "Order-insensitive" has to cover a fully reordered two-token name
     ("Shrestha Anish" vs "अनिष श्रेष्ठ", surname-first against given-name-first),
     where left[0] pairs with right[-1] rather than right[0]. So this checks the
-    *unordered* pair {left[0], left[-1]} against {right[0], right[-1]}: either
-    the straight correspondence or the swapped one must hold completely. It is
-    still exactly two anchors on each side, still exact-match only — nothing
-    fuzzy, nothing about the interior tokens.
+    *unordered* pair {left[0], left[-1]} against {right[0], right[-1]}: the
+    straight correspondence always counts.
+
+    The swapped correspondence does NOT always count. Without a further check,
+    a two-token name where both tokens can be either end -- "कृष्ण राम" vs
+    "राम कृष्ण", both plain given names -- would score a perfect 1.0, identical
+    to an exact match, on nothing but a coincidental permutation. No penalty
+    fixes this: any deduction big enough to sink "कृष्ण राम"/"राम कृष्ण" also
+    sinks "Shrestha Anish"/"अनिष श्रेष्ठ", which scores lower (0.96) precisely
+    because it crosses scripts. So a swap is only accepted when exactly one
+    anchor is a curated SURNAME -- that token pins which end is the surname,
+    so the reorder is verifiable rather than guessed. If neither anchor is a
+    known surname, or both are ("थापा मगर" vs "मगर थापा" -- which one is the
+    surname is unknowable), the swap fails closed.
     """
     first_l, last_l = left[0], left[-1]
     first_r, last_r = right[0], right[-1]
-    straight = tokens_equal(first_l, first_r) and tokens_equal(last_l, last_r)
-    swapped = tokens_equal(first_l, last_r) and tokens_equal(last_l, first_r)
-    return straight or swapped
+    if tokens_equal(first_l, first_r) and tokens_equal(last_l, last_r):
+        return True
+    if not (tokens_equal(first_l, last_r) and tokens_equal(last_l, first_r)):
+        return False
+    return _is_surname(first_l) != _is_surname(last_l)
 
 
 def match_score(extracted: str, candidate: str) -> float:
@@ -164,10 +211,14 @@ def match_score(extracted: str, candidate: str) -> float:
 
     1.0 is an exact match after normalisation; 0.0 means "do not bind". Between
     them the only deductions are VARIANT_PENALTY per token matched through
-    romanisation and PARTICLE_PENALTY per omitted middle particle.
+    romanisation, PARTICLE_PENALTY per omitted middle particle, and
+    EXTRA_OMISSION_PENALTY for every omission after the first.
 
-    Order-insensitive, so reordered name parts match. Both ANCHORS -- first and
-    last token -- must match, which is what stops a partial match: extracted
+    Order-insensitive for a reordered given-name/surname pair, but only when
+    the reorder is verifiable -- see `_anchors_match`: a straight anchor match
+    always counts, a swapped one only when exactly one anchor is a curated
+    SURNAME. Both ANCHORS -- first and last token -- must match one of those
+    two ways, which is what stops a partial match: extracted
     "घुरनी देवी खत्वे" against the stored "घुरनी देवी" scores 0.
     """
     left, right = name_tokens(extracted), name_tokens(candidate)
@@ -194,11 +245,19 @@ def match_score(extracted: str, candidate: str) -> float:
             return 0.0
         matched = pool.pop(match_at)
         if token[0] != matched[0]:
+            # Greedy: the first pool token that satisfies tokens_equal is taken,
+            # even if a later still-unmatched one would have been an identity
+            # match rather than a variant. That can only over-count variants,
+            # never under-count them, so it only ever fails toward a LOWER
+            # score -- never toward a wrongful bind.
             variants += 1
 
-    if any(not _is_particle(token) for token in pool):
+    # Whatever is left in the pool once every shorter token has claimed one is
+    # what the longer name has that the shorter one doesn't: the omissions.
+    omitted = pool
+    if any(not _is_particle(token) for token in omitted):
         return 0.0
-    dropped = len(pool)
+    dropped = len(omitted)
     return max(
         0.0,
         1.0
