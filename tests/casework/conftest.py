@@ -35,3 +35,15 @@ def _isolate_llm_response_cache(monkeypatch, tmp_path):
     A test that wants real default-directory behaviour delenv's this itself.
     """
     monkeypatch.setenv("CASEWORK_LLM_CACHE_DIR", str(tmp_path / "llm-cache"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_review_files(monkeypatch, tmp_path):
+    """Enricher `main()`s write a human review file on EVERY run, dry runs
+    included (`casework/common/review.py`), defaulting to
+    `<repo>/work/reviews/`. Same reason as the two fixtures above: without
+    this, every test that drives `main()` end to end drops a Markdown file
+    full of fixture Nepali into that real directory. A test that wants to read
+    its own review file back finds it under this `tmp_path`.
+    """
+    monkeypatch.setenv("CASEWORK_REVIEW_DIR", str(tmp_path / "reviews"))

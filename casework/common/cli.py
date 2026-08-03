@@ -98,6 +98,14 @@ def add_common_args(parser):
         help="Override the cache directory; defaults to "
              "$CASEWORK_LLM_CACHE_DIR, then <repo>/work/llm-cache. Point every "
              "worktree at one shared dir to reuse entries across sessions.")
+    # The human-accuracy deliverable (casework/common/review.py). Written on
+    # EVERY run, dry runs included -- the dry run is the read-only path, so it
+    # is where output accuracy gets judged. Point this at the meta-repo task
+    # directory when a run's file belongs with that task's notes.
+    parser.add_argument(
+        "--review-file", default="",
+        help="Write the human review file here instead of "
+             "$CASEWORK_REVIEW_DIR / <repo>/work/reviews/<ts>-<stage>-<run>.md.")
     parser.add_argument("--verbose", action="store_true")
     return parser
 

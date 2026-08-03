@@ -21,12 +21,14 @@ import os
 #   enrich_timeline.py:518          tier="premium"
 #   enrich_allegations.py:350       tier="premium"
 #   enrich_related_entities.py:421  tier="premium"
+#   enrich_description.py:576       tier="premium"
 TIERS = {
     "bigo": "premium",
     "tags": "cheap",
     "timeline": "premium",
     "allegations": "premium",
     "entities": "premium",
+    "description": "premium",
 }
 DEFAULT_TIER = "cheap"
 

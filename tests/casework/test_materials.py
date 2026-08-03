@@ -5,7 +5,8 @@ import urllib.request
 from casework.common.api import BROWSER_UA
 from casework.common.materials import (
     court_order_ident, fetch_markdown, markdown_link, material_exists,
-    material_iri, materials_of_type, press_release_ident, raw_links, source_text,
+    material_iri, materials_of_type, press_release_ident, raw_links,
+    source_chunks, source_text, typed_materials,
 )
 
 CASE = {
@@ -38,6 +39,55 @@ def test_materials_of_type_filters():
     got = materials_of_type(CASE, ("press_release",))
     assert len(got) == 1
     assert got[0]["material_type"] == "press_release"
+
+
+def test_typed_materials_keeps_the_entry_level_material_iri():
+    """The IRI lives on the evidence ENTRY, not inside the resolved material
+    dict, so `materials_of_type` drops the only identifier a reviewer can use
+    to find the document again."""
+    got = typed_materials(CASE, ("press_release",))
+    assert got == [(
+        "press_release",
+        "https://jawafdehi.org/material/ciaa_press_release/1",
+        CASE["evidence"][0]["material"],
+    )]
+
+
+def test_typed_materials_selects_the_same_entries_as_materials_of_type():
+    assert [m for _, _, m in typed_materials(CASE)] == materials_of_type(CASE)
+
+
+def test_typed_materials_tolerates_a_missing_material_iri():
+    case = {"evidence": [{"material": {"material_type": "press_release", "urls": []}}]}
+    assert typed_materials(case) == [("press_release", "", case["evidence"][0]["material"])]
+
+
+def test_source_chunks_returns_type_iri_and_text(monkeypatch):
+    import casework.common.materials as m
+    monkeypatch.setattr(m, "fetch_markdown", lambda link, timeout=60: "प्रेस विज्ञप्ति पाठ")
+
+    chunks, unmet = source_chunks(CASE, types=("press_release",))
+    assert chunks == [(
+        "press_release",
+        "https://jawafdehi.org/material/ciaa_press_release/1",
+        "प्रेस विज्ञप्ति पाठ",
+    )]
+    assert unmet == []
+
+
+def test_source_text_is_the_join_of_source_chunks(monkeypatch):
+    """One implementation of the fetch and of the unmet wording, two shapes.
+    If these ever disagree, the typed and untyped callers are reading
+    different documents."""
+    import casework.common.materials as m
+    monkeypatch.setattr(
+        m, "fetch_markdown",
+        lambda link, timeout=60: {"https://x/pr.md": "पाठ एक"}.get(link, ""),
+    )
+    chunks, chunk_unmet = source_chunks(CASE)
+    text, text_unmet = source_text(CASE)
+    assert text == "\n\n".join(t for _, _, t in chunks)
+    assert text_unmet == chunk_unmet
 
 
 def test_source_text_reports_unmet_when_no_markdown(monkeypatch):
