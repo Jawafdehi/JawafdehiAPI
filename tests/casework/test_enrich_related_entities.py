@@ -40,12 +40,17 @@ from pathlib import Path
 import pytest
 
 from casework import enrich_related_entities as ere
+from casework.common.api import ENTITY_SEARCH_MAX_PAGES, ENTITY_SEARCH_PAGE_SIZE
 from casework.enrich_related_entities import (
     _build_content_parts,
     _enforce_prompt_budget,
     _parse_extraction_response,
     _truncate_court_order,
     _truncate_press_release,
+    current_entity_binds,
+    merge_entity_binds,
+    plan_case_entities,
+    validate_bind_item,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -828,14 +833,6 @@ def test_events_file_covers_start_and_extract_happy_path(
 #    search happens, since binding scope is `related`-only by design.
 # --------------------------------------------------------------------------
 
-from casework.enrich_related_entities import (  # noqa: E402
-    EntityBindPlan,
-    current_entity_binds,
-    merge_entity_binds,
-    plan_case_entities,
-    validate_bind_item,
-)
-
 ANKUR_IRI = "https://jawafdehi.org/entity/person/amkura-khatri-2de9b3"
 EXISTING_IRI = "https://jawafdehi.org/entity/person/gopal-bahadur-shrestha-1a2b3c"
 
@@ -859,6 +856,9 @@ def test_merge_preserves_existing_binds_and_their_order():
     current = [{"nes_id": EXISTING_IRI, "relationship_type": "accused", "notes": "क"}]
     added = {"nes_id": ANKUR_IRI, "relationship_type": "related", "notes": "ख"}
     merged = merge_entity_binds(current, [added])
+    # A merge that also appended a duplicate would still satisfy the two
+    # assertions below, so pin the length too.
+    assert len(merged) == 2
     assert merged[0] == current[0]
     assert merged[1] == added
 
@@ -947,7 +947,6 @@ def test_plan_binds_a_confident_name_and_keeps_the_existing_bind():
         {"entity_name": "अंकुर खत्री", "relationship_type": "related",
          "notes": "घुस लेनदेनमा सहयोग"}])
 
-    assert isinstance(plan, EntityBindPlan)
     assert plan.action == "WOULD_PATCH"
     assert [i["nes_id"] for i in plan.patch_items] == [EXISTING_IRI, ANKUR_IRI]
     assert plan.patch_items[1]["notes"] == "घुस लेनदेनमा सहयोग"
@@ -962,6 +961,11 @@ def test_plan_is_a_noop_when_the_name_is_already_bound():
     plan = plan_case_entities(api, case, 'W/"e"', [
         {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "ख"}])
     assert plan.action == "NOOP"
+    # Fix round 1, item 3: a name that resolves to an already-bound entity
+    # must not be counted in `plan.bound` -- it produced no new write, so
+    # a summary counting len(plan.bound) as "binds made" must not overstate
+    # on a re-run.
+    assert plan.bound == []
 
 
 def test_plan_refuses_a_non_draft_case():
@@ -1094,3 +1098,175 @@ def test_plan_still_binds_a_related_item_alongside_a_skipped_location_item():
     assert [i["nes_id"] for i in plan.patch_items] == [ANKUR_IRI]
     assert len(plan.review) == 1
     assert len(plan.bound) == 1
+
+
+# --------------------------------------------------------------------------
+# Fix round 1 -- review response. Seven items; this section covers the six
+# that land in this module (the ETag question's write-side enforcement is
+# Task 7's, per the ruling; this module only surfaces its absence).
+# --------------------------------------------------------------------------
+
+
+# --- Item 1 (critical): the location gate must be an allow-list ----------
+
+
+@pytest.mark.parametrize("relationship_type", ["Location", " location ", "", "organization"])
+def test_plan_allow_lists_related_and_reviews_everything_else(relationship_type):
+    # The gate used to be `item.get("relationship_type") == "location"` -- an
+    # exact-string DENY-list -- while the extraction filter one function away
+    # (`main()`'s `valid_items`) uses `.lower() in ("location", "related")`.
+    # An LLM that capitalises the field ("Location") slipped past the deny-
+    # list straight through resolve() to a real BIND -- reproduced by the
+    # reviewer end to end. Inverted to an ALLOW-list: only a trimmed,
+    # lowercased "related" is ever searched; "Location", padded whitespace,
+    # an empty string, and an unrecognised value ("organization") all review
+    # without spending a search request, exactly like a bare "location" does.
+    case = {"slug": "case-scope", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": relationship_type,
+         "notes": "क"}])
+
+    assert plan.action == "NOOP"
+    assert plan.patch_items == []
+    assert plan.bound == []
+    assert len(plan.review) == 1
+    name, decision = plan.review[0]
+    assert name == "अंकुर खत्री"
+    assert decision.nes_id is None
+    assert "scope" in decision.reason
+    assert api.search_calls == []
+    assert api.get_entity_calls == []
+
+
+def test_plan_treats_a_missing_relationship_type_as_out_of_scope():
+    # The allow-list's other half: a missing key must fail the same way as an
+    # explicit "location" -- previously this was "safe" only because a filter
+    # in the unrelated `main()` function happened to drop such items first, a
+    # coupling this planner should not have to rely on.
+    case = {"slug": "case-missing-type", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "notes": "क"}])  # no relationship_type at all
+
+    assert plan.action == "NOOP"
+    assert len(plan.review) == 1
+    assert api.search_calls == []
+
+
+# --- Item 2 (important): a case payload with no "entities" key -----------
+
+
+def test_plan_refuses_to_write_when_the_entities_key_is_absent_from_the_case_payload():
+    # `case.get("entities") or []` cannot tell "this case has no binds" from
+    # "this payload does not carry binds" -- and sent to `replace_list`, the
+    # latter deletes every existing bind. Absent is not empty.
+    case = {"slug": "case-noentities", "state": "DRAFT"}  # no "entities" key
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}])
+
+    assert plan.action == "NOOP"
+    assert plan.patch_items == []
+    assert "entities" in plan.reason
+    # Never even reached the resolver -- refused before any search.
+    assert api.search_calls == []
+
+
+# --- Item 3 (important): bound-count accuracy + exception text -----------
+
+
+def test_plan_folds_the_get_entity_exception_text_into_the_review_reason():
+    # A misconfigured base URL or a changed `get_entity` signature would
+    # downgrade EVERY bind to REVIEW with only "entity document unavailable" to
+    # go on -- indistinguishable from a real transient failure. The actual
+    # exception text must be diagnosable from the plan.
+    case = {"slug": "case-diag", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi(
+        [case], {"अंकुर खत्री": [ANKUR_CANDIDATE]},
+        documents={ANKUR_IRI: RuntimeError("502 Bad Gateway from api.example")})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}])
+
+    assert len(plan.review) == 1
+    _, decision = plan.review[0]
+    assert "502 Bad Gateway from api.example" in decision.reason
+
+
+# --- Item 5 (important, new): a truncated candidate list must not bind ---
+
+
+def test_plan_downgrades_a_bind_to_review_when_the_candidate_list_hit_the_search_cap():
+    # `search_entities` itself documents that hitting its page cap means a
+    # same-name tie may extend past the window it returned -- so the
+    # ambiguity veto's premise (every tied candidate was seen) does not hold.
+    # A BIND built on a capped-out list must not survive.
+    cap = ENTITY_SEARCH_PAGE_SIZE * ENTITY_SEARCH_MAX_PAGES
+    filler = [
+        {"id": f"https://jawafdehi.org/entity/person/filler-{i:03d}-aaaaaa",
+         "title": {"ne": "फरक नाम"}, "score": 1.0}
+        for i in range(cap - 1)
+    ]
+    candidates = [*filler, ANKUR_CANDIDATE]
+    assert len(candidates) == cap
+
+    case = {"slug": "case-truncated", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": candidates})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}])
+
+    assert plan.action == "NOOP"
+    assert plan.patch_items == []
+    assert plan.bound == []
+    assert len(plan.review) == 1
+    name, decision = plan.review[0]
+    assert decision.nes_id is None
+    assert "cap" in decision.reason
+
+
+def test_plan_still_binds_when_the_candidate_list_is_one_short_of_the_cap():
+    # The boundary: one candidate short of the cap must still bind normally --
+    # proves the guard is keyed on the actual constant, not an off-by-one that
+    # would also catch a merely-large-but-complete result.
+    cap = ENTITY_SEARCH_PAGE_SIZE * ENTITY_SEARCH_MAX_PAGES
+    filler = [
+        {"id": f"https://jawafdehi.org/entity/person/filler-{i:03d}-aaaaaa",
+         "title": {"ne": "फरक नाम"}, "score": 1.0}
+        for i in range(cap - 2)
+    ]
+    candidates = [*filler, ANKUR_CANDIDATE]
+    assert len(candidates) == cap - 1
+
+    case = {"slug": "case-not-truncated", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": candidates})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}])
+
+    assert plan.action == "WOULD_PATCH"
+    assert [i["nes_id"] for i in plan.patch_items] == [ANKUR_IRI]
+
+
+# --- Item 4: no `required_state` keyword exists any more ------------------
+
+
+def test_plan_case_entities_has_no_required_state_parameter():
+    # The brief's own signature offered `required_state`, and its only
+    # possible use (`required_state="IN_REVIEW"`) is exactly what this
+    # module's REQUIRED_WRITE_STATE comment forbids -- IN_REVIEW's `notes`
+    # come back blanked for a non-casework read, so merging it would wipe
+    # every existing note. Zero callers ever passed it; removed rather than
+    # left as a footgun with no user.
+    import inspect
+
+    params = inspect.signature(plan_case_entities).parameters
+    assert "required_state" not in params
+
+
+# --- The ETag visibility note (not a fix -- Task 7 enforces it) -----------
+
+
+def test_plan_reason_names_a_missing_etag_for_visibility():
+    case = {"slug": "case-noetag", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case])
+    plan = plan_case_entities(api, case, None, [])
+    assert "etag" in plan.reason.lower()

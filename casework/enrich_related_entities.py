@@ -88,7 +88,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 
-from casework.common.api import CaseworkApi
+from casework.common.api import ENTITY_SEARCH_MAX_PAGES, ENTITY_SEARCH_PAGE_SIZE, CaseworkApi
 from casework.common.cli import (
     add_common_args,
     basic_auth_from_env,
@@ -326,22 +326,52 @@ class EntityBindPlan:
     reason: str = ""
 
 
-def plan_case_entities(api, case, etag, extracted_items, *,
-                       required_state=REQUIRED_WRITE_STATE):
+# The candidate-list size at which `search_entities` gave up paging because the
+# last page's lowest score still tied the first page's top score (see its own
+# docstring). At that size we have NOT necessarily seen every tied candidate,
+# so the ambiguity veto's premise -- "every same-name entity was scored" -- does
+# not hold. Imported, not hardcoded, so this tracks `search_entities`' own cap.
+_CANDIDATE_LIST_TRUNCATION_CAP = ENTITY_SEARCH_PAGE_SIZE * ENTITY_SEARCH_MAX_PAGES
+
+
+def plan_case_entities(api, case, etag, extracted_items):
     """Resolve every extracted name for one case and build its write plan.
 
-    Guarantees: never plans a write for a non-DRAFT case; only BIND decisions
-    (that also survive the document veto) reach `patch_items`; every item is
-    validated before it lands there; and the merge emits NOOP when nothing
-    changes, so a re-run is idempotent.
+    Guarantees: never plans a write for a non-DRAFT case, or for a case whose
+    payload does not carry an `entities` key at all (see below); only BIND
+    decisions that also survive the document veto and the truncation guard
+    reach `patch_items`; every item this planner adds is validated before it
+    lands there; and the merge emits NOOP when nothing changes, so a re-run is
+    idempotent.
 
-    Two vetoes live here, external to `casework.entity_resolver` because both
-    need something `resolve()` cannot see on its own:
+    No `required_state` parameter: an earlier version let a caller merge
+    against IN_REVIEW, which is exactly what REQUIRED_WRITE_STATE's own
+    reasoning above forbids -- IN_REVIEW is publicly retrievable, so a
+    non-casework read blanks `notes`, and merging that redacted snapshot into
+    the whole-list replace would wipe every existing note. Pinned directly so
+    there is no keyword that can reopen that hole.
 
-    * A `location`-typed item is never a bind candidate -- the design scopes
-      binding to related persons and organisations only. It goes straight to
-      `review` before any search happens, so a location extraction never
-      spends a search request it can never use.
+    `"entities" not in case` is refused rather than merged: `case.get(
+    "entities") or []` cannot tell "this case has no binds" from "this payload
+    does not carry binds at all" (e.g. a caller passed a trimmed dict). Both
+    server read paths do include `entities` today, so this is a defensive
+    guard against a payload shape that would otherwise silently plan a
+    destructive whole-list replace with every existing bind missing.
+
+    Three vetoes live here, external to `casework.entity_resolver` because all
+    three need something `resolve()` cannot see on its own:
+
+    * A name is only ever a bind candidate when its OWN extracted
+      `relationship_type` is `related` (case-insensitively, whitespace
+      trimmed). This is an ALLOW-list, not a deny-list on `location`: an
+      unrecognised value, an empty string, and a missing key all fail the
+      same way as `location` does, and none of them ever reach
+      `api.search_entities` -- the check runs before any search. A deny-list
+      would have to enumerate every unsafe value correctly forever; failing
+      safe by default is the direction the governing constraint points, and
+      it is also what closes a casing mismatch against the extraction
+      filter's own `.lower()` comparison in `main()` -- an LLM that emits
+      "Location" must veto exactly like "location" does.
     * A BIND from `resolve()` still needs the document veto
       (`casework.entity_resolver.apply_document_veto`): the search payload
       alone cannot tell a real case subject from an Election Commission
@@ -350,45 +380,98 @@ def plan_case_entities(api, case, etag, extracted_items, *,
       (timeout, 403, 502, a renamed/404 entity) maps to an unreadable
       document, which the veto downgrades to REVIEW with `nes_id=None`.
       Fail closed: a transient read failure must never let a BIND survive.
+      The exception's own text is folded into the reason (and logged), so a
+      misconfigured base URL that downgrades every bind is diagnosable rather
+      than looking identical to a genuine election-record hit.
+    * A BIND whose candidate list hit `search_entities`' page cap is
+      downgraded to REVIEW: at the cap, a same-name duplicate may sit just
+      outside the window, so the ambiguity veto never got to see it.
     """
     slug = case.get("slug")
     state = case.get("state")
     plan = EntityBindPlan(slug=slug, action="NOOP", state=state, if_match=etag)
-    if state != required_state:
+    if state != REQUIRED_WRITE_STATE:
         plan.action = "SKIP_STATE"
-        plan.reason = f"state {state!r} != {required_state!r}"
+        plan.reason = f"state {state!r} != {REQUIRED_WRITE_STATE!r}"
         return plan
+    if "entities" not in case:
+        plan.reason = (
+            "case payload has no 'entities' key -- absent is not empty; "
+            "refusing to plan a write from an incomplete read, since merging "
+            "would silently drop every existing bind via the whole-list "
+            "replace. Re-read the case (get_case_with_etag) before retrying.")
+        return plan
+    if not etag:
+        plan.reason = (
+            "no ETag was supplied for this read: the eventual write would go "
+            "unconditional (If-Match omitted), so a concurrent edit between "
+            "this read and that write would be silently clobbered rather than "
+            "rejected with 412. Surfaced here for visibility only -- Task 7's "
+            "write path is where this is actually enforced.")
 
     current = current_entity_binds(case)
     plan.n_current = len(current)
+    have = {bind["nes_id"] for bind in current}
     additions = []
     for item in extracted_items:
         name = (item.get("entity_name") or "").strip()
         if not name:
             continue
 
-        if item.get("relationship_type") == "location":
+        rel_type = (item.get("relationship_type") or "").strip().lower()
+        if rel_type != "related":
             plan.review.append((name, Decision(
                 REVIEW, None, 0.0, "",
-                "location-typed extraction is out of bind scope by design: "
-                "binding is scoped to related persons and organisations only, "
-                "so this is reported for review rather than searched",
+                f"relationship_type {item.get('relationship_type')!r} is out "
+                "of bind scope by design: only 'related' extractions "
+                "(case-insensitive) are ever bound. 'location', any other "
+                "value, an empty string and a missing key are all reported "
+                "for review without spending a search request",
                 ())))
             continue
 
-        decision = resolve(name, api.search_entities(name))
+        candidates = api.search_entities(name)
+        decision = resolve(name, candidates)
         if decision.is_bind:
+            read_error = None
             try:
                 document = api.get_entity(decision.nes_id)
-            except Exception:
+            except Exception as exc:
                 document = None  # unreadable == unverified
+                read_error = str(exc)
             decision = apply_document_veto(decision, document)
+            if read_error:
+                log.warning(
+                    "get_entity(%s) failed while veto-checking %r: %s",
+                    decision.nes_id if decision.nes_id else "<downgraded>",
+                    name, read_error)
+                decision = Decision(
+                    decision.verdict, decision.nes_id, decision.score,
+                    decision.matched_name,
+                    f"{decision.reason} (read error: {read_error!r})",
+                    decision.candidates)
+
+        if decision.is_bind and len(candidates) >= _CANDIDATE_LIST_TRUNCATION_CAP:
+            decision = Decision(
+                REVIEW, None, decision.score, decision.matched_name,
+                f"candidate list hit the {_CANDIDATE_LIST_TRUNCATION_CAP}-result "
+                "search cap: a same-name duplicate may exist just outside the "
+                "window, so the ambiguity veto's premise (every tied candidate "
+                "was seen) does not hold here",
+                decision.candidates)
 
         if decision.verdict == REVIEW:
             plan.review.append((name, decision))
             continue
         if decision.verdict == NO_MATCH:
             plan.nomatch.append((name, decision))
+            continue
+
+        if decision.nes_id in have:
+            # Already bound to this case (by an earlier extracted name, or by
+            # an existing bind) -- not a new addition, so it is not counted in
+            # `plan.bound` either. Counting it there would overstate "binds
+            # written" on every idempotent re-run.
             continue
 
         notes = (item.get("notes") or "").strip()
@@ -399,6 +482,7 @@ def plan_case_entities(api, case, etag, extracted_items, *,
             "relationship_type": "related",
             "notes": notes,
         })
+        have.add(decision.nes_id)
         additions.append(bind)
         plan.bound.append((name, decision, notes))
 
