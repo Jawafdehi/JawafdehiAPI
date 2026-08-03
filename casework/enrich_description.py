@@ -80,6 +80,7 @@ from casework.common.cli import (
     print_summary,
     setup_logging,
 )
+from casework.common.format import format_bigo, format_entities, format_list
 from casework.common.llm import bootstrap, tier_for
 from casework.common.materials import source_chunks
 from casework.common.parse import parse_object_response
@@ -254,37 +255,6 @@ def _clamp(text: str, limit: int, label: str = "source") -> str:
     return sent
 
 
-def _format_bigo(value) -> str:
-    """Donor-verbatim बिगो display string."""
-    return f"रु {value:,}" if value else "उल्लेख छैन"
-
-
-def _format_list(items) -> str:
-    """Numbered Nepali-friendly rendering of a case's string list field."""
-    entries = [str(i).strip() for i in (items or []) if str(i or "").strip()]
-    if not entries:
-        return "(none)"
-    return "\n".join(f"{n}. {e}" for n, e in enumerate(entries, 1))
-
-
-def _format_entities(entities) -> str:
-    """One line per linked entity: role, name, IRI.
-
-    The payload is a list of `{entity_iri, role, ...}` dicts (see
-    `cases/serializers.py`); a non-dict entry is skipped rather than crashing
-    prompt assembly.
-    """
-    lines = []
-    for e in entities or []:
-        if not isinstance(e, dict):
-            continue
-        role = e.get("role") or "?"
-        iri = e.get("entity_iri") or ""
-        name = e.get("name") or e.get("label") or iri.rsplit("/", 1)[-1]
-        lines.append(f"- [{role}] {name} ({iri})" if iri else f"- [{role}] {name}")
-    return "\n".join(lines) or "(none)"
-
-
 def _ordered_sources(chunks):
     """Sort `source_chunks` triples into `DESCRIPTION_SOURCE_ORDER`.
 
@@ -343,11 +313,11 @@ def _generate_description(detail, court_number, source_text, invoke_text, usage)
     prompt = EXTRACTION_USER_PROMPT.format(
         case_title=detail.get("title") or "",
         court_number=court_number or "(unknown)",
-        bigo=_format_bigo(detail.get("bigo")),
+        bigo=format_bigo(detail.get("bigo")),
         court_cases=", ".join(detail.get("court_cases") or []) or "(none)",
-        key_allegations=_format_list(detail.get("key_allegations")),
+        key_allegations=format_list(detail.get("key_allegations")),
         timeline=json.dumps(detail.get("timeline") or [], ensure_ascii=False),
-        entities=_format_entities(detail.get("entities")),
+        entities=format_entities(detail.get("entities")),
         source_text=source_text,
     )
     response_text = invoke_text(

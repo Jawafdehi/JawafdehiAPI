@@ -158,6 +158,21 @@ STAGES = {
         requires_materials=PRESS_TYPES + COURT_TYPES,
         requires_stages=("convert",),
     ),
+    # `card` writes the two listing-card fields. It reads NO material -- both
+    # fields derive from the `description` already on the case, exactly like
+    # `tags` derives from case fields -- so `requires_materials` is empty and
+    # gating it on a converted document would strand every case whose
+    # description came from somewhere else.
+    #
+    # Unlike `tags`, though, `description` IS a hard gate here, not just an
+    # ordering preference: a card built from an empty description is a card
+    # built from nothing. Hence `requires_fields` AND `requires_stages` --
+    # `requires_stages` alone only orders, it never checks.
+    "card": Stage(
+        "card", provides=("title", "short_description"),
+        requires_fields=("description",),
+        requires_stages=("description",),
+    ),
 }
 
 

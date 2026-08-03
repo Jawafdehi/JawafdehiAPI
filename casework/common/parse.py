@@ -62,7 +62,7 @@ def balanced_array(text: str, start: int):
     return _balanced_span(text, start, "[", "]")
 
 
-def _strip_fence(text: str) -> str:
+def strip_fence(text: str) -> str:
     """Drop a leading ```-fenced block's fences, returning the body.
 
     Returns `text` unchanged when there is no complete fence pair.
@@ -79,8 +79,8 @@ def _strip_fence(text: str) -> str:
     return text[nl + 1 : end].strip()
 
 
-def parse_object_response(response_text, required_key):
-    """First balanced JSON OBJECT in the response that carries `required_key`.
+def parse_object_response(response_text, required_key=None, *, predicate=None):
+    """First balanced JSON OBJECT in the response that the caller accepts.
 
     ``parse_extraction_response`` only ever returns a LIST -- it is shaped for
     ``{"allegations": [...]}`` replies. A reply whose payload is a long STRING
@@ -92,11 +92,20 @@ def parse_object_response(response_text, required_key):
     exactly those. Ported from the donor's ``_parse_response``
     (``0321a85:casework/enrich_description.py``).
 
+    ``predicate`` narrows acceptance beyond "the key is present" and is what
+    keeps the SCAN going past a near-miss: the judge parser needs
+    ``adequate`` to be a real bool, so an object carrying ``{"adequate":
+    "yes"}`` has to be rejected and the next ``{`` tried, not returned. Pass
+    ``required_key`` for the plain case, ``predicate`` for the rest, or both.
+
     Returns the parsed dict, or None.
     """
     import json
 
-    text = _strip_fence((response_text or "").strip())
+    if required_key is None and predicate is None:
+        raise ValueError("parse_object_response needs a required_key or a predicate")
+
+    text = strip_fence((response_text or "").strip())
     for obj_start in range(len(text)):
         if text[obj_start] != "{":
             continue
@@ -107,8 +116,13 @@ def parse_object_response(response_text, required_key):
             obj = json.loads(block)
         except json.JSONDecodeError:
             continue
-        if isinstance(obj, dict) and required_key in obj:
-            return obj
+        if not isinstance(obj, dict):
+            continue
+        if required_key is not None and required_key not in obj:
+            continue
+        if predicate is not None and not predicate(obj):
+            continue
+        return obj
     return None
 
 
@@ -117,7 +131,7 @@ def parse_extraction_response(response_text, wrapper_keys):
     {"<key>": [...]} wrappers). Returns the list, or None."""
     import json
 
-    text = _strip_fence((response_text or "").strip())
+    text = strip_fence((response_text or "").strip())
 
     obj_start = text.find("{")
     if obj_start != -1:

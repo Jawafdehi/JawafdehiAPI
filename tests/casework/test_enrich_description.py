@@ -32,9 +32,6 @@ import pytest
 from casework import enrich_description as ed
 from casework.enrich_description import (
     _assemble_source_text,
-    _format_bigo,
-    _format_entities,
-    _format_list,
     _generate_description,
     _has_substantial_description,
     _ordered_sources,
@@ -344,44 +341,23 @@ class TestParseDescriptionResponse:
         assert _parse_description_response("") is None
 
 
-# --------------------------------------------------------------------------
-# prompt-context formatters
-# --------------------------------------------------------------------------
-
-
-class TestFormatters:
-    def test_bigo_formats_with_thousands_separators(self):
-        assert _format_bigo(10403941) == "रु 10,403,941"
-
-    def test_bigo_missing_says_so_in_nepali(self):
-        assert _format_bigo(None) == "उल्लेख छैन"
-        assert _format_bigo(0) == "उल्लेख छैन"
-
-    def test_list_is_numbered_and_drops_blanks(self):
-        assert _format_list(["पहिलो", "  ", "", "दोस्रो"]) == "1. पहिलो\n2. दोस्रो"
-
-    def test_empty_list_says_none(self):
-        assert _format_list([]) == "(none)"
-        assert _format_list(None) == "(none)"
-
-    def test_entities_render_role_name_and_iri(self):
-        out = _format_entities([
-            {"role": "ACCUSED", "name": "कमल राज गौतम",
-             "entity_iri": "https://jawafdehi.org/entity/person/kamal-raj-gautam"},
-        ])
-        assert "[ACCUSED] कमल राज गौतम" in out
-        assert "entity/person/kamal-raj-gautam" in out
-
-    def test_entities_fall_back_to_the_iri_tail_when_unnamed(self):
-        out = _format_entities([
-            {"role": "RELATED",
-             "entity_iri": "https://jawafdehi.org/entity/org/padma-company"},
-        ])
-        assert "padma-company" in out
-
-    def test_a_non_dict_entity_entry_is_skipped_not_crashed(self):
-        out = _format_entities(["गलत", None, {"role": "ACCUSED", "name": "राम"}])
-        assert out == "- [ACCUSED] राम"
+def test_prompt_context_comes_from_the_shared_formatters(donor_source):
+    """The donor imported `format_bigo` / `format_list` / `format_entities` from
+    the shared `casework/common.py` -- the very same functions `enrich_card` and
+    `enrich_title` used. A private per-enricher copy is a fork, and this one
+    forked wrong: the first draft of this port read `role` / `entity_iri` /
+    `name` off each entity, none of which exist on the live payload
+    (`{nes_id, display_name, entity_type, type, outcome, notes}`, built by
+    `nes_resolver.build_entity_binds`). Every entity rendered as a blank bullet
+    and the model lost every name in the case, with no test failing.
+    """
+    for name in ("format_bigo", "format_list", "format_entities"):
+        assert name in donor_source, f"donor must import {name}"
+    imported = _imported_modules(_shipped_source())
+    assert "casework.common.format" in imported
+    ids = _identifiers(_shipped_source())
+    for private in ("_format_bigo", "_format_list", "_format_entities"):
+        assert private not in ids, f"{private} must not be a private copy"
 
 
 # --------------------------------------------------------------------------
@@ -495,9 +471,14 @@ DETAIL_FOR_PROMPT = {
     "court_cases": ["https://jawafdehi.org/courtcase/special/081-cr-0091"],
     "key_allegations": ["ठेक्कामा मिलेमतो गरी सार्वजनिक सम्पत्ति हानि पुर्‍याएको।"],
     "timeline": [{"date": "2024-05-01", "date_bs": "2081-01-19", "title": "उजुरी दर्ता"}],
+    # The LIVE entity payload shape: nes_id / display_name / entity_type /
+    # type (the RELATIONSHIP type) / outcome / notes, per
+    # cases/services/nes_resolver.py::build_entity_binds. There is no `role`
+    # and no `entity_iri` key on a case's entities.
     "entities": [
-        {"role": "ACCUSED", "name": "कमल राज गौतम",
-         "entity_iri": "https://jawafdehi.org/entity/person/kamal-raj-gautam"},
+        {"nes_id": "person/kamal-raj-gautam", "display_name": "कमल राज गौतम",
+         "entity_type": "person", "type": "accused", "outcome": "",
+         "notes": "तत्कालीन प्रमुख"},
     ],
 }
 
@@ -534,10 +515,11 @@ def test_generate_prompt_carries_every_context_block():
     )
     content = seen["content"]
     assert "काठमाडौं महानगरपालिका ठेक्का अनियमितता" in content
-    assert "रु 10,403,941" in content
+    assert "10,403,941" in content
     assert "081-cr-0091" in content
     assert "ठेक्कामा मिलेमतो" in content
-    assert "कमल राज गौतम" in content
+    assert "[accused] कमल राज गौतम" in content
+    assert "तत्कालीन प्रमुख" in content
     assert "अभियोगपत्रको पाठ" in content
 
 

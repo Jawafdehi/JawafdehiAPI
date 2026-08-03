@@ -1,6 +1,6 @@
 from casework.common.parse import (
-    _strip_fence, balanced_object, is_valid_iso_date, parse_extraction_response,
-    parse_object_response,
+    balanced_object, is_valid_iso_date, parse_extraction_response,
+    parse_object_response, strip_fence,
 )
 
 
@@ -134,5 +134,5 @@ def test_parse_object_response_returns_none_for_empty_and_none_input():
 
 def test_strip_fence_leaves_text_without_a_closing_fence_alone():
     # A truncated response must not have its whole body eaten by a half fence.
-    assert _strip_fence('```json\n{"description": "विवरण"}') == (
+    assert strip_fence('```json\n{"description": "विवरण"}') == (
         '```json\n{"description": "विवरण"}')
