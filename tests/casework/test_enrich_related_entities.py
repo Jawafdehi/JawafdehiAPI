@@ -467,9 +467,13 @@ PRESS_CASE_ALREADY_POPULATED = {
     "slug": "case-populated",
     "title": "पहिल्यै entities भरिएको मुद्दा",
     "state": "DRAFT",
+    # "type", not "relationship_type" -- the production read shape
+    # (cases/services/nes_resolver.py via CaseSerializer.get_entities) sends
+    # the relationship type back under "type"; "relationship_type" is a
+    # write-only key that never appears on a read.
     "entities": [
         {"nes_id": "https://nes.jawafdehi.org/entity/1",
-         "relationship_type": "related", "notes": "पहिल्यै बाँधिएको"},
+         "type": "related", "notes": "पहिल्यै बाँधिएको"},
     ],
     "evidence": [
         {"material_iri": "https://jawafdehi.org/material/ciaa/press_releases/5",
@@ -659,18 +663,28 @@ def test_pre_llm_skip_keys_on_a_related_bind_not_any_bind(
     # every one of those forever. A case bound solely to a 'location' must
     # still reach the LLM; a case that already carries a 'related' bind must
     # not (that would re-spend a premium-tier call on every run).
+    #
+    # "type", not "relationship_type": that is the PRODUCTION read shape
+    # (cases/services/nes_resolver.py via CaseSerializer.get_entities) --
+    # `relationship_type` is a write-only key `validate_bind_item` builds and
+    # never appears coming back from a read. A version of this test that used
+    # `relationship_type` for both fixtures passed against a skip filtered on
+    # that same wrong key, hiding a real regression (every case would have
+    # burned a premium LLM call, worse than the shape-agnostic check this
+    # amendment replaced) -- see `test_pre_llm_skip_also_tolerates_the_write_
+    # shape_key` below for the `relationship_type` case.
     location_only = dict(PRESS_ONLY_CASE)
     location_only["slug"] = "case-location-only-bind"
     location_only["entities"] = [
         {"nes_id": "https://jawafdehi.org/entity/place/surkhet-district-abc123",
-         "relationship_type": "location", "notes": ""}]
+         "type": "location", "notes": ""}]
 
     related_bound = dict(COURT_ONLY_CASE)
     related_bound["slug"] = "case-related-bind"
     related_bound["entities"] = [
         {"nes_id": "https://jawafdehi.org/entity/organization/"
                    "sajha-bhandara-sahakari-9f9f9f",
-         "relationship_type": "related", "notes": "ठेक्का प्राप्त गर्ने संस्था"}]
+         "type": "related", "notes": "ठेक्का प्राप्त गर्ने संस्था"}]
 
     api = _SearchStubApi([location_only, related_bound])  # nothing resolves
     stub = _call_tracking_stub(ENTITY_RESPONSE)
@@ -686,6 +700,24 @@ def test_pre_llm_skip_keys_on_a_related_bind_not_any_bind(
     rows_by_slug = {r["slug"]: r for r in report.rows}
     assert "already present" not in rows_by_slug["case-location-only-bind"]["reason"]
     assert "already present" in rows_by_slug["case-related-bind"]["reason"]
+
+
+def test_pre_llm_skip_also_tolerates_the_write_shape_key(
+    monkeypatch, patched_fetch_markdown
+):
+    # A hand-built or legacy payload using "relationship_type" instead of the
+    # real read shape's "type" must still be recognised -- same tolerance
+    # `current_entity_binds` already applies.
+    related_bound = dict(COURT_ONLY_CASE)
+    related_bound["slug"] = "case-related-bind-write-shape"
+    related_bound["entities"] = [
+        {"nes_id": "https://jawafdehi.org/entity/organization/"
+                   "sajha-bhandara-sahakari-9f9f9f",
+         "relationship_type": "related", "notes": "ठेक्का प्राप्त गर्ने संस्था"}]
+    api = _SearchStubApi([related_bound])
+    stub = _call_tracking_stub(ENTITY_RESPONSE)
+    _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+    assert stub.calls == []
 
 
 def test_press_only_case_reaches_the_llm(monkeypatch, patched_fetch_markdown, capsys):
@@ -802,7 +834,7 @@ def test_summary_reports_the_three_counts_separately(
               argv=["--dry-run"])
     out = capsys.readouterr().out
     assert "TOTAL entities extracted across all cases: 2" in out
-    assert "TOTAL entities bound to cases: 0" in out
+    assert "TOTAL entities that WOULD bind to cases (dry run, nothing written): 0" in out
     assert "TOTAL reported for human review:" in out
     assert "TOTAL with no NES match:" in out
     assert "bound zero" in out.lower()
@@ -929,7 +961,20 @@ def _read_events(path):
 def test_events_file_covers_start_and_extract_happy_path(
     monkeypatch, patched_fetch_markdown, tmp_path
 ):
-    api = _StubApi([PRESS_ONLY_CASE])
+    # A genuine happy path, not merely a stub that survives: `_StubApi` has
+    # no `get_case_with_etag`, so `plan_case_entities` was always refused
+    # (case payload has no "entities" key -> SKIP_STATE-adjacent early
+    # return) and the resolution loop, the search, and the write never ran --
+    # `("resolve", "ok")` used to pass here only because that event fired
+    # unconditionally, resolution or not. `_SearchStubApi` on a DRAFT case
+    # carrying an "entities" key and a real ETag is what actually exercises
+    # extraction -> resolution -> a genuine `replace_list` write end to end.
+    case = dict(PRESS_ONLY_CASE, entities=[])
+    api = _SearchStubApi(
+        [case],
+        {"साझा भण्डार सहकारी": [{"id": "https://jawafdehi.org/entity/organization/"
+                                  "sajha-bhandara-sahakari-9f9f9f",
+                                 "title": {"ne": "साझा भण्डार सहकारी"}, "score": 200.0}]})
     _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: ENTITY_RESPONSE,
               argv=["--apply"])
 
@@ -945,6 +990,8 @@ def test_events_file_covers_start_and_extract_happy_path(
     assert ("start", "start") in steps_and_statuses
     assert ("extract", "ok") in steps_and_statuses
     assert ("resolve", "ok") in steps_and_statuses
+    assert ("write", "ok") in steps_and_statuses
+    assert len(api.replace_list_calls) == 1
 
 
 # --------------------------------------------------------------------------
@@ -1615,3 +1662,148 @@ def test_plan_summary_reconciles_on_the_ordinary_bind_review_nomatch_split():
     assert summary == {
         "extracted": 3, "bound": 1, "review": 1, "nomatch": 1, "already_bound": 0,
     }
+
+
+# --------------------------------------------------------------------------
+# Task 8, fix round 1 -- the two refusal paths, the write-then-report order,
+# and the report files `main()` actually writes.
+# --------------------------------------------------------------------------
+
+
+def _report_files():
+    logger = logging.getLogger("casework.entities")
+    return ere.report_paths(logger._casework_run_paths)
+
+
+THREE_WAY_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"},
+        {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related", "notes": "ख"},
+        {"entity_name": "खगेन्द्र पराजुली", "relationship_type": "related", "notes": "ग"},
+    ],
+    "accused_notes": [],
+})
+
+# One name binds outright, one is ambiguous between two same-name people (so it
+# goes to review), one matches nothing in NES. Mirrors the real production
+# split, where most extracted names have no NES entity at all.
+ANISH_A = {"id": "https://jawafdehi.org/entity/person/anish-shrestha-219986",
+           "title": {"ne": "अनिष श्रेष्‍ठ"}, "score": 182.17}
+ANISH_B = {"id": "https://jawafdehi.org/entity/person/anish-shrestha-285096",
+           "title": {"ne": "अनिष श्रेष्ठ"}, "score": 182.17}
+THREE_WAY_SEARCH = {"अंकुर खत्री": [ANKUR_CANDIDATE],
+                    "अनिष श्रेष्ठ": [ANISH_A, ANISH_B],
+                    "खगेन्द्र पराजुली": []}
+
+
+def test_a_non_draft_case_reports_nothing_as_already_bound(
+    monkeypatch, patched_fetch_markdown, capsys
+):
+    # `ENRICHABLE_STATES` includes IN_REVIEW, so a non-DRAFT case really does
+    # reach the planner, which refuses it. Before the fix, `plan_summary` still
+    # ran on that refused plan and -- deriving `already_bound` by subtracting
+    # three empty lists from the extracted count -- reported every extracted
+    # name as already bound, while pointing at two empty report files.
+    case = dict(PRESS_ONLY_CASE, slug="case-in-review", state="IN_REVIEW",
+                entities=[])
+    api = _SearchStubApi([case], THREE_WAY_SEARCH)
+    report = _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: THREE_WAY_RESPONSE,
+                       argv=["--dry-run"])
+    out = capsys.readouterr().out
+
+    assert "TOTAL already bound (nothing to write): 0" in out
+    assert "TOTAL reported for human review: 0" in out
+    assert "TOTAL with no NES match: 0" in out
+    rows = [r for r in report.rows if r["slug"] == "case-in-review"]
+    assert [r["status"] for r in rows] == ["skipped"]
+
+
+def test_a_payload_without_an_entities_key_is_an_error_not_already_bound(
+    monkeypatch, patched_fetch_markdown, capsys
+):
+    # The planner's OTHER refusal. It leaves `action` at its "NOOP" default, so
+    # a guard keyed on `action == "SKIP_STATE"` misses it and it falls into the
+    # genuine-NOOP branch -- which is why the guard keys on `plan.examined`.
+    # An incomplete read is a caller bug, so it is recorded as an error rather
+    # than a routine skip.
+    case = {k: v for k, v in PRESS_ONLY_CASE.items()}
+    case["slug"] = "case-no-entities-key"
+    case.pop("entities", None)
+    assert "entities" not in case
+
+    api = _SearchStubApi([case], THREE_WAY_SEARCH)
+    report = _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: THREE_WAY_RESPONSE,
+                       argv=["--dry-run"])
+    out = capsys.readouterr().out
+
+    assert "TOTAL already bound (nothing to write): 0" in out
+    rows = [r for r in report.rows if r["slug"] == "case-no-entities-key"]
+    assert [r["status"] for r in rows] == ["error"]
+    assert api.replace_list_calls == []
+
+
+def test_a_failed_write_leaves_no_bound_row_and_no_bound_claim(
+    monkeypatch, patched_fetch_markdown, capsys
+):
+    # A real, reproducible failure mode: no ETag was captured, so
+    # `apply_entity_plan` refuses the unconditional whole-list replace. The
+    # console and `*.binds.jsonl` must not claim a bind that never landed.
+    case = dict(PRESS_ONLY_CASE, slug="case-write-fails", entities=[])
+    api = _SearchStubApi([case], THREE_WAY_SEARCH)
+    api.etag = None
+    report = _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: THREE_WAY_RESPONSE,
+                       argv=["--apply"])
+    out = capsys.readouterr().out
+
+    assert "  BOUND " not in out
+    assert "TOTAL entities bound to cases: 0" in out
+    assert api.replace_list_calls == []
+    assert Path(_report_files()["binds"]).read_text(encoding="utf-8") == ""
+    statuses = [r["status"] for r in report.rows if r["slug"] == "case-write-fails"]
+    assert "error" in statuses
+
+
+def test_main_writes_the_three_report_files_with_the_right_rows(
+    monkeypatch, patched_fetch_markdown
+):
+    # Nothing else pins which rows land in which file: swapping `bind_rows` for
+    # `review_rows` at the `write_jsonl` calls passed the whole suite before
+    # this test existed.
+    case = dict(PRESS_ONLY_CASE, slug="case-three-way", entities=[])
+    api = _SearchStubApi([case], THREE_WAY_SEARCH)
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: THREE_WAY_RESPONSE,
+              argv=["--apply"])
+
+    files = _report_files()
+    binds = [json.loads(line) for line
+             in Path(files["binds"]).read_text(encoding="utf-8").splitlines()]
+    review = [json.loads(line) for line
+              in Path(files["review"]).read_text(encoding="utf-8").splitlines()]
+    nomatch = Path(files["nomatch"]).read_text(encoding="utf-8")
+
+    assert [b["extracted"] for b in binds] == ["अंकुर खत्री"]
+    assert binds[0]["nes_id"] == ANKUR_IRI
+    assert binds[0]["written"] is True
+
+    assert [r["extracted"] for r in review] == ["अनिष श्रेष्ठ"]
+    assert "ambiguous" in review[0]["reason"]
+    # The candidate list travels with the row, so a reviewer can reproduce the
+    # decision from the file alone.
+    assert len(review[0]["candidates"]) >= 2
+
+    assert "खगेन्द्र पराजुली" in nomatch
+    assert "अंकुर खत्री" not in nomatch
+
+
+def test_dry_run_bind_rows_are_marked_unwritten(
+    monkeypatch, patched_fetch_markdown
+):
+    case = dict(PRESS_ONLY_CASE, slug="case-dry-marked", entities=[])
+    api = _SearchStubApi([case], THREE_WAY_SEARCH)
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: THREE_WAY_RESPONSE,
+              argv=["--dry-run"])
+
+    binds = [json.loads(line) for line
+             in Path(_report_files()["binds"]).read_text(encoding="utf-8").splitlines()]
+    assert [b["written"] for b in binds] == [False]
+    assert api.replace_list_calls == []

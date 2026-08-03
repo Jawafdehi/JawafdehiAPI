@@ -305,6 +305,18 @@ class EntityBindPlan:
     nomatch: list = field(default_factory=list)  # (name, Decision)
     patch_items: list = field(default_factory=list)
     reason: str = ""
+    # True once the resolution loop actually ran. False means the plan was
+    # refused up front (wrong state, or a payload with no `entities` key) and
+    # NO extracted name was ever looked at.
+    #
+    # Callers need this to read `bound`/`review`/`nomatch` correctly: all three
+    # are empty both when every name was already bound (a genuine NOOP) and
+    # when nothing was examined at all (a refusal). `plan_summary` derives
+    # `already_bound` by subtracting those three from the extracted count, so
+    # on a refusal it would report every name as already-bound. `reason` cannot
+    # stand in for this flag -- the no-ETag branch sets a reason and then
+    # carries on resolving.
+    examined: bool = False
 
 
 # The candidate-list size at which `search_entities` gave up paging because the
@@ -389,6 +401,10 @@ def plan_case_entities(api, case, etag, extracted_items):
             "this read and that write would be silently clobbered rather than "
             "rejected with 412. Surfaced here for visibility only -- Task 7's "
             "write path is where this is actually enforced.")
+
+    # Past both refusals: every extracted name below really is looked at, so
+    # the three result lists can be read at face value from here on.
+    plan.examined = True
 
     current = current_entity_binds(case)
     plan.n_current = len(current)
@@ -813,10 +829,18 @@ def main(argv=None):
         # persons or to locations still has work to do here. Measured on
         # production: 162 of 3,003 cases carry binds but no `related` one, and
         # a bare `case.get("entities")` test skipped every single one of them.
+        #
+        # The API is asymmetric: `validate_bind_item` WRITES `relationship_
+        # type`, but the read path (`cases/services/nes_resolver.py`, via
+        # `CaseSerializer.get_entities`) sends the relationship type back
+        # under `type` -- `relationship_type` never appears on a read. Same
+        # tolerance `current_entity_binds` already applies just above, so a
+        # hand-built dict using either key still behaves correctly.
         existing_related = [
             bind for bind in (case.get("entities") or [])
             if isinstance(bind, dict)
-            and (bind.get("relationship_type") or "").strip().lower() == "related"
+            and (bind.get("type") or bind.get("relationship_type") or "").strip().lower()
+            == "related"
         ]
         if existing_related and not args.force:
             report.record(
@@ -933,13 +957,31 @@ def main(argv=None):
                       level=logging.WARNING)
 
         plan = plan_case_entities(api, fresh, etag, valid_items)
-        for name, decision, notes in plan.bound:
-            bind_rows.append({"slug": slug, "extracted": name,
-                              "nes_id": decision.nes_id, "score": decision.score,
-                              "matched_name": decision.matched_name, "notes": notes})
-            print(f"  WOULD BIND {name}  ->  {decision.nes_id}  "
-                  f"(score {decision.score:.2f})" if args.dry_run
-                  else f"  BOUND {name}  ->  {decision.nes_id}")
+
+        # Two refusals reach here and NEITHER looked at a single extracted
+        # name: a non-DRAFT state, and a payload with no `entities` key. Both
+        # must return before `plan_summary` runs -- it derives `already_bound`
+        # by subtracting bound/review/nomatch from the extracted count, and on
+        # a refusal all three are empty, so every name would be reported as
+        # already-bound over two report files that were never touched.
+        #
+        # Keyed on `plan.examined`, not on `action == "SKIP_STATE"`: the
+        # payload refusal leaves `action` at its "NOOP" default and would
+        # otherwise fall through into the genuine-NOOP branch below.
+        #
+        # A wrong state is routine (most cases are not DRAFT); a missing
+        # `entities` key means the caller handed over an incomplete read,
+        # which is a bug worth surfacing as an error rather than a skip.
+        if not plan.examined:
+            refused_state = plan.action == "SKIP_STATE"
+            report.record(slug, "entities",
+                          "skipped" if refused_state else "error", plan.reason)
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                      step="resolve", status="skipped" if refused_state else "error",
+                      detail=plan.reason,
+                      level=logging.WARNING if refused_state else logging.ERROR)
+            continue
+
         for name, decision in plan.review:
             review_rows.append({"slug": slug, "extracted": name,
                                 "reason": decision.reason, "score": decision.score,
@@ -948,7 +990,6 @@ def main(argv=None):
             nomatch_rows.append((name, slug, decision))
 
         counts = plan_summary(plan, valid_items)
-        total_bound += counts["bound"]
         total_review += counts["review"]
         total_nomatch += counts["nomatch"]
         total_already_bound += counts["already_bound"]
@@ -958,17 +999,30 @@ def main(argv=None):
                   detail=(f"{len(plan.bound)} bind, {len(plan.review)} review, "
                           f"{len(plan.nomatch)} no-match"))
 
-        if plan.action == "SKIP_STATE":
-            report.record(slug, "entities", "skipped", plan.reason)
-            continue
         if plan.action == "NOOP":
             report.record(slug, "entities", "already",
                           f"{len(plan.review)} for review, {len(plan.nomatch)} no match")
             continue
+
+        # plan.action == "WOULD_PATCH" from here on. Print/record a bind row
+        # only once it is genuinely true: in dry-run nothing is ever written,
+        # so "WOULD BIND" is accurate immediately; under --apply the write
+        # must actually succeed first -- a 412 or a missing ETag must never
+        # leave the console or `*.binds.jsonl` claiming a bind that never
+        # landed on the server.
         if args.dry_run:
+            total_bound += counts["bound"]
+            for name, decision, notes in plan.bound:
+                bind_rows.append({"slug": slug, "extracted": name,
+                                  "nes_id": decision.nes_id, "score": decision.score,
+                                  "matched_name": decision.matched_name, "notes": notes,
+                                  "written": False})
+                print(f"  WOULD BIND {name}  ->  {decision.nes_id}  "
+                      f"(score {decision.score:.2f})")
             report.record(slug, "entities", "would-bind",
                           f"{len(plan.bound)} entities would bind")
             continue
+
         try:
             apply_entity_plan(api, plan)
         except Exception as exc:
@@ -976,6 +1030,14 @@ def main(argv=None):
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                       step="write", status="error", detail=str(exc), level=logging.ERROR)
             continue
+
+        total_bound += counts["bound"]
+        for name, decision, notes in plan.bound:
+            bind_rows.append({"slug": slug, "extracted": name,
+                              "nes_id": decision.nes_id, "score": decision.score,
+                              "matched_name": decision.matched_name, "notes": notes,
+                              "written": True})
+            print(f"  BOUND {name}  ->  {decision.nes_id}")
         report.record(slug, "entities", "bound", f"{len(plan.bound)} entities bound")
         log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                   step="write", status="ok", detail=f"{len(plan.bound)} bound")
@@ -996,13 +1058,25 @@ def main(argv=None):
     print()
     print(f"  TOTAL entities extracted across all cases: {total_entities_extracted}")
     print(f"  TOTAL accused notes extracted: {total_accused_notes_extracted}")
-    print(f"  TOTAL entities bound to cases: {total_bound}")
+    if args.dry_run:
+        # Nothing was written -- say so, so this line can never be mistaken
+        # for a record of an actual write the way an unqualified "bound to
+        # cases" count could be.
+        print(f"  TOTAL entities that WOULD bind to cases (dry run, nothing "
+              f"written): {total_bound}")
+    else:
+        print(f"  TOTAL entities bound to cases: {total_bound}")
     print(f"  TOTAL reported for human review: {total_review}  -> {reports['review']}")
     print(f"  TOTAL with no NES match: {total_nomatch}  -> {reports['nomatch']}")
     print(f"  TOTAL already bound (nothing to write): {total_already_bound}")
     if total_bound == 0:
-        print("  This run bound zero entities. Every extracted name either went to "
-              "review or matched no NES entity -- see the two files above.")
+        if total_already_bound:
+            print(f"  This run bound zero NEW entities -- {total_already_bound} "
+                  "extracted name(s) were already bound on their case(s), nothing "
+                  "left to write for them.")
+        else:
+            print("  This run bound zero entities. Every extracted name either went "
+                  "to review or matched no NES entity -- see the two files above.")
 
     usage_summary = ""
     if usage.calls > 0:
