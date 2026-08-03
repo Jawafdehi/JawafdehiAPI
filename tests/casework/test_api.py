@@ -881,9 +881,12 @@ def test_get_entity_rejects_an_empty_ref(ref):
         api.get_entity(ref)
 
 
-def test_get_entity_is_a_read_so_the_write_guard_never_fires(monkeypatch):
-    # Non-loopback host, allow_remote_writes unset: this is how the enricher
-    # reads prod, and it must not trip the guard in `_request`.
+def test_get_entity_routes_through_the_read_path_not_a_write(monkeypatch):
+    # `api.get` is stubbed here, so `_request` and its write-guard never execute.
+    # What this proves is that get_entity goes through the READ helper -- which is
+    # why the guard cannot apply to it -- not that the guard itself was exercised.
+    # The guard has its own coverage: test_basic_mode_rejects_non_loopback_base_url
+    # and the _patch/_request guard tests above.
     api = CaseworkApi("https://api.jawafdehi.org", token="t")
     monkeypatch.setattr(api, "get", lambda path, params=None, timeout=60: {"@id": "x"})
     assert api.get_entity("person/raj-bahadur-bam-318984") == {"@id": "x"}
