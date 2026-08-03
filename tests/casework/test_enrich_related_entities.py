@@ -1,21 +1,17 @@
-"""Tests for the DB-free standalone related-entities enricher
-(casework/enrich_related_entities.py). EXTRACTION ONLY.
+"""Tests for the DB-free related-entities enricher
+(casework/enrich_related_entities.py): LLM extraction, deterministic NES
+resolution (`casework/entity_resolver.py`), and the conditional bind write.
 
 ARCHITECTURE FINDING (see module docstring for the full writeup, escalated and
 confirmed with the dispatcher before any code was written): the donor
 (0321a85) writes entities via `api.create_entity(display_name=name, nes_id="")`
--- a method that does not exist on this branch's `CaseworkApi` -- producing a
-flat `{"entity": id, ...}` shape. The CURRENT schema
-(`cases/caseworker_serializers.py::EntityPatchItemSerializer`) requires
-`{"nes_id": <canonical NES @id IRI>, "relationship_type", "outcome"?, "notes"}`
-and explicitly has "no display-name fallback". Turning an LLM-extracted name
-into a confirmed `nes_id` needs a matching/confidence design with no donor
-precedent -- wrongly binding a person to a corruption case by a bad fuzzy
-match is a defamation risk, not a data-quality nit, and deserves its own
-design. Per explicit instruction, this port does NOT build that resolver. It
-ports the donor's LLM extraction faithfully and `main()` never calls
-`api.patch_field` or `api.replace_list` -- this is asserted directly
-(`test_main_never_writes_anything_via_patch_field_or_replace_list`).
+-- a method that does not exist on this branch's `CaseworkApi` and never has.
+The CURRENT schema (`cases/caseworker_serializers.py::EntityPatchItemSerializer`)
+requires `{"nes_id": <canonical NES @id IRI>, "relationship_type", "outcome"?,
+"notes"}` and explicitly has "no display-name fallback". This port's resolver
+turns an LLM-extracted name into a confirmed `nes_id` deterministically (no
+fuzzy matching, no LLM call, `MIN_BIND_SCORE = 0.85`) and only ever binds an
+entity NES already has -- an unmatched name is reported, never minted.
 
 BRIEF-VS-DONOR DIFFERENCE: the brief's suggested `validate_entity_item`
 function (canonical `nes_id` + accused-only `outcome` validation) does not
@@ -640,29 +636,78 @@ def test_force_reruns_an_already_populated_case_and_calls_the_llm(
 ):
     # The other half of Finding 2: --force must actually override the skip,
     # not be a silent no-op. Assert the LLM WAS called (call-count spy), and
-    # that the case proceeds all the way to extraction.
-    api = _StubApi([PRESS_CASE_ALREADY_POPULATED])
+    # that the case proceeds all the way to resolution (no search result is
+    # configured, so the one 'related' extraction is a no-match and the one
+    # 'location' extraction is a review -- neither is a new write, hence the
+    # plan is a NOOP, but it is a NOOP reached AFTER the LLM ran, not the
+    # pre-LLM skip -- `_StubApi` cannot stand in here any more because a
+    # 'related' extraction now genuinely reaches `api.search_entities`).
+    api = _SearchStubApi([PRESS_CASE_ALREADY_POPULATED])
     stub = _call_tracking_stub(ENTITY_RESPONSE)
     report = _run_main(
         monkeypatch, api, invoke_text_stub=stub, argv=["--force", "--dry-run"])
     assert len(stub.calls) == 1
-    assert report.rows[0]["status"] == "extracted-unbound"
+    assert report.rows[0]["status"] == "already"
+    assert report.rows[0]["reason"] == "1 for review, 1 no match"
 
 
-def test_press_only_case_reaches_the_llm(monkeypatch, patched_fetch_markdown):
+def test_pre_llm_skip_keys_on_a_related_bind_not_any_bind(
+    monkeypatch, patched_fetch_markdown
+):
+    # Measured on production: 162 of 3,003 cases carry at least one bind but
+    # not one of them 'related' -- a bare `case.get("entities")` test skips
+    # every one of those forever. A case bound solely to a 'location' must
+    # still reach the LLM; a case that already carries a 'related' bind must
+    # not (that would re-spend a premium-tier call on every run).
+    location_only = dict(PRESS_ONLY_CASE)
+    location_only["slug"] = "case-location-only-bind"
+    location_only["entities"] = [
+        {"nes_id": "https://jawafdehi.org/entity/place/surkhet-district-abc123",
+         "relationship_type": "location", "notes": ""}]
+
+    related_bound = dict(COURT_ONLY_CASE)
+    related_bound["slug"] = "case-related-bind"
+    related_bound["entities"] = [
+        {"nes_id": "https://jawafdehi.org/entity/organization/"
+                   "sajha-bhandara-sahakari-9f9f9f",
+         "relationship_type": "related", "notes": "ठेक्का प्राप्त गर्ने संस्था"}]
+
+    api = _SearchStubApi([location_only, related_bound])  # nothing resolves
+    stub = _call_tracking_stub(ENTITY_RESPONSE)
+    report = _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+
+    # The whole point of the fix: the premium call now happens for the
+    # location-only case. Assert on the mock LLM's call count, not only the
+    # report status -- with no search results configured, the location-only
+    # case's plan also ends as a no-op (nothing resolves), so "already" alone
+    # cannot tell the two cases apart; the pre-LLM skip's own reason text can.
+    assert len(stub.calls) == 1
+
+    rows_by_slug = {r["slug"]: r for r in report.rows}
+    assert "already present" not in rows_by_slug["case-location-only-bind"]["reason"]
+    assert "already present" in rows_by_slug["case-related-bind"]["reason"]
+
+
+def test_press_only_case_reaches_the_llm(monkeypatch, patched_fetch_markdown, capsys):
     stub = _call_tracking_stub(ENTITY_RESPONSE)
     api = _StubApi([PRESS_ONLY_CASE])
-    report = _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+    _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
     assert len(stub.calls) == 1
-    assert report.rows[0]["status"] == "extracted-unbound"
+    # PRESS_ONLY_CASE carries no "entities" key at all, so plan_case_entities
+    # refuses to plan a write for it (absent is not empty) and the case's
+    # report status is "already" regardless of what was extracted -- the
+    # extraction itself is what this test pins, via the run summary.
+    out = capsys.readouterr().out
+    assert "TOTAL entities extracted across all cases: 2" in out
 
 
-def test_court_only_case_reaches_the_llm(monkeypatch, patched_fetch_markdown):
+def test_court_only_case_reaches_the_llm(monkeypatch, patched_fetch_markdown, capsys):
     stub = _call_tracking_stub(ENTITY_RESPONSE)
     api = _StubApi([COURT_ONLY_CASE])
-    report = _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+    _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
     assert len(stub.calls) == 1
-    assert report.rows[0]["status"] == "extracted-unbound"
+    out = capsys.readouterr().out
+    assert "TOTAL entities extracted across all cases: 2" in out
 
 
 def test_both_present_case_reaches_the_llm_with_both_sections(
@@ -710,22 +755,124 @@ def test_llm_returning_nothing_is_recorded_as_skipped(monkeypatch, patched_fetch
     assert report.rows[0]["status"] == "skipped"
 
 
-def test_main_never_writes_anything_via_patch_field_or_replace_list(
+def test_dry_run_writes_nothing_but_prints_what_it_would_bind(
+    monkeypatch, patched_fetch_markdown, capsys
+):
+    # PRESS_ONLY_CASE itself carries no "entities" key (an intentionally-
+    # incomplete payload used elsewhere in this file to pin the "absent is
+    # not empty" refusal) -- a real case detail always carries the key, so
+    # this end-to-end write test needs a copy that does.
+    case = dict(PRESS_ONLY_CASE, entities=[])
+    api = _SearchStubApi(
+        [case],
+        {"साझा भण्डार सहकारी": [{"id": "https://jawafdehi.org/entity/organization/"
+                                  "sajha-bhandara-sahakari-9f9f9f",
+                                 "title": {"ne": "साझा भण्डार सहकारी"}, "score": 200.0}]})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: ENTITY_RESPONSE,
+              argv=["--dry-run"])
+    out = capsys.readouterr().out
+    assert api.patch_calls == []
+    assert api.replace_list_calls == []
+    assert "साझा भण्डार सहकारी" in out
+    assert "WOULD BIND" in out
+
+
+def test_apply_writes_the_merged_list_with_if_match(
     monkeypatch, patched_fetch_markdown
 ):
-    # THE central guarantee of this port: no matter how many cases extract
-    # real entities, /entities is never PATCHed and replace_list is never
-    # called -- with --apply, which is the flag that enables writes on every
-    # sibling enricher.
-    api = _StubApi([PRESS_ONLY_CASE, COURT_ONLY_CASE, BOTH_CASE])
+    case = dict(PRESS_ONLY_CASE, entities=[])
+    api = _SearchStubApi(
+        [case],
+        {"साझा भण्डार सहकारी": [{"id": "https://jawafdehi.org/entity/organization/"
+                                  "sajha-bhandara-sahakari-9f9f9f",
+                                 "title": {"ne": "साझा भण्डार सहकारी"}, "score": 200.0}]})
     _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: ENTITY_RESPONSE,
               argv=["--apply"])
-    assert api.patch_calls == []
+    assert len(api.replace_list_calls) == 1
+    slug, path, items, if_match = api.replace_list_calls[0]
+    assert (slug, path) == ("case-press-only", "entities")
+    assert if_match == api.etag
+
+
+def test_summary_reports_the_three_counts_separately(
+    monkeypatch, patched_fetch_markdown, capsys
+):
+    api = _SearchStubApi([PRESS_ONLY_CASE], {})   # nothing resolves
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: ENTITY_RESPONSE,
+              argv=["--dry-run"])
+    out = capsys.readouterr().out
+    assert "TOTAL entities extracted across all cases: 2" in out
+    assert "TOTAL entities bound to cases: 0" in out
+    assert "TOTAL reported for human review:" in out
+    assert "TOTAL with no NES match:" in out
+    assert "bound zero" in out.lower()
+
+
+def test_rerunning_on_an_already_bound_case_is_a_noop(
+    monkeypatch, patched_fetch_markdown
+):
+    bound_case = dict(PRESS_ONLY_CASE)
+    bound_case["slug"] = "case-already-bound"
+    bound_case["entities"] = [
+        {"nes_id": "https://jawafdehi.org/entity/organization/"
+                   "sajha-bhandara-sahakari-9f9f9f",
+         "type": "related", "notes": "ठेक्का प्राप्त गर्ने संस्था"}]
+    api = _SearchStubApi(
+        [bound_case],
+        {"साझा भण्डार सहकारी": [{"id": "https://jawafdehi.org/entity/organization/"
+                                  "sajha-bhandara-sahakari-9f9f9f",
+                                 "title": {"ne": "साझा भण्डार सहकारी"}, "score": 200.0}]})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: ENTITY_RESPONSE,
+              argv=["--apply", "--force"])
     assert api.replace_list_calls == []
 
 
+def test_summary_uses_plan_summary_so_already_bound_names_do_not_vanish(
+    monkeypatch, patched_fetch_markdown, capsys
+):
+    # `plan_case_entities` drops a resolved BIND whose nes_id is already on
+    # the case from bound/review/nomatch alike (correct for a re-run -- there
+    # is nothing new to write), so summing those three lists directly
+    # silently undercounts the extracted names on a re-run. This is exactly
+    # why `plan_summary` exists (Task 7); `main()` must call it rather than
+    # summing `len(plan.bound)` etc. directly, or it re-ships the bug.
+    sajha_iri = ("https://jawafdehi.org/entity/organization/"
+                 "sajha-bhandara-sahakari-9f9f9f")
+    case = dict(PRESS_ONLY_CASE)
+    case["entities"] = [
+        {"nes_id": sajha_iri, "relationship_type": "related",
+         "notes": "ठेक्का प्राप्त गर्ने संस्था"}]
+    response = json.dumps({
+        "entities": [
+            {"entity_name": "साझा भण्डार सहकारी", "relationship_type": "related",
+             "notes": "ठेक्का प्राप्त गर्ने संस्था"},
+            {"entity_name": "अंकुर खत्री", "relationship_type": "related",
+             "notes": "घुस लेनदेनमा सहयोग"},
+        ],
+        "accused_notes": [],
+    })
+    api = _SearchStubApi(
+        [case],
+        {"साझा भण्डार सहकारी": [{"id": sajha_iri,
+                                 "title": {"ne": "साझा भण्डार सहकारी"}, "score": 200.0}],
+         "अंकुर खत्री": [{"id": "https://jawafdehi.org/entity/person/"
+                          "amkura-khatri-2de9b3",
+                         "title": {"ne": "अंकुर खत्री"}, "score": 190.0}]})
+    # --force: the case already carries a 'related' bind, which would
+    # otherwise trip the pre-LLM skip before extraction ever runs.
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: response,
+              argv=["--apply", "--force"])
+
+    out = capsys.readouterr().out
+    assert "TOTAL entities extracted across all cases: 2" in out
+    assert "TOTAL entities bound to cases: 1" in out
+    assert "TOTAL already bound (nothing to write): 1" in out
+    assert "TOTAL reported for human review: 0" in out
+    assert "TOTAL with no NES match: 0" in out
+
+
 def test_invalid_relationship_type_is_excluded_from_extracted_count(
-    monkeypatch, patched_fetch_markdown
+    monkeypatch, patched_fetch_markdown, capsys
 ):
     # entity_name present but relationship_type is neither "location" nor
     # "related" (e.g. a stray "accused") -- donor's own filter
@@ -739,13 +886,14 @@ def test_invalid_relationship_type_is_excluded_from_extracted_count(
         "accused_notes": [],
     })
     api = _StubApi([PRESS_ONLY_CASE])
-    report = _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: response,
-                        argv=["--dry-run"])
-    assert "1 entities" in report.rows[0]["reason"]
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: response,
+              argv=["--dry-run"])
+    out = capsys.readouterr().out
+    assert "TOTAL entities extracted across all cases: 1" in out
 
 
 def test_accused_notes_only_response_yields_zero_valid_entities_end_to_end(
-    monkeypatch, patched_fetch_markdown
+    monkeypatch, patched_fetch_markdown, capsys
 ):
     # Exercises the shared-parser leak (see TestParseExtractionResponse) end
     # to end: with only accused_notes in the response, entities_data leaks
@@ -754,24 +902,10 @@ def test_accused_notes_only_response_yields_zero_valid_entities_end_to_end(
     # extraction still correctly reports 0 entities.
     response = json.dumps({"accused_notes": [{"name": "गोपाल", "notes": "अध्यक्ष"}]})
     api = _StubApi([PRESS_ONLY_CASE])
-    report = _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: response,
-                        argv=["--dry-run"])
-    assert report.rows[0]["status"] == "extracted-unbound"
-    assert "0 entities" in report.rows[0]["reason"]
-    assert "1 accused_notes" in report.rows[0]["reason"]
-
-
-def test_summary_surfaces_zero_bound_count_unconditionally(
-    monkeypatch, patched_fetch_markdown, capsys
-):
-    # Requirement: a run that extracted entities and bound zero must say so
-    # PLAINLY in the run summary, not just in per-case logs.
-    api = _StubApi([PRESS_ONLY_CASE])
-    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: ENTITY_RESPONSE,
-              argv=["--apply"])
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: response,
+              argv=["--dry-run"])
     out = capsys.readouterr().out
-    assert "TOTAL entities bound to cases: 0" in out
-    assert "TOTAL entities extracted across all cases: 2" in out
+    assert "TOTAL entities extracted across all cases: 0" in out
     assert "TOTAL accused notes extracted: 1" in out
 
 
@@ -779,8 +913,7 @@ def test_summary_surfaces_zero_bound_count_unconditionally(
 # Task PP2 -- run-logging events file (see test_enrich_missing_bigo.py's
 # identical block for the rationale; `conftest.py`'s autouse
 # `_isolate_casework_run_logs` fixture keeps these out of the real repo
-# `work/enricher-runs/`). This module is EXTRACTION ONLY -- there is no
-# `write` step to check; `start`/`extract` are this file's ceiling.
+# `work/enricher-runs/`).
 # --------------------------------------------------------------------------
 
 
@@ -811,8 +944,7 @@ def test_events_file_covers_start_and_extract_happy_path(
     steps_and_statuses = {(r["step"], r["status"]) for r in rows}
     assert ("start", "start") in steps_and_statuses
     assert ("extract", "ok") in steps_and_statuses
-    # Never a write event -- this module never patches anything.
-    assert not any(r["step"] == "write" for r in rows)
+    assert ("resolve", "ok") in steps_and_statuses
 
 
 # --------------------------------------------------------------------------
@@ -1311,6 +1443,21 @@ def test_apply_refuses_a_plan_that_is_not_would_patch():
     plan = ere.EntityBindPlan(slug="case-x", action="NOOP")
     with pytest.raises(ValueError, match="NOOP"):
         apply_entity_plan(_SearchStubApi([]), plan)
+
+
+def test_apply_refuses_a_merged_item_missing_nes_id_and_never_calls_replace_list():
+    # `apply_entity_plan` re-validates every item in the merged list, INCLUDING
+    # pre-existing binds it did not add itself -- `plan_case_entities` only
+    # validates the additions it builds, so a bad item already sitting on the
+    # case (e.g. a hand-edited record, or a schema that changed under it)
+    # would otherwise reach `replace_list` unchecked.
+    api = _SearchStubApi([])
+    plan = ere.EntityBindPlan(
+        slug="case-bad-item", action="WOULD_PATCH", if_match='W/"e"',
+        patch_items=[{"relationship_type": "related", "notes": "missing nes_id"}])
+    with pytest.raises(ValueError, match="canonical"):
+        apply_entity_plan(api, plan)
+    assert api.replace_list_calls == []
 
 
 def test_nomatch_report_ranks_by_how_many_cases_a_name_appears_in(tmp_path):

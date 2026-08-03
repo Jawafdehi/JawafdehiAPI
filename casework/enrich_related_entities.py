@@ -1,18 +1,12 @@
 #!/usr/bin/env python
-"""Extract CIAA Special Court case related/location entities via LLM (DB-free).
-EXTRACTION ONLY -- this port never writes to ``/entities``. Read the
-ARCHITECTURE BLOCK below before assuming that is an oversight.
+"""Extract CIAA Special Court case related/location entities via LLM, then
+resolve each extracted name to an existing NES entity and bind it.
 
 Ported from the deleted `casework/enrich_related_entities.py` (recovered at
 donor commit `0321a85`, 553 lines). Reads a case's press-release AND/OR
 court-order source text entirely over the Jawafdehi HTTP API and asks the
 premium LLM tier to extract related/location entities plus short accused-person
 notes, in one response.
-
-================================ ARCHITECTURE BLOCK =================================
-The donor is architecturally dead against the current write schema, and this
-port does NOT bridge that gap -- on purpose, after an explicit escalation and
-decision, not because the gap went unnoticed.
 
 THE DONOR'S WRITE SHAPE (0321a85, no longer valid against this branch):
     entity_id = api.create_entity(display_name=name, nes_id="")        # donor line 510
@@ -22,64 +16,41 @@ THE DONOR'S WRITE SHAPE (0321a85, no longer valid against this branch):
     api.patch_field(slug, "entities", entities_to_patch)                # donor line 543
 The donor blindly minted a brand-new entity for every LLM-extracted name, with
 NO NES resolution at all -- keyed by a flat `entity` id, no `nes_id`, no
-`outcome`. `CaseworkApi.create_entity` does not exist anywhere on this branch
-and never has during this porting project (`casework/common/api.py` only
-exposes `get`, `iter_cases`, `get_case`, `patch_field`, `replace_list`).
+`outcome`. `CaseworkApi.create_entity` does not exist on this branch and never
+has during this porting project, and it still does not exist: entities are
+owned by NES and must already exist there before this module can bind one --
+an unmatched name is reported for human review or in the no-match file, never
+minted.
 
-THE CURRENT SCHEMA (`cases/caseworker_serializers.py::EntityPatchItemSerializer`,
-~lines 148-190): every `/entities` item MUST be
+THE CURRENT SCHEMA (`cases/caseworker_serializers.py::EntityPatchItemSerializer`)
+requires every `/entities` item to be
     {"nes_id": <canonical NES @id IRI, validated by is_valid_entity_iri>,
      "relationship_type": ..., "outcome"?: <ACCUSED-role only>, "notes": ...}
 "The bind holds the canonical NES entity id directly; entities are owned by
 NES and must already exist there (no display-name fallback)" (serializer
-comment, verbatim). Posting a donor-shaped item here either 422s (missing/
-invalid `nes_id`) or -- far worse -- would require a name-matching shortcut
-that could silently bind the WRONG NES entity to a corruption case. That is a
-defamation risk, not a data-quality nit.
+comment, verbatim).
 
-WHY NO RESOLVER WAS BUILT HERE: turning an LLM-extracted Nepali name into a
-confirmed `nes_id` needs a matching/confidence design with no donor precedent.
-The closest analogue in this codebase, the still-live (but itself
-`NotImplementedError`'d in its own `handle()`) `cases/management/commands/
-enrich_ciaa_related_entities.py`, invents its own `_link_nes()` search +
-0.8-confidence-threshold heuristic with zero test coverage of false-positive
-binds. Bolting an equally untested heuristic onto this DB-free port -- inside
-a task scoped as a "port" -- is exactly the invented-behavior shape this
-project has repeatedly shipped (see the phantom `missing_details` and
-`validate_timeline_items` functions caught in tasks 14b/14c). Per explicit
-instruction, this port does NOT add `create_entity`, a resolver, a fuzzy
-matcher, or a `--force-bind` escape hatch -- not even disabled behind a flag.
-
-WHAT THIS MODULE DOES INSTEAD: it ports the donor's extraction machinery
-byte-for-byte -- system prompt, both truncation limits (including the
-asymmetric `PRESS_RELEASE_CHARS_NO_COURT` branch), prompt-budget enforcement,
-and the press-OR-court content selection (either source alone is sufficient,
-matching `STAGES["entities"].requires_materials` and the donor's own
-`_get_content_for_case`/caller gate at donor line 404: "No press release or
-court order content -- skipping") -- so extraction quality can be measured and
-reviewed. `main()` calls the LLM, parses `entities` + `accused_notes`, and
-reports per-case AND aggregate counts of what WOULD be bound -- but never
-calls `api.patch_field` or `api.replace_list`. A run that extracts 200
-entities and binds zero says so plainly in the final summary (see the
-unconditional "TOTAL entities bound to cases: 0" line), not just in per-case
-logs.
-
-ALSO NOT PORTED: the brief's suggested `validate_entity_item` function
-(canonical-`nes_id` + accused-only-`outcome` validation) does not exist
-ANYWHERE in the donor's history -- `git log --all -p -- casework/
-enrich_related_entities.py` never defines it. It matches the CURRENT
-`EntityPatchItemSerializer`'s rules, not any donor behavior, so per this
-task's "donor is the source of truth" mandate it is not implemented here.
-Same phantom-function shape as `normalise_missing_details` (14b) and
-`validate_timeline_items`-under-a-different-name (14c) -- flagged for the
-dispatcher, not silently added.
-=======================================================================================
+WHAT THIS MODULE DOES: the deterministic resolver lives in
+`casework/entity_resolver.py` -- matching an extracted name against NES search
+candidates is entirely score-based, with `MIN_BIND_SCORE = 0.85`; there is no
+fuzzy/edit-distance matching and no LLM call anywhere in the matching step.
+A name that resolves below the bind threshold, or ambiguously, goes to the
+review report instead of being bound; a name with no NES candidate at all goes
+to the no-match report. `casework.enrich_related_entities.plan_case_entities`
+builds a per-case write plan from the resolver's decisions and
+`apply_entity_plan` executes it as a single conditional (`If-Match`) whole-list
+replace of `/entities` -- never a partial patch, so an existing bind and its
+notes are always preserved via `merge_entity_binds`. Writes are DRAFT-only
+(`REQUIRED_WRITE_STATE`) and dry-run by default: `--dry-run` prints what WOULD
+bind without writing anything; `--apply` is required to actually write, and
+even then `CaseworkApi` itself refuses a non-loopback host unless
+`--allow-remote-writes` is also passed -- never pass that against production.
 
 Usage:
     uv run python -m casework.enrich_related_entities --dry-run
     uv run python -m casework.enrich_related_entities --slug case-0123
     uv run python -m casework.enrich_related_entities --limit 10 --verbose
-    uv run python -m casework.enrich_related_entities --apply   # still writes NOTHING
+    uv run python -m casework.enrich_related_entities --apply   # loopback only
 """
 
 import argparse
@@ -589,10 +560,9 @@ def write_jsonl(path, rows):
     """One JSON object per line, UTF-8, Devanagari unescaped.
 
     Row-shape agnostic on purpose: `rows` is written exactly as given, one
-    `json.dumps` per line, so a caller (Task 8) building a review row that
-    carries the full candidate list (per `design.md`'s "reproduce a decision
-    from the file alone" requirement) is never narrowed to a fixed key set
-    here.
+    `json.dumps` per line, so a caller building a review row that carries the
+    full candidate list -- so a reviewer can reproduce a decision from the
+    file alone -- is never narrowed to a fixed key set here.
     """
     with open(path, "w", encoding="utf-8") as fh:
         for row in rows:
@@ -751,10 +721,9 @@ def build_api(args):
     """Construct the client. Basic (local DEV_AUTH) unless a token is given.
 
     `allow_remote_writes` is threaded through here for uniformity with the
-    other five ported enrichers even though this module never calls
-    `patch_field`/`replace_list` -- see module docstring (EXTRACTION ONLY).
-    Passing it is harmless: it only changes what `CaseworkApi._patch` would
-    do, and `_patch` is never reached from this file.
+    other five ported enrichers; unlike them, this module DOES write --
+    `apply_entity_plan` calls `api.replace_list` -- so this flag genuinely
+    governs whether `--apply` is allowed to reach a non-loopback API base URL.
     """
     if args.api_token:
         return CaseworkApi(
@@ -769,15 +738,19 @@ def build_api(args):
 
 
 def main(argv=None):
-    """Main entry point. EXTRACTION ONLY -- see module docstring. This never
-    calls `api.patch_field` or `api.replace_list`, regardless of `--dry-run`/
-    `--apply`."""
+    """Main entry point. Extracts entities via LLM, resolves each to an
+    existing NES entity, and binds it -- but only under `--apply`; `--dry-run`
+    (the default) prints what WOULD bind without calling `api.replace_list`.
+    See the module docstring for the write shape and the guarantees around it.
+    """
     ap = argparse.ArgumentParser(
         description=(
-            "Extract related and location entities from CIAA cases via LLM "
-            "(DB-free, EXTRACTION ONLY -- no /entities writes; see module docstring)."
+            "Extract related and location entities from CIAA cases via LLM, "
+            "resolve each to an existing NES entity, and bind it (dry-run by "
+            "default; see module docstring)."
         ),
-        epilog="Reads cases entirely over the Jawafdehi HTTP API. Writes nothing.",
+        epilog="Reads cases entirely over the Jawafdehi HTTP API. "
+               "Writes to /entities only under --apply.",
     )
     add_common_args(ap)
     args = ap.parse_args(argv)
@@ -819,13 +792,15 @@ def main(argv=None):
         return report
 
     print(f"Found {total} matching case(s).")
-    print("  NOTE: this port performs EXTRACTION ONLY -- no /entities writes are")
-    print("  made, regardless of --dry-run/--apply. See module docstring for why.")
+    if args.dry_run:
+        print("  --dry-run: printing what WOULD bind; no /entities writes will be made.")
     if args.force:
-        print("  --force: re-extracting even for cases with entities already populated")
+        print("  --force: re-extracting even for cases with a 'related' bind already present")
 
     total_entities_extracted = 0
     total_accused_notes_extracted = 0
+    total_bound = total_review = total_nomatch = total_already_bound = 0
+    bind_rows, review_rows, nomatch_rows = [], [], []
 
     for idx, case in enumerate(cases, 1):
         slug = case.get("slug") or "?"
@@ -833,17 +808,23 @@ def main(argv=None):
         log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                   step="start", status="start", detail=f"[{idx}/{total}] {title[:80]}")
 
-        # Donor: `get_target_cases(api, args, skip_field="entities")` (donor
-        # line 274) -- of the five ported enrichers, this was the only one
-        # missing the already-populated skip, so every run re-spent a
-        # premium-tier LLM call on cases whose `entities` were already set.
-        if case.get("entities") and not args.force:
+        # Skip only when a `related` bind already exists. `related` is exactly
+        # and only what this stage writes, so a case bound solely to accused
+        # persons or to locations still has work to do here. Measured on
+        # production: 162 of 3,003 cases carry binds but no `related` one, and
+        # a bare `case.get("entities")` test skipped every single one of them.
+        existing_related = [
+            bind for bind in (case.get("entities") or [])
+            if isinstance(bind, dict)
+            and (bind.get("relationship_type") or "").strip().lower() == "related"
+        ]
+        if existing_related and not args.force:
             report.record(
                 slug, "entities", "already",
-                f"entities already {case['entities']}")
+                f"{len(existing_related)} 'related' bind(s) already present")
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                       step="idempotency", status="already",
-                      detail=f"entities already {case['entities']}")
+                      detail=f"{len(existing_related)} 'related' bind(s) already present")
             continue
 
         try:
@@ -937,18 +918,67 @@ def main(argv=None):
 
         total_entities_extracted += len(valid_items)
         total_accused_notes_extracted += len(accused_notes)
+        log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                  step="extract", status="ok",
+                  detail=f"{len(valid_items)} entities + {len(accused_notes)} accused_notes")
 
-        log_event(
-            logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-            step="extract", status="ok",
-            detail=(
-                f"{len(valid_items)} entities + {len(accused_notes)} accused_notes "
-                "extracted; 0 bound"))
+        # Re-read WITH the ETag so the whole-list replace is conditional. `detail`
+        # above came from `get_case`, which returns no ETag.
+        try:
+            fresh, etag = api.get_case_with_etag(slug)
+        except Exception as exc:
+            fresh, etag = detail, None
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                      step="fetch", status="fallback", detail=str(exc),
+                      level=logging.WARNING)
 
-        report.record(
-            slug, "entities", "extracted-unbound",
-            f"{len(valid_items)} entities + {len(accused_notes)} accused_notes "
-            "extracted; 0 bound -- nes_id resolution out of scope for this port")
+        plan = plan_case_entities(api, fresh, etag, valid_items)
+        for name, decision, notes in plan.bound:
+            bind_rows.append({"slug": slug, "extracted": name,
+                              "nes_id": decision.nes_id, "score": decision.score,
+                              "matched_name": decision.matched_name, "notes": notes})
+            print(f"  WOULD BIND {name}  ->  {decision.nes_id}  "
+                  f"(score {decision.score:.2f})" if args.dry_run
+                  else f"  BOUND {name}  ->  {decision.nes_id}")
+        for name, decision in plan.review:
+            review_rows.append({"slug": slug, "extracted": name,
+                                "reason": decision.reason, "score": decision.score,
+                                "candidates": [list(c) for c in decision.candidates]})
+        for name, decision in plan.nomatch:
+            nomatch_rows.append((name, slug, decision))
+
+        counts = plan_summary(plan, valid_items)
+        total_bound += counts["bound"]
+        total_review += counts["review"]
+        total_nomatch += counts["nomatch"]
+        total_already_bound += counts["already_bound"]
+
+        log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                  step="resolve", status="ok",
+                  detail=(f"{len(plan.bound)} bind, {len(plan.review)} review, "
+                          f"{len(plan.nomatch)} no-match"))
+
+        if plan.action == "SKIP_STATE":
+            report.record(slug, "entities", "skipped", plan.reason)
+            continue
+        if plan.action == "NOOP":
+            report.record(slug, "entities", "already",
+                          f"{len(plan.review)} for review, {len(plan.nomatch)} no match")
+            continue
+        if args.dry_run:
+            report.record(slug, "entities", "would-bind",
+                          f"{len(plan.bound)} entities would bind")
+            continue
+        try:
+            apply_entity_plan(api, plan)
+        except Exception as exc:
+            report.record(slug, "entities", "error", f"bind failed: {exc}")
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                      step="write", status="error", detail=str(exc), level=logging.ERROR)
+            continue
+        report.record(slug, "entities", "bound", f"{len(plan.bound)} entities bound")
+        log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                  step="write", status="ok", detail=f"{len(plan.bound)} bound")
 
     stats = report.summary()
     print_summary(stats, args.dry_run, "Related-entity extraction")
@@ -958,14 +988,21 @@ def main(argv=None):
         for reason, count in unmet_reasons.most_common():
             print(f"    {count} x {reason}")
 
-    # Surfaced unconditionally, never buried in per-case logs: a run that
-    # extracted N entities and bound zero must say so plainly here.
+    reports = report_paths(paths)
+    write_jsonl(reports["binds"], bind_rows)
+    write_jsonl(reports["review"], review_rows)
+    write_nomatch_report(reports["nomatch"], nomatch_rows)
+
     print()
     print(f"  TOTAL entities extracted across all cases: {total_entities_extracted}")
     print(f"  TOTAL accused notes extracted: {total_accused_notes_extracted}")
-    print(
-        "  TOTAL entities bound to cases: 0 (writes are intentionally disabled -- "
-        "nes_id resolution is out of scope for this port; see module docstring)")
+    print(f"  TOTAL entities bound to cases: {total_bound}")
+    print(f"  TOTAL reported for human review: {total_review}  -> {reports['review']}")
+    print(f"  TOTAL with no NES match: {total_nomatch}  -> {reports['nomatch']}")
+    print(f"  TOTAL already bound (nothing to write): {total_already_bound}")
+    if total_bound == 0:
+        print("  This run bound zero entities. Every extracted name either went to "
+              "review or matched no NES entity -- see the two files above.")
 
     usage_summary = ""
     if usage.calls > 0:
