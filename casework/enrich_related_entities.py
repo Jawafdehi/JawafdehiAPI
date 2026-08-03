@@ -86,6 +86,7 @@ import argparse
 import logging
 import sys
 import time
+from dataclasses import dataclass, field
 
 from casework.common.api import CaseworkApi
 from casework.common.cli import (
@@ -109,6 +110,8 @@ from casework.common.pipeline import (
     unmet_prerequisites,
 )
 from casework.common.select import select_for_run
+from casework.entity_resolver import NO_MATCH, REVIEW, Decision, apply_document_veto, resolve
+from jawafdehi_shared.entities.ids import is_valid_entity_iri
 
 log = logging.getLogger("casework.enrich_related_entities")
 
@@ -232,6 +235,178 @@ Output ONLY this JSON object, no other text:
   ]
 }
 """
+
+# Writes are DRAFT-only. This is also what makes the merge safe: the case read
+# BLANKS per-entity `notes` for non-casework viewers
+# (`cases/serializers.py::get_entities`), so merging a redacted snapshot into a
+# whole-list replace would wipe every existing note. `CaseViewSet.get_queryset`
+# makes DRAFT retrieve casework-only -- if we can read the case at all, the notes
+# we read are the real ones. IN_REVIEW is publicly retrievable, so it is NOT
+# safe to merge even though `select.ENRICHABLE_STATES` allows it for extraction.
+REQUIRED_WRITE_STATE = "DRAFT"
+
+# Mirrors `cases.models.RelationshipType.values`. Hardcoded because this module
+# is DB-free by design and must not import Django; a test asserts the two agree.
+RELATIONSHIP_TYPES = (
+    "alleged", "accused", "related", "witness", "opposition", "victim",
+    "location", "respondent", "petitioner",
+)
+
+
+def current_entity_binds(case):
+    """The case's existing binds in PATCH shape, order preserved.
+
+    The read shape carries `type`, `display_name`, `entity_type` and `outcome`;
+    the patch shape wants `relationship_type` and neither display field.
+    `outcome` is deliberately DROPPED: an omitted outcome stays absent from the
+    serializer's validated data, so the persist step preserves an accused bind's
+    existing verdict rather than resetting it to 'charged'.
+    """
+    binds = []
+    for entity in (case.get("entities") or []):
+        nes_id = (entity.get("nes_id") or "").strip()
+        if not nes_id:
+            continue
+        binds.append({
+            "nes_id": nes_id,
+            "relationship_type": (
+                entity.get("type") or entity.get("relationship_type") or "related"),
+            "notes": entity.get("notes") or "",
+        })
+    return binds
+
+
+def merge_entity_binds(current, additions):
+    """Append each new bind not already present, preserving existing order.
+
+    Never reorders, never drops, never overwrites an existing bind -- the
+    whole-list replace makes any omission destructive, and an existing bind
+    carries a human's notes.
+    """
+    have = {bind["nes_id"] for bind in current}
+    merged = list(current)
+    for item in additions:
+        if item["nes_id"] in have:
+            continue
+        merged.append(item)
+        have.add(item["nes_id"])
+    return merged
+
+
+def validate_bind_item(item):
+    """Local mirror of `EntityPatchItemSerializer`'s rules, applied BEFORE the
+    request body is built so a bad item never reaches the API. Raises ValueError.
+    """
+    nes_id = (item.get("nes_id") or "").strip()
+    if not is_valid_entity_iri(nes_id):
+        raise ValueError(
+            f"not a canonical NES entity IRI: {nes_id!r} (want "
+            "https://<authority>/entity/<prefix>/<slug>)")
+    rel_type = item.get("relationship_type")
+    if rel_type not in RELATIONSHIP_TYPES:
+        raise ValueError(f"unknown relationship_type: {rel_type!r}")
+    if item.get("outcome") and rel_type != "accused":
+        raise ValueError(
+            f"outcome {item['outcome']!r} is only legal on an 'accused' bind, "
+            f"not {rel_type!r}")
+    return item
+
+
+@dataclass
+class EntityBindPlan:
+    slug: str
+    action: str  # WOULD_PATCH | NOOP | SKIP_STATE
+    state: str = ""
+    if_match: str | None = None
+    n_current: int = 0
+    bound: list = field(default_factory=list)    # (name, Decision, notes)
+    review: list = field(default_factory=list)   # (name, Decision)
+    nomatch: list = field(default_factory=list)  # (name, Decision)
+    patch_items: list = field(default_factory=list)
+    reason: str = ""
+
+
+def plan_case_entities(api, case, etag, extracted_items, *,
+                       required_state=REQUIRED_WRITE_STATE):
+    """Resolve every extracted name for one case and build its write plan.
+
+    Guarantees: never plans a write for a non-DRAFT case; only BIND decisions
+    (that also survive the document veto) reach `patch_items`; every item is
+    validated before it lands there; and the merge emits NOOP when nothing
+    changes, so a re-run is idempotent.
+
+    Two vetoes live here, external to `casework.entity_resolver` because both
+    need something `resolve()` cannot see on its own:
+
+    * A `location`-typed item is never a bind candidate -- the design scopes
+      binding to related persons and organisations only. It goes straight to
+      `review` before any search happens, so a location extraction never
+      spends a search request it can never use.
+    * A BIND from `resolve()` still needs the document veto
+      (`casework.entity_resolver.apply_document_veto`): the search payload
+      alone cannot tell a real case subject from an Election Commission
+      candidate/ward-head record sharing their name. The second read
+      (`api.get_entity`) is wrapped in a bare try/except -- ANY exception
+      (timeout, 403, 502, a renamed/404 entity) maps to an unreadable
+      document, which the veto downgrades to REVIEW with `nes_id=None`.
+      Fail closed: a transient read failure must never let a BIND survive.
+    """
+    slug = case.get("slug")
+    state = case.get("state")
+    plan = EntityBindPlan(slug=slug, action="NOOP", state=state, if_match=etag)
+    if state != required_state:
+        plan.action = "SKIP_STATE"
+        plan.reason = f"state {state!r} != {required_state!r}"
+        return plan
+
+    current = current_entity_binds(case)
+    plan.n_current = len(current)
+    additions = []
+    for item in extracted_items:
+        name = (item.get("entity_name") or "").strip()
+        if not name:
+            continue
+
+        if item.get("relationship_type") == "location":
+            plan.review.append((name, Decision(
+                REVIEW, None, 0.0, "",
+                "location-typed extraction is out of bind scope by design: "
+                "binding is scoped to related persons and organisations only, "
+                "so this is reported for review rather than searched",
+                ())))
+            continue
+
+        decision = resolve(name, api.search_entities(name))
+        if decision.is_bind:
+            try:
+                document = api.get_entity(decision.nes_id)
+            except Exception:
+                document = None  # unreadable == unverified
+            decision = apply_document_veto(decision, document)
+
+        if decision.verdict == REVIEW:
+            plan.review.append((name, decision))
+            continue
+        if decision.verdict == NO_MATCH:
+            plan.nomatch.append((name, decision))
+            continue
+
+        notes = (item.get("notes") or "").strip()
+        bind = validate_bind_item({
+            "nes_id": decision.nes_id,
+            # Only ever 'related'. Locations, accused binds and outcomes are
+            # all out of scope for this planner -- see the design note.
+            "relationship_type": "related",
+            "notes": notes,
+        })
+        additions.append(bind)
+        plan.bound.append((name, decision, notes))
+
+    merged = merge_entity_binds(current, additions)
+    if merged != current:
+        plan.action = "WOULD_PATCH"
+        plan.patch_items = merged
+    return plan
 
 
 def _truncate_press_release(text, limit=None):

@@ -808,3 +808,289 @@ def test_events_file_covers_start_and_extract_happy_path(
     assert ("extract", "ok") in steps_and_statuses
     # Never a write event -- this module never patches anything.
     assert not any(r["step"] == "write" for r in rows)
+
+
+# --------------------------------------------------------------------------
+# Task 6 -- bind planning and the merge.
+#
+# Two corrections to the original brief, both load-bearing (see task-6-report.md
+# for the full writeup):
+#
+# 1. `plan_case_entities` must apply Task 5's document veto
+#    (`casework.entity_resolver.apply_document_veto`) before a BIND is trusted:
+#    `resolve()` alone will bind Election Commission candidate/ward-head
+#    records that share a name with the real case subject. The document read
+#    fails closed -- an unreadable document (None/empty/non-dict, or an
+#    exception from `get_entity`) downgrades the BIND to REVIEW, never lets it
+#    survive.
+# 2. A `location`-typed extracted item must never be bound, regardless of what
+#    `resolve()` would say -- it goes straight to `plan.review` before any
+#    search happens, since binding scope is `related`-only by design.
+# --------------------------------------------------------------------------
+
+from casework.enrich_related_entities import (  # noqa: E402
+    EntityBindPlan,
+    current_entity_binds,
+    merge_entity_binds,
+    plan_case_entities,
+    validate_bind_item,
+)
+
+ANKUR_IRI = "https://jawafdehi.org/entity/person/amkura-khatri-2de9b3"
+EXISTING_IRI = "https://jawafdehi.org/entity/person/gopal-bahadur-shrestha-1a2b3c"
+
+
+def test_current_binds_convert_read_shape_and_drop_outcome():
+    # The read snapshot uses `type`; the patch shape uses `relationship_type`.
+    # `outcome` is deliberately omitted so the server PRESERVES an accused
+    # bind's existing verdict instead of resetting it to 'charged'.
+    case = {"entities": [
+        {"nes_id": EXISTING_IRI, "display_name": "गोपाल बहादुर श्रेष्ठ",
+         "entity_type": "Person", "type": "accused", "outcome": "convicted",
+         "notes": "तत्कालीन अध्यक्ष"},
+    ]}
+    assert current_entity_binds(case) == [
+        {"nes_id": EXISTING_IRI, "relationship_type": "accused",
+         "notes": "तत्कालीन अध्यक्ष"},
+    ]
+
+
+def test_merge_preserves_existing_binds_and_their_order():
+    current = [{"nes_id": EXISTING_IRI, "relationship_type": "accused", "notes": "क"}]
+    added = {"nes_id": ANKUR_IRI, "relationship_type": "related", "notes": "ख"}
+    merged = merge_entity_binds(current, [added])
+    assert merged[0] == current[0]
+    assert merged[1] == added
+
+
+def test_merge_never_overwrites_an_existing_bind_for_the_same_id():
+    current = [{"nes_id": ANKUR_IRI, "relationship_type": "accused", "notes": "मूल"}]
+    merged = merge_entity_binds(
+        current, [{"nes_id": ANKUR_IRI, "relationship_type": "related", "notes": "नयाँ"}])
+    assert merged == current
+
+
+def test_validate_bind_item_rejects_a_non_canonical_iri():
+    with pytest.raises(ValueError, match="canonical"):
+        validate_bind_item({"nes_id": "https://nes.jawafdehi.org/entity/1",
+                            "relationship_type": "related", "notes": ""})
+
+
+def test_validate_bind_item_rejects_outcome_on_a_non_accused_role():
+    with pytest.raises(ValueError, match="accused"):
+        validate_bind_item({"nes_id": ANKUR_IRI, "relationship_type": "related",
+                            "notes": "", "outcome": "convicted"})
+
+
+def test_validate_bind_item_relationship_types_match_the_django_enum():
+    from cases.models import RelationshipType
+
+    from casework.enrich_related_entities import RELATIONSHIP_TYPES
+    assert set(RELATIONSHIP_TYPES) == set(RelationshipType.values)
+
+
+class _SearchStubApi(_StubApi):
+    """_StubApi plus entity search, ETag reads, and entity document reads.
+
+    `documents` maps a `nes_id` to either the document `get_entity` should
+    return, or an `Exception` instance it should raise instead -- so a test
+    can pin the document veto's fail-closed behaviour on a transient read
+    failure without a real network. A `nes_id` absent from `documents` gets a
+    default document that is a normal (non-election) CIAA portal entity: a
+    non-empty dict with no election-record `identifier`, so the veto is a
+    no-op unless a test deliberately configures otherwise -- 25 of the 39
+    frozen fixture documents look exactly like this and all 25 still BIND.
+    """
+
+    def __init__(self, cases, search_results=None, documents=None):
+        super().__init__(cases)
+        self._search = search_results or {}
+        self._documents = documents or {}
+        self.etag = 'W/"abc123"'
+        self.search_calls = []
+        self.get_entity_calls = []
+
+    def search_entities(self, query, **kw):
+        self.search_calls.append(query)
+        return self._search.get(query, [])
+
+    def get_entity(self, ref, timeout=60):
+        self.get_entity_calls.append(ref)
+        if ref in self._documents:
+            configured = self._documents[ref]
+            if isinstance(configured, BaseException):
+                raise configured
+            return configured
+        return {"identifier": None}
+
+    def get_case_with_etag(self, slug, timeout=60):
+        return self._cases[slug], self.etag
+
+    def patch_field(self, slug, field, value, timeout=60, if_match=None):
+        self.patch_calls.append((slug, field, value, if_match))
+        return {}
+
+    def replace_list(self, slug, path, items, timeout=60, if_match=None):
+        self.replace_list_calls.append((slug, path, items, if_match))
+        return {}
+
+
+ANKUR_CANDIDATE = {"id": ANKUR_IRI, "title": {"ne": "अंकुर खत्री", "en": "Ankur Khatri"},
+                   "score": 194.0}
+
+
+def test_plan_binds_a_confident_name_and_keeps_the_existing_bind():
+    case = {"slug": "case-x", "state": "DRAFT", "entities": [
+        {"nes_id": EXISTING_IRI, "type": "accused", "outcome": "charged", "notes": "क"}]}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related",
+         "notes": "घुस लेनदेनमा सहयोग"}])
+
+    assert isinstance(plan, EntityBindPlan)
+    assert plan.action == "WOULD_PATCH"
+    assert [i["nes_id"] for i in plan.patch_items] == [EXISTING_IRI, ANKUR_IRI]
+    assert plan.patch_items[1]["notes"] == "घुस लेनदेनमा सहयोग"
+    assert "outcome" not in plan.patch_items[1]
+    assert len(plan.bound) == 1
+
+
+def test_plan_is_a_noop_when_the_name_is_already_bound():
+    case = {"slug": "case-x", "state": "DRAFT", "entities": [
+        {"nes_id": ANKUR_IRI, "type": "related", "notes": "क"}]}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "ख"}])
+    assert plan.action == "NOOP"
+
+
+def test_plan_refuses_a_non_draft_case():
+    case = {"slug": "case-y", "state": "IN_REVIEW", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "ख"}])
+    assert plan.action == "SKIP_STATE"
+    assert plan.patch_items == []
+
+
+def test_plan_buckets_review_and_nomatch_separately():
+    anish_a = {"id": "https://jawafdehi.org/entity/person/anish-shrestha-219986",
+               "title": {"ne": "अनिष श्रेष्‍ठ"}, "score": 182.17}
+    anish_b = {"id": "https://jawafdehi.org/entity/person/anish-shrestha-285096",
+               "title": {"ne": "अनिष श्रेष्ठ"}, "score": 182.17}
+    case = {"slug": "case-z", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अनिष श्रेष्ठ": [anish_a, anish_b],
+                                  "खगेन्द्र पराजुली": []})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related", "notes": "क"},
+        {"entity_name": "खगेन्द्र पराजुली", "relationship_type": "related", "notes": "ख"}])
+    assert plan.action == "NOOP"
+    assert len(plan.review) == 1
+    assert len(plan.nomatch) == 1
+
+
+# --- Correction 1: the document veto (Task 5's `apply_document_veto`) -----
+
+
+def test_plan_downgrades_a_bind_to_review_when_the_document_is_an_election_record():
+    # A real person, correctly named, with a search-payload score above
+    # MIN_BIND_SCORE -- but the second read (the document) shows it is an
+    # Election Commission candidate/ward-head record, not confirmed as the
+    # case subject. `resolve()` alone would BIND this; the plan must not.
+    case = {"slug": "case-elect", "state": "DRAFT", "entities": []}
+    election_doc = {"identifier": [{"propertyID": "ecn-candidate-id", "value": "12345"}]}
+    api = _SearchStubApi(
+        [case], {"अंकुर खत्री": [ANKUR_CANDIDATE]}, documents={ANKUR_IRI: election_doc})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}])
+
+    assert plan.action == "NOOP"
+    assert plan.patch_items == []
+    assert plan.bound == []
+    assert len(plan.review) == 1
+    name, decision = plan.review[0]
+    assert name == "अंकुर खत्री"
+    assert decision.nes_id is None
+    assert "Election Commission" in decision.reason
+    assert api.get_entity_calls == [ANKUR_IRI]
+
+
+def test_plan_downgrades_a_bind_to_review_when_get_entity_raises():
+    # Fail closed: one transient 403/502 on the document read must not let a
+    # BIND survive. This is the whole point of the try/except around
+    # `api.get_entity` -- a raised exception must map to REVIEW, not bubble
+    # up and abort the run, and never leave nes_id set.
+    case = {"slug": "case-unreadable", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi(
+        [case], {"अंकुर खत्री": [ANKUR_CANDIDATE]},
+        documents={ANKUR_IRI: RuntimeError("502 Bad Gateway")})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}])
+
+    assert plan.action == "NOOP"
+    assert plan.patch_items == []
+    assert plan.bound == []
+    assert len(plan.review) == 1
+    name, decision = plan.review[0]
+    assert decision.nes_id is None
+    assert api.get_entity_calls == [ANKUR_IRI]
+
+
+def test_plan_still_binds_when_the_document_has_a_null_identifier():
+    # The boundary, precisely: a document that is a dict with `identifier:
+    # null` is a NORMAL CIAA portal entity (25 of the 39 frozen fixture
+    # documents look exactly like this) and must still BIND. Only an
+    # UNREADABLE document fails closed -- this is not that.
+    case = {"slug": "case-normal", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi(
+        [case], {"अंकुर खत्री": [ANKUR_CANDIDATE]}, documents={ANKUR_IRI: {"identifier": None}})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}])
+
+    assert plan.action == "WOULD_PATCH"
+    assert [i["nes_id"] for i in plan.patch_items] == [ANKUR_IRI]
+    assert len(plan.bound) == 1
+    assert plan.review == []
+
+
+# --- Correction 2: a location-typed item never binds ---------------------
+
+
+def test_plan_sends_a_location_item_straight_to_review_without_searching():
+    # 7 of 33 extracted names in a live smoke run came back
+    # relationship_type="location"; 9 of the 39 labelled bind targets are
+    # location/* entities. The design scopes binding to related persons and
+    # organisations only, so a location item must go to plan.review before
+    # any search happens -- no wasted request.
+    case = {"slug": "case-loc", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case])  # no search_results configured at all
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "location", "notes": ""}])
+
+    assert plan.action == "NOOP"
+    assert plan.patch_items == []
+    assert plan.bound == []
+    assert len(plan.review) == 1
+    name, decision = plan.review[0]
+    assert name == "सुर्खेत जिल्ला"
+    assert decision.nes_id is None
+    assert "location" in decision.reason
+    assert "scope" in decision.reason
+    assert api.search_calls == []
+    assert api.get_entity_calls == []
+
+
+def test_plan_still_binds_a_related_item_alongside_a_skipped_location_item():
+    # A mixed extraction: the location item is filtered out, the related item
+    # still resolves and binds -- one out-of-scope item must not sink the rest
+    # of the plan.
+    case = {"slug": "case-mixed", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "location", "notes": ""},
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "ख"}])
+
+    assert plan.action == "WOULD_PATCH"
+    assert [i["nes_id"] for i in plan.patch_items] == [ANKUR_IRI]
+    assert len(plan.review) == 1
+    assert len(plan.bound) == 1
