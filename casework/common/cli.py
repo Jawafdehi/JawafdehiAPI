@@ -31,6 +31,28 @@ def basic_auth_from_env():
     return user, password
 
 
+def _api_token_default():
+    """`$JAWAFDEHI_API_TOKEN`, unless local DEV_AUTH Basic credentials are set.
+
+    Every enricher's `build_api` is `if args.api_token: Bearer else Basic`, so an
+    env-var default silently reroutes ALL runs to Bearer -- including loopback
+    ones. That breaks local DEV_AUTH: per `CaseworkApi`'s docstring a `Bearer`
+    header is always routed to `OIDCAuthentication` and never falls through to
+    DRF's Basic authenticator, so `convert.py --api-base-url http://127.0.0.1:48010
+    --apply` would 401 on every upload, and it would send a production token to
+    whatever is listening on that port.
+
+    Deferring to `CASEWORK_API_USER`/`CASEWORK_API_PASSWORD` resolves it without a
+    new flag: those have no defaults anywhere (see `basic_auth_from_env`), so
+    having them set is an explicit statement that this shell targets local dev.
+    `--api-token` still overrides, for the rare case of testing a real token
+    against a local server.
+    """
+    if os.environ.get("CASEWORK_API_USER") and os.environ.get("CASEWORK_API_PASSWORD"):
+        return ""
+    return os.environ.get("JAWAFDEHI_API_TOKEN", "")
+
+
 def add_common_args(parser):
     """Register the CLI flags every ported enricher shares.
 
@@ -71,7 +93,14 @@ def add_common_args(parser):
              "neither the flag nor the env var is set, the client raises rather "
              "than silently targeting a host. Local DEV_AUTH server: "
              "http://127.0.0.1:48010")
-    parser.add_argument("--api-token", default="")
+    parser.add_argument(
+        "--api-token", default=_api_token_default(),
+        help="Bearer token for the case API; defaults to $JAWAFDEHI_API_TOKEN "
+             "unless local DEV_AUTH Basic credentials are configured. PREFER THE "
+             "ENV VAR: a token passed as a flag is visible to every local user in "
+             "/proc/<pid>/cmdline for the life of the run, and these runs are "
+             "hours long. The env var is what `basic_auth_from_env`'s error "
+             "message has always told operators to set.")
     parser.add_argument(
         "--allow-remote-writes", action="store_true", default=False,
         help=(
@@ -252,10 +281,20 @@ def log_run_header(logger, *, stage, base_url, dry_run, provider, model,
     logger.info("\n".join(lines))
 
 
+def format_counts(stats: dict) -> str:
+    """`"a=1, b=2"` from a status->count mapping, sorted for stable output.
+
+    Shared so the `.log` footer and the `run/complete` event in `*.events.jsonl`
+    cannot drift apart -- the ledger and the human log should agree on how a run
+    finished.
+    """
+    return ", ".join(f"{k}={v}" for k, v in sorted(stats.items())) or "(no cases)"
+
+
 def log_run_footer(logger, *, stage, stats: dict, duration_s: float,
                    usage_summary: str = "") -> None:
     """One INFO block: per-status counts, wall-clock duration, usage summary."""
-    counts = ", ".join(f"{k}={v}" for k, v in sorted(stats.items())) or "(no cases)"
+    counts = format_counts(stats)
     lines = [
         f"=== casework run complete: {stage} ===",
         f"  counts   : {counts}",

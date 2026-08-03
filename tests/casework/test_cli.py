@@ -42,6 +42,34 @@ def test_api_base_url_has_no_silent_localhost_default(monkeypatch):
     assert parser.parse_args([]).api_base_url is None
 
 
+@pytest.mark.parametrize("env,argv,expected", [
+    # `basic_auth_from_env`'s own error message tells the operator to "set
+    # JAWAFDEHI_API_TOKEN", but --api-token never read it -- the only way in was
+    # the flag, which puts a live Bearer token in the process argv where any
+    # local user can read it out of /proc/<pid>/cmdline.
+    ({"JAWAFDEHI_API_TOKEN": "tok-env"}, [], "tok-env"),
+    ({"JAWAFDEHI_API_TOKEN": "tok-env"}, ["--api-token", "tok-flag"], "tok-flag"),
+    # Empty (not None) keeps `if args.api_token:` in every enricher's build_api
+    # falling through to Basic auth exactly as before.
+    ({}, [], ""),
+    # Local DEV_AUTH creds present -> the env token must NOT hijack the run.
+    # `build_api` is `if args.api_token: Bearer else Basic`, and a Bearer header
+    # is always routed to OIDC and never falls through to DRF Basic, so this
+    # would 401 every loopback --apply and leak a prod token to 127.0.0.1.
+    ({"JAWAFDEHI_API_TOKEN": "tok-env", "CASEWORK_API_USER": "dev",
+      "CASEWORK_API_PASSWORD": "pw"}, [], ""),
+    # ...but an explicit flag still wins, for testing a real token locally.
+    ({"JAWAFDEHI_API_TOKEN": "tok-env", "CASEWORK_API_USER": "dev",
+      "CASEWORK_API_PASSWORD": "pw"}, ["--api-token", "tok-flag"], "tok-flag"),
+])
+def test_api_token_default(monkeypatch, env, argv, expected):
+    for key in ("JAWAFDEHI_API_TOKEN", "CASEWORK_API_USER", "CASEWORK_API_PASSWORD"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert _parse(argv).api_token == expected
+
+
 def test_model_default_is_empty_not_haiku():
     # Bumped off the cheap default: "" means "use each stage's configured tier
     # model" (premium stages -> premium model), NOT force-haiku on every tier.

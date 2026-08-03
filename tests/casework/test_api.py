@@ -331,6 +331,31 @@ def test_iter_cases_follows_pagination(monkeypatch):
     assert seen_pages == [1, 2]
 
 
+@pytest.mark.parametrize("params,expected", [
+    # Without an explicit page_size the server pages at its default 20, so a full
+    # list costs 151 round trips (~2m45s against production) before any enricher
+    # does a single case of work. The API caps page_size at 200 (measured:
+    # 200/500/1000 all return 200), so 200 is the most a client can get and cuts
+    # that to 16 requests -- verified end to end at 16 requests / 33.7s.
+    (None, 200),
+    # ...and the caller can still override it.
+    ({"page_size": 5}, 5),
+])
+def test_iter_cases_page_size(monkeypatch, params, expected):
+    seen = []
+
+    def fake_get(path, params=None, timeout=60):
+        seen.append(dict(params or {}))
+        return {"results": [], "next": None}
+
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(api, "get", fake_get)
+
+    list(api.iter_cases(params))
+
+    assert seen[0]["page_size"] == expected
+
+
 # ---------------------------------------------------------------------------
 # Write-guard -- `_patch` is the single choke point for `patch_field` and
 # `replace_list`. It must refuse to fire a PATCH at any non-loopback host

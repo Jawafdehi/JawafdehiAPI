@@ -5,6 +5,7 @@ Tests the parsers without invoking real CLIs by monkeypatching _run().
 
 import json
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from llm.providers.cli import ClaudeCliProvider, CodexCliProvider
@@ -223,6 +224,45 @@ class TestClaudeCliProvider(unittest.TestCase):
         # Test that it returns the configured value from settings (or empty by default)
         model = provider.model_for_tier("premium")
         self.assertIsInstance(model, str)
+
+    # The turn cap itself is covered by `llm/tests/test_cli_provider_turns.py`
+    # (added in #412, which fixed it independently from the case_proposal.intent
+    # side). What is NOT covered there is what happens when the raised cap is
+    # still not enough -- that is the test below.
+
+    def test_run_retries_error_max_turns(self):
+        """`error_max_turns` is transient and MUST be retried.
+
+        `_run` inspects the output only for rate-limit markers, so a non-zero
+        exit carrying `error_max_turns` was raised on the first attempt and the
+        case was permanently recorded as an error. Raising `CLAUDE_CLI_MAX_TURNS`
+        makes that rare rather than impossible: a long enough answer exhausts
+        whatever the cap is, and the retry often lands inside it.
+        """
+        provider = ClaudeCliProvider()
+        failure = json.dumps(
+            {
+                "type": "result",
+                "subtype": "error_max_turns",
+                "is_error": True,
+                "result": "",
+                "errors": ["Reached maximum number of turns (1)"],
+            }
+        )
+        success = json.dumps({"type": "result", "is_error": False, "result": "{}"})
+
+        def proc(rc, out):
+            return SimpleNamespace(returncode=rc, stdout=out, stderr="")
+
+        # side_effect takes the two results in order; no hand-rolled counter, and
+        # `run.call_count` is the assertion rather than a list nothing reads.
+        with patch("llm.providers.cli.subprocess.run",
+                   side_effect=[proc(1, failure), proc(0, success)]) as run, \
+             patch("llm.providers.cli.time.sleep"):
+            out = provider._run(["claude"], "msg", {})
+
+        self.assertEqual(run.call_count, 2, "error_max_turns was not retried")
+        self.assertEqual(json.loads(out)["result"], "{}")
 
 
 class TestCodexCliProvider(unittest.TestCase):

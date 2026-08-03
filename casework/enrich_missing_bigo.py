@@ -36,6 +36,7 @@ from casework.common.cli import (
     add_common_args,
     basic_auth_from_env,
     configure_run_logging,
+    format_counts,
     log_event,
     log_run_footer,
     log_run_header,
@@ -59,7 +60,17 @@ STAGE = STAGES["bigo"]
 # the bigo.
 BIGO_CONTEXT_KEYWORDS = (
     "बिगो",
+    # ब<->व legacy-font variants. These press releases are legacy-font PDFs, not
+    # scans, so the same word renders both ways -- often inside one document.
+    # Across the FY078/079 238-case batch: विगो is 150 of the 796 bigo tokens, and
+    # मागदावी appears in 156 of the 238 documents while मागदाबी appears in 129.
+    # Listing only the ब spelling made this gate discard correct, high-confidence
+    # extractions: 079-CR-0080 returned bigo=7000 quoting "विगो रु.7,000।- ... कायम
+    # गरी" and was recorded as "could not extract". Measured over the batch,
+    # विगो-only documents had a 0% success rate against 100% for बिगो-only ones.
+    "विगो",
     "मागदाबी",
+    "मागदावी",
     "हानि",
     "हानी",
     "नोक्सानी",
@@ -108,17 +119,23 @@ Then strip commas. Then strip the paisa suffix (everything from the first '।' 
 '/'). Then parse as integer. Never let paisa digits merge into the rupee figure — \
 e.g. २३,७५,४६,३२४।५७ is 237546324, NOT 2375463245.
 
-Rule 3 — Type-routing first (CHECK THIS BEFORE READING TEXT)
-Before reading any text, determine the press release type:
+Rule 3 — Type-routing, but only when no बिगो is declared
+First check whether the document declares a बिगो anywhere -- "बिगो रु.<AMOUNT> ... \
+कायम गरी", or an amount in a "बिगो रु." table column. If it does, EXTRACT IT and \
+ignore the routing below entirely. CIAA formally establishes a bribe AS the बिगो under \
+दफा ३(१) in 65 of the 238 FY078/079 releases, so routing on document type alone would \
+return null on a figure the document states outright.
+Only when NO बिगो is declared does the type matter:
 - Sting Operation (रंगेहात, sting, caught red-handed) → return null (high confidence). \
-  The amounts in sting releases are physical cash caught during arrest — \
-  bribe/unexplained cash — not a formally established bigo.
+  The amounts are physical cash caught during arrest -- bribe/unexplained cash -- not a \
+  formally established bigo.
 - Appeal/Review (पुनरावेदन, अपील, appeal, review) → return null (high confidence). \
   These record CIAA appealing a court verdict; bigo was defined at charge-sheet stage \
   and is not re-stated here.
-- Charge Filing (अभियोग दायर, charge filed, मुद्दा दर्ता) → proceed to extraction \
-  rules below.
-- Other → proceed to extraction rules below.
+- Charge Filing (अभियोग दायर, charge filed, मुद्दा दर्ता), or anything else → proceed to \
+  the extraction rules below.
+Rule 8's ignore list already stops bare seized cash from being read as बिगो; this rule \
+must not become a second, blunter gate that fires on a stated figure.
 
 Rule 4 — Null with low confidence
 If no reliable bigo signal exists after all checks, return null with low confidence. \
@@ -251,6 +268,83 @@ def coerce_bigo_int(value) -> Optional[int]:
     return bigo if bigo > 0 else None
 
 
+def rupee_amounts_in(text: str) -> set:
+    """Every amount stated in `text`, reduced to its rupee part.
+
+    Each match is normalised by `coerce_bigo_int` rather than re-implementing the
+    paisa rule here. That keeps ONE definition of "where does the rupee part
+    end", so the two sides of the grounding comparison cannot drift: an earlier
+    copy here omitted the '.' separator that `coerce_bigo_int` honours, so
+    'रु.324.57' reduced to 324 on the model's answer but yielded {57, 324} here.
+
+    Two tokenisation rules earn their keep, both measured against the 238
+    FY078/079 sources:
+
+    - **The paisa tail is capped at two digits and must not be followed by more
+      digits or a comma.** Paisa is 0-99, and without the cap the OCR'd-danda
+      alternative '|' swallows markdown table pipes: `| 1 | 35,200 |` parsed as
+      "1 rupees 35 paisa" and dropped 35200 from the set entirely. A बिगो stated
+      in a table column is Rule 6's *high-confidence* signal #2, so that made the
+      gate reject correct extractions and silently skip the case. 2 of the 238
+      sources contain the `<digits> | <digits>` shape.
+    - **Comma-separated groups may be split by whitespace.** Markdown extraction
+      turns 'रु.1,38,99,998।87' into 'रु. 1, 38, 99, 998।87' in 8 of the 238
+      sources; without this the figure is unreachable and a correct answer looks
+      ungrounded.
+
+    Deliberately NOT done: adding the un-truncated reading of a paisa-bearing
+    token. For 'रु.1,46,81,225।90' that reading is 1468122590 -- precisely the
+    paisa-fold this project exists to keep out of production (080-CR-0158). A
+    gate that accepted it would bless the exact error class it was built to
+    catch. Over-merging across unrelated numbers ('दफा 8, 9' -> 89) is tolerated
+    instead: a spurious extra member only makes the gate more permissive, while a
+    missing member destroys a correct figure.
+
+    The digit run is matched greedily, so a short number can never "appear"
+    merely by being a prefix of a longer one: '1389999887' yields 1389999887,
+    never 138999998.
+    """
+    # Digit groups joined by commas (tolerating the spaces markdown extraction
+    # leaves behind), then at most a two-digit paisa tail. Separators match
+    # `coerce_bigo_int`'s: danda, OCR'd pipe, slash, dot.
+    runs = re.finditer(
+        r"\d+(?:\s*,\s*\d+)*(?:\s*[।|/.]\s*\d{1,2}(?![\d,]))?",
+        text or "",
+    )
+    return {
+        amount for amount in (coerce_bigo_int(m.group(0)) for m in runs)
+        if amount is not None
+    }
+
+
+def amount_is_grounded(text: str, bigo) -> bool:
+    """True when `bigo` is actually stated in the source.
+
+    The last line of defence, and the only one that catches a model returning a
+    clean-but-wrong integer. Neither of the other two guards can:
+    `coerce_bigo_int` sees a well-formed int and passes it through, and
+    `is_explicit_bigo_context` only inspects the quote, which is usually copied
+    correctly even when the number is not.
+
+    Two real failures this stops, both from the FY078/079 dry run:
+
+    - 078-CR-0116 returned 138999998 where the charge sheet declares
+      रु.१,३८,९९,९९८।८७ (13,899,998) -- a 10x inflation whose digits appear
+      nowhere in the document.
+    - 079-CR-0067 returned 268000, the arithmetic sum of three per-defendant
+      विगो figures (35,200 + 55,200 + 177,600). A real total, but one the
+      document never states.
+
+    It does NOT resolve which बिगो to pick when a document declares several --
+    every candidate is grounded by definition. That is a data-modelling
+    question, not an extraction one (see the multi-accused note in
+    `work/2026-08-03-Dry-run-bigo-enricher/report.md`).
+    """
+    if bigo is None:
+        return True
+    return bigo in rupee_amounts_in(text)
+
+
 def is_explicit_bigo_context(evidence_quote) -> bool:
     """Check if evidence quote contains explicit BIGO context keywords."""
     if not isinstance(evidence_quote, str):
@@ -332,7 +426,7 @@ def parse_bigo_response(response_text: str) -> Optional[int]:
 
 
 def _extract_bigo(source_text_, case, invoke_text, usage) -> Optional[int]:
-    """Call the LLM to extract BIGO from source markdown."""
+    """Call the LLM to extract BIGO from the press release."""
     prompt = EXTRACTION_USER_PROMPT.format(
         case_id=case.get("slug", "?"),
         case_title=case.get("title", ""),
@@ -367,6 +461,23 @@ def build_api(args):
     )
 
 
+def _run_event(logger, paths, run_id, step, status, detail="", level=logging.INFO):
+    """Emit a RUN-scoped event (no slug) to the same events.jsonl as case events.
+
+    `ledger.build_ledger` requires both a slug and a stage and skips any event
+    missing either, so these rows describe the run without ever appearing as a
+    phantom case in the ledger.
+
+    This exists because everything before the per-case loop used to fail silently:
+    a bootstrap error printed to stderr and exited, leaving the run's `.log` AND
+    `.events.jsonl` at zero bytes with no record of the target, the mode, or the
+    reason. `log_run_header`/`log_run_footer` only reach the `.log`, never the
+    events stream the ledger actually reads.
+    """
+    log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug="",
+              step=step, status=status, detail=detail, level=level)
+
+
 def main(argv=None):
     """Main entry point."""
     ap = argparse.ArgumentParser(
@@ -380,21 +491,62 @@ def main(argv=None):
     logger, run_id, paths = configure_run_logging("bigo", verbose=args.verbose)
     start_time = time.monotonic()
 
+    # Put the run's identity on disk BEFORE anything that can fail. Selection is
+    # what decides `n_selected`, so the header cannot move up here -- but target,
+    # mode, provider and model are all known now, and they are exactly what you
+    # need to interpret a crash during bootstrap or case listing.
+    _run_event(
+        logger, paths, run_id, "run", "start",
+        f"target={args.api_base_url} mode={'DRY-RUN' if args.dry_run else 'APPLY'} "
+        f"provider={args.provider} model={args.model or '(provider default)'} "
+        f"allow_remote_writes={args.allow_remote_writes}",
+    )
+
+    def _die(step, exc):
+        """Record a pre-loop failure in the run log, then exit non-zero."""
+        detail = f"{type(exc).__name__}: {exc}"
+        _run_event(logger, paths, run_id, step, "error", detail, level=logging.ERROR)
+        log_run_footer(
+            logger, stage="bigo", stats={"aborted": 1},
+            duration_s=time.monotonic() - start_time,
+        )
+        print(f"{step} failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
     # Bootstrap Django + LLM (MUST come before importing llm.invoke)
     try:
         bootstrap(args.provider, args.model)
     except Exception as exc:
-        print(f"Bootstrap failed: {exc}", file=sys.stderr)
-        sys.exit(1)
+        _die("bootstrap", exc)
 
     from llm.invoke import invoke_text
     from llm.usage import UsageAccumulator, render_usage_table
 
-    api = build_api(args)
     usage = UsageAccumulator()
     report = RunReport()
 
-    all_cases = list(api.iter_cases())
+    # `build_api` raises on a missing/ambiguous credential and `iter_cases` pages
+    # the whole case list -- minutes of HTTP that an expired token or a 5xx can
+    # sink. Unguarded, either one killed the run with a bare traceback.
+    #
+    # `SystemExit` is caught explicitly: the missing-credential path this guard
+    # exists for goes through `basic_auth_from_env`, which raises `SystemExit`
+    # (a BaseException, NOT an Exception). Catching only `Exception` let exactly
+    # that case escape, leaving `run/start` as the last line in the events file
+    # -- the same signature as a killed run, which is what these terminal events
+    # were added to distinguish. KeyboardInterrupt is deliberately NOT caught.
+    try:
+        api = build_api(args)
+    except (Exception, SystemExit) as exc:
+        _die("build_api", exc)
+
+    try:
+        all_cases = list(api.iter_cases())
+    except Exception as exc:
+        _die("list_cases", exc)
+
+    _run_event(logger, paths, run_id, "list_cases", "ok", f"{len(all_cases)} case(s) fetched")
+
     cases = select_cases(
         all_cases,
         fiscal_year=args.fiscal_year,
@@ -410,9 +562,14 @@ def main(argv=None):
         provider=args.provider, model=args.model, n_selected=total,
         run_id=run_id, paths=paths,
     )
+    _run_event(
+        logger, paths, run_id, "select", "ok",
+        f"{total} selected from {len(all_cases)} fetched",
+    )
     if total == 0:
         print("No matching CIAA case(s) to process.", file=sys.stderr)
         print_summary(report.summary(), args.dry_run, "BIGO extraction")
+        _run_event(logger, paths, run_id, "run", "complete", "0 selected; nothing to do")
         log_run_footer(
             logger, stage="bigo", stats=report.summary(),
             duration_s=time.monotonic() - start_time,
@@ -492,6 +649,24 @@ def main(argv=None):
                       level=logging.WARNING)
             continue
 
+        # Grounding gate. A number the source never states is wrong no matter how
+        # confident the model was or how clean its quote looked -- and for a public
+        # corruption figure, missing beats wrong. Skip rather than write.
+        #
+        # Ground against everything the model was SHOWN, not just the markdown
+        # body. `_extract_bigo` also sends `_source_metadata(...)`, and per its
+        # docstring the material `display_name` is frequently where the बिगो is
+        # first stated ("... उपर बिगो रु.९०,३९,६२०।३९ कायम"). Checking the body
+        # alone would reject a figure the model read correctly out of the title.
+        shown = _source_metadata(detail, PRESS_TYPES) + "\n" + text
+        if not amount_is_grounded(shown, bigo):
+            reason = f"bigo={bigo} is not stated anywhere in the source text"
+            report.record(slug, "bigo", "skipped", reason)
+            log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
+                      step="grounding", status="skipped", detail=reason,
+                      level=logging.WARNING)
+            continue
+
         log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
                   step="extract", status="ok", detail=str(bigo))
 
@@ -526,9 +701,17 @@ def main(argv=None):
         print()
         print(usage_summary)
 
+    duration_s = time.monotonic() - start_time
+    # Terminal run row in the events stream. Its absence is how you tell a killed
+    # or crashed run from one that finished -- the .log footer alone cannot, since
+    # the ledger never reads the .log.
+    _run_event(
+        logger, paths, run_id, "run", "complete",
+        f"{format_counts(stats)} duration_s={duration_s:.1f} llm_calls={usage.calls}",
+    )
     log_run_footer(
         logger, stage="bigo", stats=stats,
-        duration_s=time.monotonic() - start_time, usage_summary=usage_summary,
+        duration_s=duration_s, usage_summary=usage_summary,
     )
 
     return report

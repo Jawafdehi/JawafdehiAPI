@@ -148,8 +148,17 @@ class CaseworkApi:
         with self._request("GET", url, headers=self._headers(), timeout=timeout) as r:
             return json.loads(r.read().decode())
 
+    # The list endpoint's server-side default is 20 per page, so walking all
+    # 3,003 cases costs 151 round trips -- ~2m45s against production, paid by
+    # every enricher run before it processes a single case. The API caps
+    # page_size at 200 (measured 2026-08-03: page_size=200/500/1000 all return
+    # 200 results), so 200 is the largest useful ask and brings that to 16
+    # requests. Callers can still override via `params`.
+    PAGE_SIZE = 200
+
     def iter_cases(self, params=None, timeout=60):
         page, params = 1, dict(params or {})
+        params.setdefault("page_size", self.PAGE_SIZE)
         while True:
             params["page"] = page
             data = self.get("/cases/", params, timeout)

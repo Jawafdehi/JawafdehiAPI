@@ -17,7 +17,6 @@ from django.conf import settings
 
 from llm.providers.base import Provider, strip_code_fence
 
-
 def _flatten(content):
     """Flatten content to plain text for CLI input.
 
@@ -113,6 +112,24 @@ class _CliProvider(Provider):
                             "usage limit",
                             "429",
                             "too many requests",
+                            # Transient, and NOT a rate limit: an answer that
+                            # runs long asks to continue, and denying it aborts
+                            # the call with an empty result. `CLAUDE_CLI_MAX_TURNS`
+                            # makes that rare, not impossible -- a long enough
+                            # answer still exhausts whatever the cap is, and the
+                            # next attempt often lands inside it. Without this,
+                            # every survivor is a permanently recorded error:
+                            # measured at 3/10 on bigo-extraction prompts when
+                            # the cap was 1.
+                            #
+                            # `llm/exhaustion.py` records the other half -- the
+                            # same marker also fires on a genuinely exhausted
+                            # token budget, and the two are indistinguishable
+                            # from the error text. Retrying is the right move
+                            # either way: a budget problem costs one wasted
+                            # attempt, where not retrying costs the case.
+                            "error_max_turns",
+                            "maximum number of turns",
                         )
                     )
                     if retryable and attempt < max_retries - 1:
@@ -236,6 +253,13 @@ class ClaudeCliProvider(_CliProvider):
         # interleaved (2026-08-03): 3/5 succeeded at 1 turn, 5/5 at 3. Successful
         # 3-turn runs averaged ~25s against ~15s for successful 1-turn runs, so the
         # extra turn is genuinely used rather than idle.
+        #
+        # Independently reproduced on a second payload -- casework bigo extraction
+        # (sonnet, same case + prompt, n=10 per arm): 3 failures / 10 at 1 turn,
+        # 0 / 10 at 2, all ten agreeing on the same extracted amount. Different
+        # prompt, different tier, same mechanism. Default mode is not immune
+        # either: the model spends a turn *attempting* a tool call even when none
+        # are exposed.
         #
         # Raising the cap does not make a short call longer or dearer: a response
         # that completes in one turn never requests a second. It only stops
