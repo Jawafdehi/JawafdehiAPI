@@ -1270,3 +1270,201 @@ def test_plan_reason_names_a_missing_etag_for_visibility():
     api = _SearchStubApi([case])
     plan = plan_case_entities(api, case, None, [])
     assert "etag" in plan.reason.lower()
+
+
+# --------------------------------------------------------------------------
+# Task 7 -- conditional apply, and the three report files.
+# --------------------------------------------------------------------------
+
+from casework.enrich_related_entities import (  # noqa: E402
+    apply_entity_plan,
+    plan_summary,
+    report_paths,
+    write_jsonl,
+    write_nomatch_report,
+)
+
+
+def test_apply_sends_the_captured_etag_as_if_match():
+    case = {"slug": "case-x", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"abc123"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}])
+    apply_entity_plan(api, plan)
+
+    slug, path, items, if_match = api.replace_list_calls[0]
+    assert (slug, path, if_match) == ("case-x", "entities", 'W/"abc123"')
+    assert [i["nes_id"] for i in items] == [ANKUR_IRI]
+
+
+def test_apply_refuses_an_unconditional_write_when_no_etag_was_captured():
+    case = {"slug": "case-x", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, None, [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}])
+    with pytest.raises(RuntimeError, match="no ETag"):
+        apply_entity_plan(api, plan)
+    assert api.replace_list_calls == []
+
+
+def test_apply_refuses_a_plan_that_is_not_would_patch():
+    plan = ere.EntityBindPlan(slug="case-x", action="NOOP")
+    with pytest.raises(ValueError, match="NOOP"):
+        apply_entity_plan(_SearchStubApi([]), plan)
+
+
+def test_nomatch_report_ranks_by_how_many_cases_a_name_appears_in(tmp_path):
+    from casework.entity_resolver import NO_MATCH as NM
+    from casework.entity_resolver import Decision
+
+    def d():
+        return Decision(NM, None, 0.0, "", "no NES entity scored high enough", ())
+
+    rows = [("जिल्ला शिक्षा कार्यालय, दाङ", "case-a", d()),
+            ("जिल्ला शिक्षा कार्यालय, दाङ", "case-b", d()),
+            ("गुल्बा कोरी", "case-c", d())]
+    out = tmp_path / "run.nomatch.md"
+    write_nomatch_report(out, rows)
+    text = out.read_text(encoding="utf-8")
+    assert text.index("जिल्ला शिक्षा कार्यालय, दाङ") < text.index("गुल्बा कोरी")
+    assert "2" in text.splitlines()[text.splitlines().index(
+        next(line for line in text.splitlines() if "दाङ" in line))]
+
+
+def test_report_paths_share_the_run_log_stem(tmp_path):
+    paths = {"log": str(tmp_path / "20260803T101500Z-entities-abc.log"),
+             "events": str(tmp_path / "20260803T101500Z-entities-abc.events.jsonl")}
+    out = report_paths(paths)
+    assert out["binds"].endswith("20260803T101500Z-entities-abc.binds.jsonl")
+    assert out["review"].endswith("20260803T101500Z-entities-abc.review.jsonl")
+    assert out["nomatch"].endswith("20260803T101500Z-entities-abc.nomatch.md")
+
+
+# --- Correction 1: report_paths must not blind-slice a non-.log stem -----
+
+
+def test_report_paths_does_not_mangle_a_log_path_without_a_log_suffix(tmp_path):
+    # The brief's `str(Path(paths["log"]))[: -len(".log")]` unconditionally
+    # chops the last 4 characters off ANY log path, .log or not -- garbling
+    # the stem for a path that does not end in .log (e.g. a caller that
+    # passes a bare run-id or a path with a different extension). Guarded:
+    # the suffix is stripped only when it is actually present.
+    stem_name = "20260803T101500Z-entities-abc"
+    paths = {"log": str(tmp_path / stem_name)}
+    out = report_paths(paths)
+    assert out["binds"].endswith(f"{stem_name}.binds.jsonl")
+    assert out["review"].endswith(f"{stem_name}.review.jsonl")
+    assert out["nomatch"].endswith(f"{stem_name}.nomatch.md")
+    # In particular, the last 4 characters of the real stem must survive --
+    # the blind slice would have chopped "-abc" down to "-a".
+    assert "abc.binds.jsonl" in out["binds"]
+
+
+# --- Correction 2: write_jsonl needs its own round-trip test -------------
+
+
+def test_write_jsonl_round_trips_one_object_per_line_with_devanagari_unescaped(
+    tmp_path,
+):
+    out = tmp_path / "run.binds.jsonl"
+    rows = [
+        {"name": "अंकुर खत्री", "nes_id": ANKUR_IRI, "case": "case-a"},
+        {"name": "गुल्बा कोरी", "nes_id": "https://jawafdehi.org/entity/person/x", "case": "case-b"},
+    ]
+    write_jsonl(out, rows)
+
+    raw = out.read_bytes()
+    text = raw.decode("utf-8")
+    lines = text.splitlines()
+    assert len(lines) == 2
+    # Devanagari must appear as literal UTF-8 bytes, never as a \uXXXX escape
+    # -- assert on the file's actual text, not on a value computed via the
+    # same json.dumps(..., ensure_ascii=False) the code itself uses.
+    assert "अंकुर खत्री" in text
+    assert "गुल्बा कोरी" in text
+    assert "\\u" not in text
+    assert json.loads(lines[0]) == rows[0]
+    assert json.loads(lines[1]) == rows[1]
+
+
+# --- Correction 3: write_nomatch_report must keep the BEST candidate seen ---
+
+
+def test_nomatch_report_keeps_the_best_scoring_candidate_in_a_group(tmp_path):
+    # As briefed, write_nomatch_report takes near/score from the FIRST
+    # decision seen for a normalised group and ignores every later one -- so
+    # a later, higher-scoring near-miss in the same group is silently
+    # dropped in favour of a worse one seen earlier. Here the SECOND row
+    # scores higher than the first; the report must show the better one.
+    from casework.entity_resolver import NO_MATCH as NM
+    from casework.entity_resolver import Decision
+
+    weak = Decision(NM, None, 0.40, "कमजोर मिल्दोजुल्दो", "no NES entity scored high enough", ())
+    strong = Decision(NM, None, 0.83, "उत्तम मिल्दोजुल्दो", "no NES entity scored high enough", ())
+    rows = [
+        ("जिल्ला शिक्षा कार्यालय, दाङ", "case-a", weak),
+        ("जिल्ला शिक्षा कार्यालय, दाङ", "case-b", strong),
+    ]
+    out = tmp_path / "run.nomatch.md"
+    write_nomatch_report(out, rows)
+    text = out.read_text(encoding="utf-8")
+    line = next(line for line in text.splitlines() if "दाङ" in line)
+    assert "उत्तम मिल्दोजुल्दो" in line
+    assert "0.83" in line
+    assert "कमजोर मिल्दोजुल्दो" not in line
+
+
+# --- Correction 4: the summary must reconcile against extracted names ----
+
+
+def test_plan_summary_reports_already_bound_names_instead_of_letting_them_vanish():
+    # plan_case_entities (Task 6) drops a resolved BIND whose nes_id is
+    # already on the case from bound, review AND nomatch alike -- correct
+    # for a re-run (nothing new to write), but it means
+    # len(bound)+len(review)+len(nomatch) alone silently undercounts the
+    # extracted names on every re-run. plan_summary must surface the gap as
+    # its own count so the totals add back up.
+    case = {"slug": "case-x", "state": "DRAFT", "entities": [
+        {"nes_id": ANKUR_IRI, "type": "related", "notes": "क"}]}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    extracted_items = [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "ख"}]
+    plan = plan_case_entities(api, case, 'W/"e"', extracted_items)
+
+    assert plan.action == "NOOP"
+    assert plan.bound == []
+    assert plan.review == []
+    assert plan.nomatch == []
+
+    summary = plan_summary(plan, extracted_items)
+    assert summary["extracted"] == 1
+    assert summary["bound"] == 0
+    assert summary["review"] == 0
+    assert summary["nomatch"] == 0
+    assert summary["already_bound"] == 1
+    assert (
+        summary["bound"] + summary["review"] + summary["nomatch"]
+        + summary["already_bound"] == summary["extracted"]
+    )
+
+
+def test_plan_summary_reconciles_on_the_ordinary_bind_review_nomatch_split():
+    anish_a = {"id": "https://jawafdehi.org/entity/person/anish-shrestha-219986",
+               "title": {"ne": "अनिष श्रेष्‍ठ"}, "score": 182.17}
+    anish_b = {"id": "https://jawafdehi.org/entity/person/anish-shrestha-285096",
+               "title": {"ne": "अनिष श्रेष्ठ"}, "score": 182.17}
+    case = {"slug": "case-z", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi(
+        [case], {"अंकुर खत्री": [ANKUR_CANDIDATE],
+                 "अनिष श्रेष्ठ": [anish_a, anish_b], "खगेन्द्र पराजुली": []})
+    extracted_items = [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"},
+        {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related", "notes": "ख"},
+        {"entity_name": "खगेन्द्र पराजुली", "relationship_type": "related", "notes": "ग"},
+    ]
+    plan = plan_case_entities(api, case, 'W/"e"', extracted_items)
+
+    summary = plan_summary(plan, extracted_items)
+    assert summary == {
+        "extracted": 3, "bound": 1, "review": 1, "nomatch": 1, "already_bound": 0,
+    }

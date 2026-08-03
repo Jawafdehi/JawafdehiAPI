@@ -83,10 +83,12 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from casework.common.api import ENTITY_SEARCH_MAX_PAGES, ENTITY_SEARCH_PAGE_SIZE, CaseworkApi
 from casework.common.cli import (
@@ -111,6 +113,14 @@ from casework.common.pipeline import (
 )
 from casework.common.select import select_for_run
 from casework.entity_resolver import NO_MATCH, REVIEW, Decision, apply_document_veto, resolve
+from casework.entity_resolver import (
+    NO_MATCH,
+    REVIEW,
+    Decision,
+    apply_document_veto,
+    normalise_name,
+    resolve,
+)
 from jawafdehi_shared.entities.ids import is_valid_entity_iri
 
 log = logging.getLogger("casework.enrich_related_entities")
@@ -491,6 +501,144 @@ def plan_case_entities(api, case, etag, extracted_items):
         plan.action = "WOULD_PATCH"
         plan.patch_items = merged
     return plan
+
+
+def apply_entity_plan(api, plan):
+    """Execute a WOULD_PATCH plan: whole-list replace of /entities, conditional
+    on the ETag captured at plan time.
+
+    Uses `replace_list` rather than `patch_field` -- both build the same
+    RFC-6902 op, but `replace_list` validates that 'entities' is a whole-list
+    path and carries the destructive-replace contract in its docstring.
+
+    Fails closed with no ETag: without If-Match the replace is unconditional and
+    a concurrent edit would be silently clobbered. A 412 means the merge is
+    stale -- re-read and retry, never force.
+    """
+    if plan.action != "WOULD_PATCH":
+        raise ValueError(
+            f"apply_entity_plan called on a {plan.action} plan for {plan.slug!r}")
+    if not plan.if_match:
+        raise RuntimeError(
+            f"refusing unconditional whole-list entities replace for {plan.slug!r}: "
+            "no ETag was captured at read time, so a concurrent edit cannot be "
+            "detected and the destructive replace could silently clobber it")
+    for item in plan.patch_items:
+        validate_bind_item(item)
+    return api.replace_list(plan.slug, "entities", plan.patch_items,
+                            if_match=plan.if_match)
+
+
+def plan_summary(plan, extracted_items):
+    """Reconcile one case's plan against the names it was built from.
+
+    `plan_case_entities` (Task 6) drops a resolved BIND whose `nes_id` is
+    already bound on the case from `bound`, `review` AND `nomatch` alike --
+    correct behaviour for a re-run (there is nothing new to write), but it
+    means `len(bound) + len(review) + len(nomatch)` alone silently undercounts
+    the extracted names on every re-run: the already-bound ones just vanish.
+    Any summary built only from those three counts would be quietly wrong
+    every time this enricher is re-run over the same case.
+
+    Recomputed here rather than threaded through `plan_case_entities`, because
+    everything needed is already available to a caller that has both the plan
+    and the `extracted_items` it was built from: the number of extracted names
+    with a non-empty `entity_name` (the same "name" `plan_case_entities` skips
+    a blank of, before it even looks at `relationship_type`) minus how many of
+    those are accounted for in `bound`/`review`/`nomatch` is exactly the count
+    that was dropped as already-bound. No re-resolution, no extra searches --
+    just arithmetic over what the plan already recorded.
+    """
+    extracted = sum(
+        1 for item in extracted_items if (item.get("entity_name") or "").strip())
+    bound = len(plan.bound)
+    review = len(plan.review)
+    nomatch = len(plan.nomatch)
+    already_bound = extracted - (bound + review + nomatch)
+    return {
+        "extracted": extracted,
+        "bound": bound,
+        "review": review,
+        "nomatch": nomatch,
+        "already_bound": already_bound,
+    }
+
+
+def report_paths(paths):
+    """The three report files, sharing the run log's timestamp-and-run-id stem.
+
+    Guards against blindly slicing off the last 4 characters of any path: a
+    log path that genuinely ends in ".log" has that suffix stripped so the
+    reports share its stem; a log path that does NOT end in ".log" (a
+    different extension, or none) is used as-is rather than having its last 4
+    characters silently chopped off -- an unconditional slice would garble
+    the stem and scatter the three report files under a name nobody would
+    look for. Using the full path as the stem (rather than raising) keeps this
+    function tolerant of whatever `configure_run_logging` hands it; the worst
+    case is a slightly longer stem (e.g. ".log.binds.jsonl"), never data loss.
+    """
+    log_path = str(Path(paths["log"]))
+    suffix = ".log"
+    stem = log_path[: -len(suffix)] if log_path.endswith(suffix) else log_path
+    return {"binds": f"{stem}.binds.jsonl",
+            "review": f"{stem}.review.jsonl",
+            "nomatch": f"{stem}.nomatch.md"}
+
+
+def write_jsonl(path, rows):
+    """One JSON object per line, UTF-8, Devanagari unescaped.
+
+    Row-shape agnostic on purpose: `rows` is written exactly as given, one
+    `json.dumps` per line, so a caller (Task 8) building a review row that
+    carries the full candidate list (per `design.md`'s "reproduce a decision
+    from the file alone" requirement) is never narrowed to a fixed key set
+    here.
+    """
+    with open(path, "w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def write_nomatch_report(path, rows):
+    """Unmatched names grouped by normalised form, most-recurring first.
+
+    Ranked by case count because the unmatched names are not one problem each --
+    the same district office recurs across cases, so creating a handful of NES
+    entities lets a re-run bind many. This file is the caseworker's queue; the
+    enricher creates nothing itself.
+
+    Keeps the BEST candidate seen per group: a normalised group can receive
+    several `(name, slug, Decision)` rows across different cases, and each
+    Decision carries its own `score`/`matched_name` for the closest NES
+    candidate that case's search turned up. Tracking only the FIRST row seen
+    per group (as opposed to the highest-scoring one) can show a caseworker a
+    worse candidate than one this run actually saw for the same name.
+    """
+    grouped = {}
+    for name, slug, decision in rows:
+        key = normalise_name(name)
+        entry = grouped.setdefault(
+            key, {"names": [], "slugs": [], "near": decision.matched_name,
+                  "score": decision.score})
+        if name not in entry["names"]:
+            entry["names"].append(name)
+        if slug not in entry["slugs"]:
+            entry["slugs"].append(slug)
+        if decision.score > entry["score"]:
+            entry["near"] = decision.matched_name
+            entry["score"] = decision.score
+    ordered = sorted(grouped.values(), key=lambda e: (-len(e["slugs"]), e["names"][0]))
+
+    lines = ["# Extracted names with no NES entity", "",
+             "Each of these needs an NES entity before a re-run can bind it. "
+             "Most-recurring first.", "",
+             "| Cases | Extracted name | Closest NES candidate | Score |",
+             "|---|---|---|---|"]
+    for entry in ordered:
+        near = entry["near"] or "—"
+        lines.append(f"| {len(entry['slugs'])} | {' / '.join(entry['names'])} "
+                     f"| {near} | {entry['score']:.2f} |")
+    Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _truncate_press_release(text, limit=None):
