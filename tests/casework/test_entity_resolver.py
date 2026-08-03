@@ -17,8 +17,10 @@ from casework.entity_resolver import (
     PROVINCE_NAME_FORMS,
     REVIEW,
     apply_document_veto,
+    has_devanagari,
     asserted_province,
     candidate_name_forms,
+    comparable_name_forms,
     is_election_candidate_record,
     match_score,
     name_tokens,
@@ -446,11 +448,17 @@ def test_organisation_filed_under_person_prefix_still_binds():
 
 
 # ---------------------------------------------------------------------------
-# The vowel-length fold. NOT a bug report -- an asserted property. The module
-# docstring's claim is "no edit-distance ALGORITHM", and that stays true; this
-# is `to_roman_colloquial` folding Devanagari vowel length, which is deliberate
-# and shared with four platform indexers. These tests pin the exact boundary so
-# nobody has to rediscover it, and so a future widening fails loudly.
+# Where two Devanagari spellings may and may not meet.
+#
+# This section used to describe `to_roman_colloquial`'s fold as a deliberate,
+# bounded property limited to vowel length. It was neither bounded nor limited to
+# that: the same fold made कमल equal कमला, and गणेश equal गनेश. Matching now goes
+# through `_matra_length_key` for same-script pairs, and romanisation only ever
+# bridges ACROSS scripts.
+#
+# These tests pin the boundary from both sides -- what must still match, and what
+# must never -- so a future widening fails loudly instead of quietly binding a
+# namesake.
 # ---------------------------------------------------------------------------
 
 
@@ -980,3 +988,63 @@ def test_candidate_name_forms_excludes_the_iri_slug():
     assert candidate_name_forms(result) == ("कमला थापा", "Kamala Thapa")
     assert not [f for f in candidate_name_forms(result) if "-" in f]
     assert resolve("कमल थापा", [dict(result, score=190.0)]).verdict == NO_MATCH
+
+
+# ---------------------------------------------------------------------------
+# Script preference. These exist because `comparable_name_forms` shipped with
+# `isascii()` as its script test and NO direct test, so three ways of defeating
+# it went unnoticed until an adversarial pass reproduced a wrong bind.
+# ---------------------------------------------------------------------------
+
+
+_KAMALA = {"id": "https://jawafdehi.org/entity/person/kamala-thapa-111111",
+           "score": 190.0}
+
+
+@pytest.mark.parametrize("en_title, label", [
+    ("Kamala Thapa", "clean ASCII"),
+    ("Kamala\xa0Thapa", "non-breaking space"),
+    ("Kamala Thapa‍", "trailing zero-width joiner"),
+    ("Kamalа Thapa", "Cyrillic lookalike"),
+])
+def test_a_latin_english_title_cannot_bridge_to_a_devanagari_extraction(en_title, label):
+    # `isascii()` asked "is EVERY character ASCII", so one non-ASCII character
+    # anywhere made a Latin title claim to be Devanagari, pass the same-script
+    # filter, and win the max() at 0.96 -- while the Devanagari title it should
+    # have been compared against scored 0.00. All four spellings are realistic:
+    # 18 of the 7,882 fixture rows have a non-ASCII title.en, and
+    # person/rambabu-kalwar-273907 really does store a Cyrillic у.
+    candidate = dict(_KAMALA, title={"ne": "कमला थापा", "en": en_title})
+    assert resolve("कमल थापा", [candidate]).verdict == NO_MATCH, label
+
+
+def test_has_devanagari_is_not_isascii():
+    assert has_devanagari("कमला थापा")
+    assert not has_devanagari("Kamala Thapa")
+    # The whole point: these are NOT ASCII, but they are not Devanagari either.
+    assert not has_devanagari("Kamala\xa0Thapa")
+    assert not has_devanagari("Kamalа Thapa")
+    assert not has_devanagari("")
+
+
+def test_a_candidate_with_no_devanagari_name_goes_to_review_not_bind():
+    # The comparison can only run through romanisation here, which cannot tell a
+    # masculine name from its feminine form. 118 of the 7,882 fixture rows are in
+    # this state (114 organisations, 4 people), so it is a real shape, and the
+    # match may well be correct -- it just is not provable here.
+    for title in ({"en": "Kamala Thapa"}, {"ne": "Kamala Thapa", "en": "Kamala Thapa"}):
+        decision = resolve("कमल थापा", [dict(_KAMALA, title=title)])
+        assert decision.verdict == REVIEW
+        assert decision.nes_id is None
+        assert "across scripts" in decision.reason
+
+
+def test_the_devanagari_title_is_preferred_when_both_are_present():
+    candidate = {"id": "https://jawafdehi.org/entity/person/anish-shrestha-219986",
+                 "title": {"ne": "अनिष श्रेष्ठ", "en": "Anish Shrestha"}, "score": 190.0}
+    assert comparable_name_forms("अनिष श्रेष्ठ", candidate) == ("अनिष श्रेष्ठ",)
+    # A LATIN extraction still gets both, because cross-script is its only route.
+    assert comparable_name_forms("Anish Shrestha", candidate) == (
+        "अनिष श्रेष्ठ", "Anish Shrestha")
+    # And it still binds that way -- this fix must not break Latin extractions.
+    assert resolve("Anish Shrestha", [candidate]).verdict == BIND

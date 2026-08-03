@@ -13,22 +13,43 @@ Levenshtein, no SequenceMatcher, no fuzzy threshold. Two tokens match only by
 being equal in some spelling, never by being nearly equal. So a consonant
 difference cannot bind — श्रेष्ठ against श्रेष्ट scores 0.0.
 
-The one exception, measured rather than assumed: `to_roman_colloquial` folds
-Devanagari VOWEL LENGTH, so ल्हमु and ल्हामु both romanise to "lhamu" and
-match_score("मिङमा ल्हमु शेर्पा", "मिङमा ल्हामु शेर्पा") is 0.98 — a bind on a
-one-character difference, by a fold rather than by an algorithm. That is
-deliberate and kept: the same fold is what lets निधि meet the stored निधी, a real
-variant a caseworker would want bound, and `to_roman_colloquial` is the shared
-platform romanisation four indexers depend on.
+ROMANISATION IS A CROSS-SCRIPT BRIDGE, NEVER A FOLD BETWEEN TWO DEVANAGARI
+SPELLINGS. This is the file's least obvious rule and the one that cost the most
+to learn, so it is stated before anything else it constrains.
 
-Read the next sentence before you touch the veto. Across the 142-name labelled
-set the fold caused no false positive THAT SURVIVED THE DOCUMENT VETO — not none
-at all. Its one effect beyond निधि/निधी was मिङमा ल्हमु शेर्पा matching
-person/mingna-lhamu-sherpa-328030 at 0.98, an Election Commission namesake that
-`resolve` alone binds and only `apply_document_veto` suppresses. So this fold's
-safety record is borrowed from that veto, and weakening the veto re-opens it.
-`test_entity_resolver.py` asserts the behaviour so it stays a known property
-instead of a surprise. Vowel length is the ONLY difference that folds this way.
+An earlier version of this docstring claimed the romanisation fold was limited to
+vowel length. It was not, and the claim was false when written. Because
+`to_roman_colloquial` emits BOTH the schwa-kept and schwa-dropped spelling, कमल
+yielded "kamala kamal" while कमला yielded "kamala"; intersecting form-sets then
+made a masculine name equal its feminine counterpart, and
+match_score("कमल थापा", "कमला थापा") was 0.98 — enough to attach a woman to a
+case charging a man. The same mechanism collapsed distinct consonants, since ण
+and न both romanise to "n" and श and ष both to "sh", so गणेश met गनेश and आशिष
+met आषिश. 194 such pairs exist in the labelled fixtures' vocabulary alone.
+
+The labelled gate read precision 1.000 throughout. It could not see any of this,
+because no labelled row happens to have a cross-gender namesake in NES. Treat a
+green gate as evidence about the rows it contains and nothing more.
+
+So today:
+
+* Two Devanagari spellings meet only through matra LENGTH — ि/ी and ु/ू, via
+  `_matra_length_key`. That keeps निधि meeting the stored निधी, one person spelled
+  two ways. An ADDED ा does not fold, because a final ा is Nepali's masculine ->
+  feminine marker; the price is that ल्हमु no longer meets ल्हामु, which is a real
+  variant of one person and is now a review item.
+* A Devanagari extraction is scored against a Devanagari title when the candidate
+  has one (`comparable_name_forms`), because that comparison is lossless and the
+  cross-script one is not.
+* The IRI slug is not scored at all (`candidate_name_forms`) — it romanises, so
+  scoring it turned a same-script comparison back into a cross-script one.
+* When a candidate offers no Devanagari name, romanisation is the only route
+  available, so `resolve` refuses to bind and reports for human confirmation.
+
+Residual, deliberately open: a LATIN extraction still reaches Devanagari through
+romanisation. That is inherent to romanising at all, extractions are
+overwhelmingly Devanagari, and the ambiguity veto covers it when both spellings
+exist in NES.
 """
 
 from __future__ import annotations
@@ -222,6 +243,29 @@ def name_tokens(raw: str) -> tuple[tuple[str, frozenset[str]], ...]:
 # are different vowels rather than lengths of one, and deliberately not the
 # independent vowel letters -- only the dependent signs a scribe varies.
 _MATRA_LENGTH_FOLD = str.maketrans({"ि": "ी", "ु": "ू"})
+
+
+_DEVANAGARI = re.compile(r"[ऀ-ॿ]")
+
+
+def has_devanagari(text: str) -> bool:
+    """True when `text` contains at least one Devanagari character.
+
+    NOT `text.isascii()`, which is the wrong primitive for this and shipped a
+    real hole: it asks "is every character ASCII", so ONE non-ASCII character
+    anywhere makes a Latin string claim to be Devanagari. A non-breaking space
+    between two Latin words, a stray zero-width joiner, a Cyrillic lookalike --
+    each defeated the same-script filter, and each is then discarded by
+    `normalise_name` before tokenising, so the string tokenised as pure Latin
+    after having been classified as Devanagari.
+
+    That is live in real data, not hypothetical: 18 of the 7,882 candidate rows
+    in the fixtures have a non-ASCII `title.en`, and
+    `person/rambabu-kalwar-273907` stores "Rambabу Kalwar" with a Cyrillic у.
+    With `isascii()`, `resolve("कमल थापा", ...)` bound a कमला थापा entity at 0.96
+    through exactly that contamination.
+    """
+    return bool(_DEVANAGARI.search(text or ""))
 
 
 def _matra_length_key(token: str) -> str:
@@ -546,9 +590,9 @@ def comparable_name_forms(extracted_name: str, result: dict) -> tuple[str, ...]:
     documented in `tokens_equal`.
     """
     forms = candidate_name_forms(result)
-    if extracted_name.isascii():
+    if not has_devanagari(extracted_name):
         return forms
-    same_script = tuple(form for form in forms if not form.isascii())
+    same_script = tuple(form for form in forms if has_devanagari(form))
     return same_script or forms
 
 
@@ -831,6 +875,19 @@ def resolve(extracted_name: str, candidates: list[dict],
     veto = _name_vetoes(extracted_name)
     if veto:
         return review(veto)
+    # A Devanagari extraction that could only be compared against a LATIN form
+    # matched through `to_roman_colloquial`, which collapses ण with न, श with ष,
+    # and a masculine name with its feminine form. `comparable_name_forms`
+    # prefers a same-script title precisely to avoid that, so reaching here
+    # means the candidate offered none -- 118 of the 7,882 fixture rows, 114
+    # organisations and 4 people. The match may well be right; it is just not
+    # provable by this module, so it goes to a human instead of being written.
+    if has_devanagari(extracted_name) and not has_devanagari(scored[0][2]):
+        return review(
+            "matched only across scripts: this candidate carries no Devanagari "
+            "name, so the comparison had to go through romanisation, which "
+            "cannot tell ण from न, श from ष, or a masculine name from its "
+            "feminine form. Confirm by hand")
     score, nes_id, matched = scored[0]
     # Last, because these two are the vetoes that depend on WHICH candidate won.
     province_veto = _province_veto(extracted_name, nes_id)
