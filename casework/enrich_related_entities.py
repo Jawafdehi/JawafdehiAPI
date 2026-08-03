@@ -498,6 +498,44 @@ def plan_case_entities(api, case, etag, extracted_items):
     return plan
 
 
+def _check_entity_plan(plan):
+    """Raise unless this plan may be written. THE ONLY COPY of the write
+    preconditions: `apply_entity_plan` enforces them, `entity_plan_refusal`
+    reports them without writing. Two copies would drift, and the direction they
+    would drift in is a dry run promising a bind a real run refuses.
+    """
+    if plan.action != "WOULD_PATCH":
+        raise ValueError(
+            f"apply_entity_plan called on a {plan.action} plan for {plan.slug!r}")
+    if not plan.if_match:
+        raise RuntimeError(
+            f"refusing unconditional whole-list entities replace for {plan.slug!r}: "
+            "no ETag was captured at read time, so a concurrent edit cannot be "
+            "detected and the destructive replace could silently clobber it")
+    for item in plan.patch_items:
+        validate_bind_item(item)
+
+
+def entity_plan_refusal(plan):
+    """Why a real `--apply` run would refuse this plan, or "" if it would write.
+
+    Exists so `would-bind` in a dry run means "would actually bind". The no-ETag
+    branch of `plan_case_entities` sets `plan.reason` and then KEEPS RESOLVING by
+    design, so such a plan reaches `action == "WOULD_PATCH"` with bound names on
+    it. Dry run used to print `WOULD BIND` for those and record `would-bind`,
+    while `--apply` hit `_check_entity_plan` and recorded `error` -- overstating,
+    in the one output whose entire job is to predict a real run.
+
+    Reports rather than raises, because a dry run is not an error path: the plan
+    is refused for this case and the run carries on.
+    """
+    try:
+        _check_entity_plan(plan)
+    except (ValueError, RuntimeError) as exc:
+        return str(exc)
+    return ""
+
+
 def apply_entity_plan(api, plan):
     """Execute a WOULD_PATCH plan: whole-list replace of /entities, conditional
     on the ETag captured at plan time.
@@ -518,16 +556,7 @@ def apply_entity_plan(api, plan):
     against the current list. Do not add a retry loop here -- a retry that re-uses
     `plan.patch_items` would re-send the same stale list.
     """
-    if plan.action != "WOULD_PATCH":
-        raise ValueError(
-            f"apply_entity_plan called on a {plan.action} plan for {plan.slug!r}")
-    if not plan.if_match:
-        raise RuntimeError(
-            f"refusing unconditional whole-list entities replace for {plan.slug!r}: "
-            "no ETag was captured at read time, so a concurrent edit cannot be "
-            "detected and the destructive replace could silently clobber it")
-    for item in plan.patch_items:
-        validate_bind_item(item)
+    _check_entity_plan(plan)
     return api.replace_list(plan.slug, "entities", plan.patch_items,
                             if_match=plan.if_match)
 
@@ -1027,6 +1056,17 @@ def main(argv=None):
         # leave the console or `*.binds.jsonl` claiming a bind that never
         # landed on the server.
         if args.dry_run:
+            # A dry run predicts a real run, so it must apply the SAME
+            # preconditions `--apply` enforces. Without this, a plan with no
+            # captured ETag prints WOULD BIND here and errors under --apply.
+            refusal = entity_plan_refusal(plan)
+            if refusal:
+                report.record(slug, "entities", "would-refuse", refusal)
+                log_event(logger, paths["events"], run_id=run_id, stage="entities",
+                          slug=slug, step="write", status="would-refuse",
+                          detail=refusal, level=logging.WARNING)
+                print(f"  WOULD REFUSE {len(plan.bound)} bind(s) on {slug}: {refusal}")
+                continue
             total_bound += counts["bound"]
             for name, decision, notes in plan.bound:
                 bind_rows.append({"slug": slug, "extracted": name,
@@ -1086,7 +1126,17 @@ def main(argv=None):
     print(f"  TOTAL with no NES match: {total_nomatch}  -> {reports['nomatch']}")
     print(f"  TOTAL already bound (nothing to write): {total_already_bound}")
     if total_bound == 0:
-        if total_already_bound:
+        if total_entities_extracted == 0:
+            # Reachable from three separate skip gates -- the idempotency skip,
+            # the prerequisite gate and the no-source gate -- plus an LLM that
+            # returns nothing. Without this branch the `else` below fires and
+            # claims every extracted name went to review or matched nothing, when
+            # no name was extracted at all and both files are empty.
+            print("  This run bound zero entities because it extracted none: every "
+                  "case was skipped before extraction, or the LLM returned nothing. "
+                  "The review and no-match files above are empty. The status counts "
+                  "in the summary say which gate each case hit.")
+        elif total_already_bound:
             print(f"  This run bound zero NEW entities -- {total_already_bound} "
                   "extracted name(s) were already bound on their case(s), nothing "
                   "left to write for them.")

@@ -1807,3 +1807,111 @@ def test_dry_run_bind_rows_are_marked_unwritten(
              in Path(_report_files()["binds"]).read_text(encoding="utf-8").splitlines()]
     assert [b["written"] for b in binds] == [False]
     assert api.replace_list_calls == []
+
+
+# --------------------------------------------------------------------------
+# Deferred items 7, 8 and 10 from the final review: a dry run must predict a
+# real run, an all-skipped run must not describe names it never extracted, and
+# the merged wire payload must be asserted on a case that already has a bind.
+# --------------------------------------------------------------------------
+
+
+def test_dry_run_refuses_what_apply_refuses_instead_of_promising_a_bind(
+    monkeypatch, patched_fetch_markdown, capsys
+):
+    # The no-ETag branch of `plan_case_entities` sets `plan.reason` and keeps
+    # resolving by design, so the plan reaches WOULD_PATCH with a bound name on
+    # it. Dry run used to print WOULD BIND and record `would-bind` for exactly
+    # the plan `--apply` errors on -- overstating the one output whose whole job
+    # is to predict a real run.
+    case = dict(PRESS_ONLY_CASE, slug="case-dry-no-etag", entities=[])
+    api = _SearchStubApi([case], THREE_WAY_SEARCH)
+    api.etag = None
+    report = _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: THREE_WAY_RESPONSE,
+                       argv=["--dry-run"])
+    out = capsys.readouterr().out
+
+    assert "WOULD BIND" not in out
+    assert "WOULD REFUSE" in out
+    assert "no ETag" in out
+    assert "TOTAL entities that WOULD bind to cases (dry run, nothing written): 0" in out
+    statuses = [r["status"] for r in report.rows if r["slug"] == "case-dry-no-etag"]
+    assert statuses == ["would-refuse"]
+    assert Path(_report_files()["binds"]).read_text(encoding="utf-8") == ""
+    assert api.replace_list_calls == []
+
+
+def test_the_dry_run_refusal_and_the_apply_refusal_are_the_same_check():
+    # One copy of the preconditions, so the pair cannot drift. `--apply` raises
+    # and dry run reports, over the identical conditions in the identical order.
+    no_etag = ere.EntityBindPlan(
+        slug="case-x", action="WOULD_PATCH", if_match=None,
+        patch_items=[{"nes_id": ANKUR_IRI, "relationship_type": "related", "notes": ""}])
+    bad_item = ere.EntityBindPlan(
+        slug="case-y", action="WOULD_PATCH", if_match='W/"e"',
+        patch_items=[{"relationship_type": "related", "notes": "no nes_id"}])
+    writable = ere.EntityBindPlan(
+        slug="case-z", action="WOULD_PATCH", if_match='W/"e"',
+        patch_items=[{"nes_id": ANKUR_IRI, "relationship_type": "related", "notes": ""}])
+
+    assert "no ETag" in ere.entity_plan_refusal(no_etag)
+    assert "canonical" in ere.entity_plan_refusal(bad_item)
+    assert ere.entity_plan_refusal(ere.EntityBindPlan(slug="case-n", action="NOOP"))
+    assert ere.entity_plan_refusal(writable) == ""
+
+    for plan in (no_etag, bad_item):
+        with pytest.raises((ValueError, RuntimeError)):
+            apply_entity_plan(_SearchStubApi([]), plan)
+
+
+def test_an_all_skipped_run_does_not_claim_names_went_to_review(
+    monkeypatch, patched_fetch_markdown, capsys
+):
+    # Every case skipped on the idempotency gate, so nothing was extracted and
+    # both report files are empty. The zero-bound footer used to say "Every
+    # extracted name either went to review or matched no NES entity -- see the
+    # two files above", describing names that do not exist and files that are
+    # empty.
+    already = dict(PRESS_ONLY_CASE, slug="case-all-skipped", entities=[
+        {"nes_id": ANKUR_IRI, "type": "related", "notes": "पहिल्यै"},
+    ])
+    api = _SearchStubApi([already], THREE_WAY_SEARCH)
+    stub = _call_tracking_stub(THREE_WAY_RESPONSE)
+    _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+    out = capsys.readouterr().out
+
+    assert stub.calls == [], "the case should have been skipped before the LLM"
+    assert "TOTAL entities extracted across all cases: 0" in out
+    assert "bound zero entities because it extracted none" in out
+    assert "Every extracted name either went to review" not in out
+    files = _report_files()
+    assert Path(files["review"]).read_text(encoding="utf-8") == ""
+
+
+def test_apply_over_a_case_that_already_has_a_bind_writes_both_rows(
+    monkeypatch, patched_fetch_markdown
+):
+    # The wire payload, end to end, for the shape `replace_list` makes dangerous:
+    # a case that already carries a bind. Every omitted row is DELETED by the
+    # whole-list replace, so the request body must carry the pre-existing bind
+    # unchanged -- notes intact, relationship_type intact -- ahead of the new one.
+    # No other test asserts this on a `main() --apply` run.
+    case = dict(PRESS_ONLY_CASE, slug="case-merge-wire", entities=[
+        {"nes_id": EXISTING_IRI, "display_name": "गोपाल बहादुर श्रेष्ठ",
+         "entity_type": "Person", "type": "accused", "outcome": "convicted",
+         "notes": "तत्कालीन अध्यक्ष"},
+    ])
+    api = _SearchStubApi([case], THREE_WAY_SEARCH)
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: THREE_WAY_RESPONSE,
+              argv=["--apply"])
+
+    assert len(api.replace_list_calls) == 1
+    slug, path, items, if_match = api.replace_list_calls[0]
+    assert (slug, path, if_match) == ("case-merge-wire", "entities", 'W/"abc123"')
+    assert items == [
+        # The human's bind, byte for byte as `current_entity_binds` read it.
+        # `outcome` is deliberately absent so the server preserves 'convicted'.
+        {"nes_id": EXISTING_IRI, "relationship_type": "accused",
+         "notes": "तत्कालीन अध्यक्ष"},
+        {"nes_id": ANKUR_IRI, "relationship_type": "related", "notes": "क"},
+    ]
