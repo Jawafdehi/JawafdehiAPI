@@ -22,8 +22,10 @@ from casework.entity_resolver import (
     is_election_candidate_record,
     match_score,
     name_tokens,
+    names_an_institution,
     names_the_province,
     normalise_name,
+    qualified_siblings,
     resolve,
     token_forms,
     tokens_equal,
@@ -277,6 +279,133 @@ def test_generic_institutional_name_in_latin_script_goes_to_review():
     assert "generic" in decision.reason
 
 
+# ---------------------------------------------------------------------------
+# The unqualified-institution veto. STRUCTURAL, not lexical: an institution-type
+# name that NES also holds with a locality appended is the family, not a member,
+# so the district-less record it matches asserts no district. This replaced a
+# curated-vocabulary test that fired only when the DOMAIN word happened to be on
+# a list -- `जिल्ला वन कार्यालय` was held because वन was added, and
+# `मालपोत कार्यालय` bound at 1.00 to a district-less bucket because मालपोत was
+# not. Cost on the labelled set: precision stays 1.000, recall 0.872 -> 0.846.
+# ---------------------------------------------------------------------------
+
+_MALPOT_BUCKET = _candidate(
+    "https://jawafdehi.org/entity/organization/malapota-karyalaya-44fbce",
+    ne="मालपोत कार्यालय",
+)
+_MALPOT_KALANKI = _candidate(
+    "https://jawafdehi.org/entity/organization/malpot-land-revenue-office-kalanki",
+    ne="मालपोत कार्यालय, कलंकी",
+)
+_MALPOT_SURKHET = _candidate(
+    "https://jawafdehi.org/entity/organization/malapota-karyalaya-surkheta-b5bb2d",
+    ne="मालपोत कार्यालय सुर्खेत",
+)
+
+
+def test_unqualified_office_name_is_held_when_nes_holds_qualified_siblings():
+    # All three are real prod rows. The bare one scores 1.00 and would bind.
+    decision = resolve(
+        "मालपोत कार्यालय", [_MALPOT_BUCKET, _MALPOT_KALANKI, _MALPOT_SURKHET])
+    assert decision.verdict == REVIEW
+    assert decision.nes_id is None
+    assert "unqualified institution name" in decision.reason
+    # The reason must name a sibling, or a caseworker cannot see what to add.
+    assert "कलंकी" in decision.reason or "सुर्खेत" in decision.reason
+
+
+def test_the_same_office_name_carrying_its_district_still_binds():
+    # The district-qualified name is not a prefix of anything, so it binds even
+    # with the bare bucket sitting in the same candidate list. This is the half
+    # of the behaviour that keeps the veto from costing correct office binds.
+    decision = resolve(
+        "मालपोत कार्यालय, कलंकी", [_MALPOT_BUCKET, _MALPOT_KALANKI, _MALPOT_SURKHET])
+    assert decision.verdict == BIND
+    assert decision.nes_id == (
+        "https://jawafdehi.org/entity/organization/malpot-land-revenue-office-kalanki")
+
+
+def test_a_place_that_owns_ward_offices_still_binds():
+    # PREFIX, not subset, and this is why. NES holds a ward office per ward
+    # INSIDE अदानचुली गाउँपालिका, and every one of those titles CONTAINS the
+    # municipality's name -- at the END. Those are children of the entity, not
+    # other instances of it. A subset test would refuse all seven municipality
+    # binds in the labelled set (measured: recall 0.872 -> 0.692).
+    palika = _candidate(
+        "https://jawafdehi.org/entity/location/localunit/adanchuli-gaunpalika-60306",
+        ne="अदानचुली गाउँपालिका",
+    )
+    ward = _candidate(
+        "https://jawafdehi.org/entity/organization/vada-na-1-ko-karyalaya-ada-9c1d2e",
+        ne="वडा नं. 1 को कार्यालय, अदानचुली गाउँपालिका",
+    )
+    decision = resolve("अदानचुली गाउँपालिका", [palika, ward])
+    assert decision.verdict == BIND
+    assert decision.nes_id == (
+        "https://jawafdehi.org/entity/location/localunit/adanchuli-gaunpalika-60306")
+
+
+def test_the_veto_does_not_depend_on_a_curated_domain_word():
+    # राजस्व (revenue) is on NO list in this module -- that is the point. The
+    # veto reads the candidate list's shape, so a domain word nobody curated
+    # behaves exactly like मालपोत. This is the test that fails if someone
+    # re-implements the veto as a vocabulary check.
+    bucket = _candidate(
+        "https://jawafdehi.org/entity/organization/rajasva-karyalaya-7fa1b2",
+        ne="राजस्व कार्यालय",
+    )
+    qualified = _candidate(
+        "https://jawafdehi.org/entity/organization/rajasva-karyalaya-birgunja-3c4d5e",
+        ne="राजस्व कार्यालय बिरगंज",
+    )
+    decision = resolve("राजस्व कार्यालय", [bucket, qualified])
+    assert decision.verdict == REVIEW
+    assert "unqualified institution name" in decision.reason
+
+
+def test_a_person_name_never_reaches_the_bucket_test():
+    # No organisational-form word, so the gate excludes it. Without that gate a
+    # two-token person name would be vetoed by any longer namesake in the
+    # candidate list, which is a recall cost with no precision benefit -- the
+    # ambiguity veto already handles same-name entities.
+    ram = _candidate(
+        "https://jawafdehi.org/entity/person/rama-thapa-4c5d6e", ne="राम थापा")
+    longer = _candidate(
+        "https://jawafdehi.org/entity/person/rama-thapa-magara-7f8a9b",
+        ne="राम थापा मगर",
+    )
+    assert resolve("राम थापा", [ram, longer]).verdict == BIND
+
+
+def test_the_winners_own_longer_alternate_title_is_not_a_sibling():
+    # One entity carrying both "प्रहरी कार्यालय" and a longer title must not veto
+    # itself. `qualified_siblings` excludes the winning IRI for exactly this.
+    same = {
+        "id": "https://jawafdehi.org/entity/organization/prahari-karyalaya-1a2b3c",
+        "title": {"ne": "प्रहरी कार्यालय", "en": "Prahari Karyalaya Nepal"},
+    }
+    assert resolve("प्रहरी कार्यालय", [same]).verdict == BIND
+
+
+def test_qualified_siblings_dedupes_a_repeated_search_row():
+    # /api/search/ really does return one IRI twice (both "मालपोत कार्यालय, पर्सा"
+    # rows in the frozen capture). A repeat must not inflate the count the
+    # review reason prints.
+    repeated = [_MALPOT_SURKHET, dict(_MALPOT_SURKHET)]
+    assert qualified_siblings("मालपोत कार्यालय", repeated) == ("मालपोत कार्यालय सुर्खेत",)
+
+
+def test_qualified_siblings_ignores_a_shorter_or_equal_title():
+    assert qualified_siblings("मालपोत कार्यालय", [_MALPOT_BUCKET]) == ()
+
+
+def test_names_an_institution_is_the_gate_and_reads_both_scripts():
+    assert names_an_institution("मालपोत कार्यालय")
+    assert names_an_institution("District Forest Office")
+    assert not names_an_institution("अंकुर खत्री")
+    assert not names_an_institution("Norton Rose Fulbright LLP")
+
+
 def test_single_token_name_goes_to_review():
     nepal = _candidate("https://jawafdehi.org/entity/location/nepal", en="Nepal")
     decision = resolve("Nepal", [nepal])
@@ -388,7 +517,7 @@ def test_consonant_difference_still_does_not_match():
 
 
 # ---------------------------------------------------------------------------
-# is_election_candidate_record -- the ECN veto predicate. Five of the 39
+# is_election_candidate_record -- the ECN veto predicate. Six of the 40
 # first-pass binds across the labelled set were namesake ward candidates in the
 # wrong district; this is what refuses them.
 # ---------------------------------------------------------------------------

@@ -21,7 +21,7 @@ deliberate and kept: the same fold is what lets निधि meet the stored न
 variant a caseworker would want bound, and `to_roman_colloquial` is the shared
 platform romanisation four indexers depend on.
 
-Read the next sentence before you touch the veto. Across the 140-name labelled
+Read the next sentence before you touch the veto. Across the 142-name labelled
 set the fold caused no false positive THAT SURVIVED THE DOCUMENT VETO — not none
 at all. Its one effect beyond निधि/निधी was मिङमा ल्हमु शेर्पा matching
 person/mingna-lhamu-sherpa-328030 at 0.98, an Election Commission namesake that
@@ -59,9 +59,23 @@ MIDDLE_PARTICLES = frozenset({
     "devi", "lal", "lala", "narayan", "narayana", "maya", "raj", "raja",
 })
 
-# Institutional words that identify nobody on their own. A name made only of
-# these goes to review: bare "जिल्ला वन कार्यालय" matches a generic office entity
-# while the case's office is the one in Mugu.
+# Organisational-FORM words: the words that say what KIND of body a name names
+# (office, committee, ministry, municipality) rather than which one. Two jobs:
+#
+#   1. The gate on the structural unqualified-institution veto below. A name
+#      carrying one of these words names an institution, so
+#      `_unqualified_institution_veto` may test it for the bucket shape; a name
+#      carrying none is a person or a company and is left alone.
+#   2. A backstop: a name made ONLY of these identifies nobody at all, so
+#      `_name_vetoes` reviews it outright without needing a candidate list.
+#
+# This set deliberately does NOT try to enumerate the DOMAIN words that make an
+# office generic (मालपोत land-revenue, नापी survey, राजस्व revenue, प्रहरी police,
+# स्वास्थ्य health, ...). That list has no end, and the veto that needed it was a
+# whack-a-mole: `जिल्ला वन कार्यालय` was fixed by adding वन and the neighbouring
+# `मालपोत कार्यालय` walked through unchanged. The structural veto below replaced
+# that mechanism, so this set only has to stay closed over organisational FORMS,
+# which it can be -- Nepal has a fixed inventory of them.
 #
 # Both scripts, like MIDDLE_PARTICLES and SURNAMES: token_forms only adds a
 # romanisation for a NON-ASCII extracted token, so a Latin extraction like
@@ -88,12 +102,14 @@ GENERIC_TOKENS = frozenset({
     "प्रदेश", "pradesha", "pradesh", "province",
     "आयोजना", "ayojana", "project",
     "निर्माण", "nirmana", "nirman", "construction",
-    # "वन" (forest): the missing third token of this constant's own worked
-    # example, "जिल्ला वन कार्यालय" -- a bare District Forest Office name is
-    # still generic (there is one per district) even though "forest" is a
-    # domain word rather than an organisational-structure word like the rest
-    # of this set. Added in Task 3 so the genericity veto actually catches
-    # the case the docstring above describes.
+    # "वन" (forest) is the one DOMAIN word here, added in Task 3 to make the
+    # all-generic backstop catch "जिल्ला वन कार्यालय". The structural veto below
+    # now vetoes that row on its own (measured: with वन removed from this set,
+    # `_unqualified_institution_veto` still holds it, on the sibling
+    # "जिल्ला वन कार्यालय कपिलवस्तु" in its own candidate list). It stays as
+    # redundant cover rather than as the mechanism, because that row would
+    # otherwise rest on a single sibling being inside the search window. It is
+    # NOT an invitation to add the next domain word -- add nothing here.
     "वन", "vana", "van", "forest",
 })
 
@@ -417,9 +433,18 @@ class Decision:
 def candidate_name_forms(result: dict) -> tuple[str, ...]:
     """The name strings of one search result worth scoring against.
 
-    The Devanagari title, the English title, and the IRI slug. The slug is NES's
-    own romanisation of the name, so it matches Latin extractions that neither
-    title reaches; its trailing id segment is dropped first.
+    The Devanagari title, the English title, and the IRI slug with its trailing
+    id segment dropped.
+
+    THE SLUG FORM SCORES BUT NEVER DECIDES. Measured over all 7,882 candidate
+    rows in `tests/casework/fixtures/entity_candidates.json`: it scores above 0
+    on 53 rows and strictly beats both titles on ZERO of them, so removing it
+    changes no verdict on the labelled set. It does not reach Latin extractions
+    the titles miss -- `token_forms` already romanises Devanagari tokens on both
+    sides of the comparison, so a Latin extraction reaches `title.ne` directly.
+    It is kept because the three forms enter a `max()`, where a redundant form
+    costs nothing; it is not a safety net, since `max()` can only ever RAISE a
+    candidate's score.
     """
     title = result.get("title") or {}
     forms = [title.get("ne"), title.get("en")]
@@ -511,13 +536,126 @@ def _name_vetoes(extracted: str) -> str:
     return ""
 
 
+def names_an_institution(extracted: str) -> bool:
+    """True when the name carries an organisational-FORM word.
+
+    The gate on the veto below: "office", "committee", "ministry",
+    "municipality", "department" and the rest of GENERIC_TOKENS say the name
+    designates a body rather than a person or a company. A person name never
+    carries one, so persons never reach the bucket test -- which is what keeps
+    that test off the shape it would misread (a two-token given-name/surname pair
+    that happens to be the leading half of a longer person's name).
+    """
+    return any(token[1] & GENERIC_TOKENS for token in name_tokens(extracted))
+
+
+def qualified_siblings(extracted: str, candidates: list[dict],
+                       exclude: str = "") -> tuple[str, ...]:
+    """Candidate titles that are the extracted name PLUS a trailing qualifier.
+
+    Positional and strict: every token of `extracted` must equal the token at the
+    SAME INDEX of the candidate's title, and the title must carry at least one
+    more token after them. So the bare `मालपोत कार्यालय` has
+    `मालपोत कार्यालय, पर्सा` and `मालपोत कार्यालय सुर्खेत` as qualified siblings --
+    each is the same name with a district appended.
+
+    Prefix, not subset, and that asymmetry is the whole discriminator. Nepali
+    institution names APPEND their locality, so:
+
+      * a name that is a strict PREFIX of other NES titles is the unqualified
+        head of a family of offices -- one per district, and NES holds the
+        district-qualified members;
+      * a name other NES titles END with is a PLACE that owns them --
+        `अदानचुली गाउँपालिका` is the tail of
+        `वडा नं. 1 को कार्यालय, अदानचुली गाउँपालिका`, which is a ward office
+        INSIDE that municipality, a child of the entity rather than another
+        instance of it.
+
+    A subset test cannot tell those apart and would refuse all seven
+    municipality binds in `tests/casework/fixtures/` (measured: recall 0.872 ->
+    0.692). The prefix test refuses one row, `मालपोत कार्यालय`, and no other.
+
+    Both titles are read (`title.ne` and `title.en`), deduped by IRI, and the
+    winning candidate is excluded via `exclude` -- so neither a repeat search row
+    nor the winner's own longer alternate title can manufacture a sibling.
+    """
+    small = name_tokens(extracted)
+    if not small:
+        return ()
+    seen: set[str] = set()
+    out: list[str] = []
+    for result in candidates or ():
+        nes_id = (result.get("id") or "").strip()
+        if not nes_id or nes_id == exclude or nes_id in seen:
+            continue
+        title = result.get("title") or {}
+        for form in (title.get("ne"), title.get("en")):
+            longer = name_tokens(form or "")
+            if len(longer) <= len(small):
+                continue
+            if all(tokens_equal(a, b) for a, b in zip(small, longer)):
+                seen.add(nes_id)
+                out.append(form)
+                break
+    return tuple(out)
+
+
+def _unqualified_institution_veto(extracted: str, nes_id: str,
+                                  candidates: list[dict]) -> str:
+    """Reason the winning candidate is an unqualified institution bucket, or "".
+
+    THE PROPERTY, which is structural rather than lexical: an institution-type
+    name with no distinguishing qualifier cannot identify ONE specific office,
+    because Nepal has one of these per district. Such a name must not bind, and
+    NES's own candidate list is what proves the name is unqualified -- if NES
+    holds `<this name> + <a locality>`, then `<this name>` alone is the family,
+    not a member of it.
+
+    Replaces a curated-vocabulary test. The old veto asked "is every token in
+    GENERIC_TOKENS", which meant it fired only when the DOMAIN word was curated
+    too: `जिल्ला वन कार्यालय` was held because Task 3 added वन, and the
+    neighbouring `मालपोत कार्यालय` bound at 1.00 to
+    `organization/malapota-karyalaya-44fbce`, a district-less bucket, because
+    मालपोत was not on the list. NES holds 12 entities whose title contains
+    मालपोत and 11 of them name their district. Extending the word list would
+    have bought exactly one more round of the same game.
+
+    Nothing fuzzy, nothing probabilistic: token equality via `tokens_equal`, the
+    same comparison every other decision here uses, over a candidate list the
+    caller already fetched. Cost on the labelled set: precision stays 1.000,
+    recall 0.872 -> 0.846 (34 correct binds -> 33). The one row it costs is
+    `मालपोत कार्यालय`, whose label is a human's bind on one specific case; the
+    resolver would produce that same bind for a case in any other district,
+    which is the behaviour being refused.
+
+    Reads no district table and no locality list. A genuinely district-qualified
+    name keeps binding, and it does not depend on recognising the district: the
+    qualified name simply is not a prefix of anything.
+    `भूमिसुधार कार्यालय नवलपरासी`, `जिल्ला प्राविधिक कार्यालय, मुगु` and
+    `मालपोत कार्यालय, कलंकी` all have zero qualified siblings and all still bind.
+    """
+    if not names_an_institution(extracted):
+        return ""
+    siblings = qualified_siblings(extracted, candidates, exclude=nes_id)
+    if not siblings:
+        return ""
+    shown = ", ".join(repr(title) for title in siblings[:3])
+    return (
+        f"unqualified institution name: NES holds {len(siblings)} entit"
+        f"{'y' if len(siblings) == 1 else 'ies'} named '{extracted}' plus a "
+        f"qualifier ({shown}), so this name is the family and {nes_id} is the "
+        "member that names no locality. Nepal has one of these per district -- "
+        "add the district to the name, then re-run."
+    )
+
+
 def resolve(extracted_name: str, candidates: list[dict]) -> Decision:
     """Decide what to do with one LLM-extracted name.
 
     BIND only when exactly ONE NES entity scores at or above MIN_BIND_SCORE and
     no veto applies. More than one qualifying entity is an ambiguity and goes to
-    review -- 12 of the 138 real extracted strings hit that, with up to 13
-    same-name entities for "संजय प्रसाद यादव".
+    review -- 11 of the 142 labelled names hit that, with up to 13 same-name
+    entities for "संजय प्रसाद यादव".
 
     A candidate whose @id is not a canonical entity IRI is dropped before
     scoring, so a malformed IRI can never reach the API.
@@ -555,10 +693,13 @@ def resolve(extracted_name: str, candidates: list[dict]) -> Decision:
     if veto:
         return Decision(REVIEW, None, scored[0][0], scored[0][2], veto, frozen)
     score, nes_id, matched = scored[0]
-    # Last, because it is the only veto that depends on WHICH candidate won.
+    # Last, because these two are the vetoes that depend on WHICH candidate won.
     province_veto = _province_veto(extracted_name, nes_id)
     if province_veto:
         return Decision(REVIEW, None, score, matched, province_veto, frozen)
+    bucket_veto = _unqualified_institution_veto(extracted_name, nes_id, candidates or [])
+    if bucket_veto:
+        return Decision(REVIEW, None, score, matched, bucket_veto, frozen)
     return Decision(BIND, nes_id, score, matched, "", frozen)
 
 
@@ -627,7 +768,7 @@ def is_election_candidate_record(document) -> bool:
     point at one. So an exact name match onto such a record is, absent
     corroboration, a DIFFERENT PERSON who happens to share the name.
 
-    That is not hypothetical. Five of the 39 first-pass binds across the labelled
+    That is not hypothetical. Six of the 40 first-pass binds across the labelled
     set in `tests/casework/fixtures/` were namesake candidates in the wrong
     district. The clearest is `नन्दलाल दास`, bound to
     `person/nandlal-das-310567` — a Ward Member candidate for Katahariya
