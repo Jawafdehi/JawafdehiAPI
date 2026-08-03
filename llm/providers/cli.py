@@ -17,6 +17,7 @@ from django.conf import settings
 
 from llm.providers.base import Provider, strip_code_fence
 
+
 def _flatten(content):
     """Flatten content to plain text for CLI input.
 

@@ -564,6 +564,21 @@ class _FakeUsage:
         return {"by_provider": []}
 
 
+def _quoting_invoke(bigo, captured=None):
+    """A fake `invoke_text` returning `bigo` with a quote that clears the
+    keyword guard. Pass `captured` to record the prompt that was actually sent.
+    """
+    def fake_invoke(**kw):
+        if captured is not None:
+            captured["content"] = kw["content"]
+        return json.dumps({
+            "bigo": bigo, "confidence": "high",
+            "evidence_quote": f"बिगो रु.{bigo} कायम गरी",
+        })
+
+    return fake_invoke
+
+
 def _run_main(monkeypatch, cases, invoke_text_stub, argv):
     """Drive `main()` end to end with a stubbed API and a stubbed LLM call.
 
@@ -598,22 +613,64 @@ class TestGroundingSpansEverythingTheModelWasShown:
     figure the model read correctly out of the title, and skipped the case.
     """
 
+    # The बिगो is stated ONLY in the material display_name -- never in the body.
+    CASE = {
+        "slug": "case-x", "title": "t",
+        "evidence": [{
+            "material_iri": "https://jawafdehi.org/material/1",
+            "material": {
+                "material_type": "press_release",
+                "display_name": "... उपर बिगो रु.९०,३९,६२०।३९ कायम",
+                "urls": [{"role": "MARKDOWN", "link": "https://x/p.md"}],
+            },
+        }],
+    }
+
     def test_an_amount_stated_only_in_the_display_name_is_grounded(self):
-        case = {
-            "slug": "case-x", "title": "t",
-            "evidence": [{
-                "material_iri": "https://jawafdehi.org/material/1",
-                "material": {
-                    "material_type": "press_release",
-                    "display_name": "... उपर बिगो रु.९०,३९,६२०।३९ कायम",
-                    "urls": [{"role": "MARKDOWN", "link": "https://x/p.md"}],
-                },
-            }],
-        }
         body = "आरोपपत्र दायर गरिएको छ।"
         assert amount_is_grounded(body, 9039620) is False
-        shown = emb._source_metadata(case, emb.PRESS_TYPES) + "\n" + body
+        _, shown = emb._extract_bigo(
+            body, self.CASE, _quoting_invoke(9039620), _FakeUsage()
+        )
         assert amount_is_grounded(shown, 9039620) is True
+
+    def test_the_gate_checks_the_same_string_the_prompt_carried(self):
+        """`_extract_bigo` returns its composed source text so the gate can check
+        that exact string. Rebuilding it at the call site meant two constructions
+        of "what the model was shown" that a prompt change would silently drift
+        apart -- and it ran `_source_metadata` a second time per case.
+        """
+        captured = {}
+        _, shown = emb._extract_bigo(
+            "आरोपपत्र दायर गरिएको छ।", self.CASE,
+            _quoting_invoke(9039620, captured), _FakeUsage(),
+        )
+        for line in shown.splitlines():
+            if line.strip():
+                assert line in captured["content"], (
+                    f"grounding text carries a line the prompt never did: {line!r}"
+                )
+
+    def test_a_figure_the_clamp_cut_out_of_the_prompt_is_not_grounded(self):
+        """The clamp is why the gate cannot rebuild its own text.
+
+        `_extract_bigo` truncates the body at `FEED_CHARS`. An unclamped rebuild
+        grounds against the discarded tail too, so a fabricated amount that
+        happens to match text the model could not read would pass -- exactly the
+        coincidence the gate exists to reject.
+        """
+        long_body = "क" * emb.FEED_CHARS + " बिगो रु.९०,३९,६२०।३९ कायम"
+        captured = {}
+        _, shown = emb._extract_bigo(
+            long_body, {"slug": "case-y", "title": "t", "evidence": []},
+            _quoting_invoke(9039620, captured), _FakeUsage(),
+        )
+
+        assert "९०,३९,६२०" not in captured["content"], "clamp did not cut the tail"
+        assert amount_is_grounded(long_body, 9039620) is True, (
+            "control: the raw body does state the figure"
+        )
+        assert amount_is_grounded(shown, 9039620) is False
 
 
 class TestRupeeAmountsInTokenisation:

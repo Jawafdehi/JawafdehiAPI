@@ -425,15 +425,25 @@ def parse_bigo_response(response_text: str) -> Optional[int]:
     return None
 
 
-def _extract_bigo(source_text_, case, invoke_text, usage) -> Optional[int]:
-    """Call the LLM to extract BIGO from the press release."""
+def _extract_bigo(source_text_, case, invoke_text, usage) -> tuple[Optional[int], str]:
+    """Call the LLM to extract BIGO from the press release.
+
+    Returns `(bigo, shown)`, where `shown` is the source text this prompt
+    actually carried -- the metadata block plus the clamped body, both post-
+    truncation. The grounding gate checks that exact string rather than
+    recomposing it, for two reasons: a second construction drifts the moment the
+    prompt inputs change, and an unclamped rebuild would ground an amount
+    against text the clamp had already cut out of the model's view.
+    """
+    source_context = _clamp(
+        _source_metadata(case, PRESS_TYPES), SOURCE_CONTEXT_CHARS, "bigo context"
+    )
+    markdown = _clamp(source_text_, FEED_CHARS, "bigo source")
     prompt = EXTRACTION_USER_PROMPT.format(
         case_id=case.get("slug", "?"),
         case_title=case.get("title", ""),
-        source_context=_clamp(
-            _source_metadata(case, PRESS_TYPES), SOURCE_CONTEXT_CHARS, "bigo context"
-        ),
-        markdown=_clamp(source_text_, FEED_CHARS, "bigo source"),
+        source_context=source_context,
+        markdown=markdown,
     )
 
     response_text = invoke_text(
@@ -444,7 +454,7 @@ def _extract_bigo(source_text_, case, invoke_text, usage) -> Optional[int]:
         usage=usage,
     )
 
-    return parse_bigo_response(response_text)
+    return parse_bigo_response(response_text), f"{source_context}\n{markdown}"
 
 
 def build_api(args):
@@ -629,7 +639,7 @@ def main(argv=None):
                   step="source", status="ok", detail=f"{len(text)} chars")
 
         try:
-            bigo = _extract_bigo(text, detail, invoke_text, usage)
+            bigo, shown = _extract_bigo(text, detail, invoke_text, usage)
         except Exception as exc:
             report.record(slug, "bigo", "error", f"LLM extraction failed: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
@@ -653,12 +663,12 @@ def main(argv=None):
         # confident the model was or how clean its quote looked -- and for a public
         # corruption figure, missing beats wrong. Skip rather than write.
         #
-        # Ground against everything the model was SHOWN, not just the markdown
-        # body. `_extract_bigo` also sends `_source_metadata(...)`, and per its
-        # docstring the material `display_name` is frequently where the बिगो is
-        # first stated ("... उपर बिगो रु.९०,३९,६२०।३९ कायम"). Checking the body
-        # alone would reject a figure the model read correctly out of the title.
-        shown = _source_metadata(detail, PRESS_TYPES) + "\n" + text
+        # `shown` is everything the model was SHOWN, straight from the call that
+        # built the prompt -- not just the markdown body. `_extract_bigo` also
+        # sends `_source_metadata(...)`, and per its docstring the material
+        # `display_name` is frequently where the बिगो is first stated
+        # ("... उपर बिगो रु.९०,३९,६२०।३९ कायम"). Checking the body alone rejected
+        # figures the model had read correctly out of the title.
         if not amount_is_grounded(shown, bigo):
             reason = f"bigo={bigo} is not stated anywhere in the source text"
             report.record(slug, "bigo", "skipped", reason)
