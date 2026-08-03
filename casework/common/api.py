@@ -98,6 +98,17 @@ class CaseworkApi:
         # non-loopback `base_url` -- see `_patch` below. Reads are never
         # affected by this flag.
         self.allow_remote_writes = allow_remote_writes
+        # Run-scoped read caches for the two entity reads. Keyed on the exact
+        # argument, so a hit returns what a second request would have returned:
+        # NES is fixed for a run's duration and both endpoints are read-only.
+        # These exist because corruption cases name the SAME institutions over
+        # and over -- a ministry or a district office recurs across many cases in
+        # one batch, and each recurrence otherwise re-pays a paged search (up to
+        # four round trips) or a document GET for an answer already in hand.
+        # Scoped to the instance, not the class, so the cache dies with the run
+        # and can never serve a stale document to a later one.
+        self._entity_search_cache: dict[tuple, list] = {}
+        self._entity_doc_cache: dict[str, dict] = {}
 
     def _headers(self, content_type=None):
         if self.basic is not None:
@@ -255,7 +266,14 @@ class CaseworkApi:
 
         A read, so the write-guard in `_request` never applies -- this is usable
         against production.
+
+        Memoised per run (see `__init__`): a repeated query returns the first
+        answer instead of re-paging. Keyed on the paging arguments too, so a
+        caller asking for a different window is never served the wrong one.
         """
+        cache_key = (query, page_size, pages)
+        if cache_key in self._entity_search_cache:
+            return self._entity_search_cache[cache_key]
         results, top_score = [], None
         for page in range(1, pages + 1):
             data = self.get("/search/", {"q": query, "type": "entity",
@@ -274,6 +292,7 @@ class CaseworkApi:
             logger.info(
                 "entity search for %r hit the %d-page cap (%d candidates); a "
                 "same-name tie may extend past it", query, pages, len(results))
+        self._entity_search_cache[cache_key] = results
         return results
 
     def get_entity(self, ref, timeout=60):
@@ -297,13 +316,21 @@ class CaseworkApi:
 
         A read, so it goes through `self.get` and the write-guard in `_request`
         never applies -- usable against production.
+
+        Memoised per run (see `__init__`): the same entity bound on several cases
+        in one batch is fetched once. The document is read-only, so a hit is
+        indistinguishable from a second request.
         """
         ref = (ref or "").strip()
         if not ref:
             raise ValueError("get_entity needs an entity IRI or a <prefix>/<slug> path")
+        if ref in self._entity_doc_cache:
+            return self._entity_doc_cache[ref]
         is_iri = ref.startswith("http://") or ref.startswith("https://")
         quoted = urllib.parse.quote(ref, safe="" if is_iri else "/")
-        return self.get("/entities/" + quoted, timeout=timeout)
+        document = self.get("/entities/" + quoted, timeout=timeout)
+        self._entity_doc_cache[ref] = document
+        return document
 
     def _patch(self, slug, ops, timeout=60, if_match=None):
         """The choke point for FIELD writes (`patch_field`, `replace_list`) --

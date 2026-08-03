@@ -234,6 +234,30 @@ RELATIONSHIP_TYPES = (
 )
 
 
+def bind_relationship_type(entity):
+    """One bind's relationship type, lowercased and trimmed, from either key.
+
+    THE SINGLE PLACE that knows the case API is asymmetric about this field: a
+    bind is WRITTEN as `relationship_type` but READ BACK as `type`, and
+    `relationship_type` never appears on a read. Verified against 1,099
+    production binds -- the read values are accused, related, location,
+    respondent, petitioner and alleged, all under `type`.
+
+    This exists as a chokepoint because getting it wrong once already cost a
+    Critical: the pre-LLM skip checked `relationship_type` alone, so it matched
+    nothing and every case re-spent a premium LLM call on every run. The fix for
+    that bug hand-copied the tolerance to a second site rather than centralising
+    it, which left the same trap open for a third. Read the field only through
+    here, and a future third key name is a one-line change.
+
+    Returns "" when neither key is present, so a caller must supply its own
+    default rather than inherit a silent one.
+    """
+    if not isinstance(entity, dict):
+        return ""
+    return (entity.get("type") or entity.get("relationship_type") or "").strip().lower()
+
+
 def current_entity_binds(case):
     """The case's existing binds in PATCH shape, order preserved.
 
@@ -250,8 +274,7 @@ def current_entity_binds(case):
             continue
         binds.append({
             "nes_id": nes_id,
-            "relationship_type": (
-                entity.get("type") or entity.get("relationship_type") or "related"),
+            "relationship_type": bind_relationship_type(entity) or "related",
             "notes": entity.get("notes") or "",
         })
     return binds
@@ -297,6 +320,11 @@ def validate_bind_item(item):
 class EntityBindPlan:
     slug: str
     action: str  # WOULD_PATCH | NOOP | SKIP_STATE
+    # Diagnostics. Nothing in this module reads either one -- they exist so a
+    # caller inspecting a plan (a dry-run harness, a debugging session) can see
+    # the state the decision was made against and how many binds the case
+    # already carried. `bind_materials.BindPlan` DOES consume its equivalents,
+    # so do not assume these are wired up here by analogy with it.
     state: str = ""
     if_match: str | None = None
     n_current: int = 0
@@ -436,7 +464,12 @@ def plan_case_entities(api, case, etag, extracted_items):
             continue
 
         candidates = api.search_entities(name)
-        decision = resolve(name, candidates)
+        # The cap goes IN, so `resolve` applies the truncation veto itself
+        # alongside the ambiguity check it protects. Previously this module
+        # re-checked it afterwards, which meant a BIND straight out of `resolve`
+        # was not actually safe to trust without a caller topping it up.
+        decision = resolve(name, candidates,
+                           candidate_cap=_CANDIDATE_LIST_TRUNCATION_CAP)
         if decision.is_bind:
             read_error = None
             try:
@@ -455,15 +488,6 @@ def plan_case_entities(api, case, etag, extracted_items):
                     decision.matched_name,
                     f"{decision.reason} (read error: {read_error!r})",
                     decision.candidates)
-
-        if decision.is_bind and len(candidates) >= _CANDIDATE_LIST_TRUNCATION_CAP:
-            decision = Decision(
-                REVIEW, None, decision.score, decision.matched_name,
-                f"candidate list hit the {_CANDIDATE_LIST_TRUNCATION_CAP}-result "
-                "search cap: a same-name duplicate may exist just outside the "
-                "window, so the ambiguity veto's premise (every tied candidate "
-                "was seen) does not hold here",
-                decision.candidates)
 
         if decision.verdict == REVIEW:
             plan.review.append((name, decision))
@@ -883,9 +907,7 @@ def main(argv=None):
         # hand-built dict using either key still behaves correctly.
         existing_related = [
             bind for bind in (case.get("entities") or [])
-            if isinstance(bind, dict)
-            and (bind.get("type") or bind.get("relationship_type") or "").strip().lower()
-            == "related"
+            if bind_relationship_type(bind) == "related"
         ]
         if existing_related and not args.force:
             report.record(

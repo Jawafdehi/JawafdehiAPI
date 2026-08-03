@@ -689,11 +689,19 @@ def test_veto_never_upgrades_a_review_or_no_match_even_on_a_bad_document():
 
 
 def test_resolve_still_binds_on_names_alone_and_takes_no_document():
-    # Tasks 3 and 4 are reviewed and settled: the veto is a separate function and
-    # resolve() knows nothing about documents. Assert the signature, not just the
-    # behaviour -- a document parameter creeping in here would move I/O back into
-    # the pure layer.
-    assert list(inspect.signature(resolve).parameters) == ["extracted_name", "candidates"]
+    # Tasks 3 and 4 are reviewed and settled: the document veto is a separate
+    # function and resolve() knows nothing about documents. Assert the signature,
+    # not just the behaviour -- a document parameter creeping in here would move
+    # I/O back into the pure layer.
+    #
+    # `candidate_cap` is a plain int (the size at which the caller's search
+    # stopped paging), so it does not reopen that door. The guarantee this test
+    # protects is "nothing that implies I/O", which is asserted directly below
+    # rather than relying on an exact list that any harmless addition breaks.
+    params = list(inspect.signature(resolve).parameters)
+    assert params == ["extracted_name", "candidates", "candidate_cap"]
+    forbidden = ("document", "api", "client", "session", "fetch", "get", "url")
+    assert not [p for p in params if any(word in p for word in forbidden)]
 
     decision = resolve("राज बहादुर बम", _BAM_CANDIDATES)
     assert decision.verdict == BIND
@@ -928,3 +936,54 @@ def test_province_forms_carry_no_redundant_romanisation():
             "already in the set, so they widen the allow-path for nothing")
         # Exactly one Latin form -- the IRI slug.
         assert {f for f in forms if f.isascii()} == {province}, province
+
+
+# ---------------------------------------------------------------------------
+# The truncation veto, now inside resolve() beside the ambiguity check it
+# protects. It used to live in the caller, which meant a BIND straight out of
+# resolve() was not safe to trust without the caller topping it up.
+# ---------------------------------------------------------------------------
+
+
+def _pad_to(candidates, total):
+    """Extra candidates that score nothing, only to reach a raw list length.
+
+    Distinct valid IRIs with unrelated titles, so they are dropped during
+    scoring and cannot manufacture an ambiguity -- the only thing they change is
+    `len(candidates)`, which is exactly what the truncation veto reads.
+    """
+    padded = list(candidates)
+    while len(padded) < total:
+        n = len(padded)
+        padded.append({"id": f"https://jawafdehi.org/entity/person/padding-name-{n:06d}",
+                       "title": {"ne": f"असम्बन्धित नाम {n}"}, "score": 1.0})
+    return padded
+
+
+def test_a_truncated_candidate_list_refuses_a_bind_inside_resolve():
+    candidates = _pad_to(_BAM_CANDIDATES, 200)
+    decision = resolve("राज बहादुर बम", candidates, candidate_cap=200)
+    assert decision.verdict == REVIEW
+    assert decision.nes_id is None
+    assert "search cap" in decision.reason
+
+
+def test_the_truncation_veto_counts_the_raw_list_not_the_deduped_scores():
+    # `scored` is deduped by IRI and drops malformed ones, so it can fall below
+    # the cap on a response that genuinely hit it. Counting `scored` instead of
+    # the raw list would silently let the veto miss.
+    candidates = _pad_to(_BAM_CANDIDATES, 199)
+    candidates.append(dict(candidates[-1]))          # a repeat row: 200 raw, 199 distinct
+    assert len({c["id"] for c in candidates}) < len(candidates)
+    decision = resolve("राज बहादुर बम", candidates, candidate_cap=200)
+    assert decision.verdict == REVIEW
+    assert "search cap" in decision.reason
+
+
+def test_an_untruncated_list_still_binds_and_no_cap_means_complete():
+    # Below the cap the veto must not fire...
+    assert resolve("राज बहादुर बम", _pad_to(_BAM_CANDIDATES, 199),
+                   candidate_cap=200).verdict == BIND
+    # ...and omitting the cap asserts "this is the complete candidate set", so a
+    # long list is not evidence of truncation on its own.
+    assert resolve("राज बहादुर बम", _pad_to(_BAM_CANDIDATES, 200)).verdict == BIND

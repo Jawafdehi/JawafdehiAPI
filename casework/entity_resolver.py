@@ -36,6 +36,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+from functools import lru_cache
 
 from jawafdehi_shared.entities.ids import is_valid_entity_iri
 from jawafdehi_shared.search.transliterate import to_roman_colloquial
@@ -177,8 +178,17 @@ def normalise_name(raw: str) -> str:
     return _WHITESPACE.sub(" ", text).strip().lower()
 
 
+@lru_cache(maxsize=8192)
 def token_forms(token: str) -> frozenset[str]:
     """Every spelling of one token that counts as the same token.
+
+    Cached because it is pure (`str` -> `frozenset`) and called relentlessly:
+    `resolve` scores up to 200 candidates against up to 3 name forms each, and
+    every one of those calls re-tokenises the SAME extracted name, so the
+    transliteration below would otherwise run hundreds of times per name for one
+    answer. Institutional tokens like "कार्यालय" and "जिल्ला" also recur across
+    unrelated names in the same run. The cache cannot change a decision -- same
+    token, same forms -- it only stops paying for the answer twice.
 
     The token itself, plus its colloquial romanisations when it is non-ASCII
     (to_roman_colloquial emits both the schwa-kept and schwa-dropped spellings),
@@ -663,7 +673,8 @@ def _unqualified_institution_veto(extracted: str, nes_id: str,
     )
 
 
-def resolve(extracted_name: str, candidates: list[dict]) -> Decision:
+def resolve(extracted_name: str, candidates: list[dict],
+            candidate_cap: int | None = None) -> Decision:
     """Decide what to do with one LLM-extracted name.
 
     BIND only when exactly ONE NES entity scores at or above MIN_BIND_SCORE and
@@ -673,6 +684,17 @@ def resolve(extracted_name: str, candidates: list[dict]) -> Decision:
 
     A candidate whose @id is not a canonical entity IRI is dropped before
     scoring, so a malformed IRI can never reach the API.
+
+    `candidate_cap` is the size at which the caller's search STOPPED PAGING
+    rather than ran out of results. Pass it whenever `candidates` came from a
+    paged source: at the cap, a same-name duplicate may sit just outside the
+    window, so the ambiguity veto's premise -- "every tied candidate was
+    scored" -- does not hold, and a lone survivor is not proof of uniqueness.
+    This veto lives here, beside the ambiguity check it protects, precisely so
+    that a BIND from this function needs no external top-up to be trustworthy.
+    The cap is a parameter rather than a constant because its value belongs to
+    the HTTP client's pagination settings, which this module deliberately does
+    not import. Leaving it None means "these candidates are the complete set".
     """
     best_by_id: dict[str, tuple[float, str, str]] = {}
     for result in candidates or ():
@@ -699,21 +721,36 @@ def resolve(extracted_name: str, candidates: list[dict]) -> Decision:
                         scored[0][2] if scored else "",
                         "no NES entity scored at or above the bind threshold",
                         frozen)
+
+    # Every veto below refuses the SAME way -- downgrade the winning candidate
+    # to REVIEW with a reason -- so the construction lives in one place. A new
+    # veto is then one line, with no chance of transposing an argument.
+    def review(reason: str) -> Decision:
+        return Decision(REVIEW, None, scored[0][0], scored[0][2], reason, frozen)
+
     if len(qualifying) > 1:
-        return Decision(REVIEW, None, scored[0][0], scored[0][2],
-                        f"ambiguous: {len(qualifying)} distinct NES entities score "
-                        f"at or above the bind threshold", frozen)
+        return review(f"ambiguous: {len(qualifying)} distinct NES entities score "
+                      "at or above the bind threshold")
+    # Counted on the RAW candidate list, not on `scored`: `scored` is deduped by
+    # IRI and drops malformed ones, so it can fall below the cap on a response
+    # that genuinely hit it -- which would silently let the veto miss.
+    if candidate_cap is not None and len(candidates or ()) >= candidate_cap:
+        return review(
+            f"candidate list hit the {candidate_cap}-result search cap: a "
+            "same-name duplicate may exist just outside the window, so the "
+            "ambiguity veto's premise (every tied candidate was seen) does "
+            "not hold here")
     veto = _name_vetoes(extracted_name)
     if veto:
-        return Decision(REVIEW, None, scored[0][0], scored[0][2], veto, frozen)
+        return review(veto)
     score, nes_id, matched = scored[0]
     # Last, because these two are the vetoes that depend on WHICH candidate won.
     province_veto = _province_veto(extracted_name, nes_id)
     if province_veto:
-        return Decision(REVIEW, None, score, matched, province_veto, frozen)
+        return review(province_veto)
     bucket_veto = _unqualified_institution_veto(extracted_name, nes_id, candidates or [])
     if bucket_veto:
-        return Decision(REVIEW, None, score, matched, bucket_veto, frozen)
+        return review(bucket_veto)
     return Decision(BIND, nes_id, score, matched, "", frozen)
 
 
