@@ -365,6 +365,14 @@ def plan_case_entities(api, case, etag, extracted_items):
       it is also what closes a casing mismatch against the extraction
       filter's own `.lower()` comparison in `main()` -- an LLM that emits
       "Location" must veto exactly like "location" does.
+      THIS IS THE STEP THAT SEPARATES THE MATCHER'S RECALL FROM THE SHIPPED
+      PIPELINE'S. Measured on the labelled set: the resolver binds 33 of 39,
+      recall 0.846; this allow-list refuses seven location-typed municipalities
+      before searching, so production binds 26, recall 0.667. Both figures are
+      printed by `tests/casework/test_entity_resolver_labelled.py`, each named,
+      and `test_a_location_typed_extraction_never_reaches_a_bind` fails if this
+      allow-list is widened. Whether to bind locations is an open product
+      decision -- do not widen it as a drive-by.
     * A BIND from `resolve()` still needs the document veto
       (`casework.entity_resolver.apply_document_veto`): the search payload
       alone cannot tell a real case subject from an Election Commission
@@ -499,8 +507,16 @@ def apply_entity_plan(api, plan):
     path and carries the destructive-replace contract in its docstring.
 
     Fails closed with no ETag: without If-Match the replace is unconditional and
-    a concurrent edit would be silently clobbered. A 412 means the merge is
-    stale -- re-read and retry, never force.
+    a concurrent edit would be silently clobbered.
+
+    NEITHER RETRIES NOR FORCES. A 412 means someone else edited the case between
+    the read and this write, so the merged list is built on a stale snapshot and
+    writing it would drop their change. The 412 propagates out of
+    `api.replace_list`; `main()` catches it, records the case as `error` and emits
+    no bind row, so nothing claims a bind that never landed. An operator who wants
+    the bind re-runs the enricher, which re-reads the case and rebuilds the merge
+    against the current list. Do not add a retry loop here -- a retry that re-uses
+    `plan.patch_items` would re-send the same stale list.
     """
     if plan.action != "WOULD_PATCH":
         raise ValueError(

@@ -833,8 +833,8 @@ def test_asserted_province_only_fires_on_a_provincial_segment(iri, expected):
 
 def test_localunit_binds_are_untouched_by_the_province_veto():
     # The regression that rules out the blunt fix. Vetoing every locality-scoped
-    # IRI (/provincial|/district|/localunit/) would cost 8 of the 39 labelled
-    # binds -- recall 0.872 -> 0.667 -- because for those 8 the locality IS the
+    # IRI (/provincial|/district|/localunit/) would cost 7 of the 33 labelled-set
+    # binds -- recall 0.846 -> 0.667 -- because for those 7 the locality IS the
     # entity's own name.
     decision = resolve(
         "अदानचुली गाउँपालिका",

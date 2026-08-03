@@ -1077,7 +1077,7 @@ class _SearchStubApi(_StubApi):
     failure without a real network. A `nes_id` absent from `documents` gets a
     default document that is a normal (non-election) CIAA portal entity: a
     non-empty dict with no election-record `identifier`, so the veto is a
-    no-op unless a test deliberately configures otherwise -- 25 of the 39
+    no-op unless a test deliberately configures otherwise -- 25 of the 40
     frozen fixture documents look exactly like this and all 25 still BIND.
     """
 
@@ -1221,7 +1221,7 @@ def test_plan_downgrades_a_bind_to_review_when_get_entity_raises():
 
 def test_plan_still_binds_when_the_document_has_a_null_identifier():
     # The boundary, precisely: a document that is a dict with `identifier:
-    # null` is a NORMAL CIAA portal entity (25 of the 39 frozen fixture
+    # null` is a NORMAL CIAA portal entity (25 of the 40 frozen fixture
     # documents look exactly like this) and must still BIND. Only an
     # UNREADABLE document fails closed -- this is not that.
     case = {"slug": "case-normal", "state": "DRAFT", "entities": []}
