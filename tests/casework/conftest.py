@@ -17,3 +17,21 @@ def _isolate_casework_run_logs(monkeypatch, tmp_path):
     for itself.
     """
     monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_llm_response_cache(monkeypatch, tmp_path):
+    """The `invoke_text` response cache (`casework/common/llm_cache.py`) is ON by
+    default and defaults to `<repo>/work/llm-cache/`, so without this fixture the
+    suite both litters that real directory and -- much worse -- READS from it.
+
+    That second failure is the one to keep in mind: a test whose stub returns a
+    fixed string writes an entry keyed on its own prompt, and the next run of any
+    test using the same prompt gets a cache HIT, so its stub is never called and
+    assertions like `assert seen_tiers == ["premium"]` fail against an empty list.
+    The suite would pass or fail depending on what a previous run left on disk.
+    Per-test tmp dir keeps every test's cache empty at start.
+
+    A test that wants real default-directory behaviour delenv's this itself.
+    """
+    monkeypatch.setenv("CASEWORK_LLM_CACHE_DIR", str(tmp_path / "llm-cache"))

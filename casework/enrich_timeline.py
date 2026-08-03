@@ -765,6 +765,15 @@ def main(argv=None):
 
     from llm.invoke import invoke_text, invoke_with_tools
     from llm.usage import UsageAccumulator, render_usage_table
+    from casework.common.llm_cache import build_llm_cache, wrap_invoke_text
+
+    # Local dev response cache (see casework/common/llm_cache.py). A dry run bills
+    # exactly like an apply, so re-running this batch after a parser fix would
+    # otherwise pay twice for byte-identical calls. --no-llm-cache forces fresh.
+    # invoke_with_tools is deliberately NOT wrapped: a multi-turn tool loop has no
+    # stable key.
+    llm_cache = build_llm_cache(args)
+    invoke_text = wrap_invoke_text(invoke_text, llm_cache)
 
     api = build_api(args)
     usage = UsageAccumulator()
@@ -940,6 +949,12 @@ def main(argv=None):
             usage.as_dict()["by_provider"], title="timeline usage")
         print()
         print(usage_summary)
+
+    # Unconditional, outside the `if usage.calls` guard above: a run served
+    # entirely from cache makes zero calls, and that is exactly the run whose
+    # provenance must not be silent.
+    cache_summary = llm_cache.summary()
+    print(cache_summary)
 
     log_run_footer(
         logger, stage="timeline", stats=stats,

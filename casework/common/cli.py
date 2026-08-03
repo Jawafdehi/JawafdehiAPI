@@ -81,6 +81,23 @@ def add_common_args(parser):
             "this is set."
         ),
     )
+    # Local dev response cache for invoke_text (casework/common/llm_cache.py).
+    # ON by default: a dry run bills exactly like an apply, so re-running a batch
+    # after a parser fix otherwise pays twice for byte-identical calls. The key
+    # includes the resolved model, so changing --model or the prompt correctly
+    # misses. Pass --no-llm-cache for the run you sign off on.
+    parser.add_argument(
+        "--llm-cache", action="store_true", default=True,
+        help="Serve identical invoke_text calls from the local disk cache "
+             "(default on). Cache hits record no token usage.")
+    parser.add_argument(
+        "--no-llm-cache", dest="llm_cache", action="store_false",
+        help="Force fresh LLM calls. Use for a final verification run.")
+    parser.add_argument(
+        "--llm-cache-dir", default="",
+        help="Override the cache directory; defaults to "
+             "$CASEWORK_LLM_CACHE_DIR, then <repo>/work/llm-cache. Point every "
+             "worktree at one shared dir to reuse entries across sessions.")
     parser.add_argument("--verbose", action="store_true")
     return parser
 
