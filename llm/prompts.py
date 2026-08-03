@@ -151,6 +151,15 @@ class PromptSpec:
                 either template is missing or a variable did not resolve, so a
                 broken prompt costs nothing.
         """
+        if max_tokens is not None and max_tokens < 1:
+            # Same rule __post_init__ applies to the configured budget. Without it
+            # the override was the one way past that check, and a zero budget is
+            # the pathological case this whole seam exists to fix: it reaches the
+            # provider, bills a call, and cannot produce a token.
+            raise ValueError(
+                f"{self.name}: max_tokens override must be >= 1, got {max_tokens!r}."
+            )
+
         system = self.render_system(**context)
         content = self.render(**context)
         budget = self.max_tokens if max_tokens is None else max_tokens

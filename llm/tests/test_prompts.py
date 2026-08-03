@@ -223,6 +223,18 @@ class TestTheBudgetCanBeOverriddenForOneCall:
             spec.invoke(case_title="X", excerpts=[], max_tokens=32_000)
         assert spec.max_tokens == 8000
 
+    @pytest.mark.parametrize("bad", [0, -1, -32_000])
+    def test_a_non_positive_override_is_refused_before_any_call(self, bad):
+        """__post_init__ guards the configured budget; the override was the way
+        past it. A zero budget still reaches the provider and still bills a call,
+        and cannot produce a token — the pathological form of the very bug this
+        seam was added to fix."""
+        spec = _spec(max_tokens=8000)
+        with mock.patch("llm.prompts.invoke_json") as invoke:
+            with pytest.raises(ValueError, match="max_tokens override"):
+                spec.invoke(case_title="X", excerpts=[], max_tokens=bad)
+        invoke.assert_not_called()
+
     def test_the_log_records_the_effective_budget_not_the_specs(self):
         """Otherwise an escalated retry is indistinguishable in the logs from the
         attempt that provoked it, and a spec that escalates every single time

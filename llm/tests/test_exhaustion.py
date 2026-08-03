@@ -22,8 +22,17 @@ class TestFailuresThatMeanOutOfRoom:
     def test_the_prose_form_is_read_as_exhaustion(self):
         assert is_exhaustion(RuntimeError("Reached maximum number of turns (1)"))
 
-    def test_an_explicit_token_cap_is_read_as_exhaustion(self):
-        assert is_exhaustion(RuntimeError("stop_reason: max_tokens"))
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "stop_reason: max_tokens",
+            "stop_reason=max_tokens",
+            '{"stop_reason":"max_tokens"}',
+            "stop reason: max_tokens",
+        ],
+    )
+    def test_an_explicit_stop_reason_is_read_as_exhaustion(self, message):
+        assert is_exhaustion(RuntimeError(message))
 
     def test_matching_ignores_case(self):
         assert is_exhaustion(RuntimeError("ERROR_MAX_TURNS"))
@@ -54,6 +63,22 @@ class TestFailuresThatMustNotBeRetriedAtFourTimesTheCost:
         ],
     )
     def test_an_unrelated_failure_is_not_exhaustion(self, message):
+        assert not is_exhaustion(RuntimeError(message))
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "invalid max_tokens value",
+            "max_tokens: field required",
+            "max_tokens must be >= 1, got 0",
+            "unknown parameter: max_tokens",
+        ],
+    )
+    def test_a_max_tokens_CONFIGURATION_error_is_not_exhaustion(self, message):
+        """The bare substring "max_tokens" was the original marker, and it made
+        every one of these look like an exhausted generation. They are bugs: an
+        escalated retry pays several times over to fail in exactly the same way,
+        which is the trap this module exists to avoid."""
         assert not is_exhaustion(RuntimeError(message))
 
     def test_a_timeout_is_not_exhaustion(self):
