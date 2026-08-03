@@ -1,22 +1,38 @@
 # Resolver fixtures
 
-`entity_candidates.json` is a frozen capture of prod `/api/search/?type=entity` responses.
-`entity_labels.jsonl` is the labelled set the resolver is measured against. Together they
-make `test_entity_resolver_labelled.py` offline and deterministic — the "same NES snapshot"
+Three files, all frozen prod reads, and together they make
+`test_entity_resolver_labelled.py` offline and deterministic — the "same NES snapshot"
 the design note requires.
+
+| File | What it holds |
+|---|---|
+| `entity_candidates.json` | `/api/search/?type=entity` responses, 140 names, 7,782 rows, `id`/`title`/`score` only |
+| `entity_documents.json` | One trimmed `/api/entities/<ref>` document per entity the resolver would bind (39), keyed by IRI |
+| `entity_labels.jsonl` | The 140 labelled rows the pipeline is measured against |
 
 The names are real: 138 come from the July A/B extraction logs in
 `work/2026-07-17-enricher-extraction/`, so the distribution matches what the LLM actually
 emits, dirt and all. Two more are constructed (see below), for 140 rows.
 
-## The gate is currently RED, on purpose
+## Why there are two captures, not one
 
-`test_zero_false_positives_across_the_labelled_set` fails on five rows. Precision is
-0.872, not 1.0. Those five are not mislabelled and the threshold is not wrong — the
-resolver binds five Election Commission candidate records that are different people who
-happen to share a name with someone the case names. Read `.superpowers/sdd/plan/task-5-report.md`
-before touching either fixture. **Do not fix this by editing a label or moving
-`MIN_BIND_SCORE`.**
+`entity_candidates.json` alone measures the name matcher, which scores **precision 0.872**.
+The five misses are all Election Commission 2079 candidate records — namesakes of the
+people the cases name, in the wrong district or holding an office the case's person cannot
+hold. `/api/search/` returns no field that separates them, so no amount of scoring work
+reaches them.
+
+`entity_documents.json` is what does. The gate runs the two-step pipeline a caller uses:
+
+```python
+decision = resolve(name, api.search_entities(name))
+if decision.is_bind:
+    decision = apply_document_veto(decision, api.get_entity(decision.nes_id))
+```
+
+With the veto, precision is **1.000** and recall stays at **0.872** — the veto removed five
+wrong binds and zero correct ones. If you change either fixture, re-measure both numbers.
+**Never close a precision gap by editing a label or moving `MIN_BIND_SCORE`.**
 
 ## Where each label comes from
 
@@ -28,7 +44,7 @@ slug. Every label below rests on something else.
 |---|---|---|
 | `verified: human bind on <case-slug>` | The entity is already bound to that case in prod, by a caseworker or the portal migration. `GET /api/cases/<slug>/` | 19 |
 | `verified: prod entity doc consistent with case context` | The full entity document pins the referent — a CBS local-unit code, `gov-np-domain`, a wikidata QID, or CIAA-portal-backlog provenance — and the case's district agrees | 20 |
-| `rejected: ECN election-candidate record, not the case subject` | The document carries `ecn-candidate-id` and a 2079 candidate `hasOccupation` for a ward the case has nothing to do with | 5 |
+| `rejected: ECN election-candidate record, not the case subject` | The document carries `ecn-candidate-id` and a 2079 candidate `hasOccupation` for a ward the case has nothing to do with. `apply_document_veto` catches all five | 5 |
 | `rejected: N same-name entities in prod` | Self-verifying: N real entities, one name | 10 |
 | `rejected: no NES entity with this name` | Nothing scored above zero against the frozen capture | 83 |
 | `unsettled: evidence does not decide` | Labelled conservatively — REVIEW, never BIND | 1 |
@@ -62,8 +78,8 @@ uv run python scripts/capture_entity_candidates.py \
     tests/casework/fixtures/entity_candidates.json
 ```
 
-That is a GET-only production read and takes about 80 seconds. Recover the names file
-first if it is missing:
+That writes both captures — the candidates, then one document per would-be bind. GET-only
+against production, about 100 seconds. Recover the names file first if it is missing:
 
 ```bash
 cd /home/gaurav/repos/jawafdehi-meta

@@ -3,15 +3,22 @@
 A false positive here is a wrong bind: a named individual publicly attached to a
 corruption case they had nothing to do with. One is a build failure.
 
-Both fixtures and the labelling method are described in `fixtures/README.md`.
-The labels come from evidence `resolve` cannot read -- the full prod entity
-document and the binds already on the source case -- so this measures the
-resolver rather than mirroring it.
+The fixtures and the labelling method are described in `fixtures/README.md`. The
+labels come from evidence `resolve` cannot read -- the full prod entity document
+and the binds already on the source case -- so this measures the resolver rather
+than mirroring it.
+
+The pipeline under test is the two-step one a caller uses, not `resolve` alone:
+`resolve` matches names, then `apply_document_veto` reads the bound entity's
+document and refuses Election Commission candidate records. Measuring `resolve`
+on its own scores 0.872, because the name matcher cannot tell a namesake ward
+candidate from the official a case names -- `/api/search/` does not return the
+field that would say.
 """
 import json
 from pathlib import Path
 
-from casework.entity_resolver import BIND, resolve
+from casework.entity_resolver import BIND, apply_document_veto, resolve
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -26,10 +33,26 @@ def load_candidates():
     return json.loads((FIXTURES / "entity_candidates.json").read_text(encoding="utf-8"))
 
 
+def load_documents():
+    return json.loads((FIXTURES / "entity_documents.json").read_text(encoding="utf-8"))
+
+
 def _decisions():
-    candidates = load_candidates()
+    """Every labelled row through the full two-step decision, offline.
+
+    The frozen documents stand in for `CaseworkApi.get_entity`; the veto is only
+    consulted for a BIND, exactly as the caller does it, so no test depends on a
+    document for a row that never reaches that step.
+    """
+    candidates, documents = load_candidates(), load_documents()
     for row in load_labels():
-        yield row, resolve(row["extracted"], candidates.get(row["extracted"], []))
+        decision = resolve(row["extracted"], candidates.get(row["extracted"], []))
+        if decision.is_bind:
+            assert decision.nes_id in documents, (
+                f"no frozen document for {decision.nes_id} -- re-run "
+                "scripts/capture_entity_candidates.py")
+            decision = apply_document_veto(decision, documents[decision.nes_id])
+        yield row, decision
 
 
 def test_zero_false_positives_across_the_labelled_set():

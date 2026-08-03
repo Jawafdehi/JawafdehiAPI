@@ -1,0 +1,297 @@
+{
+ "https://jawafdehi.org/entity/location/localunit/adanchuli-gaunpalika-60306": {
+  "hasOccupation": null,
+  "identifier": [
+   {
+    "@type": "PropertyValue",
+    "propertyID": "cbs-local-unit-code",
+    "value": "60306"
+   }
+  ]
+ },
+ "https://jawafdehi.org/entity/location/localunit/chhayanath-rara-municipality-60202": {
+  "hasOccupation": null,
+  "identifier": [
+   {
+    "@type": "PropertyValue",
+    "propertyID": "cbs-local-unit-code",
+    "value": "60202"
+   }
+  ]
+ },
+ "https://jawafdehi.org/entity/location/localunit/nawarajpur-gaunpalika-20214": {
+  "hasOccupation": null,
+  "identifier": [
+   {
+    "@type": "PropertyValue",
+    "propertyID": "cbs-local-unit-code",
+    "value": "20214"
+   }
+  ]
+ },
+ "https://jawafdehi.org/entity/location/localunit/ramdhuni-municipality-11305": {
+  "hasOccupation": null,
+  "identifier": [
+   {
+    "@type": "PropertyValue",
+    "propertyID": "cbs-local-unit-code",
+    "value": "11305"
+   }
+  ]
+ },
+ "https://jawafdehi.org/entity/location/localunit/sharada-municipality-60907": {
+  "hasOccupation": null,
+  "identifier": [
+   {
+    "@type": "PropertyValue",
+    "propertyID": "cbs-local-unit-code",
+    "value": "60907"
+   }
+  ]
+ },
+ "https://jawafdehi.org/entity/location/localunit/soru-gaunpalika-60203": {
+  "hasOccupation": null,
+  "identifier": [
+   {
+    "@type": "PropertyValue",
+    "propertyID": "cbs-local-unit-code",
+    "value": "60203"
+   }
+  ]
+ },
+ "https://jawafdehi.org/entity/location/localunit/tamakoshi-gaunpalika-30106": {
+  "hasOccupation": null,
+  "identifier": [
+   {
+    "@type": "PropertyValue",
+    "propertyID": "cbs-local-unit-code",
+    "value": "30106"
+   }
+  ]
+ },
+ "https://jawafdehi.org/entity/organization/bhumisudhara-karyalaya-navalaparasi-1030dc": {
+  "hasOccupation": null,
+  "identifier": null
+ },
+ "https://jawafdehi.org/entity/organization/education/university/tu": {
+  "hasOccupation": null,
+  "identifier": [
+   {
+    "@type": "PropertyValue",
+    "propertyID": "edu-np-domain",
+    "value": "tu.edu.np"
+   },
+   {
+    "@type": "PropertyValue",
+    "propertyID": "ugc-acronym",
+    "value": "TU"
+   },
+   {
+    "@type": "PropertyValue",
+    "propertyID": "wikidata-qid",
+    "value": "Q588239"
+   }
+  ]
+ },
+ "https://jawafdehi.org/entity/organization/german-aviation-capital-gmbm-3048f0": {
+  "hasOccupation": null,
+  "identifier": null
+ },
+ "https://jawafdehi.org/entity/organization/government/body/nid": {
+  "hasOccupation": null,
+  "identifier": [
+   {
+    "@type": "PropertyValue",
+    "propertyID": "gov-np-domain",
+    "value": "nid.gov.np"
+   },
+   {
+    "@type": "PropertyValue",
+    "propertyID": "wikidata-qid",
+    "value": "Q6973841"
+   }
+  ]
+ },
+ "https://jawafdehi.org/entity/organization/hifly-x-ireland-limited-a2f371": {
+  "hasOccupation": null,
+  "identifier": null
+ },
+ "https://jawafdehi.org/entity/organization/jilla-pravidhika-karyalaya-mugu-5b7f05": {
+  "hasOccupation": null,
+  "identifier": null
+ },
+ "https://jawafdehi.org/entity/organization/malapota-karyalaya-44fbce": {
+  "hasOccupation": null,
+  "identifier": null
+ },
+ "https://jawafdehi.org/entity/organization/malpot-land-revenue-office-kalanki": {
+  "hasOccupation": null,
+  "identifier": null
+ },
+ "https://jawafdehi.org/entity/organization/norton-rose-fulbright-llp-3ba6bf": {
+  "hasOccupation": null,
+  "identifier": null
+ },
+ "https://jawafdehi.org/entity/organization/samskrti-paryatana-tatha-nagarika-uddaya-3683e0": {
+  "hasOccupation": null,
+  "identifier": null
+ },
+ "https://jawafdehi.org/entity/organization/tandavada-si-cai-ayojana-upabhokta-samit-c32ce0": {
+  "hasOccupation": null,
+  "identifier": null
+ },
+ "https://jawafdehi.org/entity/organization/virajana-bhandari-e8c7c5": {
+  "hasOccupation": null,
+  "identifier": null
+ },
+ "https://jawafdehi.org/entity/person/amkura-khatri-2de9b3": {
+  "hasOccupation": null,
+  "identifier": null
+ },
+ "https://jawafdehi.org/entity/person/amsika-khatri-0c16d2": {
+  "hasOccupation": null,
+  "identifier": null
+ },
+ "https://jawafdehi.org/entity/person/anupa-mehara-bc64f1": {
+  "hasOccupation": null,
+  "identifier": null
+ },
+ "https://jawafdehi.org/entity/person/buddhamaya-thapa-magara-75359e": {
+  "hasOccupation": null,
+  "identifier": null
+ },
+ "https://jawafdehi.org/entity/person/hikmata-pyakurela-b2ff30": {
+  "hasOccupation": null,
+  "identifier": null
+ },
+ "https://jawafdehi.org/entity/person/khusilala-saha-865cdc": {
+  "hasOccupation": null,
+  "identifier": null
+ },
+ "https://jawafdehi.org/entity/person/madhava-kumara-bhatta-810e85": {
+  "hasOccupation": null,
+  "identifier": null
+ },
+ "https://jawafdehi.org/entity/person/mingna-lhamu-sherpa-328030": {
+  "hasOccupation": [
+   {
+    "jobTitle": {
+     "en": "Executive Dalit/Minority Member",
+     "ne": "दलित वा अल्पसंख्यक सदस्य"
+    },
+    "roleName": "Executive Dalit/Minority Member candidate (2022 local, Sirijanga Gaunpalika)"
+   }
+  ],
+  "identifier": [
+   {
+    "@type": "PropertyValue",
+    "propertyID": "ecn-candidate-id",
+    "value": "328030"
+   }
+  ]
+ },
+ "https://jawafdehi.org/entity/person/nandlal-das-310567": {
+  "hasOccupation": [
+   {
+    "jobTitle": {
+     "en": "Ward Member",
+     "ne": "वडा सदस्य"
+    },
+    "roleName": "Ward Member candidate (2022 local, Katahariya Municipality ward 4)"
+   }
+  ],
+  "identifier": [
+   {
+    "@type": "PropertyValue",
+    "propertyID": "ecn-candidate-id",
+    "value": "310567"
+   }
+  ]
+ },
+ "https://jawafdehi.org/entity/person/premasarana-khatri-376ee7": {
+  "hasOccupation": null,
+  "identifier": null
+ },
+ "https://jawafdehi.org/entity/person/rabikumara-khatri-d06371": {
+  "hasOccupation": null,
+  "identifier": null
+ },
+ "https://jawafdehi.org/entity/person/raj-bahadur-bam-318984": {
+  "hasOccupation": [
+   {
+    "jobTitle": {
+     "en": "Ward Member",
+     "ne": "वडा सदस्य"
+    },
+    "roleName": "Ward Member candidate (2022 local, Palata Gaunpalika ward 9)"
+   }
+  ],
+  "identifier": [
+   {
+    "@type": "PropertyValue",
+    "propertyID": "ecn-candidate-id",
+    "value": "318984"
+   }
+  ]
+ },
+ "https://jawafdehi.org/entity/person/rajesvara-kamali-b16f89": {
+  "hasOccupation": null,
+  "identifier": null
+ },
+ "https://jawafdehi.org/entity/person/ramesa-kumara-nidhi-95d296": {
+  "hasOccupation": null,
+  "identifier": null
+ },
+ "https://jawafdehi.org/entity/person/sobita-prasai-efab53": {
+  "hasOccupation": null,
+  "identifier": null
+ },
+ "https://jawafdehi.org/entity/person/topendra-khanal-204079": {
+  "hasOccupation": [
+   {
+    "jobTitle": {
+     "en": "Chairperson",
+     "ne": "अध्यक्ष"
+    },
+    "roleName": "Chairperson candidate (2022 local, Rajpur Gaunpalika)"
+   }
+  ],
+  "identifier": [
+   {
+    "@type": "PropertyValue",
+    "propertyID": "ecn-candidate-id",
+    "value": "204079"
+   }
+  ]
+ },
+ "https://jawafdehi.org/entity/person/vasanti-ravala-8aacf5": {
+  "hasOccupation": null,
+  "identifier": null
+ },
+ "https://jawafdehi.org/entity/person/visnu-bahadura-ravala-24ac8b": {
+  "hasOccupation": null,
+  "identifier": null
+ },
+ "https://jawafdehi.org/entity/person/visva-mohana-prasada-yadava-a4da26": {
+  "hasOccupation": null,
+  "identifier": null
+ },
+ "https://jawafdehi.org/entity/person/yangji-sherpa-242914": {
+  "hasOccupation": [
+   {
+    "jobTitle": {
+     "en": "Ward Woman Member",
+     "ne": "महिला सदस्य"
+    },
+    "roleName": "Ward Woman Member candidate (2022 local, Gaurishankar Gaunpalika ward 7)"
+   }
+  ],
+  "identifier": [
+   {
+    "@type": "PropertyValue",
+    "propertyID": "ecn-candidate-id",
+    "value": "242914"
+   }
+  ]
+ }
+}

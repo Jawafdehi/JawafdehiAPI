@@ -810,3 +810,80 @@ def test_search_entities_is_a_read_so_the_write_guard_never_fires(monkeypatch):
     api = CaseworkApi("https://api.jawafdehi.org", token="t")
     monkeypatch.setattr(api, "get", lambda path, params=None, timeout=60: {"results": []})
     assert api.search_entities("अनिष श्रेष्ठ") == []
+
+
+# ---------------------------------------------------------------------------
+# get_entity -- the second read the ECN veto needs. `/api/search/` returns only
+# id/title/score, so it cannot tell an Election Commission 2079 candidate record
+# apart from a person NES holds because a CIAA case named them. The detail route
+# (`entities/urls.py`'s `_REF`) takes a canonical IRI or a bare `<prefix>/<slug>`
+# path, but the two need DIFFERENT url-encoding -- both spellings below were
+# checked against prod.
+# ---------------------------------------------------------------------------
+
+
+def _capture_get(api, monkeypatch, payload=None):
+    seen = []
+
+    def fake_get(path, params=None, timeout=60):
+        seen.append((path, params, timeout))
+        return payload if payload is not None else {}
+
+    monkeypatch.setattr(api, "get", fake_get)
+    return seen
+
+
+def test_get_entity_keeps_the_prefix_separator_on_a_bare_path(monkeypatch):
+    api = CaseworkApi("http://127.0.0.1:48010", token="t")
+    seen = _capture_get(api, monkeypatch)
+
+    api.get_entity("person/khusilala-saha-865cdc")
+
+    assert seen[0][0] == "/entities/person/khusilala-saha-865cdc"
+
+
+def test_get_entity_fully_encodes_a_canonical_iri(monkeypatch):
+    # The slashes in "https://" MUST be encoded. Left bare they put a "//" in
+    # the request path, which collapses in transit and 404s against prod.
+    api = CaseworkApi("http://127.0.0.1:48010", token="t")
+    seen = _capture_get(api, monkeypatch)
+
+    api.get_entity("https://jawafdehi.org/entity/person/raj-bahadur-bam-318984")
+
+    assert seen[0][0] == (
+        "/entities/https%3A%2F%2Fjawafdehi.org%2Fentity%2Fperson%2F"
+        "raj-bahadur-bam-318984"
+    )
+
+
+def test_get_entity_returns_the_parsed_document(monkeypatch):
+    api = CaseworkApi("http://127.0.0.1:48010", token="t")
+    document = {"@id": "https://jawafdehi.org/entity/person/raj-bahadur-bam-318984",
+                "identifier": [{"propertyID": "ecn-candidate-id", "value": "318984"}]}
+    _capture_get(api, monkeypatch, payload=document)
+
+    assert api.get_entity("person/raj-bahadur-bam-318984") == document
+
+
+def test_get_entity_passes_the_timeout_through(monkeypatch):
+    api = CaseworkApi("http://127.0.0.1:48010", token="t")
+    seen = _capture_get(api, monkeypatch)
+
+    api.get_entity("person/raj-bahadur-bam-318984", timeout=5)
+
+    assert seen[0][2] == 5
+
+
+@pytest.mark.parametrize("ref", ["", "   ", None])
+def test_get_entity_rejects_an_empty_ref(ref):
+    api = CaseworkApi("http://127.0.0.1:48010", token="t")
+    with pytest.raises(ValueError):
+        api.get_entity(ref)
+
+
+def test_get_entity_is_a_read_so_the_write_guard_never_fires(monkeypatch):
+    # Non-loopback host, allow_remote_writes unset: this is how the enricher
+    # reads prod, and it must not trip the guard in `_request`.
+    api = CaseworkApi("https://api.jawafdehi.org", token="t")
+    monkeypatch.setattr(api, "get", lambda path, params=None, timeout=60: {"@id": "x"})
+    assert api.get_entity("person/raj-bahadur-bam-318984") == {"@id": "x"}

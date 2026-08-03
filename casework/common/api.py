@@ -276,6 +276,35 @@ class CaseworkApi:
                 "same-name tie may extend past it", query, pages, len(results))
         return results
 
+    def get_entity(self, ref, timeout=60):
+        """One NES entity document, by canonical IRI or bare ``<prefix>/<slug>``.
+
+        `/api/search/` returns only `id`, `title` and `score`, so it cannot tell
+        an Election Commission 2079 candidate record apart from a person NES
+        holds because a CIAA case named them. This is the read that can:
+        `identifier` carries the `ecn-candidate-id` marker that
+        `casework.entity_resolver.is_election_candidate_record` vetoes on.
+
+        The detail route (`entities/urls.py`'s `_REF`) takes either form, but
+        they need DIFFERENT encoding and the difference is not cosmetic --
+        both spellings below were checked against prod:
+
+        * `person/khusilala-saha-865cdc` keeps its separator, so quote with
+          ``safe="/"``.
+        * A full IRI must be encoded WHOLE (``safe=""``). Leaving the
+          ``https://`` slashes bare puts a ``//`` in the request path, which
+          collapses in transit and 404s.
+
+        A read, so it goes through `self.get` and the write-guard in `_request`
+        never applies -- usable against production.
+        """
+        ref = (ref or "").strip()
+        if not ref:
+            raise ValueError("get_entity needs an entity IRI or a <prefix>/<slug> path")
+        is_iri = ref.startswith("http://") or ref.startswith("https://")
+        quoted = urllib.parse.quote(ref, safe="" if is_iri else "/")
+        return self.get("/entities/" + quoted, timeout=timeout)
+
     def _patch(self, slug, ops, timeout=60, if_match=None):
         """The choke point for FIELD writes (`patch_field`, `replace_list`) --
         NOT "every write": `convert.py`'s `upload_markdown` writes via a

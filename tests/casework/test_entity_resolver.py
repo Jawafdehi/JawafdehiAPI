@@ -12,7 +12,9 @@ from casework.entity_resolver import (
     MIN_BIND_SCORE,
     NO_MATCH,
     REVIEW,
+    apply_document_veto,
     candidate_name_forms,
+    is_election_candidate_record,
     match_score,
     name_tokens,
     normalise_name,
@@ -344,3 +346,158 @@ def test_slug_suffix_strip_does_not_eat_a_letters_only_name_segment():
         [{"id": "https://jawafdehi.org/entity/person/ram-bahadur-baba"}],
     )
     assert decision.verdict != BIND
+
+
+# ---------------------------------------------------------------------------
+# The vowel-length fold. NOT a bug report -- an asserted property. The module
+# docstring's claim is "no edit-distance ALGORITHM", and that stays true; this
+# is `to_roman_colloquial` folding Devanagari vowel length, which is deliberate
+# and shared with four platform indexers. These tests pin the exact boundary so
+# nobody has to rediscover it, and so a future widening fails loudly.
+# ---------------------------------------------------------------------------
+
+
+def test_vowel_length_folds_so_lhamu_variants_match():
+    # Prod: person/mingna-lhamu-sherpa-328030 stores मिङमा ल्हामु शेर्पा while the
+    # extractor emitted मिङमा ल्हमु शेर्पा. Both romanise to "lhamu".
+    assert tokens_equal(name_tokens("ल्हमु")[0], name_tokens("ल्हामु")[0])
+    assert match_score("मिङमा ल्हमु शेर्पा", "मिङमा ल्हामु शेर्पा") == pytest.approx(0.98)
+
+
+def test_vowel_length_fold_is_what_lets_a_real_variant_bind():
+    # The same fold earns its keep: निधि against the stored निधी is a spelling
+    # variant of one person, not two people.
+    assert match_score("रमेश कुमार निधि", "रमेश कुमार निधी") == pytest.approx(0.98)
+
+
+def test_consonant_difference_still_does_not_match():
+    # The boundary. श्रेष्ठ vs श्रेष्ट is a CONSONANT difference (ठ vs ट), and it
+    # must never bind -- this is the case the "no edit distance" rule exists for.
+    assert match_score("अनिष श्रेष्ठ", "अनिष श्रेष्ट") == 0.0
+    assert resolve(
+        "अनिष श्रेष्ट",
+        [{"id": "https://jawafdehi.org/entity/person/anish-shrestha-285096",
+          "title": {"ne": "अनिष श्रेष्ठ"}}],
+    ).verdict == NO_MATCH
+
+
+# ---------------------------------------------------------------------------
+# is_election_candidate_record -- the ECN veto predicate. Five of the 39
+# first-pass binds across the labelled set were namesake ward candidates in the
+# wrong district; this is what refuses them.
+# ---------------------------------------------------------------------------
+
+_ECN_ID = {"@type": "PropertyValue", "propertyID": "ecn-candidate-id", "value": "318984"}
+_CBS_ID = {"@type": "PropertyValue", "propertyID": "cbs-local-unit-code", "value": "60306"}
+
+
+def test_ecn_marker_in_a_list_is_detected():
+    # person/raj-bahadur-bam-318984: an elected Ward Member in Kalikot, while
+    # case 080-CR-0175 concerns an acting Chief Administrative Officer.
+    assert is_election_candidate_record({"identifier": [_ECN_ID]}) is True
+
+
+def test_ecn_marker_as_a_bare_dict_is_detected():
+    # `identifier` is single-valued rather than a list on some documents.
+    assert is_election_candidate_record({"identifier": _ECN_ID}) is True
+
+
+def test_portal_backlog_document_is_not_an_election_record():
+    # person/amkura-khatri-2de9b3 -- a real CIAA portal entity, correctly bound
+    # by a caseworker on case-080-cr-0064. No identifier at all.
+    assert is_election_candidate_record(
+        {"@id": "https://jawafdehi.org/entity/person/amkura-khatri-2de9b3",
+         "name": {"ne": "अंकुर खत्री"}, "dateCreated": "2026-07-03T19:04:58Z"}
+    ) is False
+
+
+def test_another_identifier_type_is_not_an_election_record():
+    # location/localunit/adanchuli-gaunpalika-60306 carries a CBS code, and is a
+    # correct bind. Only the ECN marker vetoes.
+    assert is_election_candidate_record({"identifier": [_CBS_ID]}) is False
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        None,
+        {},
+        "not a document",
+        {"identifier": None},
+        {"identifier": "ecn-candidate-id"},
+        {"identifier": ["ecn-candidate-id", None, 7]},
+        {"identifier": [None, _ECN_ID]},
+    ],
+)
+def test_malformed_documents_do_not_raise(document):
+    # A veto that raises on a shape it did not expect is a veto that gets
+    # wrapped in a bare except and silently disabled. It must only ever answer.
+    assert isinstance(is_election_candidate_record(document), bool)
+
+
+def test_ecn_marker_still_found_past_a_non_dict_member():
+    assert is_election_candidate_record({"identifier": [None, _ECN_ID]}) is True
+
+
+# ---------------------------------------------------------------------------
+# apply_document_veto -- the pure downgrade. resolve() stays untouched; the I/O
+# belongs to the caller.
+# ---------------------------------------------------------------------------
+
+_BAM_CANDIDATES = [
+    {"id": "https://jawafdehi.org/entity/person/raj-bahadur-bam-318984",
+     "title": {"ne": "राज बहादुर बम"}},
+]
+
+
+def test_veto_downgrades_an_ecn_bind_to_review():
+    decision = resolve("राज बहादुर बम", _BAM_CANDIDATES)
+    assert decision.verdict == BIND
+
+    vetoed = apply_document_veto(decision, {"identifier": [_ECN_ID]})
+
+    assert vetoed.verdict == REVIEW
+    assert vetoed.nes_id is None
+    assert "ecn-candidate-id" in vetoed.reason
+    # The caseworker still needs the evidence to judge -- Task 7 writes these
+    # into the review file, so a veto must not blank them.
+    assert vetoed.candidates == decision.candidates
+    assert vetoed.score == decision.score
+    assert vetoed.matched_name == decision.matched_name
+
+
+def test_veto_leaves_a_clean_bind_alone():
+    decision = resolve("राज बहादुर बम", _BAM_CANDIDATES)
+    assert apply_document_veto(decision, {"identifier": [_CBS_ID]}) == decision
+
+
+def test_veto_leaves_review_and_no_match_untouched_so_it_is_safe_to_call_always():
+    review = resolve(
+        "अनिष श्रेष्ठ",
+        [{"id": "https://jawafdehi.org/entity/person/anish-shrestha-219986",
+          "title": {"ne": "अनिष श्रेष्ठ"}},
+         {"id": "https://jawafdehi.org/entity/person/anish-shrestha-285096",
+          "title": {"ne": "अनिष श्रेष्ठ"}}],
+    )
+    assert review.verdict == REVIEW
+    assert apply_document_veto(review, {"identifier": [_ECN_ID]}) == review
+
+    no_match = resolve("खगेन्द्र पराजुली", [])
+    assert no_match.verdict == NO_MATCH
+    assert apply_document_veto(no_match, {"identifier": [_ECN_ID]}) == no_match
+
+
+def test_veto_tolerates_a_missing_document():
+    # get_entity can 404 on a candidate that vanished between the two calls.
+    # Failing open here would be wrong, but raising would abort a whole run --
+    # a document we cannot read simply does not trip the veto.
+    decision = resolve("राज बहादुर बम", _BAM_CANDIDATES)
+    assert apply_document_veto(decision, None) == decision
+
+
+def test_resolve_signature_and_behaviour_are_unchanged_by_the_veto():
+    # Tasks 3 and 4 are reviewed and settled: resolve() still binds on names
+    # alone and knows nothing about documents.
+    decision = resolve("राज बहादुर बम", _BAM_CANDIDATES)
+    assert decision.verdict == BIND
+    assert decision.nes_id == "https://jawafdehi.org/entity/person/raj-bahadur-bam-318984"

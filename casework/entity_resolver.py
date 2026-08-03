@@ -7,9 +7,22 @@ candidate list always decides the same way.
 
 THE GOVERNING CONSTRAINT: a wrong bind publicly attaches a named individual to a
 corruption case they had nothing to do with. A missed bind costs a caseworker
-five minutes. Every tradeoff here resolves in that direction, which is why there
-is no edit distance anywhere in this file — it is the only mechanism that would
-let श्रेष्ठ match श्रेष्ट, and a one-character difference must never bind.
+five minutes. Every tradeoff here resolves in that direction, which is why no
+similarity ratio or edit-distance ALGORITHM appears anywhere in this file: no
+Levenshtein, no SequenceMatcher, no fuzzy threshold. Two tokens match only by
+being equal in some spelling, never by being nearly equal. So a consonant
+difference cannot bind — श्रेष्ठ against श्रेष्ट scores 0.0.
+
+The one exception, measured rather than assumed: `to_roman_colloquial` folds
+Devanagari VOWEL LENGTH, so ल्हमु and ल्हामु both romanise to "lhamu" and
+match_score("मिङमा ल्हमु शेर्पा", "मिङमा ल्हामु शेर्पा") is 0.98 — a bind on a
+one-character difference, by a fold rather than by an algorithm. That is
+deliberate and kept: the same fold is what lets निधि meet the stored निधी, a real
+variant a caseworker would want bound, and `to_roman_colloquial` is the shared
+platform romanisation four indexers depend on. It caused no false positive
+across the 140-name labelled set. `test_entity_resolver.py` asserts the
+behaviour so it stays a known property instead of a surprise. Vowel length is
+the ONLY difference that folds this way.
 """
 
 from __future__ import annotations
@@ -413,3 +426,89 @@ def resolve(extracted_name: str, candidates: list[dict]) -> Decision:
         return Decision(REVIEW, None, scored[0][0], scored[0][2], veto, frozen)
     score, nes_id, matched = scored[0]
     return Decision(BIND, nes_id, score, matched, "", frozen)
+
+
+# The marker the Election Commission bulk load leaves on every candidate record.
+# A `PropertyValue` with this `propertyID` is the ONLY thing the veto keys on --
+# see `is_election_candidate_record` for why the slug and the occupation are not
+# usable substitutes.
+_ECN_PROPERTY_ID = "ecn-candidate-id"
+
+
+def is_election_candidate_record(document) -> bool:
+    """True when this NES entity document is an Election Commission candidate record.
+
+    WHY THIS EXISTS, because it looks like paranoia and a future reader will
+    otherwise delete it. A large share of NES's 162,650 `person` entities are
+    Election Commission 2079 candidate records — one row per person per contested
+    post, covering essentially every ward in Nepal. Of 655 accused person binds
+    that human caseworkers made on published Jawafdehi cases, only 2 point at
+    one. So an exact name match onto a candidate record is, absent corroboration,
+    a DIFFERENT PERSON who happens to share the name.
+
+    That is not hypothetical. Five of the 39 first-pass binds across the labelled
+    set in `tests/casework/fixtures/` were namesake candidates in the wrong
+    district. The clearest: `राज बहादुर बम` bound to
+    `person/raj-bahadur-bam-318984`, an ELECTED Ward Member for Palata
+    Gaunpalika ward 9 in Kalikot, while case 080-CR-0175 concerns an acting Chief
+    Administrative Officer — a civil-service post an elected ward member cannot
+    hold. Binding it would have publicly named an unrelated man as a corruption
+    suspect.
+
+    Keyed on the `ecn-candidate-id` identifier alone, deliberately:
+
+    * The SLUG is not a proxy. `person/nandlal-das-310567` ends in its ECN id,
+      but `person/mohan-bahadur-basnet-334834` — a correct human bind, the
+      accused on published case 081-CR-0060 — ends in a 6-digit internal id and
+      carries no ECN marker. A slug-shape rule would veto real binds.
+    * `hasOccupation` alone is softer: plenty of legitimately-bound officials
+      have one, and the field is free-form.
+
+    Defensive about shape on purpose — `identifier` may be absent, a single dict
+    rather than a list, or hold members that are not dicts at all.
+    """
+    if not isinstance(document, dict):
+        return False
+    identifiers = document.get("identifier")
+    if identifiers is None:
+        return False
+    if isinstance(identifiers, dict):
+        identifiers = [identifiers]
+    elif not isinstance(identifiers, (list, tuple)):
+        return False
+    return any(
+        isinstance(entry, dict) and entry.get("propertyID") == _ECN_PROPERTY_ID
+        for entry in identifiers
+    )
+
+
+def apply_document_veto(decision: Decision, document) -> Decision:
+    """Downgrade a BIND to REVIEW when the bound entity is an ECN candidate record.
+
+    Split out from `resolve` so `resolve` stays pure and the I/O stays with the
+    caller — the entity document needs a second HTTP round trip per bind, which
+    is exactly the kind of thing this module refuses to do itself:
+
+        decision = resolve(name, api.search_entities(name))
+        if decision.is_bind:
+            decision = apply_document_veto(decision, api.get_entity(decision.nes_id))
+
+    Anything that is not a BIND comes back untouched, so it is safe to call
+    unconditionally. A vetoed decision keeps its `score`, `matched_name` and the
+    full `candidates` tuple — Task 7 writes those into the file a caseworker
+    reads, and dropping them would leave the reviewer with nothing to judge — but
+    `nes_id` becomes None, because a REVIEW that still carries an id invites the
+    very bind this veto just refused.
+    """
+    if not decision.is_bind or not is_election_candidate_record(document):
+        return decision
+    return Decision(
+        REVIEW,
+        None,
+        decision.score,
+        decision.matched_name,
+        "Election Commission candidate record, not confirmed as the case subject: "
+        f"{decision.nes_id} carries an {_ECN_PROPERTY_ID}. Same-name candidate "
+        "records outnumber real case subjects, so this needs a human look.",
+        decision.candidates,
+    )
