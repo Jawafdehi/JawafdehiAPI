@@ -201,6 +201,49 @@ class TestInvoke:
         assert kwargs["version"] == 7
 
 
+class TestTheBudgetCanBeOverriddenForOneCall:
+    """The seam an escalated retry hangs off (case_proposals.job_handlers)."""
+
+    def test_the_specs_budget_is_used_when_nothing_is_passed(self):
+        spec = _spec(max_tokens=8000)
+        with mock.patch("llm.prompts.invoke_json", return_value={}) as invoke:
+            spec.invoke(case_title="X", excerpts=[])
+        assert invoke.call_args.kwargs["max_tokens"] == 8000
+
+    def test_an_override_reaches_the_provider(self):
+        spec = _spec(max_tokens=8000)
+        with mock.patch("llm.prompts.invoke_json", return_value={}) as invoke:
+            spec.invoke(case_title="X", excerpts=[], max_tokens=32_000)
+        assert invoke.call_args.kwargs["max_tokens"] == 32_000
+
+    def test_the_override_does_not_mutate_the_registered_spec(self):
+        """Specs are frozen, and a retry must not widen the budget for everyone."""
+        spec = _spec(max_tokens=8000)
+        with mock.patch("llm.prompts.invoke_json", return_value={}):
+            spec.invoke(case_title="X", excerpts=[], max_tokens=32_000)
+        assert spec.max_tokens == 8000
+
+    def test_the_log_records_the_effective_budget_not_the_specs(self):
+        """Otherwise an escalated retry is indistinguishable in the logs from the
+        attempt that provoked it, and a spec that escalates every single time
+        looks exactly like one that never does."""
+        spec = _spec(max_tokens=8000)
+        with mock.patch("llm.prompts.invoke_json", return_value={}):
+            with mock.patch.object(prompts.logger, "info") as log:
+                spec.invoke(case_title="X", excerpts=[], max_tokens=32_000)
+
+        kwargs = log.call_args.kwargs
+        assert kwargs["max_tokens"] == 32_000
+        assert kwargs["escalated"] is True
+
+    def test_an_unescalated_call_says_so(self):
+        spec = _spec(max_tokens=8000)
+        with mock.patch("llm.prompts.invoke_json", return_value={}):
+            with mock.patch.object(prompts.logger, "info") as log:
+                spec.invoke(case_title="X", excerpts=[])
+        assert log.call_args.kwargs["escalated"] is False
+
+
 class TestRequiredAppliesToBothTemplates:
     """`required` must cover the system prompt too, not just the content.
 

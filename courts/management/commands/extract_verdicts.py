@@ -36,6 +36,7 @@ from django.utils import timezone
 
 from courts.models import CourtCase, CourtCaseHearing
 from courts.scraper.registers import NGM_DB
+from llm.exhaustion import is_exhaustion
 from courts.scraper.verdicts import (
     DECISION_TYPES,
     PROVENANCE_KEY,
@@ -62,24 +63,12 @@ MAX_TOKENS = 8000
 #: The 2026-07-31 production run lost 3 of 84 cases this way, all of them long
 #: multi-defendant judgments where the reasoning alone outran 8000 tokens.
 ESCALATED_MAX_TOKENS = 32000
-#: How exhaustion presents. ``claude -p`` does not report "out of output tokens":
-#: the assistant turn simply ends unfinished, the CLI wants another turn to
-#: continue, ``--max-turns 1`` denies it, and the run aborts as
-#: ``error_max_turns`` -- "Reached maximum number of turns (1)". So the turn
-#: limit is the messenger and the token budget is the cause, which is why
-#: escalation raises the budget rather than the turn count.
-_EXHAUSTED = ("error_max_turns", "maximum number of turns", "max_tokens")
-
-
-def _is_exhaustion(exc):
-    """True if this failure looks like the model ran out of room, not out of luck.
-
-    Deliberately narrow. A convert failure, a missing document, an auth 403 or a
-    malformed response must NOT be retried at 4x the budget -- that would just
-    spend four times as much to fail the same way.
-    """
-    msg = str(exc).lower()
-    return any(s.lower() in msg for s in _EXHAUSTED)
+#: How exhaustion presents -- and why the turn limit is only the messenger, while
+#: the token budget is the cause -- now lives in :mod:`llm.exhaustion`. It moved
+#: because the same failure was diagnosed from scratch a second time, in
+#: `case_proposals`, which is once too often for it to stay private to this
+#: command. Kept as a module-level alias so this file's tests still name it.
+_is_exhaustion = is_exhaustion
 
 
 class Command(BaseCommand):

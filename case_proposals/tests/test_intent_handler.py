@@ -11,7 +11,10 @@ from unittest import mock
 
 import pytest
 
-from case_proposals.job_handlers import handle_case_proposal_intent
+from case_proposals.job_handlers import (
+    ESCALATED_MAX_TOKENS,
+    handle_case_proposal_intent,
+)
 from llm import templating
 
 pytestmark = pytest.mark.django_db
@@ -136,3 +139,85 @@ class TestPayloadGuards:
         """The whole point of the build_payload seam: the worker runs DB-free."""
         with django_assert_num_queries(0):
             run(payload())
+
+
+class TestAnExhaustedBudgetIsRetriedOnce:
+    """The failure that shipped: a budget spent thinking, billed and useless.
+
+    The first production invocation of this kind died as ``error_max_turns`` after
+    a full premium call, and would have done so on every attempt. These pin both
+    halves of the fix — that exhaustion escalates, and that nothing else does.
+    """
+
+    def test_it_retries_at_the_escalated_budget_and_succeeds(self):
+        answer = {"intent": {"kind": "add_timeline_entry"}, "rationale": "new hearing"}
+        with mock.patch(
+            "llm.prompts.PromptSpec.invoke",
+            side_effect=[RuntimeError("subtype: error_max_turns"), answer],
+        ) as invoke:
+            result = handle_case_proposal_intent(payload(), on_stage=lambda s: None)
+
+        assert invoke.call_count == 2
+        assert result["intent"] == {"kind": "add_timeline_entry"}
+        assert result["escalated"] is True
+
+    def test_the_first_attempt_uses_the_specs_own_budget(self):
+        """Not the escalated one. An answer must come from the documented params."""
+        with mock.patch(
+            "llm.prompts.PromptSpec.invoke",
+            side_effect=[RuntimeError("error_max_turns"), {"intent": None}],
+        ) as invoke:
+            handle_case_proposal_intent(payload(), on_stage=lambda s: None)
+
+        assert "max_tokens" not in invoke.call_args_list[0].kwargs
+        assert invoke.call_args_list[1].kwargs["max_tokens"] == ESCALATED_MAX_TOKENS
+
+    def test_the_lease_is_extended_again_before_paying_for_the_retry(self):
+        """The first call has already eaten the lease's slack."""
+        stages = []
+        with mock.patch(
+            "llm.prompts.PromptSpec.invoke",
+            side_effect=[RuntimeError("error_max_turns"), {"intent": None}],
+        ):
+            handle_case_proposal_intent(payload(), on_stage=stages.append)
+        assert stages == ["prompting", "prompting (escalated)"]
+
+    def test_it_escalates_at_most_once(self):
+        """A second exhaustion is evidence about the prompt, not the budget."""
+        with mock.patch(
+            "llm.prompts.PromptSpec.invoke",
+            side_effect=RuntimeError("error_max_turns"),
+        ) as invoke:
+            with pytest.raises(RuntimeError, match="error_max_turns"):
+                handle_case_proposal_intent(payload(), on_stage=lambda s: None)
+        assert invoke.call_count == 2
+
+    @pytest.mark.parametrize(
+        "message", ["401 Unauthorized", "connection reset", "no such template"]
+    )
+    def test_an_unrelated_failure_is_not_retried(self, message):
+        """Retrying these would spend four times as much to fail the same way."""
+        with mock.patch(
+            "llm.prompts.PromptSpec.invoke", side_effect=RuntimeError(message)
+        ) as invoke:
+            with pytest.raises(RuntimeError, match=message):
+                handle_case_proposal_intent(payload(), on_stage=lambda s: None)
+        assert invoke.call_count == 1
+
+    def test_a_call_that_succeeds_first_time_is_not_marked_escalated(self):
+        result, _ = run(payload())
+        assert result["escalated"] is False
+
+
+class TestTheBudgetIsBigEnoughToFinishAnAnswer:
+    def test_the_spec_budgets_for_reasoning_not_just_for_the_answer(self):
+        """1200 could not finish one. Pinned so it cannot quietly go back.
+
+        The number is not sacred; the property is. On the CLI provider the budget
+        becomes CLAUDE_CODE_MAX_OUTPUT_TOKENS and caps reasoning as well as
+        output, and `courts.extract_verdicts` measured 1200 failing outright after
+        ~4800 output tokens on a comparable prompt.
+        """
+        from llm import prompts as registry
+
+        assert registry.get("case_proposal.intent").max_tokens >= 8000
