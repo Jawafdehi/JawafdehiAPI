@@ -112,3 +112,97 @@ def name_tokens(raw: str) -> tuple[tuple[str, frozenset[str]], ...]:
 def tokens_equal(a, b) -> bool:
     """True when two `(raw, forms)` tokens name the same thing."""
     return bool(a[1] & b[1])
+
+
+# The single bind threshold. Set by the worked table below, NOT by how many binds
+# it produces:
+#     identical after normalisation                        1.00  bind
+#     four tokens bridged across scripts                   0.92  bind
+#     two tokens, one omitted particle                     0.95  bind
+#     four bridged tokens, one omitted particle             0.87  bind
+#     two tokens, two omitted particles                     0.80  review
+#     four bridged tokens, two omitted particles            0.72  review
+#     anchor mismatch, or a non-particle omission           0.00  no match
+# Two stacked guesses is not near-certain, so it reports. Moving this constant
+# moves a name between buckets and changes nothing else about the output.
+MIN_BIND_SCORE = 0.85
+# A token that matches only through romanisation or the curated variant table is
+# weaker evidence than an identical token, but not much weaker.
+VARIANT_PENALTY = 0.02
+# A missing middle particle is the one omission that does not sink a match.
+PARTICLE_PENALTY = 0.05
+# The second and later omissions cost more. Dropping one middle particle is a
+# spelling habit; dropping two means the strings may name different people. With
+# a flat penalty "राम थापा" would bind to "राम बहादुर प्रसाद थापा" at 0.90.
+EXTRA_OMISSION_PENALTY = 0.10
+
+
+def _is_particle(token) -> bool:
+    return bool(token[1] & MIDDLE_PARTICLES)
+
+
+def _anchors_match(left, right) -> bool:
+    """Both names' first-and-last token pair must match, order notwithstanding.
+
+    "Order-insensitive" has to cover a fully reordered two-token name
+    ("Shrestha Anish" vs "अनिष श्रेष्ठ", surname-first against given-name-first),
+    where left[0] pairs with right[-1] rather than right[0]. So this checks the
+    *unordered* pair {left[0], left[-1]} against {right[0], right[-1]}: either
+    the straight correspondence or the swapped one must hold completely. It is
+    still exactly two anchors on each side, still exact-match only — nothing
+    fuzzy, nothing about the interior tokens.
+    """
+    first_l, last_l = left[0], left[-1]
+    first_r, last_r = right[0], right[-1]
+    straight = tokens_equal(first_l, first_r) and tokens_equal(last_l, last_r)
+    swapped = tokens_equal(first_l, last_r) and tokens_equal(last_l, first_r)
+    return straight or swapped
+
+
+def match_score(extracted: str, candidate: str) -> float:
+    """How near-certain it is that these two strings name the same entity.
+
+    1.0 is an exact match after normalisation; 0.0 means "do not bind". Between
+    them the only deductions are VARIANT_PENALTY per token matched through
+    romanisation and PARTICLE_PENALTY per omitted middle particle.
+
+    Order-insensitive, so reordered name parts match. Both ANCHORS -- first and
+    last token -- must match, which is what stops a partial match: extracted
+    "घुरनी देवी खत्वे" against the stored "घुरनी देवी" scores 0.
+    """
+    left, right = name_tokens(extracted), name_tokens(candidate)
+    if not left or not right:
+        return 0.0
+    if not _anchors_match(left, right):
+        return 0.0
+
+    longer, shorter = (left, right) if len(left) >= len(right) else (right, left)
+    # Order-insensitive matching: pull each shorter token out of a mutable pool
+    # of longer tokens (by content, not position) rather than walking both in
+    # lockstep. A positional walk would mis-score a fully reordered name: it
+    # would consume the wrong longer token as "omitted" before ever reaching
+    # the one that actually pairs with the current shorter token.
+    pool = list(longer)
+    variants = 0
+    for token in shorter:
+        match_at = next(
+            (i for i, candidate_token in enumerate(pool) if tokens_equal(token, candidate_token)),
+            None,
+        )
+        if match_at is None:
+            # A token of the shorter name pairs with nothing. Not a match.
+            return 0.0
+        matched = pool.pop(match_at)
+        if token[0] != matched[0]:
+            variants += 1
+
+    if any(not _is_particle(token) for token in pool):
+        return 0.0
+    dropped = len(pool)
+    return max(
+        0.0,
+        1.0
+        - VARIANT_PENALTY * variants
+        - PARTICLE_PENALTY * dropped
+        - EXTRA_OMISSION_PENALTY * max(0, dropped - 1),
+    )
