@@ -154,17 +154,28 @@ class LlmCache:
             "response": response,
             **(meta or {}),
         }
+        # `tmp_name` is bound BEFORE the write, and the cleanup catches Exception
+        # rather than OSError. Both matter: binding it inside the `with` (after
+        # json.dump returns) leaves it unbound if the dump raises, so the handler
+        # itself would raise NameError -- and a non-OSError escaping here would
+        # break this method's contract that an unwritable cache costs a saving,
+        # never a run. It also leaves the temp file on disk to be re-found later.
+        tmp_name = None
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(
                 "w", encoding="utf-8", dir=str(path.parent),
                 prefix=f".{key[:8]}-", suffix=".tmp", delete=False,
             ) as fh:
-                json.dump(record, fh, ensure_ascii=False)
                 tmp_name = fh.name
+                json.dump(record, fh, ensure_ascii=False)
             os.replace(tmp_name, path)
-        except OSError as exc:
-            # An unwritable cache is a lost saving, not a failed run.
+        except Exception as exc:
+            if tmp_name:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
             self._log.warning(
                 "llm-cache: could not write %s (%s)", path.name, type(exc).__name__
             )

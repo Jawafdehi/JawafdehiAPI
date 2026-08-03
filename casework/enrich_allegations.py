@@ -436,6 +436,7 @@ def main(argv=None):
     log_run_footer(
         logger, stage="allegations", stats=stats,
         duration_s=time.monotonic() - start_time, usage_summary=usage_summary,
+        cache_summary=cache_summary,
     )
 
     return report

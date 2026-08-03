@@ -270,8 +270,15 @@ def log_run_header(logger, *, stage, base_url, dry_run, provider, model,
 
 
 def log_run_footer(logger, *, stage, stats: dict, duration_s: float,
-                   usage_summary: str = "") -> None:
-    """One INFO block: per-status counts, wall-clock duration, usage summary."""
+                   usage_summary: str = "", cache_summary: str = "") -> None:
+    """One INFO block: per-status counts, wall-clock duration, usage + cache.
+
+    `cache_summary` belongs in the durable run log, not just on stdout: a run
+    served entirely from the response cache makes zero LLM calls, so
+    `usage_summary` is empty and the log would carry no record of where the
+    output came from. The provenance of a cached run is exactly the thing a
+    reader needs weeks later.
+    """
     counts = ", ".join(f"{k}={v}" for k, v in sorted(stats.items())) or "(no cases)"
     lines = [
         f"=== casework run complete: {stage} ===",
@@ -280,4 +287,6 @@ def log_run_footer(logger, *, stage, stats: dict, duration_s: float,
     ]
     if usage_summary:
         lines.append(f"  usage    : {usage_summary}")
+    if cache_summary:
+        lines.append(f"  cache    : {cache_summary}")
     logger.info("\n".join(lines))

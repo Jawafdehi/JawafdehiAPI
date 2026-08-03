@@ -132,6 +132,31 @@ def test_put_leaves_no_temp_files_behind(tmp_path):
             if p.name.endswith(".tmp")] == []
 
 
+def test_a_failed_write_returns_false_and_leaves_no_temp_file(tmp_path, monkeypatch):
+    """The contract is that an unwritable cache costs a saving, never a run. A
+    serialisation failure must not escape `put`, and must not strand a .tmp file
+    for a later run to trip over."""
+    cache = LlmCache(cache_dir=tmp_path)
+
+    def boom(*a, **kw):
+        raise TypeError("not JSON serialisable")
+
+    monkeypatch.setattr(llm_cache.json, "dump", boom)
+    assert cache.put(_key(), RESPONSE) is False
+    assert cache.writes == 0
+    assert list(tmp_path.rglob("*.tmp")) == []
+    assert list(tmp_path.rglob("*.json")) == []
+
+
+def test_a_failed_mkdir_returns_false_rather_than_raising(tmp_path, monkeypatch):
+    cache = LlmCache(cache_dir=tmp_path)
+    monkeypatch.setattr(
+        llm_cache.Path, "mkdir",
+        lambda *a, **kw: (_ for _ in ()).throw(OSError("read-only fs")),
+    )
+    assert cache.put(_key(), RESPONSE) is False
+
+
 def test_disabled_cache_neither_reads_nor_writes(tmp_path):
     cache = LlmCache(cache_dir=tmp_path, enabled=False)
     assert cache.put(_key(), RESPONSE) is False
@@ -304,3 +329,38 @@ def test_cli_exposes_the_cache_flags(tmp_path):
     assert parser.parse_args(["--no-llm-cache"]).llm_cache is False
     parsed = parser.parse_args(["--llm-cache-dir", str(tmp_path)])
     assert build_llm_cache(parsed).dir == tmp_path
+
+
+def test_invoke_text_param_names_still_match_the_real_signature():
+    """`_call_fields` maps positional args onto `_INVOKE_TEXT_PARAMS`, so that
+    constant is a duplicate of `llm.invoke.invoke_text`'s parameter list. Assert
+    the copy here rather than inspecting the signature at runtime: a rename would
+    already break every enricher (they all call invoke_text by keyword), so a
+    runtime guard defends an event that cannot happen quietly -- but it should
+    still fail in CI rather than in a batch run.
+    """
+    import inspect
+
+    from llm.invoke import invoke_text
+
+    actual = tuple(inspect.signature(invoke_text).parameters)
+    assert actual == llm_cache._INVOKE_TEXT_PARAMS, (
+        "llm.invoke.invoke_text changed shape; update _INVOKE_TEXT_PARAMS"
+    )
+
+
+def test_cache_summary_reaches_the_durable_run_log(caplog):
+    """Printing it to stdout is not enough. A run served entirely from cache
+    makes zero LLM calls, so `usage_summary` is empty and without this the log
+    file records nothing about where the output came from."""
+    import logging
+
+    from casework.common.cli import log_run_footer
+
+    logger = logging.getLogger("test.cache_footer")
+    with caplog.at_level(logging.INFO, logger="test.cache_footer"):
+        log_run_footer(
+            logger, stage="bigo", stats={"enriched": 3}, duration_s=1.0,
+            usage_summary="", cache_summary="llm cache: 3 hit / 0 miss",
+        )
+    assert "cache    : llm cache: 3 hit / 0 miss" in caplog.text
