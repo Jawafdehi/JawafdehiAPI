@@ -10,7 +10,7 @@ import pytest
 from django.core.exceptions import ValidationError
 from hypothesis import given, settings
 
-from cases.fields import TextListField, TimelineListField
+from cases.fields import HttpsURLField, TextListField, TimelineListField
 from tests.strategies import text_list, timeline_list
 
 # ============================================================================
@@ -266,3 +266,55 @@ def test_timeline_list_field_rejects_malformed_end_date():
             [{"date": "2020-07-15", "end_date": "not-a-date", "title": "Event"}],
             None,
         )
+
+
+# ============================================================================
+# HttpsURLField Tests
+# ============================================================================
+#
+# The whole point of this subclass is the ``assume_scheme`` it forwards at the
+# FORM layer -- that is what stops Django 5.x emitting RemovedInDjango60Warning
+# for every ModelForm over a URLField, which was ~98% of this suite's warning
+# volume. Nothing else asserts it, and a silent regression here (dropping the
+# formfield override, or the migration drifting back to models.URLField) would
+# only show up as warning noise creeping back in.
+
+
+def test_https_url_field_formfield_pins_assume_scheme():
+    """The form field assumes ``https``, which is what silences the deprecation."""
+    assert HttpsURLField().formfield().assume_scheme == "https"
+
+
+def test_https_url_field_prepends_https_to_a_scheme_less_value():
+    """A scheme-less value cleans to https://, i.e. Django 6.0 behaviour today."""
+    assert (
+        HttpsURLField().formfield().clean("example.com/banner.png")
+        == "https://example.com/banner.png"
+    )
+    # An explicit scheme is left alone -- only the ABSENT scheme is filled in.
+    assert (
+        HttpsURLField().formfield().clean("http://example.com/x.png")
+        == "http://example.com/x.png"
+    )
+
+
+def test_https_url_field_caller_can_still_override_assume_scheme():
+    """``assume_scheme`` is a default, not a lock -- the ``**kwargs`` order matters."""
+    assert HttpsURLField().formfield(assume_scheme="http").assume_scheme == "http"
+
+
+def test_https_url_field_is_a_database_level_noop():
+    """``deconstruct()`` is inherited, so the column is an ordinary URLField.
+
+    This is why migration 0055 is state-only: same path-independent kwargs, same
+    ``varchar``. If this subclass ever grows a ``deconstruct()`` or a different
+    ``db_type``, that migration stops being a no-op and needs revisiting.
+    """
+    from django.db import connection, models
+
+    _, _, _, kwargs = HttpsURLField(max_length=500, blank=True).deconstruct()
+    _, _, _, plain = models.URLField(max_length=500, blank=True).deconstruct()
+    assert kwargs == plain
+    assert HttpsURLField(max_length=500).db_type(connection) == models.URLField(
+        max_length=500
+    ).db_type(connection)

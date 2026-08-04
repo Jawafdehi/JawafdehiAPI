@@ -6,9 +6,11 @@ from unittest.mock import MagicMock
 
 from jawafdehi_shared.search.indexing import (
     delete_doc,
+    flatten_strings,
     has_devanagari,
     name_to_titles,
     title_translit,
+    type_token,
 )
 
 
@@ -38,6 +40,44 @@ def test_title_translit_carries_romanization():
     out = title_translit("शेर बहादुर", None)
     assert out  # a non-empty romanized bridge string
     assert title_translit(None, None) is None
+
+
+# ---------------------------------------------------------------------------
+# flatten_strings / type_token
+# ---------------------------------------------------------------------------
+#
+# These two were byte-identical private copies in entities/search_index.py and
+# materials/search_index.py, and neither copy was ever tested directly — only
+# through each app's build_doc. They are shared now, so a change here moves BOTH
+# the NES entity index and the NGM material index at once; that is what these
+# pin.
+
+
+def test_flatten_strings_handles_every_json_ld_shape():
+    assert flatten_strings("  Nepal  ") == ["Nepal"]
+    # language map -> every value, dict order preserved
+    assert flatten_strings({"ne": "नेपाल", "en": "Nepal"}) == ["नेपाल", "Nepal"]
+    # lists and tuples recurse, and nest arbitrarily deep
+    assert flatten_strings(["a", ("b",), [{"en": "c"}]]) == ["a", "b", "c"]
+
+
+def test_flatten_strings_drops_empty_and_non_strings():
+    # Blank/whitespace-only strings are dropped, NOT kept as "".
+    assert flatten_strings(["a", "", "   ", None, 42, True, {}, []]) == ["a"]
+    assert flatten_strings(None) == []
+    # Duplicates are NOT deduped — callers that need that do it themselves
+    # (build_doc's `if ident not in identifiers` guard depends on this).
+    assert flatten_strings(["a", "a"]) == ["a", "a"]
+
+
+def test_type_token_renders_at_type():
+    assert type_token("Person") == "Person"
+    # A multi-type document comma-joins, matching how the promoted
+    # entity_type / material_type columns store it.
+    assert type_token(["Person", "PublicOfficial"]) == "Person,PublicOfficial"
+    # Absent @type is "" (a falsy token), never the string "None".
+    assert type_token(None) == ""
+    assert type_token([]) == ""
 
 
 def test_delete_doc_swallows_404():

@@ -28,7 +28,6 @@ from jawafdehi_shared.search.opensearch import MATERIAL_INDEX, make_client
 SOURCE_APP = "ngm"
 
 
-
 def build_doc(obj: Any) -> dict[str, Any]:
     """Map a ``Material`` to the common index doc. Pure: no OpenSearch calls."""
     data: dict[str, Any] = getattr(obj, "data", None) or {}

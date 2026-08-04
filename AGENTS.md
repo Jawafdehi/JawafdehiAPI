@@ -188,5 +188,12 @@ do not push to it.
   Skip `S` (the overwhelming majority are test asserts; the rest are env-var
   names, not secrets) and `ARG` (Django signal/override signatures).
 - **Coverage is never measured** — no `pytest-cov`, nothing in CI.
+- `review.scorer.score_case` builds each rule dict with a trailing `**fields`
+  spread, so the per-rule KEY ORDER differs from the pre-decomposition version
+  (`score`/`confidence`/… now come after `description`/`good_examples`/
+  `bad_examples`). Values are identical — verified by golden-output diff across
+  8 scenarios. It only matters because the result lands in `ReviewRun.result`
+  (a `JSONField`): don't add a hash/equality check over the serialized form
+  without normalizing key order first.
 - `TRY400` at `jawafdehi_shared/drf/throttling.py:93` and `newsletter/views.py:171`
   log `.error` where `.exception` would keep the stack trace.

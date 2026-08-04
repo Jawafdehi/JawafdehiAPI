@@ -35,7 +35,6 @@ from jawafdehi_shared.search.opensearch import ENTITY_INDEX, make_client
 SOURCE_APP = "nes"
 
 
-
 def build_doc(obj: Any) -> dict[str, Any]:
     """Map a ``StoredEntity`` (or any object with ``.iri``/``.data``) to the
     common index doc. Pure: no OpenSearch calls."""
