@@ -1089,6 +1089,100 @@ def test_events_file_covers_start_extract_write_on_apply_happy_path(
     assert ("write", "enriched") in steps_and_statuses
 
 
+class TestBatchCsvWiring:
+    """The bigo enricher must honour `--batch-csv` like the other four.
+
+    It was the one enricher left on the hand-rolled `select_cases(...)` +
+    `cases[:limit]` pair, so it advertised `--batch-csv` in `--help` (the flag
+    is registered by the shared `add_common_args`) while ignoring it entirely --
+    the worst of the three possible states. An operator passing a reviewed batch
+    would have got a full-corpus run that looked like it had been scoped.
+
+    `test_batch_csv_cli_wiring.py` covers the parse-time guards and `convert.py`.
+    These drive `main()` end to end, because the bug was in the wiring, not in
+    the selection algebra.
+    """
+
+    @staticmethod
+    def _ready(slug, state="DRAFT"):
+        """A case that reaches extraction, with a caller-chosen slug/state."""
+        return {**PRESS_CASE_READY, "slug": slug, "state": state}
+
+    @staticmethod
+    def _batch(tmp_path, *slugs):
+        path = tmp_path / "batch.csv"
+        path.write_text("slug\n" + "".join(f"{s}\n" for s in slugs), encoding="utf-8")
+        return str(path)
+
+    @staticmethod
+    def _visited():
+        """Slugs the per-case loop actually opened, in order."""
+        return [r["slug"] for r in _read_events(_events_path()) if r["step"] == "start"]
+
+    def test_a_case_outside_the_batch_is_never_touched(
+        self, monkeypatch, patched_fetch_markdown, tmp_path
+    ):
+        _run_main(
+            monkeypatch,
+            [self._ready("case-a"), self._ready("case-b"), self._ready("case-zzz")],
+            invoke_text_stub=lambda **kw: "{}",
+            argv=["--dry-run", "--batch-csv", self._batch(tmp_path, "case-a", "case-b")],
+        )
+        assert self._visited() == ["case-a", "case-b"]
+
+    def test_limit_takes_the_files_first_rows_not_the_apis(
+        self, monkeypatch, patched_fetch_markdown, tmp_path
+    ):
+        """The reason this wiring matters. `--limit` sliced whatever order the
+        API returned, so a `--limit 10` smoke test picked an arbitrary ten --
+        in one real run, nine that already had a `bigo`, producing zero LLM
+        calls. Against a batch the slice is the operator's first ten rows.
+        """
+        # API order is the reverse of the batch order, so an unbatched slice
+        # would take case-c and case-b.
+        _run_main(
+            monkeypatch,
+            [self._ready("case-c"), self._ready("case-b"), self._ready("case-a")],
+            invoke_text_stub=lambda **kw: "{}",
+            argv=["--dry-run", "--limit", "2",
+                  "--batch-csv", self._batch(tmp_path, "case-a", "case-b", "case-c")],
+        )
+        assert self._visited() == ["case-a", "case-b"]
+
+    def test_a_since_published_batch_row_is_skipped(
+        self, monkeypatch, patched_fetch_markdown, tmp_path
+    ):
+        """A batch still passes the state gate, unlike `--slug`. A stale CSV
+        listing a case that has since been PUBLISHED must not re-enrich it.
+
+        `case-other` is DRAFT and absent from the batch purely so this test can
+        fail for the right reason: without the wiring, bulk selection would
+        already gate out the PUBLISHED row, so the assertion would pass while
+        proving nothing. `case-other` makes an ignored batch visible.
+        """
+        _run_main(
+            monkeypatch,
+            [self._ready("case-a"), self._ready("case-published", state="PUBLISHED"),
+             self._ready("case-other")],
+            invoke_text_stub=lambda **kw: "{}",
+            argv=["--dry-run",
+                  "--batch-csv", self._batch(tmp_path, "case-a", "case-published")],
+        )
+        assert self._visited() == ["case-a"]
+
+    def test_without_a_batch_the_run_is_still_bulk(
+        self, monkeypatch, patched_fetch_markdown, tmp_path
+    ):
+        """Wiring the batch in must not narrow the default path."""
+        _run_main(
+            monkeypatch,
+            [self._ready("case-a"), self._ready("case-b")],
+            invoke_text_stub=lambda **kw: "{}",
+            argv=["--dry-run"],
+        )
+        assert sorted(self._visited()) == ["case-a", "case-b"]
+
+
 class TestCaseListingNarratesItself:
     """The 33s of silence before the first case.
 

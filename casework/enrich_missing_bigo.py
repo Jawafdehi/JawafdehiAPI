@@ -47,7 +47,7 @@ from casework.common.llm import bootstrap, tier_for
 from casework.common.materials import materials_of_type, source_text
 from casework.common.parse import balanced_object
 from casework.common.pipeline import PRESS_TYPES, STAGES, RunReport, unmet_prerequisites
-from casework.common.select import select_cases
+from casework.common.select import select_for_run
 
 log = logging.getLogger("casework.enrich_missing_bigo")
 
@@ -551,9 +551,9 @@ def main(argv=None):
         _die("build_api", exc)
 
     # Listing production is 16 requests and ~33s before the first case is even
-    # looked at, and `--limit N` does not shorten it (the slice below happens
-    # after the whole list is in memory). Report each page through the run
-    # logger, so the wait is legible live and its shape is on the record
+    # looked at, and `--limit N` does not shorten it -- `select_for_run` slices
+    # after the whole list is already in memory. Report each page through the
+    # run logger, so the wait is legible live and its shape is on the record
     # afterwards -- an unnarrated 33s gap reads as a hang.
     def _list_progress(page, fetched, total):
         _run_event(
@@ -568,14 +568,7 @@ def main(argv=None):
 
     _run_event(logger, paths, run_id, "list_cases", "ok", f"{len(all_cases)} case(s) fetched")
 
-    cases = select_cases(
-        all_cases,
-        fiscal_year=args.fiscal_year,
-        slugs=args.slug,
-        court_cases=args.court_case,
-    )
-    if args.limit:
-        cases = cases[: args.limit]
+    cases = select_for_run(all_cases, args)
 
     total = len(cases)
     log_run_header(
