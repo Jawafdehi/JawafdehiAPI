@@ -46,6 +46,17 @@ namesake. That is the accepted cost of the mode; every such bind is marked
 labelled set: precision 0.872, recall 0.872, and all five wrong binds are
 Election Commission candidate records rather than namesake mix-ups.
 
+TWO REFUSALS SURVIVE THAT MODE, both because they are not "uncertain" at all:
+
+* A CROSS-SCRIPT-ONLY MATCH (`is_cross_script_only`). Overriding the other vetoes
+  accepts a known risk about a name that DID match; overriding this one asserts a
+  match the matcher rejects, because the score exists only through romanisation.
+  कमल थापा scores 0.96 against a `Kamala Thapa` entity and 0.00 against
+  कमला थापा -- binding it names a woman in a case charging a man.
+* AN UNREADABLE ENTITY DOCUMENT (`apply_document_veto`'s fail-closed branch). One
+  403 or 502 would otherwise bind whichever namesake sorted first with nothing
+  having been checked at all.
+
 `--strict` is the conservative pipeline: an ambiguity or a veto goes to the review
 report instead of binding. Same labelled set: precision 1.000, recall 0.846.
 
@@ -123,6 +134,7 @@ from casework.entity_resolver import (
     REVIEW,
     Decision,
     apply_document_veto,
+    is_cross_script_only,
     normalise_name,
     resolve,
 )
@@ -393,7 +405,11 @@ class EntityBindPlan:
     if_match: str | None = None
     n_current: int = 0
     bound: list = field(default_factory=list)    # (name, Decision, notes)
-    review: list = field(default_factory=list)   # (name, Decision)
+    # The section is on the row because it belongs to the row: two extracted items
+    # can name the same person in different sections, so it cannot be recovered
+    # from the name afterwards. Carries the raw (lowercased) value for an
+    # unrecognised section, which is exactly what a caseworker needs to see.
+    review: list = field(default_factory=list)   # (name, Decision, section)
     nomatch: list = field(default_factory=list)  # (name, Decision)
     patch_items: list = field(default_factory=list)
     reason: str = ""
@@ -429,6 +445,14 @@ class EntityBindPlan:
 # testing a reason string by eye is how they would drift apart.
 PROMOTED_PREFIX = "promoted over: "
 
+# Appended to the veto reason of the one REVIEW permissive mode will not promote,
+# so the review row explains itself. See `_promote_top_candidate`.
+NOT_PROMOTED_CROSS_SCRIPT = (
+    "not promoted even in permissive mode: the winning candidate carries no "
+    "Devanagari name, so its score comes from romanisation, which folds a "
+    "masculine name into its feminine form. Binding it would assert a match that "
+    "a same-script comparison refuses outright. Confirm by hand")
+
 
 def is_promoted(decision):
     """True when this bind won by overriding a veto, so it is one to double-check."""
@@ -442,6 +466,12 @@ def _plan_sections(plan):
     the list actually being written, so the report cannot disagree with the
     request body. Keeping a parallel copy in `plan.bound` would be a second
     source of truth for the same fact.
+
+    Total over `plan.bound`, so callers index it directly. Every bound decision
+    reached `additions` and `merge_entity_binds` only ever adds to `current`, so a
+    missing key would mean the plan and the request body have diverged -- a bug to
+    raise on, not to paper over with a default section that would file the entity
+    under a relationship nobody asserted.
     """
     return {item["nes_id"]: item["relationship_type"]
             for item in plan.patch_items if item.get("nes_id")}
@@ -460,15 +490,15 @@ def _bind_row(slug, name, decision, notes, section, written):
             "reason": decision.reason, "written": written}
 
 
-def _promote_top_candidate(decision):
+def _promote_top_candidate(decision, extracted_name):
     """A vetoed/ambiguous REVIEW -> a BIND on its highest-scoring candidate.
 
     This is the whole of "bind every name that matched something". `resolve`
-    returns REVIEW for four different reasons -- ambiguity, truncation,
-    cross-script matching, province/institution scope -- and
-    `apply_document_veto` adds a fifth. All five mean "a candidate cleared the
-    score threshold but something else was unproven", so all five have a top
-    candidate sitting right there in `decision.candidates`.
+    returns REVIEW for ambiguity, truncation, name vetoes and province/institution
+    scope, and `apply_document_veto` adds the election-record one. Each of those
+    means "a candidate cleared the score threshold but something ELSE was
+    unproven", so each has a top candidate sitting right there in
+    `decision.candidates`.
 
     Deterministic by construction: `resolve` sorts `candidates` by
     `(-score, nes_id)`, so two entities tied at the same score always resolve to
@@ -476,15 +506,33 @@ def _promote_top_candidate(decision):
     run before it. NO_MATCH is left alone: nothing scored, so there is nothing
     to promote, and this module may never create an NES entity.
 
-    The cost is explicit: a promoted ambiguity is a coin flip between namesakes.
-    `decision.reason` is carried into the bind's note so the row says why it was
-    uncertain, and `*.binds.jsonl` records the runners-up that lost.
+    ONE REVIEW IS NEVER PROMOTED: a cross-script-only match (see
+    `is_cross_script_only`). There the NAME itself is what is unproven, so
+    promoting does not accept a known risk, it asserts a match the matcher rejects
+    -- कमल थापा scores 0.96 against a `Kamala Thapa` entity and 0.00 against
+    कमला थापा, so the bind would name a woman in a case charging a man. Checked
+    against the candidate rather than against `decision.reason`, because
+    `resolve` reports only the FIRST veto that fires: a name that is both
+    ambiguous and cross-script comes back reading "ambiguous", and a reason-text
+    check would promote it.
+
+    The remaining cost is explicit: a promoted ambiguity is a coin flip between
+    namesakes. `decision.reason` is carried into the bind's note so the row says
+    why it was uncertain, and `*.binds.jsonl` records the runners-up that lost.
     """
     if decision.verdict != REVIEW or not decision.candidates:
         return decision
     score, nes_id, matched = decision.candidates[0]
     if score < MIN_BIND_SCORE:
         return decision
+    if is_cross_script_only(extracted_name, matched):
+        # Say why this one stayed behind while permissive mode promoted its
+        # neighbours, or the row reads as an ordinary ambiguity that a caseworker
+        # would expect to have been bound like all the others.
+        return Decision(decision.verdict, decision.nes_id, decision.score,
+                        decision.matched_name,
+                        f"{decision.reason}; {NOT_PROMOTED_CROSS_SCRIPT}",
+                        decision.candidates)
     return Decision(BIND, nes_id, score, matched,
                     f"{PROMOTED_PREFIX}{decision.reason}", decision.candidates)
 
@@ -495,7 +543,9 @@ def _resolve_with_vetoes(api, name, strict=False):
     no role can drift onto a different guard.
 
     `strict=False` (the default) binds the best-scoring candidate whenever one
-    cleared the threshold, even if a veto fired -- see `_promote_top_candidate`.
+    cleared the threshold, even if a veto fired -- with the two exceptions
+    `_promote_top_candidate` and the fail-closed branch below spell out: a
+    cross-script-only match and an unreadable entity document are never promoted.
     `strict=True` restores the conservative behaviour: a veto means REVIEW and a
     human decides.
 
@@ -523,9 +573,16 @@ def _resolve_with_vetoes(api, name, strict=False):
         # Promote BEFORE the document read, so a name that `resolve` vetoed still
         # gets its winning candidate checked against its own document below
         # rather than skipping that read entirely.
-        decision = _promote_top_candidate(decision)
+        decision = _promote_top_candidate(decision, name)
         if not decision.is_bind:
             return decision
+
+    # What the first promotion overrode, if it happened. `apply_document_veto`
+    # REPLACES the reason, so without this the earlier veto is lost: a name that
+    # was ambiguous AND looked like an election record would end up recorded as
+    # only the second, and `*.binds.jsonl` -- the sole audit trail for permissive
+    # mode -- would under-report how uncertain the bind actually was.
+    overridden = decision.reason[len(PROMOTED_PREFIX):] if is_promoted(decision) else ""
 
     read_error = None
     try:
@@ -535,6 +592,12 @@ def _resolve_with_vetoes(api, name, strict=False):
         read_error = str(exc)
     readable = isinstance(document, dict) and bool(document)
     decision = apply_document_veto(decision, document)
+    if overridden and decision.reason != f"{PROMOTED_PREFIX}{overridden}":
+        # The veto (or the unreadable-document branch) wrote over the reason.
+        decision = Decision(
+            decision.verdict, decision.nes_id, decision.score,
+            decision.matched_name, f"{decision.reason}; also {overridden}",
+            decision.candidates)
     if read_error:
         log.warning("get_entity(%s) failed while veto-checking %r: %s",
                     decision.nes_id if decision.nes_id else "<downgraded>",
@@ -551,7 +614,7 @@ def _resolve_with_vetoes(api, name, strict=False):
     # with nothing having actually been matched against. Distinguished by whether
     # the document came back, never by parsing the veto's reason text.
     if not strict and readable:
-        decision = _promote_top_candidate(decision)
+        decision = _promote_top_candidate(decision, name)
     return decision
 
 
@@ -605,14 +668,21 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
     press-release PDF lacked a MARKDOWN role, or the LLM call failed. See
     `casework/court_record.py`, which is kept and tested but unwired.
 
-    One guard survives permissive mode: `apply_document_veto`'s FAIL-CLOSED
-    branch. `api.get_entity` is wrapped in a bare try/except, and ANY exception
-    (timeout, 403, 502, a renamed/404 entity) or an empty body means the document
-    was never read -- which stays REVIEW. Uncertainty about which namesake is
-    right is a judgement the caller chose to accept; an HTTP failure is not a
-    judgement at all, and promoting it would bind on evidence nobody ever saw.
-    The exception's own text is folded into the reason (and logged), so a
-    misconfigured base URL is diagnosable rather than looking like a real veto.
+    TWO GUARDS SURVIVE PERMISSIVE MODE. Both draw the same line: the caller chose
+    to accept uncertainty ABOUT a match, not to invent one.
+
+    1. `apply_document_veto`'s FAIL-CLOSED branch. `api.get_entity` is wrapped in a
+       bare try/except, and ANY exception (timeout, 403, 502, a renamed/404 entity)
+       or an empty body means the document was never read -- which stays REVIEW.
+       Which namesake is right is a judgement the caller chose to accept; an HTTP
+       failure is not a judgement at all, and promoting it would bind on evidence
+       nobody ever saw. The exception's own text is folded into the reason (and
+       logged), so a misconfigured base URL is diagnosable rather than looking like
+       a real veto.
+    2. `_promote_top_candidate`'s CROSS-SCRIPT refusal. A candidate with no
+       Devanagari name only scored through romanisation, which folds a masculine
+       name into its feminine form; there the name itself is what is unproven, so
+       there is no "best-scoring match" to fall back on.
     """
     slug = case.get("slug")
     state = case.get("state")
@@ -664,13 +734,13 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
                 f"of the {len(RELATIONSHIP_TYPES)} the case API accepts "
                 f"({', '.join(RELATIONSHIP_TYPES)}), so there is no section to "
                 "bind it into. Reported without spending a search request",
-                ())))
+                ()), rel_type))
             continue
 
         decision = _resolve_with_vetoes(api, name, strict=strict)
 
         if decision.verdict == REVIEW:
-            plan.review.append((name, decision))
+            plan.review.append((name, decision, rel_type))
             continue
         if decision.verdict == NO_MATCH:
             plan.nomatch.append((name, decision))
@@ -1026,7 +1096,8 @@ def main(argv=None):
         "--strict", action="store_true",
         help="Bind only when exactly one NES entity matched and no veto fired; "
              "send ambiguities and vetoed matches to review instead. Off by "
-             "default: the default binds the best-scoring match for every name.")
+             "default: the default binds the best-scoring match for every name, "
+             "except a match that exists only across scripts.")
     args = ap.parse_args(argv)
 
     setup_logging(args.verbose)
@@ -1258,18 +1329,16 @@ def main(argv=None):
                       level=logging.WARNING if refused_state else logging.ERROR)
             continue
 
-        # The section the extraction ASKED for, by name. A review row used to be
-        # hardcoded `"role": "related"`, which is now simply wrong -- and the
-        # section is the most useful thing on the row for triage, because it says
-        # whether an unresolved name was going to be an accused or a district.
-        asked_section = {
-            (item.get("entity_name") or "").strip():
-                (item.get("relationship_type") or "").strip().lower()
-            for item in valid_items
-        }
-        for name, decision in plan.review:
+        # `role` is the section the extraction ASKED for, which the planner records
+        # per review row. It used to be hardcoded `"related"`, then looked up in a
+        # name-keyed dict -- both wrong, the second one whenever an extraction
+        # names the same person in two sections, where every row got the last
+        # section seen. The section is the most useful field on the row for triage,
+        # because it says whether an unresolved name was going to be an accused or
+        # a district.
+        for name, decision, section in plan.review:
             review_rows.append({"slug": slug, "extracted": name,
-                                "role": asked_section.get(name, ""),
+                                "role": section,
                                 "reason": decision.reason, "score": decision.score,
                                 "candidates": [list(c) for c in decision.candidates]})
         for name, decision in plan.nomatch:
@@ -1311,7 +1380,7 @@ def main(argv=None):
             total_bound += counts["bound"]
             sections = _plan_sections(plan)
             for name, decision, notes in plan.bound:
-                section = sections.get(decision.nes_id, "related")
+                section = sections[decision.nes_id]
                 bind_rows.append(
                     _bind_row(slug, name, decision, notes, section, False))
                 total_promoted += is_promoted(decision)
@@ -1333,7 +1402,7 @@ def main(argv=None):
         total_bound += counts["bound"]
         sections = _plan_sections(plan)
         for name, decision, notes in plan.bound:
-            section = sections.get(decision.nes_id, "related")
+            section = sections[decision.nes_id]
             bind_rows.append(_bind_row(slug, name, decision, notes, section, True))
             total_promoted += is_promoted(decision)
             print(f"  BOUND ({section}) {name}  ->  {decision.nes_id}"

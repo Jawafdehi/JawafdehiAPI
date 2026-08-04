@@ -1280,6 +1280,128 @@ def test_promotion_is_deterministic_across_candidate_orderings():
     assert bound[0] == bound[1] == anish_a["id"]
 
 
+# A candidate that exists in NES with an English title only, so the only available
+# comparison is Devanagari-against-Latin. That comparison goes through
+# `to_roman_colloquial`, which folds कमल (masculine) into कमला (feminine): the pair
+# scores 0.96 across scripts and 0.00 within Devanagari.
+KAMALA_IRI = "https://jawafdehi.org/entity/person/kamala-thapa-4f21ac"
+KAMALA_LATIN_ONLY = {"id": KAMALA_IRI, "title": {"en": "Kamala Thapa"}, "score": 190.0}
+
+
+def test_permissive_mode_refuses_to_promote_a_cross_script_only_match():
+    # THE ONE VETO PERMISSIVE MODE LEAVES STANDING. Every other promotion binds a
+    # name that matched, on grounds outside the name; this one would bind a name
+    # that did not match at all -- कमला थापा is a woman, कमल थापा is a man, and
+    # only romanisation makes them equal. The extracted name must stay in review
+    # even though its top candidate scores 0.96, well over MIN_BIND_SCORE.
+    case = {"slug": "case-kamal", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"कमल थापा": [KAMALA_LATIN_ONLY]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "कमल थापा", "relationship_type": "accused", "notes": "क"}])
+
+    assert plan.action == "NOOP"
+    assert plan.patch_items == []
+    assert plan.bound == []
+    assert len(plan.review) == 1
+    _name, decision, section = plan.review[0]
+    assert decision.nes_id is None
+    assert section == "accused"
+    assert "across scripts" in decision.reason
+    assert "not promoted" in decision.reason
+    # The candidate is preserved so a caseworker can confirm or reject it by hand;
+    # only the automatic bind is refused.
+    assert decision.candidates[0][1] == KAMALA_IRI
+    # And the document was never fetched: a name this module will not bind must
+    # not cost an HTTP round trip either.
+    assert api.get_entity_calls == []
+
+
+def test_a_cross_script_match_is_refused_even_when_another_veto_reports_first():
+    # The reason `_promote_top_candidate` checks the CANDIDATE and not
+    # `decision.reason`. `resolve` reports only the first veto that fires, and
+    # ambiguity is checked before the cross-script guard -- so a name that is both
+    # comes back reading "ambiguous", and a reason-text check would promote it,
+    # restoring the exact wrong bind. Two Latin-only namesakes, both above
+    # threshold: the reason says ambiguous, the refusal must still happen.
+    second = {"id": "https://jawafdehi.org/entity/person/kamala-thapa-9b7e10",
+              "title": {"en": "Kamala Thapa"}, "score": 188.0}
+    case = {"slug": "case-kamal-2", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"कमल थापा": [KAMALA_LATIN_ONLY, second]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "कमल थापा", "relationship_type": "accused", "notes": "क"}])
+
+    assert plan.bound == []
+    _name, decision, _section = plan.review[0]
+    assert "ambiguous" in decision.reason      # the veto that reported
+    assert "not promoted" in decision.reason   # the refusal that still applies
+    assert decision.nes_id is None
+
+
+def test_a_same_script_candidate_is_still_promoted_over_its_veto():
+    # The other side of the guard: refusing cross-script must not quietly turn off
+    # promotion generally. Same names, same ambiguity, but the candidates carry
+    # Devanagari titles -- so the comparison was fair and the bind goes ahead.
+    thapa_a = {"id": "https://jawafdehi.org/entity/person/kamal-thapa-111111",
+               "title": {"ne": "कमल थापा"}, "score": 190.0}
+    thapa_b = {"id": "https://jawafdehi.org/entity/person/kamal-thapa-222222",
+               "title": {"ne": "कमल थापा"}, "score": 189.0}
+    case = {"slug": "case-kamal-3", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"कमल थापा": [thapa_a, thapa_b]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "कमल थापा", "relationship_type": "accused", "notes": "क"}])
+
+    assert plan.review == []
+    _name, decision, _notes = plan.bound[0]
+    assert decision.nes_id == thapa_a["id"]
+    assert is_promoted(decision)
+    assert "ambiguous" in decision.reason
+
+
+def test_strict_mode_also_refuses_a_cross_script_only_match():
+    # Strict mode never promoted anything, so this is unchanged behaviour --
+    # asserted so the two modes cannot diverge on the one case where they must
+    # agree.
+    case = {"slug": "case-kamal-strict", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"कमल थापा": [KAMALA_LATIN_ONLY]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "कमल थापा", "relationship_type": "accused", "notes": "क"}],
+        strict=True)
+
+    assert plan.bound == []
+    assert plan.review[0][1].nes_id is None
+
+
+def test_each_review_row_reports_its_own_section():
+    # One person, named in two sections by the same extraction -- a witness in a
+    # case who is also alleged, which the prompt allows. The section is recorded on
+    # the review row itself for exactly this reason: derived from a name-keyed dict
+    # instead, both rows reported the LAST section seen, so a caseworker triaging
+    # `*.review.jsonl` would see two `witness` rows and no `alleged` one.
+    case = {"slug": "case-two-roles", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अनिष श्रेष्ठ": [ANISH_A, ANISH_B]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "alleged", "notes": "क"},
+        {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "witness", "notes": "ख"}],
+        strict=True)
+
+    assert [section for _n, _d, section in plan.review] == ["alleged", "witness"]
+
+
+def test_an_unrecognised_section_is_reported_verbatim_on_its_review_row():
+    # The row exists to tell a caseworker what the model actually said, so the raw
+    # value is what goes on it -- not "" and not a guessed section.
+    case = {"slug": "case-bad-section", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "Suspect", "notes": "क"}])
+
+    _name, decision, section = plan.review[0]
+    assert section == "suspect"
+    assert "is not one of the" in decision.reason
+    # Refused before a search request was spent.
+    assert api.search_calls == []
+
+
 # --- Correction 1: the document veto (Task 5's `apply_document_veto`) -----
 
 
@@ -1300,7 +1422,7 @@ def test_strict_downgrades_a_bind_to_review_when_the_document_is_an_election_rec
     assert plan.patch_items == []
     assert plan.bound == []
     assert len(plan.review) == 1
-    name, decision = plan.review[0]
+    name, decision, _section = plan.review[0]
     assert name == "अंकुर खत्री"
     assert decision.nes_id is None
     assert "Election Commission" in decision.reason
@@ -1327,6 +1449,40 @@ def test_permissive_binds_an_election_record_and_records_the_overridden_veto():
     assert "Election Commission" in decision.reason
 
 
+def test_a_doubly_uncertain_bind_records_both_vetoes_it_overrode():
+    # `apply_document_veto` REPLACES the reason, so a name that was ambiguous AND
+    # turned out to be an election record used to end up recorded as only the
+    # second. `*.binds.jsonl` is the whole audit trail for permissive mode -- the
+    # file a caseworker filters to find the judgement calls -- so it must not
+    # under-report how uncertain a bind was.
+    election_doc = {"identifier": [{"propertyID": "ecn-candidate-id", "value": "12345"}]}
+    case = {"slug": "case-both", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अनिष श्रेष्ठ": [ANISH_A, ANISH_B]},
+                         documents={ANISH_A["id"]: election_doc})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related", "notes": "क"}])
+
+    _name, decision, _notes = plan.bound[0]
+    assert decision.nes_id == ANISH_A["id"]
+    assert is_promoted(decision)
+    assert "Election Commission" in decision.reason   # the second veto
+    assert "ambiguous" in decision.reason             # the first, no longer lost
+
+
+def test_a_single_overridden_veto_is_not_recorded_twice():
+    # The carry-forward must fire only when the reason was actually replaced. A
+    # promoted ambiguity whose document comes back clean passes through
+    # `apply_document_veto` untouched, so it keeps exactly one reason.
+    case = {"slug": "case-once", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अनिष श्रेष्ठ": [ANISH_A, ANISH_B]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related", "notes": "क"}])
+
+    _name, decision, _notes = plan.bound[0]
+    assert decision.reason.count("ambiguous") == 1
+    assert "; also" not in decision.reason
+
+
 def test_plan_downgrades_a_bind_to_review_when_get_entity_raises():
     # Fail closed: one transient 403/502 on the document read must not let a
     # BIND survive. This is the whole point of the try/except around
@@ -1343,7 +1499,7 @@ def test_plan_downgrades_a_bind_to_review_when_get_entity_raises():
     assert plan.patch_items == []
     assert plan.bound == []
     assert len(plan.review) == 1
-    name, decision = plan.review[0]
+    name, decision, _section = plan.review[0]
     assert decision.nes_id is None
     assert api.get_entity_calls == [ANKUR_IRI]
 
@@ -1478,7 +1634,7 @@ def test_a_section_the_api_does_not_accept_reviews_without_searching(relationshi
     assert plan.patch_items == []
     assert plan.bound == []
     assert len(plan.review) == 1
-    name, decision = plan.review[0]
+    name, decision, _section = plan.review[0]
     assert name == "अंकुर खत्री"
     assert decision.nes_id is None
     assert api.search_calls == []
@@ -1537,7 +1693,7 @@ def test_plan_folds_the_get_entity_exception_text_into_the_review_reason():
         {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}])
 
     assert len(plan.review) == 1
-    _, decision = plan.review[0]
+    _, decision, _section = plan.review[0]
     assert "502 Bad Gateway from api.example" in decision.reason
 
 
@@ -1571,7 +1727,7 @@ def test_plan_downgrades_a_bind_when_search_reports_an_incomplete_window():
     assert plan.patch_items == []
     assert plan.bound == []
     assert len(plan.review) == 1
-    _, decision = plan.review[0]
+    _, decision, _section = plan.review[0]
     assert decision.nes_id is None
     assert "truncated mid-block" in decision.reason
 

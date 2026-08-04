@@ -268,6 +268,42 @@ def has_devanagari(text: str) -> bool:
     return bool(_DEVANAGARI.search(text or ""))
 
 
+# The cross-script veto, as a predicate and a reason, named so callers can refer
+# to THIS veto rather than pattern-matching its prose.
+#
+# It is the odd one out among the five vetoes, and the difference is what makes it
+# worth naming. The other four hold back a name that DID match, on grounds outside
+# the name itself -- there are several people called this, the candidate window may
+# have been cut short, the entity looks like an election record, the title never
+# named a province. This one holds back a name that did NOT match: the score exists
+# only because romanisation folded the two spellings together, and `match_score`
+# on the same script refuses the pair outright.
+#
+#     match_score("कमल थापा", "कमला थापा")    -> 0.00   same script, refused
+#     match_score("कमल थापा", "Kamala Thapa") -> 0.96   across scripts, accepted
+#
+# So a caller that overrides vetoes to bind more names -- `enrich_related_entities`
+# in its default permissive mode -- must be able to leave this one standing, or it
+# binds a woman to a corruption case charging a man. Overriding the other four
+# widens what counts as proven; overriding this one asserts a match that the
+# matcher, given a fair comparison, rejects.
+CROSS_SCRIPT_REASON = (
+    "matched only across scripts: this candidate carries no Devanagari name, so "
+    "the comparison had to go through romanisation, which cannot tell ण from न, "
+    "श from ष, or a masculine name from its feminine form. Confirm by hand")
+
+
+def is_cross_script_only(extracted_name: str, matched_name: str) -> bool:
+    """True when the only comparison available was Devanagari against Latin.
+
+    `comparable_name_forms` prefers a same-script title precisely to avoid this,
+    so a True here means the candidate offered none -- 118 of the 7,882 fixture
+    rows, 114 organisations and 4 people. The match may well be right; it is just
+    not provable by this module, so it goes to a human instead of being written.
+    """
+    return has_devanagari(extracted_name) and not has_devanagari(matched_name)
+
+
 def _matra_length_key(token: str) -> str:
     """`token` with matra length flattened, for same-script comparison only."""
     return token.translate(_MATRA_LENGTH_FOLD)
@@ -912,19 +948,8 @@ def resolve(extracted_name: str, candidates: list[dict],
     veto = _name_vetoes(extracted_name)
     if veto:
         return review(veto)
-    # A Devanagari extraction that could only be compared against a LATIN form
-    # matched through `to_roman_colloquial`, which collapses ण with न, श with ष,
-    # and a masculine name with its feminine form. `comparable_name_forms`
-    # prefers a same-script title precisely to avoid that, so reaching here
-    # means the candidate offered none -- 118 of the 7,882 fixture rows, 114
-    # organisations and 4 people. The match may well be right; it is just not
-    # provable by this module, so it goes to a human instead of being written.
-    if has_devanagari(extracted_name) and not has_devanagari(scored[0][2]):
-        return review(
-            "matched only across scripts: this candidate carries no Devanagari "
-            "name, so the comparison had to go through romanisation, which "
-            "cannot tell ण from न, श from ष, or a masculine name from its "
-            "feminine form. Confirm by hand")
+    if is_cross_script_only(extracted_name, scored[0][2]):
+        return review(CROSS_SCRIPT_REASON)
     score, nes_id, matched = scored[0]
     # Last, because these two are the vetoes that depend on WHICH candidate won.
     province_veto = _province_veto(extracted_name, nes_id)
