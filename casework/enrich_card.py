@@ -236,7 +236,10 @@ Bigo (बिगो), NPR: {bigo}
 KEY ALLEGATIONS:
 {key_allegations}
 
-NAMED ENTITIES (accused / related / location):
+NAMED ENTITIES (accused / related / location). A `फैसला:` label on an entity is
+that person's own outcome — use it to get a split verdict right. Any other trailing
+text is an INTERNAL caseworker note: read it for context, never quote or paraphrase
+it, and never treat it as a published fact.
 {entities}
 
 DESCRIPTION (snippet — the factual basis for both fields):
@@ -407,8 +410,8 @@ def _build_prompt(detail, number, need_title, need_short):
     )
 
 
-def _carries_a_field(obj):
-    """True when the object holds a NON-BLANK STRING on at least one card field.
+def _carries_a_field(obj, wanted=(TITLE_FIELD, SHORT_FIELD)):
+    """True when the object holds a NON-BLANK STRING on a field this run WANTS.
 
     Key presence is not enough, and this is the whole point. The system prompt
     tells the model to "set an unrequested key to null", so
@@ -418,21 +421,28 @@ def _carries_a_field(obj):
     reports two rejections ("LLM returned an empty ...") for a response whose
     REAL object may have been the next `{` along, behind a preamble.
 
-    Matches the contract `casework/common/titles.py::parse_title` documents for
-    the same reason.
+    `wanted` IS NOT DECORATION. Checking both fields unconditionally reopens the
+    same hole one field over: on an `--only title` run,
+    `{"title": null, "short_description": "..."}` satisfies "carries a field",
+    the scan stops there, and the title is then rejected at vetting ("LLM
+    returned no title") while the object that actually had one -- behind a
+    preamble the model added -- is never looked at. The predicate has to ask about
+    the fields the run can write, not about the union of both.
     """
     return any(
         isinstance(obj.get(field), str) and obj.get(field).strip()
-        for field in (TITLE_FIELD, SHORT_FIELD)
+        for field in wanted
     )
 
 
 def _generate(detail, number, need_title, need_short, invoke_text, usage):
     """One cheap-tier call producing whichever fields were asked for.
 
-    Returns the parsed dict, or None. Accepts an object carrying EITHER key --
-    a run asking only for a title gets `{"title": ..., "short_description":
-    null}`, so demanding both would reject every single-field reply.
+    Returns the parsed dict, or None. Accepts an object carrying any field this
+    run ASKED FOR -- a run wanting only a title gets `{"title": ...,
+    "short_description": null}`, so demanding both would reject every single-field
+    reply, and accepting either would let a null title through on an
+    `--only title` run. See `_carries_a_field`.
     """
     response_text = invoke_text(
         system=SYSTEM_PROMPT,
@@ -441,10 +451,26 @@ def _generate(detail, number, need_title, need_short, invoke_text, usage):
         tier=tier_for("card"),
         usage=usage,
     )
+    wanted = tuple(f for f, need in ((TITLE_FIELD, need_title),
+                                    (SHORT_FIELD, need_short)) if need)
+    # TWO PASSES, NARROW THEN BROAD. The narrow pass skips an object that carries
+    # only the field this run cannot write -- otherwise an `--only title` run
+    # accepts `{"title": null, "short_description": "..."}`, stops scanning, and
+    # reports "LLM returned no title" while the object that HAD one, behind a
+    # preamble, is never looked at.
+    #
+    # The broad pass exists so narrowing does not cost error precision. When the
+    # model's real answer carries the wanted field but leaves it BLANK, the narrow
+    # pass rejects it and, alone, would report "no card JSON object found" -- true
+    # of the predicate, misleading to an operator whose model actually returned an
+    # empty teaser. Falling back lets vetting name the real problem. Both passes
+    # are pure string work; neither costs an LLM call.
     result = parse_object_response(
         response_text,
-        predicate=_carries_a_field,
+        predicate=lambda obj: _carries_a_field(obj, wanted),
     )
+    if result is None:
+        result = parse_object_response(response_text, predicate=_carries_a_field)
     if result is None:
         log.warning("No card JSON object found in the LLM response")
     return result
@@ -701,6 +727,26 @@ def main(argv=None):
                                  note=f"detail fetch failed: {exc}"))
             log_event(logger, paths["events"], run_id=run_id, stage="card", slug=slug,
                       step="fetch", status="error", detail=str(exc),
+                      level=logging.ERROR)
+            continue
+
+        # A 200 THAT CARRIES NO ETag IS THE SAME HOLE AS A FAILED FETCH. The
+        # reasoning above guards the exception route, but `if_match` is only sent
+        # when it is truthy (`common/api.py`) and the server only checks it when
+        # present -- so a response that simply lacks the header (a proxy stripping
+        # it, a non-`retrieve` path) also produces an unconditional write, with no
+        # log line saying so. `cases/api_views.py` does set it today, which makes
+        # this latent rather than live; it is one check to close, and the argument
+        # above applies unchanged: a skipped case costs one re-run, a clobbered
+        # caseworker edit is unrecoverable.
+        if not etag:
+            reason = ("case detail returned no ETag; refusing to write "
+                      "unconditionally (would clobber a concurrent edit)")
+            report.record(slug, "card", "error", reason)
+            review.add(ReviewRow(slug=slug, status="error",
+                                 before=detail.get("title") or "", note=reason))
+            log_event(logger, paths["events"], run_id=run_id, stage="card", slug=slug,
+                      step="fetch", status="error", detail=reason,
                       level=logging.ERROR)
             continue
 

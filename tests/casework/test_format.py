@@ -66,8 +66,24 @@ class TestFormatEntities:
         assert "तत्कालीन प्रमुख जिल्ला अधिकारी" in format_entities([LIVE_ENTITY])
 
     def test_blank_notes_add_no_dash(self):
-        out = format_entities([dict(LIVE_ENTITY, notes="")])
+        out = format_entities([dict(LIVE_ENTITY, notes="", outcome="")])
         assert out == "- [accused] कमल राज गौतम"
+
+    def test_the_per_entity_outcome_reaches_the_prompt(self):
+        """The structured answer to "who was convicted and who was cleared".
+
+        Both prompts require a per-defendant outcome -- `enrich_description`'s
+        section ग and `enrich_card`'s split-verdict teaser rule -- and dropping
+        this key forced both models to re-derive the split from prose, which is
+        what produced the misreported verdicts.
+        """
+        out = format_entities([dict(LIVE_ENTITY, notes="", outcome="सफाई")])
+        assert out == "- [accused] कमल राज गौतम — फैसला: सफाई"
+
+    def test_a_blank_outcome_adds_no_label(self):
+        for blank in ("", "   ", None):
+            out = format_entities([dict(LIVE_ENTITY, notes="", outcome=blank)])
+            assert out == "- [accused] कमल राज गौतम", f"outcome={blank!r}"
 
     def test_an_unresolved_entity_still_gets_a_line(self):
         """`build_entity_binds` sets display_name to None when NES cannot
@@ -80,7 +96,7 @@ class TestFormatEntities:
         assert out == "- [accused] "
 
     def test_a_non_dict_entry_is_skipped_not_crashed(self):
-        out = format_entities(["गलत", None, dict(LIVE_ENTITY, notes="")])
+        out = format_entities(["गलत", None, dict(LIVE_ENTITY, notes="", outcome="")])
         assert out == "- [accused] कमल राज गौतम"
 
     def test_only_malformed_entries_falls_back_to_none_provided(self):
@@ -111,7 +127,8 @@ class TestFormatEntities:
                                          "entity_type": "person"}},
             include_notes=True,
         )
-        assert format_entities(binds) == "- [accused] कमल राज गौतम — तत्कालीन प्रमुख"
+        assert format_entities(binds) == (
+            "- [accused] कमल राज गौतम — फैसला: convicted — तत्कालीन प्रमुख")
 
 
 def test_the_donors_all_shared_these_three_functions():

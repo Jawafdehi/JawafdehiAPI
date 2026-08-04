@@ -20,6 +20,16 @@ related / location), which is why it is what gets bracketed, and `entity_type`
 did not include it. There is no `role` key and no `entity_iri` key on this
 payload; reading those yields a bulleted list of blanks that looks plausible in
 a prompt and silently starves the model of every name in the case.
+
+`outcome` IS THE ONE DELIBERATE ADDITION to the donor's line, and the reason is
+narrow. Both consumers of this function require a PER-DEFENDANT outcome:
+`enrich_description`'s section ग asks for "the outcome for each defendant
+(दोषी / सफाई)", and `enrich_card`'s teaser rule says a person a court CLEARED
+must never read as convicted. The structured, per-entity answer to exactly that
+question is sitting on the payload in `outcome`, and dropping it forced both
+models to re-derive the split from prose -- which is what produced the
+misreported verdicts this branch has been fixing. Only these two enrichers call
+this function, so adding it changes no already-evaluated prompt.
 """
 
 
@@ -44,6 +54,10 @@ def format_entities(entities) -> str:
 
     A non-dict entry is skipped rather than crashing prompt assembly -- one
     malformed row must not cost the whole case its entity context.
+
+    `outcome` is labelled rather than run together with the notes, so a
+    multi-defendant split verdict reads unambiguously per person. See the module
+    docstring for why it is here at all.
     """
     if not entities:
         return "(none provided)"
@@ -53,8 +67,11 @@ def format_entities(entities) -> str:
             continue
         name = e.get("display_name") or ""
         etype = e.get("type") or ""
+        outcome = (e.get("outcome") or "").strip()
         notes = e.get("notes") or ""
         line = f"- [{etype}] {name}"
+        if outcome:
+            line += f" — फैसला: {outcome}"
         if notes:
             line += f" — {notes}"
         lines.append(line)

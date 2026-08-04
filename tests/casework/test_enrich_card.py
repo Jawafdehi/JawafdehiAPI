@@ -1297,3 +1297,71 @@ class TestAStubDescriptionCannotGroundACard:
         _run_main(monkeypatch, api, stub, BASE_ARGV + ["--apply"])
         assert stub.calls, "an 861-char description is a real one"
         assert api.patched
+
+
+class TestAMissingETagIsNotAFreePass:
+    """Review finding 10. `if_match` is sent only when truthy and the server
+    checks it only when present, so `etag=None` is an UNCONDITIONAL write.
+
+    The exception route was already guarded with exactly this argument. A 200 that
+    simply lacks the header -- a proxy stripping it, a non-`retrieve` path --
+    produced the same unconditional write with no log line. Latent today, since
+    `cases/api_views.py` does set it.
+    """
+
+    def test_no_etag_means_no_write(self, monkeypatch):
+        stub = _llm(title="काठमाडौं ठेक्का घोटाला (076-CR-0182)")
+        api = _StubApi([CASE_STUB_BOTH], etag="")
+        report = _run_main(monkeypatch, api, stub, BASE_ARGV + ["--apply"])
+        assert api.patched == [], "a write with no precondition can clobber an edit"
+        assert any("no ETag" in r["reason"] for r in report.rows)
+
+    def test_no_etag_costs_no_llm_call(self, monkeypatch):
+        stub = _llm(title="काठमाडौं ठेक्का घोटाला (076-CR-0182)")
+        _run_main(monkeypatch, _StubApi([CASE_STUB_BOTH], etag=""), stub,
+                  BASE_ARGV + ["--apply"])
+        assert stub.calls == []
+
+    def test_a_present_etag_still_writes(self, monkeypatch):
+        api = _StubApi([CASE_STUB_BOTH], etag='W/"etag-1"')
+        _run_main(monkeypatch, api, _llm(title="काठमाडौं ठेक्का घोटाला (076-CR-0182)"),
+                  BASE_ARGV + ["--apply"])
+        assert api.patched, "the guard must not block the normal case"
+
+
+class TestTheParsePredicateAsksAboutTheFieldsTheRunCanWrite:
+    """Review finding 9. `_carries_a_field` checked the UNION of both fields."""
+
+    def test_only_title_skips_an_object_carrying_only_the_other_field(self):
+        """`{"title": null, "short_description": "..."}` used to be accepted on an
+        `--only title` run, stopping the scan, so the object that actually had a
+        title -- behind a preamble -- was never looked at."""
+        decoy = {"title": None, "short_description": "कुनै सारांश।"}
+        assert ec._carries_a_field(decoy) is True, "the union test accepts it"
+        assert ec._carries_a_field(decoy, (ec.TITLE_FIELD,)) is False
+
+    def test_the_real_object_behind_a_preamble_is_found(self, monkeypatch):
+        """The end-to-end shape of the bug: a decoy object first, the answer
+        second, on a title-only run."""
+        good = "काठमाडौं ठेक्का घोटाला (076-CR-0182)"
+
+        def stub(**kw):
+            return (
+                'यहाँ नतिजा छ:\n'
+                '{"title": null, "short_description": "कुनै सारांश।"}\n'
+                f'{{"title": "{good}", "short_description": null}}'
+            )
+
+        stub.calls = []
+        api = _StubApi([CASE_STUB_BOTH])
+        _run_main(monkeypatch, api, stub, BASE_ARGV + ["--only", "title", "--apply"])
+        assert [(f, v) for _, f, v, _ in api.patched] == [("title", good)]
+
+    def test_a_blank_wanted_field_still_reports_precisely(self, monkeypatch):
+        """The broad second pass. Narrowing alone would report "no card JSON
+        object found" for a model that really did return an empty teaser."""
+        api = _StubApi([CASE_STUB_BOTH])
+        report = _run_main(monkeypatch, api, _llm(short="   "),
+                           BASE_ARGV + ["--only", "short_description", "--apply"])
+        assert api.patched == []
+        assert any(r["status"] == "rejected" for r in report.rows)

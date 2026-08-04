@@ -224,7 +224,11 @@ KEY ALLEGATIONS (already curated for this case):
 FACTUAL TIMELINE (already curated; dates are reliable — use for section ग etc.):
 {timeline}
 
-NAMED ENTITIES (accused / related / location):
+NAMED ENTITIES (accused / related / location). A `फैसला:` label on an entity is
+that person's own outcome — it is the authoritative per-defendant answer for
+section ग, so prefer it over inferring the split from the source prose. Any other
+trailing text is an INTERNAL caseworker note: read it for context, never quote or
+paraphrase it, and never treat it as a published fact.
 {entities}
 
 SOURCE DOCUMENTS (press release, charge sheet, verdict — the factual basis for
@@ -467,6 +471,7 @@ def main(argv=None):
         # matters more here than anywhere else -- a 412 means re-read and retry,
         # where an unconditional write would silently clobber the other writer.
         etag = None
+        fetch_ok = True
         try:
             detail, etag = api.get_case_with_etag(slug)
         except Exception as exc:
@@ -474,10 +479,29 @@ def main(argv=None):
             # case. The LIST-shaped payload still yields a well-formed "unmet"
             # reason below (unresolved material), never a crash. Widened from the
             # donor's `requests.HTTPError` because `CaseworkApi` is urllib-based.
+            fetch_ok = False
             detail = case
             log_event(logger, paths["events"], run_id=run_id, stage="description",
                       slug=slug, step="fetch", status="fallback", detail=str(exc),
                       level=logging.WARNING)
+
+        # A SUCCESSFUL FETCH THAT CARRIES NO ETag IS AN UNCONDITIONAL WRITE.
+        # `if_match` is sent only when truthy and the server checks it only when
+        # present, so a 200 missing the header (a proxy stripping it, a
+        # non-`retrieve` path) writes without a precondition and logs nothing about
+        # it. Scoped to `fetch_ok` so the donor fallback above is untouched: that
+        # path is meant to reach the unmet-material gate and report from there.
+        if fetch_ok and not etag:
+            reason = ("case detail returned no ETag; refusing to write "
+                      "unconditionally (would clobber a concurrent edit)")
+            report.record(slug, "description", "error", reason)
+            review.add(ReviewRow(slug=slug, status="error",
+                                 before=(detail.get("description") or "").strip(),
+                                 note=reason))
+            log_event(logger, paths["events"], run_id=run_id, stage="description",
+                      slug=slug, step="fetch", status="error", detail=reason,
+                      level=logging.ERROR)
+            continue
 
         before = (detail.get("description") or "").strip()
 
@@ -587,6 +611,25 @@ def main(argv=None):
                                  note=source_note))
             log_event(logger, paths["events"], run_id=run_id, stage="description",
                       slug=slug, step="write", status="would-enrich", detail=detail_msg)
+            continue
+
+        # THE BACKSTOP FOR THE FALLBACK ROUTE. The fetch-time guard above is
+        # scoped to a successful fetch, which leaves the donor fallback
+        # (`detail = case`, `etag = None`) able to reach a write. Today the
+        # unmet-material gate stops it, because a LIST payload carries
+        # `material: null` -- but that is an accident of the list serializer, not
+        # a precondition, and it is the same "safe by accident" reasoning
+        # `enrich_card` refuses to rely on. One check, at the only write.
+        if not etag:
+            reason = ("no ETag for this case; refusing an unconditional write "
+                      "(would clobber a concurrent edit)")
+            report.record(slug, "description", "error", reason)
+            review.add(ReviewRow(slug=slug, status="error", before=before,
+                                 generated=description, sources=fed,
+                                 note="; ".join(filter(None, (reason, source_note)))))
+            log_event(logger, paths["events"], run_id=run_id, stage="description",
+                      slug=slug, step="write", status="error", detail=reason,
+                      level=logging.ERROR)
             continue
 
         try:

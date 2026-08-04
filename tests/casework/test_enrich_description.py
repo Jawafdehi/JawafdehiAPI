@@ -1075,3 +1075,51 @@ def test_the_court_number_reaches_the_model_uppercase(
     content = stub.calls[0]["content"]
     assert "Special-court case number: 081-CR-0091" in content
     assert "case number: 081-cr-0091" not in content
+
+
+def test_a_successful_fetch_with_no_etag_refuses_to_write(
+    monkeypatch, patched_fetch_markdown, tmp_path
+):
+    """Review finding 10, description side. A 200 missing the ETag header writes
+    with no precondition -- and a description is the most expensive output in the
+    pipeline, so losing someone else's edit to it matters most here."""
+    stub = _tracking_stub("### क) सार\nठेक्का विवरण।")
+    api = _StubApi([CASE_READY], etag="")
+    report = _run_main(monkeypatch, api, stub, BASE_ARGV + ["--apply"])
+    assert api.patched == []
+    assert stub.calls == [], "and it must not pay for the premium call first"
+    assert any("no ETag" in r["reason"] for r in report.rows)
+
+
+def test_the_donor_fallback_route_still_cannot_write_unconditionally(
+    monkeypatch, patched_fetch_markdown, tmp_path
+):
+    """The fetch-time guard is scoped to a SUCCESSFUL fetch, so it deliberately
+    leaves the donor fallback (`detail = case`, `etag = None`) alone -- that path
+    is meant to report from the unmet-material gate.
+
+    But the gate only stops it because a LIST payload carries `material: null`,
+    which is an accident of the serializer rather than a precondition. So the
+    write itself is guarded too. This drives the fallback with a detail-shaped
+    payload -- the case the material gate does NOT catch -- and asserts nothing is
+    written.
+    """
+    api = _StubApi([CASE_READY], fail_detail_for=["case-ready"])
+    report = _run_main(monkeypatch, api, _tracking_stub("### क) सार\nठेक्का विवरण।"),
+                       BASE_ARGV + ["--apply"])
+    assert api.patched == []
+    assert any("no ETag" in r["reason"] for r in report.rows)
+
+
+def test_a_dry_run_is_not_blocked_by_a_missing_etag(
+    monkeypatch, patched_fetch_markdown, tmp_path
+):
+    """The write guard sits after the dry-run branch, so the read-only path still
+    produces its accuracy artefact. Blocking it would mean a fetch quirk could
+    stop output ever being reviewed."""
+    api = _StubApi([CASE_READY], fail_detail_for=["case-ready"])
+    _run_main(monkeypatch, api, _tracking_stub("### क) सार\nठेक्का विवरण।"),
+              BASE_ARGV + ["--dry-run"])
+    assert api.patched == []
+    text = _review_file(tmp_path).read_text(encoding="utf-8")
+    assert "ठेक्का विवरण।" in text

@@ -119,6 +119,15 @@ def title_is_acceptable(title, court_number) -> bool:
 def parse_title(response_text):
     """Pull the title out of an LLM response. Returns the title or None.
 
+    NO PRODUCTION CALLER TODAY -- only `tests/casework/test_titles.py` reaches
+    this. `enrich_card` imports `TITLE_RULES`, `title_has_headcount`,
+    `title_is_acceptable` and `validate_title` from this module, but parses
+    responses with its own `_carries_a_field` predicate, because it asks for two
+    fields in one object and this function knows only about `title`. The module
+    header's "ONE consumer" is about `TITLE_RULES`, not about this function.
+    Consequence worth knowing before relying on the docstring below: the bare-line
+    fallback is unreachable in production, so it is tested but not exercised.
+
     Prefers a ``{"title": "..."}`` object. The `predicate` demands a non-blank
     STRING, so an object carrying `{"title": null}` -- which the donor's own
     prompt invites, by telling the model to null an unrequested key -- is
