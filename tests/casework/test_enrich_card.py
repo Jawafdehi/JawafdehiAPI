@@ -396,6 +396,37 @@ class TestSnippetKeepsTheOutcome:
         assert "सफाई" in snippet
         assert "[…]" in snippet
 
+    def test_a_long_verdict_is_read_to_the_end_not_clipped(self):
+        """The whole verdict section reaches the model, not a fixed 1,200 chars.
+
+        A flat slice clipped the verdict on 21 of the 52 long published
+        descriptions, and worst where it matters: a multi-defendant case states
+        one outcome PER defendant, so a clipped slice keeps the conviction and
+        drops the acquittal. `078-CR-0103` reproduced it twice -- सफाई sat 172
+        characters past where the old slice ended.
+        """
+        verdict = ("\n### ग) विशेष अदालतको फैसलाको सार\n"
+                   + ("अदालतले प्रतिवादीलाई दोषी ठहर गरेको। " * 40)
+                   + "\nदोस्रो प्रतिवादीलाई सफाई दिएको।")
+        snippet = _snippet(dict(DETAIL, description=("क) अभियोगदावी। " * 400) + verdict))
+        assert "दोषी ठहर" in snippet, "the conviction must survive"
+        assert "सफाई दिएको।" in snippet, (
+            "the ACQUITTAL is the half a fixed-width slice used to drop")
+        assert len(snippet) <= ec.SNIPPET_MAX_CHARS + 16
+
+    def test_the_ceiling_still_bounds_a_runaway_verdict(self):
+        """The longest published verdict section is 13,617 chars; one outlier
+        judgment must not fill the whole prompt."""
+        text = ("क) अभियोगदावी। " * 400) + "\nफैसला: " + ("दोषी ठहर गरेको। " * 2000)
+        snippet = _snippet(dict(DETAIL, description=text))
+        assert len(snippet) <= ec.SNIPPET_MAX_CHARS + 16
+
+    def test_a_short_verdict_makes_the_snippet_SMALLER_than_the_old_flat_slice(self):
+        """The median verdict section is 794 chars, so the common case now sends
+        LESS than the old fixed 1,200 -- this change is not a cost increase."""
+        text = ("क) अभियोगदावी। " * 400) + "\nफैसला: सफाई दिएको।"
+        assert len(_snippet(dict(DETAIL, description=text))) < 3000
+
     def test_an_early_outcome_word_does_not_hijack_the_slice(self):
         """Finding 1. The vocabulary scan takes the LAST match, not the first.
 

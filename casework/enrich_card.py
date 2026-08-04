@@ -250,8 +250,15 @@ _OUTCOME_HEADING_RE = re.compile(r"^#{0,4}[ \t]*ग\)[^\n]*फैसला[^\n]*
 #: have one. These are the words a Nepali verdict is stated in.
 _OUTCOME_WORD_RE = re.compile(r"(फैसला|सफाई|सफाइ|दोषी|ठहर|जरिवाना|कैद)")
 
-#: How much of the snippet budget is reserved for the verdict passage.
-OUTCOME_SLICE_CHARS = 1200
+#: How much of the description's OPENING the snippet keeps. The rest of the
+#: budget goes to the verdict.
+SNIPPET_HEAD_CHARS = 1800
+
+#: Ceiling on the whole snippet once a verdict has been spliced in. The verdict
+#: passage is read to the END of the description rather than clipped to a fixed
+#: width, so this is what stops a 13,617-character judgment summary from filling
+#: the prompt. See `_snippet` for the measurement behind 6000.
+SNIPPET_MAX_CHARS = 6000
 
 
 def _outcome_offset(text):
@@ -306,7 +313,26 @@ def _snippet(detail):
     teaser read as a live accusation.
 
     So when an outcome exists outside the head, the snippet becomes
-    head + elision + the verdict passage, inside the same total budget.
+    head + elision + the verdict passage.
+
+    THE VERDICT PASSAGE IS READ TO THE END, NOT CLIPPED TO A FIXED WIDTH. It used
+    to take a flat 1,200 characters, and that silently truncated the verdict on
+    **21 of the 52** published descriptions long enough to need this path. The
+    failure is worst exactly where it matters most: a multi-defendant case states
+    one outcome per defendant, so a clipped slice keeps the first (usually a
+    conviction) and drops the rest. Reproduced twice on `078-CR-0103`, where the
+    verdict section runs 1,835 characters and राकेशमान श्रेष्ठ's सफाई sits 172
+    characters past where a 1,200-char slice ended -- the model was shown the
+    conviction, never the acquittal, and wrote a teaser that reads as though both
+    defendants were convicted.
+
+    Why a ceiling instead of no limit: the median verdict section is only 794
+    characters, so most cases send LESS than the old fixed slice and the typical
+    snippet gets smaller, not bigger. The tail is what needs room -- three in four
+    are under 3,337 characters, but the longest is 13,617. `SNIPPET_MAX_CHARS`
+    covers the realistic tail without letting one outlier judgment dominate the
+    prompt. Input tokens are the cheap half of this stage; the output cap
+    (`CARD_MAX_TOKENS`) is unchanged and is what actually bounds cost.
     """
     text = (detail.get("description") or "").strip()
     if not text:
@@ -315,14 +341,13 @@ def _snippet(detail):
         return text
 
     offset = _outcome_offset(text)
-    head_budget = DESCRIPTION_SNIPPET_BUDGET - OUTCOME_SLICE_CHARS
     # Nothing to rescue when the text states no outcome, or when the outcome
     # already sits inside the head the plain clamp would have kept anyway.
-    if offset is None or offset < head_budget:
+    if offset is None or offset < SNIPPET_HEAD_CHARS:
         return text[:DESCRIPTION_SNIPPET_BUDGET]
 
-    head = text[:head_budget].rstrip()
-    outcome = text[offset:offset + OUTCOME_SLICE_CHARS].rstrip()
+    head = text[:SNIPPET_HEAD_CHARS].rstrip()
+    outcome = text[offset:offset + (SNIPPET_MAX_CHARS - SNIPPET_HEAD_CHARS)].rstrip()
     return f"{head}\n\n[…]\n\n{outcome}"
 
 
