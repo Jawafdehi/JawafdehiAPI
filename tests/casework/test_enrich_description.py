@@ -205,9 +205,8 @@ class TestDonorDeviations:
     def test_donor_used_a_tool_loop_and_this_port_uses_plain_invoke_text(
         self, donor_source
     ):
-        # Deviation 2. The cache cannot key a multi-turn tool loop
-        # (casework/common/llm_cache.py), so the port's most expensive call
-        # would be the one call never served from disk.
+        # Deviation 2. The donor advertised the tool nowhere in its prompt, and
+        # a tool loop bills every turn -- on the pipeline's most expensive call.
         assert "invoke_with_tools" in donor_source
         assert "convert_date_tool" in donor_source
         ids = _identifiers(_shipped_source())

@@ -987,8 +987,7 @@ def test_build_api_refuses_a_remote_write_by_default():
 def test_add_common_args_is_wired():
     """Sanity: the shared flags this script relies on all parse."""
     args = build_parser().parse_args(
-        ["--limit", "3", "--force", "--no-llm-cache", "--verbose"])
+        ["--limit", "3", "--force", "--verbose"])
     assert args.limit == 3
     assert args.force is True
-    assert args.llm_cache is False
     assert isinstance(build_parser(), argparse.ArgumentParser)

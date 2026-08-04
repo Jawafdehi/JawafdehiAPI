@@ -517,15 +517,6 @@ def main(argv=None):
     from llm.invoke import invoke_text
     from llm.usage import UsageAccumulator, render_usage_table
 
-    from casework.common.llm_cache import build_llm_cache, wrap_invoke_text
-
-    # Local dev response cache (casework/common/llm_cache.py). Cheap tier, but
-    # this stage makes TWO calls per case (the adequacy judge, then the
-    # generation), so a re-run after a gate tweak still doubles the bill without
-    # it. --no-llm-cache forces fresh.
-    llm_cache = build_llm_cache(args)
-    invoke_text = wrap_invoke_text(invoke_text, llm_cache)
-
     api = build_api(args)
     usage = UsageAccumulator()
     report = RunReport()
@@ -723,14 +714,11 @@ def main(argv=None):
         print()
         print(usage_summary)
 
-    cache_summary = llm_cache.summary()
-    print(cache_summary)
     print(f"review file: {review.write()}")
 
     log_run_footer(
         logger, stage="card", stats=stats,
         duration_s=time.monotonic() - start_time, usage_summary=usage_summary,
-        cache_summary=cache_summary,
     )
 
     return report
