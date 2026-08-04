@@ -61,7 +61,7 @@ DEVIATION 3 -- NO LIST-LEVEL `skip_field`. The card donor selected cases with
 assumption that "nothing populates it today, so virtually every card is
 processed". That assumption is now false, and expensively so: 2,666 cases carry a
 populated template stub, so a field-presence skip would skip every single case
-this script exists to fix. Selection is `select_cases` plus per-case gates, and
+this script exists to fix. Selection is `select_for_run` plus per-case gates, and
 the short_description gate is the content-based adequacy judge
 (`casework/common/judge.py`), which is what can tell a 120-character grammatical
 Nepali stub from a real teaser.
@@ -131,7 +131,7 @@ from casework.common.llm import bootstrap, tier_for
 from casework.common.parse import parse_object_response
 from casework.common.pipeline import STAGES, RunReport, unmet_prerequisites
 from casework.common.review import ReviewRow, build_review_file
-from casework.common.select import court_number, select_cases
+from casework.common.select import court_number, select_for_run
 from casework.common.titles import (
     TITLE_RULES,
     title_has_headcount,
@@ -608,14 +608,11 @@ def main(argv=None):
         args, stage="card", field_name=f"{TITLE_FIELD} + {SHORT_FIELD}", run_id=run_id)
 
     all_cases = list(api.iter_cases())
-    cases = select_cases(
-        all_cases,
-        fiscal_year=args.fiscal_year,
-        slugs=args.slug,
-        court_cases=args.court_case,
-    )
-    if args.limit:
-        cases = cases[: args.limit]
+    # `select_for_run` is the one selection path every enricher shares (#410): it
+    # applies the --batch-csv allowlist, then the other selectors, then --limit --
+    # and it slices --limit in BATCH order, which a local `cases[:limit]` cannot
+    # do because the API's iteration order is not the CSV's.
+    cases = select_for_run(all_cases, args)
 
     total = len(cases)
     log_run_header(

@@ -92,7 +92,7 @@ from casework.common.pipeline import (
     unmet_prerequisites,
 )
 from casework.common.review import ReviewRow, build_review_file
-from casework.common.select import court_number, select_cases
+from casework.common.select import court_number, select_for_run
 
 # `summarize_verdict` and its four donor-pinned constants are imported from the
 # timeline enricher rather than re-copied. The donor kept them in the shared
@@ -424,14 +424,11 @@ def main(argv=None):
         args, stage="description", field_name="description", run_id=run_id)
 
     all_cases = list(api.iter_cases())
-    cases = select_cases(
-        all_cases,
-        fiscal_year=args.fiscal_year,
-        slugs=args.slug,
-        court_cases=args.court_case,
-    )
-    if args.limit:
-        cases = cases[: args.limit]
+    # `select_for_run` is the one selection path every enricher shares (#410): it
+    # applies the --batch-csv allowlist, then the other selectors, then --limit --
+    # and it slices --limit in BATCH order, which a local `cases[:limit]` cannot
+    # do because the API's iteration order is not the CSV's.
+    cases = select_for_run(all_cases, args)
 
     total = len(cases)
     log_run_header(

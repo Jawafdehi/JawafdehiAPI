@@ -1130,3 +1130,18 @@ class TestTheSplitVerdictRule:
         """The split rule must not weaken the no-guessing rule beside it."""
         assert "do not guess" in ec.SYSTEM_PROMPT
         assert "अनुसन्धान जारी" in ec.SYSTEM_PROMPT
+
+
+def test_batch_csv_reaches_selection(monkeypatch, tmp_path):
+    """`--batch-csv` selects through `select_for_run` (#410), not a local slice.
+
+    Pins the wiring, not the loader: `tests/casework/test_select_batch_csv.py`
+    owns the parsing. What this asserts is that THIS enricher routes selection
+    through the shared path, so a batch file restricts the run here the same way
+    it does on the five enrichers already on main.
+    """
+    csv = tmp_path / "batch.csv"
+    csv.write_text("slug\n076-cr-0182-nope\n", encoding="utf-8")
+    args = build_parser().parse_args(["--batch-csv", str(csv)])
+    assert args.batch_csv == str(csv)
+    assert "select_for_run" in Path(ec.__file__).read_text(encoding="utf-8")

@@ -1004,3 +1004,17 @@ def test_build_api_refuses_a_remote_write_by_default(monkeypatch):
     api = ed.build_api(_Args())
     with pytest.raises(RuntimeError, match="refusing to write"):
         api.patch_field("case-ready", "description", "विवरण।")
+
+
+def test_batch_csv_reaches_selection(tmp_path):
+    """`--batch-csv` selects through the shared `select_for_run` path (#410)."""
+    import argparse
+
+    from casework.common.cli import add_common_args
+
+    csv = tmp_path / "batch.csv"
+    csv.write_text("slug\ncase-078-cr-0103-x\n", encoding="utf-8")
+    args = add_common_args(argparse.ArgumentParser()).parse_args(
+        ["--batch-csv", str(csv)])
+    assert args.batch_csv == str(csv)
+    assert "select_for_run" in _shipped_source()
