@@ -467,6 +467,7 @@ class _StubApi:
         self._cases = {c["slug"]: dict(c) for c in cases}
         self._etag = etag
         self.patched = []
+        self.requests = []
 
     def iter_cases(self, params=None, timeout=60):
         yield from self._cases.values()
@@ -477,6 +478,22 @@ class _StubApi:
     def patch_field(self, slug, field, value, timeout=60, if_match=None):
         self.patched.append((slug, field, value, if_match))
         self._cases[slug][field] = value
+        return {}
+
+    def patch_fields(self, slug, pairs, timeout=60, if_match=None):
+        """One request, several fields -- what `enrich_card` actually calls.
+
+        `patched` still gets one entry per field so the assertions here read the
+        same as before; `requests` counts the HTTP calls, which is what tells a
+        multi-op write apart from a loop.
+        """
+        pairs = list(pairs)
+        if not pairs:
+            return {}
+        self.requests.append((slug, [f for f, _ in pairs], if_match))
+        for field, value in pairs:
+            self.patched.append((slug, field, value, if_match))
+            self._cases[slug][field] = value
         return {}
 
 
@@ -497,12 +514,21 @@ class _EtagEnforcingApi(_StubApi):
         super().__init__(cases)
         self._version = 1
 
-    def patch_field(self, slug, field, value, timeout=60, if_match=None):
+    def _bump(self, if_match):
         if if_match is not None and if_match != self._etag:
             raise RuntimeError("HTTP Error 412: Precondition Failed")
         self._version += 1
         self._etag = f'W/"etag-{self._version}"'
+
+    def patch_field(self, slug, field, value, timeout=60, if_match=None):
+        self._bump(if_match)
         return super().patch_field(slug, field, value, timeout, if_match)
+
+    def patch_fields(self, slug, pairs, timeout=60, if_match=None):
+        pairs = list(pairs)
+        if pairs:
+            self._bump(if_match)
+        return super().patch_fields(slug, pairs, timeout, if_match)
 
 
 class _FakeUsage:
@@ -695,46 +721,61 @@ def test_a_rejected_title_does_not_block_the_short_description(monkeypatch):
     assert [f for _, f, _, _ in api.patched] == ["short_description"]
 
 
-def test_both_fields_land_when_the_server_enforces_if_match(monkeypatch):
-    """Regression: the second field write must not carry the first one's ETag.
+def test_both_fields_land_in_one_patch_when_the_server_enforces_if_match(monkeypatch):
+    """DEVIATION 6, and the regression test for the bug that motivated it.
 
-    Found by the 2026-08-04 local smoke run, invisible to every other test here
-    and to any dry run — the dry run reports `would-enrich` twice and looks
-    perfect, because it never issues a PATCH at all.
+    The donor shape -- one PATCH per field -- took a 412 on the second write for
+    every case, because the first write had already changed the ETag. Asserting
+    ONE request is the point: a passing "both fields are present" check would
+    also pass for a two-request version that refreshes the ETag in between, and
+    that version is the one that cannot be atomic.
+
+    Invisible to any dry run, which issues no PATCH and reports `would-enrich`
+    for both fields.
     """
     api = _EtagEnforcingApi([CASE_STUB_BOTH])
     report = _run_main(monkeypatch, api, _llm(title=MATCHING_TITLE),
                        BASE_ARGV + ["--apply"])
 
-    assert [f for _, f, _, _ in api.patched] == ["title", "short_description"]
+    assert len(api.requests) == 1, "both fields must go in ONE conditional PATCH"
+    slug, fields, if_match = api.requests[0]
+    assert fields == ["title", "short_description"]
+    assert if_match, "the write must stay conditional"
     assert not [r for r in report.rows if r["status"] == "error"]
-
-    first_etag = api.patched[0][3]
-    second_etag = api.patched[1][3]
-    assert first_etag and second_etag, "both writes must send an If-Match"
-    assert first_etag != second_etag, (
-        "the second PATCH reused the first PATCH's ETag — a guaranteed 412"
-    )
+    assert api._cases[slug]["title"] == MATCHING_TITLE
 
 
-def test_a_failed_etag_refresh_does_not_block_the_second_write(monkeypatch):
-    """The write already succeeded, so a refresh failure must not lose the other
-    field. The ETag is cleared and the second write goes unconditional."""
+def test_a_rejected_title_leaves_the_teaser_in_a_single_op_patch(monkeypatch):
+    """Per-field independence survives the merge into one request.
+
+    It lives in vetting, not in the number of PATCHes: a title that fails
+    `vet_title` is left out of the op list and the teaser still lands.
+    """
     api = _EtagEnforcingApi([CASE_STUB_BOTH])
-    calls = {"n": 0}
-    real_get = api.get_case_with_etag
+    _run_main(monkeypatch, api, _llm(title="शीर्षक without a number"),
+              BASE_ARGV + ["--apply"])
 
-    def flaky(slug, timeout=60):
-        calls["n"] += 1
-        if calls["n"] > 1:          # the post-write refresh
-            raise RuntimeError("connection reset")
-        return real_get(slug, timeout)
+    assert len(api.requests) == 1
+    assert api.requests[0][1] == ["short_description"]
 
-    api.get_case_with_etag = flaky
-    _run_main(monkeypatch, api, _llm(title=MATCHING_TITLE), BASE_ARGV + ["--apply"])
 
-    assert [f for _, f, _, _ in api.patched] == ["title", "short_description"]
-    assert api.patched[1][3] is None, "second write should be unconditional"
+def test_a_failed_patch_reports_every_field_as_failed(monkeypatch):
+    """The write is atomic, so the failure has to be reported that way.
+
+    Reporting one field written and one failed would describe a state the server
+    never held.
+    """
+    class _FailingApi(_EtagEnforcingApi):
+        def patch_fields(self, slug, pairs, timeout=60, if_match=None):
+            raise RuntimeError("HTTP Error 500: Internal Server Error")
+
+    api = _FailingApi([CASE_STUB_BOTH])
+    report = _run_main(monkeypatch, api, _llm(title=MATCHING_TITLE),
+                       BASE_ARGV + ["--apply"])
+
+    assert api.patched == []
+    errors = [r for r in report.rows if r["status"] == "error"]
+    assert len(errors) == 2, "both fields are unwritten, so both are errors"
 
 
 def test_an_unparseable_reply_is_skipped_not_written(monkeypatch):
@@ -759,18 +800,31 @@ def test_an_llm_exception_is_recorded_as_error(monkeypatch):
 
 
 def test_a_patch_failure_is_recorded_and_the_run_continues(monkeypatch):
-    class _FailingApi(_StubApi):
-        def patch_field(self, slug, field, value, timeout=60, if_match=None):
-            if field == "title":
-                raise RuntimeError("412 stale")
-            return super().patch_field(slug, field, value, timeout, if_match)
+    """One case's failed write must not end the batch.
 
-    api = _FailingApi([CASE_STUB_BOTH])
+    This used to assert that a failed `title` write let `short_description`
+    through. DEVIATION 6 removed that: the two fields share one atomic PATCH, so
+    a failure loses both (see
+    `test_a_failed_patch_reports_every_field_as_failed`). What still has to hold
+    -- and what the original test was really protecting -- is that the RUN keeps
+    going to the next case.
+    """
+    class _FailingApi(_StubApi):
+        def patch_fields(self, slug, pairs, timeout=60, if_match=None):
+            if slug == "case-stub-both":
+                raise RuntimeError("412 stale")
+            return super().patch_fields(slug, pairs, timeout, if_match)
+
+    api = _FailingApi([CASE_STUB_BOTH, CASE_GOOD_TITLE])
     report = _run_main(monkeypatch, api,
                        _llm(title="काठमाडौं ठेक्का घोटाला (076-CR-0182)"),
                        BASE_ARGV + ["--apply"])
-    assert [f for _, f, _, _ in api.patched] == ["short_description"]
+
     assert any("412 stale" in r["reason"] for r in report.rows)
+    written = {s for s, _, _, _ in api.patched}
+    assert "case-stub-both" not in written, "the failed write must not be recorded"
+    assert "case-good-title" in written, (
+        "the other case must still be written after this one failed")
 
 
 # --------------------------------------------------------------------------

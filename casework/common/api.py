@@ -30,6 +30,28 @@ def build_replace_patch(field, value):
     return [{"op": "replace", "path": f"/{field}", "value": value}]
 
 
+def build_replace_ops(pairs):
+    """One RFC-6902 document replacing SEVERAL scalar fields at once.
+
+    `pairs` is an iterable of `(field, value)`. Empty in -> empty out, so a
+    caller whose fields all failed validation sends nothing rather than an empty
+    patch the server would have to reason about.
+
+    WHY THIS EXISTS. `patch_field` is one request per field, and each request
+    changes the case's ETag -- so a caller writing two fields under the ETag it
+    read at the top gets a 412 on the second write, every time. That is not
+    hypothetical: `enrich_card` shipped that way and could never write both
+    `title` and `short_description` in one pass (2026-08-04 smoke run). Sending
+    both ops in ONE conditional request removes the failure instead of handling
+    it -- the server applies the whole array against a single snapshot, so the
+    write is atomic and the `If-Match` covers exactly the state that was read.
+    """
+    return [
+        {"op": "replace", "path": f"/{field}", "value": value}
+        for field, value in pairs
+    ]
+
+
 class CaseworkApi:
     """Control-plane HTTP client with two mutually exclusive auth modes.
 
@@ -269,6 +291,19 @@ class CaseworkApi:
 
     def patch_field(self, slug, field, value, timeout=60, if_match=None):
         return self._patch(slug, build_replace_patch(field, value), timeout, if_match=if_match)
+
+    def patch_fields(self, slug, pairs, timeout=60, if_match=None):
+        """Write several scalar fields in ONE conditional request.
+
+        Prefer this over a `patch_field` loop whenever a caller writes more than
+        one field under a single ETag -- see `build_replace_ops` for why a loop
+        cannot work. Returns the server's response body, or `{}` when `pairs` is
+        empty (no request is made).
+        """
+        ops = build_replace_ops(pairs)
+        if not ops:
+            return {}
+        return self._patch(slug, ops, timeout, if_match=if_match)
 
     def replace_list(self, slug, path, items, timeout=60, if_match=None):
         """Whole-list replace for /evidence and /entities.

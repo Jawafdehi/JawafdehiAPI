@@ -6,7 +6,11 @@ import urllib.request
 
 import pytest
 
-from casework.common.api import CaseworkApi, build_replace_patch
+from casework.common.api import (
+    CaseworkApi,
+    build_replace_ops,
+    build_replace_patch,
+)
 
 
 def test_build_replace_patch_is_a_list_of_ops():
@@ -21,6 +25,70 @@ def test_build_replace_patch_handles_list_paths():
     assert build_replace_patch("evidence", items) == [
         {"op": "replace", "path": "/evidence", "value": items}
     ]
+
+
+def test_build_replace_ops_puts_every_field_in_one_document():
+    """One document, several ops -- the shape that makes a multi-field write
+    atomic under a single `If-Match`."""
+    ops = build_replace_ops([("title", "शीर्षक"), ("short_description", "सार")])
+    assert ops == [
+        {"op": "replace", "path": "/title", "value": "शीर्षक"},
+        {"op": "replace", "path": "/short_description", "value": "सार"},
+    ]
+
+
+def test_build_replace_ops_preserves_the_order_it_was_given():
+    fields = ["a", "b", "c", "d"]
+    ops = build_replace_ops((f, f.upper()) for f in fields)
+    assert [op["path"] for op in ops] == ["/a", "/b", "/c", "/d"]
+
+
+def test_build_replace_ops_on_nothing_is_an_empty_document():
+    """A caller whose every field failed validation must send no ops, not an
+    empty patch the server has to reason about."""
+    assert build_replace_ops([]) == []
+
+
+def test_patch_fields_makes_no_request_when_there_is_nothing_to_write(monkeypatch):
+    api = CaseworkApi("http://127.0.0.1:48010", basic=("u", "p"))
+
+    def boom(*a, **kw):
+        raise AssertionError("patch_fields must not issue a request for no ops")
+
+    monkeypatch.setattr(api, "_request", boom)
+    assert api.patch_fields("case-x", []) == {}
+
+
+def test_patch_fields_sends_one_conditional_request_for_both_fields(monkeypatch):
+    """The regression this helper exists for: two `patch_field` calls take a 412
+    on the second, because the first one moved the ETag."""
+    seen = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def fake_request(method, url, data=None, headers=None, timeout=None):
+        seen.setdefault("calls", []).append(method)
+        seen["data"] = json.loads(data.decode())
+        seen["headers"] = headers
+        return _Resp()
+
+    api = CaseworkApi("http://127.0.0.1:48010", basic=("u", "p"))
+    monkeypatch.setattr(api, "_request", fake_request)
+    api.patch_fields(
+        "case-x", [("title", "शीर्षक"), ("short_description", "सार")],
+        if_match='W/"etag-1"')
+
+    assert seen["calls"] == ["PATCH"], "one request, not one per field"
+    assert [op["path"] for op in seen["data"]] == ["/title", "/short_description"]
+    assert seen["headers"]["If-Match"] == 'W/"etag-1"'
 
 
 def test_patch_uses_plain_application_json(monkeypatch):

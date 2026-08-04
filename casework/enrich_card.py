@@ -27,7 +27,7 @@ and what makes the single-owner split affordable: `order_stages` runs
 `description` first and this picks up what it wrote, no charge sheet re-fetched.
 
 Ported from two donors at commit `0321a85`: `casework/enrich_card.py` (425 lines)
-and `casework/enrich_title.py` (283 lines). Four deliberate deviations:
+and `casework/enrich_title.py` (283 lines). Six deliberate deviations:
 
 DEVIATION 1 -- `enrich_title.py` IS NOT PORTED AS ITS OWN SCRIPT. It becomes
 `--only title`. The donor needed a separate script because `enrich_description`
@@ -80,6 +80,20 @@ whatever framing the provider wraps around the reply. The donor's 1000 was set
 against Latin-heavy expectations; it does not survive real Nepali output. 4000 is
 still half of `enrich_description`'s budget and cannot mask an over-length title,
 because `vet_title` rejects on characters, not tokens.
+
+DEVIATION 6 -- BOTH FIELDS GO IN ONE PATCH, NOT ONE PATCH EACH. The donor wrote
+each field with its own request. That cannot work against a server enforcing
+`If-Match`: the first PATCH changes the case's ETag, so the second one -- still
+carrying the ETag read at the top of the case -- fails with 412 every time. The
+2026-08-04 smoke run wrote `title` and lost `short_description` to
+"HTTP Error 412: Precondition Failed" on every case, so the script could never
+finish a card. No dry run can catch it; a dry run issues no PATCH and reports
+`would-enrich` for both fields. `_write_fields` now sends one multi-op document
+(`CaseworkApi.patch_fields`), which also makes the write atomic: a half-written
+card -- new headline, stale teaser -- is no longer reachable. Per-field
+INDEPENDENCE is unchanged and lives where it always belonged, in vetting: a title
+that fails `vet_title` is simply left out of the op list, and the teaser still
+lands.
 
 Usage:
     uv run python -m casework.enrich_card --dry-run
@@ -299,10 +313,13 @@ def vet_short_description(candidate):
 class _WriteContext:
     """Everything `_vet_and_write` needs that is the same for both fields.
 
-    A dataclass rather than a closure inside `main()`: the two fields go through
-    identical vet -> record -> log -> maybe-PATCH machinery, and writing that
-    twice is how the title path and the short_description path drift until one
-    of them forgets to pass `if_match` or forgets a review row.
+    A dataclass rather than a closure inside `main()`: both fields go through
+    identical vet -> record -> log machinery, and writing that twice is how the
+    title path and the short_description path drift until one of them forgets a
+    review row.
+
+    `etag` is read once per case and never rewritten -- the single multi-op PATCH
+    in `_write_fields` is the only write, so there is nothing to refresh.
     """
     api: object
     slug: str
@@ -316,69 +333,85 @@ class _WriteContext:
     events_path: str
 
 
-def _vet_and_write(ctx, field, current, candidate, vet):
-    """Vet one generated field value and write it, or record why it was refused.
+def _record(ctx, field, current, status, note, generated):
+    """One report row + one review row for one field's outcome.
 
-    Returns the written value, or None when nothing was written -- a rejection,
-    a dry run, and a failed PATCH all return None, because in all three cases
-    the server still holds `current`.
+    Shared by the vet and the write halves so a rejection and a successful write
+    cannot drift into describing themselves differently.
     """
-    def _record(status, note, generated):
-        ctx.report.record(ctx.slug, "card", status, f"{field}: {note}")
-        ctx.review.add(ReviewRow(
-            slug=ctx.slug, status=f"{status} ({field})", before=current,
-            generated=generated, sources=ctx.sources, note=note))
+    ctx.report.record(ctx.slug, "card", status, f"{field}: {note}")
+    ctx.review.add(ReviewRow(
+        slug=ctx.slug, status=f"{status} ({field})", before=current,
+        generated=generated, sources=ctx.sources, note=note))
 
+
+def _vet_field(ctx, field, current, candidate, vet):
+    """Vet one generated value. Returns it, or None when it was refused.
+
+    Vetting is deliberately separate from writing: a bad headline must not cost
+    the case its teaser, and that independence lives HERE, before any request is
+    made -- not in the number of PATCHes issued.
+    """
     value, rejection = vet(candidate)
     if rejection:
-        _record("rejected", rejection, (candidate or "").strip())
+        _record(ctx, field, current, "rejected", rejection,
+                (candidate or "").strip())
         log_event(ctx.logger, ctx.events_path, run_id=ctx.run_id, stage="card",
                   slug=ctx.slug, step=f"vet:{field}", status="rejected",
                   detail=rejection, level=logging.WARNING)
         return None
+    return value
+
+
+def _write_fields(ctx, accepted):
+    """Write every field that passed vetting in ONE conditional PATCH.
+
+    `accepted` is `[(field, current, value)]`.
+
+    WHY ONE REQUEST AND NOT ONE PER FIELD. A PATCH changes the case's ETag, so a
+    second request carrying the ETag read at the top of the case fails `If-Match`
+    with a 412 -- always. This script shipped as two `patch_field` calls and could
+    therefore never write both `title` and `short_description` in one pass: the
+    2026-08-04 smoke run wrote the title and took
+    "HTTP Error 412: Precondition Failed" on the teaser for every case. A dry run
+    cannot see it, because it issues no PATCH at all and reports `would-enrich`
+    for both.
+
+    Sending both ops in one request removes that failure rather than handling it,
+    and buys atomicity: the server applies the whole array against a single
+    snapshot, so a half-written card -- new headline, stale teaser -- stops being
+    a reachable state.
+    """
+    if not accepted:
+        return []
 
     if ctx.dry_run:
-        _record("would-enrich", value, value)
-        log_event(ctx.logger, ctx.events_path, run_id=ctx.run_id, stage="card",
-                  slug=ctx.slug, step=f"write:{field}", status="would-enrich",
-                  detail=f"{field}={value}")
-        return None
+        for field, current, value in accepted:
+            _record(ctx, field, current, "would-enrich", value, value)
+            log_event(ctx.logger, ctx.events_path, run_id=ctx.run_id,
+                      stage="card", slug=ctx.slug, step=f"write:{field}",
+                      status="would-enrich", detail=f"{field}={value}")
+        return []
 
     try:
-        ctx.api.patch_field(ctx.slug, field, value, if_match=ctx.etag)
+        ctx.api.patch_fields(
+            ctx.slug, [(f, v) for f, _, v in accepted], if_match=ctx.etag)
     except Exception as exc:
-        _record("error", f"PATCH failed: {exc}", value)
-        log_event(ctx.logger, ctx.events_path, run_id=ctx.run_id, stage="card",
-                  slug=ctx.slug, step=f"write:{field}", status="error",
-                  detail=str(exc), level=logging.ERROR)
-        return None
+        # The write is atomic, so the failure is too: every field is reported
+        # failed, because the server holds `current` for all of them.
+        for field, current, value in accepted:
+            _record(ctx, field, current, "error", f"PATCH failed: {exc}", value)
+            log_event(ctx.logger, ctx.events_path, run_id=ctx.run_id,
+                      stage="card", slug=ctx.slug, step=f"write:{field}",
+                      status="error", detail=str(exc), level=logging.ERROR)
+        return []
 
-    # RE-READ THE ETAG BEFORE THE NEXT FIELD. This script is the only ported
-    # enricher that issues TWO PATCHes for one case, and the first one changes
-    # the case's ETag -- so reusing the ETag captured before it makes the second
-    # write fail `If-Match` with a 412. Measured on the 2026-08-04 local smoke
-    # run: `title` landed, `short_description` died with
-    # "HTTP Error 412: Precondition Failed" on BOTH cases, meaning the script
-    # could never write both fields in one pass. The dry run cannot see this --
-    # it reports `would-enrich` for both and looks perfect.
-    #
-    # A failed refresh clears the ETag rather than keeping the stale one: an
-    # unconditional second write is a smaller problem than a guaranteed 412,
-    # and the case was just read, so the race window is the width of one PATCH.
-    try:
-        _, ctx.etag = ctx.api.get_case_with_etag(ctx.slug)
-    except Exception as exc:  # noqa: BLE001 -- the write already succeeded.
-        ctx.etag = None
+    for field, current, value in accepted:
+        _record(ctx, field, current, "enriched", value, value)
         log_event(ctx.logger, ctx.events_path, run_id=ctx.run_id, stage="card",
-                  slug=ctx.slug, step=f"etag:{field}", status="stale",
-                  detail=f"could not re-read ETag after writing {field}: {exc}",
-                  level=logging.WARNING)
-
-    _record("enriched", value, value)
-    log_event(ctx.logger, ctx.events_path, run_id=ctx.run_id, stage="card",
-              slug=ctx.slug, step=f"write:{field}", status="enriched",
-              detail=f"{field}={value}")
-    return value
+                  slug=ctx.slug, step=f"write:{field}", status="enriched",
+                  detail=f"{field}={value}")
+    return [f for f, _, _ in accepted]
 
 
 def build_api(args):
@@ -587,12 +620,21 @@ def main(argv=None):
             report=report, review=review, logger=logger, run_id=run_id,
             events_path=paths["events"],
         )
+        # Vet first, write once. Each field can still be refused on its own --
+        # what it cannot do any more is cost the other field a 412.
+        accepted = []
         if need_title:
-            _vet_and_write(ctx, TITLE_FIELD, current_title,
-                           result.get(TITLE_FIELD), lambda c: vet_title(c, number))
+            value = _vet_field(ctx, TITLE_FIELD, current_title,
+                               result.get(TITLE_FIELD),
+                               lambda c: vet_title(c, number))
+            if value is not None:
+                accepted.append((TITLE_FIELD, current_title, value))
         if need_short:
-            _vet_and_write(ctx, SHORT_FIELD, current_short,
-                           result.get(SHORT_FIELD), vet_short_description)
+            value = _vet_field(ctx, SHORT_FIELD, current_short,
+                               result.get(SHORT_FIELD), vet_short_description)
+            if value is not None:
+                accepted.append((SHORT_FIELD, current_short, value))
+        _write_fields(ctx, accepted)
 
     stats = report.summary()
     print_summary(stats, args.dry_run, "Card enrichment")
