@@ -64,6 +64,38 @@ class PollerError(Exception):
     pass
 
 
+def _capture_job_failure(exc, *, job_id, kind, err) -> bool:
+    """Send one job failure to Sentry. Returns whether it was sent.
+
+    Best-effort by construction. A telemetry problem must never turn a reported job
+    failure into an unreported one, so every path returns rather than raises —
+    including the import, since ``sentry_sdk`` is a real dependency here but this
+    command also runs in environments that trim it.
+
+    Grouped by ``kind`` rather than by traceback. The interesting question is "is
+    ``case_proposal_intent`` failing?", not "how many distinct stack shapes did the
+    JSON decoder produce?" — and an LLM failure's traceback varies with the prompt
+    while the thing worth alerting on does not.
+    """
+    try:
+        import sentry_sdk
+    except Exception:  # noqa: BLE001 - telemetry must not break the worker
+        return False
+
+    try:
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("job.kind", kind or "unknown")
+            scope.set_tag("component", "review_poller")
+            scope.set_context("job", {"id": job_id, "kind": kind})
+            # The queue's own record of the failure, which is what an operator
+            # would otherwise have to go to Postgres to read.
+            scope.set_extra("job_error", err[:4000])
+            scope.fingerprint = ["review_poller", "job_failed", kind or "unknown"]
+            return bool(sentry_sdk.capture_exception(exc))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 class Command(BaseCommand):
     help = "Consume jobs from the central queue, run them locally, submit results."
 
@@ -216,6 +248,17 @@ class Command(BaseCommand):
             import traceback
 
             err = f"{e}\n{traceback.format_exc()[:2000]}"
+            # Report to Sentry EXPLICITLY. This except block is why nothing else
+            # would: the exception is caught here and handed to the queue, so it
+            # never reaches the interpreter's excepthook, which is the only thing
+            # sentry_sdk hooks for a management command. Every LLM job failure this
+            # worker has ever had — including two rounds of misdiagnosed
+            # `error_max_turns` — was therefore visible only in `job.error` and in
+            # this pod's stdout, and stdout is 90 days of VictoriaLogs that nobody
+            # alerts on.
+            #
+            # A no-op when no DSN is configured, so this is safe in dev and CI.
+            _capture_job_failure(e, job_id=job_id, kind=kind, err=err)
             try:
                 # Transient errors are retryable; the queue re-queues with backoff
                 # up to the kind's max_attempts, else dead-letters.
