@@ -197,13 +197,21 @@ def _validation_failure(job, reason: str, **context) -> None:
     _record(job, proposal_id=None, rejected=reason, **context)
 
 
-def _already_staged(dedup_key: str) -> bool:
+def already_staged(dedup_key: str) -> bool:
     """True if this fact has already been proposed, whatever was decided about it.
 
     Deliberately not filtered by status. A REJECTED proposal is a caseworker
     saying no to this exact fact, and the rejection has to stay sticky — a
     re-observed docket entry must not come back a week later as a fresh pending
     item for someone to reject again.
+
+    **Called in two places, for two different reasons.** The proposal-builder
+    consumer calls it before enqueueing, which is where the money is saved: no
+    job, no model call. :func:`on_result` calls it again after the call, which is
+    where correctness is guaranteed — the two are separated by 30–90 seconds of
+    inference, and a concurrent decision inside that gap is entirely possible.
+    Neither makes the other redundant: drop the first and every re-observation is
+    paid for, drop the second and a race writes a duplicate row.
     """
     from case_proposals.models import CaseUpdateProposal
 
@@ -266,7 +274,7 @@ def on_result(job, result: dict) -> None:
     # Those need to stay distinguishable: the first is the idempotency spine
     # working, the second is a prompt regression, and conflating them means a
     # dashboard full of validation failures that are all benign.
-    if _already_staged(dedup_key):
+    if already_staged(dedup_key):
         logger.info("case_proposal.intent_already_staged", job_id=job.pk, dedup_key=dedup_key)
         return _record(job, proposal_id=None, duplicate=True, dedup_key=dedup_key)
 

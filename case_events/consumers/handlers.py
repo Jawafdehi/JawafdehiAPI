@@ -55,20 +55,55 @@ def _producer(name: str) -> str:
 # ── matcher ──────────────────────────────────────────────────────────────────
 
 
-def _enrichable():
-    """Cases an observed fact may be proposed against.
+#: The case states an INFERRED match may be proposed against.
+#:
+#: An allowlist rather than ``exclude(CLOSED)``, so that adding a state to the
+#: workflow does not silently opt it in. A new state should have to be argued for
+#: here, not inherited by default.
+ENRICHABLE_STATES = ("IN_REVIEW", "PUBLISHED")
 
-    Excludes CLOSED, which on this platform is the soft delete: ``Case.delete()``
-    flips the state and keeps the row (accountability archive — nothing is hard
-    deleted). Without this filter a deleted case still joins on its court-case
-    references, so every scrape of that docket buys a premium model call and puts
-    a review item in front of a caseworker for a case somebody deliberately
-    removed. DRAFT and IN_REVIEW are deliberately kept: a case being built is
-    exactly the sort of thing new facts should land on.
+
+def _not_deleted():
+    """Every case that still exists, whatever its workflow state.
+
+    CLOSED is this platform's soft delete: ``Case.delete()`` flips the state and
+    keeps the row (accountability archive — nothing is hard deleted). Without this
+    filter a deleted case still joins on its court-case references, so every
+    re-scrape of that docket buys a premium model call and puts a review item in
+    front of a caseworker for a case somebody deliberately removed.
+
+    This is the floor, and it applies to every path. Nothing may be proposed
+    against a deleted case, however the match was arrived at.
     """
     from cases.models import Case, CaseState
 
     return Case.objects.exclude(state=CaseState.CLOSED)
+
+
+def _enrichable():
+    """Cases an INFERRED fact may be proposed against — the narrower set.
+
+    Used by :func:`_cases_for_refs`, where we joined a docket or a material to a
+    case ourselves and nobody asked us to. Deliberately NOT used by
+    :func:`_cases_named_directly`, where a human named the case; see there for why
+    the two differ.
+
+    **DRAFT is excluded, reversing what this used to do.** The old reasoning was
+    that "a case being built is exactly the sort of thing new facts should land
+    on" — true of a case someone is actively writing, false of this archive.
+    Measured 2026-08-04: DRAFT is 2919 of 3003 non-closed cases, 97%, and is
+    overwhelmingly bulk-imported stubs nobody has opened rather than
+    work-in-progress. Inferring facts onto those proposes against cases with no
+    editorial owner, filling a review queue nobody is clearing at the price of a
+    premium call each.
+
+    The cost of the reversal, stated because it is not free: the inferrable set
+    goes from 3003 cases to 84, and matching signals in a 48h window from 6 to 3.
+    Half of what this pipeline can currently see is now deliberately ignored. A
+    DRAFT case that wants enrichment gets it by being moved to IN_REVIEW — a
+    caseworker action, and a cheap one.
+    """
+    return _not_deleted().filter(state__in=ENRICHABLE_STATES)
 
 
 def _cases_for_refs(refs: list[str]):
@@ -106,6 +141,18 @@ def _cases_named_directly(refs: list[str]):
     Separate from the join above because a signal that names the case outright
     is not a match at all — it is an assertion, and it should not be scored as
     though we inferred it.
+
+    **That distinction is now load-bearing, not just cosmetic.** This path uses
+    :func:`_not_deleted`, so DRAFT is allowed here and refused by
+    :func:`_cases_for_refs`. The reason is who is asking. A docket join is us
+    guessing that a fact belongs to a case, and guessing onto 2919 ownerless DRAFT
+    stubs is the waste ``ENRICHABLE_STATES`` exists to stop. A manual note is a
+    caseworker naming the case, and refusing that would make the note endpoint
+    silently useless on 97% of the archive — it answers 202 "a proposal will
+    appear if the note warrants one", and none ever would.
+
+    CLOSED remains refused on both paths. Being named by a human is not a reason
+    to enrich a case somebody deleted.
     """
     from jawafdehi_shared.entities.ids import parse_case_iri
 
@@ -118,7 +165,7 @@ def _cases_named_directly(refs: list[str]):
     if not slugs:
         return []
 
-    return list(_enrichable().filter(slug__in=slugs).only("id", "slug", "title"))
+    return list(_not_deleted().filter(slug__in=slugs).only("id", "slug", "title"))
 
 
 def handle_matcher(envelope: dict, context) -> None:
@@ -252,8 +299,12 @@ def handle_proposal_builder(envelope: dict, context) -> None:
     long enough to cover the worst case, and make every redelivery pay for a
     fresh premium call. Enqueue-and-ack hands all of that to the jobs queue,
     where the lease, the retry budget and terminal handling already exist.
+
+    **A fact already staged is dropped here, before a job exists.** See
+    :func:`case_proposals.job_kind.already_staged` for why the check downstream is
+    not enough on its own.
     """
-    from case_proposals.job_kind import DETECTED_BY, KIND
+    from case_proposals.job_kind import DETECTED_BY, KIND, already_staged
     from jobs import queue as jobs_queue
 
     payload = envelope.get("payload") or {}
@@ -267,6 +318,22 @@ def handle_proposal_builder(envelope: dict, context) -> None:
     dedup_key = envelope.get("dedup_key") or ""
     if not dedup_key:
         raise PoisonMessage(f"{subjects.CASE_MATCHED} envelope has no dedup_key to key a proposal on")
+
+    if already_staged(dedup_key):
+        # Ack and stop. The downstream check in `on_result` would also catch this
+        # and mark the job a duplicate — but only AFTER paying for the model call,
+        # which is the entire cost of the job. Nothing upstream prevents the
+        # repeat: the streams' duplicate_window is 120s while the docket producer
+        # rescans a 48h window every 6h, and `jobs.queue.enqueue` frees a
+        # dedup_key as soon as the previous job reaches a terminal state. So every
+        # fact was re-observed ~8 times and paid for ~8 times to produce one
+        # proposal.
+        logger.info(
+            "case_events.intent_skipped_already_staged",
+            case_id=case_id,
+            dedup_key=dedup_key,
+        )
+        return
 
     job = jobs_queue.enqueue(
         KIND,

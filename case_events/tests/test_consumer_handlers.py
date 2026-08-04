@@ -17,7 +17,13 @@ import pytest
 
 from case_events import subjects
 from case_events.consumers import PoisonMessage, handlers
-from cases.models import Case, CaseCourtCaseReference, CaseMaterialReference, CaseType
+from cases.models import (
+    Case,
+    CaseCourtCaseReference,
+    CaseMaterialReference,
+    CaseState,
+    CaseType,
+)
 from jawafdehi_shared.entities.ids import (
     build_case_iri,
     build_courtcase_iri,
@@ -28,8 +34,17 @@ from jawafdehi_shared.entities.ids import (
 pytestmark = pytest.mark.django_db
 
 
-def make_case(slug="lalita-niwas-land-scam", title="Lalita Niwas land scam"):
-    return Case.objects.create(title=title, case_type=CaseType.CORRUPTION, slug=slug)
+def make_case(slug="lalita-niwas-land-scam", title="Lalita Niwas land scam", state=CaseState.IN_REVIEW):
+    """A case the matcher is allowed to propose against.
+
+    ``state`` is explicit and does NOT default to the model's own default. The
+    model defaults to DRAFT, and DRAFT is deliberately not enrichable — see
+    ``handlers.ENRICHABLE_STATES``. A fixture that inherited the model default
+    would make every matcher test here assert against a case the matcher is
+    supposed to ignore, and they would all fail for the same uninformative
+    reason.
+    """
+    return Case.objects.create(title=title, case_type=CaseType.CORRUPTION, slug=slug, state=state)
 
 
 def signal_envelope(**overrides):
@@ -254,10 +269,60 @@ class TestMatcher:
 
         assert published(pub) == []
 
-    def test_a_draft_case_IS_matched(self):
-        """Kept deliberately: a case being built is what new facts should land on."""
-        case = make_case()
-        assert case.state == "DRAFT"
+    def test_a_draft_case_is_NOT_matched(self):
+        """Reverses what this test used to assert, and the reversal is the point.
+
+        It previously read `test_a_draft_case_IS_matched`, on the reasoning that
+        a case being built is what new facts should land on. True of a case a
+        human is writing; false of this archive, where DRAFT was 2919 of 3003
+        non-closed cases on 2026-08-04 and is overwhelmingly bulk-imported stubs
+        with no editorial owner. Proposing against those spends a premium call
+        each to fill a queue nobody is clearing.
+        """
+        case = make_case(state=CaseState.DRAFT)
+        iri = build_courtcase_iri("special", "082-CR-0154")
+        CaseCourtCaseReference.objects.create(case=case, courtcase_iri=iri, ordinal=1)
+
+        with mock.patch("case_events.bus.publish") as pub:
+            handlers.handle_matcher(signal_envelope(subject_refs=[iri]), None)
+
+        assert published(pub) == []
+
+    def test_a_draft_case_NAMED_OUTRIGHT_is_still_matched(self):
+        """The asymmetry, and it is deliberate — inference is filtered, assertion
+        is not.
+
+        A docket join is us guessing a fact belongs to a case, and guessing onto
+        ownerless DRAFT stubs is the waste ENRICHABLE_STATES exists to stop. A
+        caseworker's manual note names the case, and this is the path it takes;
+        filtering it would make the note endpoint silently useless on 97% of the
+        archive — it answers 202 "a proposal will appear if the note warrants
+        one" and none ever would.
+        """
+        case = make_case(state=CaseState.DRAFT)
+
+        with mock.patch("case_events.bus.publish") as pub:
+            handlers.handle_matcher(signal_envelope(subject_refs=[build_case_iri(case.slug)]), None)
+
+        assert len(published(pub)) == 1
+
+    def test_a_closed_case_is_refused_on_the_assertion_path_too(self):
+        """The floor that has no exception. Being named by a human is not a
+        reason to enrich a case somebody deleted, so the assertion path relaxes
+        DRAFT and nothing else."""
+        case = make_case(state=CaseState.DRAFT)
+        case.delete()
+
+        with mock.patch("case_events.bus.publish") as pub:
+            handlers.handle_matcher(signal_envelope(subject_refs=[build_case_iri(case.slug)]), None)
+
+        assert published(pub) == []
+
+    @pytest.mark.parametrize("state", [CaseState.IN_REVIEW, CaseState.PUBLISHED])
+    def test_the_two_enrichable_states_are_matched(self, state):
+        """The positive half, pinned per state rather than left to the fixture's
+        default — otherwise retuning that default silently drops the coverage."""
+        case = make_case(state=state)
         iri = build_courtcase_iri("special", "082-CR-0154")
         CaseCourtCaseReference.objects.create(case=case, courtcase_iri=iri, ordinal=1)
 
@@ -265,6 +330,11 @@ class TestMatcher:
             handlers.handle_matcher(signal_envelope(subject_refs=[iri]), None)
 
         assert len(published(pub)) == 1
+
+    def test_every_enrichable_state_is_a_real_case_state(self):
+        """Guards a typo in the allowlist, which would fail open to silence: an
+        unknown string matches nothing and looks exactly like a quiet window."""
+        assert set(handlers.ENRICHABLE_STATES) <= set(CaseState.values)
 
 
 def matched_envelope(case, **overrides):
@@ -281,6 +351,20 @@ def matched_envelope(case, **overrides):
         },
         **overrides,
     }
+
+
+def stage_proposal(case, envelope, **overrides):
+    """The row that means "this exact fact has already been proposed"."""
+    from case_proposals.models import CaseUpdateProposal
+
+    return CaseUpdateProposal.objects.create(
+        case_slug=case.slug,
+        dedup_key=envelope["dedup_key"],
+        source_kind="ngm_docket",
+        intent={"type": "append_timeline_entry", "entry": {}},
+        confidence=0.9,
+        **overrides,
+    )
 
 
 class TestProposalBuilder:
@@ -317,6 +401,63 @@ class TestProposalBuilder:
         handlers.handle_proposal_builder(envelope, None)
 
         assert Job.objects.count() == 1
+
+    def test_a_fact_already_staged_never_becomes_a_job(self):
+        """The whole point of the check: no job means no premium call.
+
+        The queue's own dedup does NOT cover this. ``jobs.queue.enqueue`` frees a
+        dedup_key the moment the prior job is terminal, so once the first job is
+        `done` the next observation of the same fact enqueues cleanly, pays for a
+        full model call, and is only then discarded by ``on_result``. With the
+        docket producer rescanning a 48h window every 6h, that is ~8 calls per
+        fact for one proposal.
+        """
+        from jobs.models import Job
+
+        case = make_case()
+        envelope = matched_envelope(case)
+        stage_proposal(case, envelope)
+
+        with mock.patch("llm.prompts.PromptSpec.invoke") as invoke:
+            handlers.handle_proposal_builder(envelope, None)
+
+        assert Job.objects.count() == 0
+        invoke.assert_not_called()
+
+    def test_the_skip_survives_the_first_job_reaching_a_terminal_state(self):
+        """The regression this actually fixes, reproduced through the real queue.
+
+        Asserted by driving the job to `done` — the state that frees the dedup
+        key — rather than by trusting the docstring above. Without the check in
+        the handler this enqueues a second job and the test fails.
+        """
+        from jobs.models import Job
+
+        case = make_case()
+        envelope = matched_envelope(case)
+        handlers.handle_proposal_builder(envelope, None)
+
+        job = Job.objects.get()
+        job.status = "done"
+        job.save(update_fields=["status"])
+        stage_proposal(case, envelope)
+
+        handlers.handle_proposal_builder(envelope, None)
+
+        assert Job.objects.count() == 1
+
+    def test_a_rejected_proposal_also_blocks_the_rebuild(self):
+        """Rejection has to stay sticky, and cheaply. A caseworker saying no to a
+        fact must not buy another call to re-propose it next window."""
+        from jobs.models import Job
+
+        case = make_case()
+        envelope = matched_envelope(case)
+        stage_proposal(case, envelope, status="rejected")
+
+        handlers.handle_proposal_builder(envelope, None)
+
+        assert Job.objects.count() == 0
 
     def test_the_signals_subject_becomes_the_proposals_source_kind(self):
         from jobs.models import Job
