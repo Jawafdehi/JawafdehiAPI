@@ -127,6 +127,32 @@ def test_empty_base_url_raises():
         CaseworkApi(base_url=None, token="t")
 
 
+def test_bearer_mode_rejects_cleartext_http_to_a_remote_host():
+    """CWE-319. `_headers` attaches `Authorization: Bearer <token>` to every
+    request, reads included, and the write-guard only inspects the host -- not
+    the scheme. So an `http://` remote base URL put a production token on the
+    wire in cleartext, and these runs are hours long.
+
+    `basic=` was already loopback-only; Bearer had no scheme check at all.
+    """
+    with pytest.raises(ValueError, match="https"):
+        CaseworkApi(base_url="http://api.jawafdehi.org", token="prod-token")
+
+
+def test_bearer_mode_accepts_https_to_a_remote_host():
+    CaseworkApi(base_url="https://api.jawafdehi.org", token="prod-token")
+
+
+@pytest.mark.parametrize("base_url", [
+    "http://127.0.0.1:48010",
+    "http://localhost:48010",
+])
+def test_bearer_mode_still_allows_cleartext_to_loopback(base_url):
+    """A local DEV_AUTH server has no TLS, and a token never leaves the host.
+    Requiring https here would break every local run for no gain."""
+    CaseworkApi(base_url=base_url, token="local-token")
+
+
 def test_basic_mode_rejects_non_loopback_base_url():
     with pytest.raises(ValueError):
         CaseworkApi(

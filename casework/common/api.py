@@ -65,14 +65,28 @@ class CaseworkApi:
                 "production default) or `basic=(username, password)` "
                 "(HTTP Basic, local DEV_AUTH only) -- never both, never neither"
             )
-        if basic is not None:
-            host = urllib.parse.urlparse(self.base_url).hostname
-            if host not in LOOPBACK_HOSTS:
-                raise ValueError(
-                    f"basic= is only permitted against loopback (127.0.0.1 or "
-                    f"localhost); refusing to send Basic auth to {base_url!r} -- "
-                    "use `token` (Bearer) for any non-local host"
-                )
+        parsed = urllib.parse.urlparse(self.base_url)
+        is_loopback = parsed.hostname in LOOPBACK_HOSTS
+        if basic is not None and not is_loopback:
+            raise ValueError(
+                f"basic= is only permitted against loopback (127.0.0.1 or "
+                f"localhost); refusing to send Basic auth to {base_url!r} -- "
+                "use `token` (Bearer) for any non-local host"
+            )
+        # `_headers` attaches the credential to EVERY request, reads included,
+        # and the write-guard below only inspects the host -- not the scheme. An
+        # `http://` remote base URL therefore put a production token on the wire
+        # in cleartext (CWE-319), for runs that last hours. Loopback stays
+        # exempt: a local DEV_AUTH server has no TLS and the token never leaves
+        # the host, so requiring https there would break every local run for no
+        # gain.
+        if not is_loopback and parsed.scheme != "https":
+            raise ValueError(
+                f"refusing to send credentials to {base_url!r} over "
+                f"{parsed.scheme or 'no'} -- a remote base_url must use https, "
+                "or the Authorization header travels in cleartext. Use "
+                "http://127.0.0.1:48010 for a local DEV_AUTH server."
+            )
         self.token = token
         self.basic = basic
         # Write-guard opt-in. False (the default) means `_patch` refuses any

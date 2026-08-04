@@ -152,3 +152,55 @@ def test_convert_without_batch_csv_still_walks_every_case():
 def test_convert_slug_flag_still_wins_over_a_full_walk():
     api = _FakeApi("case-a", "case-b")
     assert slugs_for_run(api, _convert_args(slug=["case-b"])) == ["case-b"]
+
+
+# ---------------------------------------------------------------------------
+# Combined selectors. The batch branch returned early, so a selector passed
+# alongside it was accepted and silently dropped -- the run then processed
+# every batch row while its command line said otherwise.
+# ---------------------------------------------------------------------------
+
+
+def test_convert_intersects_batch_csv_with_slug(tmp_path):
+    """`--batch-csv b.csv --slug case-a` must convert case-a, not the whole
+    file. Narrowing a batch is the normal way to re-run one row of a reviewed
+    batch, and silently widening it back to the batch is a wrong-scope write."""
+    path = _batch(tmp_path, "case-a", "case-b", "case-c")
+    api = _FakeApi("case-a", "case-b", "case-c")
+    assert slugs_for_run(api, _convert_args(batch_csv=path, slug=["case-a"])) == [
+        "case-a"]
+
+
+def test_convert_intersection_keeps_batch_order(tmp_path):
+    """`--limit` slices the result, so the intersection must stay in file order
+    rather than in whatever order `--slug` was typed."""
+    path = _batch(tmp_path, "case-a", "case-b", "case-c")
+    api = _FakeApi("case-a", "case-b", "case-c")
+    assert slugs_for_run(
+        api, _convert_args(batch_csv=path, slug=["case-c", "case-a"])
+    ) == ["case-a", "case-c"]
+
+
+def test_convert_slug_outside_the_batch_selects_nothing(tmp_path):
+    """The batch stays a hard allowlist: `--slug` can only narrow it. Selecting
+    nothing is the safe outcome, and it is visible as n=0 rather than silent."""
+    path = _batch(tmp_path, "case-a")
+    api = _FakeApi("case-a", "case-b")
+    assert slugs_for_run(api, _convert_args(batch_csv=path, slug=["case-b"])) == []
+
+
+@pytest.mark.parametrize("selector", [
+    {"fiscal_year": "078"},
+    {"court_case": ["078-CR-0001"]},
+])
+def test_convert_rejects_selectors_it_cannot_honour(selector):
+    """`--fiscal-year` and `--court-case` come from the shared
+    `add_common_args`, so they appear in convert's `--help`, but convert never
+    implemented either. Accepted-and-ignored is the dangerous reading: with no
+    batch and no `--slug`, `convert --fiscal-year 078` walks and converts the
+    ENTIRE corpus while its command line claims one year. Failing costs the
+    operator one message; the silent version costs a full-corpus run.
+    """
+    api = _FakeApi("case-a", "case-b")
+    with pytest.raises(SystemExit, match="not supported"):
+        slugs_for_run(api, _convert_args(**selector))

@@ -230,12 +230,35 @@ def slugs_for_run(api, args):
     here. The allowlist property is what matters and it holds: no slug outside
     the file is returned.
 
-    ``--fiscal-year`` and ``--court-case`` remain accepted-and-ignored here.
-    Both predate the batch work; wiring them in needs a corpus walk, which is
-    a bigger change than this fix.
+    ``--slug`` NARROWS a batch rather than being dropped. The batch branch used
+    to return early, so ``--batch-csv b.csv --slug case-a`` converted every row
+    in the file -- a wrong-scope write whose command line said otherwise. The
+    intersection keeps file order, because ``--limit`` slices the result.
+
+    ``--fiscal-year`` and ``--court-case`` are rejected outright. Both come from
+    the shared ``add_common_args`` and so appear in this tool's ``--help``, but
+    neither was ever implemented here, and accepted-and-ignored is the dangerous
+    reading: with no batch and no ``--slug``, ``convert --fiscal-year 078``
+    walks and converts the ENTIRE corpus while claiming one year. Failing costs
+    one message; honouring them needs a corpus walk and a bigger change.
     """
+    unsupported = [
+        flag for flag, value in (
+            ("--fiscal-year", getattr(args, "fiscal_year", "")),
+            ("--court-case", getattr(args, "court_case", None)),
+        ) if value
+    ]
+    if unsupported:
+        raise SystemExit(
+            f"{', '.join(unsupported)} not supported by convert -- it would be "
+            "accepted and ignored, converting every case instead of the subset "
+            "you asked for. Scope the run with --batch-csv or --slug."
+        )
     if getattr(args, "batch_csv", None):
         slugs = slugs_from_batch_csv(args.batch_csv)
+        if args.slug:
+            wanted = set(args.slug)
+            slugs = [s for s in slugs if s in wanted]
     elif args.slug:
         slugs = list(args.slug)
     else:

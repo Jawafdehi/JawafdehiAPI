@@ -97,9 +97,13 @@ flowchart TB
 
 ### The prerequisite DAG
 
-`convert` is the gate every LLM stage waits on: a case with evidence bound but no
-MARKDOWN-role material cannot be enriched. That is reported as an **explicit
-unmet prerequisite**, never as a silent skip that looks like "already done".
+`convert` gates the four stages that read material — `bigo`, `timeline`,
+`allegations`, `entities`. A case with evidence bound but no MARKDOWN-role
+material cannot be enriched, and that is reported as an **explicit unmet
+prerequisite**, never as a silent skip that looks like "already done".
+
+`tags` is the exception: it reads no material at all, so `convert` does not gate
+it (see the bullet below the diagram).
 
 ```mermaid
 flowchart LR
@@ -247,8 +251,15 @@ look complete that you never touched.
 
 - `--dry-run` defaults to **on**; `--apply` opts in. Get this from
   `add_common_args`, do not re-implement it.
-- Pass `if_match=etag` on every write. Without it a concurrent edit is silently
-  overwritten instead of failing with 412.
+- Pass `if_match=etag` on every **case PATCH** — `patch_field` and
+  `replace_list`. Without it a concurrent edit is silently overwritten instead
+  of failing with 412. Material uploads (`convert.py`'s MARKDOWN POST) go
+  through `_request` directly and have no case ETag to send; they are covered by
+  the loopback write-guard instead.
+- A remote `--api-base-url` must be `https`. `CaseworkApi` refuses to construct
+  otherwise, because the `Authorization` header goes on every request and these
+  runs last hours. Loopback over `http` is exempt — a local DEV_AUTH server has
+  no TLS and the token never leaves the host.
 - Read the token from `$JAWAFDEHI_API_TOKEN` rather than `--api-token`. A token
   passed on the command line sits in `/proc/<pid>/cmdline` (mode 444) for the
   whole run and is readable by every local user via `ps -af`; the environment
