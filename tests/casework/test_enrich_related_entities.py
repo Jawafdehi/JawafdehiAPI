@@ -1289,7 +1289,7 @@ def test_permissive_binds_the_ambiguity_and_still_cannot_bind_a_nomatch():
     assert len(plan.bound) == 1
     assert plan.review == []
     assert len(plan.nomatch) == 1
-    _name, decision, _notes = plan.bound[0]
+    _name, decision, _notes, _section = plan.bound[0]
     assert decision.nes_id == anish_a["id"]      # first by the deterministic sort
     assert is_promoted(decision)
     assert "ambiguous" in decision.reason
@@ -1387,7 +1387,7 @@ def test_a_same_script_candidate_is_still_promoted_over_its_veto():
         {"entity_name": "कमल थापा", "relationship_type": "accused", "notes": "क"}])
 
     assert plan.review == []
-    _name, decision, _notes = plan.bound[0]
+    _name, decision, _notes, _section = plan.bound[0]
     assert decision.nes_id == thapa_a["id"]
     assert is_promoted(decision)
     assert "ambiguous" in decision.reason
@@ -1421,6 +1421,10 @@ def test_one_entity_binds_into_two_sections_in_a_single_plan():
     assert [(i["nes_id"], i["relationship_type"]) for i in plan.patch_items] == [
         (SURKHET_IRI, "location"), (SURKHET_IRI, "related")]
     assert len(plan.bound) == 2
+    # Each row carries its OWN section. Looked up by `nes_id` instead, both rows
+    # reported whichever section was written last, so `.binds.jsonl` and the
+    # console would have labelled the location bind 'related'.
+    assert [section for _n, _d, _notes, section in plan.bound] == ["location", "related"]
 
 
 def test_the_same_entity_and_section_twice_is_planned_once():
@@ -1557,7 +1561,7 @@ def test_permissive_binds_an_election_record_and_records_the_overridden_veto():
     assert plan.action == "WOULD_PATCH"
     assert [i["nes_id"] for i in plan.patch_items] == [ANKUR_IRI]
     assert plan.review == []
-    _name, decision, _notes = plan.bound[0]
+    _name, decision, _notes, _section = plan.bound[0]
     assert decision.nes_id == ANKUR_IRI
     assert is_promoted(decision)
     assert "Election Commission" in decision.reason
@@ -1576,7 +1580,7 @@ def test_a_doubly_uncertain_bind_records_both_vetoes_it_overrode():
     plan = plan_case_entities(api, case, 'W/"e"', [
         {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related", "notes": "क"}])
 
-    _name, decision, _notes = plan.bound[0]
+    _name, decision, _notes, _section = plan.bound[0]
     assert decision.nes_id == ANISH_A["id"]
     assert is_promoted(decision)
     assert "Election Commission" in decision.reason   # the second veto
@@ -1592,7 +1596,7 @@ def test_a_single_overridden_veto_is_not_recorded_twice():
     plan = plan_case_entities(api, case, 'W/"e"', [
         {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related", "notes": "क"}])
 
-    _name, decision, _notes = plan.bound[0]
+    _name, decision, _notes, _section = plan.bound[0]
     assert decision.reason.count("ambiguous") == 1
     assert "; also" not in decision.reason
 
@@ -1865,7 +1869,7 @@ def test_permissive_binds_through_a_truncated_window_and_says_so():
         {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}])
 
     assert plan.action == "WOULD_PATCH"
-    _name, decision, _notes = plan.bound[0]
+    _name, decision, _notes, _section = plan.bound[0]
     assert decision.nes_id == ANKUR_IRI
     assert is_promoted(decision)
     assert "truncated mid-block" in decision.reason
@@ -1888,7 +1892,7 @@ def test_a_complete_window_binds_however_long_the_list_is():
         {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}])
 
     assert plan.action == "WOULD_PATCH"
-    assert [n for n, _, _ in plan.bound] == ["अंकुर खत्री"]
+    assert [n for n, _, _, _ in plan.bound] == ["अंकुर खत्री"]
 
 
 def test_plan_still_binds_when_the_candidate_list_is_one_short_of_the_cap():
@@ -2357,6 +2361,38 @@ def test_dry_run_bind_rows_are_marked_unwritten(
     assert [b["written"] for b in binds] == [False, False]
     assert api.replace_list_calls == []
     assert [b["reason"].startswith(PROMOTED_PREFIX) for b in binds] == [False, True]
+
+
+TWO_SECTION_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "location", "notes": "क"},
+        {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "related", "notes": "ख"},
+    ],
+    "accused_notes": [],
+})
+
+
+def test_binds_jsonl_labels_each_section_when_one_entity_binds_twice(
+    monkeypatch, patched_fetch_markdown, capsys
+):
+    # End to end through `main()`, because the plan-level assertion is not enough:
+    # the report row's section used to come from an `nes_id`-keyed lookup over
+    # `patch_items`, which collapses two sections for one entity and labels BOTH
+    # rows with whichever was written last. A caseworker reading `.binds.jsonl`
+    # would see two `related` binds and no `location` one.
+    case = dict(PRESS_ONLY_CASE, slug="case-two-sections-e2e", entities=[])
+    api = _SearchStubApi([case], {"सुर्खेत जिल्ला": [SURKHET_CANDIDATE]})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: TWO_SECTION_RESPONSE,
+              argv=["--dry-run"])
+
+    binds = [json.loads(line) for line
+             in Path(_report_files()["binds"]).read_text(encoding="utf-8").splitlines()]
+    assert [b["role"] for b in binds] == ["location", "related"]
+    assert {b["nes_id"] for b in binds} == {SURKHET_IRI}
+    # And the console says the same thing, since that is what an operator reads.
+    out = capsys.readouterr().out
+    assert "WOULD BIND (location)" in out
+    assert "WOULD BIND (related)" in out
 
 
 # --------------------------------------------------------------------------

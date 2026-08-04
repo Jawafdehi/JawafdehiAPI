@@ -425,7 +425,11 @@ class EntityBindPlan:
     state: str = ""
     if_match: str | None = None
     n_current: int = 0
-    bound: list = field(default_factory=list)    # (name, Decision, notes)
+    # The section rides on the row for the same reason it does on `review`: bind
+    # identity is `(nes_id, relationship_type)`, so one entity can appear twice
+    # here under different sections and a `nes_id`-keyed lookup collapses them --
+    # both rows then report whichever section was written last.
+    bound: list = field(default_factory=list)    # (name, Decision, notes, section)
     # The section is on the row because it belongs to the row: two extracted items
     # can name the same person in different sections, so it cannot be recovered
     # from the name afterwards. Carries the raw (lowercased) value for an
@@ -478,24 +482,6 @@ NOT_PROMOTED_CROSS_SCRIPT = (
 def is_promoted(decision):
     """True when this bind won by overriding a veto, so it is one to double-check."""
     return decision.reason.startswith(PROMOTED_PREFIX)
-
-
-def _plan_sections(plan):
-    """`nes_id` -> the section it is being bound into, from the plan's own items.
-
-    Derived from `patch_items` rather than tracked alongside `plan.bound`: that is
-    the list actually being written, so the report cannot disagree with the
-    request body. Keeping a parallel copy in `plan.bound` would be a second
-    source of truth for the same fact.
-
-    Total over `plan.bound`, so callers index it directly. Every bound decision
-    reached `additions` and `merge_entity_binds` only ever adds to `current`, so a
-    missing key would mean the plan and the request body have diverged -- a bug to
-    raise on, not to paper over with a default section that would file the entity
-    under a relationship nobody asserted.
-    """
-    return {item["nes_id"]: item["relationship_type"]
-            for item in plan.patch_items if item.get("nes_id")}
 
 
 def _bind_row(slug, name, decision, notes, section, written):
@@ -829,7 +815,7 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
         # adding the entry after the mutation would invite that to drift.
         have.add(bind_key(item_to_bind))
         additions.append(validate_bind_item(item_to_bind))
-        plan.bound.append((name, decision, notes))
+        plan.bound.append((name, decision, notes, rel_type))
 
     merged = merge_entity_binds(current, additions)
     if merged != current:
@@ -1474,9 +1460,7 @@ def main(argv=None):
                 print(f"  WOULD REFUSE {len(plan.bound)} bind(s) on {slug}: {refusal}")
                 continue
             total_bound += counts["bound"]
-            sections = _plan_sections(plan)
-            for name, decision, notes in plan.bound:
-                section = sections[decision.nes_id]
+            for name, decision, notes, section in plan.bound:
                 bind_rows.append(
                     _bind_row(slug, name, decision, notes, section, False))
                 total_promoted += is_promoted(decision)
@@ -1496,9 +1480,7 @@ def main(argv=None):
             continue
 
         total_bound += counts["bound"]
-        sections = _plan_sections(plan)
-        for name, decision, notes in plan.bound:
-            section = sections[decision.nes_id]
+        for name, decision, notes, section in plan.bound:
             bind_rows.append(_bind_row(slug, name, decision, notes, section, True))
             total_promoted += is_promoted(decision)
             print(f"  BOUND ({section}) {name}  ->  {decision.nes_id}"
