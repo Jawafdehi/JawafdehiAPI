@@ -644,8 +644,8 @@ def test_veto_fails_closed_when_the_document_cannot_be_read(document):
 )
 def test_a_document_with_no_ecn_marker_is_readable_and_still_binds(document):
     # The boundary that matters, and it is easy to get backwards. "No ECN
-    # identifier" is an ANSWER, not a failed read: 25 of the 40 frozen documents
-    # in tests/casework/fixtures/entity_documents.json are exactly
+    # identifier" is an ANSWER, not a failed read: measured against production,
+    # 25 of 40 entity documents the resolver would bind are exactly
     # {"identifier": null, "hasOccupation": null} -- the CIAA portal entities that
     # human caseworkers correctly bound as accused. Treating that shape as
     # unverified would downgrade every one of them and drop recall to near zero.
