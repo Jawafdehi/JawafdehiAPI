@@ -1103,3 +1103,30 @@ def test_a_failed_detail_fetch_skips_the_case_and_never_writes(monkeypatch):
     _run_main(monkeypatch, api, _llm(title="काठमाडौं ठेक्का घोटाला (076-CR-0182)"),
               ["--apply", "--allow-remote-writes"])
     assert api.requests == [], "no PATCH may be attempted without a fresh ETag"
+
+
+class TestTheSplitVerdictRule:
+    """The teaser must not convict a defendant the court cleared.
+
+    Measured on production: 1,250 of 3,003 cases (42%) name co-defendants in the
+    title, and 10 of the 35 published descriptions that state a decision state
+    BOTH दोषी and सफाई -- roughly three in ten decided cases hand different
+    outcomes to different people. `078-CR-0103` is the case that surfaced it: the
+    model was shown the acquittal (after `SNIPPET_MAX_CHARS` widened the window)
+    and still wrote a teaser naming only the conviction, because the prompt asked
+    it to "state the outcome", singular.
+    """
+
+    def test_the_prompt_demands_the_split_be_named(self):
+        assert "DIFFERENT OUTCOMES" in ec.SYSTEM_PROMPT
+        assert "सफाई" in ec.SYSTEM_PROMPT
+
+    def test_the_rule_names_the_harm_not_just_the_format(self):
+        """A rule the model can follow mechanically without understanding why
+        gets dropped under length pressure. This one says who is hurt."""
+        assert "CLEARED must never read as convicted" in ec.SYSTEM_PROMPT
+
+    def test_the_outcome_rules_still_forbid_inventing_a_verdict(self):
+        """The split rule must not weaken the no-guessing rule beside it."""
+        assert "do not guess" in ec.SYSTEM_PROMPT
+        assert "अनुसन्धान जारी" in ec.SYSTEM_PROMPT

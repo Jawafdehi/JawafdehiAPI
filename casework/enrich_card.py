@@ -191,6 +191,13 @@ allegation. A teaser that gives only the आरोप for a case that was alread
 is wrong by omission: readers take it as a live accusation. When the description \
 reports no verdict, say nothing about an outcome — do not guess, and do not write \
 "अनुसन्धान जारी" unless the description says so.
+- IF THE DEFENDANTS GOT DIFFERENT OUTCOMES, SAY SO. When the description reports \
+one defendant दोषी and another सफाई, a teaser naming only one of them is false \
+about the other — and a person a court CLEARED must never read as convicted. Name \
+the split plainly: "…एक प्रतिवादीलाई दोषी ठहर, अर्कोलाई सफाई" or \
+"…प्रधानाध्यापकलाई कैद, लेखा कर्मचारीलाई सफाई". Prefer naming who was cleared over \
+listing the sentence in full — the sentence is on the case page, the correction of \
+a false impression is not.
 
 OUTPUT FORMAT — return ONLY a single JSON object, no markdown fences, no prose.
 Include only the requested key(s); set an unrequested key to null:
