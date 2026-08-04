@@ -271,6 +271,28 @@ class CaseworkApi:
             etag = headers.get("ETag") if headers is not None else None
             return body, etag
 
+    def get_court_case_entities(self, court, number, timeout=60):
+        """Every party row on one NGM court case, following pagination.
+
+        Rows carry `side` ("plaintiff" | "defendant"), `name`, and an `nes_id`
+        that is usually null -- see `casework.court_record` for why the accused
+        path reads the names and resolves them rather than trusting that field.
+
+        Pages by page NUMBER and ignores the response's `next` URL: `get()`
+        builds its request as `base_url + path`, so an absolute `next` would be
+        concatenated onto the base and produce a doubled prefix. `iter_cases`
+        sets the same precedent.
+        """
+        path = (f"/courtcases/{urllib.parse.quote(str(court), safe='')}"
+                f"/{urllib.parse.quote(str(number), safe='')}/entities")
+        rows, page = [], 1
+        while True:
+            data = self.get(path, {"page_size": 200, "page": page}, timeout)
+            rows.extend(data.get("results") or [])
+            if not data.get("next"):
+                return rows
+            page += 1
+
     def search_entities(self, query, *, page_size=ENTITY_SEARCH_PAGE_SIZE,
                         pages=ENTITY_SEARCH_MAX_PAGES, timeout=60):
         """Candidate NES entities for `query`, from the unified search endpoint.

@@ -890,3 +890,76 @@ def test_get_entity_routes_through_the_read_path_not_a_write(monkeypatch):
     api = CaseworkApi("https://api.jawafdehi.org", token="t")
     monkeypatch.setattr(api, "get", lambda path, params=None, timeout=60: {"@id": "x"})
     assert api.get_entity("person/raj-bahadur-bam-318984") == {"@id": "x"}
+
+
+# --------------------------------------------------------------------------
+# get_court_case_entities -- the accused name source.
+#
+# Pages by PAGE NUMBER, never by following the `next` URL: `get()` builds its
+# URL as `base_url + path`, so handing it an absolute `next` would produce
+# "http://host/api/http://host/api/...". `iter_cases` sets the same precedent.
+# --------------------------------------------------------------------------
+
+
+def _paged_request(pages, seen):
+    """Serve `pages` (a list of result-lists) by ?page=, recording every URL."""
+
+    def fake_request(method, url, data=None, headers=None, timeout=None):
+        seen.append(url)
+        page = 1
+        if "page=" in url:
+            page = int(url.split("page=")[1].split("&")[0])
+        rows = pages[page - 1] if page - 1 < len(pages) else []
+        body = {"results": rows,
+                "next": "ignored-on-purpose" if page < len(pages) else None}
+
+        class R:
+            status = 200
+
+            def read(self):
+                return json.dumps(body).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        return R()
+
+    return fake_request
+
+
+def test_get_court_case_entities_quotes_the_court_and_number(monkeypatch):
+    seen = []
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(api, "_request", _paged_request([[{"side": "defendant"}]], seen))
+
+    api.get_court_case_entities("special", "080-cr-0111")
+
+    assert seen[0].startswith(
+        "http://127.0.0.1:48010/api/courtcases/special/080-cr-0111/entities?")
+
+
+def test_get_court_case_entities_follows_pagination_by_page_number(monkeypatch):
+    seen = []
+    pages = [[{"name": "अ"}] * 200, [{"name": "ब"}] * 200, [{"name": "स"}] * 12]
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(api, "_request", _paged_request(pages, seen))
+
+    rows = api.get_court_case_entities("special", "080-cr-0111")
+
+    assert len(rows) == 412
+    assert len(seen) == 3
+    # Never an absolute URL pasted onto the base -- that would double the prefix.
+    assert all(url.count("http://") == 1 for url in seen)
+
+
+def test_get_court_case_entities_stops_when_next_is_null(monkeypatch):
+    seen = []
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(api, "_request", _paged_request([[{"name": "अ"}]], seen))
+
+    api.get_court_case_entities("special", "080-cr-0111")
+
+    assert len(seen) == 1
