@@ -15,6 +15,7 @@ that look like bugs but are load-bearing.
 ```bash
 uv sync                                    # install app + dev tools
 uv run ruff check .                        # the lint gate (exactly what CI runs)
+uv run ty check                            # type check — ADVISORY, not a gate
 uv run python manage.py check
 DJANGO_SETTINGS_MODULE=config.settings_test TESTING=true \
   uv run pytest -q --ignore=integration-tests    # full suite, ~2.3 min, no services
@@ -30,6 +31,21 @@ only: `uv run pytest -m security`.
 
 `ruff format` is deliberately **not** gated — the tree predates it and running it
 would reflag ~150 files. Don't reformat files you aren't otherwise editing.
+
+**What the lint gate enforces** (`[tool.ruff.lint]` in `pyproject.toml`): the
+defaults (`E4`/`E7`/`E9`/`F`) tree-wide, plus `BLE` tree-wide, plus `ANN` (minus
+`ANN401`) **in `lakehouse/` only**. `ANN` is selected globally and switched off
+per-directory in `per-file-ignores`, because ruff has no select-for-one-path
+primitive — so a directory opts *in* by deleting its line there, and only once
+its `ruff check <dir> --select ANN` count is already 0. Tests are exempt
+permanently.
+
+**`ty` is advisory, not a gate** — `uv run ty check`, and CI runs it with
+`|| true`. It is pre-1.0 with no Django plugin, so it cannot see through the
+model metaclass: at adoption it reported 1304 diagnostics of which ~800 were
+`Model.objects` / DRF `force_authenticate` false positives.
+`[tool.ty.rules]` silences those families, leaving **28 real ones** — worth
+reading, and the list to drive to zero before making it a gate.
 
 ## Traps — things that look wrong and are not
 
@@ -120,21 +136,27 @@ do not push to it.
 
 ## Known debt (measured 2026-08-04, don't rediscover)
 
-- `cases/api_views.py:801` — `partial_update` is a ~400-line method, cyclomatic
-  complexity 31, inside a 1895-line module. The hottest maintenance risk in the
-  tree and the biggest obstacle to working on the case-write path.
-- **No type checker configured.** `mypy --check-untyped-defs` over source (tests
-  excluded) reports 128 errors / 358 files, but a large share are false positives
-  from missing `django-stubs` — mypy reads `models.TextChoices` as
-  `tuple[str, str]`. Add `django-stubs` + `djangorestframework-stubs` and
-  re-baseline *before* concluding anything from that number. Ruff `ANN` over the
-  same scope: 2317 findings across ~1500 functions.
-- **No `[tool.ruff]` section**, so the gate is defaults only (`E4`/`E7`/`E9`/`F`).
-  Measured candidates worth enabling, ~500 findings and largely auto-fixable:
-  `UP` 253, `I` 81, `SIM` 74, `PTH` 43, `C4` 32, `B` 30 (24 are `B904`
-  raise-without-from), `DTZ` 7, plus `RUF100` (105 *unused* noqa — free deletion).
-  Skip `S` (4358 of 4514 are test asserts; the rest are env-var names, not secrets)
-  and `ARG` (Django signal/override signatures).
+- `cases/api_views.py:801` — `partial_update` is a ~400-line method, radon
+  cyclomatic complexity **50** (grade F), inside a 1895-line module. The last
+  F-grade block in the tree and the biggest obstacle to working on the case-write
+  path. `search_index.build_doc` (was F/41) and `review/scorer.score_case` (was
+  F/48) have been decomposed; this one has not.
+- **`ty`'s 28 real diagnostics** (`uv run ty check`). Mostly Django-shaped and
+  low-value (`__str__` returning `CharField` not `str`, `QuerySet.as_manager`),
+  but read them before dismissing: two genuine bugs came out of the first pass —
+  `case_scraper.py` called `len()` on an Optional `response.text` (TypeError on a
+  blocked Gemini candidate), and `ciaa_draft_case_service.convert_bs_to_ad` was
+  annotated `Optional[datetime]` while `bs_to_ad` returns `date`.
+- **`ANN` is enforced in `lakehouse/` only** — 2317 findings across ~1500
+  functions elsewhere. Per-directory counts, cheapest first: `content` 57,
+  `discovery` 80, `newsletter` 82, `case_proposals` 105, `jobs` 122, `llm` 154,
+  `casework` 329. Annotate one, then delete its `per-file-ignores` line.
+- **Other ruff families worth enabling**, ~500 findings and largely auto-fixable:
+  `UP` 253, `I` 81, `SIM` 19 (was 28), `PTH` 43, `C4` 32, `B` 30 (24 are `B904`
+  raise-without-from), `DTZ` 7, plus `RUF100` (105 *unused* noqa — free deletion,
+  and note 8 of those are `# noqa: BLE001` on handlers that log or re-raise,
+  which BLE001 never flags). Skip `S` (4358 of 4514 are test asserts; the rest
+  are env-var names, not secrets) and `ARG` (Django signal/override signatures).
 - **Coverage is never measured** — no `pytest-cov`, nothing in CI.
 - `TRY400` at `jawafdehi_shared/drf/throttling.py:93` and `newsletter/views.py:171`
   log `.error` where `.exception` would keep the stack trace.

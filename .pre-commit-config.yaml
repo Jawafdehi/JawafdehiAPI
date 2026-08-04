@@ -1,22 +1,29 @@
 # Pre-commit hooks for the jawafdehi-api monolith (uv project).
 # Install once per clone:  uv run pre-commit install
 #
-# The ruff hook is a `local`/system hook that shells out to `uv run ruff check`, so it
-# uses the SAME ruff as CI (the `dev` dependency-group) — no separately-pinned mirror
-# version to drift. This mirrors the CI gate exactly: `ruff check` only. Formatting is
-# intentionally NOT gated (see .github/workflows/ci.yml; `ruff format` would reflag ~150
-# legacy files). The base hooks below are non-mutating checks only.
+# Gating policy, unchanged: `ruff check` only. Formatting is intentionally NOT
+# gated (see .github/workflows/ci.yml; `ruff format` would reflag ~150 legacy
+# files), and the base hooks below are non-mutating checks only.
+#
+# The ruff hook is the official astral-sh/ruff-pre-commit mirror, PINNED to the
+# exact version in uv.lock. That pin is the point: this replaced a `local` hook
+# that shelled out to `uv run ruff check`, whose stated advantage was "no
+# separately-pinned mirror version to drift" — but which silently changed
+# behaviour whenever `uv sync` moved ruff, and required a working project venv
+# just to lint. The mirror is hermetic (pre-commit builds its own env) and its
+# version is reviewable in a diff.
+#
+# WHEN BUMPING RUFF: change `rev` here and the `ruff>=` floor in pyproject.toml
+# together, then re-run `uv lock`. A mismatch means pre-commit and CI can
+# disagree — `uv run ruff --version` must equal the `rev` below.
 repos:
-  - repo: local
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.20
     hooks:
+      # No `args:` needed — the mirror's own hook definition already passes
+      # --force-exclude (passing it again is a hard error: "the argument
+      # '--force-exclude' cannot be used multiple times").
       - id: ruff-check
-        name: ruff check (uv, mirrors CI)
-        entry: uv run ruff check --force-exclude
-        # `unsupported` is pre-commit 4.4+'s canonical name for the old `system` language
-        # (runs the entry as-is on PATH; pre-commit does not manage the env).
-        language: unsupported
-        types_or: [python, pyi]
-        require_serial: true
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
@@ -26,3 +33,12 @@ repos:
       - id: check-case-conflict
       - id: check-toml
       - id: check-yaml
+
+# ty (astral-sh) is deliberately NOT a hook yet. It is installed in the `dev`
+# group and configured in pyproject.toml under [tool.ty]; run it with
+# `uv run ty check`. At adoption it reported 1304 diagnostics on this tree, ~800
+# of them Django metaclass blind spots (`Model.objects`, DRF
+# `force_authenticate`) that ty cannot yet see through. The [tool.ty.rules]
+# block silences those families and leaves 30 real ones. Wire it in here only
+# once those 30 are at 0 and the silenced families can be re-enabled — see the
+# staged plan in pyproject.toml.

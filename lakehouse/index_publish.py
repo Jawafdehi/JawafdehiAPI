@@ -121,7 +121,7 @@ def _iter_shaped_nodes(
             yield from _iter_shaped_nodes(part)
 
 
-def _make_s3_client(settings: LakehouseSettings):
+def _make_s3_client(settings: LakehouseSettings) -> Any:
     """Build a boto3 S3 client for the R2/S3 object store from ``settings``.
 
     Engine-agnostic: the same call targets Cloudflare R2, MinIO, or AWS S3 — only

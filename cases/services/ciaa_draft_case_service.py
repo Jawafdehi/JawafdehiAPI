@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 from django.core.exceptions import ValidationError
@@ -259,7 +259,7 @@ class CIAADraftCaseService:
 
         return case_data
 
-    def convert_bs_to_ad(self, bs_date_str: str) -> Optional[datetime]:
+    def convert_bs_to_ad(self, bs_date_str: str) -> Optional[date]:
         """Convert Bikram Sambat date string to AD date. Returns date or None.
 
         Delegates to the shared :func:`jawafdehi_shared.dates.bs_to_ad` contract
