@@ -44,7 +44,7 @@ permanently.
 `|| true`. It is pre-1.0 with no Django plugin, so it cannot see through the
 model metaclass: at adoption it reported 1304 diagnostics of which ~800 were
 `Model.objects` / DRF `force_authenticate` false positives.
-`[tool.ty.rules]` silences those families, leaving **28 real ones** — worth
+`[tool.ty.rules]` silences those families, leaving **30 real ones** — worth
 reading, and the list to drive to zero before making it a gate.
 
 ## Traps — things that look wrong and are not
@@ -80,6 +80,18 @@ the point.
 `https://jawafdehi.org/entity/<prefix>/<slug>`, `/material/<source>/<ident>`,
 `/case/<slug>`, `/courtcase/<court>/<case_number>`. The legacy
 `entity:<prefix>/<slug>` scheme is gone — do not reintroduce it.
+
+**The five enricher `main()`s are no longer a clone — do not "extract" them.**
+`enrich_{allegations,missing_bigo,related_entities,tags,timeline}` once opened
+with the same ~30-line prologue, and jscpd flagged it. That is fixed: the shared
+selection step is `casework.common.select.select_for_run`, and jscpd now reports
+**0 clones** across the five. What remains looks repetitive but is not
+interchangeable — `enrich_missing_bigo` alone carries a `_die()` helper, a
+pre-bootstrap `run/start` event, `SystemExit` handling for the
+missing-credential path (`basic_auth_from_env` raises a BaseException, not an
+Exception) and paged list progress. A prologue extraction that treats all five
+as identical silently deletes those. Verified 2026-08-04 by measuring: jscpd over
+just those five files reports 0 duplicated lines.
 
 **Deliberate `try/except/pass` sites are annotated.** Where swallowing is
 intended it carries a `# noqa: BLE001` plus a reason (`review/runner.py:50`
@@ -120,8 +132,15 @@ fallback path to add.
 
 ## Working model
 
-Trunk is **`main`**. `origin` = the org (`Jawafdehi/JawafdehiAPI`), `fork` = the
-`damodaha` personal fork; PRs are filed on the org from the fork.
+Trunk is **`main`**. `origin` = the org (`Jawafdehi/JawafdehiAPI`), `fork` =
+`damodaha/jawafdehi-api` — note the fork's repo name does NOT match the org's
+(`jawafdehi-api` vs `JawafdehiAPI`), so `gh repo fork` reports "already exists"
+while `gh repo view damodaha/JawafdehiAPI` 404s. Push branches to `fork` and
+file the PR on the org; never push a branch to `origin`.
+
+**`main` goes stale fast.** Fetch and rebase before doing anything else: this
+tree sat 27 commits behind for one session's work, which was enough for upstream
+to independently refactor the same duplication (see the enricher note below).
 
 **Do local changes in git worktrees** (`git worktree add <path> -b <branch> main`),
 not by checking out branches in the primary tree — the primary tree holds `main`
@@ -138,29 +157,36 @@ do not push to it.
 
 - **No F-grade blocks remain.** All three were decomposed on 2026-08-04:
   `cases/api_views.py` `partial_update` F/50→C/17, `review/scorer.score_case`
-  F/48→B/9, `cases/search_index.build_doc` F/41→B/8. Radon over source now:
-  4175 A · 454 B · 165 C · 23 D · 3 E · 0 F.
-- The 3 remaining **E-grade** blocks, in descending cost:
+  F/48→B/9, `cases/search_index.build_doc` F/41→B/8. Radon over the tree now:
+  5246 A · 507 B · 190 C · 25 D · 4 E · 0 F.
+- The 4 remaining **E-grade** blocks, in descending cost:
   `entities/management/commands/merge_persons.py:95` `handle` E/40,
-  `courts/scraper/supreme.py:358` `parse_hearings_and_timeline` E/34, and
-  `tests/e2e/test_public_api_e2e.py:101` E/34 (a test, low value to split).
-  `cases/api_views.py` is still a 1895-line module even after the split.
-- **`ty`'s 28 real diagnostics** (`uv run ty check`). Mostly Django-shaped and
+  `courts/scraper/supreme.py:370` `parse_hearings_and_timeline` E/34,
+  `tests/e2e/test_public_api_e2e.py:101` E/34 (a test, low value to split), and
+  `casework/enrich_related_entities.py:364` `main` E/33.
+  `cases/api_views.py` is still a 1989-line module even after the split.
+- **`ty`'s 30 real diagnostics** (`uv run ty check`). Mostly Django-shaped and
   low-value (`__str__` returning `CharField` not `str`, `QuerySet.as_manager`),
   but read them before dismissing: two genuine bugs came out of the first pass —
   `case_scraper.py` called `len()` on an Optional `response.text` (TypeError on a
   blocked Gemini candidate), and `ciaa_draft_case_service.convert_bs_to_ad` was
   annotated `Optional[datetime]` while `bs_to_ad` returns `date`.
-- **`ANN` is enforced in `lakehouse/` only** — 2317 findings across ~1500
-  functions elsewhere. Per-directory counts, cheapest first: `content` 57,
-  `discovery` 80, `newsletter` 82, `case_proposals` 105, `jobs` 122, `llm` 154,
-  `casework` 329. Annotate one, then delete its `per-file-ignores` line.
-- **Other ruff families worth enabling**, ~500 findings and largely auto-fixable:
-  `UP` 253, `I` 81, `SIM` 19 (was 28), `PTH` 43, `C4` 32, `B` 30 (24 are `B904`
-  raise-without-from), `DTZ` 7, plus `RUF100` (105 *unused* noqa — free deletion,
-  and note 8 of those are `# noqa: BLE001` on handlers that log or re-raise,
-  which BLE001 never flags). Skip `S` (4358 of 4514 are test asserts; the rest
-  are env-var names, not secrets) and `ARG` (Django signal/override signatures).
+- **`ANN` is enforced in `lakehouse/` only.** Per-directory source-only counts,
+  cheapest first (re-measured after the 2026-08-04 upstream rebase): `newsletter`
+  5, `discovery` 31, `jobs` 34, `content` 57, `case_proposals` 78, `case_events`
+  81, `llm` 163, `casework` 362. Annotate one, then delete its
+  `per-file-ignores` line. `case_events` is new upstream (the NATS bus) and got
+  the same opt-out on arrival.
+- **Other ruff families worth enabling**, ~640 findings and largely auto-fixable
+  (re-measured 2026-08-04 against upstream `b83e39b`): `UP` 295, `SIM` 106
+  (112 on upstream `main`; this branch cleared 6), `I` 90, `PTH` 47, `C4` 40,
+  `B` 33 (24 are `B904` raise-without-from), `DTZ` 9, plus `RUF100` 19 *unused*
+  noqa — free deletion, and note 8 of those are `# noqa: BLE001` on handlers
+  that log or re-raise, which BLE001 never flags. Measure `RUF100` with
+  `--extend-select`, never `--select`: the latter turns the other families off,
+  so every `# noqa: BLE001` in the tree then looks unused (121 false hits).
+  Skip `S` (the overwhelming majority are test asserts; the rest are env-var
+  names, not secrets) and `ARG` (Django signal/override signatures).
 - **Coverage is never measured** — no `pytest-cov`, nothing in CI.
 - `TRY400` at `jawafdehi_shared/drf/throttling.py:93` and `newsletter/views.py:171`
   log `.error` where `.exception` would keep the stack trace.

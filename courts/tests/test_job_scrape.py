@@ -162,7 +162,7 @@ class SweepJobWiringTests(_NgmTestCase):
     def test_sweep_payload_skips_the_causelist_half(self):
         from courts.job_handlers import handle_court_scrape
 
-        result = handle_court_scrape(self._SWEEP_PAYLOAD, fetch=_fake_fetch)
+        result = handle_court_scrape(self._SWEEP_PAYLOAD, fetch=fake_fetch)
         self.assertEqual(result["dates"], 0)
         self.assertEqual(result["cases"], 0)
         self.assertIn("sweeps", result)
@@ -175,14 +175,14 @@ class SweepJobWiringTests(_NgmTestCase):
             CourtCase.objects.using("ngm").create(
                 court_id="special", case_number=f"076-CR-{seq:04d}"
             )
-        result = handle_court_scrape(self._SWEEP_PAYLOAD, fetch=_fake_fetch)
+        result = handle_court_scrape(self._SWEEP_PAYLOAD, fetch=fake_fetch)
         self.assertEqual(result["swept"], 5)
         self.assertGreater(result["deferred"], 0, "a capped run must not read as complete")
 
     def test_cause_list_job_is_unchanged_by_default(self):
         from courts.job_handlers import handle_court_scrape
 
-        result = handle_court_scrape(_SPECIAL_PAYLOAD, fetch=_fake_fetch)
+        result = handle_court_scrape(_SPECIAL_PAYLOAD, fetch=fake_fetch)
         self.assertNotIn("sweeps", result)
         self.assertGreater(result["cases"], 0)
 
@@ -258,7 +258,7 @@ class SweepJobWiringTests(_NgmTestCase):
         result = handle_court_scrape(
             {**self._SWEEP_PAYLOAD, "sweep_series": ["CR"], "sweep_tail": 0,
              "sweep_budget": 50},
-            fetch=_fake_fetch,
+            fetch=fake_fetch,
         )
         # 3 interior holes in CR; OA's 3 are left alone. sweep_tail=0 must be
         # honoured as zero rather than read as "unset" and defaulted.
@@ -294,7 +294,7 @@ class SweepJobWiringTests(_NgmTestCase):
             registry.REGISTRY["special"], "court_ids", return_value=["special", "other"]
         ):
             result = handle_court_scrape(
-                {**self._SWEEP_PAYLOAD, "court_id": None}, fetch=_fake_fetch
+                {**self._SWEEP_PAYLOAD, "court_id": None}, fetch=fake_fetch
             )
         self.assertEqual(sum(s["attempts"] for s in result["sweeps"]), 5)
         self.assertGreater(result["deferred"] + result["courts_skipped"], 0)

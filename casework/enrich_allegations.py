@@ -249,7 +249,7 @@ def main(argv=None):
     # Bootstrap Django + LLM (MUST come before importing llm.invoke)
     try:
         bootstrap(args.provider, args.model)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - bootstrap failure is reported and exits(1)
         print(f"Bootstrap failed: {exc}", file=sys.stderr)
         sys.exit(1)
 

@@ -211,6 +211,9 @@ extend-ignore = ["ANN401"]
 "cases/**" = ["ANN"]
 "casework/**" = ["ANN"]
 "case_proposals/**" = ["ANN"]
+# case_events landed upstream (the NATS bus + pull consumers) after ANN was
+# switched on, with 81 findings — same treatment as every other directory here.
+"case_events/**" = ["ANN"]
 "config/**" = ["ANN"]
 "content/**" = ["ANN"]
 "courts/**" = ["ANN"]

@@ -89,7 +89,7 @@ class Command(BaseCommand):
         for court_id, case_number in targets:
             try:
                 enrichment = module.crawl_detail(fetch, court_id, case_number)
-            except Exception as exc:  # a portal flake must not abandon the rest
+            except Exception as exc:  # noqa: BLE001 - a portal flake must not abandon the rest
                 failed += 1
                 self.stderr.write(f"  {court_id}/{case_number}: {exc}")
                 time.sleep(o["delay"])

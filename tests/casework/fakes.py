@@ -12,7 +12,7 @@ class FakeUsage:
 
     Each `_run_main` helper installs a fake `llm.usage` module via
     `monkeypatch.setitem(sys.modules, ...)` and needs a `UsageAccumulator` on
-    it. Only two members are ever reached: `casework.common.run.finish_run`
+    it. Only two members are ever reached: each enricher's `main()` epilogue
     reads `.calls` to decide whether to render a usage table, and
     `render_usage_table` (itself stubbed out alongside this) would read
     `.as_dict()`. `calls` stays 0, so the table is always skipped.

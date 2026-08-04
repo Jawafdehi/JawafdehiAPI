@@ -165,7 +165,7 @@ async def ensure_streams(js) -> list[str]:
         else:
             try:
                 await js.add_stream(config)
-            except Exception:
+            except Exception:  # noqa: BLE001 - lost a create race; converge instead of failing
                 # Lost a race with another bootstrap between the check and the
                 # create. Converge rather than fail: the loser's job is to leave
                 # the stream matching the spec, and it now does either way.
