@@ -1139,3 +1139,27 @@ OPENSEARCH_PASSWORD = os.getenv("OPENSEARCH_PASSWORD", "")
 # Credentials ride in the URL (nats://user:pass@host:4222) and are per identity,
 # not shared — the monolith publishes as itself, and consumers get their own.
 NATS_URL = os.getenv("NATS_URL", "")
+
+# Where the notifier consumer announces a proposal decision. Empty means "log
+# only", which is what it did before this existed and remains the safe default:
+# no URL, no outbound request, no behaviour change.
+#
+# A SECRET, despite looking like a URL. A webhook endpoint carries its own
+# authentication in the path — anyone holding it can post to the channel — so it
+# belongs in OpenBao and reaches the pod through an ExternalSecret, never a
+# manifest and never a settings literal.
+#
+# Deliberately provider-agnostic in name. The first consumer of it is a Discord
+# webhook, which needs a top-level `content` string; the body sent also carries
+# the structured fields so a different receiver can read it without parsing prose.
+CASE_EVENTS_WEBHOOK_URL = os.getenv("CASE_EVENTS_WEBHOOK_URL", "")
+
+# Seconds. Short on purpose: this runs on a consumer's worker thread, and a
+# notification is the least important thing that thread does. A slow endpoint must
+# not extend the message's ack window.
+CASE_EVENTS_WEBHOOK_TIMEOUT = float(os.getenv("CASE_EVENTS_WEBHOOK_TIMEOUT", "5"))
+
+# Public origin of the SPA, used to build the review link in that notification. A
+# consumer has no request to derive it from, and ALLOWED_HOSTS is the API's host
+# rather than the front end's, so this is its own setting rather than a guess.
+FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "https://jawafdehi.org")
