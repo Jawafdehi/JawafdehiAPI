@@ -9,15 +9,18 @@ import json
 import logging
 import sys
 import types
+import urllib.error
 from pathlib import Path
 
 import pytest
 
 from casework import enrich_missing_bigo as emb
 from casework.enrich_missing_bigo import (
+    amount_is_grounded,
     coerce_bigo_int,
     is_explicit_bigo_context,
     parse_bigo_response,
+    rupee_amounts_in,
 )
 
 # --------------------------------------------------------------------------
@@ -224,6 +227,107 @@ def test_valid_high_confidence_bigo_parses():
     assert parse_bigo_response(body) == 10403941
 
 
+def test_va_spelled_bigo_quote_is_accepted():
+    """A quote spelling the word विगो must not be discarded.
+
+    These press releases are legacy-font PDFs, not scans, and render बिगो as विगो
+    in 150 of the 796 bigo tokens across the FY078/079 238-case batch. The gate
+    listed only the ब spelling, so 079-CR-0080's correct high-confidence 7000 was
+    thrown away and recorded as "LLM could not extract a reliable BIGO".
+    Verbatim quote from that document.
+    """
+    body = json.dumps(
+        {
+            "bigo": 7000,
+            "confidence": "high",
+            "evidence_quote": (
+                "निज सशस्त्र प्रहरी जवान मुख्तार देवानलाई उल्लेखित कसुरमा "
+                "विगो रु.7,000।- (सात हजार रुपैयाँ) कायम गरी"
+            ),
+            "press_release_type": "charge_filing",
+        }
+    )
+    assert parse_bigo_response(body) == 7000
+
+
+class TestAmountIsGrounded:
+    """The grounding gate: a bigo the source never states must not be written.
+
+    Every fixture here is a verbatim span from a real document, and every rejected
+    value is one that a real run actually produced.
+    """
+
+    # 078-CR-0116, the 10x inflation. Charge sheet declares रु.१,३८,९९,९९८।८७;
+    # the run proposed 138999998, whose digits appear nowhere in the document.
+    CR_0116 = (
+        "ओम सप्लायर्स, कलैया 6, बारा र ऐ.ऐ.का प्रोपाइटर निज ओम शंकर प्रसादलाई "
+        "बिगो रु.1,38,99,998।87 (एक करोड अठतीस लाख उनान्सय हजार नौ सय अन्ठानब्बे) कायम गरी"
+    )
+
+    def test_rejects_the_078_cr_0116_ten_x_inflation(self):
+        assert amount_is_grounded(self.CR_0116, 13899998) is True
+        assert amount_is_grounded(self.CR_0116, 138999998) is False
+
+    def test_rejects_a_paisa_fold(self):
+        """1389999887 is रупees..paisa concatenated -- never a real amount."""
+        assert amount_is_grounded(self.CR_0116, 1389999887) is False
+
+    def test_rejects_an_unstated_arithmetic_sum(self):
+        """079-CR-0067: the run summed three per-defendant विगो into a total the
+        release never states (35,200 + 55,200 + 177,600 = 268,000)."""
+        text = (
+            "मोहन प्रसाद आचायिउपर बिगो रु.55,200।– कायम गरी ... "
+            "जानुका श्रेष्ठउपर बिगो रु.1,77,600।- कायम गरी ... "
+            "पवन श्रेष्ठउपर विगो रु.35,200।- कायम गरी"
+        )
+        for stated in (55200, 177600, 35200):
+            assert amount_is_grounded(text, stated) is True
+        assert amount_is_grounded(text, 268000) is False
+
+    def test_accepts_devanagari_digits(self):
+        """079-CR-0136 states the amount in Devanagari; the gate must normalise."""
+        text = "निज विष्णु कान्त मिरलेलाई बिगो रु.७२,५२,४८०।५९ कायम गरी"
+        assert amount_is_grounded(text, 7252480) is True
+        assert amount_is_grounded(text, 725248059) is False
+
+    def test_accepts_a_table_cell_amount(self):
+        """078-CR-0073 states its total in a बिगो रु. table column, not inline."""
+        text = "सि.नं | पद, नामथर | कार्यालय | बिगो रु. |\n1. | अध्यक्ष | लिखु | रु.4,21,00,706।24 |"
+        assert amount_is_grounded(text, 42100706) is True
+
+    def test_short_value_is_not_grounded_by_being_a_prefix(self):
+        """The guard against the obvious false positive: 1389 must not count as
+        'stated' just because 13899998 contains it."""
+        assert amount_is_grounded("रु.1,38,99,998।87", 1389) is False
+        assert amount_is_grounded("रु.1,38,99,998।87", 138) is False
+
+    def test_none_passes_through(self):
+        """A null bigo is the enricher's own 'found nothing' -- not ungrounded."""
+        assert amount_is_grounded("anything", None) is True
+
+    def test_zero_paisa_dash_suffix(self):
+        """078-CR-0101 writes whole rupees as '।-' (danda then hyphen)."""
+        assert amount_is_grounded("निजलाई बिगो रु.७,६७,९८८।- कायम गरी", 767988) is True
+
+    def test_rupee_amounts_drops_paisa_and_commas(self):
+        assert rupee_amounts_in("रु.6,79,12,383।98") == {67912383}
+
+
+def test_va_spelled_magadavi_quote_is_accepted():
+    """मागदावी is the same ब<->व variant as मागदाबी and appears in 156 of the 238.
+
+    The quote deliberately carries NO other whitelisted keyword -- no बिगो, no
+    हानि/नोक्सानी -- so मागदावी alone has to carry the gate. Otherwise the test
+    passes on an unrelated keyword and proves nothing.
+    """
+    quote = "सजायको मागदावी लिई आज विशेष अदालत, काठमाडौंमा आरोपपत्र दायर गरिएको छ"
+    assert not any(k in quote for k in emb.BIGO_CONTEXT_KEYWORDS if k != "मागदावी")
+    body = json.dumps(
+        {"bigo": 2451526, "confidence": "high", "evidence_quote": quote}
+    )
+    assert parse_bigo_response(body) == 2451526
+
+
 def test_null_bigo_with_high_confidence_and_bigo_quote_is_none():
     # coerce_bigo_int(None) is None even after passing the context gate.
     body = '{"bigo": null, "confidence": "high", "evidence_quote": "बिगो निर्धारण भएको छैन"}'
@@ -426,7 +530,11 @@ class _StubApi:
         self._markdown_by_link = markdown_by_link or {}
         self.patched = []
 
-    def iter_cases(self, params=None, timeout=60):
+    def iter_cases(self, params=None, timeout=60, progress=None):
+        # Mirror the real client: one page, and report it. Accepting `progress`
+        # but never calling it would let the caller's reporter rot untested.
+        if progress:
+            progress(page=1, fetched=len(self._cases), total=len(self._cases))
         yield from self._cases.values()
 
     def get_case(self, slug, timeout=60):
@@ -460,6 +568,21 @@ class _FakeUsage:
         return {"by_provider": []}
 
 
+def _quoting_invoke(bigo, captured=None):
+    """A fake `invoke_text` returning `bigo` with a quote that clears the
+    keyword guard. Pass `captured` to record the prompt that was actually sent.
+    """
+    def fake_invoke(**kw):
+        if captured is not None:
+            captured["content"] = kw["content"]
+        return json.dumps({
+            "bigo": bigo, "confidence": "high",
+            "evidence_quote": f"बिगो रु.{bigo} कायम गरी",
+        })
+
+    return fake_invoke
+
+
 def _run_main(monkeypatch, cases, invoke_text_stub, argv):
     """Drive `main()` end to end with a stubbed API and a stubbed LLM call.
 
@@ -484,6 +607,330 @@ def _run_main(monkeypatch, cases, invoke_text_stub, argv):
 
     report = emb.main(argv)
     return api, report
+
+
+class TestGroundingSpansEverythingTheModelWasShown:
+    """`_extract_bigo` sends the source METADATA as well as the markdown body, so
+    the gate has to check both. `_source_metadata`'s own docstring records that a
+    material `display_name` is frequently where the बिगो is first stated
+    ("... उपर बिगो रु.९०,३९,६२०।३९ कायम"). Grounding the body alone rejected a
+    figure the model read correctly out of the title, and skipped the case.
+    """
+
+    # The बिगो is stated ONLY in the material display_name -- never in the body.
+    CASE = {
+        "slug": "case-x", "title": "t",
+        "evidence": [{
+            "material_iri": "https://jawafdehi.org/material/1",
+            "material": {
+                "material_type": "press_release",
+                "display_name": "... उपर बिगो रु.९०,३९,६२०।३९ कायम",
+                "urls": [{"role": "MARKDOWN", "link": "https://x/p.md"}],
+            },
+        }],
+    }
+
+    def test_an_amount_stated_only_in_the_display_name_is_grounded(self):
+        body = "आरोपपत्र दायर गरिएको छ।"
+        assert amount_is_grounded(body, 9039620) is False
+        _, shown = emb._extract_bigo(
+            body, self.CASE, _quoting_invoke(9039620), _FakeUsage()
+        )
+        assert amount_is_grounded(shown, 9039620) is True
+
+    def test_the_gate_checks_the_same_string_the_prompt_carried(self):
+        """`_extract_bigo` returns its composed source text so the gate can check
+        that exact string. Rebuilding it at the call site meant two constructions
+        of "what the model was shown" that a prompt change would silently drift
+        apart -- and it ran `_source_metadata` a second time per case.
+        """
+        captured = {}
+        _, shown = emb._extract_bigo(
+            "आरोपपत्र दायर गरिएको छ।", self.CASE,
+            _quoting_invoke(9039620, captured), _FakeUsage(),
+        )
+        for line in shown.splitlines():
+            if line.strip():
+                assert line in captured["content"], (
+                    f"grounding text carries a line the prompt never did: {line!r}"
+                )
+
+    def test_a_figure_the_clamp_cut_out_of_the_prompt_is_not_grounded(self):
+        """The clamp is why the gate cannot rebuild its own text.
+
+        `_extract_bigo` truncates the body at `FEED_CHARS`. An unclamped rebuild
+        grounds against the discarded tail too, so a fabricated amount that
+        happens to match text the model could not read would pass -- exactly the
+        coincidence the gate exists to reject.
+        """
+        long_body = "क" * emb.FEED_CHARS + " बिगो रु.९०,३९,६२०।३९ कायम"
+        captured = {}
+        _, shown = emb._extract_bigo(
+            long_body, {"slug": "case-y", "title": "t", "evidence": []},
+            _quoting_invoke(9039620, captured), _FakeUsage(),
+        )
+
+        assert "९०,३९,६२०" not in captured["content"], "clamp did not cut the tail"
+        assert amount_is_grounded(long_body, 9039620) is True, (
+            "control: the raw body does state the figure"
+        )
+        assert amount_is_grounded(shown, 9039620) is False
+
+
+class TestRupeeAmountsInTokenisation:
+    """Tokenisation rules measured against the 238 FY078/079 sources. Each of
+    these was a silent data-loss bug: the gate rejected a correct extraction and
+    `main` recorded `skipped`, so the case simply never got a value.
+    """
+
+    def test_markdown_table_pipes_are_not_read_as_paisa_separators(self):
+        """`|` is in the separator class because OCR renders the danda '।' as a
+        pipe -- but in a markdown table it is a cell delimiter. Unbounded, the
+        paisa group ate `<serial> | <first group>` and dropped the real amount:
+        `| 1 | 35,200 |` yielded {1, 200}, never 35200. 2 of the 238 sources
+        contain that shape, and a बिगो in a table column is Rule 6's
+        high-confidence signal #2."""
+        assert 35200 in rupee_amounts_in("| सि.नं | बिगो रु. |\n| 1 | 35,200 |")
+        assert 177600 in rupee_amounts_in("| 2 | 1,77,600 |")
+        assert 42100706 in rupee_amounts_in("| 1. | अध्यक्ष | 4,21,00,706।24 |")
+
+    def test_comma_groups_split_by_whitespace_still_parse(self):
+        """Markdown extraction turns रु.1,38,99,998।87 into रु. 1, 38, 99, 998।87
+        in 8 of the 238 sources."""
+        assert 13899998 in rupee_amounts_in("रु. 1, 38, 99, 998।87")
+
+    def test_a_paisa_fold_is_never_admitted(self):
+        """The un-truncated reading of a paisa-bearing token IS the paisa-fold
+        error (080-CR-0158). Adding it to the set would make the gate bless the
+        exact class of bug it exists to catch."""
+        amounts = rupee_amounts_in("बिगो रु.1,46,81,225।90")
+        assert 14681225 in amounts
+        assert 1468122590 not in amounts
+
+    def test_the_dot_separator_matches_coerce_bigo_int(self):
+        """An earlier copy of this function omitted '.', which `coerce_bigo_int`
+        honours -- so रु.324.57 reduced to 324 on the model's answer but yielded
+        {57, 324} here. The two sides of the comparison must not drift."""
+        amounts = rupee_amounts_in("रु.324.57")
+        assert coerce_bigo_int("रु.324.57") == 324
+        assert 324 in amounts
+        assert 57 not in amounts
+
+
+class TestExtractionPromptDecisions:
+    """Two prompt choices that were measured, not guessed. Both cost real money
+    to establish, so they are pinned here rather than left to a reader's judgement.
+    """
+
+    def test_rule_3_subordinates_type_routing_to_a_declared_bigo(self):
+        """Rule 3 used to route sting/appeal releases to null BEFORE reading the
+        text. Measured over the 238 FY078/079 sources: 0 documents contain any
+        sting trigger and 0 contain any appeal trigger, so it never fired -- while
+        65 declare a bribe AS the बिगो under दफा ३(१). Had it ever fired it would
+        have produced false nulls on figures the document states outright."""
+        rule3 = emb.EXTRACTION_SYSTEM_PROMPT.split("Rule 3")[1].split("Rule 4")[0]
+        declared = rule3.index("declares a बिगो")
+        sting = rule3.index("Sting Operation")
+        assert declared < sting, (
+            "Rule 3 routes on document type before checking for a declared बिगो; "
+            "that is the false-null ordering, and 65 of 238 releases declare a "
+            "bribe as the बिगो"
+        )
+
+    def test_prompt_has_no_multi_defendant_decision_procedure(self):
+        """The four-step "Rule 7b" for multi-defendant cases was built, run over
+        all 238, and reverted: accuracy fell from 235/238 to ~228/238. It nulled
+        078-CR-0073 despite the release stating `कुल जम्मा रु.4,21,00,706।24`, and
+        made three cases return one defendant's figure instead of the case total.
+        Giving the model an ordered procedure gave it more ways to go wrong than
+        simply reporting the figure labelled बिगो.
+        """
+        prompt = emb.EXTRACTION_SYSTEM_PROMPT
+        assert "Rule 7b" not in prompt
+        assert "Rule 7c" not in prompt
+        # Rule 7 itself -- "no clear bigo label, return null" -- must stay.
+        assert "Rule 7 — Multiple amounts" in prompt
+
+
+class TestBigoIsPressReleaseOnly:
+    """The judgment is deliberately NOT read by this stage.
+
+    Feeding the court order alongside the press release was built, run against
+    all 238 bound FY078/079 cases, and reverted (2026-08-03):
+      - 52k chars sent per case vs 2.4k press-only -- 22x the input on EVERY
+        case, ~2 min/case vs ~15s, projecting ~8h and >$100 against $23.
+      - It changed the answer only on the ~18 multi-defendant cases, where the
+        press release states per-defendant figures and no total.
+      - `bigo` is the ALLEGED loss. The press release IS that claim; the
+        judgment records what was ESTABLISHED, so it is the wrong primary
+        source for this field regardless of cost.
+    These tests exist so re-adding it has to be a deliberate act, not a
+    one-word edit to `requires_materials`.
+    """
+
+    def test_bigo_stage_gates_on_press_material_only(self):
+        """Pins the LITERAL membership, not PRESS_TYPES against itself.
+
+        `set(requires_materials) == set(PRESS_TYPES)` is vacuous -- it stays green
+        if `court_order` is added TO `PRESS_TYPES`, or if `charge_sheet` is dropped
+        from it. `test_pipeline.py` documents that exact trap.
+        """
+        from casework.common.pipeline import STAGES
+
+        assert set(STAGES["bigo"].requires_materials) == {
+            "press_release", "ciaa_press_release", "charge_sheet",
+        }, ("court_order is back on the bigo stage -- that is 22x the input per "
+            "case for the ~18 multi-defendant ones; bind the charge sheet instead")
+
+    def test_no_court_material_leaks_into_the_prompt(self):
+        """Not just the body text -- the source-metadata block must not advertise
+        the judgment either, or the model will report figures it cannot see."""
+        captured = {}
+
+        def fake_invoke(**kw):
+            captured["content"] = kw["content"]
+            return json.dumps({
+                "bigo": 7252480, "confidence": "high",
+                "evidence_quote": "बिगो रु.७२,५२,४८०।५९ कायम गरी",
+            })
+
+        case = {
+            "slug": "case-x", "title": "t",
+            "evidence": [{
+                "material_iri": "https://jawafdehi.org/material/1",
+                "material": {
+                    "material_type": "court_order",
+                    "display_name": "SPECIAL-COURT-JUDGMENT-MARKER",
+                    "urls": [{"role": "MARKDOWN", "link": "https://x/j.md"}],
+                },
+            }],
+        }
+        emb._extract_bigo("press release text", case, fake_invoke, _FakeUsage())
+        assert "SPECIAL-COURT-JUDGMENT-MARKER" not in captured["content"]
+
+    def test_a_total_stated_only_in_the_judgment_is_not_grounded(self):
+        """Grounding spans the press release alone. A figure that exists only in
+        the unread judgment must be rejected, not written."""
+        press = "प्रतिवादीहरूउपर आरोपपत्र दायर गरिएको छ।"
+        assert amount_is_grounded(press, 16405000) is False
+
+
+class TestPreLoopFailuresAreLogged:
+    """Everything before the per-case loop must leave a record.
+
+    These paths used to fail silently: a bootstrap error printed to stderr and
+    exited, leaving both the run `.log` and `.events.jsonl` at ZERO bytes with no
+    record of the target, the mode, or the reason. `log_run_header`/`_footer` only
+    reach the `.log`, and `ledger.py` reads only `*.events.jsonl`.
+    """
+
+    def test_bootstrap_failure_is_recorded(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            emb, "bootstrap",
+            lambda *a, **k: (_ for _ in ()).throw(
+                RuntimeError("SECRET_KEY environment variable must be set")),
+        )
+        with pytest.raises(SystemExit) as exc:
+            emb.main(["--dry-run", "--api-base-url", "https://api.jawafdehi.org"])
+        assert exc.value.code == 1
+
+        rows = _read_events(_events_path())
+        assert rows, "bootstrap failure left the events log empty"
+        started = [r for r in rows if r["step"] == "run" and r["status"] == "start"]
+        assert started, "no run/start event -- the run's target and mode are unrecorded"
+        assert "target=https://api.jawafdehi.org" in started[0]["detail"]
+        assert "mode=DRY-RUN" in started[0]["detail"]
+        failed = [r for r in rows if r["step"] == "bootstrap" and r["status"] == "error"]
+        assert failed, "the bootstrap error itself was not recorded"
+        assert "SECRET_KEY" in failed[0]["detail"]
+
+    def test_missing_credentials_are_recorded_despite_raising_systemexit(
+        self, monkeypatch, tmp_path
+    ):
+        """The credential path raises `SystemExit`, not `Exception`.
+
+        `basic_auth_from_env` calls `raise SystemExit(...)`, which derives from
+        BaseException -- so an `except Exception` guard let exactly the failure it
+        was added for escape, leaving `run/start` as the last line in the events
+        file. That is indistinguishable from a killed run, which is the very thing
+        these terminal events exist to disambiguate.
+        """
+        monkeypatch.setattr(emb, "bootstrap", lambda *a, **k: None)
+        for key in ("JAWAFDEHI_API_TOKEN", "CASEWORK_API_USER", "CASEWORK_API_PASSWORD"):
+            monkeypatch.delenv(key, raising=False)
+
+        with pytest.raises(SystemExit) as exc:
+            emb.main(["--dry-run", "--api-base-url", "https://api.jawafdehi.org"])
+        assert exc.value.code == 1
+
+        rows = _read_events(_events_path())
+        failed = [r for r in rows if r["step"] == "build_api" and r["status"] == "error"]
+        assert failed, "a missing credential was not recorded -- SystemExit escaped"
+        assert "SystemExit" in failed[0]["detail"]
+
+    def test_case_listing_failure_is_recorded(self, monkeypatch, tmp_path):
+        """An expired token mid-listing must not die as a bare traceback."""
+        monkeypatch.setattr(emb, "bootstrap", lambda *a, **k: None)
+
+        class _Boom:
+            def iter_cases(self, *a, **k):
+                raise urllib.error.HTTPError("u", 401, "Unauthorized", {}, None)
+
+        monkeypatch.setattr(emb, "build_api", lambda args: _Boom())
+        with pytest.raises(SystemExit):
+            emb.main(["--dry-run", "--api-base-url", "https://api.jawafdehi.org"])
+
+        rows = _read_events(_events_path())
+        failed = [r for r in rows if r["step"] == "list_cases" and r["status"] == "error"]
+        assert failed, "a failure during case listing was not recorded"
+        assert "401" in failed[0]["detail"]
+
+    def test_run_scoped_events_never_appear_as_cases_in_the_ledger(
+        self, monkeypatch, tmp_path
+    ):
+        """Run rows carry no slug, and build_ledger requires slug AND stage."""
+        monkeypatch.setattr(
+            emb, "bootstrap",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("nope")),
+        )
+        with pytest.raises(SystemExit):
+            emb.main(["--dry-run", "--api-base-url", "http://127.0.0.1:48010"])
+
+        from casework.ledger import build_ledger
+
+        rows = _read_events(_events_path())
+        # Must be meaningful in both directions: the rows exist on disk...
+        run_rows = [r for r in rows if r["step"] in ("run", "bootstrap")]
+        assert run_rows, "no run-scoped rows were written at all"
+        assert all(r["slug"] == "" for r in run_rows), "run rows must carry no slug"
+        assert any(r["status"] == "error" for r in run_rows), (
+            "an outcome-shaped status is what would leak; the test is vacuous without one"
+        )
+        # ...and none of them becomes a phantom case in the ledger.
+        ledger = build_ledger(tmp_path)
+        assert ledger == {}, f"run bookkeeping leaked into the ledger: {ledger}"
+
+    def test_successful_run_emits_a_terminal_run_event(
+        self, monkeypatch, tmp_path, patched_fetch_markdown
+    ):
+        """The presence of run/complete is how you tell a finished run from a
+        killed one -- the ledger never reads the .log footer."""
+        _run_main(
+            monkeypatch,
+            [PRESS_CASE_READY],
+            invoke_text_stub=lambda **kw: json.dumps(
+                {"bigo": 10403941, "confidence": "high",
+                 "evidence_quote": "बिगो रु. १,०४,०३,९४१ कायम गरी"}),
+            argv=["--dry-run"],
+        )
+        rows = _read_events(_events_path())
+        steps = {(r["step"], r["status"]) for r in rows}
+        assert ("run", "start") in steps
+        assert ("list_cases", "ok") in steps
+        assert ("select", "ok") in steps
+        assert ("run", "complete") in steps
+        done = [r for r in rows if r["step"] == "run" and r["status"] == "complete"]
+        assert "would-enrich=1" in done[0]["detail"]
 
 
 def test_unmet_prerequisite_is_recorded_not_silently_skipped(
@@ -624,15 +1071,158 @@ def test_events_file_covers_start_extract_write_on_apply_happy_path(
     assert rows, "events file must not be empty"
 
     required_keys = {"ts", "run_id", "stage", "slug", "step", "status", "detail", "elapsed_ms"}
+    # Run-scoped rows (run/list_cases/select) deliberately carry no slug so the
+    # ledger skips them -- see TestPreLoopFailuresAreLogged. Every CASE row must
+    # still name its case, which is what this assertion is for.
+    RUN_STEPS = {"run", "list_cases", "select", "bootstrap", "build_api"}
+    case_rows = [r for r in rows if r["step"] not in RUN_STEPS]
+    assert case_rows, "no per-case events were written"
     for row in rows:
         assert required_keys <= set(row.keys())
-        assert row["slug"] == "case-ready"
         assert row["stage"] == "bigo"
+    for row in case_rows:
+        assert row["slug"] == "case-ready"
 
     steps_and_statuses = {(r["step"], r["status"]) for r in rows}
     assert ("start", "start") in steps_and_statuses
     assert ("extract", "ok") in steps_and_statuses
     assert ("write", "enriched") in steps_and_statuses
+
+
+class TestBatchCsvWiring:
+    """The bigo enricher must honour `--batch-csv` like the other four.
+
+    It was the one enricher left on the hand-rolled `select_cases(...)` +
+    `cases[:limit]` pair, so it advertised `--batch-csv` in `--help` (the flag
+    is registered by the shared `add_common_args`) while ignoring it entirely --
+    the worst of the three possible states. An operator passing a reviewed batch
+    would have got a full-corpus run that looked like it had been scoped.
+
+    `test_batch_csv_cli_wiring.py` covers the parse-time guards and `convert.py`.
+    These drive `main()` end to end, because the bug was in the wiring, not in
+    the selection algebra.
+    """
+
+    @staticmethod
+    def _ready(slug, state="DRAFT"):
+        """A case that reaches extraction, with a caller-chosen slug/state."""
+        return {**PRESS_CASE_READY, "slug": slug, "state": state}
+
+    @staticmethod
+    def _batch(tmp_path, *slugs):
+        path = tmp_path / "batch.csv"
+        path.write_text("slug\n" + "".join(f"{s}\n" for s in slugs), encoding="utf-8")
+        return str(path)
+
+    @staticmethod
+    def _visited():
+        """Slugs the per-case loop actually opened, in order."""
+        return [r["slug"] for r in _read_events(_events_path()) if r["step"] == "start"]
+
+    def test_a_case_outside_the_batch_is_never_touched(
+        self, monkeypatch, patched_fetch_markdown, tmp_path
+    ):
+        _run_main(
+            monkeypatch,
+            [self._ready("case-a"), self._ready("case-b"), self._ready("case-zzz")],
+            invoke_text_stub=lambda **kw: "{}",
+            argv=["--dry-run", "--batch-csv", self._batch(tmp_path, "case-a", "case-b")],
+        )
+        assert self._visited() == ["case-a", "case-b"]
+
+    def test_limit_takes_the_files_first_rows_not_the_apis(
+        self, monkeypatch, patched_fetch_markdown, tmp_path
+    ):
+        """The reason this wiring matters. `--limit` sliced whatever order the
+        API returned, so a `--limit 10` smoke test picked an arbitrary ten --
+        in one real run, nine that already had a `bigo`, producing zero LLM
+        calls. Against a batch the slice is the operator's first ten rows.
+        """
+        # API order is the reverse of the batch order, so an unbatched slice
+        # would take case-c and case-b.
+        _run_main(
+            monkeypatch,
+            [self._ready("case-c"), self._ready("case-b"), self._ready("case-a")],
+            invoke_text_stub=lambda **kw: "{}",
+            argv=["--dry-run", "--limit", "2",
+                  "--batch-csv", self._batch(tmp_path, "case-a", "case-b", "case-c")],
+        )
+        assert self._visited() == ["case-a", "case-b"]
+
+    def test_a_since_published_batch_row_is_skipped(
+        self, monkeypatch, patched_fetch_markdown, tmp_path
+    ):
+        """A batch still passes the state gate, unlike `--slug`. A stale CSV
+        listing a case that has since been PUBLISHED must not re-enrich it.
+
+        `case-other` is DRAFT and absent from the batch purely so this test can
+        fail for the right reason: without the wiring, bulk selection would
+        already gate out the PUBLISHED row, so the assertion would pass while
+        proving nothing. `case-other` makes an ignored batch visible.
+        """
+        _run_main(
+            monkeypatch,
+            [self._ready("case-a"), self._ready("case-published", state="PUBLISHED"),
+             self._ready("case-other")],
+            invoke_text_stub=lambda **kw: "{}",
+            argv=["--dry-run",
+                  "--batch-csv", self._batch(tmp_path, "case-a", "case-published")],
+        )
+        assert self._visited() == ["case-a"]
+
+    def test_without_a_batch_the_run_is_still_bulk(
+        self, monkeypatch, patched_fetch_markdown, tmp_path
+    ):
+        """Wiring the batch in must not narrow the default path."""
+        _run_main(
+            monkeypatch,
+            [self._ready("case-a"), self._ready("case-b")],
+            invoke_text_stub=lambda **kw: "{}",
+            argv=["--dry-run"],
+        )
+        assert sorted(self._visited()) == ["case-a", "case-b"]
+
+
+class TestCaseListingNarratesItself:
+    """The 33s of silence before the first case.
+
+    Listing production is 16 sequential requests at `PAGE_SIZE`, and `--limit N`
+    does not shorten it -- the slice happens after the whole list is in memory.
+    A real `--limit 10` run logged `run/start`, then nothing for 33 seconds, then
+    everything at once. That is indistinguishable from a hang, and an operator
+    watching it has no basis to decide between waiting and Ctrl-C.
+    """
+
+    def test_each_page_is_recorded_as_it_lands(self, monkeypatch, tmp_path):
+        _run_main(monkeypatch, [PRESS_CASE_READY], invoke_text_stub=lambda **kw: "{}",
+                  argv=["--dry-run"])
+
+        rows = _read_events(_events_path())
+        progress = [r for r in rows
+                    if r["step"] == "list_cases" and r["status"] == "progress"]
+        assert progress, "the listing wait left no record"
+        assert "page 1" in progress[0]["detail"]
+        assert "1/1 fetched" in progress[0]["detail"]
+
+    def test_progress_lands_before_the_listing_finishes(self, monkeypatch, tmp_path):
+        """Ordering is the whole point: a report emitted after `list_cases/ok`
+        would describe the wait instead of filling it."""
+        _run_main(monkeypatch, [PRESS_CASE_READY], invoke_text_stub=lambda **kw: "{}",
+                  argv=["--dry-run"])
+
+        seq = [(r["step"], r["status"]) for r in _read_events(_events_path())]
+        assert seq.index(("list_cases", "progress")) < seq.index(("list_cases", "ok"))
+
+    def test_progress_rows_stay_out_of_the_ledger(self, monkeypatch, tmp_path):
+        """`build_ledger` skips rows without a slug. 16 pages per run must not
+        become 16 phantom cases."""
+        _run_main(monkeypatch, [PRESS_CASE_READY], invoke_text_stub=lambda **kw: "{}",
+                  argv=["--dry-run"])
+
+        rows = _read_events(_events_path())
+        for row in rows:
+            if row["step"] == "list_cases":
+                assert row["slug"] == "", row
 
 
 def test_events_file_records_would_enrich_under_dry_run(

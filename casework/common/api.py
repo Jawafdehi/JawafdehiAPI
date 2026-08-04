@@ -65,14 +65,28 @@ class CaseworkApi:
                 "production default) or `basic=(username, password)` "
                 "(HTTP Basic, local DEV_AUTH only) -- never both, never neither"
             )
-        if basic is not None:
-            host = urllib.parse.urlparse(self.base_url).hostname
-            if host not in LOOPBACK_HOSTS:
-                raise ValueError(
-                    f"basic= is only permitted against loopback (127.0.0.1 or "
-                    f"localhost); refusing to send Basic auth to {base_url!r} -- "
-                    "use `token` (Bearer) for any non-local host"
-                )
+        parsed = urllib.parse.urlparse(self.base_url)
+        is_loopback = parsed.hostname in LOOPBACK_HOSTS
+        if basic is not None and not is_loopback:
+            raise ValueError(
+                f"basic= is only permitted against loopback (127.0.0.1 or "
+                f"localhost); refusing to send Basic auth to {base_url!r} -- "
+                "use `token` (Bearer) for any non-local host"
+            )
+        # `_headers` attaches the credential to EVERY request, reads included,
+        # and the write-guard below only inspects the host -- not the scheme. An
+        # `http://` remote base URL therefore put a production token on the wire
+        # in cleartext (CWE-319), for runs that last hours. Loopback stays
+        # exempt: a local DEV_AUTH server has no TLS and the token never leaves
+        # the host, so requiring https there would break every local run for no
+        # gain.
+        if not is_loopback and parsed.scheme != "https":
+            raise ValueError(
+                f"refusing to send credentials to {base_url!r} over "
+                f"{parsed.scheme or 'no'} -- a remote base_url must use https, "
+                "or the Authorization header travels in cleartext. Use "
+                "http://127.0.0.1:48010 for a local DEV_AUTH server."
+            )
         self.token = token
         self.basic = basic
         # Write-guard opt-in. False (the default) means `_patch` refuses any
@@ -148,16 +162,52 @@ class CaseworkApi:
         with self._request("GET", url, headers=self._headers(), timeout=timeout) as r:
             return json.loads(r.read().decode())
 
-    def iter_cases(self, params=None, timeout=60):
+    # The list endpoint's server-side default is 20 per page, so walking all
+    # 3,003 cases costs 151 round trips -- ~2m45s against production, paid by
+    # every enricher run before it processes a single case. The API caps
+    # page_size at 200 (measured 2026-08-03: page_size=200/500/1000 all return
+    # 200 results), so 200 is the largest useful ask and brings that to 16
+    # requests. Callers can still override via `params`.
+    PAGE_SIZE = 200
+
+    def iter_cases(self, params=None, timeout=60, progress=None):
+        """Yield every case, following pagination.
+
+        Even at `PAGE_SIZE`, listing production is 16 sequential requests and
+        ~33s, and it runs before an enricher does a single case of work. With no
+        output during it a run is indistinguishable from a hang, so each page
+        reports `(page, fetched, total)` as soon as it lands -- during the wait,
+        not after it.
+
+        `progress` is called with those as keywords. Pass one to route the
+        report into a run's own logger and events file; the default logs to
+        `casework.api`, so an enricher that wires nothing still narrates.
+        """
         page, params = 1, dict(params or {})
+        params.setdefault("page_size", self.PAGE_SIZE)
+        progress = progress or self._log_list_progress
+        fetched = 0
         while True:
             params["page"] = page
             data = self.get("/cases/", params, timeout)
-            for case in data.get("results", []):
-                yield case
+            results = data.get("results", [])
+            fetched += len(results)
+            # Report before yielding: a consumer that stops early still gets a
+            # record of the work already paid for.
+            progress(page=page, fetched=fetched, total=data.get("count"))
+            yield from results
             if not data.get("next"):
                 return
             page += 1
+
+    @staticmethod
+    def _log_list_progress(page, fetched, total):
+        """Default `iter_cases` reporter. `total` is absent on an uncountable
+        paginator, so the denominator degrades to '?' rather than raising."""
+        logger.info(
+            "case list: page %s, %s/%s fetched", page, fetched,
+            total if total is not None else "?",
+        )
 
     def get_case(self, slug, timeout=60):
         """Detail endpoint -- the ONLY one that resolves `material` on evidence."""

@@ -1,5 +1,6 @@
 """Shared argparse, logging and reporting for casework enricher CLIs."""
 
+import argparse
 import json
 import logging
 import os
@@ -31,8 +32,73 @@ def basic_auth_from_env():
     return user, password
 
 
-def add_common_args(parser):
+def _api_token_default():
+    """`$JAWAFDEHI_API_TOKEN`, unless local DEV_AUTH Basic credentials are set.
+
+    Every enricher's `build_api` is `if args.api_token: Bearer else Basic`, so an
+    env-var default silently reroutes ALL runs to Bearer -- including loopback
+    ones. That breaks local DEV_AUTH: per `CaseworkApi`'s docstring a `Bearer`
+    header is always routed to `OIDCAuthentication` and never falls through to
+    DRF's Basic authenticator, so `convert.py --api-base-url http://127.0.0.1:48010
+    --apply` would 401 on every upload, and it would send a production token to
+    whatever is listening on that port.
+
+    Deferring to `CASEWORK_API_USER`/`CASEWORK_API_PASSWORD` resolves it without a
+    new flag: those have no defaults anywhere (see `basic_auth_from_env`), so
+    having them set is an explicit statement that this shell targets local dev.
+    `--api-token` still overrides, for the rare case of testing a real token
+    against a local server.
+    """
+    if os.environ.get("CASEWORK_API_USER") and os.environ.get("CASEWORK_API_PASSWORD"):
+        return ""
+    return os.environ.get("JAWAFDEHI_API_TOKEN", "")
+
+
+def _batch_csv_arg(value):
+    """argparse ``type`` for ``--batch-csv``: reject bad paths at parse time.
+
+    Two failures this closes, both of which otherwise surface far too late:
+
+    An **empty value** must not mean "no batch". ``--batch-csv "$BATCH"`` with an
+    unset or misspelled variable reaches argparse as ``""``, which argparse
+    accepts happily; ``select_for_run`` would then read it as "no batch given"
+    and fall through to bulk selection over every DRAFT/IN_REVIEW case in the
+    corpus. That is the precise inverse of what the flag is for, and it is
+    silent -- the run just looks bigger than expected.
+
+    A **missing file** must not cost a corpus walk first. ``select_for_run``
+    runs after ``iter_cases``, so validating there means a typo pays ~16 pages
+    of HTTP before exiting. Checking here costs one ``stat``.
+    """
+    path = value.strip()
+    if not path:
+        raise argparse.ArgumentTypeError(
+            "needs a path to a CSV; got an empty value. An unset shell "
+            "variable expands to '', and an empty batch would otherwise widen "
+            "the run to every enrichable case.")
+    if not os.path.isfile(path):
+        raise argparse.ArgumentTypeError(f"file not found: {path}")
+    return path
+
+
+_BATCH_CSV_HELP = (
+    "CSV with a `slug` column -- the same format `bind_materials.py "
+    "--batch-csv` consumes, so a `select_batch.py` batch feeds straight in. "
+    "Acts as a HARD allowlist: no case outside the file is ever touched, and "
+    "`--limit N` takes the file's first N rows. Other selectors can only "
+    "narrow it. Unlike --slug, a batch still passes the DRAFT/IN_REVIEW state "
+    "gate, so a stale row for a since-PUBLISHED case is skipped rather than "
+    "re-enriched.")
+
+
+def add_common_args(parser, *, batch_csv_required=False, batch_csv_help=None):
     """Register the CLI flags every ported enricher shares.
+
+    ``batch_csv_required`` / ``batch_csv_help`` exist for ``bind_materials.py``,
+    which needs ``--batch-csv`` to be mandatory and documents extra
+    material-IRI columns the enrichers ignore. It used to register its own copy
+    of the flag on top of this one, which raised ``ArgumentError: conflicting
+    option string`` and stopped the whole tool from starting.
 
     `--dry-run` defaults to True and `--apply` opts into writes. This
     deliberately INVERTS the donor's default: the donor's `add_common_args`
@@ -47,6 +113,10 @@ def add_common_args(parser):
     """
     parser.add_argument("--slug", action="append", default=[])
     parser.add_argument("--court-case", action="append", default=[])
+    parser.add_argument(
+        "--batch-csv", type=_batch_csv_arg, default=None,
+        required=batch_csv_required,
+        help=batch_csv_help or _BATCH_CSV_HELP)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--fiscal-year", default="")
     parser.add_argument("--force", action="store_true")
@@ -71,7 +141,14 @@ def add_common_args(parser):
              "neither the flag nor the env var is set, the client raises rather "
              "than silently targeting a host. Local DEV_AUTH server: "
              "http://127.0.0.1:48010")
-    parser.add_argument("--api-token", default="")
+    parser.add_argument(
+        "--api-token", default=_api_token_default(),
+        help="Bearer token for the case API; defaults to $JAWAFDEHI_API_TOKEN "
+             "unless local DEV_AUTH Basic credentials are configured. PREFER THE "
+             "ENV VAR: a token passed as a flag is visible to every local user in "
+             "/proc/<pid>/cmdline for the life of the run, and these runs are "
+             "hours long. The env var is what `basic_auth_from_env`'s error "
+             "message has always told operators to set.")
     parser.add_argument(
         "--allow-remote-writes", action="store_true", default=False,
         help=(
@@ -252,10 +329,20 @@ def log_run_header(logger, *, stage, base_url, dry_run, provider, model,
     logger.info("\n".join(lines))
 
 
+def format_counts(stats: dict) -> str:
+    """`"a=1, b=2"` from a status->count mapping, sorted for stable output.
+
+    Shared so the `.log` footer and the `run/complete` event in `*.events.jsonl`
+    cannot drift apart -- the ledger and the human log should agree on how a run
+    finished.
+    """
+    return ", ".join(f"{k}={v}" for k, v in sorted(stats.items())) or "(no cases)"
+
+
 def log_run_footer(logger, *, stage, stats: dict, duration_s: float,
                    usage_summary: str = "") -> None:
     """One INFO block: per-status counts, wall-clock duration, usage summary."""
-    counts = ", ".join(f"{k}={v}" for k, v in sorted(stats.items())) or "(no cases)"
+    counts = format_counts(stats)
     lines = [
         f"=== casework run complete: {stage} ===",
         f"  counts   : {counts}",

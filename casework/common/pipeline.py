@@ -71,6 +71,21 @@ STAGES = {
     # of its own -- it IS the thing every other stage's prerequisite check
     # is waiting on.
     "convert": Stage("convert", provides=("MARKDOWN",)),
+    # bigo is PRESS-ONLY on purpose -- do NOT widen this to COURT_TYPES the way
+    # `timeline`/`entities` do. That was tried and measured on the 238 bound
+    # FY078/079 cases (2026-08-03) and reverted:
+    #   - Court orders averaged 52k chars sent vs 2.4k for press releases -- 22x
+    #     the input on EVERY case, ~2 min/case vs ~15s, projecting ~8h and >$100
+    #     for a run that costs $23 press-only.
+    #   - It only changed the answer on the multi-defendant subset (roughly 18 of
+    #     238), where the press release states per-defendant figures and no total.
+    #   - `bigo` is the ALLEGED loss. The press release IS the charge-stage claim;
+    #     the judgment records what was ESTABLISHED, which can be reduced or
+    #     overturned. So for this field the judgment is the wrong primary source,
+    #     not merely an expensive one.
+    # Press-only measured 235/238 acceptable. If the multi-defendant subset ever
+    # needs a real total, bind the charge sheet (small, and the document the field
+    # is defined against) rather than reading the judgment on all of them.
     "bigo": Stage(
         "bigo", provides=("bigo",),
         requires_materials=PRESS_TYPES,

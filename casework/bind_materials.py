@@ -436,9 +436,11 @@ def _plan_to_dict(p):
 
 def build_parser():
     parser = argparse.ArgumentParser(description="Bind lake materials to case evidence.")
-    add_common_args(parser)
-    parser.add_argument("--batch-csv", required=True,
-                        help="CSV with a `slug` column and material-IRI columns.")
+    # --batch-csv comes from add_common_args (the enrichers share it now);
+    # registering a second one here raises ArgumentError at import-time.
+    add_common_args(
+        parser, batch_csv_required=True,
+        batch_csv_help="CSV with a `slug` column and material-IRI columns.")
     parser.add_argument("--report", default="",
                         help="Optional path to write a JSON run report.")
     return parser

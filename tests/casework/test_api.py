@@ -127,6 +127,32 @@ def test_empty_base_url_raises():
         CaseworkApi(base_url=None, token="t")
 
 
+def test_bearer_mode_rejects_cleartext_http_to_a_remote_host():
+    """CWE-319. `_headers` attaches `Authorization: Bearer <token>` to every
+    request, reads included, and the write-guard only inspects the host -- not
+    the scheme. So an `http://` remote base URL put a production token on the
+    wire in cleartext, and these runs are hours long.
+
+    `basic=` was already loopback-only; Bearer had no scheme check at all.
+    """
+    with pytest.raises(ValueError, match="https"):
+        CaseworkApi(base_url="http://api.jawafdehi.org", token="prod-token")
+
+
+def test_bearer_mode_accepts_https_to_a_remote_host():
+    CaseworkApi(base_url="https://api.jawafdehi.org", token="prod-token")
+
+
+@pytest.mark.parametrize("base_url", [
+    "http://127.0.0.1:48010",
+    "http://localhost:48010",
+])
+def test_bearer_mode_still_allows_cleartext_to_loopback(base_url):
+    """A local DEV_AUTH server has no TLS, and a token never leaves the host.
+    Requiring https here would break every local run for no gain."""
+    CaseworkApi(base_url=base_url, token="local-token")
+
+
 def test_basic_mode_rejects_non_loopback_base_url():
     with pytest.raises(ValueError):
         CaseworkApi(
@@ -329,6 +355,119 @@ def test_iter_cases_follows_pagination(monkeypatch):
 
     assert [c["slug"] for c in cases] == ["case-a", "case-b", "case-c"]
     assert seen_pages == [1, 2]
+
+
+@pytest.mark.parametrize("params,expected", [
+    # Without an explicit page_size the server pages at its default 20, so a full
+    # list costs 151 round trips (~2m45s against production) before any enricher
+    # does a single case of work. The API caps page_size at 200 (measured:
+    # 200/500/1000 all return 200), so 200 is the most a client can get and cuts
+    # that to 16 requests -- verified end to end at 16 requests / 33.7s.
+    (None, 200),
+    # ...and the caller can still override it.
+    ({"page_size": 5}, 5),
+])
+def test_iter_cases_page_size(monkeypatch, params, expected):
+    seen = []
+
+    def fake_get(path, params=None, timeout=60):
+        seen.append(dict(params or {}))
+        return {"results": [], "next": None}
+
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(api, "get", fake_get)
+
+    list(api.iter_cases(params))
+
+    assert seen[0]["page_size"] == expected
+
+
+# ---------------------------------------------------------------------------
+# Progress. Listing the 3,003-case production list is 16 sequential requests
+# and ~33s during which NOTHING was logged, so a run was indistinguishable
+# from a hang -- an operator has no way to tell whether to wait or Ctrl-C.
+# ---------------------------------------------------------------------------
+
+
+def _paged(n_pages, per_page=2):
+    """`n_pages` DRF-shaped pages, each with `per_page` results and a `count`."""
+    total = n_pages * per_page
+    return {
+        page: {
+            "results": [{"slug": f"case-{page}-{i}"} for i in range(per_page)],
+            "count": total,
+            "next": f"http://x/?page={page + 1}" if page < n_pages else None,
+        }
+        for page in range(1, n_pages + 1)
+    }
+
+
+def test_iter_cases_reports_progress_after_every_page(monkeypatch):
+    """One callback per page, carrying enough to render a live counter: which
+    page, how many cases so far, and the server's total."""
+    pages = _paged(3)
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(api, "get", lambda path, params=None, timeout=60: pages[params["page"]])
+
+    seen = []
+    list(api.iter_cases(progress=lambda **kw: seen.append(kw)))
+
+    assert seen == [
+        {"page": 1, "fetched": 2, "total": 6},
+        {"page": 2, "fetched": 4, "total": 6},
+        {"page": 3, "fetched": 6, "total": 6},
+    ]
+
+
+def test_iter_cases_progress_tolerates_a_server_that_sends_no_count(monkeypatch):
+    """`total` is whatever the server said, and DRF only sends `count` when the
+    paginator is countable. Reporting must degrade, not raise."""
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(
+        api, "get",
+        lambda path, params=None, timeout=60: {"results": [{"slug": "a"}], "next": None},
+    )
+
+    seen = []
+    list(api.iter_cases(progress=lambda **kw: seen.append(kw)))
+
+    assert seen == [{"page": 1, "fetched": 1, "total": None}]
+
+
+def test_iter_cases_without_a_callback_still_logs_progress(monkeypatch, caplog):
+    """The default has to be useful on its own. Five of the six enrichers do not
+    wire a callback, and they have the same 33s of silence to explain.
+    """
+    pages = _paged(2)
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(api, "get", lambda path, params=None, timeout=60: pages[params["page"]])
+
+    with caplog.at_level(logging.INFO, logger="casework.api"):
+        list(api.iter_cases())
+
+    progress = [r.getMessage() for r in caplog.records if "page" in r.getMessage()]
+    assert len(progress) == 2, progress
+    assert "1" in progress[0] and "4" in progress[0], progress[0]
+
+
+def test_iter_cases_progress_is_emitted_before_the_next_request(monkeypatch):
+    """Reporting after the whole loop would be useless -- the point is feedback
+    DURING the wait. Each page's callback must fire before the next GET goes out.
+    """
+    pages = _paged(3)
+    order = []
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+
+    def fake_get(path, params=None, timeout=60):
+        order.append(f"get{params['page']}")
+        return pages[params["page"]]
+
+    monkeypatch.setattr(api, "get", fake_get)
+    list(api.iter_cases(progress=lambda **kw: order.append(f"progress{kw['page']}")))
+
+    assert order == [
+        "get1", "progress1", "get2", "progress2", "get3", "progress3",
+    ]
 
 
 # ---------------------------------------------------------------------------

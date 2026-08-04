@@ -51,6 +51,7 @@ from casework.common.cli import (
 )
 from casework.common.materials import markdown_link, raw_links
 from casework.common.pipeline import COURT_TYPES, PRESS_TYPES, RunReport
+from casework.common.select import slugs_from_batch_csv
 
 log = logging.getLogger("casework.convert")
 
@@ -216,6 +217,55 @@ def build_api(args):
     )
 
 
+def slugs_for_run(api, args):
+    """Which case slugs this run converts, honouring ``--batch-csv``.
+
+    convert calls ``add_common_args``, so ``--batch-csv`` shows up in its
+    ``--help``; before this it was accepted and ignored, and the run silently
+    converted every case in the corpus while the README promised a hard
+    allowlist. The batch is read straight from the file rather than through
+    ``select_for_run`` so an explicit batch still costs no ``iter_cases`` walk,
+    and because conversion touches materials rather than case content -- the
+    DRAFT/IN_REVIEW state gate the enrichers apply to a batch is not meaningful
+    here. The allowlist property is what matters and it holds: no slug outside
+    the file is returned.
+
+    ``--slug`` NARROWS a batch rather than being dropped. The batch branch used
+    to return early, so ``--batch-csv b.csv --slug case-a`` converted every row
+    in the file -- a wrong-scope write whose command line said otherwise. The
+    intersection keeps file order, because ``--limit`` slices the result.
+
+    ``--fiscal-year`` and ``--court-case`` are rejected outright. Both come from
+    the shared ``add_common_args`` and so appear in this tool's ``--help``, but
+    neither was ever implemented here, and accepted-and-ignored is the dangerous
+    reading: with no batch and no ``--slug``, ``convert --fiscal-year 078``
+    walks and converts the ENTIRE corpus while claiming one year. Failing costs
+    one message; honouring them needs a corpus walk and a bigger change.
+    """
+    unsupported = [
+        flag for flag, value in (
+            ("--fiscal-year", getattr(args, "fiscal_year", "")),
+            ("--court-case", getattr(args, "court_case", None)),
+        ) if value
+    ]
+    if unsupported:
+        raise SystemExit(
+            f"{', '.join(unsupported)} not supported by convert -- it would be "
+            "accepted and ignored, converting every case instead of the subset "
+            "you asked for. Scope the run with --batch-csv or --slug."
+        )
+    if getattr(args, "batch_csv", None):
+        slugs = slugs_from_batch_csv(args.batch_csv)
+        if args.slug:
+            wanted = set(args.slug)
+            slugs = [s for s in slugs if s in wanted]
+    elif args.slug:
+        slugs = list(args.slug)
+    else:
+        slugs = [c.get("slug") for c in api.iter_cases()]
+    return slugs[:args.limit] if args.limit else slugs
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     add_common_args(parser)
@@ -230,9 +280,7 @@ def main(argv=None):
     api = build_api(args)
     report = RunReport()
 
-    slugs = args.slug or [c.get("slug") for c in api.iter_cases()]
-    if args.limit:
-        slugs = slugs[:args.limit]
+    slugs = slugs_for_run(api, args)
 
     log_run_header(
         logger, stage="convert", base_url=args.api_base_url, dry_run=args.dry_run,
