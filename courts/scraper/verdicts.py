@@ -326,11 +326,22 @@ def derived_hearing_filter() -> Q:
     return Q(**{f"extra_data__{PROVENANCE_KEY}__isnull": False})
 
 
-def build_hearing(case, extraction: VerdictExtraction, *, order_url, model, now):
+def build_hearing(case, extraction: VerdictExtraction, *, order_url, model, now, escalated=False):
     """The unsaved :class:`CourtCaseHearing` for one recovered verdict.
 
     The verdict DATE comes from ``case_status`` -- that is the court's own field
     and is not in question. Only the disposition is model-derived.
+
+    ``escalated`` records whether this row needed a second attempt at a larger
+    token budget. It is persisted because it previously was not: the 2026-07-31
+    run escalated 3 of 84 cases, printed that count to stdout, and kept nothing --
+    so when the diagnosis behind the escalation was later found to be wrong, those
+    3 cases could not be identified to re-check. A per-run count that survives
+    only in a terminal scrollback cannot answer a question asked a week later.
+
+    Defaulted to False rather than made required so that a caller that has not
+    been taught about escalation records "not escalated" instead of crashing; the
+    one caller that CAN escalate passes it explicitly.
     """
     if extraction.abstained:
         raise ValueError("refusing to build a hearing from an abstention")
@@ -357,6 +368,7 @@ def build_hearing(case, extraction: VerdictExtraction, *, order_url, model, now)
                 "evidence": extraction.evidence,
                 "model_verdict_date_bs": extraction.verdict_date_bs,
                 "extracted_at": now.isoformat(),
+                "escalated": escalated,
             }
         },
     )

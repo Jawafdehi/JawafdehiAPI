@@ -136,6 +136,38 @@ class BuildHearingTests(TestCase):
         found = CourtCaseHearing.objects.using("ngm").filter(derived_hearing_filter())
         self.assertNotIn(scraped.pk, [h.pk for h in found])
 
+    def test_whether_a_row_needed_an_escalated_budget_is_persisted(self):
+        """Recorded per case, not just counted per run.
+
+        The 2026-07-31 run escalated 3 of 84 cases and printed only the count.
+        When the reasoning behind escalating was later found to be wrong -- the
+        error it triggers on has two causes, and the one assumed was not the one
+        that mattered -- those 3 cases could not be identified to re-check,
+        because nothing about them survived the terminal scrollback. A run whose
+        only record is its own stdout cannot answer a question asked afterwards.
+        """
+        plain = build_hearing(self.case, self.ex, order_url="u", model="m", now=timezone.now())
+        self.assertFalse(plain.extra_data[PROVENANCE_KEY]["escalated"])
+
+        hard = build_hearing(
+            self.case, self.ex, order_url="u", model="m", now=timezone.now(), escalated=True
+        )
+        self.assertTrue(hard.extra_data[PROVENANCE_KEY]["escalated"])
+
+        hard.save(using="ngm")
+        reloaded = CourtCaseHearing.objects.using("ngm").get(pk=hard.pk)
+        self.assertTrue(
+            reloaded.extra_data[PROVENANCE_KEY]["escalated"],
+            "the flag has to survive the round trip, or it answers nothing later",
+        )
+
+    def test_the_escalation_flag_defaults_to_not_escalated(self):
+        """A caller that has not been taught about escalation must record False,
+        not crash and not omit the key — an absent key would read as 'unknown'
+        for every historical row and make the next comparison ambiguous again."""
+        h = build_hearing(self.case, self.ex, order_url="u", model="m", now=timezone.now())
+        self.assertIn("escalated", h.extra_data[PROVENANCE_KEY])
+
     def test_an_abstention_can_never_become_a_row(self):
         with self.assertRaises(ValueError):
             build_hearing(self.case, parse_response(_resp(decision_type="ABSTAIN")),

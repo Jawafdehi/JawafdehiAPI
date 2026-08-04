@@ -60,14 +60,34 @@ DEFAULT_DELAY = 1.0
 #: at -- but they are lost coverage, so give reasoning real headroom.
 MAX_TOKENS = 8000
 #: Second-attempt budget, used ONLY after a first attempt died of exhaustion.
-#: The 2026-07-31 production run lost 3 of 84 cases this way, all of them long
-#: multi-defendant judgments where the reasoning alone outran 8000 tokens.
+#:
+#: The 2026-07-31 production run escalated 3 of 84 cases. **The claim that these
+#: were "long multi-defendant judgments where the reasoning alone outran 8000
+#: tokens" has been removed, because nothing measured it** -- it was inferred from
+#: the error text, and that inference is now known to be unreliable (see below).
+#: Whether raising the budget is the right remedy for those 3 is an open question,
+#: not a settled one.
 ESCALATED_MAX_TOKENS = 32000
-#: How exhaustion presents -- and why the turn limit is only the messenger, while
-#: the token budget is the cause -- now lives in :mod:`llm.exhaustion`. It moved
-#: because the same failure was diagnosed from scratch a second time, in
+#: How exhaustion presents now lives in :mod:`llm.exhaustion`. It moved because
+#: the same failure was diagnosed from scratch a second time, in
 #: `case_proposals`, which is once too often for it to stay private to this
-#: command. Kept as a module-level alias so this file's tests still name it.
+#: command.
+#:
+#: **This comment used to say the turn limit was "only the messenger, while the
+#: token budget is the cause". That was wrong.** ``error_max_turns`` has two
+#: causes wanting opposite remedies, and they are not distinguishable from the
+#: error text; on `case_proposal.intent` the turn cap was the whole cause and
+#: three successive budget increases changed nothing (JawafdehiAPI#412 raised the
+#: cap to ``CLAUDE_CLI_MAX_TURNS``, default 3).
+#:
+#: Which means the escalation below may now be treating a symptom this codebase
+#: no longer has, at 4x the tokens each time it fires. It is kept rather than
+#: removed because a budget-caused exhaustion is still real and still wants
+#: exactly this remedy -- but the next run's ``escalated`` count is the number to
+#: watch, and it is now recorded per case (see ``build_hearing``) so that the
+#: question can actually be answered instead of re-inferred.
+#:
+#: Kept as a module-level alias so this file's tests still name it.
 _is_exhaustion = is_exhaustion
 
 
@@ -265,7 +285,9 @@ class Command(BaseCommand):
 
             now = timezone.now()
             try:
-                hearing = build_hearing(case, ex, order_url=url, model=model, now=now)
+                hearing = build_hearing(
+                    case, ex, order_url=url, model=model, now=now, escalated=escalated
+                )
             except ValueError as exc:
                 failed += 1
                 self.stdout.write(f"  {i:>3} {case.case_number}  FAILED {exc}")
