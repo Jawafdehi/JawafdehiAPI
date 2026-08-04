@@ -243,67 +243,75 @@ def build_parser():
     return ap
 
 
-#: The verdict SECTION heading (`### ग) विशेष अदालतको फैसलाको सार`, the contract
-#: in `casework/enrich_description.py`). Line-anchored and required to name
-#: फैसला, because a bare `ग)` is also a list marker and a table cell reference --
-#: `081-CR-0060` carries "(ग), (घ) र (ङ) मा उल्लिखित सम्पत्ति" in a table at
-#: offset 1,740, and matching that would splice a random table row in as the
-#: outcome.
-_OUTCOME_HEADING_RE = re.compile(r"^#{0,4}[ \t]*ग\)[^\n]*फैसला[^\n]*$", re.MULTILINE)
-
-#: Fallback locator. Only 11 of the published descriptions actually follow the
-#: heading contract -- most are hand-written prose with no headings at all -- so
-#: a heading-only search finds the outcome in a small minority of the cases that
-#: have one. These are the words a Nepali verdict is stated in.
-_OUTCOME_WORD_RE = re.compile(r"(फैसला|सफाई|सफाइ|दोषी|ठहर|जरिवाना|कैद)")
+#: Words that state a RESULT -- what the court decided, not what anyone asked
+#: for. `फैसला` ("judgment") is deliberately ABSENT even though a verdict section
+#: is titled with it: it is also the word an appeal section uses to refer BACK to
+#: the judgment, so including it drags the locator past the verdict it exists to
+#: find. Measured over the corpus, `पुनरावेदन` appears after the last outcome
+#: word on 16 of the 83 descriptions long enough to need this path.
+_OUTCOME_WORD_RE = re.compile(r"(सफाई|सफाइ|दोषी|ठहर|जरिवाना|कैद)")
 
 #: How much of the description's OPENING the snippet keeps. The rest of the
 #: budget goes to the verdict.
 SNIPPET_HEAD_CHARS = 1800
 
-#: Ceiling on the whole snippet once a verdict has been spliced in. The verdict
-#: passage is read to the END of the description rather than clipped to a fixed
-#: width, so this is what stops a 13,617-character judgment summary from filling
-#: the prompt. See `_snippet` for the measurement behind 6000.
+#: Ceiling on the whole snippet once a verdict has been spliced in -- what stops
+#: a 13,617-character judgment summary from filling the prompt.
 SNIPPET_MAX_CHARS = 6000
 
+#: How far past the last outcome word the window runs, so the sentence stating
+#: the outcome is never cut off mid-clause.
+_OUTCOME_TRAILING_CHARS = 200
 
-def _outcome_offset(text):
-    """Where the verdict passage starts, or None when the text states no outcome.
 
-    Prefers the section heading (a clean boundary). Failing that, takes the LAST
-    outcome word, not the first, and backs up to its line start so the slice does
-    not begin mid-sentence.
+def _verdict_window(text):
+    """`(start, end)` of the verdict passage, or None when no outcome is stated.
 
-    LAST, NOT FIRST -- these words appear all over a description, not only in the
-    verdict. Section क) is specified to state the punishment SOUGHT (मागदावी),
-    which is written in exactly this vocabulary (कैद, जरिवाना), and narrative
-    reasoning uses ठहर freely. Measured over the 56 published descriptions longer
-    than the snippet budget, taking the first match produced two distinct
-    failures:
+    THE WINDOW ENDS AT THE LAST OUTCOME WORD AND GROWS BACKWARD. Every
+    start-somewhere-and-read-forward design loses verdicts, because no single
+    point reliably marks where the outcome discussion begins:
 
-      - No rescue at all when the first hit sits inside the head. One case's
-        first match is `ठहर` at offset 847, in a sentence about who bears a tax
-        liability; the real फैसला is at 5,275.
-      - A WRONG rescue when the first hit is past the head budget: another case
-        matches `दोषी` at 6,466, mid-narrative, and splices from there while the
-        actual ठहर sits at 26,224. That is the worse half -- the prompt rule says
-        STATE THE OUTCOME, so the model is handed unrelated prose and invited to
-        report it as the verdict.
+      - Read forward from the FIRST outcome word past the head, and a
+        mid-narrative hit hijacks the slice. One real case matches `दोषी` at
+        6,466 while the actual ठहर sits at 26,224.
+      - Read forward from the LAST outcome word, and a multi-defendant verdict
+        loses every defendant but the last one named.
+      - Read forward from the `ग)` section heading, and a long verdict
+        discussion is clipped before it finishes. Measured: preferring the
+        heading scores WORSE than ignoring it (51/54 vs 53/54 on carrying the
+        acquittal), which is why this function has no heading branch at all.
 
-    Scanning from the end fixes both: the rescue fires on 35 of the 45
-    non-heading cases instead of 29, and the passage it splices is the one the
-    document ends on, which is where a verdict structurally sits.
+    Ending the window at the last outcome word and filling the budget backward
+    dominates all three, because the outcome discussion is contiguous and ends
+    where the last outcome word is. Measured over the 83 descriptions longer than
+    the snippet budget, on whether the passage the model actually receives
+    contains the court's granted acquittal:
+
+        plain head clamp        2/54       (and 7/76 on the last outcome stated)
+        read forward from last  42/54      (62/76)
+        this function           53/54      (76/76)
+
+    The one remaining miss is a false one -- `सफाइ दिने अवसर` ("an opportunity to
+    be heard") is a due-process phrase, not a verdict.
     """
-    heading = _OUTCOME_HEADING_RE.search(text)
-    if heading is not None:
-        return text.rfind("\n", 0, heading.start()) + 1
-    last = None
-    for last in _OUTCOME_WORD_RE.finditer(text):
-        pass
-    if last is None:
+    matches = [m for m in _OUTCOME_WORD_RE.finditer(text)
+               if m.start() >= SNIPPET_HEAD_CHARS]
+    if not matches:
         return None
-    return text.rfind("\n", 0, last.start()) + 1
+    end = min(len(text), matches[-1].end() + _OUTCOME_TRAILING_CHARS)
+    start = max(SNIPPET_HEAD_CHARS, end - (SNIPPET_MAX_CHARS - SNIPPET_HEAD_CHARS))
+    # Align to a line boundary so the passage does not open mid-sentence, moving
+    # FORWARD. Backing up to the PREVIOUS line start is the obvious reading and
+    # is wrong: it grows the window by up to a whole line, which put 50 of the 83
+    # real snippets over `SNIPPET_MAX_CHARS` (the worst 6,998). Moving forward
+    # can only shrink it, so the ceiling holds. A text with no newline at all
+    # simply keeps the computed start -- `find` returning -1 must not be read as
+    # a boundary, which is the trap on the other side of this.
+    if start > SNIPPET_HEAD_CHARS:
+        line_start = text.find("\n", start)
+        if 0 <= line_start < end:
+            start = line_start + 1
+    return start, end
 
 
 def _snippet(detail):
@@ -322,24 +330,18 @@ def _snippet(detail):
     So when an outcome exists outside the head, the snippet becomes
     head + elision + the verdict passage.
 
-    THE VERDICT PASSAGE IS READ TO THE END, NOT CLIPPED TO A FIXED WIDTH. It used
-    to take a flat 1,200 characters, and that silently truncated the verdict on
-    **21 of the 52** published descriptions long enough to need this path. The
-    failure is worst exactly where it matters most: a multi-defendant case states
-    one outcome per defendant, so a clipped slice keeps the first (usually a
-    conviction) and drops the rest. Reproduced twice on `078-CR-0103`, where the
-    verdict section runs 1,835 characters and राकेशमान श्रेष्ठ's सफाई sits 172
-    characters past where a 1,200-char slice ended -- the model was shown the
-    conviction, never the acquittal, and wrote a teaser that reads as though both
-    defendants were convicted.
+    A MULTI-DEFENDANT VERDICT IS THE CASE THAT MUST NOT BE CLIPPED. Such a case
+    states one outcome per defendant, so any slice that ends early keeps the
+    first (usually a conviction) and drops the rest. Reproduced twice on
+    `078-CR-0103`, where राकेशमान श्रेष्ठ's सफाई sat past where the slice ended --
+    the model was shown the conviction, never the acquittal, and wrote a teaser
+    reading as though both defendants were convicted. `_verdict_window` exists to
+    make that structurally hard; see its docstring for the measurement.
 
-    Why a ceiling instead of no limit: the median verdict section is only 794
-    characters, so most cases send LESS than the old fixed slice and the typical
-    snippet gets smaller, not bigger. The tail is what needs room -- three in four
-    are under 3,337 characters, but the longest is 13,617. `SNIPPET_MAX_CHARS`
-    covers the realistic tail without letting one outlier judgment dominate the
-    prompt. Input tokens are the cheap half of this stage; the output cap
-    (`CARD_MAX_TOKENS`) is unchanged and is what actually bounds cost.
+    Why a ceiling instead of no limit: three in four verdict passages are under
+    3,337 characters, but the longest is 13,617, and one outlier judgment must
+    not dominate the prompt. Input tokens are the cheap half of this stage; the
+    output cap (`CARD_MAX_TOKENS`) is what actually bounds cost.
     """
     text = (detail.get("description") or "").strip()
     if not text:
@@ -347,15 +349,15 @@ def _snippet(detail):
     if len(text) <= DESCRIPTION_SNIPPET_BUDGET:
         return text
 
-    offset = _outcome_offset(text)
-    # Nothing to rescue when the text states no outcome, or when the outcome
-    # already sits inside the head the plain clamp would have kept anyway.
-    if offset is None or offset < SNIPPET_HEAD_CHARS:
+    window = _verdict_window(text)
+    # Nothing to rescue when the text states no outcome past the head -- an
+    # outcome inside the head is already kept by the plain clamp.
+    if window is None:
         return text[:DESCRIPTION_SNIPPET_BUDGET]
 
+    start, end = window
     head = text[:SNIPPET_HEAD_CHARS].rstrip()
-    outcome = text[offset:offset + (SNIPPET_MAX_CHARS - SNIPPET_HEAD_CHARS)].rstrip()
-    return f"{head}\n\n[…]\n\n{outcome}"
+    return f"{head}\n\n[…]\n\n{text[start:end].strip()}"
 
 
 def _build_prompt(detail, number, need_title, need_short):

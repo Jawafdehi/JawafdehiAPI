@@ -373,11 +373,15 @@ DETAIL = {
 class TestSnippetKeepsTheOutcome:
     """The teaser cannot state a verdict the snippet clamped away.
 
-    A description states the allegation first and the verdict last. Measured on
-    the published cases whose description exceeds the 3,000-char budget and
-    states an outcome: 34 of 52 state it ONLY beyond 3,000. `081-CR-0060` is the
-    case that surfaced it -- acquitted, सफाई at offset 5,100, and the generated
-    teaser read as a live accusation.
+    A description states the allegation first and the verdict last. Measured over
+    the 83 descriptions longer than the 3,000-char budget, on whether the passage
+    the model actually receives contains the court's granted acquittal:
+
+        plain head clamp   2/54
+        `_verdict_window` 53/54
+
+    `081-CR-0060` is the case that surfaced it -- acquitted, सफाई at offset 5,100,
+    and the generated teaser read as a live accusation.
     """
 
     def _long(self, tail):
@@ -390,20 +394,17 @@ class TestSnippetKeepsTheOutcome:
         assert len(snippet) <= ec.DESCRIPTION_SNIPPET_BUDGET + 16
 
     def test_a_headingless_outcome_is_still_found(self):
-        """Only 11 published descriptions use the ### ग) heading; most are plain
-        prose, so the vocabulary fallback carries the real load."""
+        """Only 28 of the 83 long descriptions carry the ### ग) heading; most are
+        plain prose, so the vocabulary scan carries the real load."""
         snippet = _snippet(self._long("\nविशेष अदालतले प्रतिवादीलाई सफाई दिएको।"))
         assert "सफाई" in snippet
         assert "[…]" in snippet
 
-    def test_a_long_verdict_is_read_to_the_end_not_clipped(self):
-        """The whole verdict section reaches the model, not a fixed 1,200 chars.
-
-        A flat slice clipped the verdict on 21 of the 52 long published
-        descriptions, and worst where it matters: a multi-defendant case states
-        one outcome PER defendant, so a clipped slice keeps the conviction and
-        drops the acquittal. `078-CR-0103` reproduced it twice -- सफाई sat 172
-        characters past where the old slice ended.
+    def test_a_multi_defendant_verdict_keeps_every_outcome(self):
+        """A multi-defendant case states one outcome PER defendant, so any slice
+        that ends early keeps the conviction and drops the acquittal.
+        `078-CR-0103` reproduced it twice -- सफाई sat 172 characters past where a
+        fixed 1,200-char slice ended.
         """
         verdict = ("\n### ग) विशेष अदालतको फैसलाको सार\n"
                    + ("अदालतले प्रतिवादीलाई दोषी ठहर गरेको। " * 40)
@@ -421,9 +422,15 @@ class TestSnippetKeepsTheOutcome:
         snippet = _snippet(dict(DETAIL, description=text))
         assert len(snippet) <= ec.SNIPPET_MAX_CHARS + 16
 
-    def test_a_short_verdict_makes_the_snippet_SMALLER_than_the_old_flat_slice(self):
-        """The median verdict section is 794 chars, so the common case now sends
-        LESS than the old fixed 1,200 -- this change is not a cost increase."""
+    def test_a_short_verdict_does_not_pad_the_snippet_to_the_ceiling(self):
+        """Filling the budget backward stops at a line boundary, so a one-line
+        verdict sends one line -- not 4,200 characters of the preceding narrative.
+
+        Be honest about the cost: across the 83 real long descriptions the
+        average snippet is 5,119 chars against 3,159 under the old locator. That
+        is the price of carrying the verdict, and it is input tokens on the cheap
+        tier; the output cap (`CARD_MAX_TOKENS`) is what bounds spend.
+        """
         text = ("क) अभियोगदावी। " * 400) + "\nफैसला: सफाई दिएको।"
         assert len(_snippet(dict(DETAIL, description=text))) < 3000
 
@@ -444,20 +451,75 @@ class TestSnippetKeepsTheOutcome:
             "the real outcome sits at the end; a first-match scan misses it")
         assert "[…]" in snippet
 
-    def test_the_offset_is_the_last_outcome_word_not_the_first(self):
-        text = "कैद माग।\n" + ("पूरक विवरण। " * 50) + "\nअन्ततः सफाई भएको।"
-        offset = ec._outcome_offset(text)
-        assert offset > text.index("कैद माग।"), "must not stop at the first hit"
-        assert text[offset:].startswith("अन्ततः सफाई भएको।")
+    def test_the_window_ENDS_at_the_last_outcome_word(self):
+        """The window is anchored to the END of the outcome discussion and fills
+        the budget backward, so every defendant named before the last one still
+        reaches the model."""
+        text = ("क) अभियोगदावी। " * 400
+                + "\nपहिलो प्रतिवादीलाई दोषी ठहर। दोस्रोलाई सफाई भएको।")
+        start, end = ec._verdict_window(text)
+        assert end >= text.rindex("सफाई"), "the window must reach the last outcome"
+        assert start <= text.index("दोषी"), (
+            "and must extend back far enough to keep the first defendant")
 
-    def test_the_heading_still_wins_over_the_vocabulary_scan(self):
-        """A clean section boundary beats a bare word anywhere in the text."""
-        text = ("कैद माग।\n### ग) विशेष अदालतको फैसलाको सार\nसफाई भएको।\n"
-                "थप टिप्पणीमा जरिवाना शब्द पछि आउँछ।")
-        offset = ec._outcome_offset(text)
-        assert text[offset:].startswith("### ग) विशेष अदालतको फैसला")
+    def test_an_appeal_section_after_the_verdict_does_not_steal_the_window(self):
+        """Review finding 1. `फैसला` is how an appeal section refers BACK to the
+        judgment, so a locator that treats it as an outcome word lands past the
+        verdict. On the corpus, `पुनरावेदन` follows the last outcome word on 16
+        of the 83 long descriptions.
 
-    def test_a_table_cell_reference_is_not_mistaken_for_the_heading(self):
+        Before this fix the snippet contained the appeal sentence and NOT the
+        acquittal -- worse than no rescue at all, because the plain clamp would
+        have kept it.
+        """
+        text = ("क) अभियोगदावी।\n" * 130
+                + "विशेष अदालतले राकेशमान श्रेष्ठलाई सफाई दिएको।\n"
+                + "ख) प्रमाणको विवेचना गरिएको।\n" * 250
+                + "घ) पुनरावेदनको सार: उक्त फैसलाउपर पुनरावेदन गरेको।")
+        snippet = _snippet(dict(DETAIL, description=text))
+        assert "सफाई" in snippet, "the acquittal is the whole point of the rescue"
+        assert "फैसला" not in ec._OUTCOME_WORD_RE.pattern, (
+            "फैसला in the vocabulary is what caused this")
+
+    def test_a_single_paragraph_verdict_is_still_rescued(self):
+        """Review finding 2. A description with no newline at all used to cancel
+        the rescue silently: the old locator backed up to the previous line start,
+        `rfind` returned -1, `+ 1` made that offset 0, and offset 0 reads as "the
+        outcome is already in the head". The module's own docstring says most
+        descriptions are hand-written prose."""
+        text = ("क) अभियोगदावीमा भ्रष्टाचारको आरोप छ। " * 200
+                + "विशेष अदालतले प्रतिवादी राकेशमान श्रेष्ठलाई सफाई दिएको।")
+        assert "\n" not in text
+        snippet = _snippet(dict(DETAIL, description=text))
+        assert "[…]" in snippet, "the rescue must fire"
+        assert "सफाई" in snippet
+
+    def test_the_ceiling_survives_line_alignment(self):
+        """Aligning the window start to a line boundary must move FORWARD.
+
+        Backing up to the previous line start is the obvious reading and grows
+        the window by up to a whole line -- it put 50 of the 83 real snippets over
+        the ceiling, the worst at 6,998 chars.
+        """
+        # One 900-char line, then the verdict, so a backward alignment would
+        # overshoot by the full line length.
+        text = ("क) " + "अभियोगदावीको विस्तृत विवरण। " * 200 + "\n"
+                + "अ" * 900 + " अन्ततः प्रतिवादीलाई सफाई दिएको।")
+        snippet = _snippet(dict(DETAIL, description=text))
+        assert len(snippet) <= ec.SNIPPET_MAX_CHARS + 16, (
+            f"snippet is {len(snippet)}, ceiling is {ec.SNIPPET_MAX_CHARS}")
+
+    def test_the_ceg_heading_is_deliberately_not_preferred(self):
+        """Measured: preferring the `ग)` heading and reading forward from it
+        scores WORSE than ignoring it (51/54 vs 53/54 on carrying the court's
+        granted acquittal), because a long verdict discussion gets clipped before
+        it finishes. Only 28 of the 83 long descriptions carry the heading at all.
+        """
+        assert not hasattr(ec, "_OUTCOME_HEADING_RE"), (
+            "the heading branch was removed on evidence; re-adding it needs new "
+            "evidence, not intuition about clean boundaries")
+
+    def test_a_table_cell_reference_is_not_mistaken_for_a_verdict(self):
         """`081-CR-0060` carries "(ग), (घ) र (ङ) मा उल्लिखित सम्पत्ति" in a table
         at offset 1,740. Splicing from there would present a table row as the
         verdict."""
