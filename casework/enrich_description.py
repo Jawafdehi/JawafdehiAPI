@@ -88,6 +88,7 @@ from casework.common.pipeline import (
     COURT_TYPES,
     PRESS_TYPES,
     STAGES,
+    SUBSTANTIAL_DESCRIPTION_CHARS,
     RunReport,
     unmet_prerequisites,
 )
@@ -128,11 +129,6 @@ DESCRIPTION_SOURCE_ORDER = ("charge_sheet", "ciaa_press_release", "press_release
 # donor's own default.
 SOURCE_TEXT_BUDGET = 60000
 DESCRIPTION_MAX_TOKENS = 8000
-
-# Donor-verbatim idempotency threshold (`_has_substantial_description`): a
-# description shorter than this is a stub, not a description. Content-based on
-# purpose -- an emptiness test would treat a one-line template stub as done.
-SUBSTANTIAL_DESCRIPTION_CHARS = 600
 
 EXTRACTION_SYSTEM_PROMPT = """\
 You are a Nepali legal analyst writing the public case summary (description) for \
@@ -341,7 +337,14 @@ def _generate_description(detail, court_number, source_text, invoke_text, usage)
     """One premium-tier call. Returns the description string, or None."""
     prompt = EXTRACTION_USER_PROMPT.format(
         case_title=detail.get("title") or "",
-        court_number=court_number or "(unknown)",
+        # UPPERCASED. `select.court_number()` reads the number off the canonical
+        # IRI, which is lowercase (`.../courtcase/special/081-cr-0091`), and the
+        # prompt tells the model to prefer specifics from the context over vague
+        # phrasing -- so the lowercase form lands verbatim in public prose. Fixed
+        # for the card on evidence (`081-cr-0060` shipped in 2 of 5 titles in the
+        # 2026-08-04 evaluation, against 50/50 uppercase in PUBLISHED titles);
+        # this is the same defect on the same input, one stage earlier.
+        court_number=(court_number or "").upper() or "(unknown)",
         bigo=format_bigo(detail.get("bigo")),
         court_cases=", ".join(detail.get("court_cases") or []) or "(none)",
         key_allegations=format_list(detail.get("key_allegations")),
@@ -509,6 +512,22 @@ def main(argv=None):
                       detail="; ".join(reasons), level=logging.WARNING)
             continue
 
+        # A PARTIAL FETCH FAILURE MUST BE VISIBLE. `text_unmet` was previously
+        # consumed only when NOTHING fetched, so a case whose charge sheet
+        # succeeded and whose court order 500'd generated a full public narrative
+        # from the prosecution claim alone -- silently omitting that the defendant
+        # was acquitted. Nothing in the review file said a verdict source existed
+        # and was lost, so the human reviewer could not catch it either. This is
+        # the one stage where the lost source can BE the outcome.
+        source_note = ""
+        if text_unmet:
+            source_note = "SOURCE MISSING — " + "; ".join(text_unmet)
+            for reason in text_unmet:
+                report.record(slug, "description", "partial", reason)
+            log_event(logger, paths["events"], run_id=run_id, stage="description",
+                      slug=slug, step="source", status="partial",
+                      detail="; ".join(text_unmet), level=logging.WARNING)
+
         log_event(logger, paths["events"], run_id=run_id, stage="description", slug=slug,
                   step="source", status="ok",
                   detail=f"{len(chunks)} source(s): "
@@ -536,7 +555,8 @@ def main(argv=None):
         except Exception as exc:
             report.record(slug, "description", "error", f"LLM generation failed: {exc}")
             review.add(ReviewRow(slug=slug, status="error", before=before, sources=fed,
-                                 note=f"LLM generation failed: {exc}"))
+                                 note="; ".join(filter(None, (
+                                     f"LLM generation failed: {exc}", source_note)))))
             log_event(logger, paths["events"], run_id=run_id, stage="description",
                       slug=slug, step="generate", status="error", detail=str(exc),
                       level=logging.ERROR)
@@ -549,7 +569,8 @@ def main(argv=None):
         if not description:
             report.record(slug, "description", "skipped", "LLM returned no description")
             review.add(ReviewRow(slug=slug, status="skipped", before=before, sources=fed,
-                                 note="LLM returned no description"))
+                                 note="; ".join(filter(None, (
+                                     "LLM returned no description", source_note)))))
             log_event(logger, paths["events"], run_id=run_id, stage="description",
                       slug=slug, step="generate", status="skipped",
                       detail="LLM returned no description", level=logging.WARNING)
@@ -562,7 +583,8 @@ def main(argv=None):
         if args.dry_run:
             report.record(slug, "description", "would-enrich", detail_msg)
             review.add(ReviewRow(slug=slug, status="would-enrich", before=before,
-                                 generated=description, sources=fed))
+                                 generated=description, sources=fed,
+                                 note=source_note))
             log_event(logger, paths["events"], run_id=run_id, stage="description",
                       slug=slug, step="write", status="would-enrich", detail=detail_msg)
             continue
@@ -571,14 +593,16 @@ def main(argv=None):
             api.patch_field(slug, "description", description, if_match=etag)
             report.record(slug, "description", "enriched", detail_msg)
             review.add(ReviewRow(slug=slug, status="enriched", before=before,
-                                 generated=description, sources=fed))
+                                 generated=description, sources=fed,
+                                 note=source_note))
             log_event(logger, paths["events"], run_id=run_id, stage="description",
                       slug=slug, step="write", status="enriched", detail=detail_msg)
         except Exception as exc:
             report.record(slug, "description", "error", f"PATCH failed: {exc}")
             review.add(ReviewRow(slug=slug, status="error", before=before,
                                  generated=description, sources=fed,
-                                 note=f"PATCH failed: {exc}"))
+                                 note="; ".join(filter(None, (
+                                     f"PATCH failed: {exc}", source_note)))))
             log_event(logger, paths["events"], run_id=run_id, stage="description",
                       slug=slug, step="write", status="error", detail=str(exc),
                       level=logging.ERROR)

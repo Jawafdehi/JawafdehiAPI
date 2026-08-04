@@ -78,6 +78,26 @@ def test_model_default_is_empty_not_haiku():
     assert _parse([]).model == ""
 
 
+def test_the_model_help_lists_the_tiers_the_registry_actually_holds():
+    """Review finding 11. The help text used to name the premium stages by hand,
+    and went stale the moment `description` and `card` were registered -- it
+    promised "premium stages (bigo, timeline, allegations, entities)" to an
+    operator reading `--help` to find out what a run would cost.
+
+    Deriving it from `llm.TIERS` is what stops that recurring.
+    """
+    import argparse
+
+    from casework.common.llm import TIERS
+
+    parser = add_common_args(argparse.ArgumentParser())
+    help_text = parser.format_help()
+    for stage, tier in TIERS.items():
+        assert stage in help_text, f"{stage} is registered but absent from --model help"
+    assert "description" in help_text and "card" in help_text
+    assert "premium stages (bigo, timeline, allegations, entities)" not in help_text
+
+
 def test_provider_default_is_claude_cli():
     assert _parse([]).provider == "claude_cli"
 

@@ -43,6 +43,16 @@ from casework.common.materials import markdown_link, materials_of_type
 PRESS_TYPES = ("press_release", "ciaa_press_release", "charge_sheet")
 COURT_TYPES = ("court_order",)
 
+#: What counts as a REAL description, as opposed to a stub. Donor-verbatim from
+#: `enrich_description`'s `_has_substantial_description`.
+#:
+#: Shared, not duplicated, because two stages must agree on the answer.
+#: `enrich_description` uses it to decide a case is already done;
+#: `enrich_card` uses it to refuse to write a card grounded in nothing. When
+#: only the first held the number, `unmet_prerequisites`' emptiness test was
+#: the card's whole defence -- and it passes a whitespace-only description.
+SUBSTANTIAL_DESCRIPTION_CHARS = 600
+
 
 @dataclass(frozen=True)
 class Stage:

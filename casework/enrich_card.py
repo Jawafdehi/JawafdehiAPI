@@ -129,7 +129,12 @@ from casework.common.format import format_bigo, format_entities, format_list
 from casework.common.judge import judge_description_adequacy
 from casework.common.llm import bootstrap, tier_for
 from casework.common.parse import parse_object_response
-from casework.common.pipeline import STAGES, RunReport, unmet_prerequisites
+from casework.common.pipeline import (
+    STAGES,
+    SUBSTANTIAL_DESCRIPTION_CHARS,
+    RunReport,
+    unmet_prerequisites,
+)
 from casework.common.review import ReviewRow, build_review_file
 from casework.common.select import court_number, select_for_run
 from casework.common.titles import (
@@ -162,6 +167,21 @@ CARD_MAX_TOKENS = 4000
 # editorial limit for a one-line teaser. See deviation 4.
 MAX_TITLE_CHARS = 200
 MAX_SHORT_DESCRIPTION_CHARS = 320
+
+#: The literal placeholders in the OUTPUT FORMAT example below. Named constants
+#: so the prompt and the vetting gate cannot drift apart.
+#:
+#: WHY THIS IS A WRITE GATE AND NOT A CURIOSITY. A cheap-tier model that echoes
+#: the example instead of answering it produces an object that passes every other
+#: check. `vet_title` catches the title half only by accident -- the example's
+#: case number never matches the case's own, so `validate_title` rejects it --
+#: but `short_description` has no format contract to violate, so nothing stopped
+#: "एक-वाक्य सारांश" ("one-sentence summary") from being PATCHed onto a public
+#: case card. Deviation 2 argues the cheap tier is safe here because "the two
+#: write gates are also unusually strong"; that was true of `title` and false of
+#: `short_description`.
+_TITLE_PLACEHOLDER = "नेपाली शीर्षक (080-CR-0047)"
+_SHORT_PLACEHOLDER = "एक-वाक्य सारांश"
 
 SYSTEM_PROMPT = (
     """\
@@ -201,8 +221,9 @@ a false impression is not.
 
 OUTPUT FORMAT — return ONLY a single JSON object, no markdown fences, no prose.
 Include only the requested key(s); set an unrequested key to null:
-{"title": "नेपाली शीर्षक (080-CR-0047)", "short_description": "एक-वाक्य सारांश"}
 """
+    + f'{{"title": "{_TITLE_PLACEHOLDER}", '
+      f'"short_description": "{_SHORT_PLACEHOLDER}"}}\n'
 )
 
 USER_PROMPT = """\
@@ -457,10 +478,17 @@ def vet_short_description(candidate):
     An empty value is a rejection, not a write: `CaseListSerializer` ships this
     field with no fallback to title or description (`cases/serializers.py:320`),
     so writing "" renders a blank card on the public list.
+
+    The placeholder check is the only content gate this field has -- unlike
+    `title`, it has no format contract for `validate_title` to enforce. See
+    `_SHORT_PLACEHOLDER`.
     """
     short = (candidate or "").strip()
     if not short:
         return None, "LLM returned an empty short_description"
+    if _SHORT_PLACEHOLDER in short:
+        return None, ("echoed the OUTPUT FORMAT placeholder "
+                      f"({_SHORT_PLACEHOLDER!r}) instead of answering")
     if len(short) > MAX_SHORT_DESCRIPTION_CHARS:
         return None, f"too long: {len(short)} > {MAX_SHORT_DESCRIPTION_CHARS} chars"
     return short, None
@@ -687,6 +715,23 @@ def main(argv=None):
         number = court_number(detail)
 
         unmet = unmet_prerequisites(STAGE, detail)
+        # THE EMPTINESS TEST IS NOT ENOUGH, so the substance check belongs here --
+        # before the adequacy judge below, which is itself an LLM call and would
+        # otherwise be billed for a case that cannot be carded.
+        #
+        # `unmet_prerequisites` rejects `description` only when it is `None`, `""`,
+        # `[]` or `{}`. A whitespace-only description passes it and reaches the
+        # prompt as `DESCRIPTION: (none)`; a one-line template stub reaches it as
+        # the entire factual basis for a headline TITLE_RULES asks to name the
+        # principal accused with a quantifiable hook. Either way the model is asked
+        # for facts it was never given. An earlier comment here claimed a second
+        # check would be unreachable code -- that was wrong, and being wrong is the
+        # reason no guard existed.
+        substance = len((detail.get("description") or "").strip())
+        if not unmet and substance < SUBSTANTIAL_DESCRIPTION_CHARS:
+            unmet = [f"description is only {substance} chars, under the "
+                     f"{SUBSTANTIAL_DESCRIPTION_CHARS}-char threshold the "
+                     "description stage itself uses for a real description"]
         if unmet:
             for reason in unmet:
                 report.record(slug, "card", "unmet", reason)
@@ -740,11 +785,6 @@ def main(argv=None):
             review.add(ReviewRow(slug=slug, status="already", before=current_for_review,
                                  note="nothing to do (use --force)"))
             continue
-
-        # No blank-description guard here on purpose: `unmet_prerequisites` above
-        # already reported and skipped every such case, because
-        # `STAGES["card"].requires_fields` is `("description",)`. A second check
-        # would be unreachable code that reads like a live safety net.
 
         try:
             result = _generate(detail, number, need_title, need_short,

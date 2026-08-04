@@ -91,6 +91,20 @@ _BATCH_CSV_HELP = (
     "re-enriched.")
 
 
+def _stages_at_tier(tier):
+    """Stage names registered at `tier`, for `--model`'s help text.
+
+    Derived from `llm.TIERS` rather than written out, because the hand-written
+    list went stale the moment `description` and `card` were registered -- it
+    still promised "premium stages (bigo, timeline, allegations, entities)" to an
+    operator reading `--help` to find out what a run would cost. `llm` imports
+    nothing from this module, so there is no cycle.
+    """
+    from casework.common.llm import TIERS
+
+    return ", ".join(sorted(s for s, t in TIERS.items() if t == tier)) or "(none)"
+
+
 def add_common_args(parser, *, batch_csv_required=False, batch_csv_help=None):
     """Register the CLI flags every ported enricher shares.
 
@@ -130,11 +144,11 @@ def add_common_args(parser, *, batch_csv_required=False, batch_csv_help=None):
         help="LLM model/alias to force on both tiers via the claude_cli "
              "provider's model settings (other providers use their own model "
              "config and ignore this). Empty (the default) lets each stage use "
-             "its configured tier model -- premium stages (bigo, timeline, "
-             "allegations, entities) get the premium model, tags gets the cheap "
-             "one -- falling back to the provider CLI's own default. An earlier "
-             "default of 'haiku' overrode every tier with the cheap model; pass "
-             "--model haiku explicitly to restore that for a cheap run.")
+             "its configured tier model, falling back to the provider CLI's own "
+             f"default. Premium stages: {_stages_at_tier('premium')}. Cheap "
+             f"stages: {_stages_at_tier('cheap')}. An earlier default of 'haiku' "
+             "overrode every tier with the cheap model; pass --model haiku "
+             "explicitly to restore that for a cheap run.")
     parser.add_argument(
         "--api-base-url", default=os.environ.get("JAWAFDEHI_API_BASE"),
         help="Base URL of the case API; defaults to $JAWAFDEHI_API_BASE. If "

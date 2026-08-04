@@ -1207,3 +1207,93 @@ def test_batch_csv_reaches_selection(monkeypatch, tmp_path):
     args = build_parser().parse_args(["--batch-csv", str(csv)])
     assert args.batch_csv == str(csv)
     assert "select_for_run" in Path(ec.__file__).read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------
+# code-review findings
+# --------------------------------------------------------------------------
+
+
+class TestThePlaceholderIsNotAWritableAnswer:
+    """Review finding 4. The OUTPUT FORMAT example is a string the model can
+    echo, and `short_description` had no content gate to stop it.
+
+    `vet_title` catches the title half only by accident -- the example's case
+    number never matches the case's own, so `validate_title` rejects it. But
+    `short_description` has no format contract to violate, so "एक-वाक्य सारांश"
+    ("one-sentence summary") passed vetting and would render on a public card.
+    Deviation 2 justifies the cheap tier by "the two write gates are also
+    unusually strong here"; that was true of one field and false of the other.
+    """
+
+    def test_the_short_placeholder_is_rejected(self):
+        short, reason = vet_short_description(ec._SHORT_PLACEHOLDER)
+        assert short is None
+        assert "placeholder" in reason
+
+    def test_the_placeholder_is_rejected_inside_a_longer_reply(self):
+        short, reason = vet_short_description(f"{ec._SHORT_PLACEHOLDER}: ठेक्का प्रकरण।")
+        assert short is None
+
+    def test_the_prompt_and_the_gate_cannot_drift(self):
+        """The prompt is BUILT from the constant the gate checks, so an edit to
+        the example cannot leave the gate guarding a string nobody sends."""
+        assert ec._SHORT_PLACEHOLDER in ec.SYSTEM_PROMPT
+        assert ec._TITLE_PLACEHOLDER in ec.SYSTEM_PROMPT
+
+    def test_an_echoed_placeholder_is_never_written(self, monkeypatch):
+        api = _StubApi([CASE_STUB_BOTH])
+        _run_main(monkeypatch, api,
+                  _llm(title=ec._TITLE_PLACEHOLDER, short=ec._SHORT_PLACEHOLDER),
+                  BASE_ARGV + ["--apply"])
+        assert api.patched == [], "echoing the example must write nothing at all"
+
+
+class TestAStubDescriptionCannotGroundACard:
+    """Review finding 5. `unmet_prerequisites` is an emptiness test, so it
+    rejected only `None`/`""`/`[]`/`{}`.
+
+    A whitespace-only description passed it and reached the prompt as
+    `DESCRIPTION: (none)`; a one-line template stub reached it as the entire
+    factual basis for a headline TITLE_RULES asks to name the principal accused
+    with a quantifiable hook. A comment in `main()` asserted a second check would
+    be unreachable code -- that was wrong, and being wrong is why no guard
+    existed.
+    """
+
+    def test_the_emptiness_test_alone_lets_whitespace_through(self):
+        """Pins WHY the extra guard is needed, not just that it exists."""
+        from casework.common.pipeline import STAGES, unmet_prerequisites
+
+        assert unmet_prerequisites(STAGES["card"], {"description": "   \n  "}) == []
+
+    def test_a_whitespace_only_description_generates_nothing(self, monkeypatch):
+        stub = _llm(title="काठमाडौं ठेक्का घोटाला (076-CR-0182)")
+        api = _StubApi([dict(CASE_STUB_BOTH, description="   \n  ")])
+        _run_main(monkeypatch, api, stub, BASE_ARGV + ["--apply"])
+        assert stub.calls == [], "no LLM call may be billed on an empty basis"
+        assert api.patched == []
+
+    def test_a_template_stub_description_generates_nothing(self, monkeypatch):
+        stub = _llm(title="काठमाडौं ठेक्का घोटाला (076-CR-0182)")
+        api = _StubApi([dict(CASE_STUB_BOTH,
+                             description="यो मुद्दाको विवरण अद्यावधिक हुँदैछ।")])
+        _run_main(monkeypatch, api, stub, BASE_ARGV + ["--apply"])
+        assert stub.calls == []
+        assert api.patched == []
+
+    def test_the_threshold_is_the_description_stage_s_own(self):
+        """One number, one home. When only `enrich_description` held it, the two
+        stages disagreed on what "written" means."""
+        from casework.common import pipeline
+
+        assert ec.SUBSTANTIAL_DESCRIPTION_CHARS is pipeline.SUBSTANTIAL_DESCRIPTION_CHARS
+        assert ec.SUBSTANTIAL_DESCRIPTION_CHARS == 600
+
+    def test_a_real_description_still_passes(self, monkeypatch):
+        """The guard must not swallow the normal case."""
+        stub = _llm(title="काठमाडौं ठेक्का घोटाला (076-CR-0182)")
+        api = _StubApi([CASE_STUB_BOTH])
+        _run_main(monkeypatch, api, stub, BASE_ARGV + ["--apply"])
+        assert stub.calls, "an 861-char description is a real one"
+        assert api.patched

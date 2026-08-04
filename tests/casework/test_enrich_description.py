@@ -571,7 +571,10 @@ def test_generate_prompt_carries_every_context_block():
     content = seen["content"]
     assert "काठमाडौं महानगरपालिका ठेक्का अनियमितता" in content
     assert "10,403,941" in content
-    assert "081-cr-0091" in content
+    assert "Special-court case number: 081-CR-0091" in content, (
+        "the number is presented UPPERCASE. Asserting the bare lowercase string "
+        "instead passed for the wrong reason -- it also appears in the raw "
+        "court_cases IRI block, so the assertion held either way")
     assert "ठेक्कामा मिलेमतो" in content
     assert "[accused] कमल राज गौतम" in content
     assert "तत्कालीन प्रमुख" in content
@@ -1018,3 +1021,57 @@ def test_batch_csv_reaches_selection(tmp_path):
         ["--batch-csv", str(csv)])
     assert args.batch_csv == str(csv)
     assert "select_for_run" in _shipped_source()
+
+
+# --------------------------------------------------------------------------
+# code-review findings
+# --------------------------------------------------------------------------
+
+
+def test_a_partly_failed_source_fetch_is_reported_not_swallowed(monkeypatch, tmp_path):
+    """Review finding 3. `text_unmet` used to be consumed ONLY when nothing
+    fetched at all.
+
+    So a case whose charge sheet fetched and whose court order 500'd generated a
+    full public narrative from the prosecution claim alone -- silently omitting
+    that the defendant was acquitted -- and the review file listed only the
+    source that succeeded. The human reviewer had no way to see that a verdict
+    source existed and was lost. This is the one stage where the missing source
+    can BE the outcome.
+    """
+    import casework.common.materials as m
+
+    def half_broken(link, timeout=60):
+        if link == _COURT_MD:
+            raise RuntimeError("502 Bad Gateway")
+        return "अख्तियारले काठमाडौं महानगरपालिकाको ठेक्कामा भ्रष्टाचार भएको जनाएको।"
+
+    monkeypatch.setattr(m, "fetch_markdown", half_broken)
+    stub = _tracking_stub("### क) अभियोगदावीको सार\nठेक्कामा भ्रष्टाचार भएको।")
+    api = _StubApi([CASE_READY])
+    _run_main(monkeypatch, api, stub, BASE_ARGV + ["--dry-run"])
+
+    assert stub.calls, "the surviving source still generates -- this is not a skip"
+    text = _review_file(tmp_path).read_text(encoding="utf-8")
+    assert "SOURCE MISSING" in text, (
+        "the reviewer signs off on this file; a lost verdict source must appear in it")
+    assert "court_order" in text
+    assert "502 Bad Gateway" in text
+
+
+def test_the_court_number_reaches_the_model_uppercase(
+    monkeypatch, patched_fetch_markdown, tmp_path
+):
+    """Review finding 6. `select.court_number()` reads the number off the
+    canonical IRI, which is lowercase, and the prompt tells the model to prefer
+    specifics from the context -- so `मुद्दा 081-cr-0091` lands in public prose.
+
+    Fixed for the card on evidence (2 of 5 titles shipped lowercase in the
+    2026-08-04 evaluation, against 50/50 uppercase in PUBLISHED titles); this is
+    the same defect one stage earlier.
+    """
+    stub = _tracking_stub("### क) सार\nठेक्का विवरण।")
+    _run_main(monkeypatch, _StubApi([CASE_READY]), stub, BASE_ARGV + ["--dry-run"])
+    content = stub.calls[0]["content"]
+    assert "Special-court case number: 081-CR-0091" in content
+    assert "case number: 081-cr-0091" not in content
