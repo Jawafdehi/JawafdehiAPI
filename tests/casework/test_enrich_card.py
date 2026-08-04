@@ -1365,3 +1365,34 @@ class TestTheParsePredicateAsksAboutTheFieldsTheRunCanWrite:
                            BASE_ARGV + ["--only", "short_description", "--apply"])
         assert api.patched == []
         assert any(r["status"] == "rejected" for r in report.rows)
+
+
+class TestTheOutputAccuracyRulesTheSmokeRunsFound:
+    """Three defects observed in real generated teasers, each a wrong FACT about
+    a named person rather than a code path. Pinned so a prompt edit cannot drop
+    them silently.
+    """
+
+    def test_a_sentence_may_not_be_compressed_into_a_different_number(self):
+        """Observed: the court imposed `२ वर्ष ६ महिना` (2.5 years) and the model
+        wrote `२.६ वर्ष` -- concatenating the digits into a number the court never
+        imposed, misstating a real person's prison sentence in public text."""
+        assert "२ वर्ष ६ महिना" in ec.SYSTEM_PROMPT
+        assert "२.६ वर्ष" in ec.SYSTEM_PROMPT, "the wrong form must be shown as wrong"
+        assert "NEVER COMPRESS" in ec.SYSTEM_PROMPT
+        assert "never round" in ec.SYSTEM_PROMPT
+
+    def test_a_total_may_not_be_relabelled_as_one_of_its_parts(self):
+        """Observed: रु. ३०,४२,३७८ described as construction money when it
+        included रु. ९२,३७८ of double salary."""
+        assert "DO NOT RELABEL WHAT MONEY WAS FOR" in ec.SYSTEM_PROMPT
+
+    def test_the_digit_script_may_not_be_mixed(self):
+        """Observed: `07८-CR-0103` -- Latin 0, 7 then Devanagari ८."""
+        assert "ONE DIGIT SCRIPT PER FIELD" in ec.SYSTEM_PROMPT
+        assert "07८-CR-0103" in ec.SYSTEM_PROMPT
+
+    def test_the_budget_loses_to_correctness(self):
+        """A shorter teaser beats a wrong number -- the rule has to say which
+        gives way, or the 200-char guidance silently wins."""
+        assert "a shorter teaser is" in ec.SYSTEM_PROMPT

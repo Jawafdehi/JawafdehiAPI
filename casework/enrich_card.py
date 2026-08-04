@@ -205,6 +205,20 @@ SHORT_DESCRIPTION RULES (when asked for it):
   (who/what/how much) at a glance.
 - Plain prose: no court number, no markdown, no headings, no bullets.
 - Neutral and factual, grounded in the provided data.
+- NEVER COMPRESS A SENTENCE OR AN AMOUNT INTO A DIFFERENT NUMBER. Copy every \
+duration, quantity and money figure in the form the description states it. \
+"२ वर्ष ६ महिना" is TWO AND A HALF YEARS; writing it "२.६ वर्ष" invents a number \
+the court never imposed and misstates a real person's prison sentence. If a figure \
+does not fit the character budget, drop it and keep the words — a shorter teaser is \
+always better than a wrong number. Never convert units, never round, never merge \
+two figures into a total.
+- DO NOT RELABEL WHAT MONEY WAS FOR. When a total is made of distinct components \
+— construction funds plus a double salary, say — do not attribute the whole sum to \
+one of them. Either name the component you are quoting or use the case's बिगो as \
+given, unlabelled.
+- ONE DIGIT SCRIPT PER FIELD. Nepali prose takes Devanagari numerals \
+(२०८०, रु. ३०,४२,३७८). A case number keeps its own form — "078-CR-0103", never \
+"07८-CR-0103". Mixing the two scripts inside one number is always an error.
 - STATE THE OUTCOME when the description reports one. If the case has been \
 decided — दोषी, सफाई, आंशिक सफाई, जरिवाना, कैद — say so, briefly, after the \
 allegation. A teaser that gives only the आरोप for a case that was already decided \
