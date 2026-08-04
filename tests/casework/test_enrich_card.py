@@ -49,6 +49,11 @@ STUB_SHORT = (
 )
 GOOD_TITLE = "काठमाडौं महानगरपालिका ठेक्का घोटाला: रु ३३ करोड हिनामिना (081-CR-0091)"
 
+# A title whose court number matches CASE_STUB_BOTH. `GOOD_TITLE` names
+# 081-CR-0091, so `vet_title` rightly rejects it for a 076-CR-0182 case --
+# use this whenever a test needs the title write to actually land.
+MATCHING_TITLE = "काठमाडौं ठेक्का घोटाला: रु ३३ करोड हिनामिना (076-CR-0182)"
+
 
 def _donor_source(name) -> str:
     proc = subprocess.run(
@@ -185,9 +190,17 @@ class TestDonorDeviations:
         assert "DESCRIPTION_SNIPPET_BUDGET = 2000" in donor_title
         assert ec.DESCRIPTION_SNIPPET_BUDGET == 3000
 
-    def test_max_tokens_matches_the_donors(self, donor_card):
+    def test_max_tokens_deliberately_exceeds_the_donors(self, donor_card):
+        """DEVIATION 5, pinned both ways.
+
+        The donor's 1000 killed a real case on the 2026-08-04 local smoke run:
+        `API Error: Claude's response exceeded the 1000 output token maximum`.
+        The provider raises rather than truncating, so the case produced nothing
+        at all. Devanagari costs far more tokens per character than Latin, and
+        the two fields' own caps (200 + 320 chars) have to fit.
+        """
         assert "max_tokens=1000" in donor_card
-        assert ec.CARD_MAX_TOKENS == 1000
+        assert ec.CARD_MAX_TOKENS == 4000
 
 
 # --------------------------------------------------------------------------
@@ -388,7 +401,7 @@ class TestPromptAssembly:
         assert _snippet(dict(DETAIL, description="")) == "(none)"
 
 
-def test_generate_uses_the_cheap_tier_and_1000_max_tokens():
+def test_generate_uses_the_cheap_tier_and_the_card_token_budget():
     seen = {}
 
     def stub(**kw):
@@ -398,7 +411,7 @@ def test_generate_uses_the_cheap_tier_and_1000_max_tokens():
     result = _generate(DETAIL, "081-CR-0091", True, True, stub, usage=None)
     assert result["title"] == GOOD_TITLE
     assert seen["tier"] == "cheap"
-    assert seen["max_tokens"] == 1000
+    assert seen["max_tokens"] == ec.CARD_MAX_TOKENS
     assert seen["system"] == ec.SYSTEM_PROMPT
 
 
@@ -465,6 +478,31 @@ class _StubApi:
         self.patched.append((slug, field, value, if_match))
         self._cases[slug][field] = value
         return {}
+
+
+class _EtagEnforcingApi(_StubApi):
+    """`_StubApi` with the server's actual optimistic-concurrency semantics.
+
+    Every successful write mints a NEW ETag, and a PATCH carrying a stale
+    `If-Match` is refused — which is what `/api/cases/{slug}/` does. `_StubApi`
+    returns one constant ETag and ignores `If-Match` altogether, and that is
+    precisely why a full green suite coexisted with a script that could never
+    write both of its fields: the 2026-08-04 local smoke run wrote `title`, then
+    took `HTTP Error 412: Precondition Failed` on `short_description` for every
+    case. Any future two-PATCH enricher should be tested against this, not the
+    permissive double.
+    """
+
+    def __init__(self, cases):
+        super().__init__(cases)
+        self._version = 1
+
+    def patch_field(self, slug, field, value, timeout=60, if_match=None):
+        if if_match is not None and if_match != self._etag:
+            raise RuntimeError("HTTP Error 412: Precondition Failed")
+        self._version += 1
+        self._etag = f'W/"etag-{self._version}"'
+        return super().patch_field(slug, field, value, timeout, if_match)
 
 
 class _FakeUsage:
@@ -655,6 +693,48 @@ def test_a_rejected_title_does_not_block_the_short_description(monkeypatch):
     _run_main(monkeypatch, api, _llm(title="शीर्षक without a number"),
               BASE_ARGV + ["--apply"])
     assert [f for _, f, _, _ in api.patched] == ["short_description"]
+
+
+def test_both_fields_land_when_the_server_enforces_if_match(monkeypatch):
+    """Regression: the second field write must not carry the first one's ETag.
+
+    Found by the 2026-08-04 local smoke run, invisible to every other test here
+    and to any dry run — the dry run reports `would-enrich` twice and looks
+    perfect, because it never issues a PATCH at all.
+    """
+    api = _EtagEnforcingApi([CASE_STUB_BOTH])
+    report = _run_main(monkeypatch, api, _llm(title=MATCHING_TITLE),
+                       BASE_ARGV + ["--apply"])
+
+    assert [f for _, f, _, _ in api.patched] == ["title", "short_description"]
+    assert not [r for r in report.rows if r["status"] == "error"]
+
+    first_etag = api.patched[0][3]
+    second_etag = api.patched[1][3]
+    assert first_etag and second_etag, "both writes must send an If-Match"
+    assert first_etag != second_etag, (
+        "the second PATCH reused the first PATCH's ETag — a guaranteed 412"
+    )
+
+
+def test_a_failed_etag_refresh_does_not_block_the_second_write(monkeypatch):
+    """The write already succeeded, so a refresh failure must not lose the other
+    field. The ETag is cleared and the second write goes unconditional."""
+    api = _EtagEnforcingApi([CASE_STUB_BOTH])
+    calls = {"n": 0}
+    real_get = api.get_case_with_etag
+
+    def flaky(slug, timeout=60):
+        calls["n"] += 1
+        if calls["n"] > 1:          # the post-write refresh
+            raise RuntimeError("connection reset")
+        return real_get(slug, timeout)
+
+    api.get_case_with_etag = flaky
+    _run_main(monkeypatch, api, _llm(title=MATCHING_TITLE), BASE_ARGV + ["--apply"])
+
+    assert [f for _, f, _, _ in api.patched] == ["title", "short_description"]
+    assert api.patched[1][3] is None, "second write should be unconditional"
 
 
 def test_an_unparseable_reply_is_skipped_not_written(monkeypatch):

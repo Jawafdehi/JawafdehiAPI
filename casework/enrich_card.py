@@ -70,6 +70,17 @@ So over-length is reported and the case moves on. The `short_description` cap of
 320 is different in kind: the field is a `TextField` with no server limit, so that
 number is the donor's editorial judgement about a one-line card teaser, kept as-is.
 
+DEVIATION 5 -- `CARD_MAX_TOKENS` IS 4000, NOT THE DONOR'S 1000. Measured on the
+2026-08-04 local smoke run: one of two cases died with
+`API Error: Claude's response exceeded the 1000 output token maximum`, a hard
+provider failure rather than a truncated answer, so the case produced nothing at
+all. The cap has to cover the two fields' own limits (200 + 320 chars) in
+DEVANAGARI, which costs far more tokens per character than Latin text, plus
+whatever framing the provider wraps around the reply. The donor's 1000 was set
+against Latin-heavy expectations; it does not survive real Nepali output. 4000 is
+still half of `enrich_description`'s budget and cannot mask an over-length title,
+because `vet_title` rejects on characters, not tokens.
+
 Usage:
     uv run python -m casework.enrich_card --dry-run
     uv run python -m casework.enrich_card --slug case-0123
@@ -120,7 +131,11 @@ SHORT_FIELD = "short_description"
 # snippet budget; `enrich_title.py` used 2000, and the wider one wins per
 # deviation 1.
 DESCRIPTION_SNIPPET_BUDGET = 3000
-CARD_MAX_TOKENS = 1000
+# 4000, not the donor's 1000 -- see DEVIATION 5. A Devanagari title +
+# short_description does not fit in 1000 output tokens, and the provider turns an
+# over-budget reply into a hard error, so the case yields nothing rather than a
+# trimmed answer.
+CARD_MAX_TOKENS = 4000
 
 # `title` really is capped at 200 by CasePatchSerializer AND cases/models.py.
 # `short_description` is a TextField with no server cap -- 320 is the donor's
@@ -337,6 +352,27 @@ def _vet_and_write(ctx, field, current, candidate, vet):
                   slug=ctx.slug, step=f"write:{field}", status="error",
                   detail=str(exc), level=logging.ERROR)
         return None
+
+    # RE-READ THE ETAG BEFORE THE NEXT FIELD. This script is the only ported
+    # enricher that issues TWO PATCHes for one case, and the first one changes
+    # the case's ETag -- so reusing the ETag captured before it makes the second
+    # write fail `If-Match` with a 412. Measured on the 2026-08-04 local smoke
+    # run: `title` landed, `short_description` died with
+    # "HTTP Error 412: Precondition Failed" on BOTH cases, meaning the script
+    # could never write both fields in one pass. The dry run cannot see this --
+    # it reports `would-enrich` for both and looks perfect.
+    #
+    # A failed refresh clears the ETag rather than keeping the stale one: an
+    # unconditional second write is a smaller problem than a guaranteed 412,
+    # and the case was just read, so the race window is the width of one PATCH.
+    try:
+        _, ctx.etag = ctx.api.get_case_with_etag(ctx.slug)
+    except Exception as exc:  # noqa: BLE001 -- the write already succeeded.
+        ctx.etag = None
+        log_event(ctx.logger, ctx.events_path, run_id=ctx.run_id, stage="card",
+                  slug=ctx.slug, step=f"etag:{field}", status="stale",
+                  detail=f"could not re-read ETag after writing {field}: {exc}",
+                  level=logging.WARNING)
 
     _record("enriched", value, value)
     log_event(ctx.logger, ctx.events_path, run_id=ctx.run_id, stage="card",

@@ -103,7 +103,7 @@ class TestVerdictHandling:
         judge_description_adequacy(
             REAL_TEASER, kind="teaser", invoke_text=_stub({"adequate": True}, calls))
         assert calls[0]["tier"] == "cheap"
-        assert calls[0]["max_tokens"] == 300
+        assert calls[0]["max_tokens"] == 2000
 
     def test_the_tier_is_overridable(self):
         calls = []

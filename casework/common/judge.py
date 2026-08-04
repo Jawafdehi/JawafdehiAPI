@@ -32,6 +32,19 @@ log = logging.getLogger("casework.judge")
 _JUDGE_MIN_CHARS = 15
 _JUDGE_TEXT_BUDGET = 2000
 
+#: Output budget for the verdict. 2000, NOT the donor's 300
+#: (`0321a85:casework/common.py:1016`) -- DEVIATION, measured on the 2026-08-04
+#: local smoke run. Through the `claude_cli` provider every judge call died with
+#: `API Error: Claude's response exceeded the 300 output token maximum`, and
+#: because this function fails toward regenerating, a systematically failing
+#: judge does not fail loudly: it silently reports every value inadequate. The
+#: visible symptom was `enrich_card` rewriting `short_description` on EVERY run
+#: -- no idempotency, and one wasted generation call per case per run. The
+#: verdict JSON itself is tiny; the budget has to cover the framing the provider
+#: wraps around a reply, which measured ~2,250 output tokens even for a
+#: 250-character answer.
+_JUDGE_MAX_TOKENS = 2000
+
 _JUDGE_SYSTEM_PROMPT = """\
 You are a strict data-quality reviewer for Jawafdehi, a civic archive of Nepal's \
 anti-corruption cases. You judge whether a given TEXT is an ADEQUATE value for the \
@@ -97,7 +110,7 @@ def judge_description_adequacy(
         response_text = invoke_text(
             system=_JUDGE_SYSTEM_PROMPT,
             content=user_prompt,
-            max_tokens=300,
+            max_tokens=_JUDGE_MAX_TOKENS,
             tier=tier,
             usage=usage,
         )
