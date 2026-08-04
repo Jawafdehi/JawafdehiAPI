@@ -156,7 +156,7 @@ dev = [
 # So the rules below are OFF for now, and ty is ADVISORY rather than a gate: CI
 # runs it with `|| true` (see ci.yml) and pre-commit does not run it at all. A
 # gate that reports 800 false positives trains people to ignore it. What IS
-# useful today is the 28 that remain once those families are silenced, which is
+# useful today is the 30 that remain once those families are silenced, which is
 # why the checker is installed and configured rather than skipped.
 #
 # The path to a real gate, in order:

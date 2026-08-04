@@ -1216,6 +1216,39 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         court_cases_touched = self._touches(patch_ops, "/court_cases")
 
         with transaction.atomic():
+            # Re-check ``If-Match`` under a row lock, INSIDE the transaction that
+            # writes. The check in _reject_before_patch runs before this block, so
+            # on its own it is only a fast pre-filter: two clients holding the same
+            # ETag can both pass it and then clobber each other, because every write
+            # below is an unconditional UPDATE rather than one predicated on the
+            # version the token was derived from. Taking the lock first serializes
+            # them, so the second sees the first's committed ``updated_at`` and gets
+            # a 412 instead of silently overwriting — which is the whole point of
+            # the header on an endpoint whose /entities and /evidence ops replace
+            # whole lists. Mirrors materials/views.py, the same contract on the
+            # material plane.
+            #
+            # NOTE: sqlite has ``has_select_for_update = False``, so Django SILENTLY
+            # omits FOR UPDATE under the test gate — the lock is real on Postgres
+            # (prod) only. The tests therefore pin the If-Match contract, not the
+            # lock itself.
+            locked = (
+                Case.objects.select_for_update().filter(pk=case.pk).only("updated_at")
+            ).first()
+            if locked is not None and not _if_match_matches(request, locked):
+                transaction.set_rollback(True)
+                resp = Response(
+                    {
+                        "detail": (
+                            "This case was modified since you opened it. "
+                            "Reload to get the latest version before saving."
+                        )
+                    },
+                    status=status.HTTP_412_PRECONDITION_FAILED,
+                )
+                resp["ETag"] = _version_token(locked)
+                return resp
+
             # Persist scalar field changes
             scalar_updates = {
                 field: validated[field]

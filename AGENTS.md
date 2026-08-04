@@ -26,6 +26,13 @@ databases, one per router alias. Do not stand up Postgres/OpenSearch/MinIO to ru
 it. `--ignore=integration-tests` matters: `integration-tests/` is a separate live-stack
 suite that *errors* rather than skips when the stack is down.
 
+Expect **3297 passed · 4 skipped · 1 warning** (measured 2026-08-04). The 4 skips
+are `materials/tests/test_patch_concurrency_postgres.py`, which needs a real
+Postgres `ngm` alias AND `DJANGO_SETTINGS_MODULE=config.settings` — see that
+module's docstring; `settings_test` hardcodes sqlite, so they can never run on the
+default gate. The 1 warning is upstream's own un-awaited `_drain_tasks` coroutine
+in `case_events`, not something this tree introduced.
+
 Run one test: `uv run pytest tests/api/test_public_api.py -k name`. Security suite
 only: `uv run pytest -m security`.
 
@@ -98,6 +105,18 @@ intended it carries a `# noqa: BLE001` plus a reason (`review/runner.py:50`
 progress reporting, `jobs/registry.py:76` consumer-import wiring). Don't add new
 silent handlers, and don't "fix" the annotated ones without reading the note.
 
+**`If-Match` is checked TWICE on `PATCH /api/cases/{slug}/`, on purpose.** The
+first check is in `_reject_before_patch` — a cheap pre-filter that runs before
+`request.data` is even touched (see the gate-precedence note there). The second
+is under `select_for_update()` *inside* `transaction.atomic()`, and that one is
+the actual guarantee: every write in the block is an unconditional `UPDATE`, not
+one predicated on the version the token came from, so without the locked
+re-check two clients holding the same ETag both pass the pre-filter and the later
+write silently clobbers. Don't "deduplicate" these. Same contract as
+`materials/views.py`. Note sqlite has `has_select_for_update = False`, so Django
+silently omits `FOR UPDATE` under the test gate — the lock is real on Postgres
+only, and the tests pin the If-Match contract rather than the lock.
+
 **Search is a hard dependency.** OpenSearch down = 503, by design. There is no
 fallback path to add.
 
@@ -126,9 +145,10 @@ fallback path to add.
   set `FORMS_URLFIELD_ASSUME_HTTPS`; that transitional setting is itself deprecated
   and warns on assignment (verified: `django/conf/__init__.py:239`). Swapping the
   field class needs a state-only `AlterField` migration (see `cases/migrations/0055`).
-- **The suite must stay at zero warnings.** It was 916 before 2026-08-04 (98% one
-  repeated whitenoise `UserWarning`) and is 0 now. A new warning is a real signal;
-  keep it that way rather than letting volume rebuild.
+- **The suite must stay at one warning.** It was 916 before 2026-08-04 (98% one
+  repeated whitenoise `UserWarning`); the 1 that remains is upstream's un-awaited
+  `_drain_tasks` coroutine in `case_events`. A *second* new warning is a real
+  signal; keep it that way rather than letting volume rebuild.
 
 ## Working model
 
@@ -156,7 +176,7 @@ do not push to it.
 ## Known debt (measured 2026-08-04, don't rediscover)
 
 - **No F-grade blocks remain.** All three were decomposed on 2026-08-04:
-  `cases/api_views.py` `partial_update` F/50→C/17, `review/scorer.score_case`
+  `cases/api_views.py` `partial_update` F/50→C/19, `review/scorer.score_case`
   F/48→B/9, `cases/search_index.build_doc` F/41→B/8. Radon over the tree now:
   5246 A · 507 B · 190 C · 25 D · 4 E · 0 F.
 - The 4 remaining **E-grade** blocks, in descending cost:

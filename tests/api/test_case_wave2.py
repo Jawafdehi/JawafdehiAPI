@@ -11,7 +11,10 @@ All three are additive and backward compatible: no ``page_size`` → default 20;
 no ``If-Match`` → last-write-wins as before; the history endpoint is new.
 """
 
+from unittest.mock import patch
+
 import pytest
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from cases.models import (
@@ -195,6 +198,54 @@ def test_patch_with_stale_if_match_rejected_412():
     assert resp.headers.get("ETag")  # carries the current token for reconcile
     case.refresh_from_db()
     assert case.title == "Edited elsewhere"  # my stale write did NOT land
+
+
+@pytest.mark.django_db
+def test_if_match_is_rechecked_inside_the_write_transaction():
+    """A write landing AFTER the pre-flight check still 412s, not clobbers.
+
+    ``partial_update`` checks ``If-Match`` twice: once in ``_reject_before_patch``
+    (a cheap pre-filter, before the body is even parsed) and again under
+    ``select_for_update`` inside ``transaction.atomic()``. Only the second one
+    makes the header a real guarantee — without it two clients holding the same
+    token both pass the pre-filter and the later write silently wins, because
+    every write is an unconditional UPDATE rather than one predicated on the
+    version the token came from.
+
+    Simulate exactly that interleaving by letting the concurrent edit land
+    between the two checks: patch ``_reject_before_patch`` to bump ``updated_at``
+    after it returns, which is the window the row lock is there to close.
+    """
+    user = create_user_with_role("mod-tx", "mod-tx@example.com", "Moderator")
+    case = _publishable_case(state=CaseState.DRAFT)
+    client = _authed_client(user)
+
+    token = client.get(URL.format(case.slug)).headers["ETag"]
+
+    from cases.api_views import CaseViewSet
+
+    original = CaseViewSet._reject_before_patch
+
+    def racing_gate(self, request, case_obj):
+        result = original(self, request, case_obj)
+        # The competing writer commits HERE — after the pre-filter said "fresh".
+        Case.objects.filter(pk=case_obj.pk).update(
+            title="Won the race", updated_at=timezone.now()
+        )
+        return result
+
+    with patch.object(CaseViewSet, "_reject_before_patch", racing_gate):
+        resp = client.patch(
+            URL.format(case.slug),
+            data=[{"op": "replace", "path": "/title", "value": "Lost the race"}],
+            format="json",
+            HTTP_IF_MATCH=token,
+        )
+
+    assert resp.status_code == 412
+    assert resp.headers.get("ETag")  # the current token, so the client can reconcile
+    case.refresh_from_db()
+    assert case.title == "Won the race"  # the losing write did NOT land
 
 
 @pytest.mark.django_db
