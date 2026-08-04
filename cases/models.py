@@ -19,6 +19,7 @@ from jawafdehi_shared.entities.ids import (
 )
 
 from .fields import (
+    HttpsURLField,
     TextListField,
     TimelineListField,
 )
@@ -631,12 +632,12 @@ class Case(models.Model):
     short_description = models.TextField(
         blank=True, help_text="Short description/summary of the case"
     )
-    thumbnail_url = models.URLField(
+    thumbnail_url = HttpsURLField(
         blank=True,
         max_length=500,
         help_text="URL to a small thumbnail picture for the case",
     )
-    banner_url = models.URLField(
+    banner_url = HttpsURLField(
         blank=True, max_length=500, help_text="URL to a large banner image for the case"
     )
     # Date fields

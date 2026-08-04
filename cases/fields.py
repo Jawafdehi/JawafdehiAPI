@@ -1,7 +1,8 @@
 """
 Custom field types for the Case model.
 
-These fields provide structured validation and storage for list-based data.
+These fields provide structured validation and storage for list-based data,
+plus ``HttpsURLField`` (a Django-6-ready ``URLField``).
 """
 
 import re
@@ -9,6 +10,34 @@ from datetime import datetime
 
 from django.core.exceptions import ValidationError
 from django.db import models
+
+
+class HttpsURLField(models.URLField):
+    """``URLField`` that pins the form-layer ``assume_scheme`` to ``https``.
+
+    Django 5.x warns (``RemovedInDjango60Warning``) whenever a
+    ``forms.URLField`` is built without an explicit ``assume_scheme``, because
+    the scheme prepended to a scheme-less value changes from ``http`` to
+    ``https`` in Django 6.0. ``models.URLField.formfield()`` does not forward
+    the argument, so every ModelForm over such a field trips the warning — the
+    Case admin form alone accounts for the overwhelming majority of the test
+    suite's warning volume.
+
+    Passing ``assume_scheme`` here (rather than setting the
+    ``FORMS_URLFIELD_ASSUME_HTTPS`` transitional setting project-wide) is the
+    fix that does not trade one deprecation for another: that setting is ITSELF
+    deprecated and emits ``RemovedInDjango60Warning`` on assignment
+    (``django/conf/__init__.py``), so it would silence nothing.
+
+    Adopting the Django 6.0 behaviour NOW is also the safer default: it only
+    affects scheme-less input typed into a form, and ``https`` is what these
+    image URLs should be. ``deconstruct()` is inherited, so this subclass is
+    a no-op at the database level (same ``varchar``) — but it IS a distinct
+    field path in migration state, hence the accompanying AlterField.
+    """
+
+    def formfield(self, **kwargs):
+        return super().formfield(**{"assume_scheme": "https", **kwargs})
 
 
 class TextListField(models.JSONField):
