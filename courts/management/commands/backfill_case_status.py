@@ -11,6 +11,21 @@ and freshly-scraped data are normalised identically. Fixes on existing data:
 - DQ-03: fills ``verdict_date_bs``/``verdict_date_ad`` from the paren form
   (~465k rows), never overwriting a value that is already set.
 
+**Supreme Court re-run (2026-08-04).** DQ-01 and DQ-03 interact in a way that left
+the entire Supreme corpus reading as undecided: DQ-01 correctly NULLed the header
+those rows carried in ``case_status``, which removed the only text DQ-03 knew how
+to parse a date out of. Result, measured on prod: 107,554 supreme rows, **zero**
+with ``case_status``, **zero** with ``verdict_date_ad`` — while the dispositions sat
+in ``extra_data.enrichment_hearings`` all along. DQ-03 now also accepts the
+disposing sitting's own date via ``courts.case_status.outcome_from_hearings``.
+
+Projection over all 107,554 supreme rows with the current parser: **86,782 rows
+would gain a verdict date and 86,773 a verdict_type** (largest groups
+CLAIM_DENIED 34,124, PROCEDURAL 17,607, CLAIM_UPHELD 9,764, AFFIRMED 6,114).
+1,201 terminal-labelled entries remain unclassified and are deliberately left
+NULL — mostly encoding corruption (``( (``, ``))))())())``, ``® ``-separated
+compounds) plus genuinely ambiguous cells like a bare ``आदेश जारी``.
+
 Divergence from the retired ngm script it replaces: that script stashed the
 parsed lifecycle into ``extra_data['parsed_status']`` because the typed columns
 did not exist yet. In the monorepo those columns are first-class (migration
@@ -65,20 +80,35 @@ def compute_case_updates(case_status, verdict_type, verdict_date_bs, verdict_dat
     """
     parsed = cs.parse_case_status(case_status)
     updates: dict[str, object] = {}
+    outcome = cs.outcome_from_hearings(hearings)
 
     # DQ-01 — a stored header/label artifact is not a real status.
     if cs.is_status_artifact(case_status):
         updates["case_status"] = None
 
-    # DQ-02 — outcome enum from the status, else the final decisive hearing.
-    new_verdict = parsed.verdict_type or cs.verdict_from_hearings(hearings)
+    # DQ-02 — outcome enum from the status, else the final disposing hearing.
+    new_verdict = parsed.verdict_type or (outcome.verdict_type if outcome else None)
     if new_verdict and new_verdict != verdict_type:
         updates["verdict_type"] = new_verdict
 
-    # DQ-03 — fill a missing verdict date from the paren form; never overwrite.
-    if parsed.verdict_date_bs and not verdict_date_bs:
-        updates["verdict_date_bs"] = parsed.verdict_date_bs
-        updates["verdict_date_ad"] = parsed.verdict_date_ad
+    # DQ-03 — fill a missing verdict date; never overwrite one already present.
+    #
+    # Two sources, in order of authority. The paren form inside ``case_status`` is
+    # the court's own summary of its own disposition, so it wins. Failing that,
+    # take the date of the sitting that actually disposed of the case.
+    #
+    # That fallback is the ONLY route open to Supreme rows, and the reason this
+    # exists: their ``case_status`` held the scraped column header ``आदेश /फैसलाको
+    # किसिम``, DQ-01 correctly NULLed it, and that left no paren form to parse a
+    # date out of — so ~49.5k appeals that HAVE been decided still read as
+    # undecided, with the disposition sitting untouched in extra_data all along.
+    if not verdict_date_bs:
+        if parsed.verdict_date_bs:
+            updates["verdict_date_bs"] = parsed.verdict_date_bs
+            updates["verdict_date_ad"] = parsed.verdict_date_ad
+        elif outcome and outcome.verdict_date_bs:
+            updates["verdict_date_bs"] = outcome.verdict_date_bs
+            updates["verdict_date_ad"] = outcome.verdict_date_ad
 
     return updates, parsed
 
