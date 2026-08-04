@@ -26,7 +26,7 @@ class APIImageChooserBlock(ImageChooserBlock):
         data = {"id": value.pk, "title": value.title, "alt": value.default_alt_text}
         try:
             rendition = value.get_rendition("width-1200")
-        except Exception:
+        except Exception:  # noqa: BLE001 - a rendition failure degrades to the un-rendered payload
             return data
         data.update(
             {

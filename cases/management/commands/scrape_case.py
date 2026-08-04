@@ -153,7 +153,7 @@ class Command(BaseCommand):
             raise CommandError(str(e))
         except ValueError as e:
             raise CommandError(str(e))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - re-raised as CommandError for the CLI
             raise CommandError(f"Scraping failed: {e}")
 
     def import_to_database(
@@ -220,7 +220,7 @@ class Command(BaseCommand):
             self.log_error(f"  Type: {db_case.case_type}")
             self.log_error(f"  Updated at: {db_case.updated_at.isoformat()}")
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - re-raised as CommandError for the CLI
             self.log_error(f"\n✗ Database import failed: {e}")
             raise CommandError(f"Failed to import case to database: {e}")
 

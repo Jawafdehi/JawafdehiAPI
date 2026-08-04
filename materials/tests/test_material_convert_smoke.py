@@ -44,7 +44,7 @@ def _run_one_convert_job():
     try:
         result = handle_material_convert(job.payload, on_stage=lambda s: None)
         return jobs_queue.finalize(job, status=Job.DONE, result=result)
-    except Exception as exc:  # mirror the poller: report a retryable failure
+    except Exception as exc:  # noqa: BLE001 - mirror the poller: report a retryable failure
         return jobs_queue.finalize(
             job, status=Job.FAILED, error=str(exc), retryable=True
         )

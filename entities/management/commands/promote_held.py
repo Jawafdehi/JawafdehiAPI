@@ -125,7 +125,7 @@ class Command(BaseCommand):
             canon_iri, canon_data, _ = rows_sorted[0]
             try:
                 validate_jsonld_entity(canon_data)
-            except Exception:
+            except Exception:  # noqa: BLE001 - one bad held row must not stop the batch
                 continue
             promoted_paired += 1
             if len(examples) < 20:
@@ -149,7 +149,7 @@ class Command(BaseCommand):
                     continue
                 try:
                     validate_jsonld_entity(data)
-                except Exception:
+                except Exception:  # noqa: BLE001 - one bad held row must not stop the batch
                     continue
                 promoted_ecn += 1
                 if not dry:

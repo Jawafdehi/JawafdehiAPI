@@ -244,7 +244,7 @@ class Command(BaseCommand):
             except json.JSONDecodeError as e:
                 failed += 1
                 logger.error(f"JSON parse error in {json_file.name}: {e}")
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - per-row failure is counted; the import continues
                 failed += 1
                 logger.error(f"Error processing {json_file.name}: {e}")
 

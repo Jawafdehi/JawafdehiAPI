@@ -141,7 +141,7 @@ def oidc_token() -> str:
         )
         resp.raise_for_status()
         return resp.json().get("access_token", "")
-    except Exception:
+    except Exception:  # noqa: BLE001 - no token available -> unauthenticated request
         return ""
 
 
@@ -167,7 +167,7 @@ def _is_up(base_url: str) -> bool:
         try:
             if httpx.get(f"{base_url}{path}", timeout=3).status_code < 500:
                 return True
-        except Exception:
+        except Exception:  # noqa: BLE001 - an unreachable path just means try the next one
             continue
     return False
 

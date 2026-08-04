@@ -575,7 +575,7 @@ def _get_ngm_data(case: dict, api: CaseworkApi) -> Optional[dict]:
     quoted = urllib.parse.quote(f"special:{special_ref}", safe=":")
     try:
         data = api.get(f"/ngm/court_case/{quoted}")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - an NGM lookup failure degrades to no court section
         log.warning("NGM query failed for %s: %s", special_ref, exc)
         return None
 
@@ -820,7 +820,7 @@ def main(argv=None):
         # identical rationale).
         try:
             detail = api.get_case(slug)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - detail-fetch failure falls back to the LIST-shaped case
             detail = case
             log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
                       step="fetch", status="fallback", detail=str(exc),
@@ -872,7 +872,7 @@ def main(argv=None):
                 usage=usage,
                 ngm_data=ngm_data,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - per-case LLM failure is recorded, run continues
             report.record(slug, "timeline", "error", f"LLM extraction failed: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
                       step="extract", status="error", detail=str(exc),
@@ -913,7 +913,7 @@ def main(argv=None):
             log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
                       step="write", status="enriched",
                       detail=f"{len(entries)} entries: {entries_json}")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - per-case PATCH failure is recorded, run continues
             report.record(slug, "timeline", "error", f"PATCH failed: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="timeline", slug=slug,
                       step="write", status="error", detail=str(exc),

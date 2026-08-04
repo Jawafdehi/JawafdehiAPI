@@ -46,7 +46,7 @@ try:  # pragma: no cover - exercised by backend_available()
     from indic_transliteration import sanscript as _sanscript
 
     _BACKEND = "indic-transliteration"
-except Exception:  # ImportError or any load failure -> documented fallback.
+except Exception:  # noqa: BLE001 - ImportError or any load failure -> documented fallback
     _sanscript = None
     _BACKEND = None
 

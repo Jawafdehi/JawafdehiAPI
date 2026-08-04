@@ -611,7 +611,7 @@ def main(argv=None):
 
         try:
             detail = api.get_case(slug)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - per-case fetch failure is recorded, run continues
             report.record(slug, "bigo", "error", f"case fetch failed: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
                       step="fetch", status="error", detail=str(exc),
@@ -644,7 +644,7 @@ def main(argv=None):
 
         try:
             bigo, shown = _extract_bigo(text, detail, invoke_text, usage)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - per-case LLM failure is recorded, run continues
             report.record(slug, "bigo", "error", f"LLM extraction failed: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
                       step="extract", status="error", detail=str(exc),
@@ -695,7 +695,7 @@ def main(argv=None):
             report.record(slug, "bigo", "enriched", f"bigo={bigo}")
             log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
                       step="write", status="enriched", detail=f"bigo={bigo}")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - per-case PATCH failure is recorded, run continues
             report.record(slug, "bigo", "error", f"PATCH failed: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
                       step="write", status="error", detail=str(exc),

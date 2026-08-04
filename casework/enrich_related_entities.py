@@ -441,7 +441,7 @@ def main(argv=None):
 
         try:
             detail = api.get_case(slug)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - detail-fetch failure falls back to the LIST-shaped case
             detail = case
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                       step="fetch", status="fallback", detail=str(exc),
@@ -500,7 +500,7 @@ def main(argv=None):
                 tier=tier_for("entities"),
                 usage=usage,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - per-case LLM failure is recorded, run continues
             report.record(slug, "entities", "error", f"LLM extraction failed: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                       step="extract", status="error", detail=str(exc),

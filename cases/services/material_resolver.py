@@ -129,7 +129,7 @@ def _derive_court_case_document(material_iri: str) -> Optional[dict]:
         if case is None:
             return None
         return materials_jsonld.court_case_to_jsonld(case)
-    except Exception:  # pragma: no cover - defensive: court app/DB unavailable
+    except Exception:  # pragma: no cover  # noqa: BLE001 - defensive: court app/DB unavailable
         logger.warning(
             "court-case derive failed for material %s", material_iri, exc_info=True
         )
@@ -181,7 +181,7 @@ def resolve_materials(material_iris) -> dict[str, ResolvedMaterial]:
                 "material_type": mat.material_type or None,
                 "urls": _links_from_document(data),
             }
-    except Exception:  # pragma: no cover - defensive: DB not routed/migrated
+    except Exception:  # pragma: no cover  # noqa: BLE001 - defensive: DB not routed/migrated
         logger.warning(
             "Failed to resolve NGM materials in-process; returning stubs.",
             exc_info=True,

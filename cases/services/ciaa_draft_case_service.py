@@ -331,7 +331,7 @@ class CIAADraftCaseService:
             details = get_court_case_details(court, case_no)
             cell = (details or {}).get("case", {}).get("defendant")
             stated, bare = parse_stated_defendant_count(cell)
-        except Exception:
+        except Exception:  # noqa: BLE001 - defensive: a roster-flag failure must not fail the draft
             logger.warning(
                 "Truncation guard skipped: NGM details unavailable for %s/%s",
                 court,

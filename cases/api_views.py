@@ -1741,7 +1741,7 @@ class OEmbedView(APIView):
                 thumbnail_url = absolute_media_url(rendition.url)
                 thumbnail_width = rendition.width
                 thumbnail_height = rendition.height
-            except Exception:  # pragma: no cover - rendition failures should degrade.
+            except Exception:  # pragma: no cover  # noqa: BLE001 - a rendition failure degrades to no thumbnail
                 thumbnail_url = ""
 
         return self._base_oembed(
