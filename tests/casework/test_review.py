@@ -200,3 +200,32 @@ def test_build_review_file_marks_apply_runs(tmp_path):
 def test_the_header_names_the_model_or_says_it_defaulted(tmp_path, model, expected):
     rf = _file(tmp_path, model=model, provider="claude_cli")
     assert expected in rf.render()
+
+
+def test_a_directory_valued_override_gets_a_stamped_per_stage_name(tmp_path):
+    """Finding 6. Two stages pointed at one DIRECTORY must not collide.
+
+    The workflow that exposed this is the normal one: dry-run `description`, read
+    it, dry-run `card` against the same cases. Both runs were given the same
+    `--review-file`, and only the card's survived.
+    """
+    target = tmp_path / "reviews"
+    target.mkdir()
+    desc = review_path("description", "aaaa1111", override=str(target))
+    card = review_path("card", "bbbb2222", override=str(target))
+    assert desc.parent == target and card.parent == target
+    assert desc != card
+    assert desc.name.endswith("-description-aaaa1111.md")
+    assert card.name.endswith("-card-bbbb2222.md")
+
+
+def test_a_trailing_slash_is_a_directory_even_before_it_exists(tmp_path):
+    path = review_path("card", "cccc3333", override=f"{tmp_path / 'later'}/")
+    assert path.parent == tmp_path / "later"
+    assert path.name.endswith("-card-cccc3333.md")
+
+
+def test_a_file_valued_override_is_still_used_verbatim(tmp_path):
+    """Naming one file stays a deliberate act -- no stamp, no stage suffix."""
+    target = tmp_path / "exactly-this.md"
+    assert review_path("card", "dddd4444", override=str(target)) == target

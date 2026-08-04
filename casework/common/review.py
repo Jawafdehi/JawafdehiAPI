@@ -171,9 +171,22 @@ def review_path(stage, run_id, override=""):
     drop its file straight into the meta-repo task directory it belongs to),
     then `$CASEWORK_REVIEW_DIR`, then `<repo>/work/reviews/`. `work/` is
     gitignored, so the default never risks committing generated Nepali prose.
+
+    A DIRECTORY-VALUED OVERRIDE IS TREATED AS A DIRECTORY, and gets the same
+    `<ts>-<stage>-<run>.md` name the default builds. Without that, the two
+    stages of the normal workflow silently destroy each other's evidence:
+    `enrich_description --review-file work/reviews/run.md` followed by
+    `enrich_card --review-file work/reviews/run.md` leaves only the card's file,
+    and the description output the card was judged against is gone. A file-valued
+    override still lands exactly where it is pointed -- naming one file is a
+    deliberate act, naming a directory is not.
     """
     if override:
-        return Path(override)
+        path = Path(override)
+        if path.is_dir() or override.endswith(("/", os.sep)):
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            return path / f"{stamp}-{stage}-{run_id}.md"
+        return path
     base = Path(os.environ.get("CASEWORK_REVIEW_DIR") or _DEFAULT_REVIEW_DIR)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return base / f"{stamp}-{stage}-{run_id}.md"

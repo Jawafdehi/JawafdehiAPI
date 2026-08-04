@@ -22,9 +22,14 @@ titles end in the case number in parens, which is the format contract). Both
 fields render on the public case list, so wrong here is wrong on the front page.
 
 Fetches NO source documents. Both fields derive from the `description` already on
-the case (falling back to `key_allegations`), which is what makes the stage cheap
-and what makes the single-owner split affordable: `order_stages` runs
-`description` first and this picks up what it wrote, no charge sheet re-fetched.
+the case, which is what makes the stage cheap and what makes the single-owner
+split affordable: `order_stages` runs `description` first and this picks up what
+it wrote, no charge sheet re-fetched. `key_allegations` and the entity list go
+into the prompt as supporting context, NOT as a fallback source -- the donor
+treated them as one, but `STAGES["card"].requires_fields` declares
+`("description",)`, so `unmet_prerequisites` reports any case with a blank
+description as unmet before generation is ever reached. A description is a hard
+prerequisite here, not a preference.
 
 Ported from two donors at commit `0321a85`: `casework/enrich_card.py` (425 lines)
 and `casework/enrich_title.py` (283 lines). Six deliberate deviations:
@@ -252,14 +257,39 @@ OUTCOME_SLICE_CHARS = 1200
 def _outcome_offset(text):
     """Where the verdict passage starts, or None when the text states no outcome.
 
-    Prefers the section heading (a clean boundary) and falls back to the first
-    outcome word, backing up to its line start so the slice does not begin
-    mid-sentence.
+    Prefers the section heading (a clean boundary). Failing that, takes the LAST
+    outcome word, not the first, and backs up to its line start so the slice does
+    not begin mid-sentence.
+
+    LAST, NOT FIRST -- these words appear all over a description, not only in the
+    verdict. Section क) is specified to state the punishment SOUGHT (मागदावी),
+    which is written in exactly this vocabulary (कैद, जरिवाना), and narrative
+    reasoning uses ठहर freely. Measured over the 56 published descriptions longer
+    than the snippet budget, taking the first match produced two distinct
+    failures:
+
+      - No rescue at all when the first hit sits inside the head. One case's
+        first match is `ठहर` at offset 847, in a sentence about who bears a tax
+        liability; the real फैसला is at 5,275.
+      - A WRONG rescue when the first hit is past the head budget: another case
+        matches `दोषी` at 6,466, mid-narrative, and splices from there while the
+        actual ठहर sits at 26,224. That is the worse half -- the prompt rule says
+        STATE THE OUTCOME, so the model is handed unrelated prose and invited to
+        report it as the verdict.
+
+    Scanning from the end fixes both: the rescue fires on 35 of the 45
+    non-heading cases instead of 29, and the passage it splices is the one the
+    document ends on, which is where a verdict structurally sits.
     """
-    match = _OUTCOME_HEADING_RE.search(text) or _OUTCOME_WORD_RE.search(text)
-    if match is None:
+    heading = _OUTCOME_HEADING_RE.search(text)
+    if heading is not None:
+        return text.rfind("\n", 0, heading.start()) + 1
+    last = None
+    for last in _OUTCOME_WORD_RE.finditer(text):
+        pass
+    if last is None:
         return None
-    return text.rfind("\n", 0, match.start()) + 1
+    return text.rfind("\n", 0, last.start()) + 1
 
 
 def _snippet(detail):
@@ -322,6 +352,26 @@ def _build_prompt(detail, number, need_title, need_short):
     )
 
 
+def _carries_a_field(obj):
+    """True when the object holds a NON-BLANK STRING on at least one card field.
+
+    Key presence is not enough, and this is the whole point. The system prompt
+    tells the model to "set an unrequested key to null", so
+    `{"title": null, "short_description": null}` is a shape the prompt itself
+    invites -- and a presence test (`TITLE_FIELD in o`) accepts it, which stops
+    `parse_object_response`'s scan on an object carrying nothing. The run then
+    reports two rejections ("LLM returned an empty ...") for a response whose
+    REAL object may have been the next `{` along, behind a preamble.
+
+    Matches the contract `casework/common/titles.py::parse_title` documents for
+    the same reason.
+    """
+    return any(
+        isinstance(obj.get(field), str) and obj.get(field).strip()
+        for field in (TITLE_FIELD, SHORT_FIELD)
+    )
+
+
 def _generate(detail, number, need_title, need_short, invoke_text, usage):
     """One cheap-tier call producing whichever fields were asked for.
 
@@ -338,7 +388,7 @@ def _generate(detail, number, need_title, need_short, invoke_text, usage):
     )
     result = parse_object_response(
         response_text,
-        predicate=lambda o: TITLE_FIELD in o or SHORT_FIELD in o,
+        predicate=_carries_a_field,
     )
     if result is None:
         log.warning("No card JSON object found in the LLM response")
@@ -569,23 +619,47 @@ def main(argv=None):
         try:
             detail, etag = api.get_case_with_etag(slug)
         except Exception as exc:
-            # Donor-preserved fallback: a detail-fetch failure does not abort the
-            # case. Widened from the donor's bare `except` / `requests.HTTPError`
-            # because `CaseworkApi` is urllib-based.
-            detail, etag = case, None
+            # NOT the donor's fall-back-to-the-list-payload. This stage must skip.
+            #
+            # The donor (and `enrich_description`) continue on `detail = case`,
+            # and for description that is safe by accident: its
+            # `requires_materials` gate trips on the list payload's unresolved
+            # `associatedMedia`, so the case is reported unmet and never
+            # generated. `STAGES["card"]` declares NO `requires_materials` -- it
+            # reads no document -- so nothing would stop the run here.
+            #
+            # What would happen instead is the bad case: `CaseSerializer` is the
+            # list serializer's child (`cases/serializers.py:312`), so the list
+            # payload carries `title`, `short_description` AND `description`.
+            # Card would generate a headline from a page-cached description and
+            # then PATCH with `if_match=None`, because the failed fetch is
+            # exactly what left `etag` unset -- an unconditional write that
+            # silently clobbers whatever a caseworker changed in between. A
+            # skipped case costs one re-run; a clobbered edit is unrecoverable.
+            report.record(slug, "card", "error", f"detail fetch failed: {exc}")
+            review.add(ReviewRow(slug=slug, status="error",
+                                 before=case.get("title") or "",
+                                 note=f"detail fetch failed: {exc}"))
             log_event(logger, paths["events"], run_id=run_id, stage="card", slug=slug,
-                      step="fetch", status="fallback", detail=str(exc),
-                      level=logging.WARNING)
+                      step="fetch", status="error", detail=str(exc),
+                      level=logging.ERROR)
+            continue
 
         current_title = detail.get("title") or ""
         current_short = detail.get("short_description") or ""
+        # Whole-case rows (unmet / already / error / skipped) concern both fields
+        # or neither, so the "Before" column has to reflect what the RUN is about.
+        # Reporting `current_title` unconditionally showed a reviewer the headline
+        # in every row of an `--only short_description` run -- the one field that
+        # run could not touch.
+        current_for_review = current_title if want_title else current_short
         number = court_number(detail)
 
         unmet = unmet_prerequisites(STAGE, detail)
         if unmet:
             for reason in unmet:
                 report.record(slug, "card", "unmet", reason)
-            review.add(ReviewRow(slug=slug, status="unmet", before=current_title,
+            review.add(ReviewRow(slug=slug, status="unmet", before=current_for_review,
                                  note="; ".join(unmet)))
             log_event(logger, paths["events"], run_id=run_id, stage="card", slug=slug,
                       step="prereq", status="unmet", detail="; ".join(unmet),
@@ -632,28 +706,21 @@ def main(argv=None):
                           detail=short_reason)
 
         if not need_title and not need_short:
-            review.add(ReviewRow(slug=slug, status="already", before=current_title,
+            review.add(ReviewRow(slug=slug, status="already", before=current_for_review,
                                  note="nothing to do (use --force)"))
             continue
 
-        # Both fields derive from the description, falling back to allegations.
-        if not (detail.get("description") or "").strip() and not detail.get(
-                "key_allegations"):
-            reason = "no description or key_allegations to derive a card from"
-            report.record(slug, "card", "unmet", reason)
-            review.add(ReviewRow(slug=slug, status="unmet", before=current_title,
-                                 note=reason))
-            log_event(logger, paths["events"], run_id=run_id, stage="card", slug=slug,
-                      step="source", status="unmet", detail=reason,
-                      level=logging.WARNING)
-            continue
+        # No blank-description guard here on purpose: `unmet_prerequisites` above
+        # already reported and skipped every such case, because
+        # `STAGES["card"].requires_fields` is `("description",)`. A second check
+        # would be unreachable code that reads like a live safety net.
 
         try:
             result = _generate(detail, number, need_title, need_short,
                                invoke_text, usage)
         except Exception as exc:
             report.record(slug, "card", "error", f"LLM generation failed: {exc}")
-            review.add(ReviewRow(slug=slug, status="error", before=current_title,
+            review.add(ReviewRow(slug=slug, status="error", before=current_for_review,
                                  note=f"LLM generation failed: {exc}"))
             log_event(logger, paths["events"], run_id=run_id, stage="card", slug=slug,
                       step="generate", status="error", detail=str(exc),
@@ -666,7 +733,7 @@ def main(argv=None):
 
         if result is None:
             report.record(slug, "card", "skipped", "LLM returned no parseable object")
-            review.add(ReviewRow(slug=slug, status="skipped", before=current_title,
+            review.add(ReviewRow(slug=slug, status="skipped", before=current_for_review,
                                  note="LLM returned no parseable object"))
             log_event(logger, paths["events"], run_id=run_id, stage="card", slug=slug,
                       step="generate", status="skipped",

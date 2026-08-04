@@ -396,6 +396,36 @@ class TestSnippetKeepsTheOutcome:
         assert "सफाई" in snippet
         assert "[…]" in snippet
 
+    def test_an_early_outcome_word_does_not_hijack_the_slice(self):
+        """Finding 1. The vocabulary scan takes the LAST match, not the first.
+
+        Section क) states the punishment SOUGHT (मागदावी) in this exact
+        vocabulary, and narrative reasoning uses ठहर freely. Measured on a real
+        case: first match `दोषी` at offset 6,466 in a sentence about
+        investigating officials, actual ठहर at 26,224. Taking the first match
+        spliced 6,466 onward and handed the model unrelated prose under a prompt
+        rule that says STATE THE OUTCOME.
+        """
+        text = ("क) मागदावी: कैद र जरिवाना माग गरिएको। " * 200
+                + "\nविशेष अदालतले प्रतिवादीलाई सफाई दिएको ठहर।")
+        snippet = _snippet(dict(DETAIL, description=text))
+        assert "सफाई दिएको ठहर।" in snippet, (
+            "the real outcome sits at the end; a first-match scan misses it")
+        assert "[…]" in snippet
+
+    def test_the_offset_is_the_last_outcome_word_not_the_first(self):
+        text = "कैद माग।\n" + ("पूरक विवरण। " * 50) + "\nअन्ततः सफाई भएको।"
+        offset = ec._outcome_offset(text)
+        assert offset > text.index("कैद माग।"), "must not stop at the first hit"
+        assert text[offset:].startswith("अन्ततः सफाई भएको।")
+
+    def test_the_heading_still_wins_over_the_vocabulary_scan(self):
+        """A clean section boundary beats a bare word anywhere in the text."""
+        text = ("कैद माग।\n### ग) विशेष अदालतको फैसलाको सार\nसफाई भएको।\n"
+                "थप टिप्पणीमा जरिवाना शब्द पछि आउँछ।")
+        offset = ec._outcome_offset(text)
+        assert text[offset:].startswith("### ग) विशेष अदालतको फैसला")
+
     def test_a_table_cell_reference_is_not_mistaken_for_the_heading(self):
         """`081-CR-0060` carries "(ग), (घ) र (ङ) मा उल्लिखित सम्पत्ति" in a table
         at offset 1,740. Splicing from there would present a table row as the
@@ -991,3 +1021,54 @@ def test_add_common_args_is_wired():
     assert args.limit == 3
     assert args.force is True
     assert isinstance(build_parser(), argparse.ArgumentParser)
+
+
+class TestPredicateRejectsAnAllNullObject:
+    """Finding 4. Key PRESENCE is not a usable field.
+
+    The system prompt tells the model to "set an unrequested key to null", so
+    `{"title": null, "short_description": null}` is a shape the prompt invites.
+    A presence test accepted it, stopping `parse_object_response`'s scan on an
+    object carrying nothing -- while the real object may have been the next `{`.
+    """
+
+    def test_an_all_null_object_is_not_a_usable_field(self):
+        assert ec._carries_a_field({"title": None, "short_description": None}) is False
+
+    def test_a_blank_string_is_not_a_usable_field(self):
+        assert ec._carries_a_field({"title": "   ", "short_description": ""}) is False
+
+    def test_one_populated_field_is_enough(self):
+        """`--only title` legitimately nulls the other key."""
+        assert ec._carries_a_field({"title": "शीर्षक (081-CR-0091)",
+                                    "short_description": None}) is True
+        assert ec._carries_a_field({"title": None,
+                                    "short_description": "सारांश।"}) is True
+
+    def test_the_scan_walks_past_an_all_null_object_to_the_real_one(self):
+        """The behaviour the predicate exists for, end to end."""
+        response = (
+            '{"title": null, "short_description": null}\n'
+            '{"title": "असली शीर्षक (081-CR-0091)", "short_description": "असली सार।"}'
+        )
+        obj = ec.parse_object_response(response, predicate=ec._carries_a_field)
+        assert obj["title"] == "असली शीर्षक (081-CR-0091)"
+
+
+def test_a_failed_detail_fetch_skips_the_case_and_never_writes(monkeypatch):
+    """Finding 2. A fetch failure must not fall back to the LIST payload.
+
+    `CaseSerializer` is the list serializer's child, so the list payload carries
+    `title`, `short_description` AND `description` -- and `STAGES["card"]`
+    declares no `requires_materials`, so nothing else would stop the run. The old
+    fallback generated from a page-cached description and PATCHed with
+    `if_match=None`, because the failed fetch is what left the ETag unset.
+    """
+    class _FetchFails(_StubApi):
+        def get_case_with_etag(self, slug):
+            raise RuntimeError("HTTP Error 502: Bad Gateway")
+
+    api = _FetchFails([CASE_STUB_BOTH])
+    _run_main(monkeypatch, api, _llm(title="काठमाडौं ठेक्का घोटाला (076-CR-0182)"),
+              ["--apply", "--allow-remote-writes"])
+    assert api.requests == [], "no PATCH may be attempted without a fresh ETag"
