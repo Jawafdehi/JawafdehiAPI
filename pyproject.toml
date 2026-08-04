@@ -153,17 +153,19 @@ dev = [
 # and 110 `has no attribute force_authenticate` (DRF's APIClient). Those are
 # tool limitations, not defects in this code.
 #
-# So the rules below are OFF for now and this is deliberately not wired into CI
-# or pre-commit: a gate that reports 800 false positives trains people to ignore
-# it. What IS useful today is the remaining ~500, which is why the checker is
-# installed and configured rather than skipped.
+# So the rules below are OFF for now, and ty is ADVISORY rather than a gate: CI
+# runs it with `|| true` (see ci.yml) and pre-commit does not run it at all. A
+# gate that reports 800 false positives trains people to ignore it. What IS
+# useful today is the 28 that remain once those families are silenced, which is
+# why the checker is installed and configured rather than skipped.
 #
 # The path to a real gate, in order:
 #   1. keep `unresolved-attribute` off until ty ships Django support (track
 #      astral-sh/ty#255 "django plugin"), or add django-stubs and re-measure;
 #   2. turn the small families on one at a time (`not-iterable`,
 #      `missing-argument`, `invalid-method-override` are single digits today);
-#   3. only then add it to .pre-commit-config.yaml and ci.yml.
+#   3. only then drop the `|| true` in ci.yml and add the hook to
+#      .pre-commit-config.yaml.
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # ruff — the lint gate (CI runs exactly `uv run ruff check .`).

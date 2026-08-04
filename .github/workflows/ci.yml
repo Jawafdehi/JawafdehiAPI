@@ -43,7 +43,7 @@ jobs:
       # (`|| true`). ty is pre-1.0 and has no Django plugin, so it cannot see
       # through the model metaclass — at adoption that was ~800 of 1304
       # diagnostics on this tree. pyproject.toml's [tool.ty.rules] silences those
-      # families, leaving 30 real ones. Drop the `|| true` and make this a gate
+      # families, leaving 28 real ones. Drop the `|| true` and make this a gate
       # once those reach 0; see the staged plan in pyproject.toml.
       - name: Type check (ty, advisory — does not fail the build)
         run: uv run ty check || true

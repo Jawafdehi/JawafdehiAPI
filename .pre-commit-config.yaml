@@ -39,6 +39,6 @@ repos:
 # `uv run ty check`. At adoption it reported 1304 diagnostics on this tree, ~800
 # of them Django metaclass blind spots (`Model.objects`, DRF
 # `force_authenticate`) that ty cannot yet see through. The [tool.ty.rules]
-# block silences those families and leaves 30 real ones. Wire it in here only
+# block silences those families and leaves 28 real ones. Wire it in here only
 # once those 30 are at 0 and the silenced families can be re-enabled — see the
 # staged plan in pyproject.toml.

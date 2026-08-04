@@ -361,3 +361,52 @@ def test_relation_only_patch_bumps_etag():
 
     assert resp.status_code == 200
     assert resp.headers["ETag"] != before  # token moved on a relation-only edit
+
+
+# ---------------------------------------------------------------------------
+# 4. gate precedence: an unparseable body must not pre-empt 403 / 412
+# ---------------------------------------------------------------------------
+#
+# DRF parses the request body lazily and raises ParseError (-> 400) on the first
+# access. So WHERE ``request.data`` is first touched inside partial_update is
+# load-bearing: touching it before the permission / If-Match gates converts an
+# unauthorized or stale-token request into a 400. That both leaks "your body was
+# unparseable" to a caller entitled only to 403/412, and drops the 412's ETag —
+# the header the client needs to reconcile.
+#
+# This regressed once during a refactor that hoisted ``patch_ops = request.data``
+# above the gates, and nothing failed: the suite had no test that sent a
+# malformed body to an unauthorized caller. These two are that test.
+
+
+@pytest.mark.django_db
+def test_unparseable_body_still_403_for_unauthorized_caller():
+    """403 outranks the body parse: no probing a case you cannot write."""
+    outsider = create_user_with_role("gp-403", "gp-403@example.com", "ReadOnly")
+    case = _publishable_case(state=CaseState.DRAFT)
+
+    resp = _authed_client(outsider).patch(
+        URL.format(case.slug),
+        data="{not json",
+        content_type="application/json",
+    )
+
+    assert resp.status_code == 403
+
+
+@pytest.mark.django_db
+def test_unparseable_body_still_412_with_stale_if_match():
+    """412 (and its ETag) outrank the body parse, so the client can reconcile."""
+    user = create_user_with_role("gp-412", "gp-412@example.com", "Moderator")
+    case = _publishable_case(state=CaseState.DRAFT)
+    client = _authed_client(user)
+
+    resp = client.patch(
+        URL.format(case.slug),
+        data="{not json",
+        content_type="application/json",
+        HTTP_IF_MATCH='"definitely-stale"',
+    )
+
+    assert resp.status_code == 412
+    assert resp.headers.get("ETag")

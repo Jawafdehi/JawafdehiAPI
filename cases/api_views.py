@@ -984,14 +984,25 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             )
         return None
 
-    def _reject_before_patch(self, request, case, patch_ops):
+    def _reject_before_patch(self, request, case):
         """Every pre-patch gate: permission, If-Match, body shape, blocked paths.
 
-        Returns a Response to send, or None to proceed with applying the patch.
+        Returns ``(response, patch_ops)``: a Response to send and ``None``, or
+        ``None`` and the parsed ops to proceed with.
+
+        Touching ``request.data`` is deliberately deferred until AFTER the
+        permission and If-Match gates. DRF parses the body lazily on first
+        access and raises ``ParseError`` (-> 400) on malformed JSON, so reading
+        it any earlier turns an unauthorized or stale-token request into a 400 —
+        leaking "your body was unparseable" to a caller that should only ever
+        learn 403/412, and losing the 412's ETag reconciliation header.
         """
         if not can_change_case(request.user, case):
-            return Response(
-                {"detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN
+            return (
+                Response(
+                    {"detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN
+                ),
+                None,
             )
 
         # Optimistic concurrency (opt-in). When the client sends ``If-Match`` with
@@ -1013,16 +1024,26 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_412_PRECONDITION_FAILED,
             )
             resp["ETag"] = _version_token(case)
-            return resp
+            return resp, None
 
+        # First touch of the body — see the docstring on why it happens here.
+        patch_ops = request.data
         if not isinstance(patch_ops, list):
             self._log_non_array_body(request, case)
-            return Response(
-                {"detail": "Request body must be a JSON array of patch operations."},
-                status=status.HTTP_400_BAD_REQUEST,
+            return (
+                Response(
+                    {
+                        "detail": "Request body must be a JSON array of patch operations."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                ),
+                None,
             )
 
-        return self._reject_blocked_paths(patch_ops, case)
+        blocked = self._reject_blocked_paths(patch_ops, case)
+        if blocked is not None:
+            return blocked, None
+        return None, patch_ops
 
     def _after_commit(self, case, affected_material_iris, *, evidence_touched, state_changed):
         """Post-commit side effects: re-index, then recompute material visibility.
@@ -1158,8 +1179,7 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         # DoesNotExist handling is needed here.
         case = self.get_object()
 
-        patch_ops = request.data
-        rejection = self._reject_before_patch(request, case, patch_ops)
+        rejection, patch_ops = self._reject_before_patch(request, case)
         if rejection is not None:
             return rejection
 
