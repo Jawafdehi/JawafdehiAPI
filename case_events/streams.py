@@ -43,9 +43,33 @@ from case_events import subjects
 
 logger = structlog.get_logger(__name__)
 
-#: One year, in seconds — the retention window for all three streams in the
-#: pilot. SIGNALS is the one that could grow enough to want trimming first.
+#: One year, in seconds. The right window for the two streams that are RECORDS —
+#: the case-domain log and the poison queue.
 ONE_YEAR_SECONDS = 365 * 24 * 60 * 60
+
+#: Seven days, for SIGNALS. The earlier version of this file gave all three streams
+#: a year and noted that "SIGNALS is the one that could grow enough to want
+#: trimming first". Measured 2026-08-04, that guess was right and the number is
+#: worse than it looks: the docket producer is STATELESS by design, rescanning a
+#: 48h window every 6h, so every observed fact is re-published 8 times. At 4831
+#: signals per scan that is roughly 19k messages and ~12MB a day, which a
+#: year-long window turns into ~4.5GB — against a JetStream ceiling of 8GiB
+#: shared with CASE_EVENTS.
+#:
+#: Seven days loses nothing. Signals are "noisy, re-derivable" by the subject
+#: vocabulary's own description, the consumers are durable and ack immediately, and
+#: the dedup spine that makes a re-observation harmless lives in Postgres
+#: (``CaseUpdateProposal.dedup_key``), not in stream history. The only thing stream
+#: retention buys here is replay while debugging, and a week is generous for that.
+SEVEN_DAYS_SECONDS = 7 * 24 * 60 * 60
+
+#: A hard byte backstop for SIGNALS, well above the ~88MB a week should hold. Its
+#: job is not trimming — ``max_age`` does that — but to stop a runaway or
+#: backfilling producer from consuming the shared JetStream store and taking
+#: CASE_EVENTS down with it. Publishes into a full store FAIL, and
+#: ``handle_matcher`` raises on a failed publish, so an unbounded SIGNALS stream is
+#: a way for noise to wedge the audit trail.
+ONE_GIBIBYTE = 1024**3
 
 
 @dataclass(frozen=True)
@@ -54,6 +78,8 @@ class StreamSpec:
     subjects: tuple[str, ...]
     description: str
     max_age_seconds: int = ONE_YEAR_SECONDS
+    #: -1 means unlimited, which is JetStream's own sentinel.
+    max_bytes: int = -1
     replicas: int = 1
 
 
@@ -62,6 +88,8 @@ STREAMS: tuple[StreamSpec, ...] = (
         name="SIGNALS",
         subjects=(subjects.ALL_SIGNALS,),
         description="Raw observed facts from producers. Replayable, re-derivable.",
+        max_age_seconds=SEVEN_DAYS_SECONDS,
+        max_bytes=ONE_GIBIBYTE,
     ),
     StreamSpec(
         name="CASE_EVENTS",
@@ -77,7 +105,24 @@ STREAMS: tuple[StreamSpec, ...] = (
 
 
 async def ensure_streams(js) -> list[str]:
-    """Idempotently assert every stream in :data:`STREAMS`.
+    """Idempotently assert every stream in :data:`STREAMS`, creating OR converging.
+
+    **The "or converging" half was missing, and the docstring was wrong without
+    it.** This used to call ``add_stream`` only. JetStream's STREAM.CREATE accepts a
+    request that matches the existing stream and REJECTS one that differs, so the
+    function was idempotent in the trivial sense — re-running it changed nothing —
+    while any actual edit to :data:`STREAMS` failed against a live broker with
+    "stream name already in use". Since the whole point of the spec table is that
+    it describes what the streams should be, that made it a table of what they were
+    when first created.
+
+    So an existing stream is UPDATED to match the spec. The bootstrap identity was
+    already granted ``$JS.API.STREAM.UPDATE.>``, which says the intent was there.
+
+    Note what an update cannot do: shrinking ``max_age`` takes effect immediately
+    and messages outside the new window are dropped on the next enforcement pass.
+    That is intended here — see :data:`SEVEN_DAYS_SECONDS` — but it is a deletion,
+    so it should be a considered edit rather than a passing one.
 
     Args:
         js: A JetStream context (``nats.aio.client.Client.jetstream()``).
@@ -94,22 +139,46 @@ async def ensure_streams(js) -> list[str]:
 
     asserted = []
     for spec in STREAMS:
-        await js.add_stream(
-            StreamConfig(
-                name=spec.name,
-                subjects=list(spec.subjects),
-                description=spec.description,
-                retention=RetentionPolicy.LIMITS,
-                storage=StorageType.FILE,
-                max_age=spec.max_age_seconds,
-                num_replicas=spec.replicas,
-            )
+        config = StreamConfig(
+            name=spec.name,
+            subjects=list(spec.subjects),
+            description=spec.description,
+            retention=RetentionPolicy.LIMITS,
+            storage=StorageType.FILE,
+            max_age=spec.max_age_seconds,
+            max_bytes=spec.max_bytes,
+            num_replicas=spec.replicas,
         )
+
+        # Ask first, rather than reading an error message to find out. Matching on
+        # exception text couples this to a server's wording; `stream_info` raising
+        # NotFoundError is the documented way to ask whether a stream exists.
+        try:
+            await js.stream_info(spec.name)
+        except Exception:  # noqa: BLE001 - NotFoundError, and anything else means "try to create"
+            existed = False
+        else:
+            existed = True
+
+        if existed:
+            await js.update_stream(config)
+        else:
+            try:
+                await js.add_stream(config)
+            except Exception:
+                # Lost a race with another bootstrap between the check and the
+                # create. Converge rather than fail: the loser's job is to leave
+                # the stream matching the spec, and it now does either way.
+                await js.update_stream(config)
+
         asserted.append(spec.name)
         logger.info(
             "case_events.stream_asserted",
             stream=spec.name,
             subjects=list(spec.subjects),
             replicas=spec.replicas,
+            max_age_seconds=spec.max_age_seconds,
+            max_bytes=spec.max_bytes,
+            created=not existed,
         )
     return asserted

@@ -137,27 +137,94 @@ class TestEnsureStreams:
     suite.
     """
 
-    async def _assert_streams(self):
+    @staticmethod
+    def _fresh_broker():
+        """A JetStream mock where no stream exists yet.
+
+        The ``stream_info`` side effect is load-bearing and easy to omit: a bare
+        ``AsyncMock`` answers every call successfully, so ``stream_info`` "finds"
+        every stream and ``ensure_streams`` takes the UPDATE path. A test that
+        forgets this asserts nothing about creation while looking like it does —
+        which is how the first draft of these tests passed with ``add_stream``
+        never called at all.
+        """
         js = mock.AsyncMock()
+        js.stream_info.side_effect = RuntimeError("stream not found")
+        return js
+
+    async def _created_configs(self):
+        js = self._fresh_broker()
         await streams.ensure_streams(js)
         return [call.args[0] for call in js.add_stream.await_args_list]
 
     async def test_asserts_every_stream_with_the_configured_values(self):
-        configs = await self._assert_streams()
+        configs = await self._created_configs()
         assert [c.name for c in configs] == ["SIGNALS", "CASE_EVENTS", "DLQ"]
         for config in configs:
             # File storage: a memory stream silently loses everything on a
-            # broker restart, which for a 1-year retention window is not a
+            # broker restart, which for a year-long retention window is not a
             # degraded bus but a broken one.
             assert config.storage == "file", config.name
             assert config.num_replicas == 1, config.name
-            assert config.max_age == streams.ONE_YEAR_SECONDS, config.name
+
+    async def test_signals_is_trimmed_harder_than_the_records_are(self):
+        """The two streams that are RECORDS keep a year; the noisy one does not.
+
+        SIGNALS receives every observation EIGHT times, because the docket producer
+        is stateless and rescans a 48h window every 6h — ~19k messages and ~12MB a
+        day, which a year-long window would turn into ~4.5GB against an 8GiB
+        JetStream store shared with CASE_EVENTS.
+        """
+        by_name = {c.name: c for c in await self._created_configs()}
+        assert by_name["SIGNALS"].max_age == streams.SEVEN_DAYS_SECONDS
+        assert by_name["CASE_EVENTS"].max_age == streams.ONE_YEAR_SECONDS
+        assert by_name["DLQ"].max_age == streams.ONE_YEAR_SECONDS
+
+    async def test_only_signals_carries_a_byte_ceiling(self):
+        """A backstop, not the trimming mechanism.
+
+        Publishes into a full JetStream store FAIL, and ``handle_matcher`` raises on
+        a failed publish — so an unbounded noise stream is a route for noise to
+        wedge the audit trail.
+        """
+        by_name = {c.name: c for c in await self._created_configs()}
+        assert by_name["SIGNALS"].max_bytes == streams.ONE_GIBIBYTE
+        assert by_name["CASE_EVENTS"].max_bytes == -1
+        assert by_name["DLQ"].max_bytes == -1
+
+    async def test_an_existing_stream_is_updated_rather_than_re_created(self):
+        """The bug this fixes. ``add_stream`` alone is idempotent only in the
+        trivial sense: JetStream rejects a CREATE whose config differs from the
+        live stream, so editing STREAMS used to fail against a real broker with
+        "stream name already in use" — making the spec table a record of what the
+        streams were when first created, not what they should be."""
+        js = mock.AsyncMock()  # every stream_info succeeds -> all three exist
+        await streams.ensure_streams(js)
+
+        assert js.add_stream.await_count == 0
+        assert [c.args[0].name for c in js.update_stream.await_args_list] == [
+            "SIGNALS",
+            "CASE_EVENTS",
+            "DLQ",
+        ]
+
+    async def test_losing_a_create_race_converges_instead_of_failing(self):
+        """Two bootstraps can interleave between the check and the create. The
+        loser's job is to leave the stream matching the spec, which an update
+        does."""
+        js = self._fresh_broker()
+        js.add_stream.side_effect = RuntimeError("stream name already in use")
+
+        await streams.ensure_streams(js)
+
+        assert js.update_stream.await_count == len(streams.STREAMS)
 
     async def test_a_client_error_is_not_swallowed(self):
         # Unlike publishing, this is deliberately NOT best-effort: a consumer
-        # that cannot see its stream should fail loudly at startup.
+        # that cannot see its stream should fail loudly at startup. Asserted on
+        # the UPDATE path, since that is the one a running broker takes.
         js = mock.AsyncMock()
-        js.add_stream.side_effect = RuntimeError("jetstream unavailable")
+        js.update_stream.side_effect = RuntimeError("jetstream unavailable")
         with pytest.raises(RuntimeError):
             await streams.ensure_streams(js)
 
