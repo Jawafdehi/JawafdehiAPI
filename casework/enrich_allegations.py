@@ -249,7 +249,7 @@ def main(argv=None):
     # Bootstrap Django + LLM (MUST come before importing llm.invoke)
     try:
         bootstrap(args.provider, args.model)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - bootstrap failure is reported and exits(1)
         print(f"Bootstrap failed: {exc}", file=sys.stderr)
         sys.exit(1)
 
@@ -314,7 +314,7 @@ def main(argv=None):
         # content.
         try:
             detail = api.get_case(slug)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - detail-fetch failure falls back to the LIST-shaped case
             detail = case
             log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
                       step="fetch", status="fallback", detail=str(exc),
@@ -354,7 +354,7 @@ def main(argv=None):
                 invoke_text=invoke_text,
                 usage=usage,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - per-case LLM failure is recorded, run continues
             report.record(slug, "allegations", "error", f"LLM extraction failed: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
                       step="extract", status="error", detail=str(exc),
@@ -390,7 +390,7 @@ def main(argv=None):
             log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
                       step="write", status="enriched",
                       detail=f"key_allegations={allegations}")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - per-case PATCH failure is recorded, run continues
             report.record(slug, "allegations", "error", f"PATCH failed: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="allegations", slug=slug,
                       step="write", status="error", detail=str(exc),

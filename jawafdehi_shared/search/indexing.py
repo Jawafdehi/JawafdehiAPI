@@ -42,6 +42,37 @@ def has_devanagari(text: str | None) -> bool:
     return any(ord(ch) in _DEVANAGARI_RANGE for ch in text)
 
 
+def flatten_strings(value: Any) -> list[str]:
+    """Collect non-empty stripped strings from a string / language-map / list.
+
+    Used by the per-app indexers to fold a JSON-LD value of any shape into the
+    flat string lists the common index doc wants (``body``, ``keywords``,
+    ``identifiers``). Recurses through dict values and sequences.
+    """
+    out: list[str] = []
+    if isinstance(value, str):
+        if value.strip():
+            out.append(value.strip())
+    elif isinstance(value, dict):
+        for v in value.values():
+            out.extend(flatten_strings(v))
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            out.extend(flatten_strings(item))
+    return out
+
+
+def type_token(atype: Any) -> str:
+    """Render a JSON-LD ``@type`` as the index's single ``type`` token.
+
+    A list ``@type`` is comma-joined, matching how the promoted
+    ``entity_type``/``material_type`` columns store a multi-type document.
+    """
+    if isinstance(atype, list):
+        return ",".join(str(t) for t in atype)
+    return str(atype) if atype is not None else ""
+
+
 def name_to_titles(name: Any) -> tuple[str | None, str | None]:
     """Split a schema.org ``name`` into ``(title_ne, title_en)``.
 

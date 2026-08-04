@@ -156,18 +156,22 @@ def normalize_patch_ops(raw_ops: Any) -> List[Dict[str, Any]]:
             raise ValueError("path must be a valid JSON Pointer starting with '/'.")
 
         from_path = raw.get("from")
-        if op in {"move", "copy"}:
-            if not isinstance(from_path, str) or not from_path.startswith("/"):
-                raise ValueError(f"'{op}' operation requires a valid 'from' pointer.")
+        if op in {"move", "copy"} and (
+            not isinstance(from_path, str) or not from_path.startswith("/")
+        ):
+            raise ValueError(f"'{op}' operation requires a valid 'from' pointer.")
         if op in {"add", "replace", "test"} and "value" not in raw:
             raise ValueError(f"'{op}' operation requires 'value'.")
 
         if op in {"add", "remove", "replace", "move", "copy"}:
             if is_blocked_patch_path(path):
                 raise ValueError(f"Patching path '{path}' is not allowed.")
-            if op in {"move", "copy"} and isinstance(from_path, str):
-                if is_blocked_patch_path(from_path):
-                    raise ValueError(f"Patching path '{from_path}' is not allowed.")
+            if (
+                op in {"move", "copy"}
+                and isinstance(from_path, str)
+                and is_blocked_patch_path(from_path)
+            ):
+                raise ValueError(f"Patching path '{from_path}' is not allowed.")
 
         clean: Dict[str, Any] = {"op": op, "path": path}
         if "value" in raw:

@@ -603,10 +603,7 @@ class SearchService:
         results = [_serialize_hit(h) for h in hit_list]
 
         total = hits_block.get("total")
-        if isinstance(total, dict):
-            count = total.get("value", 0)
-        else:
-            count = total or 0
+        count = total.get("value", 0) if isinstance(total, dict) else total or 0
 
         aggregations = response.get("aggregations") or {}
         counts = _facets_from_aggs(aggregations)

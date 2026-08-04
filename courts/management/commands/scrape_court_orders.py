@@ -108,7 +108,7 @@ class OrdersHttpClient:
         try:
             resp = self._session.get(O.HOMEPAGE_URL, timeout=self._timeout)
             return resp.status_code, self._court_session(), resp.headers.get("Retry-After")
-        except Exception:
+        except Exception:  # noqa: BLE001 - any portal/parse failure is a miss, not a crash
             return None, None, None
 
     def _court_session(self) -> str | None:
@@ -116,7 +116,7 @@ class OrdersHttpClient:
         ``CookieConflictError`` if the jar ever holds two same-named cookies)."""
         try:
             return self._session.cookies.get("court_session")
-        except Exception:
+        except Exception:  # noqa: BLE001 - any portal/parse failure is a miss, not a crash
             return None
 
     def search(self, form: dict) -> tuple[int | None, str, str | None]:
@@ -135,7 +135,7 @@ class OrdersHttpClient:
             resp = self._session.post(
                 O.HOMEPAGE_URL, data=form, headers=headers, timeout=self._timeout
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - any portal/parse failure is a miss, not a crash
             return None, "", None
         resp.encoding = "utf-8"
         return resp.status_code, resp.text, resp.headers.get("Retry-After")
@@ -144,7 +144,7 @@ class OrdersHttpClient:
         """GET one order file → ``(status, content)`` (uses the CAPTCHA session)."""
         try:
             resp = self._session.get(url, timeout=self._timeout)
-        except Exception:
+        except Exception:  # noqa: BLE001 - any portal/parse failure is a miss, not a crash
             return None, b""
         return resp.status_code, resp.content
 

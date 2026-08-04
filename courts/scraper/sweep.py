@@ -186,7 +186,7 @@ def run_sweep(
             break
         try:
             enrichment = crawl_detail(fetch, court_id, case_number)
-        except Exception as exc:  # transport/parse flake — never a "missing"
+        except Exception as exc:  # noqa: BLE001 - transport/parse flake, never a "missing"
             stats.errors += 1
             consecutive_errors += 1
             logger.warning("sweep: %s %s probe failed: %s", court_id, case_number, exc)

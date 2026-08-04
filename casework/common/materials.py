@@ -74,7 +74,7 @@ def probe_material(api, source, ident, timeout=45):
     except urllib.error.HTTPError as exc:
         verdict = False if exc.code in (400, 404) else None
         return ProbeResult(source, ident, path, exc.code, verdict)
-    except Exception:
+    except Exception:  # noqa: BLE001 - any probe failure means 'not resolvable'
         return ProbeResult(source, ident, path, None, None)
 
 
@@ -147,7 +147,7 @@ def source_text(case, api=None, types=None):
             continue
         try:
             text = fetch_markdown(link)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - fetch failure becomes an unmet reason, not a crash
             unmet.append(f"{mtype}: MARKDOWN fetch failed ({exc})")
             continue
         if text.strip():

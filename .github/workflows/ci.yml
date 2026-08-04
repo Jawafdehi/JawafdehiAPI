@@ -39,6 +39,15 @@ jobs:
       - name: Lint (ruff check)
         run: uv run ruff check .
 
+      # Type check, ADVISORY: reports into the log but never fails the build
+      # (`|| true`). ty is pre-1.0 and has no Django plugin, so it cannot see
+      # through the model metaclass — at adoption that was ~800 of 1304
+      # diagnostics on this tree. pyproject.toml's [tool.ty.rules] silences those
+      # families, leaving 30 real ones. Drop the `|| true` and make this a gate
+      # once those reach 0; see the staged plan in pyproject.toml.
+      - name: Type check (ty, advisory — does not fail the build)
+        run: uv run ty check || true
+
       # ``integration-tests/`` is a separate live-stack E2E suite (own pyproject + Makefile) that
       # hits a running monolith at PLATFORM_BASE_URL — it belongs in its own stack-up job, not this
       # unit gate, so it is excluded here (it errors, not skips, when the stack is down).

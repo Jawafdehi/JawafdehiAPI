@@ -138,7 +138,133 @@ dev = [
     "hypothesis>=6.0",
     "pytest-asyncio>=0.24",
     "pre-commit>=4.6.0",
+    "ty>=0.0.66",
 ]
+
+# ---------------------------------------------------------------------------
+# ty (astral-sh) — type checking, ADVISORY, not yet a gate.
+#
+# Run it:  uv run ty check
+#
+# ty is pre-1.0 (0.0.66 here) and has NO Django plugin, so it cannot see what
+# Django's model metaclass adds at runtime. Measured on this tree at the time of
+# adoption: 1304 diagnostics, of which ~800 (61%) are that blind spot —
+# 640 `X has no attribute objects` (the default Manager, injected by ModelBase)
+# and 110 `has no attribute force_authenticate` (DRF's APIClient). Those are
+# tool limitations, not defects in this code.
+#
+# So the rules below are OFF for now, and ty is ADVISORY rather than a gate: CI
+# runs it with `|| true` (see ci.yml) and pre-commit does not run it at all. A
+# gate that reports 800 false positives trains people to ignore it. What IS
+# useful today is the 30 that remain once those families are silenced, which is
+# why the checker is installed and configured rather than skipped.
+#
+# The path to a real gate, in order:
+#   1. keep `unresolved-attribute` off until ty ships Django support (track
+#      astral-sh/ty#255 "django plugin"), or add django-stubs and re-measure;
+#   2. turn the small families on one at a time (`not-iterable`,
+#      `missing-argument`, `invalid-method-override` are single digits today);
+#   3. only then drop the `|| true` in ci.yml and add the hook to
+#      .pre-commit-config.yaml.
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# ruff — the lint gate (CI runs exactly `uv run ruff check .`).
+#
+# The default rule set (E4/E7/E9/F) stays as the tree-wide floor: this project
+# has ~52k lines of source that predate any lint config, and switching families
+# on globally would land ~500 findings in one go. Formatting stays ungated
+# (`ruff format` would reflag ~150 legacy files).
+#
+# What IS enforced tree-wide beyond the defaults: BLE001. Every deliberate
+# blind `except` already carries a `# noqa: BLE001` plus a reason (see
+# AGENTS.md), so enabling it costs nothing today and makes a NEW unexplained
+# blind catch fail the gate instead of accumulating.
+#
+# Annotation coverage (ANN, minus ANN401) is enforced per-directory, starting
+# where the code already satisfies it rather than as an aspiration. Measured ANN
+# findings by app at adoption: lakehouse 4 (all ANN401 + one missing return, now
+# fixed), content 57, discovery 80, newsletter 82, case_proposals 105, jobs 122,
+# llm 154, casework 329; ~2300 tree-wide. `lakehouse` is the beachhead — it is
+# fully annotated and passes `ty check` clean. Add the next directory only after
+# its `ruff check <dir> --select ANN` count is actually 0; a per-file-ignores
+# entry that is always violated is not a gate.
+#
+# Verified at adoption that this scoping really is live: a `def f(x): return x`
+# dropped in lakehouse/ fails with ANN001+ANN202, and the same file in cases/
+# passes.
+# ---------------------------------------------------------------------------
+[tool.ruff.lint]
+extend-select = ["BLE", "ANN"]
+# ANN401 (a parameter or return annotated `Any`) is off everywhere. The places
+# this tree reaches for `Any` are handles to genuinely untyped third-party
+# objects -- a boto3 S3 client, a duckdb module, a BeautifulSoup node. `Any` is
+# the honest annotation there, and the rule would only push people to delete the
+# annotation entirely, which ANN001/ANN201 then flag. Coverage is what is being
+# enforced; precision on foreign objects is not available to enforce.
+extend-ignore = ["ANN401"]
+
+[tool.ruff.lint.per-file-ignores]
+# ruff has no "select this rule for one path only" primitive, so ANN is selected
+# globally above and switched OFF everywhere except the directories that already
+# satisfy it. Deleting a line here is how a directory opts IN — do that only
+# once its `ruff check <dir> --select ANN` count is 0.
+"cases/**" = ["ANN"]
+"casework/**" = ["ANN"]
+"case_proposals/**" = ["ANN"]
+# case_events landed upstream (the NATS bus + pull consumers) after ANN was
+# switched on, with 81 findings — same treatment as every other directory here.
+"case_events/**" = ["ANN"]
+"config/**" = ["ANN"]
+"content/**" = ["ANN"]
+"courts/**" = ["ANN"]
+"discovery/**" = ["ANN"]
+"entities/**" = ["ANN"]
+"jawafdehi_shared/**" = ["ANN"]
+"jobs/**" = ["ANN"]
+"llm/**" = ["ANN"]
+"materials/**" = ["ANN"]
+"newsletter/**" = ["ANN"]
+"review/**" = ["ANN"]
+"search/**" = ["ANN"]
+"integration-tests/**" = ["ANN"]
+# Tests stay exempt permanently: annotating ~42k lines of test bodies buys
+# nothing (pytest does not read them) and ANN401 would fight every fixture.
+"tests/**" = ["ANN"]
+"**/tests/**" = ["ANN"]
+"**/test_*.py" = ["ANN"]
+"**/conftest.py" = ["ANN"]
+"manage.py" = ["ANN"]
+# `lakehouse/**` is deliberately absent: it is the one directory where ANN is
+# ENFORCED. Keep it that way.
+
+[tool.ty.environment]
+python-version = "3.12"
+
+[tool.ty.src]
+# Never type-check the venv, build artifacts, or migrations. Migrations are
+# generated code; `ty` flags ~30 diagnostics in them that no one should fix.
+exclude = [
+    ".venv",
+    "build",
+    "staticfiles",
+    "**/migrations/**",
+    "integration-tests",
+]
+
+[tool.ty.rules]
+# --- Django/DRF blind spots: off until ty understands the metaclass. ---
+unresolved-attribute = "ignore"
+# `Model.objects.filter(...)` returns Any to ty, so anything derived from a
+# queryset trips these three.
+invalid-argument-type = "ignore"
+not-subscriptable = "ignore"
+unsupported-operator = "ignore"
+# Django settings are assembled dynamically (`from config.settings import *`),
+# and test doubles are assigned over typed attributes on purpose.
+invalid-assignment = "ignore"
+# Optional third-party imports guarded by try/except ImportError (markitdown,
+# indic_transliteration) legitimately do not resolve in every environment.
+unresolved-import = "ignore"
 
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "config.settings"

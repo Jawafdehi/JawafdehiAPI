@@ -55,7 +55,7 @@ def _viewer_has_casework_access(context) -> bool:
 
     try:
         request._jawafdehi_casework_access = result
-    except Exception:  # pragma: no cover - request objects are normally mutable
+    except Exception:  # pragma: no cover  # noqa: BLE001 - an immutable request object is fine; the value is only cached
         pass
     return result
 

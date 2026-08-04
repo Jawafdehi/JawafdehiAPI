@@ -1082,7 +1082,7 @@ def main(argv=None):
     # Bootstrap Django + LLM (MUST come before importing llm.invoke)
     try:
         bootstrap(args.provider, args.model)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - bootstrap failure is reported and exits(1)
         print(f"Bootstrap failed: {exc}", file=sys.stderr)
         sys.exit(1)
 
@@ -1174,7 +1174,7 @@ def main(argv=None):
                         log.debug("  - metadata_llm returned no new tags")
                 else:
                     log.debug("  - metadata_llm returned no tags")
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - per-case LLM failure falls through to rule-only tags
                 # An LLM failure does NOT abort this case -- it falls
                 # through to rule-only tags, exactly as the donor's
                 # `stats["cases_llm_error"]` is tracked independently of
@@ -1206,7 +1206,7 @@ def main(argv=None):
             log_event(logger, paths["events"], run_id=run_id, stage="tags", slug=slug,
                       step="write", status="enriched",
                       detail=f"tags={all_tags} tier={tier}")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - per-case PATCH failure is recorded, run continues
             report.record(slug, "tags", "error", f"PATCH failed: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="tags", slug=slug,
                       step="write", status="error", detail=str(exc),

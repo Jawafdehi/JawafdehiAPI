@@ -66,10 +66,7 @@ def _dropped_by(row, drops):
     A missing column never matches -- so a `--drop` naming a column the CSV
     lacks is a no-op, not a crash or a silent drop-everything.
     """
-    for col, val in drops:
-        if (row.get(col) or "").strip() == val:
-            return True
-    return False
+    return any((row.get(col) or "").strip() == val for col, val in drops)
 
 
 def select_batch(rows, api, *, years=(), limit=0, drops=(), get_case=None):

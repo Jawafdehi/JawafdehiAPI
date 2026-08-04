@@ -63,3 +63,25 @@ DATABASES = {
 # base settings may have built from a stray *_READ_URL env, so clear the mapping
 # too or the router could route a read to an alias that no longer exists.
 REPLICA_ALIASES = {}
+
+# Drop WhiteNoise from the middleware chain under tests.
+#
+# WhiteNoiseMiddleware scans STATIC_ROOT (``staticfiles/`` — a gitignored
+# `collectstatic` build artifact that does not exist in a fresh clone or in CI)
+# at instantiation, and warns when the directory is missing
+# (``whitenoise/base.py:110``). Django rebuilds the middleware chain per test
+# client, so the suite emitted ~900 identical `UserWarning: No directory at:
+# .../staticfiles/` lines — 98% of its total warning output, burying everything
+# else. Note the warning is emitted by the MIDDLEWARE, so overriding
+# ``STORAGES["staticfiles"]`` does not silence it.
+#
+# Nothing in the suite asserts on static-file serving; the one test that names
+# whitenoise (``tests/test_metrics_ssl_exempt.py``) asserts SSL-redirect exemption
+# for /metrics and is unaffected — it is verified green with this override. Keeping
+# the warning output legible is what lets a genuinely new warning (e.g. the next
+# RemovedInDjangoXXWarning) be noticed instead of drowned.
+MIDDLEWARE = [
+    m
+    for m in MIDDLEWARE  # noqa: F405 — from `config.settings import *` above
+    if m != "whitenoise.middleware.WhiteNoiseMiddleware"
+]

@@ -123,7 +123,7 @@ def resolve_entities(nes_ids) -> dict[str, ResolvedEntity]:
                 "display_name": _primary_name_from_document(data),
                 "entity_type": stored.entity_type or None,
             }
-    except Exception:  # pragma: no cover - defensive: DB not routed/migrated
+    except Exception:  # pragma: no cover  # noqa: BLE001 - defensive: DB not routed/migrated
         logger.warning(
             "Failed to resolve NES entities in-process; returning stubs.",
             exc_info=True,

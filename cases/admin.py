@@ -616,9 +616,8 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         Once set and case is not DRAFT, slug becomes read-only to prevent breaking external links.
         """
         readonly = list(super().get_readonly_fields(request, obj))
-        if obj and obj.slug and obj.state != CaseState.DRAFT:
-            if "slug" not in readonly:
-                readonly.append("slug")
+        if obj and obj.slug and obj.state != CaseState.DRAFT and "slug" not in readonly:
+            readonly.append("slug")
         return readonly
 
     def has_view_permission(self, request, obj=None):

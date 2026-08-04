@@ -24,34 +24,15 @@ from typing import Any
 from jawafdehi_shared.search.indexing import (
     best_effort,
     delete_doc,
+    flatten_strings,
     name_to_titles,
     title_translit,
+    type_token,
     upsert_doc,
 )
 from jawafdehi_shared.search.opensearch import ENTITY_INDEX, make_client
 
 SOURCE_APP = "nes"
-
-
-def _flatten_strings(value: Any) -> list[str]:
-    """Collect non-empty strings from a string / language-map / list value."""
-    out: list[str] = []
-    if isinstance(value, str):
-        if value.strip():
-            out.append(value.strip())
-    elif isinstance(value, dict):
-        for v in value.values():
-            out.extend(_flatten_strings(v))
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            out.extend(_flatten_strings(item))
-    return out
-
-
-def _type_token(atype: Any) -> str:
-    if isinstance(atype, list):
-        return ",".join(str(t) for t in atype)
-    return str(atype) if atype is not None else ""
 
 
 def build_doc(obj: Any) -> dict[str, Any]:
@@ -63,20 +44,20 @@ def build_doc(obj: Any) -> dict[str, Any]:
     title_ne, title_en = name_to_titles(data.get("name"))
 
     # body: description + alternate names, both languages flattened.
-    body_parts = _flatten_strings(data.get("description"))
-    body_parts += _flatten_strings(data.get("alternateName"))
+    body_parts = flatten_strings(data.get("description"))
+    body_parts += flatten_strings(data.get("alternateName"))
     body = " ".join(body_parts) or None
 
     keywords = [k for k in (data.get("keywords") or []) if isinstance(k, str)]
 
     identifiers: list[str] = [iri] if iri else []
-    for ident in _flatten_strings(data.get("identifier")):
+    for ident in flatten_strings(data.get("identifier")):
         if ident not in identifiers:
             identifiers.append(ident)
 
     doc: dict[str, Any] = {
         "iri": iri,
-        "type": _type_token(data.get("@type")),
+        "type": type_token(data.get("@type")),
         "source_app": SOURCE_APP,
         "title_ne": title_ne,
         "title_en": title_en,

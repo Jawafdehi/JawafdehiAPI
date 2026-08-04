@@ -127,6 +127,4 @@ def fix_parenthesis_spacing(text):
     # Remove space after opening parenthesis
     text = re.sub(r"\(\s+", "(", text)
     # Remove space before closing parenthesis
-    text = re.sub(r"\s+\)", ")", text)
-
-    return text
+    return re.sub(r"\s+\)", ")", text)

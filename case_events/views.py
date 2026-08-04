@@ -67,7 +67,7 @@ class ManualNoteSerializer(serializers.Serializer):
 
         try:
             build_case_iri(value)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - re-raised as a DRF ValidationError
             raise serializers.ValidationError(f"{value!r} is not a valid case @id segment: {exc}") from None
         if not Case.objects.filter(slug=value).exists():
             raise serializers.ValidationError(f"No case with slug {value!r}.")

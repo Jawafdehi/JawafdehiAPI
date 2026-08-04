@@ -302,8 +302,17 @@ class CaseScraper:
             ),
         )
 
-        self.log(f"  Extracted {len(response.text)} characters")
-        return response.text
+        # `response.text` is Optional on the Gemini SDK: a blocked/empty candidate
+        # yields None, and the old `len(response.text)` below raised TypeError on
+        # that path instead of saying what went wrong. Fail with the reason.
+        text = response.text
+        if text is None:
+            raise RuntimeError(
+                "Gemini returned no text for the phase-1 extraction "
+                "(blocked or empty candidate)."
+            )
+        self.log(f"  Extracted {len(text)} characters")
+        return text
 
     def _phase2_structure(self, raw_data: str) -> Case:
         """

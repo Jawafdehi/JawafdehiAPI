@@ -526,7 +526,7 @@ def main(argv=None):
     # Bootstrap Django + LLM (MUST come before importing llm.invoke)
     try:
         bootstrap(args.provider, args.model)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - bootstrap failure is reported by _die() and exits(1)
         _die("bootstrap", exc)
 
     from llm.invoke import invoke_text
@@ -547,7 +547,7 @@ def main(argv=None):
     # were added to distinguish. KeyboardInterrupt is deliberately NOT caught.
     try:
         api = build_api(args)
-    except (Exception, SystemExit) as exc:
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 - credential/HTTP failure is reported by _die() and exits(1)
         _die("build_api", exc)
 
     # Listing production is 16 requests and ~33s before the first case is even
@@ -563,7 +563,7 @@ def main(argv=None):
 
     try:
         all_cases = list(api.iter_cases(progress=_list_progress))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - case-listing failure is reported by _die() and exits(1)
         _die("list_cases", exc)
 
     _run_event(logger, paths, run_id, "list_cases", "ok", f"{len(all_cases)} case(s) fetched")
@@ -611,7 +611,7 @@ def main(argv=None):
 
         try:
             detail = api.get_case(slug)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - per-case fetch failure is recorded, run continues
             report.record(slug, "bigo", "error", f"case fetch failed: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
                       step="fetch", status="error", detail=str(exc),
@@ -644,7 +644,7 @@ def main(argv=None):
 
         try:
             bigo, shown = _extract_bigo(text, detail, invoke_text, usage)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - per-case LLM failure is recorded, run continues
             report.record(slug, "bigo", "error", f"LLM extraction failed: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
                       step="extract", status="error", detail=str(exc),
@@ -695,7 +695,7 @@ def main(argv=None):
             report.record(slug, "bigo", "enriched", f"bigo={bigo}")
             log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
                       step="write", status="enriched", detail=f"bigo={bigo}")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - per-case PATCH failure is recorded, run continues
             report.record(slug, "bigo", "error", f"PATCH failed: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="bigo", slug=slug,
                       step="write", status="error", detail=str(exc),

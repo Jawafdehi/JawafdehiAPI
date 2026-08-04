@@ -61,7 +61,7 @@ class BlacklistApiClient:
     def get(self, url: str) -> tuple[int | None, str]:
         try:
             resp = self._session.get(url, timeout=self._timeout)
-        except Exception:
+        except Exception:  # noqa: BLE001 - any portal/parse failure is a miss, not a crash
             return None, ""
         return resp.status_code, resp.text
 

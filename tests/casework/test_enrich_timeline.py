@@ -51,6 +51,7 @@ from casework.enrich_timeline import (
     convert_date_tool,
     summarize_verdict,
 )
+from tests.casework.fakes import FakeUsage
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DONOR_COMMIT = "0321a85"
@@ -898,14 +899,6 @@ class _StubApi:
         return {}
 
 
-class _FakeUsage:
-    def __init__(self):
-        self.calls = 0
-
-    def as_dict(self):
-        return {"by_provider": []}
-
-
 @pytest.fixture
 def patched_fetch_markdown(monkeypatch):
     import casework.common.materials as m
@@ -938,7 +931,7 @@ def _run_main(monkeypatch, api, invoke_text_stub, invoke_with_tools_stub, argv):
     fake_llm_invoke.invoke_with_tools = invoke_with_tools_stub
 
     fake_llm_usage = types.ModuleType("llm.usage")
-    fake_llm_usage.UsageAccumulator = _FakeUsage
+    fake_llm_usage.UsageAccumulator = FakeUsage
     fake_llm_usage.render_usage_table = lambda by_provider, title=None: ""
 
     monkeypatch.setitem(sys.modules, "llm.invoke", fake_llm_invoke)

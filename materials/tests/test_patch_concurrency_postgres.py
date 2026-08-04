@@ -7,15 +7,35 @@ therefore runs with no row lock at all, and these properties are unprovable:
 concurrent writers there fail with sqlite's file-level ``database is locked``
 instead of queueing.
 
-So this module is skipped unless the ``ngm`` alias is actually Postgres. Run it
-against a throwaway cluster:
+So this module is skipped unless the ``ngm`` alias is actually Postgres — which
+means it is ALWAYS skipped under the default gate, because
+``config.settings_test`` hardcodes all three aliases to sqlite and therefore
+ignores ``NGM_DATABASE_URL`` entirely.
 
-    NGM_DATABASE_URL=postgres://... uv run pytest \\
-        materials/tests/test_patch_concurrency_postgres.py -q
+To actually run these you must ALSO leave ``config.settings_test`` behind and use
+the base settings, which do read the env var. Against a throwaway cluster::
+
+    docker run -d --name pg -e POSTGRES_PASSWORD=pg -e POSTGRES_USER=pg \\
+        -e POSTGRES_DB=pg -p 55432:5432 postgres:17
+
+    DJANGO_SETTINGS_MODULE=config.settings TESTING=true SECRET_KEY=test-only \\
+    DEBUG=True ALLOWED_HOSTS=localhost,127.0.0.1,testserver \\
+    NGM_DATABASE_URL="postgres://pg:pg@127.0.0.1:55432/pg" \\
+        uv run pytest materials/tests/test_patch_concurrency_postgres.py -q
+
+Verified green that way on 2026-08-04 (4 passed, Postgres 17). The earlier
+instruction here named only ``NGM_DATABASE_URL``, which silently kept the sqlite
+settings and skipped all four tests — the command looked like it worked because a
+skip is not a failure.
+
+The engine-independent half of these guarantees IS covered on the default gate,
+in ``test_row_lock_preconditions.py``; that is what makes leaving this module
+Postgres-gated acceptable rather than a hole.
 """
 
 from __future__ import annotations
 
+import os
 import threading
 
 import pytest
@@ -29,12 +49,29 @@ from materials.models import Material, Visibility
 
 User = get_user_model()
 
+_NGM_ENGINE = connections["ngm"].settings_dict.get("ENGINE", "")
+_IS_POSTGRES = "postgresql" in _NGM_ENGINE
+
+# Name the actual engine AND the likely cause in the skip reason. A bare "only
+# observable on Postgres" reads as "nothing to do here", when the usual cause is
+# a fixable invocation mistake: NGM_DATABASE_URL is set but
+# DJANGO_SETTINGS_MODULE still points at config.settings_test, which hardcodes
+# sqlite and ignores it. See the module docstring for the working command.
+_SKIP_REASON = (
+    f"row-lock behaviour is only observable on Postgres; ngm alias is "
+    f"{_NGM_ENGINE.rsplit('.', 1)[-1] or 'unset'}"
+    + (
+        " — NGM_DATABASE_URL is set but is being ignored, because "
+        "DJANGO_SETTINGS_MODULE=config.settings_test hardcodes sqlite "
+        "(use config.settings; see this module's docstring)"
+        if os.getenv("NGM_DATABASE_URL")
+        else " (see this module's docstring to run it)"
+    )
+)
+
 pytestmark = [
     pytest.mark.django_db(databases=["default", "ngm"], transaction=True),
-    pytest.mark.skipif(
-        "postgresql" not in connections["ngm"].settings_dict.get("ENGINE", ""),
-        reason="row-lock behaviour is only observable on Postgres",
-    ),
+    pytest.mark.skipif(not _IS_POSTGRES, reason=_SKIP_REASON),
 ]
 
 IRI = "https://jawafdehi.org/material/ag/pg-concurrency"
