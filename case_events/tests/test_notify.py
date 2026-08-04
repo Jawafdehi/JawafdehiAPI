@@ -93,6 +93,58 @@ class TestWhatLeavesTheBuilding:
         assert body["url"].endswith(notify.QUEUE_PATH)
 
 
+class TestItCannotPingAnyone:
+    """Raised in review, and a gap the module's own docstring did not cover: that
+    docstring bounds what the payload CONTAINS; this is about what it can DO."""
+
+    @override_settings(CASE_EVENTS_WEBHOOK_URL=WEBHOOK)
+    def test_a_mention_smuggled_through_a_case_slug_is_defanged(self):
+        """`case_slug` derives from a title a caseworker wrote, so it is
+        human-authored text reaching a rendered chat line."""
+        with mock.patch("urllib.request.urlopen", return_value=_Response()) as urlopen:
+            notify.post({**PAYLOAD, "case_slug": "@everyone-scandal"})
+
+        content = posted(urlopen)["content"]
+        assert "@everyone" not in content
+        assert f"@{notify.ZERO_WIDTH_SPACE}everyone" in content
+
+    @override_settings(CASE_EVENTS_WEBHOOK_URL=WEBHOOK)
+    def test_a_mention_in_the_reviewer_handle_is_defanged_too(self):
+        """The other human-authored field: an account handle."""
+        with mock.patch("urllib.request.urlopen", return_value=_Response()) as urlopen:
+            notify.post({**PAYLOAD, "reviewer": "@here"})
+
+        assert "@here" not in posted(urlopen)["content"]
+
+    @override_settings(CASE_EVENTS_WEBHOOK_URL=WEBHOOK)
+    def test_mentions_are_refused_at_the_receiver_as_well(self):
+        """The escaping is belt; this is braces. With `parse` empty a Discord
+        receiver resolves no mention even from text that escaped defanging."""
+        with mock.patch("urllib.request.urlopen", return_value=_Response()) as urlopen:
+            notify.post(PAYLOAD)
+
+        assert posted(urlopen)["allowed_mentions"] == {"parse": []}
+
+    @override_settings(CASE_EVENTS_WEBHOOK_URL=WEBHOOK)
+    def test_the_structured_fields_are_left_verbatim(self):
+        """Only the RENDERED prose is escaped. Mangling an identifier a receiver
+        might match on would be worse than the risk being guarded."""
+        with mock.patch("urllib.request.urlopen", return_value=_Response()) as urlopen:
+            notify.post({**PAYLOAD, "case_slug": "@everyone-scandal"})
+
+        assert posted(urlopen)["case_slug"] == "@everyone-scandal"
+
+    def test_the_zero_width_space_is_not_a_literal_in_the_source(self):
+        """A literal U+200B is invisible in source: an editor, a reformat or a
+        careless selection can delete it with nothing looking wrong afterwards.
+        Written as an escape so the guard stays legible."""
+        import pathlib
+
+        source = pathlib.Path(notify.__file__).read_text()
+        assert notify.ZERO_WIDTH_SPACE not in source, "use the \\u200b escape, not the character"
+        assert notify.ZERO_WIDTH_SPACE == "\u200b"
+
+
 class TestItNeverBreaksTheConsumer:
     def test_no_url_configured_is_a_silent_no_op(self):
         """Log-only is the documented default, so this must not warn or raise —

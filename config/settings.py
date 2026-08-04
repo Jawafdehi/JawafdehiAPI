@@ -1157,7 +1157,15 @@ CASE_EVENTS_WEBHOOK_URL = os.getenv("CASE_EVENTS_WEBHOOK_URL", "")
 # Seconds. Short on purpose: this runs on a consumer's worker thread, and a
 # notification is the least important thing that thread does. A slow endpoint must
 # not extend the message's ack window.
-CASE_EVENTS_WEBHOOK_TIMEOUT = float(os.getenv("CASE_EVENTS_WEBHOOK_TIMEOUT", "5"))
+#
+# Parsed with a fallback rather than a bare float(), which review caught: an
+# unparseable value would raise during settings import, and settings import failing
+# takes down every pod in the deployment. A typo in the least important tuning knob
+# in this file must not be able to do that.
+try:
+    CASE_EVENTS_WEBHOOK_TIMEOUT = float(os.getenv("CASE_EVENTS_WEBHOOK_TIMEOUT", "5"))
+except (TypeError, ValueError):
+    CASE_EVENTS_WEBHOOK_TIMEOUT = 5.0
 
 # Public origin of the SPA, used to build the review link in that notification. A
 # consumer has no request to derive it from, and ALLOWED_HOSTS is the API's host

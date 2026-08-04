@@ -34,10 +34,37 @@ logger = structlog.get_logger(__name__)
 #: request, because a consumer has no request to build one from.
 QUEUE_PATH = "/admin/proposals"
 
+#: U+200B. Named and escaped so it is visible in source — see
+#: :func:`defang_mentions`.
+ZERO_WIDTH_SPACE = "\u200b"
+
 
 def _base_url() -> str:
     configured = (getattr(settings, "FRONTEND_BASE_URL", "") or "").rstrip("/")
     return configured or "https://jawafdehi.org"
+
+
+def defang_mentions(text: str) -> str:
+    """Make ``@`` in interpolated text unable to ping anyone.
+
+    Found in review, and it is a gap the module docstring did not cover: that
+    docstring bounds what the payload CONTAINS, and this is about what it can DO.
+    Two of the interpolated fields are human-authored — ``case_slug`` derives from
+    a title a caseworker wrote, and ``reviewer`` is an account handle — so
+    ``@everyone`` reaching the rendered line would ping an entire server from a
+    case record. That is not a data leak, it is worse in one respect: it is a
+    notification channel becoming a nuisance channel, which gets it muted, which
+    silently ends the notifications.
+
+    A zero-width space after the ``@`` is the standard trick: it renders
+    indistinguishably and stops the mention resolving.
+
+    Written as the ``\\u200b`` ESCAPE rather than the character itself, on purpose.
+    A literal zero-width space in source is invisible: it can be deleted by an
+    editor, a reformat or a careless selection with nothing looking wrong
+    afterwards, and the test for this would then be the only sign left.
+    """
+    return text.replace("@", f"@{ZERO_WIDTH_SPACE}")
 
 
 def build_message(payload: dict) -> dict:
@@ -58,12 +85,21 @@ def build_message(payload: dict) -> dict:
     tail = f" by {reviewer}" if reviewer else ""
     confidence_note = f", confidence {confidence}" if confidence is not None else ""
 
+    content = defang_mentions(
+        f"Case update proposal {where} is **{status}**{tail} "
+        f"on `{case_slug}`{confidence_note}. Review: {link}"
+    )
+
     return {
         # No case title and no drafted text — see the module docstring.
-        "content": (
-            f"Case update proposal {where} is **{status}**{tail} "
-            f"on `{case_slug}`{confidence_note}. Review: {link}"
-        ),
+        "content": content,
+        # Belt to the escaping's braces, and the half that actually binds a Discord
+        # receiver: with `parse` empty, even an unescaped mention is not resolved.
+        # Harmless to any other receiver, which ignores a field it does not know.
+        "allowed_mentions": {"parse": []},
+        # NOT defanged. The structured half is for machines, and mangling an
+        # identifier a receiver might match on would be worse than the risk this
+        # guards. Only the prose that gets RENDERED is escaped.
         "proposal_id": proposal_id,
         "case_slug": case_slug,
         "status": status,
