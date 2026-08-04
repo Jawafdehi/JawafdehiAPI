@@ -33,6 +33,36 @@ def _flatten(content):
     return "\n\n".join(b.get("text", "") for b in content)
 
 
+def _envelope_facts(data) -> str:
+    """The result envelope's own account of what happened, for an error message.
+
+    ``llm.exhaustion`` records that ``error_max_turns`` has two causes wanting
+    opposite remedies, that they are indistinguishable from the error text, and that
+    telling them apart "would need ``num_turns`` from the CLI's result envelope" —
+    which "no caller can currently reach", because :meth:`_finalize` returns
+    ``data["result"]`` and discards the rest.
+
+    This is the cheap half of closing that. It does not make the distinction
+    programmatically available, which would mean changing the provider's return
+    type; it puts the deciding numbers in the message a human or Sentry reads. A
+    call that died at ``num_turns=1`` with output tokens to spare was out of TURNS;
+    one that burned its whole budget was out of TOKENS. Both are visible here.
+
+    Kept to the envelope's own fields, with no derived judgement, so it cannot
+    itself become the next confidently-wrong diagnosis.
+    """
+    usage = data.get("usage") or {}
+    facts = {
+        "subtype": data.get("subtype"),
+        "num_turns": data.get("num_turns"),
+        "stop_reason": data.get("stop_reason"),
+        "duration_ms": data.get("duration_ms"),
+        "output_tokens": usage.get("output_tokens"),
+        "result_chars": len(data.get("result") or ""),
+    }
+    return "envelope: " + " ".join(f"{k}={v!r}" for k, v in facts.items() if v is not None)
+
+
 def _dominant_model(model_usage):
     """Pick the model that did the real work from claude -p's ``modelUsage`` map.
 
@@ -198,6 +228,7 @@ class ClaudeCliProvider(_CliProvider):
         if data.get("is_error") or "result" not in data:
             raise RuntimeError(
                 f"claude_cli error: {data.get('result', 'unknown error')}\n"
+                f"{_envelope_facts(data)}\n"
                 f"Payload: {out[-500:]}"
             )
         if usage is not None:
@@ -219,7 +250,25 @@ class ClaudeCliProvider(_CliProvider):
                 model=reported_model,
                 cost_usd=data.get("total_cost_usd", 0.0),
             )
-        return strip_code_fence(data["result"])
+        # An EMPTY result inside a SUCCESS envelope. Checked because it happens, and
+        # because the alternative is unreadable: `result: ""` satisfies every test
+        # above, this method returns "", and `llm.invoke.invoke_json` then fails two
+        # layers away as `json.JSONDecodeError: Expecting value: line 1 column 1
+        # (char 0)` — a message naming a column in a document that does not exist,
+        # raised from a call site that never mentions the model. Seen in production
+        # on 2026-08-04 (case_proposal.intent job 2876, which then succeeded on
+        # retry), where it cost a diagnosis rather than an outage.
+        #
+        # A plain retry is the right remedy and already happens, so this changes the
+        # MESSAGE, not the behaviour. `llm.exhaustion.is_exhaustion` deliberately
+        # does not match this: a larger budget cannot help a model that returned
+        # nothing at all, and escalating would pay four times over to find that out.
+        text = strip_code_fence(data.get("result") or "")
+        if not text.strip():
+            raise RuntimeError(
+                f"claude_cli: the model returned an empty result. {_envelope_facts(data)}"
+            )
+        return text
 
     def invoke_text(self, system, content, max_tokens, model_id, tier, usage=None):
         """Invoke claude -p --output-format json.
