@@ -31,7 +31,6 @@ import logging
 import subprocess
 import sys
 import types
-import urllib.error
 from pathlib import Path
 
 import pytest
@@ -1132,30 +1131,21 @@ class _SearchStubApi(_StubApi):
     document is ever fetched.
     """
 
-    def __init__(self, cases, search_results=None, documents=None, parties=None):
+    # No `get_court_case_entities` stub, deliberately. This enricher no longer
+    # reads accused from the NGM court record, and a stub for a call the code
+    # cannot make would let that path be wired back in without a single test
+    # failing. `casework/court_record.py` keeps its own 15 tests.
+    def __init__(self, cases, search_results=None, documents=None):
         super().__init__(cases)
         self._search = search_results or {}
         self._documents = documents or {}
-        # Keyed "<court>/<number>", mirroring the real endpoint. Defaults to
-        # empty so every pre-existing test keeps its old behaviour: a case with
-        # no `court_cases` never reaches this at all.
-        self._parties = parties or {}
         self.etag = 'W/"abc123"'
         self.search_calls = []
         self.get_entity_calls = []
-        self.court_calls = []
 
     def search_entities(self, query, **kw):
         self.search_calls.append(query)
         return self._search.get(query, [])
-
-    def get_court_case_entities(self, court, number, timeout=60):
-        key = f"{court}/{number}"
-        self.court_calls.append(key)
-        configured = self._parties.get(key, [])
-        if isinstance(configured, BaseException):
-            raise configured
-        return configured
 
     def get_entity(self, ref, timeout=60):
         self.get_entity_calls.append(ref)
@@ -1887,14 +1877,14 @@ def test_plan_summary_reconciles_on_the_ordinary_bind_review_nomatch_split():
     plan = plan_case_entities(api, case, 'W/"e"', extracted_items, strict=True)
 
     summary = plan_summary(plan, extracted_items)
-    # Exact equality on purpose: the point is that the four extraction counts
-    # reconcile with nothing left over. Strict mode, so the split really is
-    # one-of-each. The accused counts are zero because this case cites no court
-    # reference, which is exactly what should keep them out of the
-    # `already_bound` subtraction.
+    # Exact equality on purpose, and the exact KEY SET matters as much as the
+    # values: every count here describes an extracted name, so the four must
+    # reconcile with nothing left over. A future non-extraction source of names
+    # must not add a key to this dict -- it would silently join the
+    # `already_bound` subtraction and drive it negative, which is what the three
+    # court-record keys that used to sit here existed to avoid.
     assert summary == {
         "extracted": 3, "bound": 1, "review": 1, "nomatch": 1, "already_bound": 0,
-        "accused_bound": 0, "accused_review": 0, "accused_nomatch": 0,
     }
 
 
@@ -1922,7 +1912,6 @@ def test_plan_summary_reconciles_when_permissive_mode_promotes_the_ambiguity():
 
     assert plan_summary(plan, extracted_items) == {
         "extracted": 3, "bound": 2, "review": 0, "nomatch": 1, "already_bound": 0,
-        "accused_bound": 0, "accused_review": 0, "accused_nomatch": 0,
     }
 
 
@@ -2187,140 +2176,3 @@ def test_apply_over_a_case_that_already_has_a_bind_writes_both_rows(
          "notes": "तत्कालीन अध्यक्ष"},
         {"nes_id": ANKUR_IRI, "relationship_type": "related", "notes": "क"},
     ]
-
-
-# --------------------------------------------------------------------------
-# Accused binds. The names come from the case's own NGM court record
-# (`casework.court_record`), never from the LLM extraction, and they resolve
-# through the SAME search/resolve/veto path `related` uses.
-#
-# They are tracked in their own plan lists on purpose: `plan_summary` derives
-# `already_bound` by subtracting bound/review/nomatch from the EXTRACTED count,
-# so folding court-record names into those lists would drive it negative.
-# --------------------------------------------------------------------------
-
-KAMALA_IRI = "https://jawafdehi.org/entity/person/kamala-thapa-7c1e44"
-KAMAL_IRI = "https://jawafdehi.org/entity/person/kamala-thapa-9f2b01"
-COURT_CASE = {
-    "slug": "case-y", "state": "DRAFT", "entities": [],
-    "court_cases": ["https://jawafdehi.org/courtcase/special/080-cr-0111"],
-}
-
-
-def _kamala_candidate(iri, ne):
-    return {"id": iri, "title": {"ne": ne}, "score": 190.0}
-
-
-def test_a_court_record_defendant_is_bound_as_accused_and_charged():
-    api = _SearchStubApi(
-        [COURT_CASE],
-        {"कमला थापा": [_kamala_candidate(KAMALA_IRI, "कमला थापा")]},
-        parties={"special/080-cr-0111": [
-            {"side": "plaintiff", "name": "नेपाल सरकार"},
-            {"side": "defendant", "name": "कमला थापा"},
-        ]})
-    plan = plan_case_entities(api, COURT_CASE, 'W/"e"', [])
-
-    assert plan.action == "WOULD_PATCH"
-    assert plan.patch_items == [{
-        "nes_id": KAMALA_IRI, "relationship_type": "accused",
-        "outcome": "charged", "notes": "",
-    }]
-    assert [name for name, _ in plan.accused_bound] == ["कमला थापा"]
-
-
-def test_an_ambiguous_defendant_lands_in_accused_review_under_strict():
-    """कमल vs कमला is the pair this whole guard exists for. Under strict, two
-    entities above threshold must refuse, into the ACCUSED review bucket -- not
-    the extraction one -- and the refusal must not corrupt plan_summary."""
-    api = _SearchStubApi(
-        [COURT_CASE],
-        {"कमला थापा": [_kamala_candidate(KAMALA_IRI, "कमला थापा"),
-                       _kamala_candidate(KAMAL_IRI, "कमला थापा")]},
-        parties={"special/080-cr-0111": [
-            {"side": "defendant", "name": "कमला थापा"}]})
-    plan = plan_case_entities(api, COURT_CASE, 'W/"e"', [], strict=True)
-
-    assert plan.patch_items == []
-    assert plan.action == "NOOP"
-    assert len(plan.accused_review) == 1
-    assert plan.review == []          # extraction lists stay untouched
-    assert plan.nomatch == []
-
-
-def test_an_ambiguous_defendant_is_promoted_into_an_accused_bind_by_default():
-    """The same कमल/कमला pair in the default mode: it binds, to the first by the
-    deterministic sort, and the promotion is recorded on the accused decision so
-    the accused rows are auditable exactly like the extracted ones."""
-    api = _SearchStubApi(
-        [COURT_CASE],
-        {"कमला थापा": [_kamala_candidate(KAMALA_IRI, "कमला थापा"),
-                       _kamala_candidate(KAMAL_IRI, "कमला थापा")]},
-        documents={KAMALA_IRI: {"identifier": None},
-                   KAMAL_IRI: {"identifier": None}},
-        parties={"special/080-cr-0111": [
-            {"side": "defendant", "name": "कमला थापा"}]})
-    plan = plan_case_entities(api, COURT_CASE, 'W/"e"', [])
-
-    assert plan.action == "WOULD_PATCH"
-    assert len(plan.accused_bound) == 1
-    assert plan.accused_review == []
-    _name, decision = plan.accused_bound[0]
-    assert decision.nes_id == min(KAMALA_IRI, KAMAL_IRI)
-    assert is_promoted(decision)
-    assert plan.patch_items[0]["relationship_type"] == "accused"
-    assert plan.patch_items[0]["outcome"] == CHARGED
-
-
-def test_accused_never_disturbs_the_already_bound_arithmetic():
-    case = dict(COURT_CASE, entities=[])
-    api = _SearchStubApi(
-        [case],
-        {"अंकुर खत्री": [ANKUR_CANDIDATE],
-         "कमला थापा": [_kamala_candidate(KAMALA_IRI, "कमला थापा")]},
-        parties={"special/080-cr-0111": [
-            {"side": "defendant", "name": "कमला थापा"}]})
-    items = [{"entity_name": "अंकुर खत्री", "relationship_type": "related",
-              "notes": "क"}]
-    plan = plan_case_entities(api, case, 'W/"e"', items)
-    summary = plan_summary(plan, items)
-
-    assert summary["extracted"] == 1
-    assert summary["bound"] == 1
-    assert summary["already_bound"] == 0     # never negative
-    assert summary["accused_bound"] == 1
-
-
-def test_a_defendant_already_bound_on_the_case_is_not_re_added():
-    case = dict(COURT_CASE, entities=[
-        {"nes_id": KAMALA_IRI, "type": "accused", "outcome": "convicted",
-         "notes": "तत्कालीन अध्यक्ष"}])
-    api = _SearchStubApi(
-        [case],
-        {"कमला थापा": [_kamala_candidate(KAMALA_IRI, "कमला थापा")]},
-        parties={"special/080-cr-0111": [
-            {"side": "defendant", "name": "कमला थापा"}]})
-    plan = plan_case_entities(api, case, 'W/"e"', [])
-
-    assert plan.action == "NOOP"
-    assert plan.accused_bound == []
-
-
-def test_an_unreadable_court_reference_is_recorded_not_raised():
-    err = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
-    api = _SearchStubApi([COURT_CASE], {},
-                         parties={"special/080-cr-0111": err})
-    plan = plan_case_entities(api, COURT_CASE, 'W/"e"', [])
-
-    assert plan.action == "NOOP"
-    assert any("404" in line for line in plan.court_skips)
-
-
-def test_a_case_with_no_court_reference_spends_no_search_request():
-    case = {"slug": "case-z", "state": "DRAFT", "entities": []}
-    api = _SearchStubApi([case], {})
-    plan = plan_case_entities(api, case, 'W/"e"', [])
-
-    assert api.court_calls == []
-    assert api.search_calls == []
-    assert any("no court reference" in line for line in plan.court_skips)

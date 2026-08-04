@@ -52,6 +52,16 @@ report instead of binding. Same labelled set: precision 1.000, recall 0.846.
 Either way a name with NO NES candidate goes to the no-match report -- there is
 nothing to choose between, and this module never creates an NES entity.
 
+EVERY name comes from the extraction. `accused` is a section the LLM may use like
+any other; it is NOT also read from the case's NGM court record. That path was
+removed: it needs neither a document nor an LLM, so living here put it behind five
+gates it has no use for -- the already-enriched skip, the MARKDOWN-role
+prerequisite, the no-source gate, the empty-prompt gate, and an LLM failure. A case
+with a complete court record and five named defendants bound none of them whenever
+its press-release PDF lacked a MARKDOWN role, and a token-cap failure on
+078-CR-0001 cost that case all five. `casework/court_record.py` is kept and fully
+tested but unwired, pending a decision on giving it its own CLI.
+
 `casework.enrich_related_entities.plan_case_entities`
 builds a per-case write plan from the resolver's decisions and
 `apply_entity_plan` executes it as a single conditional (`If-Match`) whole-list
@@ -99,8 +109,13 @@ from casework.common.pipeline import (
     unmet_prerequisites,
 )
 from casework.common.select import select_for_run
-from casework.entity_resolver import NO_MATCH, REVIEW, Decision, apply_document_veto, resolve
-from casework.court_record import CHARGED, defendant_names
+# `defendant_names` is deliberately NOT imported. Reading accused from the case's
+# NGM court record was removed from this enricher: it needs no document and no LLM,
+# so it does not belong behind this module's five document/LLM gates (a case with a
+# perfect court record bound zero defendants whenever its press-release PDF lacked a
+# MARKDOWN role, or the LLM call failed). `casework/court_record.py` and its tests
+# are kept intact, unwired, pending a decision on giving it its own CLI.
+from casework.court_record import CHARGED
 from casework.entity_resolver import (
     BIND,
     MIN_BIND_SCORE,
@@ -382,17 +397,16 @@ class EntityBindPlan:
     nomatch: list = field(default_factory=list)  # (name, Decision)
     patch_items: list = field(default_factory=list)
     reason: str = ""
-    # Accused come from the case's NGM court record, NOT from `extracted_items`,
-    # so they get their own three lists. Folding them into bound/review/nomatch
-    # would break `plan_summary`, which derives `already_bound` by subtracting
-    # those three from the EXTRACTED name count -- court-record names are not in
-    # that count, so every accused would push the result negative.
-    accused_bound: list = field(default_factory=list)    # (name, Decision)
-    accused_review: list = field(default_factory=list)   # (name, Decision)
-    accused_nomatch: list = field(default_factory=list)  # (name, Decision)
-    # One line per court reference that could not be read, so a case showing no
-    # accused can say whether that means "no defendants" or "we could not look".
-    court_skips: list = field(default_factory=list)
+    # There are no separate accused lists. Every name this planner handles comes
+    # from `extracted_items` and lands in bound/review/nomatch, whatever section it
+    # was extracted under -- including `accused`. The three court-record lists that
+    # used to live here went with the court-record path.
+    #
+    # This is what keeps `plan_summary` honest: it derives `already_bound` by
+    # subtracting those three lists from the EXTRACTED name count, which only works
+    # while every name in them came from that count. A future source of names that
+    # is NOT an extraction cannot reuse these lists for exactly that reason.
+    #
     # True once the resolution loop actually ran. False means the plan was
     # refused up front (wrong state, or a payload with no `entities` key) and
     # NO extracted name was ever looked at.
@@ -541,44 +555,6 @@ def _resolve_with_vetoes(api, name, strict=False):
     return decision
 
 
-def _plan_accused(api, case, plan, have, strict=False):
-    """Resolve the case's court-record defendants into `accused` bind items.
-
-    Returns the new bind items and mutates `plan`'s three accused lists plus
-    `court_skips`. Appends every bound `nes_id` to `have` so a defendant already
-    bound on the case -- or named twice across two court references -- is not
-    added again.
-
-    `outcome` is sent explicitly rather than left to the API's omitted-outcome
-    fallback: every case in this corpus is a Special Court `-CR-` case, so CIAA
-    filed a charge sheet and 'charged' is true by construction. Sending it keeps
-    the claim ours and visible in the request body.
-    """
-    names, skips = defendant_names(api, case)
-    plan.court_skips.extend(skips)
-
-    additions = []
-    for name in names:
-        decision = _resolve_with_vetoes(api, name, strict=strict)
-        if decision.verdict == REVIEW:
-            plan.accused_review.append((name, decision))
-            continue
-        if decision.verdict == NO_MATCH:
-            plan.accused_nomatch.append((name, decision))
-            continue
-        if decision.nes_id in have:
-            continue
-        additions.append(validate_bind_item({
-            "nes_id": decision.nes_id,
-            "relationship_type": "accused",
-            "outcome": CHARGED,
-            "notes": "",
-        }))
-        have.add(decision.nes_id)
-        plan.accused_bound.append((name, decision))
-    return additions
-
-
 def plan_case_entities(api, case, etag, extracted_items, strict=False):
     """Resolve every extracted name for one case and build its write plan.
 
@@ -621,9 +597,13 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
     run's `*.binds.jsonl` records the reason and the runners-up for every such
     bind, which is the audit trail for finding them again.
 
-    The court record still runs first and still supplies `accused` independently
-    of the extraction, because a defendant the court names is better sourced than
-    one an LLM guessed.
+    EVERY name here comes from the extraction. `accused` is a section the LLM may
+    put a name in like any other; it is no longer also read from the case's NGM
+    court record. That path was removed because it needs neither a document nor an
+    LLM, so sitting inside this module put it behind five gates it has no use for --
+    a case with a complete court record bound zero defendants whenever its
+    press-release PDF lacked a MARKDOWN role, or the LLM call failed. See
+    `casework/court_record.py`, which is kept and tested but unwired.
 
     One guard survives permissive mode: `apply_document_veto`'s FAIL-CLOSED
     branch. `api.get_entity` is wrapped in a bare try/except, and ANY exception
@@ -664,13 +644,7 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
     plan.n_current = len(current)
     have = {bind["nes_id"] for bind in current}
 
-    # The court record runs FIRST so it wins the person. Both loops dedupe
-    # against the same `have` set, so whichever gets there first owns that
-    # entity's bind -- and a defendant the court names is an `accused`, which is
-    # a stronger and better-sourced claim than the `related` an extraction might
-    # guess for the same person.
-    additions = list(_plan_accused(api, case, plan, have, strict=strict))
-
+    additions = []
     for item in extracted_items:
         name = (item.get("entity_name") or "").strip()
         if not name:
@@ -826,11 +800,6 @@ def plan_summary(plan, extracted_items):
         "bound": bound,
         "review": review,
         "nomatch": nomatch,
-        # Court-record accused, counted separately: they are NOT extracted
-        # names, so they must never enter the arithmetic above.
-        "accused_bound": len(plan.accused_bound),
-        "accused_review": len(plan.accused_review),
-        "accused_nomatch": len(plan.accused_nomatch),
         "already_bound": already_bound,
     }
 
@@ -1111,16 +1080,11 @@ def main(argv=None):
     total_entities_extracted = 0
     total_accused_notes_extracted = 0
     total_bound = total_review = total_nomatch = total_already_bound = 0
-    # Accused are counted apart from the extraction totals above: those are
-    # tied to `plan_summary`'s reconciliation over extracted names, and a
-    # court-record name is not an extracted name.
-    total_accused_bound = total_accused_review = total_accused_nomatch = 0
     # Binds that only exist because permissive mode overrode a veto. Counted
     # separately and printed on its own line: "we bound 40 things" and "9 of
     # those 40 were a judgement call" are different facts, and rolling the
     # second into the first is how the uncertain ones stop getting checked.
     total_promoted = 0
-    total_court_skips = 0
     bind_rows, review_rows, nomatch_rows = [], [], []
 
     for idx, case in enumerate(cases, 1):
@@ -1294,34 +1258,27 @@ def main(argv=None):
                       level=logging.WARNING if refused_state else logging.ERROR)
             continue
 
+        # The section the extraction ASKED for, by name. A review row used to be
+        # hardcoded `"role": "related"`, which is now simply wrong -- and the
+        # section is the most useful thing on the row for triage, because it says
+        # whether an unresolved name was going to be an accused or a district.
+        asked_section = {
+            (item.get("entity_name") or "").strip():
+                (item.get("relationship_type") or "").strip().lower()
+            for item in valid_items
+        }
         for name, decision in plan.review:
-            review_rows.append({"slug": slug, "extracted": name, "role": "related",
+            review_rows.append({"slug": slug, "extracted": name,
+                                "role": asked_section.get(name, ""),
                                 "reason": decision.reason, "score": decision.score,
                                 "candidates": [list(c) for c in decision.candidates]})
         for name, decision in plan.nomatch:
             nomatch_rows.append((name, slug, decision))
-        # Court-record accused share the review/no-match FILES -- a caseworker
-        # wants one queue, not two -- but carry `role` so the two sources stay
-        # tellable apart, and are tallied on their own counters.
-        for name, decision in plan.accused_review:
-            review_rows.append({"slug": slug, "extracted": name, "role": "accused",
-                                "reason": decision.reason, "score": decision.score,
-                                "candidates": [list(c) for c in decision.candidates]})
-        for name, decision in plan.accused_nomatch:
-            nomatch_rows.append((name, slug, decision))
-        for line in plan.court_skips:
-            total_court_skips += 1
-            log_event(logger, paths["events"], run_id=run_id, stage="entities",
-                      slug=slug, step="court-record", status="skipped", detail=line,
-                      level=logging.WARNING)
-            print(f"  NO COURT RECORD {slug}: {line}")
 
         counts = plan_summary(plan, valid_items)
         total_review += counts["review"]
         total_nomatch += counts["nomatch"]
         total_already_bound += counts["already_bound"]
-        total_accused_review += counts["accused_review"]
-        total_accused_nomatch += counts["accused_nomatch"]
 
         log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                   step="resolve", status="ok",
@@ -1352,7 +1309,6 @@ def main(argv=None):
                 print(f"  WOULD REFUSE {len(plan.bound)} bind(s) on {slug}: {refusal}")
                 continue
             total_bound += counts["bound"]
-            total_accused_bound += counts["accused_bound"]
             sections = _plan_sections(plan)
             for name, decision, notes in plan.bound:
                 section = sections.get(decision.nes_id, "related")
@@ -1362,16 +1318,8 @@ def main(argv=None):
                 print(f"  WOULD BIND ({section}) {name}  ->  {decision.nes_id}  "
                       f"(score {decision.score:.2f})"
                       f"{'  [UNCERTAIN]' if is_promoted(decision) else ''}")
-            for name, decision in plan.accused_bound:
-                bind_rows.append(
-                    _bind_row(slug, name, decision, "", "accused", False))
-                total_promoted += is_promoted(decision)
-                print(f"  WOULD BIND (accused) {name}  ->  {decision.nes_id}  "
-                      f"(score {decision.score:.2f})"
-                      f"{'  [UNCERTAIN]' if is_promoted(decision) else ''}")
             report.record(slug, "entities", "would-bind",
-                          f"{len(plan.bound)} extracted + "
-                          f"{len(plan.accused_bound)} court-record would bind")
+                          f"{len(plan.bound)} would bind")
             continue
 
         try:
@@ -1383,7 +1331,6 @@ def main(argv=None):
             continue
 
         total_bound += counts["bound"]
-        total_accused_bound += counts["accused_bound"]
         sections = _plan_sections(plan)
         for name, decision, notes in plan.bound:
             section = sections.get(decision.nes_id, "related")
@@ -1391,14 +1338,7 @@ def main(argv=None):
             total_promoted += is_promoted(decision)
             print(f"  BOUND ({section}) {name}  ->  {decision.nes_id}"
                   f"{'  [UNCERTAIN]' if is_promoted(decision) else ''}")
-        for name, decision in plan.accused_bound:
-            bind_rows.append(_bind_row(slug, name, decision, "", "accused", True))
-            total_promoted += is_promoted(decision)
-            print(f"  BOUND (accused) {name}  ->  {decision.nes_id}"
-                  f"{'  [UNCERTAIN]' if is_promoted(decision) else ''}")
-        report.record(slug, "entities", "bound",
-                      f"{len(plan.bound)} extracted + "
-                      f"{len(plan.accused_bound)} court-record bound")
+        report.record(slug, "entities", "bound", f"{len(plan.bound)} bound")
         log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                   step="write", status="ok", detail=f"{len(plan.bound)} bound")
 
@@ -1429,24 +1369,13 @@ def main(argv=None):
     print(f"  TOTAL reported for human review: {total_review}  -> {reports['review']}")
     print(f"  TOTAL with no NES match: {total_nomatch}  -> {reports['nomatch']}")
     print(f"  TOTAL already bound (nothing to write): {total_already_bound}")
-    # Accused stand apart from every total above: they are read from each case's
-    # NGM court record, not extracted, so they are neither in
-    # `total_entities_extracted` nor in the review/no-match reconciliation.
-    verb = "WOULD bind" if args.dry_run else "bound"
-    print(f"  ACCUSED from the court record -- {verb}: {total_accused_bound}, "
-          f"for review: {total_accused_review}, no NES match: "
-          f"{total_accused_nomatch}")
-    if total_court_skips:
-        print(f"  ACCUSED not attempted on {total_court_skips} case(s): no readable "
-              "court reference, so those cases show no accused because the record "
-              "could not be read -- not because there are no defendants.")
     if total_promoted:
         print(f"  OF THOSE, {total_promoted} bind(s) overrode a veto -- an "
               "ambiguity between namesakes, a province-scoped office, or an "
               "election-candidate record. Each is marked [UNCERTAIN] above and "
               f"carries a 'promoted over:' reason in {reports['binds']}. These "
               "are the ones to spot-check first.")
-    if total_bound == 0 and total_accused_bound == 0:
+    if total_bound == 0:
         if total_entities_extracted == 0:
             # Reachable from three separate skip gates -- the idempotency skip,
             # the prerequisite gate and the no-source gate -- plus an LLM that

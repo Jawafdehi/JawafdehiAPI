@@ -1,5 +1,17 @@
 """Accused names, read from the case's own NGM court record.
 
+CURRENTLY UNWIRED -- NOTHING IMPORTS `defendant_names`. This module is complete and
+tested; it just has no caller yet. `enrich_related_entities` used to call it, and
+that was removed: reading accused needs neither a document nor an LLM, so sitting
+inside a document-and-LLM enricher put it behind five gates it has no use for (the
+already-enriched skip, the MARKDOWN-role prerequisite, the no-source gate, the
+empty-prompt gate, and any LLM failure). A case with a complete court record bound
+zero defendants whenever its press-release PDF lacked a MARKDOWN role.
+
+The intended home is its own CLI -- pure HTTP, no model, no token spend, minutes
+across the corpus instead of hours. That is pending a decision; do not delete this
+in the meantime, and do not wire it back into an LLM enricher.
+
 WHY THIS EXISTS. Accused binds used to have no source at all: the LLM prompt's
 PART 3 extracted accused names, counted them, and threw them away. The obvious
 fix -- extract accused like everything else -- puts the most consequential bind
