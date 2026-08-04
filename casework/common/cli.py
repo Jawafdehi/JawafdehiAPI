@@ -1,5 +1,6 @@
 """Shared argparse, logging and reporting for casework enricher CLIs."""
 
+import argparse
 import json
 import logging
 import os
@@ -53,8 +54,51 @@ def _api_token_default():
     return os.environ.get("JAWAFDEHI_API_TOKEN", "")
 
 
-def add_common_args(parser):
+def _batch_csv_arg(value):
+    """argparse ``type`` for ``--batch-csv``: reject bad paths at parse time.
+
+    Two failures this closes, both of which otherwise surface far too late:
+
+    An **empty value** must not mean "no batch". ``--batch-csv "$BATCH"`` with an
+    unset or misspelled variable reaches argparse as ``""``, which argparse
+    accepts happily; ``select_for_run`` would then read it as "no batch given"
+    and fall through to bulk selection over every DRAFT/IN_REVIEW case in the
+    corpus. That is the precise inverse of what the flag is for, and it is
+    silent -- the run just looks bigger than expected.
+
+    A **missing file** must not cost a corpus walk first. ``select_for_run``
+    runs after ``iter_cases``, so validating there means a typo pays ~16 pages
+    of HTTP before exiting. Checking here costs one ``stat``.
+    """
+    path = value.strip()
+    if not path:
+        raise argparse.ArgumentTypeError(
+            "needs a path to a CSV; got an empty value. An unset shell "
+            "variable expands to '', and an empty batch would otherwise widen "
+            "the run to every enrichable case.")
+    if not os.path.isfile(path):
+        raise argparse.ArgumentTypeError(f"file not found: {path}")
+    return path
+
+
+_BATCH_CSV_HELP = (
+    "CSV with a `slug` column -- the same format `bind_materials.py "
+    "--batch-csv` consumes, so a `select_batch.py` batch feeds straight in. "
+    "Acts as a HARD allowlist: no case outside the file is ever touched, and "
+    "`--limit N` takes the file's first N rows. Other selectors can only "
+    "narrow it. Unlike --slug, a batch still passes the DRAFT/IN_REVIEW state "
+    "gate, so a stale row for a since-PUBLISHED case is skipped rather than "
+    "re-enriched.")
+
+
+def add_common_args(parser, *, batch_csv_required=False, batch_csv_help=None):
     """Register the CLI flags every ported enricher shares.
+
+    ``batch_csv_required`` / ``batch_csv_help`` exist for ``bind_materials.py``,
+    which needs ``--batch-csv`` to be mandatory and documents extra
+    material-IRI columns the enrichers ignore. It used to register its own copy
+    of the flag on top of this one, which raised ``ArgumentError: conflicting
+    option string`` and stopped the whole tool from starting.
 
     `--dry-run` defaults to True and `--apply` opts into writes. This
     deliberately INVERTS the donor's default: the donor's `add_common_args`
@@ -69,6 +113,10 @@ def add_common_args(parser):
     """
     parser.add_argument("--slug", action="append", default=[])
     parser.add_argument("--court-case", action="append", default=[])
+    parser.add_argument(
+        "--batch-csv", type=_batch_csv_arg, default=None,
+        required=batch_csv_required,
+        help=batch_csv_help or _BATCH_CSV_HELP)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--fiscal-year", default="")
     parser.add_argument("--force", action="store_true")

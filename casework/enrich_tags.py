@@ -64,7 +64,7 @@ from casework.common.cli import (
 )
 from casework.common.llm import bootstrap, tier_for
 from casework.common.pipeline import STAGES, RunReport, unmet_prerequisites
-from casework.common.select import select_cases
+from casework.common.select import select_for_run
 
 log = logging.getLogger("casework.enrich_tags")
 
@@ -1094,14 +1094,7 @@ def main(argv=None):
     report = RunReport()
 
     all_cases = list(api.iter_cases())
-    cases = select_cases(
-        all_cases,
-        fiscal_year=args.fiscal_year,
-        slugs=args.slug,
-        court_cases=args.court_case,
-    )
-    if args.limit:
-        cases = cases[: args.limit]
+    cases = select_for_run(all_cases, args)
 
     total = len(cases)
     log_run_header(

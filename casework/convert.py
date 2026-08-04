@@ -51,6 +51,7 @@ from casework.common.cli import (
 )
 from casework.common.materials import markdown_link, raw_links
 from casework.common.pipeline import COURT_TYPES, PRESS_TYPES, RunReport
+from casework.common.select import slugs_from_batch_csv
 
 log = logging.getLogger("casework.convert")
 
@@ -216,6 +217,32 @@ def build_api(args):
     )
 
 
+def slugs_for_run(api, args):
+    """Which case slugs this run converts, honouring ``--batch-csv``.
+
+    convert calls ``add_common_args``, so ``--batch-csv`` shows up in its
+    ``--help``; before this it was accepted and ignored, and the run silently
+    converted every case in the corpus while the README promised a hard
+    allowlist. The batch is read straight from the file rather than through
+    ``select_for_run`` so an explicit batch still costs no ``iter_cases`` walk,
+    and because conversion touches materials rather than case content -- the
+    DRAFT/IN_REVIEW state gate the enrichers apply to a batch is not meaningful
+    here. The allowlist property is what matters and it holds: no slug outside
+    the file is returned.
+
+    ``--fiscal-year`` and ``--court-case`` remain accepted-and-ignored here.
+    Both predate the batch work; wiring them in needs a corpus walk, which is
+    a bigger change than this fix.
+    """
+    if getattr(args, "batch_csv", None):
+        slugs = slugs_from_batch_csv(args.batch_csv)
+    elif args.slug:
+        slugs = list(args.slug)
+    else:
+        slugs = [c.get("slug") for c in api.iter_cases()]
+    return slugs[:args.limit] if args.limit else slugs
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     add_common_args(parser)
@@ -230,9 +257,7 @@ def main(argv=None):
     api = build_api(args)
     report = RunReport()
 
-    slugs = args.slug or [c.get("slug") for c in api.iter_cases()]
-    if args.limit:
-        slugs = slugs[:args.limit]
+    slugs = slugs_for_run(api, args)
 
     log_run_header(
         logger, stage="convert", base_url=args.api_base_url, dry_run=args.dry_run,
