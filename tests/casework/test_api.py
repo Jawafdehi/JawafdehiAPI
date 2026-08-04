@@ -357,6 +357,94 @@ def test_iter_cases_page_size(monkeypatch, params, expected):
 
 
 # ---------------------------------------------------------------------------
+# Progress. Listing the 3,003-case production list is 16 sequential requests
+# and ~33s during which NOTHING was logged, so a run was indistinguishable
+# from a hang -- an operator has no way to tell whether to wait or Ctrl-C.
+# ---------------------------------------------------------------------------
+
+
+def _paged(n_pages, per_page=2):
+    """`n_pages` DRF-shaped pages, each with `per_page` results and a `count`."""
+    total = n_pages * per_page
+    return {
+        page: {
+            "results": [{"slug": f"case-{page}-{i}"} for i in range(per_page)],
+            "count": total,
+            "next": f"http://x/?page={page + 1}" if page < n_pages else None,
+        }
+        for page in range(1, n_pages + 1)
+    }
+
+
+def test_iter_cases_reports_progress_after_every_page(monkeypatch):
+    """One callback per page, carrying enough to render a live counter: which
+    page, how many cases so far, and the server's total."""
+    pages = _paged(3)
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(api, "get", lambda path, params=None, timeout=60: pages[params["page"]])
+
+    seen = []
+    list(api.iter_cases(progress=lambda **kw: seen.append(kw)))
+
+    assert seen == [
+        {"page": 1, "fetched": 2, "total": 6},
+        {"page": 2, "fetched": 4, "total": 6},
+        {"page": 3, "fetched": 6, "total": 6},
+    ]
+
+
+def test_iter_cases_progress_tolerates_a_server_that_sends_no_count(monkeypatch):
+    """`total` is whatever the server said, and DRF only sends `count` when the
+    paginator is countable. Reporting must degrade, not raise."""
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(
+        api, "get",
+        lambda path, params=None, timeout=60: {"results": [{"slug": "a"}], "next": None},
+    )
+
+    seen = []
+    list(api.iter_cases(progress=lambda **kw: seen.append(kw)))
+
+    assert seen == [{"page": 1, "fetched": 1, "total": None}]
+
+
+def test_iter_cases_without_a_callback_still_logs_progress(monkeypatch, caplog):
+    """The default has to be useful on its own. Five of the six enrichers do not
+    wire a callback, and they have the same 33s of silence to explain.
+    """
+    pages = _paged(2)
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(api, "get", lambda path, params=None, timeout=60: pages[params["page"]])
+
+    with caplog.at_level(logging.INFO, logger="casework.api"):
+        list(api.iter_cases())
+
+    progress = [r.getMessage() for r in caplog.records if "page" in r.getMessage()]
+    assert len(progress) == 2, progress
+    assert "1" in progress[0] and "4" in progress[0], progress[0]
+
+
+def test_iter_cases_progress_is_emitted_before_the_next_request(monkeypatch):
+    """Reporting after the whole loop would be useless -- the point is feedback
+    DURING the wait. Each page's callback must fire before the next GET goes out.
+    """
+    pages = _paged(3)
+    order = []
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+
+    def fake_get(path, params=None, timeout=60):
+        order.append(f"get{params['page']}")
+        return pages[params["page"]]
+
+    monkeypatch.setattr(api, "get", fake_get)
+    list(api.iter_cases(progress=lambda **kw: order.append(f"progress{kw['page']}")))
+
+    assert order == [
+        "get1", "progress1", "get2", "progress2", "get3", "progress3",
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Write-guard -- `_patch` is the single choke point for `patch_field` and
 # `replace_list`. It must refuse to fire a PATCH at any non-loopback host
 # unless `allow_remote_writes=True` was explicitly passed to `__init__`.

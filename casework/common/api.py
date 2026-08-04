@@ -156,17 +156,44 @@ class CaseworkApi:
     # requests. Callers can still override via `params`.
     PAGE_SIZE = 200
 
-    def iter_cases(self, params=None, timeout=60):
+    def iter_cases(self, params=None, timeout=60, progress=None):
+        """Yield every case, following pagination.
+
+        Even at `PAGE_SIZE`, listing production is 16 sequential requests and
+        ~33s, and it runs before an enricher does a single case of work. With no
+        output during it a run is indistinguishable from a hang, so each page
+        reports `(page, fetched, total)` as soon as it lands -- during the wait,
+        not after it.
+
+        `progress` is called with those as keywords. Pass one to route the
+        report into a run's own logger and events file; the default logs to
+        `casework.api`, so an enricher that wires nothing still narrates.
+        """
         page, params = 1, dict(params or {})
         params.setdefault("page_size", self.PAGE_SIZE)
+        progress = progress or self._log_list_progress
+        fetched = 0
         while True:
             params["page"] = page
             data = self.get("/cases/", params, timeout)
-            for case in data.get("results", []):
-                yield case
+            results = data.get("results", [])
+            fetched += len(results)
+            # Report before yielding: a consumer that stops early still gets a
+            # record of the work already paid for.
+            progress(page=page, fetched=fetched, total=data.get("count"))
+            yield from results
             if not data.get("next"):
                 return
             page += 1
+
+    @staticmethod
+    def _log_list_progress(page, fetched, total):
+        """Default `iter_cases` reporter. `total` is absent on an uncountable
+        paginator, so the denominator degrades to '?' rather than raising."""
+        logger.info(
+            "case list: page %s, %s/%s fetched", page, fetched,
+            total if total is not None else "?",
+        )
 
     def get_case(self, slug, timeout=60):
         """Detail endpoint -- the ONLY one that resolves `material` on evidence."""

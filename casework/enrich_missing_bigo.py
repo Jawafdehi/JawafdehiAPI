@@ -550,8 +550,19 @@ def main(argv=None):
     except (Exception, SystemExit) as exc:
         _die("build_api", exc)
 
+    # Listing production is 16 requests and ~33s before the first case is even
+    # looked at, and `--limit N` does not shorten it (the slice below happens
+    # after the whole list is in memory). Report each page through the run
+    # logger, so the wait is legible live and its shape is on the record
+    # afterwards -- an unnarrated 33s gap reads as a hang.
+    def _list_progress(page, fetched, total):
+        _run_event(
+            logger, paths, run_id, "list_cases", "progress",
+            f"page {page}, {fetched}/{total if total is not None else '?'} fetched",
+        )
+
     try:
-        all_cases = list(api.iter_cases())
+        all_cases = list(api.iter_cases(progress=_list_progress))
     except Exception as exc:
         _die("list_cases", exc)
 

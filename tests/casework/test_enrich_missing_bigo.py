@@ -530,7 +530,11 @@ class _StubApi:
         self._markdown_by_link = markdown_by_link or {}
         self.patched = []
 
-    def iter_cases(self, params=None, timeout=60):
+    def iter_cases(self, params=None, timeout=60, progress=None):
+        # Mirror the real client: one page, and report it. Accepting `progress`
+        # but never calling it would let the caller's reporter rot untested.
+        if progress:
+            progress(page=1, fetched=len(self._cases), total=len(self._cases))
         yield from self._cases.values()
 
     def get_case(self, slug, timeout=60):
@@ -1083,6 +1087,48 @@ def test_events_file_covers_start_extract_write_on_apply_happy_path(
     assert ("start", "start") in steps_and_statuses
     assert ("extract", "ok") in steps_and_statuses
     assert ("write", "enriched") in steps_and_statuses
+
+
+class TestCaseListingNarratesItself:
+    """The 33s of silence before the first case.
+
+    Listing production is 16 sequential requests at `PAGE_SIZE`, and `--limit N`
+    does not shorten it -- the slice happens after the whole list is in memory.
+    A real `--limit 10` run logged `run/start`, then nothing for 33 seconds, then
+    everything at once. That is indistinguishable from a hang, and an operator
+    watching it has no basis to decide between waiting and Ctrl-C.
+    """
+
+    def test_each_page_is_recorded_as_it_lands(self, monkeypatch, tmp_path):
+        _run_main(monkeypatch, [PRESS_CASE_READY], invoke_text_stub=lambda **kw: "{}",
+                  argv=["--dry-run"])
+
+        rows = _read_events(_events_path())
+        progress = [r for r in rows
+                    if r["step"] == "list_cases" and r["status"] == "progress"]
+        assert progress, "the listing wait left no record"
+        assert "page 1" in progress[0]["detail"]
+        assert "1/1 fetched" in progress[0]["detail"]
+
+    def test_progress_lands_before_the_listing_finishes(self, monkeypatch, tmp_path):
+        """Ordering is the whole point: a report emitted after `list_cases/ok`
+        would describe the wait instead of filling it."""
+        _run_main(monkeypatch, [PRESS_CASE_READY], invoke_text_stub=lambda **kw: "{}",
+                  argv=["--dry-run"])
+
+        seq = [(r["step"], r["status"]) for r in _read_events(_events_path())]
+        assert seq.index(("list_cases", "progress")) < seq.index(("list_cases", "ok"))
+
+    def test_progress_rows_stay_out_of_the_ledger(self, monkeypatch, tmp_path):
+        """`build_ledger` skips rows without a slug. 16 pages per run must not
+        become 16 phantom cases."""
+        _run_main(monkeypatch, [PRESS_CASE_READY], invoke_text_stub=lambda **kw: "{}",
+                  argv=["--dry-run"])
+
+        rows = _read_events(_events_path())
+        for row in rows:
+            if row["step"] == "list_cases":
+                assert row["slug"] == "", row
 
 
 def test_events_file_records_would_enrich_under_dry_run(
