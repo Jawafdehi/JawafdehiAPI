@@ -34,6 +34,8 @@ import json
 from functools import lru_cache
 from pathlib import Path
 
+import pytest
+
 from casework.enrich_related_entities import plan_case_entities
 from casework.entity_resolver import (
     BIND,
@@ -129,19 +131,24 @@ def extracted_relationship_type(row):
     return "location" if "/entity/location/" in target else "related"
 
 
-def _production_plans():
+def _production_plans(strict=False):
     """Every labelled row through `plan_case_entities` -- the shipped pipeline.
 
     One row per plan, so `plan_case_entities`' already-bound dedupe cannot drop
     the second of two rows that resolve to the same IRI (`सोरु गाउँपालिका` and
     `सोरु गाउँपालिका, मुगु` both target one municipality).
+
+    `strict` selects which pipeline is being measured, and the two score very
+    differently -- pass it explicitly at every call site rather than relying on
+    the default, so a printed figure can never be read against the wrong mode.
     """
     api = _FrozenApi(load_candidates(), load_documents())
     for row in load_labels():
         item = {"entity_name": row["extracted"],
                 "relationship_type": extracted_relationship_type(row),
                 "notes": "measured by the labelled gate"}
-        yield row, item, plan_case_entities(api, _SYNTHETIC_CASE, "W/\"labelled\"", [item])
+        yield row, item, plan_case_entities(
+            api, _SYNTHETIC_CASE, "W/\"labelled\"", [item], strict=strict)
 
 
 # The labelled set's exact size. Asserted, not inferred, because
@@ -365,16 +372,8 @@ def test_resolver_only_precision_and_recall_are_reported():
     assert precision == 1.0
 
 
-def test_production_precision_and_recall_are_reported():
-    """WHAT SHIPS: every row through `plan_case_entities`.
-
-    Lower recall than the resolver-only figure, by design and not by accident:
-    the `related`-only allow-list refuses every location-typed extraction before
-    searching, and the truncation guard downgrades a bind whose candidate list hit
-    the search page cap. Both are precision-protecting refusals, so precision is
-    still the gate here.
-    """
-    plans = list(_production_plans())
+def _production_score(label, strict):
+    plans = list(_production_plans(strict=strict))
     assert len(plans) == EXPECTED_LABEL_COUNT, "labelled set truncated"
     should_bind = sum(1 for r, _i, _p in plans if r["expected_verdict"] == BIND)
     bound_pairs = [
@@ -383,57 +382,118 @@ def test_production_precision_and_recall_are_reported():
         for row, _item, plan in plans
         for _name, decision, _notes in plan.bound
     ]
-    precision, _recall = _score(
-        "PRODUCTION (plan_case_entities -- what the enricher actually runs)",
-        should_bind, bound_pairs)
-    assert precision == 1.0
+    return _score(label, should_bind, bound_pairs)
 
 
-def test_a_location_typed_extraction_never_reaches_a_bind():
-    """Pins the refusal the production figure rests on.
+def test_strict_production_precision_and_recall_are_reported():
+    """`--strict`: every section binds, but a veto still refuses.
 
-    `plan_case_entities` binds only a `related` extraction, and sends a `location`
-    one to review before spending a search request. Nothing else in this suite
-    exercises that allow-list, so without this test the gate could not fail the
-    day someone widened it -- and the production recall printed above would
-    quietly become wrong.
-
-    Whether to bind locations is an open product decision. This test does not
-    settle it; it makes changing the answer a deliberate act.
+    Precision is the gate here, and it is perfect -- strict mode reaches the
+    matcher's own ceiling, because widening the sections from `related`-only to
+    all nine cost nothing in precision. It is the honest zero-false-positive
+    pipeline, and `--strict` is the flag that runs it.
     """
-    refused = 0
-    for row, item, plan in _production_plans():
+    precision, recall = _production_score(
+        "STRICT PRODUCTION (--strict: all sections, vetoes respected)", strict=True)
+    assert precision == 1.0
+    # Pinned so the section widening cannot silently regress. The old
+    # `related`-only pipeline bound 26 of 39 (recall 0.667); binding every
+    # section the API accepts takes that to 33 of 39 with precision untouched.
+    assert recall == pytest.approx(33 / 39, abs=1e-4)
+
+
+def test_permissive_production_precision_and_recall_are_reported():
+    """THE DEFAULT: every matched name binds, ambiguities and vetoes included.
+
+    This is the mode that ships by default, and its precision is NOT 1.0 -- that
+    is the accepted, requested cost of binding everything that matched. The
+    figures are asserted as a regression floor so the number cannot quietly get
+    worse, never as a target.
+
+    Priced against strict, on this set, the trade is: +1 correct bind, +5
+    incorrect ones. Both directions are real and both are printed.
+    """
+    precision, recall = _production_score(
+        "PERMISSIVE PRODUCTION (default: promotes ambiguities and vetoes)",
+        strict=False)
+    assert precision == pytest.approx(34 / 39, abs=1e-4)
+    assert recall == pytest.approx(34 / 39, abs=1e-4)
+
+
+def test_every_incorrect_permissive_bind_is_an_election_record():
+    """WHERE the default mode's precision goes, named row by row.
+
+    All five wrong binds are Election Commission candidate/ward-head records --
+    not ambiguities between namesakes, which is where the risk was expected to
+    be. That makes the election-record veto the one worth reinstating first if
+    the precision cost turns out to matter, and it is why this is pinned by NAME:
+    a sixth wrong bind, or a wrong bind from a different cause, fails here rather
+    than being absorbed into the precision figure above.
+    """
+    wrong = {row["extracted"]
+             for row, _item, plan in _production_plans(strict=False)
+             for _name, decision, _notes in plan.bound
+             if (row["expected_nes_id"] if row["expected_verdict"] == BIND
+                 else None) != decision.nes_id}
+    assert wrong == set(ECN_VETO_ROWS)
+
+
+def test_a_location_typed_extraction_binds_into_the_location_section():
+    """The refusal this file used to pin, inverted -- deliberately.
+
+    A `location` extraction used to be refused before any search. It now binds,
+    and the section it lands in must be `location`: the whole point of taking the
+    section from the extraction is that a district does not get filed as a
+    related party. Seven of these nine rows resolve; the two that do not are a
+    matcher limit, not a scope refusal, so the count is asserted on the rows
+    EXERCISED rather than on the rows bound.
+    """
+    exercised = 0
+    for row, item, plan in _production_plans(strict=False):
         if item["relationship_type"] != "location":
             continue
-        refused += 1
-        assert not plan.bound, (
-            f"{row['extracted']!r} is a location-typed extraction and it REACHED A "
-            f"BIND ({plan.bound[0][1].nes_id}). The `related`-only allow-list in "
-            "plan_case_entities was widened. That is a product decision about "
-            "binding places to corruption cases, not a bug fix -- if it was "
-            "deliberate, re-measure the production figures and update this test.")
-        assert plan.patch_items == [], (
-            f"{row['extracted']!r} produced a write payload despite being refused")
-        assert plan.action == "NOOP"
-        reasons = [decision.reason for _name, decision in plan.review]
-        assert any("out of bind scope" in reason for reason in reasons), (
-            f"{row['extracted']!r} was not reported for review with the "
-            f"out-of-scope reason: {reasons}")
-    assert refused == len(LOCATION_TYPED_ROWS), (
-        f"expected {len(LOCATION_TYPED_ROWS)} location-typed rows, exercised {refused}")
+        exercised += 1
+        sections = {i["relationship_type"] for i in plan.patch_items}
+        assert sections <= {"location"}, (
+            f"{row['extracted']!r} was extracted as a location but planned a "
+            f"{sections - {'location'}} bind")
+        for item_ in plan.patch_items:
+            assert "outcome" not in item_, (
+                f"{row['extracted']!r} carries an outcome; that is legal only on "
+                "an accused bind and the DB CHECK constraint will reject it")
+    assert exercised == len(LOCATION_TYPED_ROWS), (
+        f"expected {len(LOCATION_TYPED_ROWS)} location-typed rows, "
+        f"exercised {exercised}")
 
 
-def test_the_production_path_refuses_a_strict_subset_of_resolver_binds():
-    """The two figures differ only by refusals, never by a bind production adds.
+def test_strict_production_binds_exactly_what_the_resolver_binds():
+    """With the sections widened, strict production IS the matcher.
 
-    If production ever bound something the resolver-only path did not, the
-    resolver-only zero-false-positive gate above would stop covering production
-    and this file would need a second one.
+    It used to be a strict subset -- the `related`-only allow-list refused seven
+    location rows the resolver bound. Nothing refuses them now, so the two sets
+    are equal, and the resolver-only zero-false-positive gate covers strict
+    production exactly.
     """
     resolver_bound = {row["extracted"] for row, decision in _decisions()
                       if decision.verdict == BIND}
-    production_bound = {row["extracted"] for row, _item, plan in _production_plans()
+    strict_bound = {row["extracted"]
+                    for row, _item, plan in _production_plans(strict=True)
+                    if plan.bound}
+    assert strict_bound == resolver_bound
+
+
+def test_permissive_production_binds_a_superset_of_strict_production():
+    """The default mode only ever ADDS binds -- it never loses one.
+
+    Promotion turns a REVIEW into a BIND; it must not disturb a name that already
+    bound cleanly. If this ever failed, permissive mode would be trading away
+    correct binds for uncertain ones rather than adding to them.
+    """
+    strict_bound = {row["extracted"]
+                    for row, _item, plan in _production_plans(strict=True)
+                    if plan.bound}
+    permissive_bound = {row["extracted"]
+                        for row, _item, plan in _production_plans(strict=False)
                         if plan.bound}
-    assert production_bound <= resolver_bound, (
-        "production bound names the resolver-only path did not: "
-        f"{production_bound - resolver_bound}")
+    assert strict_bound < permissive_bound
+    assert permissive_bound - strict_bound == set(ECN_VETO_ROWS) | {"मालपोत कार्यालय"}

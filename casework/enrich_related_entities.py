@@ -1,6 +1,7 @@
 #!/usr/bin/env python
-"""Extract CIAA Special Court case related/location entities via LLM, then
-resolve each extracted name to an existing NES entity and bind it.
+"""Extract CIAA Special Court case entities via LLM, then resolve each extracted
+name to an existing NES entity and bind it into the section it was extracted under
+(accused, alleged, related, witness, location, ...).
 
 Ported from the deleted `casework/enrich_related_entities.py` (recovered at
 donor commit `0321a85`, 553 lines). Reads a case's press-release AND/OR
@@ -34,9 +35,24 @@ WHAT THIS MODULE DOES: the deterministic resolver lives in
 `casework/entity_resolver.py` -- matching an extracted name against NES search
 candidates is entirely score-based, with `MIN_BIND_SCORE = 0.85`; there is no
 fuzzy/edit-distance matching and no LLM call anywhere in the matching step.
-A name that resolves below the bind threshold, or ambiguously, goes to the
-review report instead of being bound; a name with no NES candidate at all goes
-to the no-match report. `casework.enrich_related_entities.plan_case_entities`
+
+BY DEFAULT EVERY NAME THAT MATCHED AN NES ENTITY IS BOUND, into the section its
+own `relationship_type` names -- any of the nine `cases.models.RelationshipType`
+accepts. When several entities tie above the threshold, the best-scoring one wins
+by a deterministic `(-score, nes_id)` sort, so some binds WILL name the wrong
+namesake. That is the accepted cost of the mode; every such bind is marked
+`[UNCERTAIN]` on the console and carries a `promoted over:` reason in
+`*.binds.jsonl`, which is how they are found again. Measured on the 142-row
+labelled set: precision 0.872, recall 0.872, and all five wrong binds are
+Election Commission candidate records rather than namesake mix-ups.
+
+`--strict` is the conservative pipeline: an ambiguity or a veto goes to the review
+report instead of binding. Same labelled set: precision 1.000, recall 0.846.
+
+Either way a name with NO NES candidate goes to the no-match report -- there is
+nothing to choose between, and this module never creates an NES entity.
+
+`casework.enrich_related_entities.plan_case_entities`
 builds a per-case write plan from the resolver's decisions and
 `apply_entity_plan` executes it as a single conditional (`If-Match`) whole-list
 replace of `/entities` -- never a partial patch, so an existing bind and its
@@ -86,6 +102,8 @@ from casework.common.select import select_for_run
 from casework.entity_resolver import NO_MATCH, REVIEW, Decision, apply_document_veto, resolve
 from casework.court_record import CHARGED, defendant_names
 from casework.entity_resolver import (
+    BIND,
+    MIN_BIND_SCORE,
     NO_MATCH,
     REVIEW,
     Decision,
@@ -146,9 +164,9 @@ Examples of WRONG location names:
 - "काठमाडौं" ← if only reason is court/CIAA office, SKIP
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PART 2 — RELATED ENTITIES (relationship_type="related")
+PART 2 — PEOPLE AND ORGANIZATIONS (relationship_type="related" unless stated)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Any person or organization connected to the case BEYOND the primary accused.
+Any person or organization connected to the case.
 Extract ALL of these categories that appear in the documents:
 
   GOVERNMENT BODIES — ministry, department, municipality, office whose funds were
@@ -175,11 +193,20 @@ Extract ALL of these categories that appear in the documents:
   and their investigation is directly relevant.
   Example: "रविन्द्र कुमार बुढाप्रिथी"  notes: "अनुसन्धान अधिकृत, CIAA"
 
-  WITNESSES/INVESTIGATORS — named inquiry officers, key witnesses.
-  Example: "रविन्द्र कुमार बुढाप्रिथी"  notes: "अनुसन्धान अधिकृत, CIAA"
-
 Notes must never be blank for related entities. Always describe the specific connection.
 Only extract entities with CONFIRMED connections — not people who were later acquitted.
+
+USE A MORE SPECIFIC relationship_type INSTEAD OF "related" when the documents make
+the role plain. Only these three; when in doubt use "related".
+
+  "accused" — a person the charge sheet (आरोपपत्र) names as a defendant.
+  Example: "गजेन्द्र प्रसाद राउत"  notes: "प्रतिवादी"
+
+  "alleged" — named as implicated in the documents, but NOT on the charge sheet.
+  Example: "नानी काजी थापा"  notes: "घुस लेनदेनमा संलग्न भनी उल्लेख, अभियोग लगाइएको छैन"
+
+  "witness" — a named inquiry officer or witness.
+  Example: "रविन्द्र कुमार बुढाप्रिथी"  notes: "अनुसन्धान अधिकृत, CIAA"
 
 PRIORITY ORDER: People and organizations DIRECTLY involved in the case events come first.
 Generic legal infrastructure (courts, attorney offices) should be skipped unless a
@@ -205,7 +232,7 @@ Output ONLY this JSON object, no other text:
   "entities": [
     {
       "entity_name": "Name exactly as in document",
-      "relationship_type": "location" or "related",
+      "relationship_type": "location", "related", "accused", "alleged" or "witness",
       "notes": "specific description"
     }
   ],
@@ -360,10 +387,82 @@ class EntityBindPlan:
 
 
 
-def _resolve_with_vetoes(api, name):
-    """One name -> one `Decision`, with both vetoes applied. THE ONLY resolution
-    path in this module: `related` extractions and court-record `accused` names
-    both come through here, so neither role can drift onto a weaker guard.
+# Marks a bind that only exists because permissive mode overrode a veto. Written
+# into `Decision.reason` by `_promote_top_candidate` -- the ONLY producer -- and
+# read back by `is_promoted`. A named constant rather than a literal in two
+# places: the console marker and the `.binds.jsonl` audit field must agree, and
+# testing a reason string by eye is how they would drift apart.
+PROMOTED_PREFIX = "promoted over: "
+
+
+def is_promoted(decision):
+    """True when this bind won by overriding a veto, so it is one to double-check."""
+    return decision.reason.startswith(PROMOTED_PREFIX)
+
+
+def _plan_sections(plan):
+    """`nes_id` -> the section it is being bound into, from the plan's own items.
+
+    Derived from `patch_items` rather than tracked alongside `plan.bound`: that is
+    the list actually being written, so the report cannot disagree with the
+    request body. Keeping a parallel copy in `plan.bound` would be a second
+    source of truth for the same fact.
+    """
+    return {item["nes_id"]: item["relationship_type"]
+            for item in plan.patch_items if item.get("nes_id")}
+
+
+def _bind_row(slug, name, decision, notes, section, written):
+    """One `*.binds.jsonl` row.
+
+    `reason` is empty for a clean single-candidate match and carries the overridden
+    veto for a promoted one, so grepping this file for `promoted over:` lists every
+    bind that was a judgement call.
+    """
+    return {"slug": slug, "extracted": name, "role": section,
+            "nes_id": decision.nes_id, "score": decision.score,
+            "matched_name": decision.matched_name, "notes": notes,
+            "reason": decision.reason, "written": written}
+
+
+def _promote_top_candidate(decision):
+    """A vetoed/ambiguous REVIEW -> a BIND on its highest-scoring candidate.
+
+    This is the whole of "bind every name that matched something". `resolve`
+    returns REVIEW for four different reasons -- ambiguity, truncation,
+    cross-script matching, province/institution scope -- and
+    `apply_document_veto` adds a fifth. All five mean "a candidate cleared the
+    score threshold but something else was unproven", so all five have a top
+    candidate sitting right there in `decision.candidates`.
+
+    Deterministic by construction: `resolve` sorts `candidates` by
+    `(-score, nes_id)`, so two entities tied at the same score always resolve to
+    the same one -- a re-run cannot silently pick a different entity than the
+    run before it. NO_MATCH is left alone: nothing scored, so there is nothing
+    to promote, and this module may never create an NES entity.
+
+    The cost is explicit: a promoted ambiguity is a coin flip between namesakes.
+    `decision.reason` is carried into the bind's note so the row says why it was
+    uncertain, and `*.binds.jsonl` records the runners-up that lost.
+    """
+    if decision.verdict != REVIEW or not decision.candidates:
+        return decision
+    score, nes_id, matched = decision.candidates[0]
+    if score < MIN_BIND_SCORE:
+        return decision
+    return Decision(BIND, nes_id, score, matched,
+                    f"{PROMOTED_PREFIX}{decision.reason}", decision.candidates)
+
+
+def _resolve_with_vetoes(api, name, strict=False):
+    """One name -> one `Decision`. THE ONLY resolution path in this module: every
+    extracted name and every court-record `accused` name comes through here, so
+    no role can drift onto a different guard.
+
+    `strict=False` (the default) binds the best-scoring candidate whenever one
+    cleared the threshold, even if a veto fired -- see `_promote_top_candidate`.
+    `strict=True` restores the conservative behaviour: a veto means REVIEW and a
+    human decides.
 
     Completeness goes IN, so `resolve` applies the truncation veto itself
     alongside the ambiguity check it protects. `search_entities` knows whether it
@@ -384,7 +483,14 @@ def _resolve_with_vetoes(api, name):
     decision = resolve(name, candidates,
                        candidates_complete=getattr(candidates, "complete", True))
     if not decision.is_bind:
-        return decision
+        if strict:
+            return decision
+        # Promote BEFORE the document read, so a name that `resolve` vetoed still
+        # gets its winning candidate checked against its own document below
+        # rather than skipping that read entirely.
+        decision = _promote_top_candidate(decision)
+        if not decision.is_bind:
+            return decision
 
     read_error = None
     try:
@@ -392,6 +498,7 @@ def _resolve_with_vetoes(api, name):
     except Exception as exc:
         document = None  # unreadable == unverified
         read_error = str(exc)
+    readable = isinstance(document, dict) and bool(document)
     decision = apply_document_veto(decision, document)
     if read_error:
         log.warning("get_entity(%s) failed while veto-checking %r: %s",
@@ -402,10 +509,18 @@ def _resolve_with_vetoes(api, name):
             decision.matched_name,
             f"{decision.reason} (read error: {read_error!r})",
             decision.candidates)
+    # An UNREADABLE document stays REVIEW even in permissive mode. Promoting a
+    # judgement veto ("this looks like an election-candidate record") is the
+    # uncertainty this mode was asked to accept; promoting a failed HTTP read is
+    # not -- one 403 or 502 would bind whichever namesake happened to sort first,
+    # with nothing having actually been matched against. Distinguished by whether
+    # the document came back, never by parsing the veto's reason text.
+    if not strict and readable:
+        decision = _promote_top_candidate(decision)
     return decision
 
 
-def _plan_accused(api, case, plan, have):
+def _plan_accused(api, case, plan, have, strict=False):
     """Resolve the case's court-record defendants into `accused` bind items.
 
     Returns the new bind items and mutates `plan`'s three accused lists plus
@@ -423,7 +538,7 @@ def _plan_accused(api, case, plan, have):
 
     additions = []
     for name in names:
-        decision = _resolve_with_vetoes(api, name)
+        decision = _resolve_with_vetoes(api, name, strict=strict)
         if decision.verdict == REVIEW:
             plan.accused_review.append((name, decision))
             continue
@@ -443,7 +558,7 @@ def _plan_accused(api, case, plan, have):
     return additions
 
 
-def plan_case_entities(api, case, etag, extracted_items):
+def plan_case_entities(api, case, etag, extracted_items, strict=False):
     """Resolve every extracted name for one case and build its write plan.
 
     Guarantees: never plans a write for a non-DRAFT case, or for a case whose
@@ -467,42 +582,36 @@ def plan_case_entities(api, case, etag, extracted_items):
     guard against a payload shape that would otherwise silently plan a
     destructive whole-list replace with every existing bind missing.
 
-    Three vetoes live here, external to `casework.entity_resolver` because all
-    three need something `resolve()` cannot see on its own:
+    Every extracted name binds into the section its own `relationship_type`
+    names, for any of the nine the case API accepts. The only names that do not
+    bind are the ones with nowhere to go: an unrecognised section (no place to
+    file them) and a name no NES entity matched at all (nothing to file).
 
-    * A name is only ever a bind candidate when its OWN extracted
-      `relationship_type` is `related` (case-insensitively, whitespace
-      trimmed). This is an ALLOW-list, not a deny-list on `location`: an
-      unrecognised value, an empty string, and a missing key all fail the
-      same way as `location` does, and none of them ever reach
-      `api.search_entities` -- the check runs before any search. A deny-list
-      would have to enumerate every unsafe value correctly forever; failing
-      safe by default is the direction the governing constraint points, and
-      it is also what closes a casing mismatch against the extraction
-      filter's own `.lower()` comparison in `main()` -- an LLM that emits
-      "Location" must veto exactly like "location" does.
-      THIS IS THE STEP THAT SEPARATES THE MATCHER'S RECALL FROM THE SHIPPED
-      PIPELINE'S. Measured on the labelled set: the resolver binds 33 of 39,
-      recall 0.846; this allow-list refuses seven location-typed municipalities
-      before searching, so production binds 26, recall 0.667. Both figures are
-      printed by `tests/casework/test_entity_resolver_labelled.py`, each named,
-      and `test_a_location_typed_extraction_never_reaches_a_bind` fails if this
-      allow-list is widened. Whether to bind locations is an open product
-      decision -- do not widen it as a drive-by.
-    * A BIND from `resolve()` still needs the document veto
-      (`casework.entity_resolver.apply_document_veto`): the search payload
-      alone cannot tell a real case subject from an Election Commission
-      candidate/ward-head record sharing their name. The second read
-      (`api.get_entity`) is wrapped in a bare try/except -- ANY exception
-      (timeout, 403, 502, a renamed/404 entity) maps to an unreadable
-      document, which the veto downgrades to REVIEW with `nes_id=None`.
-      Fail closed: a transient read failure must never let a BIND survive.
-      The exception's own text is folded into the reason (and logged), so a
-      misconfigured base URL that downgrades every bind is diagnosable rather
-      than looking identical to a genuine election-record hit.
-    * A BIND whose candidate list hit `search_entities`' page cap is
-      downgraded to REVIEW: at the cap, a same-name duplicate may sit just
-      outside the window, so the ambiguity veto never got to see it.
+    Scope is a deliberate product decision, not a safety margin, and it was
+    widened on request: an earlier version bound `related` only and read
+    `accused` solely from the NGM court record, refusing `location` and the rest
+    before spending a search. That cost recall -- the resolver bound 33 of 39
+    labelled names, the shipped allow-list only 26 -- and the recall is what was
+    wanted. `strict=True` restores the old refusals for anyone who needs them.
+
+    What this means in practice, stated plainly because it is the real cost: in
+    the default permissive mode a name with several equally-good namesakes binds
+    to whichever sorts first, so some binds WILL name the wrong person. The
+    run's `*.binds.jsonl` records the reason and the runners-up for every such
+    bind, which is the audit trail for finding them again.
+
+    The court record still runs first and still supplies `accused` independently
+    of the extraction, because a defendant the court names is better sourced than
+    one an LLM guessed.
+
+    One guard survives permissive mode: `apply_document_veto`'s FAIL-CLOSED
+    branch. `api.get_entity` is wrapped in a bare try/except, and ANY exception
+    (timeout, 403, 502, a renamed/404 entity) or an empty body means the document
+    was never read -- which stays REVIEW. Uncertainty about which namesake is
+    right is a judgement the caller chose to accept; an HTTP failure is not a
+    judgement at all, and promoting it would bind on evidence nobody ever saw.
+    The exception's own text is folded into the reason (and logged), so a
+    misconfigured base URL is diagnosable rather than looking like a real veto.
     """
     slug = case.get("slug")
     state = case.get("state")
@@ -533,27 +642,37 @@ def plan_case_entities(api, case, etag, extracted_items):
     current = current_entity_binds(case)
     plan.n_current = len(current)
     have = {bind["nes_id"] for bind in current}
-    additions = []
+
+    # The court record runs FIRST so it wins the person. Both loops dedupe
+    # against the same `have` set, so whichever gets there first owns that
+    # entity's bind -- and a defendant the court names is an `accused`, which is
+    # a stronger and better-sourced claim than the `related` an extraction might
+    # guess for the same person.
+    additions = list(_plan_accused(api, case, plan, have, strict=strict))
+
     for item in extracted_items:
         name = (item.get("entity_name") or "").strip()
         if not name:
             continue
 
+        # Bind into whatever section the extraction names, so long as the API
+        # accepts that section. This is a validity check, not a scope filter:
+        # `alleged`, `location`, `witness`, `victim` and the rest all bind now.
+        # An unrecognised value, an empty string and a missing key still go to
+        # review, because there is no section to put them in -- guessing one
+        # would file the entity under a relationship nobody asserted.
         rel_type = (item.get("relationship_type") or "").strip().lower()
-        if rel_type != "related":
+        if rel_type not in RELATIONSHIP_TYPES:
             plan.review.append((name, Decision(
                 REVIEW, None, 0.0, "",
-                f"relationship_type {item.get('relationship_type')!r} is out "
-                "of bind scope: only 'related' EXTRACTIONS (case-insensitive) "
-                "are bound from the LLM. 'accused' is never taken from an "
-                "extraction -- it is read from the case's own NGM court record "
-                "(casework.court_record). 'location', any other value, an "
-                "empty string and a missing key are all reported for review "
-                "without spending a search request",
+                f"relationship_type {item.get('relationship_type')!r} is not one "
+                f"of the {len(RELATIONSHIP_TYPES)} the case API accepts "
+                f"({', '.join(RELATIONSHIP_TYPES)}), so there is no section to "
+                "bind it into. Reported without spending a search request",
                 ())))
             continue
 
-        decision = _resolve_with_vetoes(api, name)
+        decision = _resolve_with_vetoes(api, name, strict=strict)
 
         if decision.verdict == REVIEW:
             plan.review.append((name, decision))
@@ -570,20 +689,20 @@ def plan_case_entities(api, case, etag, extracted_items):
             continue
 
         notes = (item.get("notes") or "").strip()
-        bind = validate_bind_item({
+        item_to_bind = {
             "nes_id": decision.nes_id,
-            # Only ever 'related'. Locations, accused binds and outcomes are
-            # all out of scope for this planner -- see the design note.
-            "relationship_type": "related",
+            "relationship_type": rel_type,
             "notes": notes,
-        })
+        }
+        # `outcome` is legal ONLY on an accused bind -- the DB enforces it with
+        # the `outcome_only_on_accused` CHECK constraint, and `validate_bind_item`
+        # mirrors that. Every case in this corpus is a Special Court `-CR-` case,
+        # so CIAA filed a charge sheet and 'charged' is true by construction.
+        if rel_type == "accused":
+            item_to_bind["outcome"] = CHARGED
         have.add(decision.nes_id)
-        additions.append(bind)
+        additions.append(validate_bind_item(item_to_bind))
         plan.bound.append((name, decision, notes))
-
-    # Accused are read from the court record, never from `extracted_items`, so
-    # this runs outside the loop above and records into its own plan lists.
-    additions.extend(_plan_accused(api, case, plan, have))
 
     merged = merge_entity_binds(current, additions)
     if merged != current:
@@ -913,6 +1032,11 @@ def main(argv=None):
                "Writes to /entities only under --apply.",
     )
     add_common_args(ap)
+    ap.add_argument(
+        "--strict", action="store_true",
+        help="Bind only when exactly one NES entity matched and no veto fired; "
+             "send ambiguities and vetoed matches to review instead. Off by "
+             "default: the default binds the best-scoring match for every name.")
     args = ap.parse_args(argv)
 
     setup_logging(args.verbose)
@@ -956,6 +1080,12 @@ def main(argv=None):
         print("  --dry-run: printing what WOULD bind; no /entities writes will be made.")
     if args.force:
         print("  --force: re-extracting even for cases with a 'related' bind already present")
+    if args.strict:
+        print("  --strict: a veto or an ambiguity means REVIEW, not a bind")
+    else:
+        print("  binding every matched name into the section it was extracted "
+              "under; on an ambiguity the best-scoring entity wins, so check "
+              "the run's .binds.jsonl for the ones that were uncertain")
 
     total_entities_extracted = 0
     total_accused_notes_extracted = 0
@@ -964,6 +1094,11 @@ def main(argv=None):
     # tied to `plan_summary`'s reconciliation over extracted names, and a
     # court-record name is not an extracted name.
     total_accused_bound = total_accused_review = total_accused_nomatch = 0
+    # Binds that only exist because permissive mode overrode a veto. Counted
+    # separately and printed on its own line: "we bound 40 things" and "9 of
+    # those 40 were a judgement call" are different facts, and rolling the
+    # second into the first is how the uncertain ones stop getting checked.
+    total_promoted = 0
     total_court_skips = 0
     bind_rows, review_rows, nomatch_rows = [], [], []
 
@@ -1071,11 +1206,19 @@ def main(argv=None):
             continue
 
         entities_data, accused_notes = _parse_extraction_response(response_text)
+        # Only two things are dropped here: a non-dict, and an item with no name.
+        # Both are unrecordable -- `plan_case_entities` skips a nameless item
+        # without putting it in ANY of its three lists, so `plan_summary` would
+        # count it as already-bound (it derives that by subtraction).
+        #
+        # The relationship_type is deliberately NOT filtered here. It used to be
+        # (`in ("location", "related")`), which silently discarded every other
+        # section before the planner could see it -- so widening the planner to
+        # all nine types would have been dead code for seven of them. One place
+        # decides which sections are bindable, and that place is the planner.
         valid_items = [
             item for item in entities_data
-            if isinstance(item, dict)
-            and (item.get("entity_name") or "").strip()
-            and (item.get("relationship_type") or "").lower() in ("location", "related")
+            if isinstance(item, dict) and (item.get("entity_name") or "").strip()
         ]
 
         if not valid_items and not accused_notes:
@@ -1103,7 +1246,8 @@ def main(argv=None):
                       step="fetch", status="fallback", detail=str(exc),
                       level=logging.WARNING)
 
-        plan = plan_case_entities(api, fresh, etag, valid_items)
+        plan = plan_case_entities(api, fresh, etag, valid_items,
+                                  strict=args.strict)
 
         # Two refusals reach here and NEITHER looked at a single extracted
         # name: a non-DRAFT state, and a payload with no `entities` key. Both
@@ -1188,23 +1332,25 @@ def main(argv=None):
                 continue
             total_bound += counts["bound"]
             total_accused_bound += counts["accused_bound"]
+            sections = _plan_sections(plan)
             for name, decision, notes in plan.bound:
-                bind_rows.append({"slug": slug, "extracted": name, "role": "related",
-                                  "nes_id": decision.nes_id, "score": decision.score,
-                                  "matched_name": decision.matched_name, "notes": notes,
-                                  "written": False})
-                print(f"  WOULD BIND {name}  ->  {decision.nes_id}  "
-                      f"(score {decision.score:.2f})")
+                section = sections.get(decision.nes_id, "related")
+                bind_rows.append(
+                    _bind_row(slug, name, decision, notes, section, False))
+                total_promoted += is_promoted(decision)
+                print(f"  WOULD BIND ({section}) {name}  ->  {decision.nes_id}  "
+                      f"(score {decision.score:.2f})"
+                      f"{'  [UNCERTAIN]' if is_promoted(decision) else ''}")
             for name, decision in plan.accused_bound:
-                bind_rows.append({"slug": slug, "extracted": name, "role": "accused",
-                                  "nes_id": decision.nes_id, "score": decision.score,
-                                  "matched_name": decision.matched_name, "notes": "",
-                                  "written": False})
+                bind_rows.append(
+                    _bind_row(slug, name, decision, "", "accused", False))
+                total_promoted += is_promoted(decision)
                 print(f"  WOULD BIND (accused) {name}  ->  {decision.nes_id}  "
-                      f"(score {decision.score:.2f})")
+                      f"(score {decision.score:.2f})"
+                      f"{'  [UNCERTAIN]' if is_promoted(decision) else ''}")
             report.record(slug, "entities", "would-bind",
-                          f"{len(plan.bound)} related + {len(plan.accused_bound)} "
-                          "accused would bind")
+                          f"{len(plan.bound)} extracted + "
+                          f"{len(plan.accused_bound)} court-record would bind")
             continue
 
         try:
@@ -1217,20 +1363,21 @@ def main(argv=None):
 
         total_bound += counts["bound"]
         total_accused_bound += counts["accused_bound"]
+        sections = _plan_sections(plan)
         for name, decision, notes in plan.bound:
-            bind_rows.append({"slug": slug, "extracted": name, "role": "related",
-                              "nes_id": decision.nes_id, "score": decision.score,
-                              "matched_name": decision.matched_name, "notes": notes,
-                              "written": True})
-            print(f"  BOUND {name}  ->  {decision.nes_id}")
+            section = sections.get(decision.nes_id, "related")
+            bind_rows.append(_bind_row(slug, name, decision, notes, section, True))
+            total_promoted += is_promoted(decision)
+            print(f"  BOUND ({section}) {name}  ->  {decision.nes_id}"
+                  f"{'  [UNCERTAIN]' if is_promoted(decision) else ''}")
         for name, decision in plan.accused_bound:
-            bind_rows.append({"slug": slug, "extracted": name, "role": "accused",
-                              "nes_id": decision.nes_id, "score": decision.score,
-                              "matched_name": decision.matched_name, "notes": "",
-                              "written": True})
-            print(f"  BOUND (accused) {name}  ->  {decision.nes_id}")
+            bind_rows.append(_bind_row(slug, name, decision, "", "accused", True))
+            total_promoted += is_promoted(decision)
+            print(f"  BOUND (accused) {name}  ->  {decision.nes_id}"
+                  f"{'  [UNCERTAIN]' if is_promoted(decision) else ''}")
         report.record(slug, "entities", "bound",
-                      f"{len(plan.bound)} related + {len(plan.accused_bound)} accused bound")
+                      f"{len(plan.bound)} extracted + "
+                      f"{len(plan.accused_bound)} court-record bound")
         log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                   step="write", status="ok", detail=f"{len(plan.bound)} bound")
 
@@ -1272,6 +1419,12 @@ def main(argv=None):
         print(f"  ACCUSED not attempted on {total_court_skips} case(s): no readable "
               "court reference, so those cases show no accused because the record "
               "could not be read -- not because there are no defendants.")
+    if total_promoted:
+        print(f"  OF THOSE, {total_promoted} bind(s) overrode a veto -- an "
+              "ambiguity between namesakes, a province-scoped office, or an "
+              "election-candidate record. Each is marked [UNCERTAIN] above and "
+              f"carries a 'promoted over:' reason in {reports['binds']}. These "
+              "are the ones to spot-check first.")
     if total_bound == 0 and total_accused_bound == 0:
         if total_entities_extracted == 0:
             # Reachable from three separate skip gates -- the idempotency skip,
