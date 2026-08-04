@@ -1074,6 +1074,14 @@ CLAUDE_CLI_MODEL_PREMIUM = os.getenv("CLAUDE_CLI_MODEL_PREMIUM", "")
 CLAUDE_CLI_MODEL_CHEAP = os.getenv("CLAUDE_CLI_MODEL_CHEAP", "")
 # claude -p reasoning budget: low/medium/high/xhigh/max ("" -> CLI default).
 CLAUDE_CLI_EFFORT = os.getenv("CLAUDE_CLI_EFFORT", "")
+# Turn cap for a plain (tool-less) `claude -p` call. Was hardcoded to 1, which is
+# not the same as "one model response": a turn that runs long wants a
+# continuation, and denying it aborts the entire call as error_max_turns with
+# nothing returned — after billing for the work already done. Measured on the
+# case_proposal.intent prompt (2026-08-03, identical payload and budget, arms
+# interleaved): 3/5 succeeded at 1 turn, 5/5 at 3. Env-tunable because the right
+# number is an empirical question that should not need a code deploy to revisit.
+CLAUDE_CLI_MAX_TURNS = int(os.getenv("CLAUDE_CLI_MAX_TURNS", "3"))
 REVIEW_CLI_MAX_WORKERS = int(os.getenv("REVIEW_CLI_MAX_WORKERS", "2"))
 REVIEW_CLI_TIMEOUT = int(os.getenv("REVIEW_CLI_TIMEOUT", "300"))
 REVIEW_CLI_MAX_RETRIES = int(os.getenv("REVIEW_CLI_MAX_RETRIES", "3"))

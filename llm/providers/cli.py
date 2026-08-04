@@ -221,9 +221,25 @@ class ClaudeCliProvider(_CliProvider):
             RuntimeError: If invocation fails or output is malformed.
         """
         # NB: no --permission-mode plan. Plan mode makes claude -p emit a plan and
-        # then try to ExitPlanMode (a tool turn); with --max-turns 1 and no tools
-        # that aborts as error_max_turns before producing a result. Tools are
-        # already disabled via --allowedTools "", so default mode never prompts.
+        # then try to ExitPlanMode (a tool turn), which with no tools available
+        # aborts as error_max_turns before producing a result. Tools are already
+        # disabled via --allowedTools "", so default mode never prompts.
+        #
+        # --max-turns was hardcoded to 1 here, on the reading that one turn is one
+        # answer. It is not. A turn that runs long asks to continue, and a cap of 1
+        # refuses — aborting the whole call as error_max_turns and returning
+        # nothing, having already billed for the work done. The failure names the
+        # turn limit but reads like an exhausted token budget, which is how it was
+        # twice misdiagnosed (see llm/exhaustion.py).
+        #
+        # Measured on case_proposal.intent, identical payload and budget, arms
+        # interleaved (2026-08-03): 3/5 succeeded at 1 turn, 5/5 at 3. Successful
+        # 3-turn runs averaged ~25s against ~15s for successful 1-turn runs, so the
+        # extra turn is genuinely used rather than idle.
+        #
+        # Raising the cap does not make a short call longer or dearer: a response
+        # that completes in one turn never requests a second. It only stops
+        # long-running answers from being thrown away.
         argv = [
             getattr(settings, "CLAUDE_CLI_BIN", "claude"),
             "-p",
@@ -232,7 +248,7 @@ class ClaudeCliProvider(_CliProvider):
             "--system-prompt",
             system,
             "--max-turns",
-            "1",
+            str(max(1, getattr(settings, "CLAUDE_CLI_MAX_TURNS", 3))),
             "--allowedTools",
             "",
         ]

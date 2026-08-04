@@ -1,27 +1,46 @@
 # SPDX-License-Identifier: Hippocratic-3.0
-"""Recognising "the model ran out of room" across providers.
+"""Recognising "the model could not finish" across providers.
 
-This lives here rather than beside one caller because the same failure has now
-been diagnosed twice from scratch — once in ``courts`` (the verdict extractor,
-API#407) and once in ``case_proposals`` (the intent job, which shipped a 1200
-budget that could not finish a single answer). Both times the symptom was an
-error that does not mention tokens at all.
+This lives here rather than beside one caller because the same failure has been
+diagnosed from scratch twice — in ``courts`` (the verdict extractor, API#407) and
+in ``case_proposals`` (the intent job, API#411). Both times the symptom was an
+error that does not mention tokens at all, and both times it was read as an
+exhausted token budget.
 
-**How exhaustion presents on the CLI provider.** ``claude -p`` has no output-cap
-flag, so ``llm.providers.cli`` enforces the caller's budget through
-``CLAUDE_CODE_MAX_OUTPUT_TOKENS``. That variable caps *everything the model
-emits, reasoning included* — it is not the API's ``max_tokens``, which bounds
-the response and leaves thinking to its own budget. A model that spends the
-allowance thinking simply ends its turn unfinished; the CLI wants another turn to
-continue; ``--max-turns 1`` denies it; and the run aborts as
-``error_max_turns`` — "Reached maximum number of turns (1)".
+**``error_max_turns`` has two causes, and they want opposite fixes.**
 
-So the turn limit is the messenger and the token budget is the cause. Raising
-``--max-turns`` would not help and would let the model ramble at cost. The fix is
-always a bigger budget.
+*Out of turns.* An assistant turn that runs long asks to continue. If the turn cap
+denies it, the whole call aborts as ``error_max_turns`` — "Reached maximum number
+of turns (N)" — returning nothing, having billed for the work already done. The
+remedy is a higher cap, and a bigger token budget does nothing at all.
 
-That distinction is the part worth keeping in one place: a budget sized as though
-it only had to cover the answer is a budget that cannot finish one.
+*Out of output tokens.* ``claude -p`` has no output-cap flag, so
+``llm.providers.cli`` enforces the caller's budget through
+``CLAUDE_CODE_MAX_OUTPUT_TOKENS``, which caps *everything the model emits,
+reasoning included* — unlike the API's ``max_tokens``, which bounds the response
+and leaves thinking its own allowance. A model that spends the allowance thinking
+also ends its turn unfinished, and surfaces the same way. The remedy here is a
+bigger budget, and a higher turn cap does nothing.
+
+**An earlier version of this docstring asserted the second cause was the only
+one**, and said in terms that raising ``--max-turns`` "would not help". That was
+wrong, and it was load-bearing: it is why the intent job's budget was raised twice
+and still failed. Measured on ``case_proposal.intent`` (2026-08-03, identical
+payload and budget, arms interleaved) the call succeeded 3/5 at one turn and 5/5
+at three, while raising the budget from 2000 to 8000 to 32000 changed nothing.
+``llm/providers/cli.py`` now defaults the cap to ``CLAUDE_CLI_MAX_TURNS`` (3).
+
+**So the two are not distinguishable from the error text**, and this module does
+not pretend otherwise: :func:`is_exhaustion` answers only "is a retry at a larger
+budget worth paying for?" With the turn cap raised, a surviving ``error_max_turns``
+is more likely to be a genuine budget problem, which is what makes that retry a
+reasonable fallback rather than a guess.
+
+Telling them apart would need ``num_turns`` from the CLI's result envelope, and
+**no caller can currently reach it**: ``ClaudeCliProvider.invoke_text`` returns
+``data["result"]`` as stripped text and discards the rest. Distinguishing the two
+properly therefore means exposing that metadata first — worth doing if this
+ambiguity bites again, but it is not available to reason about today.
 """
 
 from __future__ import annotations
