@@ -84,6 +84,7 @@ from casework.common.pipeline import (
 )
 from casework.common.select import select_for_run
 from casework.entity_resolver import NO_MATCH, REVIEW, Decision, apply_document_veto, resolve
+from casework.court_record import CHARGED, defendant_names
 from casework.entity_resolver import (
     NO_MATCH,
     REVIEW,
@@ -333,6 +334,17 @@ class EntityBindPlan:
     nomatch: list = field(default_factory=list)  # (name, Decision)
     patch_items: list = field(default_factory=list)
     reason: str = ""
+    # Accused come from the case's NGM court record, NOT from `extracted_items`,
+    # so they get their own three lists. Folding them into bound/review/nomatch
+    # would break `plan_summary`, which derives `already_bound` by subtracting
+    # those three from the EXTRACTED name count -- court-record names are not in
+    # that count, so every accused would push the result negative.
+    accused_bound: list = field(default_factory=list)    # (name, Decision)
+    accused_review: list = field(default_factory=list)   # (name, Decision)
+    accused_nomatch: list = field(default_factory=list)  # (name, Decision)
+    # One line per court reference that could not be read, so a case showing no
+    # accused can say whether that means "no defendants" or "we could not look".
+    court_skips: list = field(default_factory=list)
     # True once the resolution loop actually ran. False means the plan was
     # refused up front (wrong state, or a payload with no `entities` key) and
     # NO extracted name was ever looked at.
@@ -346,6 +358,89 @@ class EntityBindPlan:
     # carries on resolving.
     examined: bool = False
 
+
+
+def _resolve_with_vetoes(api, name):
+    """One name -> one `Decision`, with both vetoes applied. THE ONLY resolution
+    path in this module: `related` extractions and court-record `accused` names
+    both come through here, so neither role can drift onto a weaker guard.
+
+    Completeness goes IN, so `resolve` applies the truncation veto itself
+    alongside the ambiguity check it protects. `search_entities` knows whether it
+    ran out of results or stopped early; before this it threw that away and the
+    resolver had to guess from a row count. `search_entities` always returns a
+    `CandidateList` carrying the real answer. The `True` default covers a caller
+    that hands over a plain list -- a stub, or a hand-built set -- which is
+    describing exactly the candidates it means, so taking it at its word is right
+    rather than cautious-by-reflex. Nothing in production reaches the default.
+
+    A BIND then still needs the document veto: the search payload alone cannot
+    tell a real case subject from an Election Commission candidate record sharing
+    their name. The second read is wrapped so ANY exception maps to an unreadable
+    document, which the veto downgrades to REVIEW. Fail closed -- a transient
+    read failure must never let a BIND survive.
+    """
+    candidates = api.search_entities(name)
+    decision = resolve(name, candidates,
+                       candidates_complete=getattr(candidates, "complete", True))
+    if not decision.is_bind:
+        return decision
+
+    read_error = None
+    try:
+        document = api.get_entity(decision.nes_id)
+    except Exception as exc:
+        document = None  # unreadable == unverified
+        read_error = str(exc)
+    decision = apply_document_veto(decision, document)
+    if read_error:
+        log.warning("get_entity(%s) failed while veto-checking %r: %s",
+                    decision.nes_id if decision.nes_id else "<downgraded>",
+                    name, read_error)
+        decision = Decision(
+            decision.verdict, decision.nes_id, decision.score,
+            decision.matched_name,
+            f"{decision.reason} (read error: {read_error!r})",
+            decision.candidates)
+    return decision
+
+
+def _plan_accused(api, case, plan, have):
+    """Resolve the case's court-record defendants into `accused` bind items.
+
+    Returns the new bind items and mutates `plan`'s three accused lists plus
+    `court_skips`. Appends every bound `nes_id` to `have` so a defendant already
+    bound on the case -- or named twice across two court references -- is not
+    added again.
+
+    `outcome` is sent explicitly rather than left to the API's omitted-outcome
+    fallback: every case in this corpus is a Special Court `-CR-` case, so CIAA
+    filed a charge sheet and 'charged' is true by construction. Sending it keeps
+    the claim ours and visible in the request body.
+    """
+    names, skips = defendant_names(api, case)
+    plan.court_skips.extend(skips)
+
+    additions = []
+    for name in names:
+        decision = _resolve_with_vetoes(api, name)
+        if decision.verdict == REVIEW:
+            plan.accused_review.append((name, decision))
+            continue
+        if decision.verdict == NO_MATCH:
+            plan.accused_nomatch.append((name, decision))
+            continue
+        if decision.nes_id in have:
+            continue
+        additions.append(validate_bind_item({
+            "nes_id": decision.nes_id,
+            "relationship_type": "accused",
+            "outcome": CHARGED,
+            "notes": "",
+        }))
+        have.add(decision.nes_id)
+        plan.accused_bound.append((name, decision))
+    return additions
 
 
 def plan_case_entities(api, case, etag, extracted_items):
@@ -449,43 +544,16 @@ def plan_case_entities(api, case, etag, extracted_items):
             plan.review.append((name, Decision(
                 REVIEW, None, 0.0, "",
                 f"relationship_type {item.get('relationship_type')!r} is out "
-                "of bind scope by design: only 'related' extractions "
-                "(case-insensitive) are ever bound. 'location', any other "
-                "value, an empty string and a missing key are all reported "
-                "for review without spending a search request",
+                "of bind scope: only 'related' EXTRACTIONS (case-insensitive) "
+                "are bound from the LLM. 'accused' is never taken from an "
+                "extraction -- it is read from the case's own NGM court record "
+                "(casework.court_record). 'location', any other value, an "
+                "empty string and a missing key are all reported for review "
+                "without spending a search request",
                 ())))
             continue
 
-        candidates = api.search_entities(name)
-        # Completeness goes IN, so `resolve` applies the truncation veto itself
-        # alongside the ambiguity check it protects. `search_entities` knows
-        # whether it ran out of results or stopped early; before this it threw
-        # that away and the resolver had to guess from a row count.
-        # `search_entities` always returns a `CandidateList` carrying the real
-        # answer. The `True` default covers a caller that hands over a plain list
-        # -- a stub, or a hand-built set -- which is describing exactly the
-        # candidates it means, so taking it at its word is right rather than
-        # cautious-by-reflex. Nothing in production reaches the default.
-        decision = resolve(name, candidates,
-                           candidates_complete=getattr(candidates, "complete", True))
-        if decision.is_bind:
-            read_error = None
-            try:
-                document = api.get_entity(decision.nes_id)
-            except Exception as exc:
-                document = None  # unreadable == unverified
-                read_error = str(exc)
-            decision = apply_document_veto(decision, document)
-            if read_error:
-                log.warning(
-                    "get_entity(%s) failed while veto-checking %r: %s",
-                    decision.nes_id if decision.nes_id else "<downgraded>",
-                    name, read_error)
-                decision = Decision(
-                    decision.verdict, decision.nes_id, decision.score,
-                    decision.matched_name,
-                    f"{decision.reason} (read error: {read_error!r})",
-                    decision.candidates)
+        decision = _resolve_with_vetoes(api, name)
 
         if decision.verdict == REVIEW:
             plan.review.append((name, decision))
@@ -512,6 +580,10 @@ def plan_case_entities(api, case, etag, extracted_items):
         have.add(decision.nes_id)
         additions.append(bind)
         plan.bound.append((name, decision, notes))
+
+    # Accused are read from the court record, never from `extracted_items`, so
+    # this runs outside the loop above and records into its own plan lists.
+    additions.extend(_plan_accused(api, case, plan, have))
 
     merged = merge_entity_binds(current, additions)
     if merged != current:
@@ -614,6 +686,11 @@ def plan_summary(plan, extracted_items):
         "bound": bound,
         "review": review,
         "nomatch": nomatch,
+        # Court-record accused, counted separately: they are NOT extracted
+        # names, so they must never enter the arithmetic above.
+        "accused_bound": len(plan.accused_bound),
+        "accused_review": len(plan.accused_review),
+        "accused_nomatch": len(plan.accused_nomatch),
         "already_bound": already_bound,
     }
 
@@ -883,6 +960,11 @@ def main(argv=None):
     total_entities_extracted = 0
     total_accused_notes_extracted = 0
     total_bound = total_review = total_nomatch = total_already_bound = 0
+    # Accused are counted apart from the extraction totals above: those are
+    # tied to `plan_summary`'s reconciliation over extracted names, and a
+    # court-record name is not an extracted name.
+    total_accused_bound = total_accused_review = total_accused_nomatch = 0
+    total_court_skips = 0
     bind_rows, review_rows, nomatch_rows = [], [], []
 
     for idx, case in enumerate(cases, 1):
@@ -1048,16 +1130,33 @@ def main(argv=None):
             continue
 
         for name, decision in plan.review:
-            review_rows.append({"slug": slug, "extracted": name,
+            review_rows.append({"slug": slug, "extracted": name, "role": "related",
                                 "reason": decision.reason, "score": decision.score,
                                 "candidates": [list(c) for c in decision.candidates]})
         for name, decision in plan.nomatch:
             nomatch_rows.append((name, slug, decision))
+        # Court-record accused share the review/no-match FILES -- a caseworker
+        # wants one queue, not two -- but carry `role` so the two sources stay
+        # tellable apart, and are tallied on their own counters.
+        for name, decision in plan.accused_review:
+            review_rows.append({"slug": slug, "extracted": name, "role": "accused",
+                                "reason": decision.reason, "score": decision.score,
+                                "candidates": [list(c) for c in decision.candidates]})
+        for name, decision in plan.accused_nomatch:
+            nomatch_rows.append((name, slug, decision))
+        for line in plan.court_skips:
+            total_court_skips += 1
+            log_event(logger, paths["events"], run_id=run_id, stage="entities",
+                      slug=slug, step="court-record", status="skipped", detail=line,
+                      level=logging.WARNING)
+            print(f"  NO COURT RECORD {slug}: {line}")
 
         counts = plan_summary(plan, valid_items)
         total_review += counts["review"]
         total_nomatch += counts["nomatch"]
         total_already_bound += counts["already_bound"]
+        total_accused_review += counts["accused_review"]
+        total_accused_nomatch += counts["accused_nomatch"]
 
         log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                   step="resolve", status="ok",
@@ -1088,15 +1187,24 @@ def main(argv=None):
                 print(f"  WOULD REFUSE {len(plan.bound)} bind(s) on {slug}: {refusal}")
                 continue
             total_bound += counts["bound"]
+            total_accused_bound += counts["accused_bound"]
             for name, decision, notes in plan.bound:
-                bind_rows.append({"slug": slug, "extracted": name,
+                bind_rows.append({"slug": slug, "extracted": name, "role": "related",
                                   "nes_id": decision.nes_id, "score": decision.score,
                                   "matched_name": decision.matched_name, "notes": notes,
                                   "written": False})
                 print(f"  WOULD BIND {name}  ->  {decision.nes_id}  "
                       f"(score {decision.score:.2f})")
+            for name, decision in plan.accused_bound:
+                bind_rows.append({"slug": slug, "extracted": name, "role": "accused",
+                                  "nes_id": decision.nes_id, "score": decision.score,
+                                  "matched_name": decision.matched_name, "notes": "",
+                                  "written": False})
+                print(f"  WOULD BIND (accused) {name}  ->  {decision.nes_id}  "
+                      f"(score {decision.score:.2f})")
             report.record(slug, "entities", "would-bind",
-                          f"{len(plan.bound)} entities would bind")
+                          f"{len(plan.bound)} related + {len(plan.accused_bound)} "
+                          "accused would bind")
             continue
 
         try:
@@ -1108,13 +1216,21 @@ def main(argv=None):
             continue
 
         total_bound += counts["bound"]
+        total_accused_bound += counts["accused_bound"]
         for name, decision, notes in plan.bound:
-            bind_rows.append({"slug": slug, "extracted": name,
+            bind_rows.append({"slug": slug, "extracted": name, "role": "related",
                               "nes_id": decision.nes_id, "score": decision.score,
                               "matched_name": decision.matched_name, "notes": notes,
                               "written": True})
             print(f"  BOUND {name}  ->  {decision.nes_id}")
-        report.record(slug, "entities", "bound", f"{len(plan.bound)} entities bound")
+        for name, decision in plan.accused_bound:
+            bind_rows.append({"slug": slug, "extracted": name, "role": "accused",
+                              "nes_id": decision.nes_id, "score": decision.score,
+                              "matched_name": decision.matched_name, "notes": "",
+                              "written": True})
+            print(f"  BOUND (accused) {name}  ->  {decision.nes_id}")
+        report.record(slug, "entities", "bound",
+                      f"{len(plan.bound)} related + {len(plan.accused_bound)} accused bound")
         log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                   step="write", status="ok", detail=f"{len(plan.bound)} bound")
 
@@ -1145,7 +1261,18 @@ def main(argv=None):
     print(f"  TOTAL reported for human review: {total_review}  -> {reports['review']}")
     print(f"  TOTAL with no NES match: {total_nomatch}  -> {reports['nomatch']}")
     print(f"  TOTAL already bound (nothing to write): {total_already_bound}")
-    if total_bound == 0:
+    # Accused stand apart from every total above: they are read from each case's
+    # NGM court record, not extracted, so they are neither in
+    # `total_entities_extracted` nor in the review/no-match reconciliation.
+    verb = "WOULD bind" if args.dry_run else "bound"
+    print(f"  ACCUSED from the court record -- {verb}: {total_accused_bound}, "
+          f"for review: {total_accused_review}, no NES match: "
+          f"{total_accused_nomatch}")
+    if total_court_skips:
+        print(f"  ACCUSED not attempted on {total_court_skips} case(s): no readable "
+              "court reference, so those cases show no accused because the record "
+              "could not be read -- not because there are no defendants.")
+    if total_bound == 0 and total_accused_bound == 0:
         if total_entities_extracted == 0:
             # Reachable from three separate skip gates -- the idempotency skip,
             # the prerequisite gate and the no-source gate -- plus an LLM that
