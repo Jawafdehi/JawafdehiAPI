@@ -1054,9 +1054,13 @@ def test_events_file_covers_start_and_extract_happy_path(
 #    fails closed -- an unreadable document (None/empty/non-dict, or an
 #    exception from `get_entity`) downgrades the BIND to REVIEW, never lets it
 #    survive.
-# 2. A `location`-typed extracted item must never be bound, regardless of what
-#    `resolve()` would say -- it goes straight to `plan.review` before any
-#    search happens, since binding scope is `related`-only by design.
+# 2. Binding is SECTION-SCOPED, not `related`-only. An extracted item binds into
+#    whatever section its own `relationship_type` names, for any of the nine the
+#    case API accepts -- so a `location`-typed item binds into `location`. Only an
+#    unrecognised section goes straight to `plan.review` before a search is spent,
+#    because there is no section to file it under. (This reverses the original
+#    brief, which refused every section but `related`; the scope was widened on
+#    request because the refusal cost recall.)
 # --------------------------------------------------------------------------
 
 ANKUR_IRI = "https://jawafdehi.org/entity/person/amkura-khatri-2de9b3"
@@ -1090,9 +1094,41 @@ def test_merge_preserves_existing_binds_and_their_order():
 
 
 def test_merge_never_overwrites_an_existing_bind_for_the_same_id():
+    # The existing bind and its human-written notes survive untouched. A second
+    # section for the same entity is APPENDED rather than replacing it -- the
+    # thing this test exists to prevent is losing "मूल", not gaining a row.
     current = [{"nes_id": ANKUR_IRI, "relationship_type": "accused", "notes": "मूल"}]
     merged = merge_entity_binds(
         current, [{"nes_id": ANKUR_IRI, "relationship_type": "related", "notes": "नयाँ"}])
+    assert merged[0] == current[0]
+
+
+def test_merge_keeps_two_sections_for_one_entity():
+    # Bind identity is the PAIR, matching the DB's
+    # `unique_case_entity_relationship_type` constraint over
+    # ("case", "nes_id", "relationship_type"). An organisation can legitimately be
+    # both where the events happened and a related party; keying the merge on
+    # `nes_id` alone silently dropped the second bind.
+    current = [{"nes_id": SURKHET_IRI, "relationship_type": "location", "notes": "क"}]
+    added = {"nes_id": SURKHET_IRI, "relationship_type": "related", "notes": "ख"}
+    merged = merge_entity_binds(current, [added])
+    assert merged == [current[0], added]
+
+
+def test_merge_is_still_idempotent_on_an_identical_pair():
+    # The pair key must not turn a re-run into a duplicate write.
+    current = [{"nes_id": ANKUR_IRI, "relationship_type": "related", "notes": "क"}]
+    merged = merge_entity_binds(
+        current, [{"nes_id": ANKUR_IRI, "relationship_type": "related", "notes": "ख"}])
+    assert merged == current
+
+
+def test_merge_treats_a_section_as_the_same_bind_regardless_of_case():
+    # The read path and a hand-built dict can disagree on casing; `bind_key`
+    # lowercases so 'Related' and 'related' are one bind, not two.
+    current = [{"nes_id": ANKUR_IRI, "relationship_type": "Related", "notes": "क"}]
+    merged = merge_entity_binds(
+        current, [{"nes_id": ANKUR_IRI, "relationship_type": "related", "notes": "ख"}])
     assert merged == current
 
 
@@ -1371,6 +1407,84 @@ def test_strict_mode_also_refuses_a_cross_script_only_match():
     assert plan.review[0][1].nes_id is None
 
 
+def test_one_entity_binds_into_two_sections_in_a_single_plan():
+    # The planner's `have` set is keyed on the pair too, so an extraction that
+    # names one entity in two sections plans both writes. Keyed on `nes_id` alone
+    # the second was dropped without appearing in any report.
+    case = {"slug": "case-two-sections", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"सुर्खेत जिल्ला": [SURKHET_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "location", "notes": "क"},
+        {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "related", "notes": "ख"}])
+
+    assert plan.action == "WOULD_PATCH"
+    assert [(i["nes_id"], i["relationship_type"]) for i in plan.patch_items] == [
+        (SURKHET_IRI, "location"), (SURKHET_IRI, "related")]
+    assert len(plan.bound) == 2
+
+
+def test_the_same_entity_and_section_twice_is_planned_once():
+    # Two extracted spellings resolving to one entity in one section is still a
+    # single bind -- the pair key must not let a duplicate through.
+    case = {"slug": "case-dupe", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"सुर्खेत जिल्ला": [SURKHET_CANDIDATE],
+                                  "सुर्खेत": [SURKHET_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "location", "notes": "क"},
+        {"entity_name": "सुर्खेत", "relationship_type": "location", "notes": "ख"}])
+
+    assert [i["nes_id"] for i in plan.patch_items] == [SURKHET_IRI]
+    assert len(plan.bound) == 1
+
+
+def test_an_accused_bind_never_escalates_an_already_characterised_entity():
+    # The most consequential bind this module can write, and the one it will not
+    # write on its own: the case already binds this person as `related`, and an
+    # `accused` bind would assert they are the subject of the case AND set
+    # outcome=charged. A human decides that, so it goes to review.
+    case = {"slug": "case-escalate", "state": "DRAFT", "entities": [
+        {"nes_id": ANKUR_IRI, "type": "related", "notes": "मानव-लिखित टिप्पणी"}]}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "accused", "notes": "क"}])
+
+    assert plan.action == "NOOP"
+    assert plan.bound == []
+    _name, decision, section = plan.review[0]
+    assert section == "accused"
+    assert "would escalate to 'accused'" in decision.reason
+    assert "'related'" in decision.reason          # names what the case already says
+    # The existing bind and its human note are untouched.
+    assert plan.patch_items == []
+
+
+def test_a_non_accused_section_does_join_an_already_characterised_entity():
+    # The other side of that guard: only `accused` is held back. A `location`
+    # bind alongside an existing `related` one is additive, not an accusation.
+    case = {"slug": "case-additive", "state": "DRAFT", "entities": [
+        {"nes_id": SURKHET_IRI, "type": "related", "notes": "क"}]}
+    api = _SearchStubApi([case], {"सुर्खेत जिल्ला": [SURKHET_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "location", "notes": "ख"}])
+
+    assert plan.action == "WOULD_PATCH"
+    assert [(i["nes_id"], i["relationship_type"]) for i in plan.patch_items] == [
+        (SURKHET_IRI, "related"), (SURKHET_IRI, "location")]
+
+
+def test_an_accused_bind_is_written_when_the_entity_is_new_to_the_case():
+    # The guard keys on an EXISTING characterisation, so a first-time accused
+    # bind is unaffected -- this is the ordinary path and must stay open.
+    case = {"slug": "case-first-accused", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "accused", "notes": "क"}])
+
+    assert plan.action == "WOULD_PATCH"
+    assert plan.patch_items == [{"nes_id": ANKUR_IRI, "relationship_type": "accused",
+                                 "notes": "क", "outcome": "charged"}]
+
+
 def test_each_review_row_reports_its_own_section():
     # One person, named in two sections by the same extraction -- a witness in a
     # case who is also alleged, which the prompt allows. The section is recorded on
@@ -1521,7 +1635,7 @@ def test_plan_still_binds_when_the_document_has_a_null_identifier():
     assert plan.review == []
 
 
-# --- Correction 2: a location-typed item never binds ---------------------
+# --- Correction 2: a location-typed item binds into the location section ---
 
 
 SURKHET_IRI = "https://jawafdehi.org/entity/location/district/surkhet"
@@ -1897,6 +2011,29 @@ def test_nomatch_report_ranks_by_how_many_cases_a_name_appears_in(tmp_path):
     assert text.index("जिल्ला शिक्षा कार्यालय, दाङ") < text.index("गुल्बा कोरी")
     assert "2" in text.splitlines()[text.splitlines().index(
         next(line for line in text.splitlines() if "दाङ" in line))]
+
+
+def test_nomatch_report_escapes_table_breaking_characters(tmp_path):
+    # Both cells hold text this module does not control -- an LLM-extracted name
+    # and an NES title. A literal pipe or a newline in either ends the cell early
+    # and shifts every column after it, so the row a caseworker is supposed to act
+    # on becomes unreadable. This report IS the queue.
+    from casework.entity_resolver import NO_MATCH as NM
+    from casework.entity_resolver import Decision
+
+    rows = [("मालपोत | कार्यालय", "case-a",
+             Decision(NM, None, 0.42, "जिल्ला\nकार्यालय", "no match", ()))]
+    out = tmp_path / "run.nomatch.md"
+    write_nomatch_report(out, rows)
+
+    row = next(line for line in out.read_text(encoding="utf-8").splitlines()
+               if "मालपोत" in line)
+    # Four columns means four separators plus the two bounding ones; an unescaped
+    # pipe or newline would change that count.
+    assert row.count("|") - row.count(r"\|") == 5
+    assert r"मालपोत \| कार्यालय" in row
+    assert "जिल्ला कार्यालय" in row      # the newline became a space
+    assert "\n" not in row
 
 
 def test_report_paths_share_the_run_log_stem(tmp_path):
