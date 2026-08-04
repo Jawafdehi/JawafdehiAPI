@@ -370,6 +370,64 @@ DETAIL = {
 }
 
 
+class TestSnippetKeepsTheOutcome:
+    """The teaser cannot state a verdict the snippet clamped away.
+
+    A description states the allegation first and the verdict last. Measured on
+    the published cases whose description exceeds the 3,000-char budget and
+    states an outcome: 34 of 52 state it ONLY beyond 3,000. `081-CR-0060` is the
+    case that surfaced it -- acquitted, सफाई at offset 5,100, and the generated
+    teaser read as a live accusation.
+    """
+
+    def _long(self, tail):
+        return dict(DETAIL, description=("क) अभियोगदावी। " * 400) + tail)
+
+    def test_a_late_outcome_is_spliced_in(self):
+        snippet = _snippet(self._long("\n### ग) विशेष अदालतको फैसलाको सार\nसफाई भएको।"))
+        assert "सफाई भएको।" in snippet
+        assert "[…]" in snippet, "the elision has to be visible to the model"
+        assert len(snippet) <= ec.DESCRIPTION_SNIPPET_BUDGET + 16
+
+    def test_a_headingless_outcome_is_still_found(self):
+        """Only 11 published descriptions use the ### ग) heading; most are plain
+        prose, so the vocabulary fallback carries the real load."""
+        snippet = _snippet(self._long("\nविशेष अदालतले प्रतिवादीलाई सफाई दिएको।"))
+        assert "सफाई" in snippet
+        assert "[…]" in snippet
+
+    def test_a_table_cell_reference_is_not_mistaken_for_the_heading(self):
+        """`081-CR-0060` carries "(ग), (घ) र (ङ) मा उल्लिखित सम्पत्ति" in a table
+        at offset 1,740. Splicing from there would present a table row as the
+        verdict."""
+        detail = dict(DETAIL, description=(
+            "क) सुरु। तालिका (ग), (घ) र (ङ) मा उल्लिखित सम्पत्ति। "
+            + ("भरण। " * 900)))
+        snippet = _snippet(detail)
+        assert "[…]" not in snippet, "no outcome exists, so nothing to splice"
+        assert len(snippet) == ec.DESCRIPTION_SNIPPET_BUDGET
+
+    def test_an_outcome_already_in_the_head_is_left_alone(self):
+        detail = dict(DETAIL, description="सफाई भएको। " + ("पछि। " * 900))
+        snippet = _snippet(detail)
+        assert "सफाई" in snippet
+        assert "[…]" not in snippet, "a plain clamp already keeps it"
+
+    def test_a_long_description_with_no_outcome_is_plainly_clamped(self):
+        snippet = _snippet(self._long("कुनै फैसला उल्लेख नभएको।".replace("फैसला", "निर्णय")))
+        assert "[…]" not in snippet
+        assert len(snippet) == ec.DESCRIPTION_SNIPPET_BUDGET
+
+    def test_a_short_description_is_returned_whole(self):
+        detail = dict(DETAIL, description="छोटो विवरण। सफाई भएको।")
+        assert _snippet(detail) == "छोटो विवरण। सफाई भएको।"
+
+    def test_the_prompt_requires_the_outcome_when_one_exists(self):
+        assert "STATE THE OUTCOME" in ec.SYSTEM_PROMPT
+        assert "सफाई" in ec.SYSTEM_PROMPT
+        assert "do not guess" in ec.SYSTEM_PROMPT
+
+
 class TestPromptAssembly:
     def test_the_court_number_reaches_the_model_uppercased(self):
         """All 50 PUBLISHED titles carrying a case number use `(081-CR-0060)`.

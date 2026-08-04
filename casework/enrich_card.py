@@ -104,6 +104,7 @@ Usage:
 
 import argparse
 import logging
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -179,6 +180,12 @@ SHORT_DESCRIPTION RULES (when asked for it):
   (who/what/how much) at a glance.
 - Plain prose: no court number, no markdown, no headings, no bullets.
 - Neutral and factual, grounded in the provided data.
+- STATE THE OUTCOME when the description reports one. If the case has been \
+decided — दोषी, सफाई, आंशिक सफाई, जरिवाना, कैद — say so, briefly, after the \
+allegation. A teaser that gives only the आरोप for a case that was already decided \
+is wrong by omission: readers take it as a live accusation. When the description \
+reports no verdict, say nothing about an outcome — do not guess, and do not write \
+"अनुसन्धान जारी" unless the description says so.
 
 OUTPUT FORMAT — return ONLY a single JSON object, no markdown fences, no prose.
 Include only the requested key(s); set an unrequested key to null:
@@ -224,10 +231,69 @@ def build_parser():
     return ap
 
 
+#: The verdict SECTION heading (`### ग) विशेष अदालतको फैसलाको सार`, the contract
+#: in `casework/enrich_description.py`). Line-anchored and required to name
+#: फैसला, because a bare `ग)` is also a list marker and a table cell reference --
+#: `081-CR-0060` carries "(ग), (घ) र (ङ) मा उल्लिखित सम्पत्ति" in a table at
+#: offset 1,740, and matching that would splice a random table row in as the
+#: outcome.
+_OUTCOME_HEADING_RE = re.compile(r"^#{0,4}[ \t]*ग\)[^\n]*फैसला[^\n]*$", re.MULTILINE)
+
+#: Fallback locator. Only 11 of the published descriptions actually follow the
+#: heading contract -- most are hand-written prose with no headings at all -- so
+#: a heading-only search finds the outcome in a small minority of the cases that
+#: have one. These are the words a Nepali verdict is stated in.
+_OUTCOME_WORD_RE = re.compile(r"(फैसला|सफाई|सफाइ|दोषी|ठहर|जरिवाना|कैद)")
+
+#: How much of the snippet budget is reserved for the verdict passage.
+OUTCOME_SLICE_CHARS = 1200
+
+
+def _outcome_offset(text):
+    """Where the verdict passage starts, or None when the text states no outcome.
+
+    Prefers the section heading (a clean boundary) and falls back to the first
+    outcome word, backing up to its line start so the slice does not begin
+    mid-sentence.
+    """
+    match = _OUTCOME_HEADING_RE.search(text) or _OUTCOME_WORD_RE.search(text)
+    if match is None:
+        return None
+    return text.rfind("\n", 0, match.start()) + 1
+
+
 def _snippet(detail):
-    """The description text fed to the prompt, or '(none)'."""
-    return (detail.get("description") or "").strip()[:DESCRIPTION_SNIPPET_BUDGET] \
-        or "(none)"
+    """The description text fed to the prompt, or '(none)'.
+
+    A HEAD CLAMP ALONE LOSES THE OUTCOME. A description states the allegation
+    first and the verdict last, so the outcome is structurally late. Measured
+    across the published cases whose description exceeds this budget and states
+    an outcome at all: **34 of 52 state it only beyond 3,000 characters**. So a
+    plain head clamp hides the verdict from the teaser on about two thirds of
+    decided cases, and no prompt rule can recover it -- the model cannot state
+    what it was never shown. The 2026-08-04 evaluation caught exactly that on
+    `081-CR-0060`, an acquitted case (सफाई at offset 5,100) whose generated
+    teaser read as a live accusation.
+
+    So when an outcome exists outside the head, the snippet becomes
+    head + elision + the verdict passage, inside the same total budget.
+    """
+    text = (detail.get("description") or "").strip()
+    if not text:
+        return "(none)"
+    if len(text) <= DESCRIPTION_SNIPPET_BUDGET:
+        return text
+
+    offset = _outcome_offset(text)
+    head_budget = DESCRIPTION_SNIPPET_BUDGET - OUTCOME_SLICE_CHARS
+    # Nothing to rescue when the text states no outcome, or when the outcome
+    # already sits inside the head the plain clamp would have kept anyway.
+    if offset is None or offset < head_budget:
+        return text[:DESCRIPTION_SNIPPET_BUDGET]
+
+    head = text[:head_budget].rstrip()
+    outcome = text[offset:offset + OUTCOME_SLICE_CHARS].rstrip()
+    return f"{head}\n\n[…]\n\n{outcome}"
 
 
 def _build_prompt(detail, number, need_title, need_short):

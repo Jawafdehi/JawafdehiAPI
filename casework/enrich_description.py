@@ -270,6 +270,35 @@ def _ordered_sources(chunks):
     return sorted(chunks, key=key)
 
 
+def _allocate_budget(sizes, budget):
+    """Chars each source may spend, max-min fair. Returns a list parallel to `sizes`.
+
+    WHY NOT GREEDY. The previous version walked the sources in PRIORITY order and
+    gave each one whatever was left, so one huge document consumed the whole
+    budget and every later source was dropped outright. Measured on
+    `081-CR-0138`: a 529,947-char charge sheet took all 60,000 and the case's
+    4,185-char press release -- 7% of the budget, and the most concise account of
+    the case that exists -- was dropped entirely. The model saw 11% of one
+    document and nothing of the other.
+
+    Allocating smallest-first fixes that without a magic reserve: each source
+    claims an equal share of what remains, and a source smaller than its share
+    returns the surplus to the pool for the larger ones. Small documents are
+    therefore never starved, and the big ones still absorb everything left over
+    -- with two sources and a 60,000 budget the press release takes its 4,185 and
+    the charge sheet gets the remaining 55,815.
+    """
+    allowance = [0] * len(sizes)
+    remaining = budget
+    # Ascending, so the smallest claims first and its surplus flows upward.
+    for n, i in enumerate(sorted(range(len(sizes)), key=lambda i: sizes[i])):
+        left = len(sizes) - n
+        take = min(sizes[i], remaining // left)
+        allowance[i] = take
+        remaining -= take
+    return allowance
+
+
 def _assemble_source_text(chunks, invoke_text, usage):
     """Build the source-document block within SOURCE_TEXT_BUDGET.
 
@@ -296,15 +325,15 @@ def _assemble_source_text(chunks, invoke_text, usage):
         prepared.append((mtype, iri, text))
 
     parts, fed = [], []
-    remaining = SOURCE_TEXT_BUDGET
-    for label, iri, text in prepared:
-        if remaining <= 0:
+    allowance = _allocate_budget([len(text) for _, _, text in prepared],
+                                SOURCE_TEXT_BUDGET)
+    for i, (label, iri, text) in enumerate(prepared):
+        if allowance[i] <= 0:
             log.warning("Source budget spent; dropped a %s source", label)
-            break
-        chunk = _clamp(text, remaining, label)
+            continue
+        chunk = _clamp(text, allowance[i], label)
         parts.append(f"[{label}]\n{chunk}")
         fed.append((label, iri, chunk))
-        remaining -= len(chunk)
     return "\n\n---\n\n".join(parts), fed
 
 

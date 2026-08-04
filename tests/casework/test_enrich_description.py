@@ -31,6 +31,7 @@ import pytest
 
 from casework import enrich_description as ed
 from casework.enrich_description import (
+    _allocate_budget,
     _assemble_source_text,
     _generate_description,
     _has_substantial_description,
@@ -447,16 +448,71 @@ class TestAssembleSourceText:
             [("charge_sheet", "iri-a", "अ" * 500)], lambda **kw: "", usage=None)
         assert len(fed[0][2]) == 100
 
-    def test_a_source_beyond_the_budget_is_dropped_with_a_warning(self, monkeypatch, caplog):
+    def test_a_tight_budget_now_truncates_both_sources_instead_of_dropping_one(
+        self, monkeypatch
+    ):
+        """Changed contract. The greedy version gave the whole budget to the
+        first source in PRIORITY order and dropped the rest; on `081-CR-0138`
+        that dropped the case's only press release so a charge sheet could take
+        all 60,000. Both sources now appear, each truncated to a fair share."""
         monkeypatch.setattr(ed, "SOURCE_TEXT_BUDGET", 10)
+        _, fed = _assemble_source_text(
+            [("charge_sheet", "iri-a", "अ" * 10),
+             ("press_release", "iri-p", "प" * 10)],
+            lambda **kw: "", usage=None,
+        )
+        assert [t for t, _, _ in fed] == ["charge_sheet", "press_release"]
+        assert [len(text) for _, _, text in fed] == [5, 5]
+
+    def test_a_source_with_no_allowance_left_is_dropped_with_a_warning(
+        self, monkeypatch, caplog
+    ):
+        """Still reachable, but only when there are more sources than budget."""
+        monkeypatch.setattr(ed, "SOURCE_TEXT_BUDGET", 1)
         with caplog.at_level(logging.WARNING, logger="casework.enrich_description"):
             _, fed = _assemble_source_text(
                 [("charge_sheet", "iri-a", "अ" * 10),
                  ("press_release", "iri-p", "प" * 10)],
                 lambda **kw: "", usage=None,
             )
-        assert [t for t, _, _ in fed] == ["charge_sheet"]
+        assert len(fed) == 1
         assert "budget spent" in caplog.text
+
+    def test_a_small_source_is_never_starved_by_a_huge_one(self, monkeypatch):
+        """The regression, at the real sizes from `081-CR-0138`: a 529,947-char
+        charge sheet used to consume all 60,000 and drop the 4,185-char press
+        release -- 7% of the budget, and the most concise account of the case."""
+        _, fed = _assemble_source_text(
+            [("press_release", "iri-p", "प" * 4185),
+             ("charge_sheet", "iri-a", "अ" * 529947)],
+            lambda **kw: "", usage=None,
+        )
+        got = {label: len(text) for label, _, text in fed}
+        assert got["press_release"] == 4185, "the small source must arrive whole"
+        assert got["charge_sheet"] == 55815
+        assert sum(got.values()) == ed.SOURCE_TEXT_BUDGET
+
+
+class TestAllocateBudget:
+    def test_the_small_source_takes_what_it_needs_and_the_rest_flows_up(self):
+        assert _allocate_budget([4185, 529947], 60000) == [4185, 55815]
+
+    def test_several_small_sources_all_survive_two_huge_ones(self):
+        assert _allocate_budget([500, 800, 1200, 400000, 300000, 2000], 60000) == \
+            [500, 800, 1200, 27750, 27750, 2000]
+
+    def test_sources_that_all_fit_are_untouched(self):
+        assert _allocate_budget([100, 200, 300], 60000) == [100, 200, 300]
+
+    def test_equal_sources_split_evenly(self):
+        assert _allocate_budget([1000, 1000, 1000], 300) == [100, 100, 100]
+
+    def test_no_sources_is_no_allocation(self):
+        assert _allocate_budget([], 60000) == []
+
+    def test_the_allocation_never_exceeds_the_budget(self):
+        for sizes in ([10] * 7, [1, 999999], [50000, 50000], [0, 100]):
+            assert sum(_allocate_budget(sizes, 60000)) <= 60000
 
 
 # --------------------------------------------------------------------------
