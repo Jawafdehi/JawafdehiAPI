@@ -246,8 +246,106 @@ class CaseEntityValidationMixin:
         return cleaned
 
 
+class CaseWriteFieldsSerializer(serializers.Serializer):
+    """The 17 field declarations and 2 normalizers common to create and PATCH.
+
+    Must subclass `serializers.Serializer`: DRF collects declared fields in
+    `SerializerMetaclass`, reading `_declared_fields` off each base, so fields
+    declared on a plain non-Serializer mixin are never collected at all and
+    silently disappear from the subclasses.
+
+    Field ORDER does change as a result. `_get_declared_fields` returns
+    ``dict(base_fields + fields)``, so these 17 now come first and each
+    subclass's own declarations follow:
+
+        create: title…bigo, case_type, state, alleged_entities, related_entities
+        PATCH : title…bigo, state, case_type, entities
+
+    Previously `case_type` led on create and sat 9th on PATCH. This is
+    positional only — the same field names with the same types, validators and
+    required/allow_null/default flags, verified field-by-field against the
+    pre-refactor serializers. JSON object key order carries no meaning for
+    request parsing or DRF validation; the visible effect is the property order
+    in the generated OpenAPI schema.
+
+    `state` stays declared per-subclass because the two genuinely differ: create
+    defaults it to ``CaseState.DRAFT``, PATCH leaves it absent (`empty`).
+    """
+
+    title = serializers.CharField(max_length=200)
+    short_description = serializers.CharField(required=False, allow_blank=True)
+    description = serializers.CharField(required=False, allow_blank=True)
+    thumbnail_url = serializers.URLField(
+        required=False, allow_blank=True, max_length=500
+    )
+    banner_url = serializers.URLField(required=False, allow_blank=True, max_length=500)
+    case_start_date = serializers.DateField(required=False, allow_null=True)
+    case_end_date = serializers.DateField(required=False, allow_null=True)
+    tags = serializers.ListField(child=serializers.CharField(), required=False)
+    key_allegations = serializers.ListField(
+        child=serializers.CharField(), required=False
+    )
+    timeline = TimelineItemSerializer(many=True, required=False)
+    evidence = EvidenceItemSerializer(many=True, required=False)
+    # Internal casework notes (Case.notes TextField; no max_length). Casework-only
+    # — read gating stays in the read serializer's SerializerMethodField (BB-04);
+    # this only makes the field writable via PATCH (BB-28).
+    # NOT ``allow_null``: the model column is NOT NULL (``default=""``), so a JSON
+    # ``null`` can't be stored — clear notes by sending "" (allow_blank). A literal
+    # ``null`` is rejected (422) rather than silently coerced, matching the column.
+    notes = serializers.CharField(required=False, allow_blank=True)
+    # Public notes (Case.public_notes TextField, markdown): attribution + edit
+    # dates. Same NOT-NULL/default="" contract as ``notes`` — allow_blank to
+    # clear, NOT allow_null. Returned publicly by the read serializer.
+    public_notes = serializers.CharField(required=False, allow_blank=True)
+    slug = serializers.SlugField(
+        max_length=50,
+        required=False,
+        allow_null=True,
+        validators=[validate_slug],
+    )
+    court_cases = serializers.ListField(
+        child=serializers.CharField(),
+        required=False,
+        allow_null=True,
+        help_text=(
+            "Court-case references: canonical @id IRIs "
+            "(https://jawafdehi.org/courtcase/<court>/<case_number>) only"
+        ),
+    )
+    missing_details = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        allow_null=True,
+    )
+    bigo = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        min_value=-9223372036854775808,
+        max_value=9223372036854775807,
+    )
+
+    def validate_missing_details(self, value):
+        """Normalize empty/whitespace missing_details to None."""
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        return value
+
+    def validate_slug(self, value):
+        """Normalize empty/whitespace slugs to None.
+
+        Slug immutability on PATCH is enforced at the view layer via
+        ``BLOCKED_PATH_PREFIXES``, not here.
+        """
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        return value
+
+
 class CaseCreateSerializer(
-    CourtCaseRefsValidationMixin, CaseEntityValidationMixin, serializers.Serializer
+    CourtCaseRefsValidationMixin,
+    CaseEntityValidationMixin,
+    CaseWriteFieldsSerializer,
 ):
     case_type = serializers.ChoiceField(choices=CaseType.choices)
     state = serializers.ChoiceField(
@@ -255,141 +353,15 @@ class CaseCreateSerializer(
         required=False,
         default=CaseState.DRAFT,
     )
-    title = serializers.CharField(max_length=200)
-    short_description = serializers.CharField(required=False, allow_blank=True)
-    description = serializers.CharField(required=False, allow_blank=True)
-    thumbnail_url = serializers.URLField(
-        required=False, allow_blank=True, max_length=500
-    )
-    banner_url = serializers.URLField(required=False, allow_blank=True, max_length=500)
-    case_start_date = serializers.DateField(required=False, allow_null=True)
-    case_end_date = serializers.DateField(required=False, allow_null=True)
-    tags = serializers.ListField(child=serializers.CharField(), required=False)
-    key_allegations = serializers.ListField(
-        child=serializers.CharField(), required=False
-    )
-    timeline = TimelineItemSerializer(many=True, required=False)
-    evidence = EvidenceItemSerializer(many=True, required=False)
-    notes = serializers.CharField(required=False, allow_blank=True)
-    # Public notes (Case.public_notes TextField, markdown): attribution + edit
-    # dates. Same NOT-NULL/default="" contract as ``notes`` — allow_blank to
-    # clear, NOT allow_null. Returned publicly by the read serializer.
-    public_notes = serializers.CharField(required=False, allow_blank=True)
     alleged_entities = serializers.ListField(
         child=serializers.CharField(), required=False
     )
     related_entities = serializers.ListField(
         child=serializers.CharField(), required=False
     )
-    slug = serializers.SlugField(
-        max_length=50,
-        required=False,
-        allow_null=True,
-        validators=[validate_slug],
-    )
-    court_cases = serializers.ListField(
-        child=serializers.CharField(),
-        required=False,
-        allow_null=True,
-        help_text=(
-            "Court-case references: canonical @id IRIs "
-            "(https://jawafdehi.org/courtcase/<court>/<case_number>) only"
-        ),
-    )
-    missing_details = serializers.CharField(
-        required=False,
-        allow_blank=True,
-        allow_null=True,
-    )
-    bigo = serializers.IntegerField(
-        required=False,
-        allow_null=True,
-        min_value=-9223372036854775808,
-        max_value=9223372036854775807,
-    )
-
-    def validate_missing_details(self, value):
-        """Normalize empty/whitespace missing_details to None."""
-        if value is None or (isinstance(value, str) and not value.strip()):
-            return None
-        return value
-
-    def validate_slug(self, value):
-        """Normalize empty/whitespace slugs to None."""
-        if value is None or (isinstance(value, str) and not value.strip()):
-            return None
-        return value
 
 
-class CasePatchSerializer(CourtCaseRefsValidationMixin, serializers.Serializer):
+class CasePatchSerializer(CourtCaseRefsValidationMixin, CaseWriteFieldsSerializer):
     state = serializers.ChoiceField(choices=CaseState.choices, required=False)
-    title = serializers.CharField(max_length=200)
-    short_description = serializers.CharField(required=False, allow_blank=True)
-    description = serializers.CharField(required=False, allow_blank=True)
-    thumbnail_url = serializers.URLField(
-        required=False, allow_blank=True, max_length=500
-    )
-    banner_url = serializers.URLField(required=False, allow_blank=True, max_length=500)
-    case_start_date = serializers.DateField(required=False, allow_null=True)
-    case_end_date = serializers.DateField(required=False, allow_null=True)
     case_type = serializers.ChoiceField(choices=CaseType.choices)
-    tags = serializers.ListField(child=serializers.CharField(), required=False)
-    key_allegations = serializers.ListField(
-        child=serializers.CharField(), required=False
-    )
-    timeline = TimelineItemSerializer(many=True, required=False)
-    evidence = EvidenceItemSerializer(many=True, required=False)
     entities = EntityPatchItemSerializer(many=True, required=False)
-    # Internal casework notes (Case.notes TextField; no max_length). Casework-only
-    # — read gating stays in the read serializer's SerializerMethodField (BB-04);
-    # this only makes the field writable via PATCH (BB-28). Mirrors the create path.
-    # NOT ``allow_null``: the model column is NOT NULL (``default=""``), so a JSON
-    # ``null`` can't be stored — clear notes by sending "" (allow_blank). A literal
-    # ``null`` is rejected (422) rather than silently coerced, matching the column.
-    notes = serializers.CharField(required=False, allow_blank=True)
-    # Public notes (Case.public_notes) — see CaseCreateSerializer for rationale.
-    # Same NOT-NULL/default="" contract as ``notes``: allow_blank, not allow_null.
-    public_notes = serializers.CharField(required=False, allow_blank=True)
-    slug = serializers.SlugField(
-        max_length=50,
-        required=False,
-        allow_null=True,
-        validators=[validate_slug],
-    )
-    court_cases = serializers.ListField(
-        child=serializers.CharField(),
-        required=False,
-        allow_null=True,
-        help_text=(
-            "Court-case references: canonical @id IRIs "
-            "(https://jawafdehi.org/courtcase/<court>/<case_number>) only"
-        ),
-    )
-    missing_details = serializers.CharField(
-        required=False,
-        allow_blank=True,
-        allow_null=True,
-    )
-    bigo = serializers.IntegerField(
-        required=False,
-        allow_null=True,
-        min_value=-9223372036854775808,
-        max_value=9223372036854775807,
-    )
-
-    def validate_missing_details(self, value):
-        """Normalize empty/whitespace missing_details to None."""
-        if value is None or (isinstance(value, str) and not value.strip()):
-            return None
-        return value
-
-    def validate_slug(self, value):
-        """
-        Validate slug for PATCH operations.
-
-        Normalize empty/whitespace slugs to None.
-        Note: Slug immutability is enforced at the view layer via BLOCKED_PATH_PREFIXES.
-        """
-        if value is None or (isinstance(value, str) and not value.strip()):
-            return None
-        return value
