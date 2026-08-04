@@ -117,6 +117,109 @@ def _safe_resolve_entities(case: Any) -> list[dict[str, Any]]:
         return []
 
 
+def _key_allegations(case: Any) -> list[str]:
+    """The case's non-empty allegation strings, stripped."""
+    return [
+        a.strip()
+        for a in (getattr(case, "key_allegations", None) or [])
+        if isinstance(a, str) and a.strip()
+    ]
+
+
+def _build_body(case: Any, short: str | None) -> str | None:
+    """Free-text recall body: description, then allegations, then short description."""
+    body_parts: list[str] = []
+    description = getattr(case, "description", None)
+    if description and description.strip():
+        body_parts.append(description.strip())
+    body_parts.extend(_key_allegations(case))
+    if short and short.strip():
+        body_parts.append(short.strip())
+    return "\n".join(body_parts) or None
+
+
+def _build_identifiers(case: Any, iri: str | None, slug: str | None) -> list[str]:
+    """Exact-match identifiers: the IRI, the slug, and every court-case ref.
+
+    Court-case refs are canonical @id IRIs; also carry the bare case number in
+    both casings. NB: ``identifiers`` is a plain keyword field that the unified
+    free-text query does NOT search — it exists for exact-match consumers, so
+    mirror the NGM courtcase docs' verbatim-UPPERCASE number alongside the IRI's
+    lowercase one to keep cross-doc lookups consistent.
+    """
+    identifiers: list[str] = [i for i in (iri, slug) if i]
+    for ref in getattr(case, "court_cases", None) or []:
+        if not isinstance(ref, str) or not ref:
+            continue
+        candidates = [ref]
+        parsed = parse_courtcase_ref(ref)
+        if parsed:
+            candidates.append(parsed[1])
+            candidates.append(parsed[1].upper())
+        for candidate in candidates:
+            if candidate not in identifiers:
+                identifiers.append(candidate)
+    return identifiers
+
+
+def _apply_dates(doc: dict[str, Any], case: Any) -> None:
+    """Set ``date``/``created_at``/``updated_at``, each only when available.
+
+    ``date`` prefers the case start date and falls back to the creation date, so
+    a case with no explicit start is still sortable.
+    """
+    start = getattr(case, "case_start_date", None)
+    created = getattr(case, "created_at", None)
+    if start is not None:
+        doc["date"] = _iso(start)
+    elif created is not None and hasattr(created, "date"):
+        doc["date"] = created.date().isoformat()
+    if created is not None:
+        doc["created_at"] = _iso(created)
+    updated = getattr(case, "updated_at", None)
+    if updated is not None:
+        doc["updated_at"] = _iso(updated)
+
+
+def _build_card(
+    case: Any,
+    *,
+    slug: str | None,
+    title: str,
+    short: str | None,
+    tags: list[str],
+    case_type: Any,
+    case_status: str,
+    entities: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Everything the SPA case card/list renders, denormalized.
+
+    Lives under ``raw`` (mapping ``enabled: false``) — stored + returned, never
+    searched or faceted. Deliberately self-contained: the SPA reads the whole
+    card off one hit, with no follow-up call to /api/cases/{slug}/.
+    """
+    return {
+        "slug": slug,
+        "title": title,
+        "short_description": short.strip() if short and short.strip() else None,
+        "key_allegations": _key_allegations(case),
+        "tags": tags,
+        "case_type": case_type,
+        "status": case_status,
+        "case_start_date": _iso(getattr(case, "case_start_date", None)),
+        "case_end_date": _iso(getattr(case, "case_end_date", None)),
+        "bigo": getattr(case, "bigo", None),
+        "thumbnail_url": getattr(case, "thumbnail_url", None),
+        "banner_url": getattr(case, "banner_url", None),
+        "timeline": [
+            entry
+            for entry in (getattr(case, "timeline", None) or [])
+            if isinstance(entry, dict)
+        ],
+        "entities": list(entities or []),
+    }
+
+
 def build_doc(case: Any, *, entities: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Map a published ``Case`` to the common index doc. Pure: no OpenSearch.
 
@@ -129,17 +232,8 @@ def build_doc(case: Any, *, entities: list[dict[str, Any]] | None = None) -> dic
     title = getattr(case, "title", "") or ""
     title_ne, title_en = name_to_titles(title)
 
-    body_parts: list[str] = []
-    description = getattr(case, "description", None)
-    if description and description.strip():
-        body_parts.append(description.strip())
-    for allegation in getattr(case, "key_allegations", None) or []:
-        if isinstance(allegation, str) and allegation.strip():
-            body_parts.append(allegation.strip())
     short = getattr(case, "short_description", None)
-    if short and short.strip():
-        body_parts.append(short.strip())
-    body = "\n".join(body_parts) or None
+    body = _build_body(case, short)
 
     tags = [t for t in (getattr(case, "tags", None) or []) if isinstance(t, str)]
     keywords = list(tags)
@@ -148,23 +242,7 @@ def build_doc(case: Any, *, entities: list[dict[str, Any]] | None = None) -> dic
         keywords.append(case_type)
 
     slug = getattr(case, "slug", None)
-    identifiers: list[str] = [i for i in (iri, slug) if i]
-    # Court-case refs are canonical @id IRIs; also carry the bare case number
-    # in both casings. NB: ``identifiers`` is a plain keyword field that the
-    # unified free-text query does NOT search — it exists for exact-match
-    # consumers, so mirror the NGM courtcase docs' verbatim-UPPERCASE number
-    # alongside the IRI's lowercase one to keep cross-doc lookups consistent.
-    for ref in getattr(case, "court_cases", None) or []:
-        if not isinstance(ref, str) or not ref:
-            continue
-        candidates = [ref]
-        parsed = parse_courtcase_ref(ref)
-        if parsed:
-            candidates.append(parsed[1])
-            candidates.append(parsed[1].upper())
-        for candidate in candidates:
-            if candidate not in identifiers:
-                identifiers.append(candidate)
+    identifiers = _build_identifiers(case, iri, slug)
 
     doc: dict[str, Any] = {
         "iri": iri,
@@ -194,17 +272,7 @@ def build_doc(case: Any, *, entities: list[dict[str, Any]] | None = None) -> dic
     if case_type and isinstance(case_type, str):
         doc["case_type"] = case_type.upper()
 
-    start = getattr(case, "case_start_date", None)
-    created = getattr(case, "created_at", None)
-    if start is not None:
-        doc["date"] = _iso(start)
-    elif created is not None and hasattr(created, "date"):
-        doc["date"] = created.date().isoformat()
-    if created is not None:
-        doc["created_at"] = _iso(created)
-    updated = getattr(case, "updated_at", None)
-    if updated is not None:
-        doc["updated_at"] = _iso(updated)
+    _apply_dates(doc, case)
 
     # Coarse lifecycle as a dedicated indexed keyword so the unified search can
     # facet/filter cases on it. Deliberately NOT the generic ``status`` field —
@@ -216,34 +284,16 @@ def build_doc(case: Any, *, entities: list[dict[str, Any]] | None = None) -> dic
     # (the SPA's non-card fallback for a hit's lifecycle).
     doc["raw"]["case_status"] = case_status
 
-    # Card payload: everything the SPA case card/list renders, denormalized so a
-    # search hit needs no follow-up call to /api/cases/{slug}/. Lives under ``raw``
-    # (mapping ``enabled: false``) — stored + returned, never searched or faceted.
-    # Deliberately self-contained: the SPA reads the whole card off one hit.
-    doc["raw"]["card"] = {
-        "slug": slug,
-        "title": title,
-        "short_description": short.strip() if short and short.strip() else None,
-        "key_allegations": [
-            a.strip()
-            for a in (getattr(case, "key_allegations", None) or [])
-            if isinstance(a, str) and a.strip()
-        ],
-        "tags": tags,
-        "case_type": case_type,
-        "status": case_status,
-        "case_start_date": _iso(getattr(case, "case_start_date", None)),
-        "case_end_date": _iso(getattr(case, "case_end_date", None)),
-        "bigo": getattr(case, "bigo", None),
-        "thumbnail_url": getattr(case, "thumbnail_url", None),
-        "banner_url": getattr(case, "banner_url", None),
-        "timeline": [
-            entry
-            for entry in (getattr(case, "timeline", None) or [])
-            if isinstance(entry, dict)
-        ],
-        "entities": list(entities or []),
-    }
+    doc["raw"]["card"] = _build_card(
+        case,
+        slug=slug,
+        title=title,
+        short=short,
+        tags=tags,
+        case_type=case_type,
+        case_status=case_status,
+        entities=entities,
+    )
     return doc
 
 
