@@ -371,10 +371,24 @@ DETAIL = {
 
 
 class TestPromptAssembly:
+    def test_the_court_number_reaches_the_model_uppercased(self):
+        """All 50 PUBLISHED titles carrying a case number use `(081-CR-0060)`.
+
+        `court_number()` reads the lowercase canonical IRI, and the model copies
+        whatever it is given, so the lowercase form shipped `(081-cr-0060)` on 2
+        of 5 cases in the 2026-08-04 evaluation. `validate_title` compares
+        case-insensitively and cannot catch it.
+        """
+        prompt = _build_prompt(DETAIL, "081-cr-0091", True, True)
+        assert "081-CR-0091" in prompt
+        assert "081-cr-0091" not in prompt
+
     def test_the_prompt_carries_every_context_block(self):
         content = _build_prompt(DETAIL, "081-cr-0091", True, True)
         assert STUB_TITLE in content
-        assert "081-cr-0091" in content
+        # Uppercased on the way in -- see
+        # test_the_court_number_reaches_the_model_uppercased.
+        assert "081-CR-0091" in content
         assert "330,000,000" in content
         assert "ठेक्कामा मिलेमतो" in content
         assert "[accused] कमल राज गौतम" in content

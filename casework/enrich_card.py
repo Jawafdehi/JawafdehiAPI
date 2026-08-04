@@ -241,7 +241,14 @@ def _build_prompt(detail, number, need_title, need_short):
     return USER_PROMPT.format(
         request_note=request_note,
         current_title=detail.get("title") or "",
-        court_number=number or "(unknown)",
+        # UPPERCASED. The model copies this string into the title verbatim, and
+        # `court_number()` reads it off the canonical IRI, which is lowercase
+        # (`.../courtcase/special/081-cr-0060`). Feeding the lowercase form
+        # produced public headlines ending in `(081-cr-0060)` on 2 of 5 cases in
+        # the 2026-08-04 evaluation, against 50 of 50 PUBLISHED titles that use
+        # `(081-CR-0060)`. `validate_title` compares case-insensitively, so
+        # nothing rejected it -- the only fix is to hand the model the right form.
+        court_number=(number or "").upper() or "(unknown)",
         bigo=format_bigo(detail.get("bigo")),
         key_allegations=format_list(detail.get("key_allegations")),
         entities=format_entities(detail.get("entities")),
@@ -383,7 +390,7 @@ def _write_fields(ctx, accepted):
     a reachable state.
     """
     if not accepted:
-        return []
+        return
 
     if ctx.dry_run:
         for field, current, value in accepted:
@@ -391,7 +398,7 @@ def _write_fields(ctx, accepted):
             log_event(ctx.logger, ctx.events_path, run_id=ctx.run_id,
                       stage="card", slug=ctx.slug, step=f"write:{field}",
                       status="would-enrich", detail=f"{field}={value}")
-        return []
+        return
 
     try:
         ctx.api.patch_fields(
@@ -404,14 +411,13 @@ def _write_fields(ctx, accepted):
             log_event(ctx.logger, ctx.events_path, run_id=ctx.run_id,
                       stage="card", slug=ctx.slug, step=f"write:{field}",
                       status="error", detail=str(exc), level=logging.ERROR)
-        return []
+        return
 
     for field, current, value in accepted:
         _record(ctx, field, current, "enriched", value, value)
         log_event(ctx.logger, ctx.events_path, run_id=ctx.run_id, stage="card",
                   slug=ctx.slug, step=f"write:{field}", status="enriched",
                   detail=f"{field}={value}")
-    return [f for f, _, _ in accepted]
 
 
 def build_api(args):

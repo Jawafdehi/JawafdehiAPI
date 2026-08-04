@@ -59,6 +59,15 @@ def test_patch_fields_makes_no_request_when_there_is_nothing_to_write(monkeypatc
     assert api.patch_fields("case-x", []) == {}
 
 
+@pytest.mark.parametrize("path", ["evidence", "entities"])
+def test_patch_fields_refuses_the_whole_list_paths(path):
+    """`replace_list` documents the merge-first contract for these; letting them
+    through here would perform the same destructive replace without it."""
+    api = CaseworkApi("http://127.0.0.1:48010", basic=("u", "p"))
+    with pytest.raises(ValueError, match="whole-list path"):
+        api.patch_fields("case-x", [("title", "शीर्षक"), (path, [])])
+
+
 def test_patch_fields_sends_one_conditional_request_for_both_fields(monkeypatch):
     """The regression this helper exists for: two `patch_field` calls take a 412
     on the second, because the first one moved the ETag."""

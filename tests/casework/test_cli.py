@@ -295,6 +295,33 @@ def test_configure_run_logging_uses_env_var_for_default_log_dir(monkeypatch, tmp
         _cleanup_logger(stage)
 
 
+def test_api_token_defaults_to_the_environment(monkeypatch):
+    """`basic_auth_from_env`'s error text tells operators to set
+    JAWAFDEHI_API_TOKEN, and the documented production invocation exports it.
+    Without this default, following that instruction failed with the very
+    message that gave it."""
+    monkeypatch.setenv("JAWAFDEHI_API_TOKEN", "eyJ-token")
+    parser = argparse.ArgumentParser()
+    add_common_args(parser)
+    assert parser.parse_args([]).api_token == "eyJ-token"
+
+
+def test_an_explicit_api_token_flag_wins_over_the_environment(monkeypatch):
+    monkeypatch.setenv("JAWAFDEHI_API_TOKEN", "from-env")
+    parser = argparse.ArgumentParser()
+    add_common_args(parser)
+    assert parser.parse_args(["--api-token", "from-flag"]).api_token == "from-flag"
+
+
+def test_api_token_is_empty_when_unset(monkeypatch):
+    """Empty, not None -- `build_api` branches on truthiness to fall back to
+    local Basic auth."""
+    monkeypatch.delenv("JAWAFDEHI_API_TOKEN", raising=False)
+    parser = argparse.ArgumentParser()
+    add_common_args(parser)
+    assert parser.parse_args([]).api_token == ""
+
+
 def test_configure_run_logging_falls_back_to_repo_root_work_dir(monkeypatch, tmp_path):
     import casework.common.cli as cli_module
 

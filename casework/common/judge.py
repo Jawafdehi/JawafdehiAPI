@@ -1,8 +1,11 @@
 """The cheap-model adequacy gate: is this field value real, or a placeholder?
 
-Ported VERBATIM from the deleted `casework/common.py` (donor commit `0321a85`,
+Ported from the deleted `casework/common.py` (donor commit `0321a85`,
 `judge_description_adequacy` / `_parse_judge_verdict` / the `_JUDGE_*`
-constants).
+constants) with ONE deviation: the output budget is 2000, not the donor's 300.
+See `_JUDGE_MAX_TOKENS` for the measurement that forced it. Everything else --
+the prompt, the parse, the fail-toward-regenerating default, the 15-character
+floor -- is the donor's.
 
 WHY A MODEL AND NOT A REGEX. The thing being detected is a template stub, and
 the stubs on real data are not blank -- 2,666 of 2,918 DRAFT cases carry a

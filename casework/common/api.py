@@ -300,6 +300,17 @@ class CaseworkApi:
         cannot work. Returns the server's response body, or `{}` when `pairs` is
         empty (no request is made).
         """
+        pairs = list(pairs)
+        # The whole-list paths are routed to `replace_list` on purpose: they are
+        # DESTRUCTIVE replaces that require the caller to have merged the full
+        # list first, and that contract is documented there, not here. Without
+        # this check, `patch_fields(slug, [("evidence", [...])])` would perform
+        # the same destructive replace while skipping the guard.
+        for field, _ in pairs:
+            if field in WHOLE_LIST_PATHS:
+                raise ValueError(
+                    f"{field} is a whole-list path -- use replace_list, which "
+                    "documents the merge-first contract")
         ops = build_replace_ops(pairs)
         if not ops:
             return {}
