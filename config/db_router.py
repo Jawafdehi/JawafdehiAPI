@@ -132,9 +132,7 @@ class ServiceDatabaseRouter:
         """
         db1 = _db_for_label(obj1._meta.app_label)
         db2 = _db_for_label(obj2._meta.app_label)
-        if db1 == db2:
-            return True
-        return False
+        return db1 == db2
 
     def allow_migrate(self, db, app_label, model_name=None, **hints):
         """Each app's tables are created ONLY in that app's database.

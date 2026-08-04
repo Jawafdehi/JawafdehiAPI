@@ -61,10 +61,9 @@ def fix_parenthesis_spacing(text: object) -> str:
     s = normalize_whitespace(text)
     if not s:
         return s
-    s = re.sub(r"(\S)\(", r"\1 (", s)
-    s = re.sub(r"\(\s+", "(", s)
-    s = re.sub(r"\s+\)", ")", s)
-    return s
+    s = re.sub(r"(\S)\(", r"\1 (", s)  # ensure a space before "("
+    s = re.sub(r"\(\s+", "(", s)  # drop space just inside "("
+    return re.sub(r"\s+\)", ")", s)  # drop space just before ")"
 
 
 def coerce_count(value: object) -> int | None:

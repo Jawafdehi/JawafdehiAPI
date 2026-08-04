@@ -126,11 +126,8 @@ class TimelineListField(models.JSONField):
                 )
 
             # Validate description if present (optional field)
-            if "description" in entry:
-                if not isinstance(entry["description"], str):
-                    raise ValidationError(
-                        f"Timeline description must be a string: {entry}"
-                    )
+            if "description" in entry and not isinstance(entry["description"], str):
+                raise ValidationError(f"Timeline description must be a string: {entry}")
 
             # Validate Bikram Sambat dates if present (optional, shape-checked
             # only — see _BS_DATE_RE)
