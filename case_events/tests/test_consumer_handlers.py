@@ -495,6 +495,49 @@ class TestProposalBuilder:
         }
         assert declared == set(handlers._SOURCE_KIND_BY_SUBJECT)
 
+    def test_the_unproduced_subjects_are_real_subjects_with_a_stated_reason(self):
+        """`UNPRODUCED` is documentation, and documentation that drifts is worse
+        than none — a stale entry would claim a producer is missing after someone
+        built it, or name a subject that no longer exists."""
+        declared = {
+            value
+            for name, value in vars(subjects).items()
+            if name.startswith("SIGNAL_") and isinstance(value, str)
+        }
+        assert set(subjects.UNPRODUCED) <= declared
+        for subject, reason in subjects.UNPRODUCED.items():
+            assert len(reason) > 40, f"{subject} needs a reason, not a label"
+
+    def test_a_subject_listed_as_unproduced_really_has_no_producer(self):
+        """The claim `UNPRODUCED` makes, checked against the code rather than
+        trusted. A subject someone wired up while leaving the note behind is
+        exactly the drift this guards.
+
+        Parsed with ``ast`` rather than grepped, and that distinction IS the test:
+        a substring search matches the comment in ``producers/dockets.py`` that
+        explains why ``status.changed`` cannot be emitted, and so reports a
+        producer that does not exist. This failed exactly that way when first
+        written. ``ast`` sees ``subjects.X`` attribute access and never sees a
+        comment.
+        """
+        import ast
+        import pathlib
+
+        producers = pathlib.Path(subjects.__file__).parent / "producers"
+        referenced = set()
+        for path in producers.glob("*.py"):
+            for node in ast.walk(ast.parse(path.read_text())):
+                if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                    if node.value.id == "subjects":
+                        referenced.add(node.attr)
+
+        for name, value in vars(subjects).items():
+            if name.startswith("SIGNAL_") and value in subjects.UNPRODUCED:
+                assert name not in referenced, f"{name} has a producer now; drop it from UNPRODUCED"
+
+        # The converse, so the guard cannot pass by finding nothing at all.
+        assert "SIGNAL_DOCKET_HEARING_ADDED" in referenced
+
     @pytest.mark.parametrize("broken", [{"case_id": None}, {"case_id": 0}])
     def test_an_envelope_with_no_case_is_poison_not_a_retry(self, broken):
         case = make_case()

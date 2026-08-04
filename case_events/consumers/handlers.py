@@ -394,19 +394,26 @@ def _source_kind_for(subject: str) -> str:
 def handle_notifier(envelope: dict, context) -> None:
     """Tell a caseworker that a proposal needs them, or that one was decided.
 
-    **The delivery channel is not chosen yet, and this does not invent one.**
-    Outbound mail from this application is currently disabled, and picking
-    between mail, the SPA's own queue badge and a chat ping is a product
-    decision rather than a plumbing one. So this emits one structured event per
-    decision and no more.
+    Two outputs, and the order is deliberate. The structured log line comes FIRST
+    and unconditionally: it is the record that a transition happened, it answers
+    "did anyone ever see this?", and it must not depend on an external service
+    being reachable. The webhook is best-effort on top of it.
 
-    That is deliberately not a placeholder that does nothing: the queue UI is
-    already the primary surface, so the useful thing a notifier adds today is a
-    single greppable line per proposal lifecycle transition — which is what a
-    "did anyone ever see this?" question needs and does not currently have.
-    Wiring a real channel means replacing the body of this function and nothing
-    else, because the subscription, the retries and the DLQ are already here.
+    **Mail was considered and ruled out.** Outbound mail from this application is
+    disabled, and enabling it for automated per-proposal messages is a larger
+    decision than this needs. A webhook reaches a channel people already watch and
+    costs one POST.
+
+    **What that POST may carry is constrained** — see :mod:`case_events.notify`.
+    The short version: a PENDING proposal is unreviewed model output about named
+    individuals, so the notification links to it rather than quoting it.
+
+    A webhook failure is swallowed, never raised. Raising would redeliver the
+    message, and redelivery would re-notify rather than re-do anything useful: the
+    proposal row already exists and the queue is the surface that matters.
     """
+    from case_events import notify
+
     payload = envelope.get("payload") or {}
     logger.info(
         "case_events.caseworker_notified",
@@ -417,6 +424,7 @@ def handle_notifier(envelope: dict, context) -> None:
         confidence=payload.get("confidence"),
         reviewer=payload.get("reviewer"),
     )
+    notify.post(payload)
 
 
 # ── derive ───────────────────────────────────────────────────────────────────
