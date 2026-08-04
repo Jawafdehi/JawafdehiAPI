@@ -81,6 +81,40 @@ from .services.statistics import (
 
 logger = logging.getLogger(__name__)
 
+# PATCH-writable fields that map directly to Case model columns (persisted via a
+# bulk UPDATE in partial_update). Module-level because it is a constant: it was
+# rebuilt as a local frozenset on every PATCH request.
+#
+# NOTE: "evidence" and "court_cases" are deliberately absent. Neither is a Case
+# column (they are the CaseMaterialReference / CaseCourtCaseReference joins), so
+# they must never be written via Case.objects.update(); they are persisted
+# separately via _write_material_references / _sync_courtcase_references when a
+# /evidence or /court_cases patch op is present.
+_PATCH_SCALAR_FIELDS = frozenset(
+    [
+        "title",
+        "short_description",
+        "description",
+        "thumbnail_url",
+        "banner_url",
+        "case_start_date",
+        "case_end_date",
+        "tags",
+        "key_allegations",
+        "timeline",
+        "slug",
+        "missing_details",
+        "bigo",
+        # Internal casework notes (Case.notes TextField). A scalar column, so it
+        # persists via the bulk UPDATE like the other scalars — the missing entry
+        # here is what silently dropped a patched note (BB-28).
+        "notes",
+        # Public notes (Case.public_notes TextField: attribution + edit dates) —
+        # also a scalar column; same persist path, read publicly.
+        "public_notes",
+    ]
+)
+
 
 def _recompute_material_visibility(material_iris) -> None:
     """Schedule a visibility recompute for the given material IRIs (on commit).
@@ -798,76 +832,40 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             return self.get_paginated_response(serializer.data)
         return Response(serializer.data)
 
-    def partial_update(self, request, *args, **kwargs):
+    # --- partial_update helpers -------------------------------------------
+    #
+    # Each `_reject_*` returns an error Response to send, or None to continue.
+    # They are split out of partial_update purely to make that ~400-line method
+    # readable (it was radon F/50); every gate keeps its original order, status
+    # code and message, because the PATCH contract is what 100+ tests pin.
+
+    def _log_non_array_body(self, request, case):
+        """Tripwire for a PATCH body that is not an RFC-6902 array.
+
+        A valid client (the SPA) always sends a bare array here, so a non-list
+        body is anomalous. An intermittent empty/object body was seen in prod
+        publish traffic but could not be reproduced from the SPA — capture enough
+        to identify the culprit if it recurs. The body is not a valid patch (so it
+        carries no case content worth redacting); still truncate + type-tag it
+        defensively.
         """
-        PATCH /api/cases/{id}/
+        body_repr = repr(request.data)
+        if len(body_repr) > 500:
+            body_repr = body_repr[:500] + "…"
+        logger.warning(
+            "cases.partial_update rejected a non-array PATCH body: "
+            "type=%s content_type=%r content_length=%s user=%s case=%s ua=%r body=%s",
+            type(request.data).__name__,
+            request.content_type,
+            request.META.get("CONTENT_LENGTH"),
+            getattr(request.user, "username", None) or "anon",
+            case.slug,
+            request.META.get("HTTP_USER_AGENT", "")[:200],
+            body_repr,
+        )
 
-        Accepts an RFC 6902 JSON Patch document and applies it against a writable
-        snapshot of the case. The snapshot is validated after patching, then scalar
-        fields are saved via a bulk UPDATE and M2M relations are updated with .set().
-
-        Blocked paths (id, version, timestamps, versionInfo) are rejected
-        before the patch is applied.
-        """
-        # get_object() raises DRF's Http404/NotFound (→ 404) when the case is
-        # absent; the ViewSet's queryset already scopes visibility, so no manual
-        # DoesNotExist handling is needed here.
-        case = self.get_object()
-
-        if not can_change_case(request.user, case):
-            return Response(
-                {"detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN
-            )
-
-        # Optimistic concurrency (opt-in). When the client sends ``If-Match``
-        # with the token it received on load, reject the write if the case has
-        # changed since (last-write-wins would otherwise silently clobber a
-        # concurrent edit — the whole-list replaces on entities/evidence make
-        # this costly). Absent the header, behaviour is unchanged (backward
-        # compatible with existing clients and scripts). 412 Precondition Failed
-        # is the RFC 7232 status; the response carries the current token so the
-        # client can reconcile.
-        if not _if_match_matches(request, case):
-            resp = Response(
-                {
-                    "detail": (
-                        "This case was modified since you opened it. "
-                        "Reload to get the latest version before saving."
-                    )
-                },
-                status=status.HTTP_412_PRECONDITION_FAILED,
-            )
-            resp["ETag"] = _version_token(case)
-            return resp
-
-        patch_ops = request.data
-        if not isinstance(patch_ops, list):
-            # Tripwire: a valid client (the SPA) always sends a bare RFC-6902
-            # array here, so a non-list body is anomalous. An intermittent
-            # empty/object body was seen in prod publish traffic but could not be
-            # reproduced from the SPA — capture enough to identify the culprit if
-            # it recurs. The body is not a valid patch (so it carries no case
-            # content worth redacting); still truncate + type-tag it defensively.
-            body_repr = repr(request.data)
-            if len(body_repr) > 500:
-                body_repr = body_repr[:500] + "…"
-            logger.warning(
-                "cases.partial_update rejected a non-array PATCH body: "
-                "type=%s content_type=%r content_length=%s user=%s case=%s ua=%r body=%s",
-                type(request.data).__name__,
-                request.content_type,
-                request.META.get("CONTENT_LENGTH"),
-                getattr(request.user, "username", None) or "anon",
-                case.slug,
-                request.META.get("HTTP_USER_AGENT", "")[:200],
-                body_repr,
-            )
-            return Response(
-                {"detail": "Request body must be a JSON array of patch operations."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        # Reject blocked paths before applying the patch
+    def _reject_blocked_paths(self, patch_ops, case):
+        """Reject ops targeting a blocked path, before the patch is applied."""
         for op in patch_ops:
             if not isinstance(op, dict):
                 return Response(
@@ -901,6 +899,269 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                         {"detail": f"Patching path '{path}' is not allowed."},
                         status=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     )
+        return None
+
+    @staticmethod
+    def _touches(patch_ops, path):
+        """True when any op targets ``path`` or a child of it.
+
+        Gates each join rewrite (entities / evidence / court-case refs) to ops
+        that actually target its path: _build_snapshot always carries these keys,
+        so they are always present in validated after apply_patch, and writing
+        unconditionally would wipe the join on every scalar PATCH. isinstance
+        guard on path: a non-string (malformed client op) must not AttributeError
+        into a 500.
+        """
+        return any(
+            isinstance(op, dict)
+            and isinstance(op.get("path"), str)
+            and (op["path"] == path or op["path"].startswith(path + "/"))
+            for op in patch_ops
+        )
+
+    def _rewrite_entity_binds(self, case, entities):
+        """Replace the whole entity-bind list. Returns a 422 Response or None.
+
+        Preserve an accused bind's verdict across the whole-list delete/recreate
+        when the client didn't send one, so an outcome-unaware client/script can't
+        silently reset verdicts to 'charged'. Keyed by
+        (nes_id, relationship_type) — the bind identity — so a re-sent accused
+        bind keeps its verdict; a new accused bind falls back to 'charged', and
+        non-accused roles carry no verdict at all.
+        """
+        prior_outcomes = {
+            (rel.nes_id, rel.relationship_type): rel.outcome
+            for rel in case.entity_relationships.all()
+        }
+        case.entity_relationships.all().delete()
+        # Two payload entries with the same (nes_id, relationship_type) pass
+        # serializer validation but collide on the
+        # ``unique_case_entity_relationship_type`` DB constraint at .create()
+        # (IntegrityError -> 500). Detect the dup here and return a field-keyed
+        # 422 instead. set_rollback + return is the method's established in-atomic
+        # 422 pattern (see the state transition block): a raised DRF
+        # ValidationError would map to 400, and this project has no custom
+        # exception handler.
+        seen_binds: set[tuple[str, str]] = set()
+        for item in entities:
+            rtype = item["relationship_type"]
+            key = (item["nes_id"], rtype)
+            if key in seen_binds:
+                transaction.set_rollback(True)
+                return Response(
+                    {
+                        "entities": [
+                            f"Duplicate entity bind: '{item['nes_id']}' "
+                            f"as '{rtype}' appears more than once."
+                        ]
+                    },
+                    status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+            seen_binds.add(key)
+            if rtype == RelationshipType.ACCUSED:
+                # Distinguish an omitted "outcome" key from an explicit null.
+                # When the client SENDS ``outcome`` (even null), honor it: a null
+                # accused verdict is normalized back to 'charged' by the model
+                # save(), so a client can reset a verdict to the default. Only
+                # when the key is entirely OMITTED do we preserve the accused
+                # bind's prior verdict across the whole-list replace; a brand-new
+                # bind with no prior verdict falls back to 'charged'.
+                if "outcome" in item:
+                    outcome = item["outcome"]
+                else:
+                    outcome = prior_outcomes.get(key) or RelationshipOutcome.CHARGED
+            else:
+                # A verdict is meaningful only for ACCUSED; every other role stays
+                # NULL (rejected earlier by the serializer, enforced by the model
+                # save() + CHECK constraint).
+                outcome = None
+            CaseEntityRelationship.objects.create(
+                case=case,
+                nes_id=item["nes_id"],
+                relationship_type=rtype,
+                outcome=outcome,
+                notes=item.get("notes") or "",
+            )
+        return None
+
+    def _reject_before_patch(self, request, case, patch_ops):
+        """Every pre-patch gate: permission, If-Match, body shape, blocked paths.
+
+        Returns a Response to send, or None to proceed with applying the patch.
+        """
+        if not can_change_case(request.user, case):
+            return Response(
+                {"detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Optimistic concurrency (opt-in). When the client sends ``If-Match`` with
+        # the token it received on load, reject the write if the case has changed
+        # since (last-write-wins would otherwise silently clobber a concurrent
+        # edit — the whole-list replaces on entities/evidence make this costly).
+        # Absent the header, behaviour is unchanged (backward compatible with
+        # existing clients and scripts). 412 Precondition Failed is the RFC 7232
+        # status; the response carries the current token so the client can
+        # reconcile.
+        if not _if_match_matches(request, case):
+            resp = Response(
+                {
+                    "detail": (
+                        "This case was modified since you opened it. "
+                        "Reload to get the latest version before saving."
+                    )
+                },
+                status=status.HTTP_412_PRECONDITION_FAILED,
+            )
+            resp["ETag"] = _version_token(case)
+            return resp
+
+        if not isinstance(patch_ops, list):
+            self._log_non_array_body(request, case)
+            return Response(
+                {"detail": "Request body must be a JSON array of patch operations."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return self._reject_blocked_paths(patch_ops, case)
+
+    def _after_commit(self, case, affected_material_iris, *, evidence_touched, state_changed):
+        """Post-commit side effects: re-index, then recompute material visibility.
+
+        Scalar edits go through queryset .update() and entity-relationship edits
+        through bulk delete/create — neither fires post_save, so the live
+        search-index signal never runs. Re-index explicitly (best-effort,
+        on_commit) so a PUBLISHED case's content/slug/relationships stay fresh in
+        the index; a non-PUBLISHED case is evicted by the same call.
+        """
+        from .search_index import index as _index_case
+
+        transaction.on_commit(lambda: _index_case(case))
+
+        # A state transition OR an evidence-set change alters the visibility of the
+        # referenced materials (visibility = MAX over referring case states).
+        # Recompute the union of currently-referenced + just-removed materials so a
+        # demoted case can't leave stale-LISTED evidence behind (ADR draft-leak
+        # guard). Skipped only on pure scalar/entity PATCHes.
+        if evidence_touched or state_changed:
+            affected_material_iris.update(
+                case.material_references.values_list("material_iri", flat=True)
+            )
+            _recompute_material_visibility(affected_material_iris)
+
+    def _write_joins(self, case, validated, touched):
+        """Rewrite the entity / evidence / court-case joins that the patch touched.
+
+        Returns ``(error_response, affected_material_iris)``. Each join is written
+        only when an op actually targeted its path — writing unconditionally would
+        wipe the join on every scalar PATCH.
+        """
+        entities_touched, evidence_touched, court_cases_touched = touched
+
+        if entities_touched:
+            dup_response = self._rewrite_entity_binds(case, validated["entities"])
+            if dup_response is not None:
+                return dup_response, set()
+
+        # Capture the pre-rewrite IRIs so removed materials are recomputed too (a
+        # material dropped from a published case must be re-evaluated, else it
+        # stays LISTED via a stale referrer).
+        affected_material_iris: set[str] = set()
+        if evidence_touched:
+            affected_material_iris.update(
+                case.material_references.values_list("material_iri", flat=True)
+            )
+            self._write_material_references(case, validated.get("evidence", []))
+            affected_material_iris.update(
+                case.material_references.values_list("material_iri", flat=True)
+            )
+
+        # The model's sync is THE single court-case join writer (no-op when
+        # unchanged); same gating rationale as evidence.
+        if court_cases_touched:
+            case._sync_courtcase_references(validated.get("court_cases") or [])
+
+        return None, affected_material_iris
+
+    def _apply_state_transition(self, request, case, target_state):
+        """Dispatch a state change to the model method that implements it.
+
+        Every target dispatches to the model method that already implements +
+        validates the transition (Case.validate() enforces BR-1..BR-4 on
+        IN_REVIEW/PUBLISHED). No transition rule is re-implemented here; the
+        permission gate was applied by the caller via can_transition_case_state.
+        A model ValidationError -> 422 with field-keyed messages (mirroring the
+        original submit() handling). Returns a Response to send, or None.
+        """
+        from_state = case.state
+        try:
+            if target_state == CaseState.IN_REVIEW:
+                case.submit()
+            elif target_state == CaseState.PUBLISHED:
+                case.publish()
+            elif target_state == CaseState.CLOSED:
+                # Soft-delete (state -> CLOSED + versionInfo audit entry).
+                case.delete()
+            elif target_state == CaseState.DRAFT:
+                # Un-submit / un-publish. No dedicated model method exists;
+                # set DRAFT (lenient validation — only title), record the
+                # audit entry, and save (mirrors submit()/publish()).
+                case.state = CaseState.DRAFT
+                case.validate()
+                case.versionInfo = {
+                    "action": "reverted_to_draft",
+                    "datetime": timezone.now().isoformat(),
+                }
+                case.save()
+            else:
+                transaction.set_rollback(True)
+                return Response(
+                    {
+                        "detail": (
+                            f"Unsupported state transition target: {target_state}."
+                        )
+                    },
+                    status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                )
+        except ValidationError as exc:
+            detail = getattr(exc, "message_dict", None) or {"detail": exc.messages}
+            transaction.set_rollback(True)
+            return Response(detail, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+        # Record the transition in the append-only history log (actor + optional
+        # reason). The reason travels in the ``X-Transition-Reason`` header so the
+        # RFC-6902 body stays a pure patch and we stop overloading the internal
+        # ``/notes`` field for return reasons. Inside the same atomic block as the
+        # caller, so the log row and the state change commit or roll back together.
+        reason = (request.headers.get("X-Transition-Reason") or "").strip()
+        CaseStateChange.objects.create(
+            case=case,
+            from_state=from_state,
+            to_state=case.state,
+            actor=request.user if request.user.is_authenticated else None,
+            reason=reason[:2000],  # defensive cap; TextField is unbounded
+        )
+        return None
+
+    def partial_update(self, request, *args, **kwargs):
+        """
+        PATCH /api/cases/{id}/
+
+        Accepts an RFC 6902 JSON Patch document and applies it against a writable
+        snapshot of the case. The snapshot is validated after patching, then scalar
+        fields are saved via a bulk UPDATE and M2M relations are updated with .set().
+
+        Blocked paths (id, version, timestamps, versionInfo) are rejected
+        before the patch is applied.
+        """
+        # get_object() raises DRF's Http404/NotFound (→ 404) when the case is
+        # absent; the ViewSet's queryset already scopes visibility, so no manual
+        # DoesNotExist handling is needed here.
+        case = self.get_object()
+
+        patch_ops = request.data
+        rejection = self._reject_before_patch(request, case, patch_ops)
+        if rejection is not None:
+            return rejection
 
         snapshot = self._build_snapshot(case)
         try:
@@ -930,61 +1191,16 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
         # principal (superuser or Caseworker) to transition to ANY state — the
         # old Caseworker DRAFT<->IN_REVIEW confinement is retired.
 
-        # Gate each join rewrite (entities / evidence / court-case refs) to ops
-        # that actually target its path: _build_snapshot always carries these
-        # keys, so they are always present in validated after apply_patch, and
-        # writing unconditionally would wipe the join on every scalar PATCH.
-        # isinstance guard on path: a non-string (malformed client op) must
-        # not AttributeError into a 500.
-        def _touches(path):
-            return any(
-                isinstance(op, dict)
-                and isinstance(op.get("path"), str)
-                and (op["path"] == path or op["path"].startswith(path + "/"))
-                for op in patch_ops
-            )
-
-        entities_touched = _touches("/entities")
-        evidence_touched = _touches("/evidence")
-        court_cases_touched = _touches("/court_cases")
-
-        # Fields that map directly to Case model columns (updated via bulk UPDATE)
-        scalar_fields = frozenset(
-            [
-                "title",
-                "short_description",
-                "description",
-                "thumbnail_url",
-                "banner_url",
-                "case_start_date",
-                "case_end_date",
-                "tags",
-                "key_allegations",
-                "timeline",
-                # NOTE: "evidence" and "court_cases" are intentionally NOT
-                # scalar fields. Neither is a Case column (they are the
-                # CaseMaterialReference / CaseCourtCaseReference joins), so they
-                # must never be written via Case.objects.update(). They are
-                # persisted separately below via _write_material_references /
-                # _write_courtcase_references when a /evidence or /court_cases
-                # patch op is present.
-                "slug",
-                "missing_details",
-                "bigo",
-                # Internal casework notes (Case.notes TextField). A scalar column,
-                # so it persists via the bulk UPDATE like the other scalars — the
-                # missing entry here is what silently dropped a patched note (BB-28).
-                "notes",
-                # Public notes (Case.public_notes TextField: attribution + edit
-                # dates) — also a scalar column; same persist path, read publicly.
-                "public_notes",
-            ]
-        )
+        entities_touched = self._touches(patch_ops, "/entities")
+        evidence_touched = self._touches(patch_ops, "/evidence")
+        court_cases_touched = self._touches(patch_ops, "/court_cases")
 
         with transaction.atomic():
             # Persist scalar field changes
             scalar_updates = {
-                field: validated[field] for field in scalar_fields if field in validated
+                field: validated[field]
+                for field in _PATCH_SCALAR_FIELDS
+                if field in validated
             }
             if scalar_updates:
                 case = self.get_object()
@@ -1007,94 +1223,17 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 # actor; the auto_now ``updated_at`` bump above is excluded) — so
                 # this write is logged automatically, no explicit call needed.
 
-            # Persist entity relationship changes only when a /entities op
-            # was explicitly included — avoids unnecessary delete/recreate on
-            # scalar-only PATCHes.
+            # Persist join changes (entities / evidence / court-case refs), each
+            # only when its path was explicitly patched — avoids an unnecessary
+            # delete/recreate on scalar-only PATCHes.
             case.refresh_from_db()
-            if entities_touched:
-                # Preserve an accused bind's verdict across the whole-list
-                # delete/recreate when the client didn't send one, so an
-                # outcome-unaware client/script can't silently reset verdicts
-                # to 'charged'. Keyed by (nes_id, relationship_type) — the bind
-                # identity — so a re-sent accused bind keeps its verdict; a new
-                # accused bind falls back to 'charged', and non-accused roles
-                # carry no verdict at all (handled in the loop below).
-                prior_outcomes = {
-                    (rel.nes_id, rel.relationship_type): rel.outcome
-                    for rel in case.entity_relationships.all()
-                }
-                case.entity_relationships.all().delete()
-                # Two payload entries with the same (nes_id, relationship_type)
-                # pass serializer validation but collide on the
-                # ``unique_case_entity_relationship_type`` DB constraint at
-                # .create() (IntegrityError -> 500). Detect the dup here and
-                # return a field-keyed 422 instead. set_rollback + return is the
-                # method's established in-atomic 422 pattern (see the state
-                # transition block below): a raised DRF ValidationError would map
-                # to 400, and this project has no custom exception handler.
-                seen_binds: set[tuple[str, str]] = set()
-                for item in validated["entities"]:
-                    rtype = item["relationship_type"]
-                    key = (item["nes_id"], rtype)
-                    if key in seen_binds:
-                        transaction.set_rollback(True)
-                        return Response(
-                            {
-                                "entities": [
-                                    f"Duplicate entity bind: '{item['nes_id']}' "
-                                    f"as '{rtype}' appears more than once."
-                                ]
-                            },
-                            status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                        )
-                    seen_binds.add(key)
-                    if rtype == RelationshipType.ACCUSED:
-                        # Distinguish an omitted "outcome" key from an explicit
-                        # null. When the client SENDS ``outcome`` (even null),
-                        # honor it: a null accused verdict is normalized back to
-                        # 'charged' by the model save(), so a client can reset a
-                        # verdict to the default. Only when the key is entirely
-                        # OMITTED do we preserve the accused bind's prior verdict
-                        # across the whole-list replace; a brand-new bind with no
-                        # prior verdict falls back to 'charged'.
-                        if "outcome" in item:
-                            outcome = item["outcome"]
-                        else:
-                            outcome = (
-                                prior_outcomes.get(key) or RelationshipOutcome.CHARGED
-                            )
-                    else:
-                        # A verdict is meaningful only for ACCUSED; every other
-                        # role stays NULL (rejected earlier by the serializer,
-                        # enforced by the model save() + CHECK constraint).
-                        outcome = None
-                    CaseEntityRelationship.objects.create(
-                        case=case,
-                        nes_id=item["nes_id"],
-                        relationship_type=rtype,
-                        outcome=outcome,
-                        notes=item.get("notes") or "",
-                    )
-
-            # Persist evidence (material-reference) changes only when a /evidence
-            # op was explicitly included. Capture the pre-rewrite IRIs so removed
-            # materials are recomputed too (a material dropped from a published
-            # case must be re-evaluated, else it stays LISTED via a stale referrer).
-            affected_material_iris: set[str] = set()
-            if evidence_touched:
-                affected_material_iris.update(
-                    case.material_references.values_list("material_iri", flat=True)
-                )
-                self._write_material_references(case, validated.get("evidence", []))
-                affected_material_iris.update(
-                    case.material_references.values_list("material_iri", flat=True)
-                )
-
-            # Persist court-case reference changes only when a /court_cases op
-            # was explicitly included (same gating rationale as evidence). The
-            # model's sync is THE single join writer (no-op when unchanged).
-            if court_cases_touched:
-                case._sync_courtcase_references(validated.get("court_cases") or [])
+            join_error, affected_material_iris = self._write_joins(
+                case,
+                validated,
+                (entities_touched, evidence_touched, court_cases_touched),
+            )
+            if join_error is not None:
+                return join_error
 
             # Bump ``updated_at`` for a relation-only PATCH. The scalar path bumps
             # it above and every state transition re-saves the row, but a PATCH
@@ -1111,83 +1250,18 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             case.refresh_from_db()
 
             if target_state is not None and target_state != case.state:
-                # Every target dispatches to the model method that already
-                # implements + validates the transition (Case.validate() enforces
-                # BR-1..BR-4 on IN_REVIEW/PUBLISHED). No transition rule is
-                # re-implemented here; the permission gate was applied above via
-                # can_transition_case_state. A model ValidationError -> 422 with
-                # field-keyed messages (mirroring the original submit() handling).
-                from_state = case.state
-                try:
-                    if target_state == CaseState.IN_REVIEW:
-                        case.submit()
-                    elif target_state == CaseState.PUBLISHED:
-                        case.publish()
-                    elif target_state == CaseState.CLOSED:
-                        # Soft-delete (state -> CLOSED + versionInfo audit entry).
-                        case.delete()
-                    elif target_state == CaseState.DRAFT:
-                        # Un-submit / un-publish. No dedicated model method exists;
-                        # set DRAFT (lenient validation — only title), record the
-                        # audit entry, and save (mirrors submit()/publish()).
-                        case.state = CaseState.DRAFT
-                        case.validate()
-                        case.versionInfo = {
-                            "action": "reverted_to_draft",
-                            "datetime": timezone.now().isoformat(),
-                        }
-                        case.save()
-                    else:
-                        transaction.set_rollback(True)
-                        return Response(
-                            {
-                                "detail": (
-                                    f"Unsupported state transition target: {target_state}."
-                                )
-                            },
-                            status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                        )
-                except ValidationError as exc:
-                    detail = getattr(exc, "message_dict", None) or {
-                        "detail": exc.messages
-                    }
-                    transaction.set_rollback(True)
-                    return Response(detail, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
-
-                # Record the transition in the append-only history log (actor +
-                # optional reason). The reason travels in the ``X-Transition-
-                # Reason`` header so the RFC-6902 body stays a pure patch and we
-                # stop overloading the internal ``/notes`` field for return
-                # reasons. Inside the same atomic block, so the log row and the
-                # state change commit or roll back together.
-                reason = (request.headers.get("X-Transition-Reason") or "").strip()
-                CaseStateChange.objects.create(
-                    case=case,
-                    from_state=from_state,
-                    to_state=case.state,
-                    actor=request.user if request.user.is_authenticated else None,
-                    reason=reason[:2000],  # defensive cap; TextField is unbounded
+                transition_response = self._apply_state_transition(
+                    request, case, target_state
                 )
+                if transition_response is not None:
+                    return transition_response
 
-        # Scalar edits go through queryset .update() and entity-relationship
-        # edits through bulk delete/create — neither fires post_save, so the
-        # live search-index signal never runs. Re-index explicitly (best-effort,
-        # on_commit) so a PUBLISHED case's content/slug/relationships stay fresh
-        # in the index; a non-PUBLISHED case is evicted by the same call.
-        from .search_index import index as _index_case
-
-        transaction.on_commit(lambda: _index_case(case))
-
-        # A state transition OR an evidence-set change alters the visibility of
-        # the referenced materials (visibility = MAX over referring case states).
-        # Recompute the union of currently-referenced + just-removed materials so
-        # a demoted case can't leave stale-LISTED evidence behind (ADR draft-leak
-        # guard). Skipped only on pure scalar/entity PATCHes.
-        if evidence_touched or (target_state is not None):
-            affected_material_iris.update(
-                case.material_references.values_list("material_iri", flat=True)
-            )
-            _recompute_material_visibility(affected_material_iris)
+        self._after_commit(
+            case,
+            affected_material_iris,
+            evidence_touched=evidence_touched,
+            state_changed=target_state is not None,
+        )
 
         # ``case`` was refreshed after the writes above; a state transition also
         # re-saved it, so ``updated_at`` reflects the just-written row. Echo the

@@ -136,11 +136,15 @@ do not push to it.
 
 ## Known debt (measured 2026-08-04, don't rediscover)
 
-- `cases/api_views.py:801` — `partial_update` is a ~400-line method, radon
-  cyclomatic complexity **50** (grade F), inside a 1895-line module. The last
-  F-grade block in the tree and the biggest obstacle to working on the case-write
-  path. `search_index.build_doc` (was F/41) and `review/scorer.score_case` (was
-  F/48) have been decomposed; this one has not.
+- **No F-grade blocks remain.** All three were decomposed on 2026-08-04:
+  `cases/api_views.py` `partial_update` F/50→C/17, `review/scorer.score_case`
+  F/48→B/9, `cases/search_index.build_doc` F/41→B/8. Radon over source now:
+  4175 A · 454 B · 165 C · 23 D · 3 E · 0 F.
+- The 3 remaining **E-grade** blocks, in descending cost:
+  `entities/management/commands/merge_persons.py:95` `handle` E/40,
+  `courts/scraper/supreme.py:358` `parse_hearings_and_timeline` E/34, and
+  `tests/e2e/test_public_api_e2e.py:101` E/34 (a test, low value to split).
+  `cases/api_views.py` is still a 1895-line module even after the split.
 - **`ty`'s 28 real diagnostics** (`uv run ty check`). Mostly Django-shaped and
   low-value (`__str__` returning `CharField` not `str`, `QuerySet.as_manager`),
   but read them before dismissing: two genuine bugs came out of the first pass —
