@@ -117,6 +117,27 @@ log = logging.getLogger("casework.enrich_related_entities")
 
 STAGE = STAGES["entities"]
 
+# The output cap for one extraction. THE ONE PLACE this port deliberately departs
+# from the donor's `max_tokens=2000`, and it is not a tuning preference -- 2000 is
+# now too small to hold a valid response, so the call fails outright rather than
+# returning less:
+#
+#   RuntimeError: claude_cli failed (rc=1): ... "API Error: Claude's response
+#   exceeded the 2000 output token maximum."
+#
+# Reproduced on 078-CR-0001 with --model sonnet, a five-defendant case. Two things
+# grew the response past the donor's cap: the extraction now asks for five sections
+# rather than two (accused/alleged/witness were added so the binder's widened scope
+# is reachable), and every name and note is Devanagari, which tokenises far worse
+# than Latin -- roughly 2-3 tokens per character, so a dozen names with Nepali notes
+# alone approaches 2000.
+#
+# 8000 matches `enrich_timeline.TIMELINE_MAX_TOKENS`, which carries the same
+# fixed-constant treatment for the same reason. A cap costs nothing unless the model
+# actually reaches it: billing is on tokens produced, not on the ceiling. There is
+# no env knob because no other constant in `casework.common` has one.
+EXTRACTION_MAX_TOKENS = 8000
+
 # ── Slicing constants (verbatim from the donor's `env_int(NAME, default)`
 # defaults). The donor read these via an `env_int()` helper that lived in the
 # deleted `casework/common.py` and was never re-created in the Task 5-11
@@ -1190,7 +1211,7 @@ def main(argv=None):
             response_text = invoke_text(
                 system=SYSTEM_PROMPT,
                 content=user_prompt,
-                max_tokens=2000,
+                max_tokens=EXTRACTION_MAX_TOKENS,
                 tier=tier_for("entities"),
                 usage=usage,
             )

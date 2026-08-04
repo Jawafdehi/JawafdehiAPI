@@ -185,11 +185,20 @@ class TestDonorFidelity:
     def test_prompt_hard_max_matches_donor(self, donor):
         assert ere.PROMPT_HARD_MAX == donor["PROMPT_HARD_MAX"]
 
-    def test_invoke_text_tier_and_max_tokens_match_donor(self):
+    def test_invoke_text_tier_matches_donor_and_max_tokens_deliberately_does_not(self):
         # Pins donor line ~421 `tier="premium"` and line ~420 `max_tokens=2000`.
         donor_kwargs = _donor_invoke_text_kwargs()
         assert donor_kwargs["tier"] == "premium"
         assert donor_kwargs["max_tokens"] == 2000
+        # The port deliberately does NOT keep the donor's 2000. At that cap the
+        # claude CLI aborts the call with "response exceeded the 2000 output token
+        # maximum" on a multi-defendant case -- reproduced on 078-CR-0001 with
+        # sonnet. 2000 stopped being a budget and became a failure, once the
+        # extraction asked for five sections of Devanagari names and notes instead
+        # of two. Pinned here, in the class that exists to catch silent drift, so
+        # the divergence stays a decision with a reason attached.
+        assert ere.EXTRACTION_MAX_TOKENS == 8000
+        assert ere.EXTRACTION_MAX_TOKENS > donor_kwargs["max_tokens"]
         # And that this port's tier_for("entities") resolves to the same
         # value (casework/common/llm.py's own pin, cross-checked here).
         from casework.common.llm import tier_for
