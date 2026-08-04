@@ -69,6 +69,7 @@ class MaterialType:
     PRESS_RELEASE = "press_release"    # CIAA/agency प्रेस विज्ञप्ति (public announcement)
     LEGAL_CORPUS = "legal_corpus"      # acts / laws / ordinances / constitution
     OFFICIAL_REPORT = "official_report"  # OAG / annual reports
+    PROCUREMENT_NOTICE = "procurement_notice"  # PPMO/bolpatra e-GP tender/bid notice
     NEWS = "news"                      # news / media article (was Jawafdehi SourceType.NEWS)
     SOCIAL_MEDIA = "social_media"      # social-media post (was SourceType.SOCIAL_MEDIA)
     DOCUMENT = "document"              # generic court filing / misc document
@@ -99,6 +100,9 @@ MATERIAL_TYPES: dict[str, tuple[Any, str | None]] = {
     MaterialType.LEGAL_CORPUS: ("Legislation", None),
     # Official report (OAG audit, annual reports) → Report.
     MaterialType.OFFICIAL_REPORT: ("Report", None),
+    # Procurement notice (PPMO/bolpatra e-GP tender/bid opportunity): schema.org
+    # has no procurement term, so CreativeWork + jawafdehi:ProcurementNotice.
+    MaterialType.PROCUREMENT_NOTICE: ("CreativeWork", "jawafdehi:ProcurementNotice"),
     # News/media article → schema.org NewsArticle (a CreativeWork subtype).
     MaterialType.NEWS: ("NewsArticle", None),
     # Social-media post → SocialMediaPosting.
