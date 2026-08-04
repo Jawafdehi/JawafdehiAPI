@@ -34,8 +34,13 @@ at three, while raising the budget from 2000 to 8000 to 32000 changed nothing.
 not pretend otherwise: :func:`is_exhaustion` answers only "is a retry at a larger
 budget worth paying for?" With the turn cap raised, a surviving ``error_max_turns``
 is more likely to be a genuine budget problem, which is what makes that retry a
-reasonable fallback rather than a guess. Callers that need certainty should look
-at ``num_turns`` in the provider's result envelope, not at the message.
+reasonable fallback rather than a guess.
+
+Telling them apart would need ``num_turns`` from the CLI's result envelope, and
+**no caller can currently reach it**: ``ClaudeCliProvider.invoke_text`` returns
+``data["result"]`` as stripped text and discards the rest. Distinguishing the two
+properly therefore means exposing that metadata first — worth doing if this
+ambiguity bites again, but it is not available to reason about today.
 """
 
 from __future__ import annotations

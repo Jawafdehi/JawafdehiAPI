@@ -33,11 +33,22 @@ def turns(argv):
 
 class TestTheTurnCap:
     def test_it_defaults_to_more_than_one_turn(self):
-        """The whole fix. At 1, an answer that needs a continuation is discarded.
-
-        Measured on case_proposal.intent: 3/5 at one turn, 5/5 at three.
-        """
+        """The property the fix is about: at 1, an answer that needs a
+        continuation is thrown away. Asserted as a range rather than a number so
+        that retuning the default does not read as breaking the behaviour."""
         assert int(turns(argv_for())) >= 2
+
+    def test_the_shipped_default_is_three(self):
+        """And the number itself, pinned separately.
+
+        The range check above cannot catch a silent regression from 3 to 2, which
+        would look fine and quietly restore part of the failure rate. Kept as its
+        own test so that deliberately retuning the default touches one obvious
+        assertion, rather than being caught by a test about something else.
+
+        Measured on case_proposal.intent: 3/5 succeeded at one turn, 5/5 at three.
+        """
+        assert turns(argv_for()) == "3"
 
     def test_it_is_read_from_settings(self):
         assert turns(argv_for(CLAUDE_CLI_MAX_TURNS=7)) == "7"
