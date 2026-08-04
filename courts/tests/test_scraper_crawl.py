@@ -11,35 +11,7 @@ from courts.case_status import ACQUITTED
 from courts.models import CourtCase, CourtCaseHearing, ScrapedDate
 from courts.scraper import special
 from courts.scraper.crawl import run_crawl
-
-_BENCH_SELECT = """<select name="bench_type">
-  <option value="">--</option><option value="1">इजलास १</option></select>"""
-
-_BENCH_PAGE = """<table width="100%" border="1">
-  <tr><th>क्र</th><th>फाँट</th><th>मिति</th><th>मुद्दा</th><th>नं</th><th>वादी</th>
-      <th>प्रतिवादी</th><th>मूल</th><th>कैफियत</th><th>स्थिति</th><th>किसिम</th></tr>
-  <tr><td>१</td><td>क</td><td>२०८१/०५/१२</td><td>भ्रष्टाचार</td><td>०८२-CR-००१५</td>
-      <td>नेपाल सरकार</td><td>क</td><td></td><td>-</td><td>पेशी</td><td>-</td></tr>
-</table>"""
-
-_DETAIL = """<table width="100%" border="0" cellspacing="0" cellpadding="1">
-  <tr><td class="caption">मुद्दा</td><td>भ्रष्टाचार</td></tr>
-  <tr><td class="caption">मुद्दाको स्थिती</td><td>आदेश /फैसलाको किसिम</td></tr>
-</table>
-<table><tr><td>पेशी को विवरण</td></tr>
-<tr><td><table class="utivtbl"><tr><th>x</th><th>x</th><th>x</th><th>x</th></tr>
-  <tr><td>२०८२/०९/२८</td><td>राम</td><td>फैसला</td><td>सफाई</td></tr></table></td></tr></table>"""
-
-
-def _fake_fetch(url, data=None):
-    data = data or {}
-    if data.get("mode") == "showbench":
-        return _BENCH_SELECT
-    if "case_details" in url:
-        return _DETAIL
-    if data.get("mode") == "show":
-        return _BENCH_PAGE
-    return ""
+from courts.tests.special_fixtures import fake_fetch
 
 
 class _NgmTestCase(TestCase):
@@ -50,7 +22,7 @@ class CrawlOrchestrationTests(_NgmTestCase):
     def test_run_crawl_writes_causelist_frontier_and_enriches(self):
         stats = run_crawl(
             special,
-            fetch=_fake_fetch,
+            fetch=fake_fetch,
             today=date(2025, 4, 20),
             lookback_days=2,
             limit_dates=1,
@@ -83,7 +55,7 @@ class CrawlOrchestrationTests(_NgmTestCase):
         CourtCase.objects.using("ngm").create(
             court_id="special", case_number="070-CR-9999", status="pending"
         )
-        run_crawl(special, fetch=_fake_fetch, today=date(2025, 4, 20),
+        run_crawl(special, fetch=fake_fetch, today=date(2025, 4, 20),
                   lookback_days=2, limit_dates=1, write=True, enrich=True)
         self.assertEqual(
             CourtCase.objects.using("ngm").get(case_number="082-CR-0015").status, "enriched"
@@ -93,7 +65,7 @@ class CrawlOrchestrationTests(_NgmTestCase):
         )
 
     def test_dry_run_writes_nothing(self):
-        stats = run_crawl(special, fetch=_fake_fetch, today=date(2025, 4, 20),
+        stats = run_crawl(special, fetch=fake_fetch, today=date(2025, 4, 20),
                           lookback_days=2, limit_dates=1, write=False)
         self.assertEqual(stats[0].cases, 1)  # parsed
         self.assertEqual(CourtCase.objects.using("ngm").count(), 0)  # but not written

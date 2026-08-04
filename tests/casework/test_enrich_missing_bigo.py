@@ -22,6 +22,7 @@ from casework.enrich_missing_bigo import (
     parse_bigo_response,
     rupee_amounts_in,
 )
+from tests.casework.fakes import FakeUsage
 
 # --------------------------------------------------------------------------
 # coerce_bigo_int -- donor pins (donor commit 0321a85, 080-CR-0158/0181)
@@ -560,14 +561,6 @@ def patched_fetch_markdown(monkeypatch):
     monkeypatch.setattr(m, "fetch_markdown", fake_fetch)
 
 
-class _FakeUsage:
-    def __init__(self):
-        self.calls = 0
-
-    def as_dict(self):
-        return {"by_provider": []}
-
-
 def _quoting_invoke(bigo, captured=None):
     """A fake `invoke_text` returning `bigo` with a quote that clears the
     keyword guard. Pass `captured` to record the prompt that was actually sent.
@@ -599,7 +592,7 @@ def _run_main(monkeypatch, cases, invoke_text_stub, argv):
     fake_llm_invoke.invoke_text = invoke_text_stub
 
     fake_llm_usage = types.ModuleType("llm.usage")
-    fake_llm_usage.UsageAccumulator = _FakeUsage
+    fake_llm_usage.UsageAccumulator = FakeUsage
     fake_llm_usage.render_usage_table = lambda by_provider, title=None: ""
 
     monkeypatch.setitem(sys.modules, "llm.invoke", fake_llm_invoke)
@@ -634,7 +627,7 @@ class TestGroundingSpansEverythingTheModelWasShown:
         body = "आरोपपत्र दायर गरिएको छ।"
         assert amount_is_grounded(body, 9039620) is False
         _, shown = emb._extract_bigo(
-            body, self.CASE, _quoting_invoke(9039620), _FakeUsage()
+            body, self.CASE, _quoting_invoke(9039620), FakeUsage()
         )
         assert amount_is_grounded(shown, 9039620) is True
 
@@ -647,7 +640,7 @@ class TestGroundingSpansEverythingTheModelWasShown:
         captured = {}
         _, shown = emb._extract_bigo(
             "आरोपपत्र दायर गरिएको छ।", self.CASE,
-            _quoting_invoke(9039620, captured), _FakeUsage(),
+            _quoting_invoke(9039620, captured), FakeUsage(),
         )
         for line in shown.splitlines():
             if line.strip():
@@ -667,7 +660,7 @@ class TestGroundingSpansEverythingTheModelWasShown:
         captured = {}
         _, shown = emb._extract_bigo(
             long_body, {"slug": "case-y", "title": "t", "evidence": []},
-            _quoting_invoke(9039620, captured), _FakeUsage(),
+            _quoting_invoke(9039620, captured), FakeUsage(),
         )
 
         assert "९०,३९,६२०" not in captured["content"], "clamp did not cut the tail"
@@ -805,7 +798,7 @@ class TestBigoIsPressReleaseOnly:
                 },
             }],
         }
-        emb._extract_bigo("press release text", case, fake_invoke, _FakeUsage())
+        emb._extract_bigo("press release text", case, fake_invoke, FakeUsage())
         assert "SPECIAL-COURT-JUDGMENT-MARKER" not in captured["content"]
 
     def test_a_total_stated_only_in_the_judgment_is_not_grounded(self):

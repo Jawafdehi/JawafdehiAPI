@@ -35,6 +35,7 @@ from casework.enrich_tags import (
     parse_llm_response,
     validate_tags,
 )
+from tests.casework.fakes import FakeUsage
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DONOR_COMMIT = "0321a85"
@@ -492,14 +493,6 @@ class _StubApi:
         return {}
 
 
-class _FakeUsage:
-    def __init__(self):
-        self.calls = 0
-
-    def as_dict(self):
-        return {"by_provider": []}
-
-
 def _run_main(monkeypatch, cases, invoke_text_stub, argv):
     """Drive `main()` end to end with a stubbed API and a stubbed LLM call.
 
@@ -515,7 +508,7 @@ def _run_main(monkeypatch, cases, invoke_text_stub, argv):
     fake_llm_invoke.invoke_text = invoke_text_stub
 
     fake_llm_usage = types.ModuleType("llm.usage")
-    fake_llm_usage.UsageAccumulator = _FakeUsage
+    fake_llm_usage.UsageAccumulator = FakeUsage
     fake_llm_usage.render_usage_table = lambda by_provider, title=None: ""
 
     monkeypatch.setitem(sys.modules, "llm.invoke", fake_llm_invoke)

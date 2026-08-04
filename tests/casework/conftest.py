@@ -17,3 +17,4 @@ def _isolate_casework_run_logs(monkeypatch, tmp_path):
     for itself.
     """
     monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+

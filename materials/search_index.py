@@ -17,33 +17,16 @@ from typing import Any
 from jawafdehi_shared.search.indexing import (
     best_effort,
     delete_doc,
+    flatten_strings,
     name_to_titles,
     title_translit,
+    type_token,
     upsert_doc,
 )
 from jawafdehi_shared.search.opensearch import MATERIAL_INDEX, make_client
 
 SOURCE_APP = "ngm"
 
-
-def _flatten_strings(value: Any) -> list[str]:
-    out: list[str] = []
-    if isinstance(value, str):
-        if value.strip():
-            out.append(value.strip())
-    elif isinstance(value, dict):
-        for v in value.values():
-            out.extend(_flatten_strings(v))
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            out.extend(_flatten_strings(item))
-    return out
-
-
-def _type_token(atype: Any) -> str:
-    if isinstance(atype, list):
-        return ",".join(str(t) for t in atype)
-    return str(atype) if atype is not None else ""
 
 
 def build_doc(obj: Any) -> dict[str, Any]:
@@ -55,8 +38,8 @@ def build_doc(obj: Any) -> dict[str, Any]:
 
     # body: free-text / OCR. schema.org ``text`` is the full-text body; also
     # fold ``description`` in (bilingual-friendly).
-    body_parts = _flatten_strings(data.get("text"))
-    body_parts += _flatten_strings(data.get("description"))
+    body_parts = flatten_strings(data.get("text"))
+    body_parts += flatten_strings(data.get("description"))
     body = " ".join(body_parts) or None
 
     keywords = [k for k in (data.get("keywords") or []) if isinstance(k, str)]
@@ -70,13 +53,13 @@ def build_doc(obj: Any) -> dict[str, Any]:
         data.get("jawafdehi:caseNumber"),
         data.get("jawafdehi:court"),
     ):
-        for ident in _flatten_strings(candidate):
+        for ident in flatten_strings(candidate):
             if ident not in identifiers:
                 identifiers.append(ident)
 
     doc: dict[str, Any] = {
         "iri": iri,
-        "type": _type_token(data.get("@type")),
+        "type": type_token(data.get("@type")),
         "source_app": SOURCE_APP,
         "title_ne": title_ne,
         "title_en": title_en,
