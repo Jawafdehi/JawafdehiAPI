@@ -14,6 +14,15 @@ DJANGO_SETTINGS_MODULE=config.settings_test TESTING=true uv run ruff check .
 DJANGO_SETTINGS_MODULE=config.settings_test TESTING=true uv run pytest -q --ignore=integration-tests
 ```
 
+The unit gate includes `tests/mcp/`: the migrated MCP tool suite, a real ASGI
+lifespan/initialize/tools-list exchange proving Django and MCP share
+`config.asgi.application`, and a subprocess initialize/list/call test for the
+retained stdio transport. Run that slice alone with:
+
+```bash
+DJANGO_SETTINGS_MODULE=config.settings_test TESTING=true uv run pytest -q tests/mcp
+```
+
 - Lints with `ruff check` only (formatting is intentionally NOT gated).
 - `integration-tests/` is excluded here — it is the live-stack suite (Tier 2).
 - **Caveat (what the sqlite gate can hide):** a few behaviors differ from prod
@@ -71,13 +80,16 @@ docker compose -p jawaf-e2e --env-file docker-compose.e2e.env \
 
 - `reindex_all --rebuild` is MANDATORY after `seed_dev` and before any
   search-dependent assertion (a fresh index otherwise auto-maps fields wrong).
-- Health is `GET /api/health` (no trailing slash).
+- API liveness is `GET /api/health` (no trailing slash).
+- MCP is checked on the same host at `POST /mcp`; `GET /mcp/health` reports
+  readiness after the MCP lifespan manager starts.
+- E2E host ports bind to `127.0.0.1`. CI generates a fresh scope-only MCP query
+  bearer; it is accepted only by `/api/query/` and maps to a no-group principal.
 - OIDC-gated tests self-skip when no Zitadel is up (dev-login covers the
   authenticated surface).
 
 ### CI
 
-`integration-tests/.github/workflows/integration.yml` runs this exact flow as a
-cross-repo gate (it checks out the frontend repo alongside and runs both halves).
-It is wired on `pull_request` as a **non-blocking** signal for now; promote it to a
-required status check once it is proven stable in Actions.
+`.github/workflows/integration.yml` runs this exact flow as a cross-repo gate
+(it checks out the frontend repo alongside and runs both halves). Image
+publication depends on both this live gate and the unit/security gate.

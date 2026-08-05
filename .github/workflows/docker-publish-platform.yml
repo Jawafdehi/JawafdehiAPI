@@ -8,18 +8,26 @@
 # after which main is the monolith and produces :main. v2 stays here so the current deploy (tracking
 # :v2) keeps building until it's cut over to :main; drop 'v2' once that cutover is done.
 name: Docker Publish (platform)
+concurrency:
+  group: docker-publish-platform-${{ github.ref }}
+  cancel-in-progress: true
 on:
   push:
     branches: ['main', 'v2']
     tags: ['v*']
-  pull_request:
-    branches: ['main', 'v2']
   workflow_dispatch: {}
 env:
   REGISTRY: docker.io
   IMAGE_NAME: jawafdehi/jawafdehi-platform
 jobs:
+  unit-and-security-gate:
+    uses: ./.github/workflows/ci.yml
+
+  live-integration-gate:
+    uses: ./.github/workflows/integration.yml
+
   build-and-push:
+    needs: [unit-and-security-gate, live-integration-gate]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10

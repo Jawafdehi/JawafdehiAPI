@@ -39,14 +39,17 @@ passing tests:
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+from unittest.mock import MagicMock, patch
+
 import pytest
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from courts import query_guard
-from courts.models import Court
+from courts import query_guard, views
+from courts.models import CaseEntity, Court, CourtCase
 
 # Every test in this module is part of the adversarial security suite. ``django_db``
 # is added so the DB-touching endpoint tests may hit every alias (see the
@@ -239,6 +242,45 @@ class TestDoS(_QuerySecurityBase):
         ok, _ = query_guard.validate_query("SELECT pg_sleep(30)")
         self.assertFalse(ok, msg="guard accepted pg_sleep DoS")
 
+    def test_unicode_escaped_pg_sleep_is_rejected_by_guard(self):
+        ok, _ = query_guard.validate_query(r'SELECT U&"pg\005fsleep"(30)')
+        self.assertFalse(ok, msg="guard accepted Unicode-escaped pg_sleep DoS")
+
+    def test_side_effecting_and_database_dump_functions_are_rejected(self):
+        queries = [
+            "SELECT setval('court_seq', 1)",
+            "SELECT nextval('court_seq')",
+            "SELECT lo_create(1234)",
+            "SELECT pg_advisory_lock(42)",
+            "SELECT pg_notify('events', 'payload')",
+            "SELECT pg_sleep_for(interval '1 minute')",
+            "SELECT pg_sleep_until(clock_timestamp() + interval '1 minute')",
+            "SELECT table_to_xml('scraped_dates'::regclass, true, false, '')",
+            "SELECT table_to_xmlschema('courts'::regclass, true, false, '')",
+            "SELECT query_to_xml_and_xmlschema('SELECT * FROM courts', true, false, '')",
+            "SELECT database_to_xml(true, false, '')",
+            "SELECT lo_get(1234)",
+        ]
+        for sql in queries:
+            with self.subTest(sql=sql):
+                ok, _ = query_guard.validate_query(sql)
+                self.assertFalse(ok, msg=f"guard accepted side-effecting SQL: {sql!r}")
+
+    def test_value_collecting_aggregates_are_rejected(self):
+        queries = [
+            "SELECT array_agg(case_number) FROM court_cases",
+            "SELECT string_agg(case_number, ',') FROM court_cases",
+            "SELECT group_concat(case_number) FROM court_cases",
+        ]
+        for sql in queries:
+            with self.subTest(sql=sql):
+                ok, error = query_guard.validate_query(sql)
+                self.assertFalse(
+                    ok,
+                    msg=f"guard accepted value-collecting aggregate: {sql!r}",
+                )
+                self.assertIn("not allowed", error)
+
     def test_timeout_over_upper_bound_is_400(self):
         self._assert_rejected(
             self._post("SELECT identifier FROM courts", timeout_seconds=121)
@@ -306,15 +348,61 @@ class TestBlockedTables(_QuerySecurityBase):
 
     # FIXED (was a real bypass; guard now blocks this) — locked as a passing test.
     def test_comma_cross_join_to_pg_catalog_is_rejected_by_guard(self):
-        ok, _ = query_guard.validate_query(
-            "SELECT * FROM courts, pg_catalog.pg_authid"
-        )
+        ok, _ = query_guard.validate_query("SELECT * FROM courts, pg_catalog.pg_authid")
         self.assertFalse(ok, msg="guard accepted a comma cross-join to pg_catalog")
 
     # FIXED (was a real bypass; guard now blocks this) — locked as a passing test.
     def test_quoted_blocked_table_is_rejected_by_guard(self):
         ok, _ = query_guard.validate_query('SELECT * FROM "scraped_dates"')
         self.assertFalse(ok, msg="guard accepted a double-quoted blocked table")
+
+
+# ---------------------------------------------------------------------------
+# 7. Resource-amplifying joins over otherwise allowed tables.
+# ---------------------------------------------------------------------------
+class TestJoinConstraints(_QuerySecurityBase):
+    def test_unconstrained_joins_are_rejected(self):
+        queries = [
+            "SELECT * FROM courts, court_cases",
+            "SELECT * FROM courts CROSS JOIN court_cases",
+            "SELECT * FROM courts JOIN court_cases ON TRUE",
+            "SELECT * FROM courts JOIN court_cases ON 1 = 1",
+            (
+                "SELECT * FROM courts c JOIN court_cases cc "
+                "ON c.identifier = c.identifier"
+            ),
+            (
+                "SELECT * FROM courts c JOIN court_cases cc "
+                "ON cc.case_number = cc.case_number"
+            ),
+            (
+                "SELECT * FROM courts c JOIN court_cases cc "
+                "ON c.identifier = cc.court_identifier OR TRUE"
+            ),
+            (
+                "SELECT * FROM courts c JOIN court_cases cc "
+                "ON identifier = court_identifier"
+            ),
+        ]
+        for sql in queries:
+            with self.subTest(sql=sql):
+                ok, error = query_guard.validate_query(sql)
+                self.assertFalse(ok, msg=f"guard accepted unconstrained join: {sql!r}")
+                self.assertIn("JOINs must use", error)
+
+    def test_qualified_equijoin_is_allowed(self):
+        ok, error = query_guard.validate_query(
+            "SELECT cc.case_number FROM courts c "
+            "JOIN court_cases cc ON c.identifier = cc.court_identifier"
+        )
+        self.assertTrue(ok, msg=error)
+
+    def test_using_join_is_allowed(self):
+        ok, error = query_guard.validate_query(
+            "SELECT case_number FROM court_cases "
+            "JOIN court_case_hearings USING (case_number)"
+        )
+        self.assertTrue(ok, msg=error)
 
 
 # ---------------------------------------------------------------------------
@@ -342,8 +430,237 @@ class TestLegitimateSelectAllowed(_QuerySecurityBase):
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
+    def test_scope_only_query_excludes_soft_deleted_cases(self):
+        CourtCase.objects.create(case_number="live-case", court_id="supreme")
+        CourtCase.objects.create(
+            case_number="deleted-case",
+            court_id="supreme",
+            is_deleted=True,
+        )
+        self.client.force_authenticate(
+            user=self.nobody, token={"scope": "openid ngm.query"}
+        )
+
+        resp = self.client.post(
+            QUERY_URL,
+            {
+                "query": (
+                    "SELECT case_number FROM court_cases "
+                    "ORDER BY case_number"
+                )
+            },
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["rows"], [["live-case"]])
+
+    def test_scope_only_query_excludes_children_of_deleted_cases(self):
+        CourtCase.objects.create(case_number="live-case", court_id="supreme")
+        CourtCase.objects.create(
+            case_number="deleted-case",
+            court_id="supreme",
+            is_deleted=True,
+        )
+        CaseEntity.objects.create(
+            case_number="live-case",
+            court_id="supreme",
+            side="plaintiff",
+            name="Visible",
+        )
+        CaseEntity.objects.create(
+            case_number="deleted-case",
+            court_id="supreme",
+            side="plaintiff",
+            name="Hidden",
+        )
+        self.client.force_authenticate(
+            user=self.nobody, token={"scope": "openid ngm.query"}
+        )
+
+        resp = self.client.post(
+            QUERY_URL,
+            {"query": "SELECT name FROM court_case_entities ORDER BY name"},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["rows"], [["Visible"]])
+
+    def test_scope_only_query_cannot_select_internal_columns(self):
+        self.client.force_authenticate(
+            user=self.nobody, token={"scope": "openid ngm.query"}
+        )
+
+        resp = self.client.post(
+            QUERY_URL,
+            {"query": "SELECT is_deleted FROM court_cases"},
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_role_bearing_query_retains_internal_projection(self):
+        CourtCase.objects.create(
+            case_number="deleted-case",
+            court_id="supreme",
+            is_deleted=True,
+        )
+
+        resp = self._post(
+            "SELECT case_number, is_deleted FROM court_cases "
+            "WHERE case_number = 'deleted-case'"
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["rows"], [["deleted-case", True]])
+
+    # -- public_projection: a caller may ASK to be narrowed ------------------
+    #
+    # The embedded MCP server serves ngm_query_judicial anonymously using a shared
+    # service account, so "does this principal hold a role?" is the wrong question
+    # for those requests — the answer depends on how that account was provisioned,
+    # and getting it wrong publishes the internal plane to the open internet. The
+    # flag lets the client state that a request is not made on a person's behalf.
+
+    def test_public_projection_flag_narrows_a_role_bearing_caller(self):
+        """The flag wins over the caller's own entitlement."""
+        CourtCase.objects.create(case_number="live-case", court_id="supreme")
+        CourtCase.objects.create(
+            case_number="deleted-case",
+            court_id="supreme",
+            is_deleted=True,
+        )
+
+        resp = self._post(
+            "SELECT case_number FROM court_cases ORDER BY case_number",
+            public_projection=True,
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["rows"], [["live-case"]])
+
+    def test_public_projection_flag_hides_internal_columns_from_a_role_holder(self):
+        resp = self._post(
+            "SELECT is_deleted FROM court_cases",
+            public_projection=True,
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @pytest.mark.security
+    def test_public_projection_flag_is_one_way(self):
+        """A falsy flag must never WIDEN a caller that had no entitlement.
+
+        Otherwise the flag would be a privilege-escalation parameter: anyone could
+        post ``public_projection: false`` and read the internal plane.
+        """
+        CourtCase.objects.create(case_number="live-case", court_id="supreme")
+        CourtCase.objects.create(
+            case_number="deleted-case",
+            court_id="supreme",
+            is_deleted=True,
+        )
+        self.client.force_authenticate(
+            user=self.nobody, token={"scope": "openid ngm.query"}
+        )
+
+        resp = self.client.post(
+            QUERY_URL,
+            {
+                "query": "SELECT case_number FROM court_cases ORDER BY case_number",
+                "public_projection": False,
+            },
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["rows"], [["live-case"]])
+
     def test_columns_resembling_keywords_are_not_false_positives(self):
         # Column names that merely CONTAIN a forbidden keyword as a substring
         # (updated_at) must not trip the \bword\b denylist.
         resp = self._post("SELECT created_at, updated_at FROM court_cases")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+
+def _mock_postgres_connection(*, in_atomic_block):
+    cursor = MagicMock()
+    cursor.description = [("identifier",)]
+    cursor.fetchmany.side_effect = [[("supreme",)], []]
+    connection = MagicMock(vendor="postgresql", in_atomic_block=in_atomic_block)
+    connection.cursor.return_value.__enter__.return_value = cursor
+    return connection, cursor
+
+
+def test_postgres_execution_uses_read_only_transaction_and_local_timeout():
+    connection, cursor = _mock_postgres_connection(in_atomic_block=False)
+
+    with (
+        patch.object(views.router, "db_for_read", return_value="ngm"),
+        patch.object(views, "connections", {"ngm": connection}),
+        patch.object(
+            views.transaction,
+            "atomic",
+            return_value=nullcontext(),
+        ) as atomic,
+    ):
+        result = views.QueryView._execute_select(
+            "SELECT identifier FROM courts",
+            timeout_seconds=2.5,
+        )
+
+    atomic.assert_called_once_with(using="ngm")
+    assert cursor.execute.call_args_list == [
+        (("SET TRANSACTION READ ONLY",),),
+        (("SET LOCAL statement_timeout = %s", [2500]),),
+        (("SELECT identifier FROM courts",),),
+    ]
+    assert result["rows"] == [["supreme"]]
+
+
+def test_postgres_execution_skips_access_mode_inside_an_open_transaction():
+    """Postgres rejects SET TRANSACTION once a statement has run (25001).
+
+    If a caller already holds a transaction, ``atomic()`` yields a savepoint
+    rather than a fresh transaction, so issuing the access-mode change would
+    error the request out. The statement timeout still applies — ``SET LOCAL`` is
+    savepoint-scoped — and SELECT-only enforcement remains query_guard's job.
+    """
+    connection, cursor = _mock_postgres_connection(in_atomic_block=True)
+
+    with (
+        patch.object(views.router, "db_for_read", return_value="ngm"),
+        patch.object(views, "connections", {"ngm": connection}),
+        patch.object(views.transaction, "atomic", return_value=nullcontext()),
+    ):
+        result = views.QueryView._execute_select(
+            "SELECT identifier FROM courts",
+            timeout_seconds=2.5,
+        )
+
+    assert cursor.execute.call_args_list == [
+        (("SET LOCAL statement_timeout = %s", [2500]),),
+        (("SELECT identifier FROM courts",),),
+    ]
+    assert result["rows"] == [["supreme"]]
+
+
+def test_query_execution_rejects_oversized_serialized_result():
+    cursor = MagicMock()
+    cursor.description = [("value",)]
+    cursor.fetchmany.side_effect = [[("x" * 100,)], []]
+    connection = MagicMock(vendor="sqlite")
+    connection.cursor.return_value.__enter__.return_value = cursor
+
+    with (
+        patch.object(views.router, "db_for_read", return_value="ngm"),
+        patch.object(views, "connections", {"ngm": connection}),
+        patch.object(views.transaction, "atomic", return_value=nullcontext()),
+        pytest.raises(views.QueryResultTooLarge),
+    ):
+        views.QueryView._execute_select(
+            "SELECT value FROM courts",
+            timeout_seconds=2.5,
+            max_response_bytes=50,
+        )

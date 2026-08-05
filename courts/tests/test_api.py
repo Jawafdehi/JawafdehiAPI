@@ -100,7 +100,7 @@ class ReadPlaneTests(_DbAPITestCase):
     def test_list_cases_paginated_shape(self):
         resp = self.client.get("/api/courtcases/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        # Platform cursor pagination -> {results, next}
+        # DRF page-number pagination -> {count, next, previous, results}
         self.assertIn("results", resp.data)
         self.assertIn("next", resp.data)
         self.assertEqual(len(resp.data["results"]), 1)

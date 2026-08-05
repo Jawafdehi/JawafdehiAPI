@@ -58,6 +58,15 @@ def token_scopes(request) -> set[str]:
     return set()
 
 
+def has_ngm_query_role(user) -> bool:
+    """Return whether a user may inspect the internal, unprojected query plane."""
+    if not (user and user.is_authenticated):
+        return False
+    if user.is_superuser:
+        return True
+    return user.groups.filter(name__in=NGM_QUERY_GROUPS).exists()
+
+
 class HasNgmRole(permissions.BasePermission):
     """Require an authenticated principal in an NGM-capable Django Group.
 
@@ -107,11 +116,8 @@ class HasNgmQueryAccess(permissions.BasePermission):
         user = getattr(request, "user", None)
         if not (user and user.is_authenticated):
             return False  # 401 via the authenticator's WWW-Authenticate header
-        if user.is_superuser:
-            return True
         if NGM_QUERY_SCOPE in token_scopes(request):
             return True
-        # ONE group query over the read-capable set. Note this is NGM_QUERY_GROUPS
-        # (ReadOnly + NGM roles), NOT HasNgmRole's NGM_ROLE_GROUPS, which excludes
-        # ReadOnly and gates writes only.
-        return user.groups.filter(name__in=NGM_QUERY_GROUPS).exists()
+        # Note this is NGM_QUERY_GROUPS (ReadOnly + NGM roles), NOT
+        # HasNgmRole's NGM_ROLE_GROUPS, which excludes ReadOnly and gates writes.
+        return has_ngm_query_role(user)

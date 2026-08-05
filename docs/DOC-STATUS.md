@@ -24,6 +24,9 @@ read [`ARCHITECTURE.md`](./ARCHITECTURE.md).
   HTTP client by design — `review/ngm_client.py`, `review/jds_client.py`)_. One image.
   **uv workspace** (NOT poetry — one top-level `pyproject.toml` + `uv.lock`). Cross-app libs
   in top-level `jawafdehi_shared/`. Runs at `:48000`.
+- **MCP is embedded in the same ASGI deployment** at `/mcp`; there is no MCP
+  sidecar. Its API-backed tools dispatch into Django in-process while preserving
+  the API auth and serializer boundary. See [`mcp/README.md`](./mcp/README.md).
 - **Headless Wagtail CMS** (`content/` app, "Newsroom") serves public updates/news at `/api/cms/v2/…`; consumed by the SPA `/updates` routes. It was dropped from `v2` in the R1 collapse commit `4c39d8c`, then **forward-ported back into `v2`** (PR #270, adapted from `origin/main`) with the frontend contract preserved — so it now ships on trunk `main`. See ARCHITECTURE §3.5.
 - **schema.org JSON-LD is the canonical stored form** for NES entities AND NGM materials,
   keyed by **`@id` IRIs**: `https://jawafdehi.org/entity/<prefix>/<slug>`,
@@ -69,6 +72,8 @@ A `>` status banner has been added in-place to the most-misleading STALE docs (m
 | `ARCHITECTURE.md` | CURRENT | **Single source of truth** for the current platform (monolith, 3 DBs/router, schema.org/IRI, unified OpenSearch, OIDC); §5 = data plane (Postgres-SoR, lakehouse-lite) | Keep. |
 | `DOC-STATUS.md` (this file) | CURRENT | The orientation index / per-doc audit | Keep. |
 | `testing.md` | CURRENT (NEW) | The testing tiers: sqlite unit gate (`config.settings_test`) + `-m security` adversarial suite + the live-stack E2E (pytest API half in `integration-tests/` and the frontend Playwright half), driven by the `docker-compose.e2e.yml` overlay; documents the CI E2E gate | Keep. |
+| `mcp/README.md` | CURRENT | Embedded MCP runtime: same ASGI process/image/port as Django, `/mcp`, in-process API dispatch, auth modes, and commands | Keep. |
+| `mcp/ADDING_TOOLS.md` | CURRENT | Tool registration and in-process API client pattern | Keep. |
 | `security/threat-model.md` | CURRENT (NEW) | Threat model for the accountability archive: assets, threat actors, controls-with-tests, and residual/accepted risks (F5 IRI fork, F14 per-worker throttle, write-gate drift). Records the 5 gated-SQL guard bypasses found + fixed | Keep. |
 | `data-plane-design.md` | CURRENT (BUILT) | Data-plane consolidation: Postgres-SoR + R2 archive + OpenSearch; **no live Iceberg** (`lakehouse/` dormant seam); `material_convert` FTS feed shipped (#264). Reconciles ARCHITECTURE §5; incorporates the jobs queue + cases-own-no-documents ADR | Keep (load-bearing). |
 | `unified-search-plan.md` | CURRENT (BUILT & LIVE) | §0 = pre-build starting point (marked as such); §1-§8 reconciled to the live build (hard-fail no-fallback, four index constants, case_id done, no "internal" role). NOTE: `Material.visibility` now EXISTS (added by #263) and gates material indexing — supersedes the old "no `visibility` field" caveat | Keep. |

@@ -1,7 +1,7 @@
 # Jawafdehi platform — ONE Django project, ONE installable package.
 #
 # NES, NGM and Jawafdehi run as Django *apps* in a single project (``config.settings``):
-# one process, one wsgi, one image. Database-per-service is preserved via DB routers
+# one process, one ASGI entrypoint, one image. Database-per-service is preserved via DB routers
 # (each app's models route to its own Postgres DB — see config/db_router.py).
 #
 # There is no uv workspace and no per-service packages: every app is a plain top-level
@@ -15,6 +15,8 @@
 name = "jawafdehi"
 version = "0.1.0"
 description = "Jawafdehi platform — ONE Django project running NES, NGM and Jawafdehi as apps in one process (database-per-service preserved via DB routers)."
+license = "LicenseRef-Hippocratic-3.0"
+license-files = ["jawafdehi_mcp/LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     # --- core web stack ---
@@ -24,6 +26,8 @@ dependencies = [
     "django-filter>=25.2",
     "drf-spectacular>=0.29",
     "gunicorn>=23.0",
+    "uvicorn[standard]>=0.34,<1",
+    "uvicorn-worker>=0.3,<1",
     "whitenoise>=6.11",
     # Prometheus /metrics (multiprocess-aware for the gunicorn workers).
     "django-prometheus>=2.3",
@@ -50,6 +54,18 @@ dependencies = [
     # when NATS_URL is unset — but it ships in the base image because the
     # consumer Deployment runs off that image.
     "nats-py>=2.9",
+    # The MCP tools' HTTP client, and a base dependency rather than an extra
+    # because MCP runs inside the platform process. Embedded, it carries the
+    # bounded ASGITransport that dispatches /api/ calls to Django in memory
+    # (jawafdehi_mcp/api_transport.py); over stdio it is a plain remote client.
+    # httpcore is a DIRECT import, and both bounds are deliberate: the document
+    # converter's SSRF guard substitutes its own httpcore network backend into
+    # httpx's private `_pool._network_backend`, so a validated address cannot be
+    # re-resolved between check and connect while the URL host is still used for
+    # Host/TLS SNI. That leans on internals of both projects, so a major bump of
+    # either has to be reviewed rather than absorbed.
+    "httpx>=0.28",
+    "httpcore>=1.0,<2",
     # --- entities/materials (NES + NGM) ---
     "jsonpatch>=1.33",          # RFC-6902 PATCH /api/entities/{ref}
     # --- ngm lakehouse / object storage ---
@@ -85,20 +101,27 @@ dependencies = [
     "wagtail>=7.4,<7.5",
     "wagtail-headless-preview>=0.9,<0.10",
     "markdown>=3.5",
+    # --- embedded Model Context Protocol server ---
+    "mcp>=1.26,<2",
+    "nepali-datetime>=1.0.8.4",
+    "markitdown[docx,pdf,pptx,xlsx]>=0.1.5",
+    "likhit",
+    "google-cloud-logging>=3.12",
+    "sqlglot>=26.33,<28",
 ]
 
 [project.optional-dependencies]
-# Document-conversion enrichment (BIGO / CIAA). Imported lazily inside management
-# commands, so the base image need not carry them.
+# Compatibility alias retained for Dockerfile.consumer and existing developer
+# commands. These packages are also base dependencies now because MCP runs in
+# the platform process.
 bigo-enrichment = [
     "markitdown[docx,pdf,pptx,xlsx]>=0.1.5",
     "likhit",
 ]
 
 [tool.uv.sources]
-# Git source for the optional bigo-enrichment extra only (likhit is imported lazily
-# inside management commands / the review converter, never at startup).
-likhit = { git = "https://github.com/Jawafdehi/likhit.git", rev = "main" }
+# Shared by material enrichment and the embedded MCP document converter.
+likhit = { git = "https://github.com/Jawafdehi/likhit.git", rev = "e98eb446437f8a086e1e8da409d413ca81106532" }
 
 [build-system]
 requires = ["hatchling"]
@@ -122,10 +145,14 @@ packages = [
     "jobs",
     "case_events",
     "llm",
+    "jawafdehi_mcp",
     "search",
     "discovery",
     "content",
 ]
+
+[tool.hatch.build.targets.wheel.force-include]
+"jawafdehi_mcp/LICENSE" = "jawafdehi_mcp/LICENSE"
 
 [dependency-groups]
 # Dev tooling (lint/format/test). Not shipped in the image.

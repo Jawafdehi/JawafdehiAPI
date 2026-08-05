@@ -4,9 +4,8 @@ Ports the FastAPI NGM API plane to DRF:
 
 - Read plane (public, ``AllowAny``): courts, cases + the case sub-resources
   hearings / entities / documents, an entity-resolution search, and blacklisted
-  firms. List endpoints use the shared ``PlatformCursorPagination`` so the wire
-  shape is the platform ``{results, next}`` (the existing converted read plane's
-  contract), not the FastAPI ``{items, next_cursor}``.
+  firms. Paginated endpoints use DRF page-number pagination and return
+  ``{count, next, previous, results}``.
 - Gated SQL plane (``POST /query``): OIDC + NGM-role gated; the query_guard
   policy (SELECT-only, allowlist, scraped_dates blocked, row cap, statement
   timeout) is enforced in the view.
@@ -21,9 +20,11 @@ cases.
 
 from __future__ import annotations
 
+import json
 import time
 
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db import IntegrityError, connections, router, transaction
 from rest_framework import mixins, status, viewsets
 
@@ -37,7 +38,7 @@ from rest_framework.views import APIView
 from . import query_guard, search_index
 from .models import BlacklistedFirm, CaseEntity, Court, CourtCase, CourtCaseHearing
 from .normalize import best_effort_normalize
-from .permissions import HasNgmQueryAccess, HasNgmRole
+from .permissions import HasNgmQueryAccess, HasNgmRole, has_ngm_query_role
 from .serializers import (
     BlacklistedFirmSerializer,
     BlacklistedFirmWriteSerializer,
@@ -53,6 +54,10 @@ from .serializers import (
 # (GET/HEAD/OPTIONS + the custom retrieve_composite/list_* actions) stay public;
 # create/update require an NGM role.
 _WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+class QueryResultTooLarge(ValueError):
+    """Raised before a raw-query result can become an oversized API response."""
 
 
 class _PublicReadNgmWriteMixin(AuditlogActorMixin):
@@ -297,6 +302,7 @@ class QueryView(APIView):
             return Response({"detail": error}, status=status.HTTP_400_BAD_REQUEST)
 
         max_rows = query_guard.default_max_rows()
+        max_response_bytes = query_guard.default_max_response_bytes()
         timeout = body.get("timeout_seconds") or query_guard.default_timeout_seconds()
         try:
             timeout = float(timeout)
@@ -308,18 +314,56 @@ class QueryView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        capped = query_guard.apply_row_cap(sql, max_rows)
+        # ``public_projection: true`` lets a caller REQUEST the narrower plane
+        # even when its own roles would grant the internal one. It is deliberately
+        # one-way — it can only turn the projection ON, never off — so honouring
+        # it from an untrusted body is safe.
+        #
+        # This exists because "is this caller entitled to internal columns?" and
+        # "is this request being made on someone's behalf?" are different
+        # questions, and only the client knows the second. The embedded MCP server
+        # serves ``ngm_query_judicial`` to ANONYMOUS callers using a shared
+        # service-account token, so role membership on that account is the wrong
+        # thing to infer disclosure from: provisioning it with ReadOnly (or any
+        # NGM role) would silently hand the unprojected plane — soft-deleted rows,
+        # ``is_deleted``, every internal column — to the open internet. MCP now
+        # sets this flag on those requests, so the guarantee no longer rests on
+        # how that account happens to be configured.
+        force_public_projection = bool(body.get("public_projection"))
+        executable_sql = sql
+        if force_public_projection or not has_ngm_query_role(request.user):
+            executable_sql = query_guard.apply_public_projection(sql)
+        capped = query_guard.apply_row_cap(executable_sql, max_rows)
         try:
-            result = self._execute_select(capped, timeout_seconds=timeout)
+            result = self._execute_select(
+                capped,
+                timeout_seconds=timeout,
+                max_response_bytes=max_response_bytes,
+            )
+        except QueryResultTooLarge:
+            return Response(
+                {
+                    "detail": (
+                        "Query result exceeds the configured response-size limit."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         except Exception:  # noqa: BLE001 — never leak DB internals to the caller
             return Response(
                 {"detail": "Database query failed"}, status=status.HTTP_400_BAD_REQUEST
             )
         result["max_rows"] = max_rows
+        result["max_response_bytes"] = max_response_bytes
         return Response(result)
 
     @staticmethod
-    def _execute_select(query: str, *, timeout_seconds: float) -> dict:
+    def _execute_select(
+        query: str,
+        *,
+        timeout_seconds: float,
+        max_response_bytes: int | None = None,
+    ) -> dict:
         """Run a validated SELECT with a statement timeout; return columns/rows.
 
         Mirrors the FastAPI ``PostgresRawQueryExecutor``. On Postgres a
@@ -334,13 +378,61 @@ class QueryView(APIView):
         ngm_alias = router.db_for_read(CourtCase)
         connection = connections[ngm_alias]
         timeout_ms = int(timeout_seconds * 1000)
+        response_limit = (
+            max_response_bytes
+            if max_response_bytes is not None
+            else query_guard.default_max_response_bytes()
+        )
+        # Postgres refuses SET TRANSACTION once a statement has run in the current
+        # transaction (25001 active_sql_transaction). Read this BEFORE opening the
+        # block below: if a caller already has one open, atomic() gives us a
+        # savepoint rather than a fresh transaction and the access-mode change
+        # would error out. In that case fall back to the statement timeout alone —
+        # read-only enforcement is defence in depth behind query_guard's
+        # SELECT-only allowlist, so degrading it beats failing the request.
+        nested = connection.in_atomic_block
         start = time.perf_counter()
-        with connection.cursor() as cursor:
-            if connection.vendor == "postgresql":
-                cursor.execute("SET statement_timeout = %s", [timeout_ms])
-            cursor.execute(query)
-            columns = [c[0] for c in cursor.description] if cursor.description else []
-            rows = [list(r) for r in cursor.fetchall()]
+        with transaction.atomic(using=ngm_alias):
+            with connection.cursor() as cursor:
+                if connection.vendor == "postgresql":
+                    if not nested:
+                        cursor.execute("SET TRANSACTION READ ONLY")
+                    # SET LOCAL is scoped to the savepoint, so it is safe either way.
+                    cursor.execute("SET LOCAL statement_timeout = %s", [timeout_ms])
+                cursor.execute(query)
+                columns = (
+                    [c[0] for c in cursor.description] if cursor.description else []
+                )
+                # Measuring means encoding each row here and again in the response
+                # renderer — deliberate. Encoding once and keeping the fragments to
+                # reuse would hold the rows AND their JSON in memory at the same
+                # time, which is the peak this cap exists to prevent; and any
+                # cheaper estimate would have to be conservative enough to reject
+                # results that would in fact have fit. The extra CPU is bounded by
+                # max_rows, so it is paid only on the largest allowed responses.
+                response_bytes = len(
+                    json.dumps(
+                        {"columns": columns, "rows": []},
+                        cls=DjangoJSONEncoder,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                )
+                rows = []
+                while batch := cursor.fetchmany(50):
+                    for raw_row in batch:
+                        row = list(raw_row)
+                        response_bytes += len(
+                            json.dumps(
+                                row,
+                                cls=DjangoJSONEncoder,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ).encode("utf-8")
+                        ) + 1
+                        if response_bytes > response_limit:
+                            raise QueryResultTooLarge
+                        rows.append(row)
         return {
             "columns": columns,
             "rows": rows,

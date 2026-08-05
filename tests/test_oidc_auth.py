@@ -11,6 +11,8 @@ authenticator validates against that key. They cover:
       shape and ignoring unknown roles).
 """
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -130,6 +132,111 @@ def _authenticate(token):
     factory = APIRequestFactory()
     request = factory.get("/api/", HTTP_AUTHORIZATION=f"Bearer {token}")
     return oidc_auth.OIDCAuthentication().authenticate(request)
+
+
+class TestSigningKeyResolutionIsConcurrent:
+    """``_signing_key_for`` lives in shared auth and gates EVERY authenticated
+    request, so its concurrency behaviour is pinned here in the platform suite
+    rather than only under tests/mcp/.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _restore_refresh_clock(self):
+        """``_jwks_last_refresh`` is module state; leaving it set would silently
+        suppress a later test's expected refresh depending on ordering."""
+        yield
+        oidc_auth.reset_jwks_client()
+
+    def test_cached_lookup_does_not_serialise_across_threads(self, monkeypatch):
+        """A slow cached JWKS read must not block other threads authenticating.
+
+        Regression guard. Holding ``_jwks_lock`` across the cached read turned N
+        concurrent authentications into a serial queue of N * OIDC_JWKS_TIMEOUT,
+        because on a cold or expired cache PyJWT performs network I/O there.
+
+        Deterministic rather than timing-based: every thread must be inside the
+        lookup simultaneously to clear the barrier, so if the lookups cannot
+        overlap the barrier breaks instead of the test merely running slowly.
+        """
+        concurrency = 4
+        barrier = threading.Barrier(concurrency, timeout=10)
+        key = object()
+        entered = []
+
+        class _ConcurrentClient:
+            def get_signing_keys(self, refresh=False):
+                entered.append(refresh)
+                barrier.wait()
+                return [key]
+
+            @staticmethod
+            def match_kid(signing_keys, kid):
+                return key
+
+        monkeypatch.setattr(
+            oidc_auth, "_get_jwks_client", lambda: _ConcurrentClient()
+        )
+        token = jwt.encode({"sub": "s"}, "x" * 32, headers={"kid": "k1"})
+
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            resolved = list(
+                pool.map(lambda _: oidc_auth._signing_key_for(token), range(concurrency))
+            )
+
+        assert resolved == [key] * concurrency
+        # All four resolved from the cache; none needed a forced refresh.
+        assert entered == [False] * concurrency
+
+    def test_rate_limited_refresh_is_still_mutually_exclusive(self, monkeypatch):
+        """The forced refresh keeps its lock: at most one per interval.
+
+        The fix above narrowed the lock; it must not have widened the refresh
+        budget. Pinned here too because it is the DoS guard for unknown kids.
+        """
+        refreshes = []
+        gate = threading.Barrier(2, timeout=10)
+
+        class _AlwaysMiss:
+            def get_signing_keys(self, refresh=False):
+                if refresh:
+                    refreshes.append(refresh)
+                return []
+
+            @staticmethod
+            def match_kid(signing_keys, kid):
+                return None
+
+        monkeypatch.setattr(oidc_auth, "_get_jwks_client", lambda: _AlwaysMiss())
+        oidc_auth._jwks_last_refresh = 0.0
+        token = jwt.encode({"sub": "s"}, "x" * 32, headers={"kid": "nope"})
+
+        def attempt(_):
+            gate.wait()  # maximise the chance both race for the refresh
+            with pytest.raises(jwt.exceptions.PyJWKClientError):
+                oidc_auth._signing_key_for(token)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(attempt, range(2)))
+
+        assert len(refreshes) == 1
+
+
+def test_jwks_client_uses_configured_timeout(settings, monkeypatch):
+    settings.OIDC_JWKS_TIMEOUT = 4.5
+    captured = {}
+    client = object()
+
+    def build_client(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return client
+
+    oidc_auth.reset_jwks_client()
+    monkeypatch.setattr(oidc_auth, "PyJWKClient", build_client)
+
+    assert oidc_auth._get_jwks_client() is client
+    assert captured["args"] == (settings.OIDC_JWKS_URI,)
+    assert captured["kwargs"]["timeout"] == 4.5
 
 
 # ---------------------------------------------------------------------------

@@ -7,11 +7,12 @@
 #   build image -> up (no zitadel) -> --wait + health loop -> seed_dev ->
 #   reindex_all --rebuild -> pytest (API) -> playwright (FE) -> artifacts -> down.
 #
-# Currently on workflow_dispatch + PR as a NON-BLOCKING signal (not a required
-# check). Flip it to a required status check once it's proven stable in Actions.
+# Runs directly on pull requests and is also reusable by the image publication
+# workflow, where it is a mandatory pre-publication gate.
 name: integration-tests
 
 on:
+  workflow_call: {}
   workflow_dispatch: {}
   pull_request:
     branches: [main, v2]
@@ -24,7 +25,6 @@ on:
 env:
   FRONTEND_REPO: jawafdehi/jawafdehi
   FRONTEND_REF: main
-  COMPOSE: -p jawaf-e2e --env-file docker-compose.e2e.env -f docker-compose.yml -f docker-compose.e2e.yml
   PLATFORM_BASE_URL: http://localhost:48010
 
 jobs:
@@ -54,34 +54,43 @@ jobs:
         with:
           bun-version: latest
 
+      - name: Generate an ephemeral MCP query bearer
+        run: echo "MCP_E2E_BEARER=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+
       - name: Build the platform image from THIS checkout
         run: docker build -t jawafdehi-platform:e2e -f Dockerfile .
 
       - name: Bring up the stack (no zitadel — dev-login replaces OIDC for E2E)
         run: |
-          docker compose ${COMPOSE} up -d --wait \
+          compose=(docker compose -p jawaf-e2e --env-file docker-compose.e2e.env \
+            -f docker-compose.yml -f docker-compose.e2e.yml)
+          "${compose[@]}" up -d --wait \
             postgres opensearch minio platform-migrate platform
 
       - name: Wait for health
         run: |
-          for i in $(seq 1 60); do
-            curl -sf "${PLATFORM_BASE_URL}/api/health" && break
+          for _ in {1..60}; do
+            if curl -sf "${PLATFORM_BASE_URL}/api/health"; then
+              exit 0
+            fi
             sleep 3
           done
-          curl -sf "${PLATFORM_BASE_URL}/api/health"
+          exit 1
 
       - name: Seed + index
         run: |
-          docker compose ${COMPOSE} exec -T platform uv run python manage.py seed_dev
-          docker compose ${COMPOSE} exec -T platform uv run python manage.py reindex_all --rebuild
+          compose=(docker compose -p jawaf-e2e --env-file docker-compose.e2e.env \
+            -f docker-compose.yml -f docker-compose.e2e.yml)
+          "${compose[@]}" exec -T platform uv run python manage.py seed_dev
+          "${compose[@]}" exec -T platform uv run python manage.py reindex_all --rebuild
 
       - name: API integration tests (pytest, live stack)
         working-directory: integration-tests
         env:
           SKIP_IF_STACK_DOWN: "0"
         run: |
-          uv sync --frozen || pip install -e .
-          uv run pytest -v || pytest -v
+          uv sync --frozen
+          uv run pytest -v
 
       - name: Frontend E2E (Playwright, real backend via proxy)
         working-directory: _frontend
@@ -101,7 +110,10 @@ jobs:
 
       - name: Collect compose logs
         if: always()
-        run: docker compose ${COMPOSE} logs > compose-logs.txt || true
+        run: |
+          compose=(docker compose -p jawaf-e2e --env-file docker-compose.e2e.env \
+            -f docker-compose.yml -f docker-compose.e2e.yml)
+          "${compose[@]}" logs > compose-logs.txt || true
 
       - name: Upload artifacts
         if: always()
@@ -115,4 +127,7 @@ jobs:
 
       - name: Tear down
         if: always()
-        run: docker compose ${COMPOSE} down -v
+        run: |
+          compose=(docker compose -p jawaf-e2e --env-file docker-compose.e2e.env \
+            -f docker-compose.yml -f docker-compose.e2e.yml)
+          "${compose[@]}" down -v
