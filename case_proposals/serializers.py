@@ -26,6 +26,21 @@ def validate_intent_shape(intent):
     elif itype == "raw_patch":
         if not isinstance(intent.get("patch"), list) or not intent["patch"]:
             raise serializers.ValidationError("raw_patch requires a non-empty `patch` list.")
+    elif itype == "set_entity_outcome":
+        # A list, not a single pair: one verdict decides every defendant at once,
+        # so the reviewable unit is the whole disposition. Filing one proposal per
+        # defendant would invite a reviewer to approve half an acquittal and leave
+        # the case internally inconsistent.
+        outcomes = intent.get("outcomes")
+        if not isinstance(outcomes, list) or not outcomes:
+            raise serializers.ValidationError(
+                "set_entity_outcome requires a non-empty `outcomes` list."
+            )
+        for item in outcomes:
+            if not isinstance(item, dict) or not item.get("nes_id") or not item.get("outcome"):
+                raise serializers.ValidationError(
+                    "each set_entity_outcome entry requires `nes_id` and `outcome`."
+                )
     return intent
 
 
