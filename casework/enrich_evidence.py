@@ -79,7 +79,29 @@ DEVIATION 6 -- THE CASE WRITE IS CONDITIONAL. The donor patched `/evidence`
 unconditionally. This sends `If-Match` with the ETag read at the top of the
 case, so a concurrent caseworker edit 412s instead of being silently destroyed
 by the whole-list replace -- the same contract `bind_materials.py` already
-holds for the same array.
+holds for the same array. A case whose GET returned NO ETag is refused
+outright rather than written unguarded.
+
+The material write is deliberately NOT symmetric with that: it sends `If-Match`
+when the server gave a token and proceeds without one when it did not. The case
+write is a whole-LIST replace that can destroy many bindings at once, while the
+material write is a single-key `add` performed only when the field read blank,
+so the worst case is overwriting an abstract written in the same instant.
+Refusing there would permanently strand any material the server does not version
+-- a derived court-case material has no stored row and so no token. The missing
+token is logged, never silent. See `_write_abstract`.
+
+DEVIATION 7 -- WHICH ENTRIES GET A NOTE IS NOT THE STAGE'S MATERIAL GATE. The
+stage registers `requires_materials=PRESS_TYPES + COURT_TYPES`, and that gate
+answers one question only: is this CASE ready to run at all. It does NOT
+restrict which entries get a note. Every entry with a MARKDOWN-role document is
+described, whatever its material type, which is what the donor did (it converted
+every source it could reach). Narrowing the per-entry loop to press and court
+types would leave most entries permanently blank: measured over the 63 public
+PUBLISHED cases (419 entries, 2026-08-05), the types this stage gates on --
+press_release, court_order, charge_sheet -- are only 31% of a finished case's
+evidence. `news` alone is 41% (172 entries, 72 of them carrying a hand-written
+note over 120 chars), `document` 15%, `legal_corpus` 10%.
 
 Usage:
     uv run python -m casework.enrich_evidence --dry-run --limit 3
@@ -479,6 +501,13 @@ def _plan_entry(ctx, entry):
             ctx.materials_done.add(iri)   # don't re-probe it for every case
         else:
             need_abstract = ctx.force or not abstract_before
+            if not need_abstract:
+                # Settled: this material already has an abstract and nothing in
+                # this run will write one, so the answer cannot change. Record it
+                # so the 40th case citing the same document does not re-read it.
+                # Without this, only materials this run WRITES were deduplicated
+                # and an already-described one cost one GET per citing case.
+                ctx.materials_done.add(iri)
 
     if not need_note and not need_abstract:
         reason = f"note {verdict.reason}" + (

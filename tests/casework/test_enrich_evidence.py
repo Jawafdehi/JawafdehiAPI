@@ -762,3 +762,27 @@ def test_a_material_is_read_once_per_run_not_once_per_citing_case(
     _run_main(monkeypatch, api, _stub_llm(), BASE_ARGV + ["--apply"])
 
     assert reads == [_PR]
+
+
+def test_an_already_described_material_is_read_once_per_run_too(
+        monkeypatch, stub_fetch):
+    """The dedup set has to cover materials this run DECIDES NOT to write, not
+    only ones it writes. An already-described document cited by 40 cases would
+    otherwise cost 40 GETs to reach the same "leave it alone" answer."""
+    reads = []
+    api = _StubApi([
+        _case("case-a", [_entry(_PR, "press_release", md=_PR_MD)]),
+        _case("case-b", [_entry(_PR, "press_release", md=_PR_MD)]),
+    ], materials={_PR: {"@id": _PR, "description": {"ne": "पहिलेको सार।"}}})
+    original = api.get_material_with_etag
+
+    def counting(iri, timeout=60):
+        reads.append(iri)
+        return original(iri, timeout)
+
+    api.get_material_with_etag = counting
+
+    _run_main(monkeypatch, api, _stub_llm(), BASE_ARGV + ["--apply"])
+
+    assert reads == [_PR]
+    assert api.material_patches == []
