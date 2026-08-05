@@ -417,7 +417,7 @@ def main(argv=None):
     # Bootstrap Django + LLM (MUST come before importing llm.invoke)
     try:
         bootstrap(args.provider, args.model)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - bootstrap is the entrypoint; it reports and exits 1
         print(f"Bootstrap failed: {exc}", file=sys.stderr)
         sys.exit(1)
 
@@ -474,7 +474,7 @@ def main(argv=None):
         fetch_ok = True
         try:
             detail, etag = api.get_case_with_etag(slug)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - donor-preserved fallback to the list payload
             # Donor-preserved fallback: a detail-fetch failure does not abort the
             # case. The LIST-shaped payload still yields a well-formed "unmet"
             # reason below (unresolved material), never a crash. Widened from the
@@ -559,7 +559,7 @@ def main(argv=None):
 
         try:
             source_block, fed = _assemble_source_text(chunks, invoke_text, usage)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - source assembly is per-case; the run continues
             report.record(slug, "description", "error", f"source assembly failed: {exc}")
             review.add(ReviewRow(slug=slug, status="error", before=before,
                                  note=f"source assembly failed: {exc}"))
@@ -576,7 +576,7 @@ def main(argv=None):
                 invoke_text=invoke_text,
                 usage=usage,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - an LLM failure is recorded per-case and the run continues
             report.record(slug, "description", "error", f"LLM generation failed: {exc}")
             review.add(ReviewRow(slug=slug, status="error", before=before, sources=fed,
                                  note="; ".join(filter(None, (
@@ -640,7 +640,7 @@ def main(argv=None):
                                  note=source_note))
             log_event(logger, paths["events"], run_id=run_id, stage="description",
                       slug=slug, step="write", status="enriched", detail=detail_msg)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - a PATCH failure is recorded per-case and the run continues
             report.record(slug, "description", "error", f"PATCH failed: {exc}")
             review.add(ReviewRow(slug=slug, status="error", before=before,
                                  generated=description, sources=fed,

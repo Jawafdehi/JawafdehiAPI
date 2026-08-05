@@ -621,7 +621,7 @@ def _write_fields(ctx, accepted):
     try:
         ctx.api.patch_fields(
             ctx.slug, [(f, v) for f, _, v in accepted], if_match=ctx.etag)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - the atomic write failed; every field is reported failed
         # The write is atomic, so the failure is too: every field is reported
         # failed, because the server holds `current` for all of them.
         for field, current, value in accepted:
@@ -662,7 +662,7 @@ def main(argv=None):
 
     try:
         bootstrap(args.provider, args.model)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - bootstrap is the entrypoint; it reports and exits 1
         print(f"Bootstrap failed: {exc}", file=sys.stderr)
         sys.exit(1)
 
@@ -717,7 +717,7 @@ def main(argv=None):
 
         try:
             detail, etag = api.get_case_with_etag(slug)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - a detail-fetch failure skips this case, never the run
             # NOT the donor's fall-back-to-the-list-payload. This stage must skip.
             #
             # The donor (and `enrich_description`) continue on `detail = case`,
@@ -849,7 +849,7 @@ def main(argv=None):
         try:
             result = _generate(detail, number, need_title, need_short,
                                invoke_text, usage)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - an LLM failure is recorded per-case and the run continues
             report.record(slug, "card", "error", f"LLM generation failed: {exc}")
             review.add(ReviewRow(slug=slug, status="error", before=current_for_review,
                                  note=f"LLM generation failed: {exc}"))

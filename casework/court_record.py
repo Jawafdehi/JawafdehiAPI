@@ -97,7 +97,7 @@ def defendant_names(api, case):
             logger.warning("court record %s/%s unreadable: HTTP %s",
                            court, number, exc.code)
             continue
-        except Exception as exc:  # network, decode, anything else
+        except Exception as exc:  # noqa: BLE001 - network, decode, anything else: a read failure is a skip
             skips.append(f"court reference {court}/{number} could not be read "
                          f"({type(exc).__name__})")
             logger.warning("court record %s/%s unreadable: %s",
