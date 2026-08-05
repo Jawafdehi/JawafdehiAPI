@@ -142,31 +142,38 @@ MATERIAL_LANG = "ne"
 DESCRIPTION_PATH = "/description"
 
 
-def description_text(material_doc):
-    """The material's stored abstract as plain text, or `""` when it has none.
+def lang_text(raw):
+    """Flatten a JSON-LD language map to plain text, or `""`.
 
-    `description` is a LANGUAGE MAP, not a string: `MATERIAL_CONTEXT` in
-    `materials/jsonld.py` declares it as
-    `{"@id": "schema:description", "@container": "@language"}`, and the shaper
-    writes `doc["description"] = {"ne": ...}`. Reading it as a string would make
-    every populated material look blank and invite an overwrite -- which is the
-    one thing the "only when blank" rule exists to prevent.
+    `MATERIAL_CONTEXT` in `materials/jsonld.py` declares `name`, `text` AND
+    `description` as `{"@container": "@language"}`, so every one of them is a
+    `{"ne": "..."}` map rather than a string. Reading any of them as a string
+    yields `""` for a populated field -- which, for `description`, would make a
+    described material look blank and invite the overwrite that the "only when
+    blank" rule exists to prevent.
 
-    Tolerates three shapes because the store holds more than one: the `ne` map
-    (what the shapers write), a map in some other language, and a legacy bare
-    string. Anything whitespace-only reads as blank.
+    Tolerates the three shapes the store actually holds: the `ne` map (what the
+    shapers write), a map in some other language, and a legacy bare string.
+    Whitespace-only reads as blank.
     """
-    raw = (material_doc or {}).get("description")
     if isinstance(raw, str):
         return raw.strip()
     if isinstance(raw, dict):
         # `ne` first (the corpus language), then any other tag that carries
-        # text -- an English abstract still means "not blank".
+        # text -- an English value still means "not blank".
         for key in (MATERIAL_LANG, *sorted(k for k in raw if k != MATERIAL_LANG)):
             value = raw.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
     return ""
+
+
+def description_text(material_doc):
+    """The material's stored abstract as plain text, or `""` when it has none.
+
+    Thin read over :func:`lang_text` -- see there for why the shape matters.
+    """
+    return lang_text((material_doc or {}).get("description"))
 
 
 def description_ops(text, lang=MATERIAL_LANG):

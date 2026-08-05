@@ -676,3 +676,89 @@ def test_the_system_prompt_asks_for_a_probative_role_not_a_resummary():
 
 def test_the_system_prompt_forbids_invention():
     assert "never invent" in ee.SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Fetch only what the gate asked for. A court order averages 52,000 characters,
+# so downloading one for an entry that is then skipped is pure waste -- and on a
+# re-run over the 567-case population that is ~250 discarded fetches.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def counting_fetch(monkeypatch):
+    import casework.common.materials as m
+    seen = []
+
+    def fake(link, timeout=60):
+        seen.append(link)
+        return {_PR_MD: "अख्तियारको प्रेस विज्ञप्ति।",
+                _CO_MD: "विशेष अदालतको फैसला।"}.get(link, "")
+
+    monkeypatch.setattr(m, "fetch_markdown", fake)
+    return seen
+
+
+def test_a_skipped_entry_never_has_its_document_fetched(monkeypatch, counting_fetch):
+    """Entry 1 carries real prose and is skipped; entry 2 is blank and is
+    enriched. Only entry 2's document may be downloaded."""
+    api = _StubApi([_case("case-a", [
+        _entry(_PR, "press_release", note="क" * 400, md=_PR_MD),
+        _entry(_CO, "court_order", note="", md=_CO_MD),
+    ])], materials={_PR: {"@id": _PR, "description": {"ne": "सार छ।"}}})
+
+    _run_main(monkeypatch, api, _stub_llm(), BASE_ARGV + ["--apply"])
+
+    assert counting_fetch == [_CO_MD]
+
+
+def test_a_fully_enriched_case_fetches_no_documents_at_all(monkeypatch, counting_fetch):
+    """The re-run case. Nothing needs writing, so nothing is downloaded."""
+    api = _StubApi([_case("case-a", [
+        _entry(_PR, "press_release", note="क" * 400, md=_PR_MD),
+        _entry(_CO, "court_order", note="ख" * 400, md=_CO_MD),
+    ])], materials={
+        _PR: {"@id": _PR, "description": {"ne": "सार छ।"}},
+        _CO: {"@id": _CO, "description": {"ne": "सार छ।"}},
+    })
+
+    _run_main(monkeypatch, api, _stub_llm(), BASE_ARGV + ["--apply"])
+
+    assert counting_fetch == []
+
+
+def test_an_entry_needing_only_an_abstract_still_fetches_its_document(
+        monkeypatch, counting_fetch):
+    """The note is prose (skip) but the material has no abstract, so the
+    document is still needed. A filter keyed on the note alone would starve the
+    abstract half."""
+    api = _StubApi([_case("case-a", [
+        _entry(_PR, "press_release", note="क" * 400, md=_PR_MD),
+    ])])
+
+    _run_main(monkeypatch, api, _stub_llm(), BASE_ARGV + ["--apply"])
+
+    assert counting_fetch == [_PR_MD]
+    assert len(api.material_patches) == 1
+
+
+def test_a_material_is_read_once_per_run_not_once_per_citing_case(
+        monkeypatch, stub_fetch):
+    """`materials_done` must suppress the repeated GET too, not only the
+    repeated write -- otherwise a material cited by 40 cases costs 40 reads."""
+    reads = []
+    api = _StubApi([
+        _case("case-a", [_entry(_PR, "press_release", md=_PR_MD)]),
+        _case("case-b", [_entry(_PR, "press_release", md=_PR_MD)]),
+    ])
+    original = api.get_material_with_etag
+
+    def counting(iri, timeout=60):
+        reads.append(iri)
+        return original(iri, timeout)
+
+    api.get_material_with_etag = counting
+
+    _run_main(monkeypatch, api, _stub_llm(), BASE_ARGV + ["--apply"])
+
+    assert reads == [_PR]

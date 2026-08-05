@@ -111,6 +111,7 @@ from casework.common.llm import bootstrap, tier_for
 from casework.common.materials import (
     description_ops,
     description_text,
+    lang_text,
     source_chunks,
 )
 from casework.common.parse import parse_object_response
@@ -172,11 +173,14 @@ TEMPLATE_LABEL_RE = re.compile(
 
 #: Characters that carry no content. A note made only of these is filler --
 #: 105 production entries are a bare `.`, and the Devanagari danda `।` is the
-#: same gesture.
+#: same gesture. Kept narrow on purpose: this generalises an OBSERVED value
+#: rather than guessing at ones that might exist. An earlier draft also carried
+#: a `_NULL_WORDS` list ("n/a", "none", "nil", "tbd") that appears nowhere in
+#: the corpus and could not change any verdict -- every member is far under
+#: `PROSE_CHARS`, so the length rule already sends them all to "needs work". It
+#: was deleted: invented surface that alters only a log string is still
+#: invented surface.
 _CONTENT_FREE = set(".।-—–_ \t\r\n") | {"…"}
-
-#: Short strings that mean "nothing here" rather than naming anything.
-_NULL_WORDS = frozenset({"n/a", "na", "none", "nil", "-", "tbd"})
 
 
 @dataclass(frozen=True)
@@ -199,7 +203,7 @@ def classify_note(note):
     module docstring. The rules, in order:
 
       1. empty / whitespace-only              -> needs work
-      2. punctuation or a null word only      -> needs work  (the bare `.`)
+      2. punctuation only                     -> needs work  (the bare `.`)
       3. a known or templated type label      -> needs work
       4. at least `PROSE_CHARS` characters    -> DONE, leave it alone
       5. anything shorter                     -> needs work
@@ -208,11 +212,17 @@ def classify_note(note):
     also short, so today rule 5 would catch them all anyway; putting the label
     test first means a template label that ever grows past the threshold is
     still recognised as a label rather than promoted to prose by its length.
+
+    Rules 1 and 2 are, for the same reason, about the REASON rather than the
+    verdict -- rule 5 would catch an empty or full-stop note on length alone.
+    They stay because the review file is read by a person deciding whether the
+    gate was right, and "empty" tells them that in a way "short (1 chars)" does
+    not.
     """
     text = (note or "").strip()
     if not text:
         return NoteVerdict(True, "empty")
-    if all(ch in _CONTENT_FREE for ch in text) or text.casefold() in _NULL_WORDS:
+    if all(ch in _CONTENT_FREE for ch in text):
         return NoteVerdict(True, f"punctuation/null only ({text!r})")
     normalised = " ".join(text.split()).casefold()
     if normalised in TYPE_LABELS or TEMPLATE_LABEL_RE.search(text):
@@ -372,16 +382,16 @@ def _parse_response(response_text):
 
 
 def _material_title(material):
-    """The material's display name for the prompt. `name` is a language map
-    (`{"ne": ...}`) on the JSON-LD, but the case serializer's embedded `material`
-    block flattens it to `display_name`; accept either rather than guessing."""
-    name = material.get("display_name") or material.get("name") or ""
-    if isinstance(name, dict):
-        for value in name.values():
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        return ""
-    return str(name).strip()
+    """The material's display name for the prompt.
+
+    Two shapes, because two serializers produce them: `name` is a language map
+    on the raw JSON-LD, while the case serializer's embedded `material` block
+    flattens it to `display_name`. Accept either rather than guessing which
+    endpoint the caller read from. The map is flattened by
+    `materials.lang_text`, which `description_text` also uses -- same JSON-LD
+    convention, one implementation.
+    """
+    return lang_text(material.get("display_name") or material.get("name") or "")
 
 
 def _writes_material(target):
@@ -418,15 +428,33 @@ def build_parser():
     return ap
 
 
-def _process_entry(*, ctx, entry, text_by_iri):
-    """Decide and (optionally) perform both writes for ONE evidence entry.
+@dataclass
+class _EntryPlan:
+    """What one evidence entry needs, decided WITHOUT fetching its document.
 
-    Returns `(iri, new_note)` when the case's `additional_details` should
-    change, else `(iri, None)`. The material write happens here rather than
-    being returned, because it targets a different endpoint and a different
-    document -- batching it into the case write is exactly the conflation
-    deviation 1 exists to prevent.
+    Exists to separate the cheap decision from the expensive work. The gate is
+    pure string comparison and the abstract check is one small GET, while the
+    document fetch is the costly step -- a court order averages 52,000
+    characters. Deciding first means a case whose notes are all real prose
+    downloads nothing at all, where an eager fetch paid for every document and
+    then discarded it. That is the whole re-run cost of the 567-case
+    population: ~250 entries carry prose, so ~250 document fetches were being
+    thrown away.
     """
+    entry: dict
+    iri: str
+    mtype: str
+    note_before: str
+    verdict: NoteVerdict
+    need_note: bool
+    need_abstract: bool
+    abstract_before: str = ""
+    material_etag: str = None
+
+
+def _plan_entry(ctx, entry):
+    """Decide what `entry` needs. Returns an `_EntryPlan`, or None when nothing
+    is needed (having recorded the `already` outcome itself)."""
     iri = entry.get("material_iri") or ""
     material = entry.get("material") or {}
     mtype = material.get("material_type") or "?"
@@ -458,7 +486,28 @@ def _process_entry(*, ctx, entry, text_by_iri):
         ctx.record(iri, "already", reason)
         ctx.review(ReviewRow(slug=ctx.slug, status="already", before=note_before,
                              note=f"{mtype} {iri} — {reason}"))
-        return iri, None
+        return None
+
+    return _EntryPlan(
+        entry=entry, iri=iri, mtype=mtype, note_before=note_before,
+        verdict=verdict, need_note=need_note, need_abstract=need_abstract,
+        abstract_before=abstract_before, material_etag=material_etag,
+    )
+
+
+def _process_entry(*, ctx, plan, text_by_iri):
+    """Generate and (optionally) perform both writes for one planned entry.
+
+    Returns `(iri, new_note)` when the case's `additional_details` should
+    change, else `(iri, None)`. The material write happens here rather than
+    being returned, because it targets a different endpoint and a different
+    document -- batching it into the case write is exactly the conflation
+    deviation 1 exists to prevent.
+    """
+    iri, mtype, note_before = plan.iri, plan.mtype, plan.note_before
+    verdict, material = plan.verdict, plan.entry.get("material") or {}
+    need_abstract, need_note = plan.need_abstract, plan.need_note
+    abstract_before, material_etag = plan.abstract_before, plan.material_etag
 
     chunk = text_by_iri.get(iri)
     if not chunk:
@@ -717,12 +766,24 @@ def _process_case(ctx, case, idx, total):
         ctx.review(ReviewRow(slug=slug, status="unmet", note="; ".join(unmet)))
         return
 
-    # Text for EVERY entry that has a MARKDOWN role, not only the press/court
-    # ones. The stage's `requires_materials` gate above decides whether the CASE
-    # is ready; which ENTRIES get a note is a separate question, and the donor
-    # described every source it could convert. Narrowing it here would leave
-    # news entries -- 41% of a finished case's evidence -- permanently blank.
-    chunks, text_unmet = source_chunks(detail)
+    # Decide before fetching. Every entry that needs nothing is settled here at
+    # the cost of one string comparison, so its document is never downloaded --
+    # see `_EntryPlan` for what that saves.
+    plans = [p for p in (_plan_entry(ctx, e) for e in detail.get("evidence") or [])
+             if p is not None]
+
+    # Text for every PLANNED entry that has a MARKDOWN role, whatever its
+    # material type. The stage's `requires_materials` gate above decides whether
+    # the CASE is ready; which ENTRIES get a note is a separate question, and the
+    # donor described every source it could convert. Narrowing by type here would
+    # leave news entries -- 41% of a finished case's evidence -- permanently
+    # blank.
+    #
+    # `source_chunks` is handed a case whose `evidence` is just the planned
+    # entries, rather than being reimplemented with a filter: that keeps ONE
+    # implementation of the MARKDOWN fetch, the browser User-Agent the WAF
+    # requires, and the unmet-reason wording.
+    chunks, text_unmet = source_chunks({**detail, "evidence": [p.entry for p in plans]})
     text_by_iri = {iri: text for _, iri, text in chunks}
     for reason in text_unmet:
         log_event(ctx.logger, ctx.events_path, run_id=ctx.run_id, stage=STAGE_NAME,
@@ -730,8 +791,8 @@ def _process_case(ctx, case, idx, total):
                   level=logging.WARNING)
 
     notes_by_iri = {}
-    for entry in detail.get("evidence") or []:
-        iri, new_note = _process_entry(ctx=ctx, entry=entry, text_by_iri=text_by_iri)
+    for plan in plans:
+        iri, new_note = _process_entry(ctx=ctx, plan=plan, text_by_iri=text_by_iri)
         if new_note:
             notes_by_iri[iri] = new_note
 
