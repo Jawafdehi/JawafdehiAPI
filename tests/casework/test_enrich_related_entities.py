@@ -1,21 +1,17 @@
-"""Tests for the DB-free standalone related-entities enricher
-(casework/enrich_related_entities.py). EXTRACTION ONLY.
+"""Tests for the DB-free related-entities enricher
+(casework/enrich_related_entities.py): LLM extraction, deterministic NES
+resolution (`casework/entity_resolver.py`), and the conditional bind write.
 
 ARCHITECTURE FINDING (see module docstring for the full writeup, escalated and
 confirmed with the dispatcher before any code was written): the donor
 (0321a85) writes entities via `api.create_entity(display_name=name, nes_id="")`
--- a method that does not exist on this branch's `CaseworkApi` -- producing a
-flat `{"entity": id, ...}` shape. The CURRENT schema
-(`cases/caseworker_serializers.py::EntityPatchItemSerializer`) requires
-`{"nes_id": <canonical NES @id IRI>, "relationship_type", "outcome"?, "notes"}`
-and explicitly has "no display-name fallback". Turning an LLM-extracted name
-into a confirmed `nes_id` needs a matching/confidence design with no donor
-precedent -- wrongly binding a person to a corruption case by a bad fuzzy
-match is a defamation risk, not a data-quality nit, and deserves its own
-design. Per explicit instruction, this port does NOT build that resolver. It
-ports the donor's LLM extraction faithfully and `main()` never calls
-`api.patch_field` or `api.replace_list` -- this is asserted directly
-(`test_main_never_writes_anything_via_patch_field_or_replace_list`).
+-- a method that does not exist on this branch's `CaseworkApi` and never has.
+The CURRENT schema (`cases/caseworker_serializers.py::EntityPatchItemSerializer`)
+requires `{"nes_id": <canonical NES @id IRI>, "relationship_type", "outcome"?,
+"notes"}` and explicitly has "no display-name fallback". This port's resolver
+turns an LLM-extracted name into a confirmed `nes_id` deterministically (no
+fuzzy matching, no LLM call, `MIN_BIND_SCORE = 0.85`) and only ever binds an
+entity NES already has -- an unmatched name is reported, never minted.
 
 BRIEF-VS-DONOR DIFFERENCE: the brief's suggested `validate_entity_item`
 function (canonical `nes_id` + accused-only `outcome` validation) does not
@@ -40,12 +36,21 @@ from pathlib import Path
 import pytest
 
 from casework import enrich_related_entities as ere
+from casework.common.api import CandidateList, ENTITY_SEARCH_MAX_PAGES, ENTITY_SEARCH_PAGE_SIZE
+from casework.court_record import CHARGED
 from casework.enrich_related_entities import (
+    PROMOTED_PREFIX,
+    RELATIONSHIP_TYPES,
     _build_content_parts,
     _enforce_prompt_budget,
     _parse_extraction_response,
     _truncate_court_order,
     _truncate_press_release,
+    current_entity_binds,
+    is_promoted,
+    merge_entity_binds,
+    plan_case_entities,
+    validate_bind_item,
 )
 from tests.casework.fakes import FakeUsage
 
@@ -127,8 +132,37 @@ class TestDonorFidelity:
     the highest-consequence silent failure available in these files: it
     changes LLM behavior/prompt budgeting with zero other test failures."""
 
-    def test_system_prompt_matches_donor(self, donor):
-        assert ere.SYSTEM_PROMPT == donor["SYSTEM_PROMPT"]
+    # The prompt is the ONE donor constant this port deliberately diverges from,
+    # because the enricher now binds every section the case API accepts and the
+    # donor prompt could only ever emit two of them. Byte-equality is replaced by
+    # two narrower pins: the parts that must not drift, and the exact divergence.
+    # Everything else in this class stays byte-for-byte.
+    def test_system_prompt_keeps_the_donor_parts_that_must_not_drift(self, donor):
+        # The location rules and the accused-notes contract are unchanged from the
+        # donor -- those drive extraction quality and prompt budgeting, and a
+        # silent edit to them is the failure this class exists to catch.
+        for anchor in ("PART 1 — LOCATION ENTITIES",
+                       "DO NOT extract accused home addresses",
+                       'The entity_name should include context in the format: '
+                       '"Organisation/Activity - Location"',
+                       "PART 3 — ACCUSED NOTES",
+                       "Only include primary accused persons. Keep notes under 80 chars."):
+            assert anchor in donor["SYSTEM_PROMPT"], "anchor is not donor text"
+            assert anchor in ere.SYSTEM_PROMPT
+
+    def test_system_prompt_offers_every_section_the_binder_can_write(self):
+        # Without this, widening `plan_case_entities` to all nine sections is dead
+        # code: the LLM never emits anything but the two the donor asked for.
+        # Asserted against the prompt's own output-format line so the two cannot
+        # drift apart.
+        offered = {"location", "related", "accused", "alleged", "witness"}
+        format_line = next(
+            line for line in ere.SYSTEM_PROMPT.splitlines()
+            if line.strip().startswith('"relationship_type"'))
+        for section in offered:
+            assert f'"{section}"' in format_line
+            assert section in RELATIONSHIP_TYPES, (
+                f"the prompt offers {section!r} but the binder would refuse it")
 
     def test_court_order_full_threshold_matches_donor(self, donor):
         assert ere.COURT_ORDER_FULL_THRESHOLD == donor["COURT_ORDER_FULL_THRESHOLD"]
@@ -151,11 +185,20 @@ class TestDonorFidelity:
     def test_prompt_hard_max_matches_donor(self, donor):
         assert ere.PROMPT_HARD_MAX == donor["PROMPT_HARD_MAX"]
 
-    def test_invoke_text_tier_and_max_tokens_match_donor(self):
+    def test_invoke_text_tier_matches_donor_and_max_tokens_deliberately_does_not(self):
         # Pins donor line ~421 `tier="premium"` and line ~420 `max_tokens=2000`.
         donor_kwargs = _donor_invoke_text_kwargs()
         assert donor_kwargs["tier"] == "premium"
         assert donor_kwargs["max_tokens"] == 2000
+        # The port deliberately does NOT keep the donor's 2000. At that cap the
+        # claude CLI aborts the call with "response exceeded the 2000 output token
+        # maximum" on a multi-defendant case -- reproduced on 078-CR-0001 with
+        # sonnet. 2000 stopped being a budget and became a failure, once the
+        # extraction asked for five sections of Devanagari names and notes instead
+        # of two. Pinned here, in the class that exists to catch silent drift, so
+        # the divergence stays a decision with a reason attached.
+        assert ere.EXTRACTION_MAX_TOKENS == 8000
+        assert ere.EXTRACTION_MAX_TOKENS > donor_kwargs["max_tokens"]
         # And that this port's tier_for("entities") resolves to the same
         # value (casework/common/llm.py's own pin, cross-checked here).
         from casework.common.llm import tier_for
@@ -467,9 +510,13 @@ PRESS_CASE_ALREADY_POPULATED = {
     "slug": "case-populated",
     "title": "पहिल्यै entities भरिएको मुद्दा",
     "state": "DRAFT",
+    # "type", not "relationship_type" -- the production read shape
+    # (cases/services/nes_resolver.py via CaseSerializer.get_entities) sends
+    # the relationship type back under "type"; "relationship_type" is a
+    # write-only key that never appears on a read.
     "entities": [
         {"nes_id": "https://nes.jawafdehi.org/entity/1",
-         "relationship_type": "related", "notes": "पहिल्यै बाँधिएको"},
+         "type": "related", "notes": "पहिल्यै बाँधिएको"},
     ],
     "evidence": [
         {"material_iri": "https://jawafdehi.org/material/ciaa/press_releases/5",
@@ -628,29 +675,105 @@ def test_force_reruns_an_already_populated_case_and_calls_the_llm(
 ):
     # The other half of Finding 2: --force must actually override the skip,
     # not be a silent no-op. Assert the LLM WAS called (call-count spy), and
-    # that the case proceeds all the way to extraction.
-    api = _StubApi([PRESS_CASE_ALREADY_POPULATED])
+    # that the case proceeds all the way to resolution. No search result is
+    # configured for either extracted name, so BOTH are no-matches -- including
+    # the 'location' one, which now gets searched like any other section instead
+    # of being refused before the request. Neither is a new write, hence a NOOP,
+    # but a NOOP reached AFTER the LLM ran rather than by the pre-LLM skip.
+    api = _SearchStubApi([PRESS_CASE_ALREADY_POPULATED])
     stub = _call_tracking_stub(ENTITY_RESPONSE)
     report = _run_main(
         monkeypatch, api, invoke_text_stub=stub, argv=["--force", "--dry-run"])
     assert len(stub.calls) == 1
-    assert report.rows[0]["status"] == "extracted-unbound"
+    assert report.rows[0]["status"] == "already"
+    assert report.rows[0]["reason"] == "0 for review, 2 no match"
 
 
-def test_press_only_case_reaches_the_llm(monkeypatch, patched_fetch_markdown):
+def test_pre_llm_skip_keys_on_a_related_bind_not_any_bind(
+    monkeypatch, patched_fetch_markdown
+):
+    # Measured on production: 162 of 3,003 cases carry at least one bind but
+    # not one of them 'related' -- a bare `case.get("entities")` test skips
+    # every one of those forever. A case bound solely to a 'location' must
+    # still reach the LLM; a case that already carries a 'related' bind must
+    # not (that would re-spend a premium-tier call on every run).
+    #
+    # "type", not "relationship_type": that is the PRODUCTION read shape
+    # (cases/services/nes_resolver.py via CaseSerializer.get_entities) --
+    # `relationship_type` is a write-only key `validate_bind_item` builds and
+    # never appears coming back from a read. A version of this test that used
+    # `relationship_type` for both fixtures passed against a skip filtered on
+    # that same wrong key, hiding a real regression (every case would have
+    # burned a premium LLM call, worse than the shape-agnostic check this
+    # amendment replaced) -- see `test_pre_llm_skip_also_tolerates_the_write_
+    # shape_key` below for the `relationship_type` case.
+    location_only = dict(PRESS_ONLY_CASE)
+    location_only["slug"] = "case-location-only-bind"
+    location_only["entities"] = [
+        {"nes_id": "https://jawafdehi.org/entity/place/surkhet-district-abc123",
+         "type": "location", "notes": ""}]
+
+    related_bound = dict(COURT_ONLY_CASE)
+    related_bound["slug"] = "case-related-bind"
+    related_bound["entities"] = [
+        {"nes_id": "https://jawafdehi.org/entity/organization/"
+                   "sajha-bhandara-sahakari-9f9f9f",
+         "type": "related", "notes": "ठेक्का प्राप्त गर्ने संस्था"}]
+
+    api = _SearchStubApi([location_only, related_bound])  # nothing resolves
+    stub = _call_tracking_stub(ENTITY_RESPONSE)
+    report = _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+
+    # The whole point of the fix: the premium call now happens for the
+    # location-only case. Assert on the mock LLM's call count, not only the
+    # report status -- with no search results configured, the location-only
+    # case's plan also ends as a no-op (nothing resolves), so "already" alone
+    # cannot tell the two cases apart; the pre-LLM skip's own reason text can.
+    assert len(stub.calls) == 1
+
+    rows_by_slug = {r["slug"]: r for r in report.rows}
+    assert "already present" not in rows_by_slug["case-location-only-bind"]["reason"]
+    assert "already present" in rows_by_slug["case-related-bind"]["reason"]
+
+
+def test_pre_llm_skip_also_tolerates_the_write_shape_key(
+    monkeypatch, patched_fetch_markdown
+):
+    # A hand-built or legacy payload using "relationship_type" instead of the
+    # real read shape's "type" must still be recognised -- same tolerance
+    # `current_entity_binds` already applies.
+    related_bound = dict(COURT_ONLY_CASE)
+    related_bound["slug"] = "case-related-bind-write-shape"
+    related_bound["entities"] = [
+        {"nes_id": "https://jawafdehi.org/entity/organization/"
+                   "sajha-bhandara-sahakari-9f9f9f",
+         "relationship_type": "related", "notes": "ठेक्का प्राप्त गर्ने संस्था"}]
+    api = _SearchStubApi([related_bound])
+    stub = _call_tracking_stub(ENTITY_RESPONSE)
+    _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+    assert stub.calls == []
+
+
+def test_press_only_case_reaches_the_llm(monkeypatch, patched_fetch_markdown, capsys):
     stub = _call_tracking_stub(ENTITY_RESPONSE)
     api = _StubApi([PRESS_ONLY_CASE])
-    report = _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+    _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
     assert len(stub.calls) == 1
-    assert report.rows[0]["status"] == "extracted-unbound"
+    # PRESS_ONLY_CASE carries no "entities" key at all, so plan_case_entities
+    # refuses to plan a write for it (absent is not empty) and the case's
+    # report status is "already" regardless of what was extracted -- the
+    # extraction itself is what this test pins, via the run summary.
+    out = capsys.readouterr().out
+    assert "TOTAL entities extracted across all cases: 2" in out
 
 
-def test_court_only_case_reaches_the_llm(monkeypatch, patched_fetch_markdown):
+def test_court_only_case_reaches_the_llm(monkeypatch, patched_fetch_markdown, capsys):
     stub = _call_tracking_stub(ENTITY_RESPONSE)
     api = _StubApi([COURT_ONLY_CASE])
-    report = _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+    _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
     assert len(stub.calls) == 1
-    assert report.rows[0]["status"] == "extracted-unbound"
+    out = capsys.readouterr().out
+    assert "TOTAL entities extracted across all cases: 2" in out
 
 
 def test_both_present_case_reaches_the_llm_with_both_sections(
@@ -698,42 +821,151 @@ def test_llm_returning_nothing_is_recorded_as_skipped(monkeypatch, patched_fetch
     assert report.rows[0]["status"] == "skipped"
 
 
-def test_main_never_writes_anything_via_patch_field_or_replace_list(
+def test_dry_run_writes_nothing_but_prints_what_it_would_bind(
+    monkeypatch, patched_fetch_markdown, capsys
+):
+    # PRESS_ONLY_CASE itself carries no "entities" key (an intentionally-
+    # incomplete payload used elsewhere in this file to pin the "absent is
+    # not empty" refusal) -- a real case detail always carries the key, so
+    # this end-to-end write test needs a copy that does.
+    case = dict(PRESS_ONLY_CASE, entities=[])
+    api = _SearchStubApi(
+        [case],
+        {"साझा भण्डार सहकारी": [{"id": "https://jawafdehi.org/entity/organization/"
+                                  "sajha-bhandara-sahakari-9f9f9f",
+                                 "title": {"ne": "साझा भण्डार सहकारी"}, "score": 200.0}]})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: ENTITY_RESPONSE,
+              argv=["--dry-run"])
+    out = capsys.readouterr().out
+    assert api.patch_calls == []
+    assert api.replace_list_calls == []
+    assert "साझा भण्डार सहकारी" in out
+    assert "WOULD BIND" in out
+
+
+def test_apply_writes_the_merged_list_with_if_match(
     monkeypatch, patched_fetch_markdown
 ):
-    # THE central guarantee of this port: no matter how many cases extract
-    # real entities, /entities is never PATCHed and replace_list is never
-    # called -- with --apply, which is the flag that enables writes on every
-    # sibling enricher.
-    api = _StubApi([PRESS_ONLY_CASE, COURT_ONLY_CASE, BOTH_CASE])
+    case = dict(PRESS_ONLY_CASE, entities=[])
+    api = _SearchStubApi(
+        [case],
+        {"साझा भण्डार सहकारी": [{"id": "https://jawafdehi.org/entity/organization/"
+                                  "sajha-bhandara-sahakari-9f9f9f",
+                                 "title": {"ne": "साझा भण्डार सहकारी"}, "score": 200.0}]})
     _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: ENTITY_RESPONSE,
               argv=["--apply"])
-    assert api.patch_calls == []
+    assert len(api.replace_list_calls) == 1
+    slug, path, items, if_match = api.replace_list_calls[0]
+    assert (slug, path) == ("case-press-only", "entities")
+    assert if_match == api.etag
+
+
+def test_summary_reports_the_three_counts_separately(
+    monkeypatch, patched_fetch_markdown, capsys
+):
+    api = _SearchStubApi([PRESS_ONLY_CASE], {})   # nothing resolves
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: ENTITY_RESPONSE,
+              argv=["--dry-run"])
+    out = capsys.readouterr().out
+    assert "TOTAL entities extracted across all cases: 2" in out
+    assert "TOTAL entities that WOULD bind to cases (dry run, nothing written): 0" in out
+    assert "TOTAL reported for human review:" in out
+    assert "TOTAL with no NES match:" in out
+    assert "bound zero" in out.lower()
+
+
+def test_rerunning_on_an_already_bound_case_is_a_noop(
+    monkeypatch, patched_fetch_markdown
+):
+    bound_case = dict(PRESS_ONLY_CASE)
+    bound_case["slug"] = "case-already-bound"
+    bound_case["entities"] = [
+        {"nes_id": "https://jawafdehi.org/entity/organization/"
+                   "sajha-bhandara-sahakari-9f9f9f",
+         "type": "related", "notes": "ठेक्का प्राप्त गर्ने संस्था"}]
+    api = _SearchStubApi(
+        [bound_case],
+        {"साझा भण्डार सहकारी": [{"id": "https://jawafdehi.org/entity/organization/"
+                                  "sajha-bhandara-sahakari-9f9f9f",
+                                 "title": {"ne": "साझा भण्डार सहकारी"}, "score": 200.0}]})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: ENTITY_RESPONSE,
+              argv=["--apply", "--force"])
     assert api.replace_list_calls == []
 
 
-def test_invalid_relationship_type_is_excluded_from_extracted_count(
-    monkeypatch, patched_fetch_markdown
+def test_summary_uses_plan_summary_so_already_bound_names_do_not_vanish(
+    monkeypatch, patched_fetch_markdown, capsys
 ):
-    # entity_name present but relationship_type is neither "location" nor
-    # "related" (e.g. a stray "accused") -- donor's own filter
-    # (`rel_type not in ("location", "related")`) drops it; this port's
-    # `valid_items` must too.
+    # `plan_case_entities` drops a resolved BIND whose nes_id is already on
+    # the case from bound/review/nomatch alike (correct for a re-run -- there
+    # is nothing new to write), so summing those three lists directly
+    # silently undercounts the extracted names on a re-run. This is exactly
+    # why `plan_summary` exists (Task 7); `main()` must call it rather than
+    # summing `len(plan.bound)` etc. directly, or it re-ships the bug.
+    sajha_iri = ("https://jawafdehi.org/entity/organization/"
+                 "sajha-bhandara-sahakari-9f9f9f")
+    case = dict(PRESS_ONLY_CASE)
+    case["entities"] = [
+        {"nes_id": sajha_iri, "relationship_type": "related",
+         "notes": "ठेक्का प्राप्त गर्ने संस्था"}]
+    response = json.dumps({
+        "entities": [
+            {"entity_name": "साझा भण्डार सहकारी", "relationship_type": "related",
+             "notes": "ठेक्का प्राप्त गर्ने संस्था"},
+            {"entity_name": "अंकुर खत्री", "relationship_type": "related",
+             "notes": "घुस लेनदेनमा सहयोग"},
+        ],
+        "accused_notes": [],
+    })
+    api = _SearchStubApi(
+        [case],
+        {"साझा भण्डार सहकारी": [{"id": sajha_iri,
+                                 "title": {"ne": "साझा भण्डार सहकारी"}, "score": 200.0}],
+         "अंकुर खत्री": [{"id": "https://jawafdehi.org/entity/person/"
+                          "amkura-khatri-2de9b3",
+                         "title": {"ne": "अंकुर खत्री"}, "score": 190.0}]})
+    # --force: the case already carries a 'related' bind, which would
+    # otherwise trip the pre-LLM skip before extraction ever runs.
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: response,
+              argv=["--apply", "--force"])
+
+    out = capsys.readouterr().out
+    assert "TOTAL entities extracted across all cases: 2" in out
+    assert "TOTAL entities bound to cases: 1" in out
+    assert "TOTAL already bound (nothing to write): 1" in out
+    assert "TOTAL reported for human review: 0" in out
+    assert "TOTAL with no NES match: 0" in out
+
+
+def test_invalid_relationship_type_is_excluded_from_extracted_count(
+    monkeypatch, patched_fetch_markdown, capsys
+):
+    # The donor dropped anything that was not "location" or "related" here, and so
+    # did this port until the binder learned every section. Both of these now
+    # count: "accused" is a real section, and an UNKNOWN one is counted too, because
+    # it reaches the planner and is recorded there as a review row. What must still
+    # be dropped is an item with no name -- the planner skips those without
+    # recording them anywhere, so counting one would corrupt `plan_summary`'s
+    # already-bound subtraction.
     response = json.dumps({
         "entities": [
             {"entity_name": "गोपाल बहादुर", "relationship_type": "accused", "notes": "x"},
             {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "location", "notes": ""},
+            {"entity_name": "बुद्धि प्रसाद", "relationship_type": "organization",
+             "notes": "unknown section, still counted"},
+            {"entity_name": "   ", "relationship_type": "related", "notes": "no name"},
         ],
         "accused_notes": [],
     })
-    api = _StubApi([PRESS_ONLY_CASE])
-    report = _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: response,
-                        argv=["--dry-run"])
-    assert "1 entities" in report.rows[0]["reason"]
+    api = _SearchStubApi([PRESS_ONLY_CASE])
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: response,
+              argv=["--dry-run"])
+    out = capsys.readouterr().out
+    assert "TOTAL entities extracted across all cases: 3" in out
 
 
 def test_accused_notes_only_response_yields_zero_valid_entities_end_to_end(
-    monkeypatch, patched_fetch_markdown
+    monkeypatch, patched_fetch_markdown, capsys
 ):
     # Exercises the shared-parser leak (see TestParseExtractionResponse) end
     # to end: with only accused_notes in the response, entities_data leaks
@@ -742,24 +974,10 @@ def test_accused_notes_only_response_yields_zero_valid_entities_end_to_end(
     # extraction still correctly reports 0 entities.
     response = json.dumps({"accused_notes": [{"name": "गोपाल", "notes": "अध्यक्ष"}]})
     api = _StubApi([PRESS_ONLY_CASE])
-    report = _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: response,
-                        argv=["--dry-run"])
-    assert report.rows[0]["status"] == "extracted-unbound"
-    assert "0 entities" in report.rows[0]["reason"]
-    assert "1 accused_notes" in report.rows[0]["reason"]
-
-
-def test_summary_surfaces_zero_bound_count_unconditionally(
-    monkeypatch, patched_fetch_markdown, capsys
-):
-    # Requirement: a run that extracted entities and bound zero must say so
-    # PLAINLY in the run summary, not just in per-case logs.
-    api = _StubApi([PRESS_ONLY_CASE])
-    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: ENTITY_RESPONSE,
-              argv=["--apply"])
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: response,
+              argv=["--dry-run"])
     out = capsys.readouterr().out
-    assert "TOTAL entities bound to cases: 0" in out
-    assert "TOTAL entities extracted across all cases: 2" in out
+    assert "TOTAL entities extracted across all cases: 0" in out
     assert "TOTAL accused notes extracted: 1" in out
 
 
@@ -767,8 +985,7 @@ def test_summary_surfaces_zero_bound_count_unconditionally(
 # Task PP2 -- run-logging events file (see test_enrich_missing_bigo.py's
 # identical block for the rationale; `conftest.py`'s autouse
 # `_isolate_casework_run_logs` fixture keeps these out of the real repo
-# `work/enricher-runs/`). This module is EXTRACTION ONLY -- there is no
-# `write` step to check; `start`/`extract` are this file's ceiling.
+# `work/enricher-runs/`).
 # --------------------------------------------------------------------------
 
 
@@ -784,7 +1001,20 @@ def _read_events(path):
 def test_events_file_covers_start_and_extract_happy_path(
     monkeypatch, patched_fetch_markdown, tmp_path
 ):
-    api = _StubApi([PRESS_ONLY_CASE])
+    # A genuine happy path, not merely a stub that survives: `_StubApi` has
+    # no `get_case_with_etag`, so `plan_case_entities` was always refused
+    # (case payload has no "entities" key -> SKIP_STATE-adjacent early
+    # return) and the resolution loop, the search, and the write never ran --
+    # `("resolve", "ok")` used to pass here only because that event fired
+    # unconditionally, resolution or not. `_SearchStubApi` on a DRAFT case
+    # carrying an "entities" key and a real ETag is what actually exercises
+    # extraction -> resolution -> a genuine `replace_list` write end to end.
+    case = dict(PRESS_ONLY_CASE, entities=[])
+    api = _SearchStubApi(
+        [case],
+        {"साझा भण्डार सहकारी": [{"id": "https://jawafdehi.org/entity/organization/"
+                                  "sajha-bhandara-sahakari-9f9f9f",
+                                 "title": {"ne": "साझा भण्डार सहकारी"}, "score": 200.0}]})
     _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: ENTITY_RESPONSE,
               argv=["--apply"])
 
@@ -799,5 +1029,1472 @@ def test_events_file_covers_start_and_extract_happy_path(
     steps_and_statuses = {(r["step"], r["status"]) for r in rows}
     assert ("start", "start") in steps_and_statuses
     assert ("extract", "ok") in steps_and_statuses
-    # Never a write event -- this module never patches anything.
-    assert not any(r["step"] == "write" for r in rows)
+    assert ("resolve", "ok") in steps_and_statuses
+    assert ("write", "ok") in steps_and_statuses
+    assert len(api.replace_list_calls) == 1
+
+
+# --------------------------------------------------------------------------
+# Task 6 -- bind planning and the merge.
+#
+# Two corrections to the original brief, both load-bearing (see task-6-report.md
+# for the full writeup):
+#
+# 1. `plan_case_entities` must apply Task 5's document veto
+#    (`casework.entity_resolver.apply_document_veto`) before a BIND is trusted:
+#    `resolve()` alone will bind Election Commission candidate/ward-head
+#    records that share a name with the real case subject. The document read
+#    fails closed -- an unreadable document (None/empty/non-dict, or an
+#    exception from `get_entity`) downgrades the BIND to REVIEW, never lets it
+#    survive.
+# 2. Binding is SECTION-SCOPED, not `related`-only. An extracted item binds into
+#    whatever section its own `relationship_type` names, for any of the nine the
+#    case API accepts -- so a `location`-typed item binds into `location`. Only an
+#    unrecognised section goes straight to `plan.review` before a search is spent,
+#    because there is no section to file it under. (This reverses the original
+#    brief, which refused every section but `related`; the scope was widened on
+#    request because the refusal cost recall.)
+# --------------------------------------------------------------------------
+
+ANKUR_IRI = "https://jawafdehi.org/entity/person/amkura-khatri-2de9b3"
+EXISTING_IRI = "https://jawafdehi.org/entity/person/gopal-bahadur-shrestha-1a2b3c"
+
+
+def test_current_binds_convert_read_shape_and_drop_outcome():
+    # The read snapshot uses `type`; the patch shape uses `relationship_type`.
+    # `outcome` is deliberately omitted so the server PRESERVES an accused
+    # bind's existing verdict instead of resetting it to 'charged'.
+    case = {"entities": [
+        {"nes_id": EXISTING_IRI, "display_name": "गोपाल बहादुर श्रेष्ठ",
+         "entity_type": "Person", "type": "accused", "outcome": "convicted",
+         "notes": "तत्कालीन अध्यक्ष"},
+    ]}
+    assert current_entity_binds(case) == [
+        {"nes_id": EXISTING_IRI, "relationship_type": "accused",
+         "notes": "तत्कालीन अध्यक्ष"},
+    ]
+
+
+def test_merge_preserves_existing_binds_and_their_order():
+    current = [{"nes_id": EXISTING_IRI, "relationship_type": "accused", "notes": "क"}]
+    added = {"nes_id": ANKUR_IRI, "relationship_type": "related", "notes": "ख"}
+    merged = merge_entity_binds(current, [added])
+    # A merge that also appended a duplicate would still satisfy the two
+    # assertions below, so pin the length too.
+    assert len(merged) == 2
+    assert merged[0] == current[0]
+    assert merged[1] == added
+
+
+def test_merge_never_overwrites_an_existing_bind_for_the_same_id():
+    # The existing bind and its human-written notes survive untouched. A second
+    # section for the same entity is APPENDED rather than replacing it -- the
+    # thing this test exists to prevent is losing "मूल", not gaining a row.
+    current = [{"nes_id": ANKUR_IRI, "relationship_type": "accused", "notes": "मूल"}]
+    merged = merge_entity_binds(
+        current, [{"nes_id": ANKUR_IRI, "relationship_type": "related", "notes": "नयाँ"}])
+    assert merged[0] == current[0]
+
+
+def test_merge_keeps_two_sections_for_one_entity():
+    # Bind identity is the PAIR, matching the DB's
+    # `unique_case_entity_relationship_type` constraint over
+    # ("case", "nes_id", "relationship_type"). An organisation can legitimately be
+    # both where the events happened and a related party; keying the merge on
+    # `nes_id` alone silently dropped the second bind.
+    current = [{"nes_id": SURKHET_IRI, "relationship_type": "location", "notes": "क"}]
+    added = {"nes_id": SURKHET_IRI, "relationship_type": "related", "notes": "ख"}
+    merged = merge_entity_binds(current, [added])
+    assert merged == [current[0], added]
+
+
+def test_merge_is_still_idempotent_on_an_identical_pair():
+    # The pair key must not turn a re-run into a duplicate write.
+    current = [{"nes_id": ANKUR_IRI, "relationship_type": "related", "notes": "क"}]
+    merged = merge_entity_binds(
+        current, [{"nes_id": ANKUR_IRI, "relationship_type": "related", "notes": "ख"}])
+    assert merged == current
+
+
+def test_merge_treats_a_section_as_the_same_bind_regardless_of_case():
+    # The read path and a hand-built dict can disagree on casing; `bind_key`
+    # lowercases so 'Related' and 'related' are one bind, not two.
+    current = [{"nes_id": ANKUR_IRI, "relationship_type": "Related", "notes": "क"}]
+    merged = merge_entity_binds(
+        current, [{"nes_id": ANKUR_IRI, "relationship_type": "related", "notes": "ख"}])
+    assert merged == current
+
+
+def test_validate_bind_item_rejects_a_non_canonical_iri():
+    with pytest.raises(ValueError, match="canonical"):
+        validate_bind_item({"nes_id": "https://nes.jawafdehi.org/entity/1",
+                            "relationship_type": "related", "notes": ""})
+
+
+def test_validate_bind_item_rejects_outcome_on_a_non_accused_role():
+    with pytest.raises(ValueError, match="accused"):
+        validate_bind_item({"nes_id": ANKUR_IRI, "relationship_type": "related",
+                            "notes": "", "outcome": "convicted"})
+
+
+def test_validate_bind_item_relationship_types_match_the_django_enum():
+    from cases.models import RelationshipType
+
+    from casework.enrich_related_entities import RELATIONSHIP_TYPES
+    assert set(RELATIONSHIP_TYPES) == set(RelationshipType.values)
+
+
+class _SearchStubApi(_StubApi):
+    """_StubApi plus entity search, ETag reads, and entity document reads.
+
+    `documents` maps a `nes_id` to either the document `get_entity` should
+    return, or an `Exception` instance it should raise instead -- so a test
+    can pin the document veto's fail-closed behaviour on a transient read
+    failure without a real network. A `nes_id` absent from `documents` gets a
+    default document that is a normal (non-election) CIAA portal entity: a
+    non-empty dict with no election-record `identifier`, so the veto is a
+    no-op unless a test deliberately configures otherwise -- 25 of the 40
+    frozen fixture documents look exactly like this and 24 of the 25 still
+    BIND. The exception is the `मालपोत कार्यालय` bucket, which the structural
+    unqualified-institution veto (`92dc4db`) now holds at REVIEW before this
+    document is ever fetched.
+    """
+
+    # No `get_court_case_entities` stub, deliberately. This enricher no longer
+    # reads accused from the NGM court record, and a stub for a call the code
+    # cannot make would let that path be wired back in without a single test
+    # failing. `casework/court_record.py` keeps its own 15 tests.
+    def __init__(self, cases, search_results=None, documents=None):
+        super().__init__(cases)
+        self._search = search_results or {}
+        self._documents = documents or {}
+        self.etag = 'W/"abc123"'
+        self.search_calls = []
+        self.get_entity_calls = []
+
+    def search_entities(self, query, **kw):
+        self.search_calls.append(query)
+        return self._search.get(query, [])
+
+    def get_entity(self, ref, timeout=60):
+        self.get_entity_calls.append(ref)
+        if ref in self._documents:
+            configured = self._documents[ref]
+            if isinstance(configured, BaseException):
+                raise configured
+            return configured
+        return {"identifier": None}
+
+    def get_case_with_etag(self, slug, timeout=60):
+        return self._cases[slug], self.etag
+
+    def patch_field(self, slug, field, value, timeout=60, if_match=None):
+        self.patch_calls.append((slug, field, value, if_match))
+        return {}
+
+    def replace_list(self, slug, path, items, timeout=60, if_match=None):
+        self.replace_list_calls.append((slug, path, items, if_match))
+        return {}
+
+
+ANKUR_CANDIDATE = {"id": ANKUR_IRI, "title": {"ne": "अंकुर खत्री", "en": "Ankur Khatri"},
+                   "score": 194.0}
+
+
+def test_plan_binds_a_confident_name_and_keeps_the_existing_bind():
+    case = {"slug": "case-x", "state": "DRAFT", "entities": [
+        {"nes_id": EXISTING_IRI, "type": "accused", "outcome": "charged", "notes": "क"}]}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related",
+         "notes": "घुस लेनदेनमा सहयोग"}])
+
+    assert plan.action == "WOULD_PATCH"
+    assert [i["nes_id"] for i in plan.patch_items] == [EXISTING_IRI, ANKUR_IRI]
+    assert plan.patch_items[1]["notes"] == "घुस लेनदेनमा सहयोग"
+    assert "outcome" not in plan.patch_items[1]
+    assert len(plan.bound) == 1
+
+
+def test_plan_is_a_noop_when_the_name_is_already_bound():
+    case = {"slug": "case-x", "state": "DRAFT", "entities": [
+        {"nes_id": ANKUR_IRI, "type": "related", "notes": "क"}]}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "ख"}])
+    assert plan.action == "NOOP"
+    # Fix round 1, item 3: a name that resolves to an already-bound entity
+    # must not be counted in `plan.bound` -- it produced no new write, so
+    # a summary counting len(plan.bound) as "binds made" must not overstate
+    # on a re-run.
+    assert plan.bound == []
+
+
+def test_plan_refuses_a_non_draft_case():
+    case = {"slug": "case-y", "state": "IN_REVIEW", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "ख"}])
+    assert plan.action == "SKIP_STATE"
+    assert plan.patch_items == []
+
+
+def test_strict_buckets_review_and_nomatch_separately():
+    # Two different failures must not land in one bucket: अनिष श्रेष्ठ matched
+    # two same-name entities (a decision to make -> review) while खगेन्द्र
+    # पराजुली matched nothing at all (nothing to decide -> nomatch). Pinned
+    # under strict=True, which is the mode that still refuses an ambiguity.
+    anish_a = {"id": "https://jawafdehi.org/entity/person/anish-shrestha-219986",
+               "title": {"ne": "अनिष श्रेष्‍ठ"}, "score": 182.17}
+    anish_b = {"id": "https://jawafdehi.org/entity/person/anish-shrestha-285096",
+               "title": {"ne": "अनिष श्रेष्ठ"}, "score": 182.17}
+    case = {"slug": "case-z", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अनिष श्रेष्ठ": [anish_a, anish_b],
+                                  "खगेन्द्र पराजुली": []})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related", "notes": "क"},
+        {"entity_name": "खगेन्द्र पराजुली", "relationship_type": "related", "notes": "ख"}],
+        strict=True)
+    assert plan.action == "NOOP"
+    assert len(plan.review) == 1
+    assert len(plan.nomatch) == 1
+
+
+def test_permissive_binds_the_ambiguity_and_still_cannot_bind_a_nomatch():
+    # The default mode's whole point, and its limit. An ambiguity between two
+    # same-name entities resolves to the first by the `(-score, nes_id)` sort and
+    # binds; a name with NO candidate stays in nomatch, because there is nothing
+    # to promote and this module may never create an NES entity.
+    anish_a = {"id": "https://jawafdehi.org/entity/person/anish-shrestha-219986",
+               "title": {"ne": "अनिष श्रेष्‍ठ"}, "score": 182.17}
+    anish_b = {"id": "https://jawafdehi.org/entity/person/anish-shrestha-285096",
+               "title": {"ne": "अनिष श्रेष्ठ"}, "score": 182.17}
+    case = {"slug": "case-z", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अनिष श्रेष्ठ": [anish_a, anish_b],
+                                  "खगेन्द्र पराजुली": []},
+                         documents={anish_a["id"]: {"identifier": None},
+                                    anish_b["id"]: {"identifier": None}})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related", "notes": "क"},
+        {"entity_name": "खगेन्द्र पराजुली", "relationship_type": "related", "notes": "ख"}])
+
+    assert plan.action == "WOULD_PATCH"
+    assert len(plan.bound) == 1
+    assert plan.review == []
+    assert len(plan.nomatch) == 1
+    _name, decision, _notes, _section = plan.bound[0]
+    assert decision.nes_id == anish_a["id"]      # first by the deterministic sort
+    assert is_promoted(decision)
+    assert "ambiguous" in decision.reason
+
+
+def test_promotion_is_deterministic_across_candidate_orderings():
+    # A re-run must never bind a DIFFERENT namesake than the run before it. The
+    # promoted winner comes from `resolve`'s `(-score, nes_id)` sort, so shuffling
+    # the search payload cannot change it.
+    anish_a = {"id": "https://jawafdehi.org/entity/person/anish-shrestha-219986",
+               "title": {"ne": "अनिष श्रेष्ठ"}, "score": 182.17}
+    anish_b = {"id": "https://jawafdehi.org/entity/person/anish-shrestha-285096",
+               "title": {"ne": "अनिष श्रेष्ठ"}, "score": 182.17}
+    docs = {anish_a["id"]: {"identifier": None}, anish_b["id"]: {"identifier": None}}
+    bound = []
+    for payload in ([anish_a, anish_b], [anish_b, anish_a]):
+        case = {"slug": "case-z", "state": "DRAFT", "entities": []}
+        api = _SearchStubApi([case], {"अनिष श्रेष्ठ": payload}, documents=docs)
+        plan = plan_case_entities(api, case, 'W/"e"', [
+            {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related",
+             "notes": "क"}])
+        bound.append(plan.bound[0][1].nes_id)
+
+    assert bound[0] == bound[1] == anish_a["id"]
+
+
+# A candidate that exists in NES with an English title only, so the only available
+# comparison is Devanagari-against-Latin. That comparison goes through
+# `to_roman_colloquial`, which folds कमल (masculine) into कमला (feminine): the pair
+# scores 0.96 across scripts and 0.00 within Devanagari.
+KAMALA_IRI = "https://jawafdehi.org/entity/person/kamala-thapa-4f21ac"
+KAMALA_LATIN_ONLY = {"id": KAMALA_IRI, "title": {"en": "Kamala Thapa"}, "score": 190.0}
+
+
+def test_permissive_mode_refuses_to_promote_a_cross_script_only_match():
+    # THE ONE VETO PERMISSIVE MODE LEAVES STANDING. Every other promotion binds a
+    # name that matched, on grounds outside the name; this one would bind a name
+    # that did not match at all -- कमला थापा is a woman, कमल थापा is a man, and
+    # only romanisation makes them equal. The extracted name must stay in review
+    # even though its top candidate scores 0.96, well over MIN_BIND_SCORE.
+    case = {"slug": "case-kamal", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"कमल थापा": [KAMALA_LATIN_ONLY]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "कमल थापा", "relationship_type": "accused", "notes": "क"}])
+
+    assert plan.action == "NOOP"
+    assert plan.patch_items == []
+    assert plan.bound == []
+    assert len(plan.review) == 1
+    _name, decision, section = plan.review[0]
+    assert decision.nes_id is None
+    assert section == "accused"
+    assert "across scripts" in decision.reason
+    assert "not promoted" in decision.reason
+    # The candidate is preserved so a caseworker can confirm or reject it by hand;
+    # only the automatic bind is refused.
+    assert decision.candidates[0][1] == KAMALA_IRI
+    # And the document was never fetched: a name this module will not bind must
+    # not cost an HTTP round trip either.
+    assert api.get_entity_calls == []
+
+
+def test_a_cross_script_match_is_refused_even_when_another_veto_reports_first():
+    # The reason `_promote_top_candidate` checks the CANDIDATE and not
+    # `decision.reason`. `resolve` reports only the first veto that fires, and
+    # ambiguity is checked before the cross-script guard -- so a name that is both
+    # comes back reading "ambiguous", and a reason-text check would promote it,
+    # restoring the exact wrong bind. Two Latin-only namesakes, both above
+    # threshold: the reason says ambiguous, the refusal must still happen.
+    second = {"id": "https://jawafdehi.org/entity/person/kamala-thapa-9b7e10",
+              "title": {"en": "Kamala Thapa"}, "score": 188.0}
+    case = {"slug": "case-kamal-2", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"कमल थापा": [KAMALA_LATIN_ONLY, second]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "कमल थापा", "relationship_type": "accused", "notes": "क"}])
+
+    assert plan.bound == []
+    _name, decision, _section = plan.review[0]
+    assert "ambiguous" in decision.reason      # the veto that reported
+    assert "not promoted" in decision.reason   # the refusal that still applies
+    assert decision.nes_id is None
+
+
+def test_a_same_script_candidate_is_still_promoted_over_its_veto():
+    # The other side of the guard: refusing cross-script must not quietly turn off
+    # promotion generally. Same names, same ambiguity, but the candidates carry
+    # Devanagari titles -- so the comparison was fair and the bind goes ahead.
+    thapa_a = {"id": "https://jawafdehi.org/entity/person/kamal-thapa-111111",
+               "title": {"ne": "कमल थापा"}, "score": 190.0}
+    thapa_b = {"id": "https://jawafdehi.org/entity/person/kamal-thapa-222222",
+               "title": {"ne": "कमल थापा"}, "score": 189.0}
+    case = {"slug": "case-kamal-3", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"कमल थापा": [thapa_a, thapa_b]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "कमल थापा", "relationship_type": "accused", "notes": "क"}])
+
+    assert plan.review == []
+    _name, decision, _notes, _section = plan.bound[0]
+    assert decision.nes_id == thapa_a["id"]
+    assert is_promoted(decision)
+    assert "ambiguous" in decision.reason
+
+
+def test_strict_mode_also_refuses_a_cross_script_only_match():
+    # Strict mode never promoted anything, so this is unchanged behaviour --
+    # asserted so the two modes cannot diverge on the one case where they must
+    # agree.
+    case = {"slug": "case-kamal-strict", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"कमल थापा": [KAMALA_LATIN_ONLY]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "कमल थापा", "relationship_type": "accused", "notes": "क"}],
+        strict=True)
+
+    assert plan.bound == []
+    assert plan.review[0][1].nes_id is None
+
+
+def test_one_entity_binds_into_two_sections_in_a_single_plan():
+    # The planner's `have` set is keyed on the pair too, so an extraction that
+    # names one entity in two sections plans both writes. Keyed on `nes_id` alone
+    # the second was dropped without appearing in any report.
+    case = {"slug": "case-two-sections", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"सुर्खेत जिल्ला": [SURKHET_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "location", "notes": "क"},
+        {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "related", "notes": "ख"}])
+
+    assert plan.action == "WOULD_PATCH"
+    assert [(i["nes_id"], i["relationship_type"]) for i in plan.patch_items] == [
+        (SURKHET_IRI, "location"), (SURKHET_IRI, "related")]
+    assert len(plan.bound) == 2
+    # Each row carries its OWN section. Looked up by `nes_id` instead, both rows
+    # reported whichever section was written last, so `.binds.jsonl` and the
+    # console would have labelled the location bind 'related'.
+    assert [section for _n, _d, _notes, section in plan.bound] == ["location", "related"]
+
+
+def test_the_same_entity_and_section_twice_is_planned_once():
+    # Two extracted spellings resolving to one entity in one section is still a
+    # single bind -- the pair key must not let a duplicate through.
+    case = {"slug": "case-dupe", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"सुर्खेत जिल्ला": [SURKHET_CANDIDATE],
+                                  "सुर्खेत": [SURKHET_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "location", "notes": "क"},
+        {"entity_name": "सुर्खेत", "relationship_type": "location", "notes": "ख"}])
+
+    assert [i["nes_id"] for i in plan.patch_items] == [SURKHET_IRI]
+    assert len(plan.bound) == 1
+
+
+def test_an_accused_bind_never_escalates_an_already_characterised_entity():
+    # The most consequential bind this module can write, and the one it will not
+    # write on its own: the case already binds this person as `related`, and an
+    # `accused` bind would assert they are the subject of the case AND set
+    # outcome=charged. A human decides that, so it goes to review.
+    case = {"slug": "case-escalate", "state": "DRAFT", "entities": [
+        {"nes_id": ANKUR_IRI, "type": "related", "notes": "मानव-लिखित टिप्पणी"}]}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "accused", "notes": "क"}])
+
+    assert plan.action == "NOOP"
+    assert plan.bound == []
+    _name, decision, section = plan.review[0]
+    assert section == "accused"
+    assert "would escalate to 'accused'" in decision.reason
+    assert "'related'" in decision.reason          # names what the case already says
+    # The existing bind and its human note are untouched.
+    assert plan.patch_items == []
+
+
+def test_a_non_accused_section_does_join_an_already_characterised_entity():
+    # The other side of that guard: only `accused` is held back. A `location`
+    # bind alongside an existing `related` one is additive, not an accusation.
+    case = {"slug": "case-additive", "state": "DRAFT", "entities": [
+        {"nes_id": SURKHET_IRI, "type": "related", "notes": "क"}]}
+    api = _SearchStubApi([case], {"सुर्खेत जिल्ला": [SURKHET_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "location", "notes": "ख"}])
+
+    assert plan.action == "WOULD_PATCH"
+    assert [(i["nes_id"], i["relationship_type"]) for i in plan.patch_items] == [
+        (SURKHET_IRI, "related"), (SURKHET_IRI, "location")]
+
+
+def test_an_accused_bind_is_written_when_the_entity_is_new_to_the_case():
+    # The guard keys on an EXISTING characterisation, so a first-time accused
+    # bind is unaffected -- this is the ordinary path and must stay open.
+    case = {"slug": "case-first-accused", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "accused", "notes": "क"}])
+
+    assert plan.action == "WOULD_PATCH"
+    assert plan.patch_items == [{"nes_id": ANKUR_IRI, "relationship_type": "accused",
+                                 "notes": "क", "outcome": "charged"}]
+
+
+def test_each_review_row_reports_its_own_section():
+    # One person, named in two sections by the same extraction -- a witness in a
+    # case who is also alleged, which the prompt allows. The section is recorded on
+    # the review row itself for exactly this reason: derived from a name-keyed dict
+    # instead, both rows reported the LAST section seen, so a caseworker triaging
+    # `*.review.jsonl` would see two `witness` rows and no `alleged` one.
+    case = {"slug": "case-two-roles", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अनिष श्रेष्ठ": [ANISH_A, ANISH_B]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "alleged", "notes": "क"},
+        {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "witness", "notes": "ख"}],
+        strict=True)
+
+    assert [section for _n, _d, section in plan.review] == ["alleged", "witness"]
+
+
+def test_an_unrecognised_section_is_reported_verbatim_on_its_review_row():
+    # The row exists to tell a caseworker what the model actually said, so the raw
+    # value is what goes on it -- not "" and not a guessed section.
+    case = {"slug": "case-bad-section", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "Suspect", "notes": "क"}])
+
+    _name, decision, section = plan.review[0]
+    assert section == "suspect"
+    assert "is not one of the" in decision.reason
+    # Refused before a search request was spent.
+    assert api.search_calls == []
+
+
+# --- Correction 1: the document veto (Task 5's `apply_document_veto`) -----
+
+
+def test_strict_downgrades_a_bind_to_review_when_the_document_is_an_election_record():
+    # A real person, correctly named, with a search-payload score above
+    # MIN_BIND_SCORE -- but the second read (the document) shows it is an
+    # Election Commission candidate/ward-head record, not confirmed as the
+    # case subject. `resolve()` alone would BIND this; strict mode must not.
+    case = {"slug": "case-elect", "state": "DRAFT", "entities": []}
+    election_doc = {"identifier": [{"propertyID": "ecn-candidate-id", "value": "12345"}]}
+    api = _SearchStubApi(
+        [case], {"अंकुर खत्री": [ANKUR_CANDIDATE]}, documents={ANKUR_IRI: election_doc})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}],
+        strict=True)
+
+    assert plan.action == "NOOP"
+    assert plan.patch_items == []
+    assert plan.bound == []
+    assert len(plan.review) == 1
+    name, decision, _section = plan.review[0]
+    assert name == "अंकुर खत्री"
+    assert decision.nes_id is None
+    assert "Election Commission" in decision.reason
+    assert api.get_entity_calls == [ANKUR_IRI]
+
+
+def test_permissive_binds_an_election_record_and_records_the_overridden_veto():
+    # The default mode overrides this veto -- that is the requested behaviour --
+    # but the bind must carry WHY, so the run's binds.jsonl can be filtered back
+    # down to exactly the judgement calls.
+    case = {"slug": "case-elect", "state": "DRAFT", "entities": []}
+    election_doc = {"identifier": [{"propertyID": "ecn-candidate-id", "value": "12345"}]}
+    api = _SearchStubApi(
+        [case], {"अंकुर खत्री": [ANKUR_CANDIDATE]}, documents={ANKUR_IRI: election_doc})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}])
+
+    assert plan.action == "WOULD_PATCH"
+    assert [i["nes_id"] for i in plan.patch_items] == [ANKUR_IRI]
+    assert plan.review == []
+    _name, decision, _notes, _section = plan.bound[0]
+    assert decision.nes_id == ANKUR_IRI
+    assert is_promoted(decision)
+    assert "Election Commission" in decision.reason
+
+
+def test_a_doubly_uncertain_bind_records_both_vetoes_it_overrode():
+    # `apply_document_veto` REPLACES the reason, so a name that was ambiguous AND
+    # turned out to be an election record used to end up recorded as only the
+    # second. `*.binds.jsonl` is the whole audit trail for permissive mode -- the
+    # file a caseworker filters to find the judgement calls -- so it must not
+    # under-report how uncertain a bind was.
+    election_doc = {"identifier": [{"propertyID": "ecn-candidate-id", "value": "12345"}]}
+    case = {"slug": "case-both", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अनिष श्रेष्ठ": [ANISH_A, ANISH_B]},
+                         documents={ANISH_A["id"]: election_doc})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related", "notes": "क"}])
+
+    _name, decision, _notes, _section = plan.bound[0]
+    assert decision.nes_id == ANISH_A["id"]
+    assert is_promoted(decision)
+    assert "Election Commission" in decision.reason   # the second veto
+    assert "ambiguous" in decision.reason             # the first, no longer lost
+
+
+def test_a_single_overridden_veto_is_not_recorded_twice():
+    # The carry-forward must fire only when the reason was actually replaced. A
+    # promoted ambiguity whose document comes back clean passes through
+    # `apply_document_veto` untouched, so it keeps exactly one reason.
+    case = {"slug": "case-once", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अनिष श्रेष्ठ": [ANISH_A, ANISH_B]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related", "notes": "क"}])
+
+    _name, decision, _notes, _section = plan.bound[0]
+    assert decision.reason.count("ambiguous") == 1
+    assert "; also" not in decision.reason
+
+
+def test_plan_downgrades_a_bind_to_review_when_get_entity_raises():
+    # Fail closed: one transient 403/502 on the document read must not let a
+    # BIND survive. This is the whole point of the try/except around
+    # `api.get_entity` -- a raised exception must map to REVIEW, not bubble
+    # up and abort the run, and never leave nes_id set.
+    case = {"slug": "case-unreadable", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi(
+        [case], {"अंकुर खत्री": [ANKUR_CANDIDATE]},
+        documents={ANKUR_IRI: RuntimeError("502 Bad Gateway")})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}])
+
+    assert plan.action == "NOOP"
+    assert plan.patch_items == []
+    assert plan.bound == []
+    assert len(plan.review) == 1
+    name, decision, _section = plan.review[0]
+    assert decision.nes_id is None
+    assert api.get_entity_calls == [ANKUR_IRI]
+
+
+def test_plan_still_binds_when_the_document_has_a_null_identifier():
+    # The boundary, precisely: a document that is a dict with `identifier:
+    # null` is a NORMAL CIAA portal entity (25 of the 40 frozen fixture
+    # documents look exactly like this) and must still BIND. Only an
+    # UNREADABLE document fails closed -- this is not that.
+    case = {"slug": "case-normal", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi(
+        [case], {"अंकुर खत्री": [ANKUR_CANDIDATE]}, documents={ANKUR_IRI: {"identifier": None}})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}])
+
+    assert plan.action == "WOULD_PATCH"
+    assert [i["nes_id"] for i in plan.patch_items] == [ANKUR_IRI]
+    assert len(plan.bound) == 1
+    assert plan.review == []
+
+
+# --- Correction 2: a location-typed item binds into the location section ---
+
+
+SURKHET_IRI = "https://jawafdehi.org/entity/location/district/surkhet"
+SURKHET_CANDIDATE = {"id": SURKHET_IRI, "title": {"ne": "सुर्खेत जिल्ला"},
+                     "score": 190.0}
+
+
+def test_a_location_item_binds_into_the_location_section():
+    # 7 of 33 extracted names in a live smoke run came back
+    # relationship_type="location", and every one of them used to be refused
+    # before searching. They now bind, into `location` -- NOT into `related`:
+    # the section comes from the extraction's own relationship_type, so a
+    # district does not get filed as a related party.
+    case = {"slug": "case-loc", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"सुर्खेत जिल्ला": [SURKHET_CANDIDATE]},
+                         documents={SURKHET_IRI: {"identifier": None}})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "location", "notes": ""}])
+
+    assert plan.action == "WOULD_PATCH"
+    assert plan.patch_items == [{"nes_id": SURKHET_IRI,
+                                 "relationship_type": "location", "notes": ""}]
+    assert len(plan.bound) == 1
+    assert plan.review == []
+    # `outcome` is legal only on an accused bind -- a location must not carry one.
+    assert "outcome" not in plan.patch_items[0]
+
+
+def test_a_location_and_a_related_item_each_bind_into_their_own_section():
+    # A mixed extraction lands in two different sections from one pass. This is
+    # the behaviour the whole change exists for: bind everything that matched,
+    # each into the section it was extracted under.
+    case = {"slug": "case-mixed", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE],
+                                  "सुर्खेत जिल्ला": [SURKHET_CANDIDATE]},
+                         documents={ANKUR_IRI: {"identifier": None},
+                                    SURKHET_IRI: {"identifier": None}})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "location", "notes": ""},
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "ख"}])
+
+    assert plan.action == "WOULD_PATCH"
+    assert {i["nes_id"]: i["relationship_type"] for i in plan.patch_items} == {
+        SURKHET_IRI: "location", ANKUR_IRI: "related"}
+    assert plan.review == []
+    assert len(plan.bound) == 2
+
+
+def test_an_accused_extraction_binds_as_accused_and_carries_the_charged_outcome():
+    # `accused` is the one section with an extra requirement: the DB's
+    # `outcome_only_on_accused` CHECK makes `outcome` legal here and nowhere
+    # else, and every case in this corpus is a Special Court `-CR-` case, so
+    # 'charged' is true by construction.
+    case = {"slug": "case-acc", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]},
+                         documents={ANKUR_IRI: {"identifier": None}})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "accused", "notes": "क"}])
+
+    assert plan.action == "WOULD_PATCH"
+    assert plan.patch_items == [{"nes_id": ANKUR_IRI, "relationship_type": "accused",
+                                 "outcome": CHARGED, "notes": "क"}]
+
+
+# --------------------------------------------------------------------------
+# Fix round 1 -- review response. Seven items; this section covers the six
+# that land in this module (the ETag question's write-side enforcement is
+# Task 7's, per the ruling; this module only surfaces its absence).
+# --------------------------------------------------------------------------
+
+
+# --- Item 1 (critical): the location gate must be an allow-list ----------
+
+
+@pytest.mark.parametrize("relationship_type,expected", [
+    ("Location", "location"),      # casing is normalised, not refused
+    (" location ", "location"),    # so is padding
+    ("ALLEGED", "alleged"),
+    ("witness", "witness"),
+])
+def test_a_valid_section_binds_however_the_llm_cased_it(relationship_type, expected):
+    # The field is trimmed and lowercased before it is checked, so an LLM that
+    # capitalises or pads it still lands in the right section. This used to be an
+    # allow-list of exactly "related"; the normalisation is what survived from it,
+    # because a casing mismatch here once let "Location" through a deny-list and
+    # bind as related.
+    case = {"slug": "case-scope", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]},
+                         documents={ANKUR_IRI: {"identifier": None}})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": relationship_type,
+         "notes": "क"}])
+
+    assert plan.action == "WOULD_PATCH"
+    assert plan.patch_items[0]["relationship_type"] == expected
+
+
+@pytest.mark.parametrize("relationship_type", ["", "organization", "Related party", None])
+def test_a_section_the_api_does_not_accept_reviews_without_searching(relationship_type):
+    # There is no section to bind these into, and guessing one would file the
+    # entity under a relationship nobody asserted. Refused BEFORE any search, so
+    # a malformed extraction costs no request.
+    case = {"slug": "case-scope", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": relationship_type,
+         "notes": "क"}])
+
+    assert plan.action == "NOOP"
+    assert plan.patch_items == []
+    assert plan.bound == []
+    assert len(plan.review) == 1
+    name, decision, _section = plan.review[0]
+    assert name == "अंकुर खत्री"
+    assert decision.nes_id is None
+    assert api.search_calls == []
+    assert api.get_entity_calls == []
+
+
+
+
+def test_plan_treats_a_missing_relationship_type_as_out_of_scope():
+    # The allow-list's other half: a missing key must fail the same way as an
+    # explicit "location" -- previously this was "safe" only because a filter
+    # in the unrelated `main()` function happened to drop such items first, a
+    # coupling this planner should not have to rely on.
+    case = {"slug": "case-missing-type", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "notes": "क"}])  # no relationship_type at all
+
+    assert plan.action == "NOOP"
+    assert len(plan.review) == 1
+    assert api.search_calls == []
+
+
+# --- Item 2 (important): a case payload with no "entities" key -----------
+
+
+def test_plan_refuses_to_write_when_the_entities_key_is_absent_from_the_case_payload():
+    # `case.get("entities") or []` cannot tell "this case has no binds" from
+    # "this payload does not carry binds" -- and sent to `replace_list`, the
+    # latter deletes every existing bind. Absent is not empty.
+    case = {"slug": "case-noentities", "state": "DRAFT"}  # no "entities" key
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}])
+
+    assert plan.action == "NOOP"
+    assert plan.patch_items == []
+    assert "entities" in plan.reason
+    # Never even reached the resolver -- refused before any search.
+    assert api.search_calls == []
+
+
+# --- Item 3 (important): bound-count accuracy + exception text -----------
+
+
+def test_plan_folds_the_get_entity_exception_text_into_the_review_reason():
+    # A misconfigured base URL or a changed `get_entity` signature would
+    # downgrade EVERY bind to REVIEW with only "entity document unavailable" to
+    # go on -- indistinguishable from a real transient failure. The actual
+    # exception text must be diagnosable from the plan.
+    case = {"slug": "case-diag", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi(
+        [case], {"अंकुर खत्री": [ANKUR_CANDIDATE]},
+        documents={ANKUR_IRI: RuntimeError("502 Bad Gateway from api.example")})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}])
+
+    assert len(plan.review) == 1
+    _, decision, _section = plan.review[0]
+    assert "502 Bad Gateway from api.example" in decision.reason
+
+
+# --- Item 5 (important, new): a truncated candidate list must not bind ---
+
+
+def test_plan_downgrades_a_bind_when_search_reports_an_incomplete_window():
+    # `search_entities` reports whether it ran out of results or stopped early,
+    # via `CandidateList.complete`. When it stopped early AND the lowest-ranked
+    # row fetched still scores as high as the match, an equally-relevant same-name
+    # entity can sit just past the edge, so the ambiguity veto's premise -- every
+    # tied candidate was seen -- does not hold and the bind must not survive.
+    #
+    # Note the scores: the filler ties the match rather than sitting far below it.
+    # That is the whole condition. A row COUNT cannot express it, which is why the
+    # earlier version of this test passed a 200-long list of score-1.0 filler and
+    # proved nothing about the real hazard.
+    candidates = CandidateList([ANKUR_CANDIDATE] + [
+        {"id": f"https://jawafdehi.org/entity/person/filler-{i:03d}-aaaaaa",
+         "title": {"ne": "फरक नाम"}, "score": ANKUR_CANDIDATE["score"]}
+        for i in range(49)])
+    candidates.complete = False
+
+    case = {"slug": "case-truncated", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": candidates})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}],
+        strict=True)
+
+    assert plan.action == "NOOP"
+    assert plan.patch_items == []
+    assert plan.bound == []
+    assert len(plan.review) == 1
+    _, decision, _section = plan.review[0]
+    assert decision.nes_id is None
+    assert "truncated mid-block" in decision.reason
+
+
+def test_permissive_binds_through_a_truncated_window_and_says_so():
+    # The riskiest promotion of the five, pinned deliberately: at the page cap a
+    # same-name duplicate can sit just outside the window, so permissive mode is
+    # binding on a candidate set it KNOWS is incomplete. That is the accepted
+    # cost of the mode -- what must not happen is it binding silently, so the
+    # reason has to survive onto the decision.
+    candidates = CandidateList([ANKUR_CANDIDATE] + [
+        {"id": f"https://jawafdehi.org/entity/person/filler-{i:03d}-aaaaaa",
+         "title": {"ne": "फरक नाम"}, "score": ANKUR_CANDIDATE["score"]}
+        for i in range(49)])
+    candidates.complete = False
+
+    case = {"slug": "case-truncated", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": candidates},
+                         documents={ANKUR_IRI: {"identifier": None}})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}])
+
+    assert plan.action == "WOULD_PATCH"
+    _name, decision, _notes, _section = plan.bound[0]
+    assert decision.nes_id == ANKUR_IRI
+    assert is_promoted(decision)
+    assert "truncated mid-block" in decision.reason
+
+
+def test_a_complete_window_binds_however_long_the_list_is():
+    # The inverse, and the reason the count-based test had to go: a full-length
+    # result set that search EXHAUSTED carries no truncation risk, and every bind
+    # on one was previously thrown away.
+    candidates = CandidateList([ANKUR_CANDIDATE] + [
+        {"id": f"https://jawafdehi.org/entity/person/filler-{i:03d}-aaaaaa",
+         "title": {"ne": "फरक नाम"}, "score": 1.0}
+        for i in range(199)])
+    candidates.complete = True
+    assert len(candidates) == ENTITY_SEARCH_PAGE_SIZE * ENTITY_SEARCH_MAX_PAGES
+
+    case = {"slug": "case-complete-window", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": candidates})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}])
+
+    assert plan.action == "WOULD_PATCH"
+    assert [n for n, _, _, _ in plan.bound] == ["अंकुर खत्री"]
+
+
+def test_plan_still_binds_when_the_candidate_list_is_one_short_of_the_cap():
+    # The boundary: one candidate short of the cap must still bind normally --
+    # proves the guard is keyed on the actual constant, not an off-by-one that
+    # would also catch a merely-large-but-complete result.
+    cap = ENTITY_SEARCH_PAGE_SIZE * ENTITY_SEARCH_MAX_PAGES
+    filler = [
+        {"id": f"https://jawafdehi.org/entity/person/filler-{i:03d}-aaaaaa",
+         "title": {"ne": "फरक नाम"}, "score": 1.0}
+        for i in range(cap - 2)
+    ]
+    candidates = [*filler, ANKUR_CANDIDATE]
+    assert len(candidates) == cap - 1
+
+    case = {"slug": "case-not-truncated", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": candidates})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}])
+
+    assert plan.action == "WOULD_PATCH"
+    assert [i["nes_id"] for i in plan.patch_items] == [ANKUR_IRI]
+
+
+# --- Item 4: no `required_state` keyword exists any more ------------------
+
+
+def test_plan_case_entities_has_no_required_state_parameter():
+    # The brief's own signature offered `required_state`, and its only
+    # possible use (`required_state="IN_REVIEW"`) is exactly what this
+    # module's REQUIRED_WRITE_STATE comment forbids -- IN_REVIEW's `notes`
+    # come back blanked for a non-casework read, so merging it would wipe
+    # every existing note. Zero callers ever passed it; removed rather than
+    # left as a footgun with no user.
+    import inspect
+
+    params = inspect.signature(plan_case_entities).parameters
+    assert "required_state" not in params
+
+
+# --- The ETag visibility note (not a fix -- Task 7 enforces it) -----------
+
+
+def test_plan_reason_names_a_missing_etag_for_visibility():
+    case = {"slug": "case-noetag", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case])
+    plan = plan_case_entities(api, case, None, [])
+    assert "etag" in plan.reason.lower()
+
+
+# --------------------------------------------------------------------------
+# Task 7 -- conditional apply, and the three report files.
+# --------------------------------------------------------------------------
+
+from casework.enrich_related_entities import (  # noqa: E402
+    apply_entity_plan,
+    plan_summary,
+    report_paths,
+    write_jsonl,
+    write_nomatch_report,
+)
+
+
+def test_apply_sends_the_captured_etag_as_if_match():
+    case = {"slug": "case-x", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"abc123"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}])
+    apply_entity_plan(api, plan)
+
+    slug, path, items, if_match = api.replace_list_calls[0]
+    assert (slug, path, if_match) == ("case-x", "entities", 'W/"abc123"')
+    assert [i["nes_id"] for i in items] == [ANKUR_IRI]
+
+
+def test_apply_refuses_an_unconditional_write_when_no_etag_was_captured():
+    case = {"slug": "case-x", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, None, [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"}])
+    with pytest.raises(RuntimeError, match="no ETag"):
+        apply_entity_plan(api, plan)
+    assert api.replace_list_calls == []
+
+
+def test_apply_refuses_a_plan_that_is_not_would_patch():
+    plan = ere.EntityBindPlan(slug="case-x", action="NOOP")
+    with pytest.raises(ValueError, match="NOOP"):
+        apply_entity_plan(_SearchStubApi([]), plan)
+
+
+def test_apply_refuses_a_merged_item_missing_nes_id_and_never_calls_replace_list():
+    # `apply_entity_plan` re-validates every item in the merged list, INCLUDING
+    # pre-existing binds it did not add itself -- `plan_case_entities` only
+    # validates the additions it builds, so a bad item already sitting on the
+    # case (e.g. a hand-edited record, or a schema that changed under it)
+    # would otherwise reach `replace_list` unchecked.
+    api = _SearchStubApi([])
+    plan = ere.EntityBindPlan(
+        slug="case-bad-item", action="WOULD_PATCH", if_match='W/"e"',
+        patch_items=[{"relationship_type": "related", "notes": "missing nes_id"}])
+    with pytest.raises(ValueError, match="canonical"):
+        apply_entity_plan(api, plan)
+    assert api.replace_list_calls == []
+
+
+def test_nomatch_report_ranks_by_how_many_cases_a_name_appears_in(tmp_path):
+    from casework.entity_resolver import NO_MATCH as NM
+    from casework.entity_resolver import Decision
+
+    def d():
+        return Decision(NM, None, 0.0, "", "no NES entity scored high enough", ())
+
+    rows = [("जिल्ला शिक्षा कार्यालय, दाङ", "case-a", d()),
+            ("जिल्ला शिक्षा कार्यालय, दाङ", "case-b", d()),
+            ("गुल्बा कोरी", "case-c", d())]
+    out = tmp_path / "run.nomatch.md"
+    write_nomatch_report(out, rows)
+    text = out.read_text(encoding="utf-8")
+    assert text.index("जिल्ला शिक्षा कार्यालय, दाङ") < text.index("गुल्बा कोरी")
+    assert "2" in text.splitlines()[text.splitlines().index(
+        next(line for line in text.splitlines() if "दाङ" in line))]
+
+
+def test_nomatch_report_escapes_table_breaking_characters(tmp_path):
+    # Both cells hold text this module does not control -- an LLM-extracted name
+    # and an NES title. A literal pipe or a newline in either ends the cell early
+    # and shifts every column after it, so the row a caseworker is supposed to act
+    # on becomes unreadable. This report IS the queue.
+    from casework.entity_resolver import NO_MATCH as NM
+    from casework.entity_resolver import Decision
+
+    rows = [("मालपोत | कार्यालय", "case-a",
+             Decision(NM, None, 0.42, "जिल्ला\nकार्यालय", "no match", ()))]
+    out = tmp_path / "run.nomatch.md"
+    write_nomatch_report(out, rows)
+
+    row = next(line for line in out.read_text(encoding="utf-8").splitlines()
+               if "मालपोत" in line)
+    # Four columns means four separators plus the two bounding ones; an unescaped
+    # pipe or newline would change that count.
+    assert row.count("|") - row.count(r"\|") == 5
+    assert r"मालपोत \| कार्यालय" in row
+    assert "जिल्ला कार्यालय" in row      # the newline became a space
+    assert "\n" not in row
+
+
+def test_report_paths_share_the_run_log_stem(tmp_path):
+    paths = {"log": str(tmp_path / "20260803T101500Z-entities-abc.log"),
+             "events": str(tmp_path / "20260803T101500Z-entities-abc.events.jsonl")}
+    out = report_paths(paths)
+    assert out["binds"].endswith("20260803T101500Z-entities-abc.binds.jsonl")
+    assert out["review"].endswith("20260803T101500Z-entities-abc.review.jsonl")
+    assert out["nomatch"].endswith("20260803T101500Z-entities-abc.nomatch.md")
+
+
+# --- Correction 1: report_paths must not blind-slice a non-.log stem -----
+
+
+def test_report_paths_does_not_mangle_a_log_path_without_a_log_suffix(tmp_path):
+    # The brief's `str(Path(paths["log"]))[: -len(".log")]` unconditionally
+    # chops the last 4 characters off ANY log path, .log or not -- garbling
+    # the stem for a path that does not end in .log (e.g. a caller that
+    # passes a bare run-id or a path with a different extension). Guarded:
+    # the suffix is stripped only when it is actually present.
+    stem_name = "20260803T101500Z-entities-abc"
+    paths = {"log": str(tmp_path / stem_name)}
+    out = report_paths(paths)
+    assert out["binds"].endswith(f"{stem_name}.binds.jsonl")
+    assert out["review"].endswith(f"{stem_name}.review.jsonl")
+    assert out["nomatch"].endswith(f"{stem_name}.nomatch.md")
+    # In particular, the last 4 characters of the real stem must survive --
+    # the blind slice would have chopped "-abc" down to "-a".
+    assert "abc.binds.jsonl" in out["binds"]
+
+
+# --- Correction 2: write_jsonl needs its own round-trip test -------------
+
+
+def test_write_jsonl_round_trips_one_object_per_line_with_devanagari_unescaped(
+    tmp_path,
+):
+    out = tmp_path / "run.binds.jsonl"
+    rows = [
+        {"name": "अंकुर खत्री", "nes_id": ANKUR_IRI, "case": "case-a"},
+        {"name": "गुल्बा कोरी", "nes_id": "https://jawafdehi.org/entity/person/x", "case": "case-b"},
+    ]
+    write_jsonl(out, rows)
+
+    raw = out.read_bytes()
+    text = raw.decode("utf-8")
+    lines = text.splitlines()
+    assert len(lines) == 2
+    # Devanagari must appear as literal UTF-8 bytes, never as a \uXXXX escape
+    # -- assert on the file's actual text, not on a value computed via the
+    # same json.dumps(..., ensure_ascii=False) the code itself uses.
+    assert "अंकुर खत्री" in text
+    assert "गुल्बा कोरी" in text
+    assert "\\u" not in text
+    assert json.loads(lines[0]) == rows[0]
+    assert json.loads(lines[1]) == rows[1]
+
+
+# --- Correction 3: write_nomatch_report must keep the BEST candidate seen ---
+
+
+def test_nomatch_report_keeps_the_best_scoring_candidate_in_a_group(tmp_path):
+    # As briefed, write_nomatch_report takes near/score from the FIRST
+    # decision seen for a normalised group and ignores every later one -- so
+    # a later, higher-scoring near-miss in the same group is silently
+    # dropped in favour of a worse one seen earlier. Here the SECOND row
+    # scores higher than the first; the report must show the better one.
+    from casework.entity_resolver import NO_MATCH as NM
+    from casework.entity_resolver import Decision
+
+    weak = Decision(NM, None, 0.40, "कमजोर मिल्दोजुल्दो", "no NES entity scored high enough", ())
+    strong = Decision(NM, None, 0.83, "उत्तम मिल्दोजुल्दो", "no NES entity scored high enough", ())
+    rows = [
+        ("जिल्ला शिक्षा कार्यालय, दाङ", "case-a", weak),
+        ("जिल्ला शिक्षा कार्यालय, दाङ", "case-b", strong),
+    ]
+    out = tmp_path / "run.nomatch.md"
+    write_nomatch_report(out, rows)
+    text = out.read_text(encoding="utf-8")
+    line = next(line for line in text.splitlines() if "दाङ" in line)
+    assert "उत्तम मिल्दोजुल्दो" in line
+    assert "0.83" in line
+    assert "कमजोर मिल्दोजुल्दो" not in line
+
+
+# --- Correction 4: the summary must reconcile against extracted names ----
+
+
+def test_plan_summary_reports_already_bound_names_instead_of_letting_them_vanish():
+    # plan_case_entities (Task 6) drops a resolved BIND whose nes_id is
+    # already on the case from bound, review AND nomatch alike -- correct
+    # for a re-run (nothing new to write), but it means
+    # len(bound)+len(review)+len(nomatch) alone silently undercounts the
+    # extracted names on every re-run. plan_summary must surface the gap as
+    # its own count so the totals add back up.
+    case = {"slug": "case-x", "state": "DRAFT", "entities": [
+        {"nes_id": ANKUR_IRI, "type": "related", "notes": "क"}]}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    extracted_items = [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "ख"}]
+    plan = plan_case_entities(api, case, 'W/"e"', extracted_items)
+
+    assert plan.action == "NOOP"
+    assert plan.bound == []
+    assert plan.review == []
+    assert plan.nomatch == []
+
+    summary = plan_summary(plan, extracted_items)
+    assert summary["extracted"] == 1
+    assert summary["bound"] == 0
+    assert summary["review"] == 0
+    assert summary["nomatch"] == 0
+    assert summary["already_bound"] == 1
+    assert (
+        summary["bound"] + summary["review"] + summary["nomatch"]
+        + summary["already_bound"] == summary["extracted"]
+    )
+
+
+def test_plan_summary_reconciles_on_the_ordinary_bind_review_nomatch_split():
+    anish_a = {"id": "https://jawafdehi.org/entity/person/anish-shrestha-219986",
+               "title": {"ne": "अनिष श्रेष्‍ठ"}, "score": 182.17}
+    anish_b = {"id": "https://jawafdehi.org/entity/person/anish-shrestha-285096",
+               "title": {"ne": "अनिष श्रेष्ठ"}, "score": 182.17}
+    case = {"slug": "case-z", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi(
+        [case], {"अंकुर खत्री": [ANKUR_CANDIDATE],
+                 "अनिष श्रेष्ठ": [anish_a, anish_b], "खगेन्द्र पराजुली": []})
+    extracted_items = [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"},
+        {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related", "notes": "ख"},
+        {"entity_name": "खगेन्द्र पराजुली", "relationship_type": "related", "notes": "ग"},
+    ]
+    plan = plan_case_entities(api, case, 'W/"e"', extracted_items, strict=True)
+
+    summary = plan_summary(plan, extracted_items)
+    # Exact equality on purpose, and the exact KEY SET matters as much as the
+    # values: every count here describes an extracted name, so the four must
+    # reconcile with nothing left over. A future non-extraction source of names
+    # must not add a key to this dict -- it would silently join the
+    # `already_bound` subtraction and drive it negative, which is what the three
+    # court-record keys that used to sit here existed to avoid.
+    assert summary == {
+        "extracted": 3, "bound": 1, "review": 1, "nomatch": 1, "already_bound": 0,
+    }
+
+
+def test_plan_summary_reconciles_when_permissive_mode_promotes_the_ambiguity():
+    # Same three names, default mode: the ambiguity moves from `review` into
+    # `bound`. The reconciliation must still close -- a promoted bind is counted
+    # once, in one bucket, not double-counted or dropped.
+    anish_a = {"id": "https://jawafdehi.org/entity/person/anish-shrestha-219986",
+               "title": {"ne": "अनिष श्रेष्‍ठ"}, "score": 182.17}
+    anish_b = {"id": "https://jawafdehi.org/entity/person/anish-shrestha-285096",
+               "title": {"ne": "अनिष श्रेष्ठ"}, "score": 182.17}
+    case = {"slug": "case-z", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi(
+        [case], {"अंकुर खत्री": [ANKUR_CANDIDATE],
+                 "अनिष श्रेष्ठ": [anish_a, anish_b], "खगेन्द्र पराजुली": []},
+        documents={ANKUR_IRI: {"identifier": None},
+                   anish_a["id"]: {"identifier": None},
+                   anish_b["id"]: {"identifier": None}})
+    extracted_items = [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"},
+        {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related", "notes": "ख"},
+        {"entity_name": "खगेन्द्र पराजुली", "relationship_type": "related", "notes": "ग"},
+    ]
+    plan = plan_case_entities(api, case, 'W/"e"', extracted_items)
+
+    assert plan_summary(plan, extracted_items) == {
+        "extracted": 3, "bound": 2, "review": 0, "nomatch": 1, "already_bound": 0,
+    }
+
+
+# --------------------------------------------------------------------------
+# Task 8, fix round 1 -- the two refusal paths, the write-then-report order,
+# and the report files `main()` actually writes.
+# --------------------------------------------------------------------------
+
+
+def _report_files():
+    logger = logging.getLogger("casework.entities")
+    return ere.report_paths(logger._casework_run_paths)
+
+
+THREE_WAY_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "related", "notes": "क"},
+        {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related", "notes": "ख"},
+        {"entity_name": "खगेन्द्र पराजुली", "relationship_type": "related", "notes": "ग"},
+    ],
+    "accused_notes": [],
+})
+
+# One name binds outright, one is ambiguous between two same-name people (so it
+# goes to review), one matches nothing in NES. Mirrors the real production
+# split, where most extracted names have no NES entity at all.
+ANISH_A = {"id": "https://jawafdehi.org/entity/person/anish-shrestha-219986",
+           "title": {"ne": "अनिष श्रेष्‍ठ"}, "score": 182.17}
+ANISH_B = {"id": "https://jawafdehi.org/entity/person/anish-shrestha-285096",
+           "title": {"ne": "अनिष श्रेष्ठ"}, "score": 182.17}
+THREE_WAY_SEARCH = {"अंकुर खत्री": [ANKUR_CANDIDATE],
+                    "अनिष श्रेष्ठ": [ANISH_A, ANISH_B],
+                    "खगेन्द्र पराजुली": []}
+
+
+def test_a_non_draft_case_reports_nothing_as_already_bound(
+    monkeypatch, patched_fetch_markdown, capsys
+):
+    # `ENRICHABLE_STATES` includes IN_REVIEW, so a non-DRAFT case really does
+    # reach the planner, which refuses it. Before the fix, `plan_summary` still
+    # ran on that refused plan and -- deriving `already_bound` by subtracting
+    # three empty lists from the extracted count -- reported every extracted
+    # name as already bound, while pointing at two empty report files.
+    case = dict(PRESS_ONLY_CASE, slug="case-in-review", state="IN_REVIEW",
+                entities=[])
+    api = _SearchStubApi([case], THREE_WAY_SEARCH)
+    report = _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: THREE_WAY_RESPONSE,
+                       argv=["--dry-run"])
+    out = capsys.readouterr().out
+
+    assert "TOTAL already bound (nothing to write): 0" in out
+    assert "TOTAL reported for human review: 0" in out
+    assert "TOTAL with no NES match: 0" in out
+    rows = [r for r in report.rows if r["slug"] == "case-in-review"]
+    assert [r["status"] for r in rows] == ["skipped"]
+
+
+def test_a_payload_without_an_entities_key_is_an_error_not_already_bound(
+    monkeypatch, patched_fetch_markdown, capsys
+):
+    # The planner's OTHER refusal. It leaves `action` at its "NOOP" default, so
+    # a guard keyed on `action == "SKIP_STATE"` misses it and it falls into the
+    # genuine-NOOP branch -- which is why the guard keys on `plan.examined`.
+    # An incomplete read is a caller bug, so it is recorded as an error rather
+    # than a routine skip.
+    case = {k: v for k, v in PRESS_ONLY_CASE.items()}
+    case["slug"] = "case-no-entities-key"
+    case.pop("entities", None)
+    assert "entities" not in case
+
+    api = _SearchStubApi([case], THREE_WAY_SEARCH)
+    report = _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: THREE_WAY_RESPONSE,
+                       argv=["--dry-run"])
+    out = capsys.readouterr().out
+
+    assert "TOTAL already bound (nothing to write): 0" in out
+    rows = [r for r in report.rows if r["slug"] == "case-no-entities-key"]
+    assert [r["status"] for r in rows] == ["error"]
+    assert api.replace_list_calls == []
+
+
+def test_a_failed_write_leaves_no_bound_row_and_no_bound_claim(
+    monkeypatch, patched_fetch_markdown, capsys
+):
+    # A real, reproducible failure mode: no ETag was captured, so
+    # `apply_entity_plan` refuses the unconditional whole-list replace. The
+    # console and `*.binds.jsonl` must not claim a bind that never landed.
+    case = dict(PRESS_ONLY_CASE, slug="case-write-fails", entities=[])
+    api = _SearchStubApi([case], THREE_WAY_SEARCH)
+    api.etag = None
+    report = _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: THREE_WAY_RESPONSE,
+                       argv=["--apply"])
+    out = capsys.readouterr().out
+
+    assert "  BOUND " not in out
+    assert "TOTAL entities bound to cases: 0" in out
+    assert api.replace_list_calls == []
+    assert Path(_report_files()["binds"]).read_text(encoding="utf-8") == ""
+    statuses = [r["status"] for r in report.rows if r["slug"] == "case-write-fails"]
+    assert "error" in statuses
+
+
+def test_main_writes_the_three_report_files_with_the_right_rows(
+    monkeypatch, patched_fetch_markdown
+):
+    # Nothing else pins which rows land in which file: swapping `bind_rows` for
+    # `review_rows` at the `write_jsonl` calls passed the whole suite before
+    # this test existed. Run under --strict, because that is the mode that still
+    # produces one row of each kind -- the default promotes the ambiguity into a
+    # bind and would leave the review file empty, testing nothing.
+    case = dict(PRESS_ONLY_CASE, slug="case-three-way", entities=[])
+    api = _SearchStubApi([case], THREE_WAY_SEARCH)
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: THREE_WAY_RESPONSE,
+              argv=["--apply", "--strict"])
+
+    files = _report_files()
+    binds = [json.loads(line) for line
+             in Path(files["binds"]).read_text(encoding="utf-8").splitlines()]
+    review = [json.loads(line) for line
+              in Path(files["review"]).read_text(encoding="utf-8").splitlines()]
+    nomatch = Path(files["nomatch"]).read_text(encoding="utf-8")
+
+    assert [b["extracted"] for b in binds] == ["अंकुर खत्री"]
+    assert binds[0]["nes_id"] == ANKUR_IRI
+    assert binds[0]["written"] is True
+
+    assert [r["extracted"] for r in review] == ["अनिष श्रेष्ठ"]
+    assert "ambiguous" in review[0]["reason"]
+    # The candidate list travels with the row, so a reviewer can reproduce the
+    # decision from the file alone.
+    assert len(review[0]["candidates"]) >= 2
+
+    assert "खगेन्द्र पराजुली" in nomatch
+    assert "अंकुर खत्री" not in nomatch
+
+
+def test_dry_run_bind_rows_are_marked_unwritten(
+    monkeypatch, patched_fetch_markdown
+):
+    case = dict(PRESS_ONLY_CASE, slug="case-dry-marked", entities=[])
+    api = _SearchStubApi([case], THREE_WAY_SEARCH)
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: THREE_WAY_RESPONSE,
+              argv=["--dry-run"])
+
+    binds = [json.loads(line) for line
+             in Path(_report_files()["binds"]).read_text(encoding="utf-8").splitlines()]
+    # Two rows in the default mode: the clean match, plus the promoted ambiguity.
+    # Both must be marked unwritten -- a promoted bind is still only a prediction
+    # in a dry run.
+    assert [b["written"] for b in binds] == [False, False]
+    assert api.replace_list_calls == []
+    assert [b["reason"].startswith(PROMOTED_PREFIX) for b in binds] == [False, True]
+
+
+TWO_SECTION_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "location", "notes": "क"},
+        {"entity_name": "सुर्खेत जिल्ला", "relationship_type": "related", "notes": "ख"},
+    ],
+    "accused_notes": [],
+})
+
+
+def test_binds_jsonl_labels_each_section_when_one_entity_binds_twice(
+    monkeypatch, patched_fetch_markdown, capsys
+):
+    # End to end through `main()`, because the plan-level assertion is not enough:
+    # the report row's section used to come from an `nes_id`-keyed lookup over
+    # `patch_items`, which collapses two sections for one entity and labels BOTH
+    # rows with whichever was written last. A caseworker reading `.binds.jsonl`
+    # would see two `related` binds and no `location` one.
+    case = dict(PRESS_ONLY_CASE, slug="case-two-sections-e2e", entities=[])
+    api = _SearchStubApi([case], {"सुर्खेत जिल्ला": [SURKHET_CANDIDATE]})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: TWO_SECTION_RESPONSE,
+              argv=["--dry-run"])
+
+    binds = [json.loads(line) for line
+             in Path(_report_files()["binds"]).read_text(encoding="utf-8").splitlines()]
+    assert [b["role"] for b in binds] == ["location", "related"]
+    assert {b["nes_id"] for b in binds} == {SURKHET_IRI}
+    # And the console says the same thing, since that is what an operator reads.
+    out = capsys.readouterr().out
+    assert "WOULD BIND (location)" in out
+    assert "WOULD BIND (related)" in out
+
+
+# --------------------------------------------------------------------------
+# Deferred items 7, 8 and 10 from the final review: a dry run must predict a
+# real run, an all-skipped run must not describe names it never extracted, and
+# the merged wire payload must be asserted on a case that already has a bind.
+# --------------------------------------------------------------------------
+
+
+def test_dry_run_refuses_what_apply_refuses_instead_of_promising_a_bind(
+    monkeypatch, patched_fetch_markdown, capsys
+):
+    # The no-ETag branch of `plan_case_entities` sets `plan.reason` and keeps
+    # resolving by design, so the plan reaches WOULD_PATCH with a bound name on
+    # it. Dry run used to print WOULD BIND and record `would-bind` for exactly
+    # the plan `--apply` errors on -- overstating the one output whose whole job
+    # is to predict a real run.
+    case = dict(PRESS_ONLY_CASE, slug="case-dry-no-etag", entities=[])
+    api = _SearchStubApi([case], THREE_WAY_SEARCH)
+    api.etag = None
+    report = _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: THREE_WAY_RESPONSE,
+                       argv=["--dry-run"])
+    out = capsys.readouterr().out
+
+    assert "WOULD BIND" not in out
+    assert "WOULD REFUSE" in out
+    assert "no ETag" in out
+    assert "TOTAL entities that WOULD bind to cases (dry run, nothing written): 0" in out
+    statuses = [r["status"] for r in report.rows if r["slug"] == "case-dry-no-etag"]
+    assert statuses == ["would-refuse"]
+    assert Path(_report_files()["binds"]).read_text(encoding="utf-8") == ""
+    assert api.replace_list_calls == []
+
+
+def test_the_dry_run_refusal_and_the_apply_refusal_are_the_same_check():
+    # One copy of the preconditions, so the pair cannot drift. `--apply` raises
+    # and dry run reports, over the identical conditions in the identical order.
+    no_etag = ere.EntityBindPlan(
+        slug="case-x", action="WOULD_PATCH", if_match=None,
+        patch_items=[{"nes_id": ANKUR_IRI, "relationship_type": "related", "notes": ""}])
+    bad_item = ere.EntityBindPlan(
+        slug="case-y", action="WOULD_PATCH", if_match='W/"e"',
+        patch_items=[{"relationship_type": "related", "notes": "no nes_id"}])
+    writable = ere.EntityBindPlan(
+        slug="case-z", action="WOULD_PATCH", if_match='W/"e"',
+        patch_items=[{"nes_id": ANKUR_IRI, "relationship_type": "related", "notes": ""}])
+
+    assert "no ETag" in ere.entity_plan_refusal(no_etag)
+    assert "canonical" in ere.entity_plan_refusal(bad_item)
+    assert ere.entity_plan_refusal(ere.EntityBindPlan(slug="case-n", action="NOOP"))
+    assert ere.entity_plan_refusal(writable) == ""
+
+    for plan in (no_etag, bad_item):
+        with pytest.raises((ValueError, RuntimeError)):
+            apply_entity_plan(_SearchStubApi([]), plan)
+
+
+def test_an_all_skipped_run_does_not_claim_names_went_to_review(
+    monkeypatch, patched_fetch_markdown, capsys
+):
+    # Every case skipped on the idempotency gate, so nothing was extracted and
+    # both report files are empty. The zero-bound footer used to say "Every
+    # extracted name either went to review or matched no NES entity -- see the
+    # two files above", describing names that do not exist and files that are
+    # empty.
+    already = dict(PRESS_ONLY_CASE, slug="case-all-skipped", entities=[
+        {"nes_id": ANKUR_IRI, "type": "related", "notes": "पहिल्यै"},
+    ])
+    api = _SearchStubApi([already], THREE_WAY_SEARCH)
+    stub = _call_tracking_stub(THREE_WAY_RESPONSE)
+    _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+    out = capsys.readouterr().out
+
+    assert stub.calls == [], "the case should have been skipped before the LLM"
+    assert "TOTAL entities extracted across all cases: 0" in out
+    assert "bound zero entities because it extracted none" in out
+    assert "Every extracted name either went to review" not in out
+    files = _report_files()
+    assert Path(files["review"]).read_text(encoding="utf-8") == ""
+
+
+def test_apply_over_a_case_that_already_has_a_bind_writes_both_rows(
+    monkeypatch, patched_fetch_markdown
+):
+    # The wire payload, end to end, for the shape `replace_list` makes dangerous:
+    # a case that already carries a bind. Every omitted row is DELETED by the
+    # whole-list replace, so the request body must carry the pre-existing bind
+    # unchanged -- notes intact, relationship_type intact -- ahead of the new one.
+    # No other test asserts this on a `main() --apply` run.
+    case = dict(PRESS_ONLY_CASE, slug="case-merge-wire", entities=[
+        {"nes_id": EXISTING_IRI, "display_name": "गोपाल बहादुर श्रेष्ठ",
+         "entity_type": "Person", "type": "accused", "outcome": "convicted",
+         "notes": "तत्कालीन अध्यक्ष"},
+    ])
+    api = _SearchStubApi([case], THREE_WAY_SEARCH)
+    # --strict keeps the payload to exactly the pre-existing bind plus one new
+    # one, which is what makes the byte-for-byte assertion below readable. What
+    # this test guards -- that the merge never drops the human's row -- does not
+    # depend on the mode.
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: THREE_WAY_RESPONSE,
+              argv=["--apply", "--strict"])
+
+    assert len(api.replace_list_calls) == 1
+    slug, path, items, if_match = api.replace_list_calls[0]
+    assert (slug, path, if_match) == ("case-merge-wire", "entities", 'W/"abc123"')
+    assert items == [
+        # The human's bind, byte for byte as `current_entity_binds` read it.
+        # `outcome` is deliberately absent so the server preserves 'convicted'.
+        {"nes_id": EXISTING_IRI, "relationship_type": "accused",
+         "notes": "तत्कालीन अध्यक्ष"},
+        {"nes_id": ANKUR_IRI, "relationship_type": "related", "notes": "क"},
+    ]

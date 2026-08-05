@@ -7,6 +7,30 @@ import urllib.parse
 import urllib.request
 
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost")
+
+
+class CandidateList(list):
+    """Search results, plus whether they are the COMPLETE result set.
+
+    A plain list cannot say why paging stopped, and the two reasons matter very
+    differently to the resolver:
+
+    * a short page means the results ran out, so the list is everything there is;
+    * stopping early on relevance, or hitting the page cap, means more rows exist
+      and this window may have cut through a block of same-name entities -- which
+      is exactly the premise the ambiguity veto needs.
+
+    `search_entities` used to compute this distinction in its for/else and then
+    throw it away, leaving the resolver to guess from `len(candidates)`. A list
+    subclass carries it without breaking any caller that just iterates or takes
+    a length.
+
+    Defaults to `complete = False`: a bare `CandidateList()` claims nothing, so
+    a caller that forgets to set it gets the cautious answer rather than a silent
+    assurance of completeness.
+    """
+
+    complete: bool = False
 # Methods that mutate server state. GET/HEAD (reads) are never guarded --
 # only these go through the write-guard in `_request`.
 WRITE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -24,6 +48,11 @@ BROWSER_UA = (
 # application/json-patch+json parser, so that content type 415s.
 PATCH_CONTENT_TYPE = "application/json"
 WHOLE_LIST_PATHS = ("evidence", "entities")
+# Candidate-retrieval window for `search_entities`. 50 is the endpoint's
+# MAX_PAGE_SIZE (`search/service.py`); 4 pages = 200 candidates is well past the
+# largest same-name block seen in prod (13, for "संजय प्रसाद यादव").
+ENTITY_SEARCH_PAGE_SIZE = 50
+ENTITY_SEARCH_MAX_PAGES = 4
 
 
 def build_replace_patch(field, value):
@@ -93,6 +122,17 @@ class CaseworkApi:
         # non-loopback `base_url` -- see `_patch` below. Reads are never
         # affected by this flag.
         self.allow_remote_writes = allow_remote_writes
+        # Run-scoped read caches for the two entity reads. Keyed on the exact
+        # argument, so a hit returns what a second request would have returned:
+        # NES is fixed for a run's duration and both endpoints are read-only.
+        # These exist because corruption cases name the SAME institutions over
+        # and over -- a ministry or a district office recurs across many cases in
+        # one batch, and each recurrence otherwise re-pays a paged search (up to
+        # four round trips) or a document GET for an answer already in hand.
+        # Scoped to the instance, not the class, so the cache dies with the run
+        # and can never serve a stale document to a later one.
+        self._entity_search_cache: dict[tuple, list] = {}
+        self._entity_doc_cache: dict[str, dict] = {}
 
     def _headers(self, content_type=None):
         if self.basic is not None:
@@ -230,6 +270,122 @@ class CaseworkApi:
             headers = getattr(r, "headers", None)
             etag = headers.get("ETag") if headers is not None else None
             return body, etag
+
+    def get_court_case_entities(self, court, number, timeout=60):
+        """Every party row on one NGM court case, following pagination.
+
+        Rows carry `side` ("plaintiff" | "defendant"), `name`, and an `nes_id`
+        that is usually null -- see `casework.court_record` for why the accused
+        path reads the names and resolves them rather than trusting that field.
+
+        Pages by page NUMBER and ignores the response's `next` URL: `get()`
+        builds its request as `base_url + path`, so an absolute `next` would be
+        concatenated onto the base and produce a doubled prefix. `iter_cases`
+        sets the same precedent.
+        """
+        path = (f"/courtcases/{urllib.parse.quote(str(court), safe='')}"
+                f"/{urllib.parse.quote(str(number), safe='')}/entities")
+        rows, page = [], 1
+        while True:
+            data = self.get(path, {"page_size": 200, "page": page}, timeout)
+            rows.extend(data.get("results") or [])
+            if not data.get("next"):
+                return rows
+            page += 1
+
+    def search_entities(self, query, *, page_size=ENTITY_SEARCH_PAGE_SIZE,
+                        pages=ENTITY_SEARCH_MAX_PAGES, timeout=60):
+        """Candidate NES entities for `query`, from the unified search endpoint.
+
+        Uses `/api/search/` (OpenSearch) and NOT `/api/entities?query=`: that
+        endpoint scores a textual query over only the first 5000 rows ordered by
+        IRI (`MAX_SEARCH_CANDIDATES` in `entities/persistence.py`), and prod NES
+        holds 162,650 `person` entities -- every result comes from the "a..."
+        slice, so recall is about 3% and an ambiguity check built on it would be
+        meaningless.
+
+        Keeps paging while the last page's LOWEST score still ties the first
+        page's top score. A block of identical-name entities truncated mid-tie
+        would hide a duplicate from the resolver's ambiguity veto and turn a
+        review into a bind. Capped at `pages` pages; the cap being reached is
+        logged, never silent.
+
+        A read, so the write-guard in `_request` never applies -- this is usable
+        against production.
+
+        Memoised per run (see `__init__`): a repeated query returns the first
+        answer instead of re-paging. Keyed on the paging arguments too, so a
+        caller asking for a different window is never served the wrong one.
+        """
+        cache_key = (query, page_size, pages)
+        if cache_key in self._entity_search_cache:
+            return self._entity_search_cache[cache_key]
+        results, top_score, complete = CandidateList(), None, False
+        for page in range(1, pages + 1):
+            data = self.get("/search/", {"q": query, "type": "entity",
+                                         "page_size": page_size, "page": page},
+                            timeout=timeout)
+            batch = data.get("results") or []
+            results.extend(batch)
+            if not batch:
+                complete = True          # no more rows exist
+                break
+            scores = [r.get("score") or 0.0 for r in batch]
+            if top_score is None:
+                top_score = max(scores)
+            if len(batch) < page_size:
+                complete = True          # a short page IS the end of the results
+                break
+            if min(scores) < top_score:
+                # Stopped early on relevance, on a FULL page -- so more rows do
+                # exist and this window may have cut through a block of
+                # same-name entities. NOT complete: the resolver decides what
+                # that costs, using the score at the window edge.
+                break
+        else:
+            logger.info(
+                "entity search for %r hit the %d-page cap (%d candidates); a "
+                "same-name tie may extend past it", query, pages, len(results))
+        results.complete = complete
+        self._entity_search_cache[cache_key] = results
+        return results
+
+    def get_entity(self, ref, timeout=60):
+        """One NES entity document, by canonical IRI or bare ``<prefix>/<slug>``.
+
+        `/api/search/` returns only `id`, `title` and `score`, so it cannot tell
+        an Election Commission 2079 candidate record apart from a person NES
+        holds because a CIAA case named them. This is the read that can:
+        `identifier` carries the `ecn-candidate-id` marker that
+        `casework.entity_resolver.is_election_candidate_record` vetoes on.
+
+        The detail route (`entities/urls.py`'s `_REF`) takes either form, but
+        they need DIFFERENT encoding and the difference is not cosmetic --
+        both spellings below were checked against prod:
+
+        * `person/khusilala-saha-865cdc` keeps its separator, so quote with
+          ``safe="/"``.
+        * A full IRI must be encoded WHOLE (``safe=""``). Leaving the
+          ``https://`` slashes bare puts a ``//`` in the request path, which
+          collapses in transit and 404s.
+
+        A read, so it goes through `self.get` and the write-guard in `_request`
+        never applies -- usable against production.
+
+        Memoised per run (see `__init__`): the same entity bound on several cases
+        in one batch is fetched once. The document is read-only, so a hit is
+        indistinguishable from a second request.
+        """
+        ref = (ref or "").strip()
+        if not ref:
+            raise ValueError("get_entity needs an entity IRI or a <prefix>/<slug> path")
+        if ref in self._entity_doc_cache:
+            return self._entity_doc_cache[ref]
+        is_iri = ref.startswith("http://") or ref.startswith("https://")
+        quoted = urllib.parse.quote(ref, safe="" if is_iri else "/")
+        document = self.get("/entities/" + quoted, timeout=timeout)
+        self._entity_doc_cache[ref] = document
+        return document
 
     def _patch(self, slug, ops, timeout=60, if_match=None):
         """The choke point for FIELD writes (`patch_field`, `replace_list`) --

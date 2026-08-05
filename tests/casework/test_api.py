@@ -717,3 +717,249 @@ def test_no_auth_material_reaches_the_logs_on_the_exception_path(monkeypatch, ca
     assert basic_creds not in all_text
     assert "Bearer" not in all_text
     assert "Basic " not in all_text
+
+
+# ---------------------------------------------------------------------------
+# search_entities -- candidate retrieval for the resolver, over the unified
+# search endpoint (`/api/search/`, OpenSearch-backed) rather than
+# `/api/entities?query=` (which only scores the first 5000 IRI-ordered rows
+# and has ~3% recall against prod's 162,650 `person` entities). Pages while
+# the last page's lowest score still ties the first page's top score, so a
+# block of identical-name entities spanning a page boundary is never
+# truncated mid-tie -- that would hide a duplicate from the resolver's
+# ambiguity veto and turn a review into a silent bind.
+# ---------------------------------------------------------------------------
+
+
+def test_search_entities_hits_the_unified_search_endpoint(monkeypatch):
+    api = CaseworkApi("http://127.0.0.1:48010", token="t")
+    seen = []
+
+    def fake_get(path, params=None, timeout=60):
+        seen.append((path, params))
+        return {"results": [], "count": 0}
+
+    monkeypatch.setattr(api, "get", fake_get)
+    api.search_entities("अनिष श्रेष्ठ")
+
+    path, params = seen[0]
+    assert path == "/search/"
+    assert params["q"] == "अनिष श्रेष्ठ"
+    assert params["type"] == "entity"
+
+
+def test_search_entities_pages_on_to_exhaust_a_top_score_tie(monkeypatch):
+    # A block of identical-name entities must never be truncated mid-tie: a
+    # hidden duplicate would let the resolver's ambiguity veto pass and produce
+    # a bind. Pages 1 and 2 are full pages entirely at the top score, so paging
+    # must continue; page 3 drops below it, which ends the walk.
+    pages = [
+        {"results": [{"id": f"https://jawafdehi.org/entity/person/p{i}",
+                      "score": 182.17} for i in range(3)]},
+        {"results": [{"id": f"https://jawafdehi.org/entity/person/q{i}",
+                      "score": 182.17} for i in range(3)]},
+        {"results": [{"id": "https://jawafdehi.org/entity/person/r0", "score": 12.0}]},
+    ]
+    calls = []
+
+    api = CaseworkApi("http://127.0.0.1:48010", token="t")
+
+    def fake_get(path, params=None, timeout=60):
+        calls.append(params["page"])
+        return pages[params["page"] - 1]
+
+    monkeypatch.setattr(api, "get", fake_get)
+    results = api.search_entities("मदन यादव", page_size=3)
+
+    assert calls == [1, 2, 3]          # kept going while the tie held
+    assert len(results) == 7
+
+
+def test_search_entities_stops_on_a_short_page(monkeypatch):
+    # Fewer results than page_size means the result set is exhausted -- there
+    # is no page 2 worth asking for, even while the top-score tie still holds.
+    calls = []
+    api = CaseworkApi("http://127.0.0.1:48010", token="t")
+
+    def fake_get(path, params=None, timeout=60):
+        calls.append(params["page"])
+        return {"results": [{"id": "https://jawafdehi.org/entity/person/p0",
+                             "score": 182.17}]}
+
+    monkeypatch.setattr(api, "get", fake_get)
+    api.search_entities("मदन यादव", page_size=3)
+    assert calls == [1]
+
+
+def test_search_entities_stops_at_the_page_cap(monkeypatch):
+    api = CaseworkApi("http://127.0.0.1:48010", token="t")
+    calls = []
+
+    def fake_get(path, params=None, timeout=60):
+        calls.append(params["page"])
+        return {"results": [{"id": f"https://jawafdehi.org/entity/person/p{params['page']}",
+                             "score": 100.0}]}
+
+    monkeypatch.setattr(api, "get", fake_get)
+    api.search_entities("थापा", page_size=1, pages=2)
+    assert calls == [1, 2]
+
+
+def test_search_entities_is_a_read_so_the_write_guard_never_fires(monkeypatch):
+    # Non-loopback host, allow_remote_writes unset: a read must still work.
+    api = CaseworkApi("https://api.jawafdehi.org", token="t")
+    monkeypatch.setattr(api, "get", lambda path, params=None, timeout=60: {"results": []})
+    assert api.search_entities("अनिष श्रेष्ठ") == []
+
+
+# ---------------------------------------------------------------------------
+# get_entity -- the second read the ECN veto needs. `/api/search/` returns only
+# id/title/score, so it cannot tell an Election Commission 2079 candidate record
+# apart from a person NES holds because a CIAA case named them. The detail route
+# (`entities/urls.py`'s `_REF`) takes a canonical IRI or a bare `<prefix>/<slug>`
+# path, but the two need DIFFERENT url-encoding -- both spellings below were
+# checked against prod.
+# ---------------------------------------------------------------------------
+
+
+def _capture_get(api, monkeypatch, payload=None):
+    seen = []
+
+    def fake_get(path, params=None, timeout=60):
+        seen.append((path, params, timeout))
+        return payload if payload is not None else {}
+
+    monkeypatch.setattr(api, "get", fake_get)
+    return seen
+
+
+def test_get_entity_keeps_the_prefix_separator_on_a_bare_path(monkeypatch):
+    api = CaseworkApi("http://127.0.0.1:48010", token="t")
+    seen = _capture_get(api, monkeypatch)
+
+    api.get_entity("person/khusilala-saha-865cdc")
+
+    assert seen[0][0] == "/entities/person/khusilala-saha-865cdc"
+
+
+def test_get_entity_fully_encodes_a_canonical_iri(monkeypatch):
+    # The slashes in "https://" MUST be encoded. Left bare they put a "//" in
+    # the request path, which collapses in transit and 404s against prod.
+    api = CaseworkApi("http://127.0.0.1:48010", token="t")
+    seen = _capture_get(api, monkeypatch)
+
+    api.get_entity("https://jawafdehi.org/entity/person/raj-bahadur-bam-318984")
+
+    assert seen[0][0] == (
+        "/entities/https%3A%2F%2Fjawafdehi.org%2Fentity%2Fperson%2F"
+        "raj-bahadur-bam-318984"
+    )
+
+
+def test_get_entity_returns_the_parsed_document(monkeypatch):
+    api = CaseworkApi("http://127.0.0.1:48010", token="t")
+    document = {"@id": "https://jawafdehi.org/entity/person/raj-bahadur-bam-318984",
+                "identifier": [{"propertyID": "ecn-candidate-id", "value": "318984"}]}
+    _capture_get(api, monkeypatch, payload=document)
+
+    assert api.get_entity("person/raj-bahadur-bam-318984") == document
+
+
+def test_get_entity_passes_the_timeout_through(monkeypatch):
+    api = CaseworkApi("http://127.0.0.1:48010", token="t")
+    seen = _capture_get(api, monkeypatch)
+
+    api.get_entity("person/raj-bahadur-bam-318984", timeout=5)
+
+    assert seen[0][2] == 5
+
+
+@pytest.mark.parametrize("ref", ["", "   ", None])
+def test_get_entity_rejects_an_empty_ref(ref):
+    api = CaseworkApi("http://127.0.0.1:48010", token="t")
+    with pytest.raises(ValueError):
+        api.get_entity(ref)
+
+
+def test_get_entity_routes_through_the_read_path_not_a_write(monkeypatch):
+    # `api.get` is stubbed here, so `_request` and its write-guard never execute.
+    # What this proves is that get_entity goes through the READ helper -- which is
+    # why the guard cannot apply to it -- not that the guard itself was exercised.
+    # The guard has its own coverage: test_basic_mode_rejects_non_loopback_base_url
+    # and the _patch/_request guard tests above.
+    api = CaseworkApi("https://api.jawafdehi.org", token="t")
+    monkeypatch.setattr(api, "get", lambda path, params=None, timeout=60: {"@id": "x"})
+    assert api.get_entity("person/raj-bahadur-bam-318984") == {"@id": "x"}
+
+
+# --------------------------------------------------------------------------
+# get_court_case_entities -- the accused name source.
+#
+# Pages by PAGE NUMBER, never by following the `next` URL: `get()` builds its
+# URL as `base_url + path`, so handing it an absolute `next` would produce
+# "http://host/api/http://host/api/...". `iter_cases` sets the same precedent.
+# --------------------------------------------------------------------------
+
+
+def _paged_request(pages, seen):
+    """Serve `pages` (a list of result-lists) by ?page=, recording every URL."""
+
+    def fake_request(method, url, data=None, headers=None, timeout=None):
+        seen.append(url)
+        page = 1
+        if "page=" in url:
+            page = int(url.split("page=")[1].split("&")[0])
+        rows = pages[page - 1] if page - 1 < len(pages) else []
+        body = {"results": rows,
+                "next": "ignored-on-purpose" if page < len(pages) else None}
+
+        class R:
+            status = 200
+
+            def read(self):
+                return json.dumps(body).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        return R()
+
+    return fake_request
+
+
+def test_get_court_case_entities_quotes_the_court_and_number(monkeypatch):
+    seen = []
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(api, "_request", _paged_request([[{"side": "defendant"}]], seen))
+
+    api.get_court_case_entities("special", "080-cr-0111")
+
+    assert seen[0].startswith(
+        "http://127.0.0.1:48010/api/courtcases/special/080-cr-0111/entities?")
+
+
+def test_get_court_case_entities_follows_pagination_by_page_number(monkeypatch):
+    seen = []
+    pages = [[{"name": "अ"}] * 200, [{"name": "ब"}] * 200, [{"name": "स"}] * 12]
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(api, "_request", _paged_request(pages, seen))
+
+    rows = api.get_court_case_entities("special", "080-cr-0111")
+
+    assert len(rows) == 412
+    assert len(seen) == 3
+    # Never an absolute URL pasted onto the base -- that would double the prefix.
+    assert all(url.count("http://") == 1 for url in seen)
+
+
+def test_get_court_case_entities_stops_when_next_is_null(monkeypatch):
+    seen = []
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(api, "_request", _paged_request([[{"name": "अ"}]], seen))
+
+    api.get_court_case_entities("special", "080-cr-0111")
+
+    assert len(seen) == 1

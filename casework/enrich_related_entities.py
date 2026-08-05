@@ -1,18 +1,13 @@
 #!/usr/bin/env python
-"""Extract CIAA Special Court case related/location entities via LLM (DB-free).
-EXTRACTION ONLY -- this port never writes to ``/entities``. Read the
-ARCHITECTURE BLOCK below before assuming that is an oversight.
+"""Extract CIAA Special Court case entities via LLM, then resolve each extracted
+name to an existing NES entity and bind it into the section it was extracted under
+(accused, alleged, related, witness, location, ...).
 
 Ported from the deleted `casework/enrich_related_entities.py` (recovered at
 donor commit `0321a85`, 553 lines). Reads a case's press-release AND/OR
 court-order source text entirely over the Jawafdehi HTTP API and asks the
 premium LLM tier to extract related/location entities plus short accused-person
 notes, in one response.
-
-================================ ARCHITECTURE BLOCK =================================
-The donor is architecturally dead against the current write schema, and this
-port does NOT bridge that gap -- on purpose, after an explicit escalation and
-decision, not because the gap went unnoticed.
 
 THE DONOR'S WRITE SHAPE (0321a85, no longer valid against this branch):
     entity_id = api.create_entity(display_name=name, nes_id="")        # donor line 510
@@ -22,70 +17,86 @@ THE DONOR'S WRITE SHAPE (0321a85, no longer valid against this branch):
     api.patch_field(slug, "entities", entities_to_patch)                # donor line 543
 The donor blindly minted a brand-new entity for every LLM-extracted name, with
 NO NES resolution at all -- keyed by a flat `entity` id, no `nes_id`, no
-`outcome`. `CaseworkApi.create_entity` does not exist anywhere on this branch
-and never has during this porting project (`casework/common/api.py` only
-exposes `get`, `iter_cases`, `get_case`, `patch_field`, `replace_list`).
+`outcome`. `CaseworkApi.create_entity` does not exist on this branch and never
+has during this porting project, and it still does not exist: entities are
+owned by NES and must already exist there before this module can bind one --
+an unmatched name is reported for human review or in the no-match file, never
+minted.
 
-THE CURRENT SCHEMA (`cases/caseworker_serializers.py::EntityPatchItemSerializer`,
-~lines 148-190): every `/entities` item MUST be
+THE CURRENT SCHEMA (`cases/caseworker_serializers.py::EntityPatchItemSerializer`)
+requires every `/entities` item to be
     {"nes_id": <canonical NES @id IRI, validated by is_valid_entity_iri>,
      "relationship_type": ..., "outcome"?: <ACCUSED-role only>, "notes": ...}
 "The bind holds the canonical NES entity id directly; entities are owned by
 NES and must already exist there (no display-name fallback)" (serializer
-comment, verbatim). Posting a donor-shaped item here either 422s (missing/
-invalid `nes_id`) or -- far worse -- would require a name-matching shortcut
-that could silently bind the WRONG NES entity to a corruption case. That is a
-defamation risk, not a data-quality nit.
+comment, verbatim).
 
-WHY NO RESOLVER WAS BUILT HERE: turning an LLM-extracted Nepali name into a
-confirmed `nes_id` needs a matching/confidence design with no donor precedent.
-The closest analogue in this codebase, the still-live (but itself
-`NotImplementedError`'d in its own `handle()`) `cases/management/commands/
-enrich_ciaa_related_entities.py`, invents its own `_link_nes()` search +
-0.8-confidence-threshold heuristic with zero test coverage of false-positive
-binds. Bolting an equally untested heuristic onto this DB-free port -- inside
-a task scoped as a "port" -- is exactly the invented-behavior shape this
-project has repeatedly shipped (see the phantom `missing_details` and
-`validate_timeline_items` functions caught in tasks 14b/14c). Per explicit
-instruction, this port does NOT add `create_entity`, a resolver, a fuzzy
-matcher, or a `--force-bind` escape hatch -- not even disabled behind a flag.
+WHAT THIS MODULE DOES: the deterministic resolver lives in
+`casework/entity_resolver.py` -- matching an extracted name against NES search
+candidates is entirely score-based, with `MIN_BIND_SCORE = 0.85`; there is no
+fuzzy/edit-distance matching and no LLM call anywhere in the matching step.
 
-WHAT THIS MODULE DOES INSTEAD: it ports the donor's extraction machinery
-byte-for-byte -- system prompt, both truncation limits (including the
-asymmetric `PRESS_RELEASE_CHARS_NO_COURT` branch), prompt-budget enforcement,
-and the press-OR-court content selection (either source alone is sufficient,
-matching `STAGES["entities"].requires_materials` and the donor's own
-`_get_content_for_case`/caller gate at donor line 404: "No press release or
-court order content -- skipping") -- so extraction quality can be measured and
-reviewed. `main()` calls the LLM, parses `entities` + `accused_notes`, and
-reports per-case AND aggregate counts of what WOULD be bound -- but never
-calls `api.patch_field` or `api.replace_list`. A run that extracts 200
-entities and binds zero says so plainly in the final summary (see the
-unconditional "TOTAL entities bound to cases: 0" line), not just in per-case
-logs.
+BY DEFAULT EVERY NAME THAT MATCHED AN NES ENTITY IS BOUND, into the section its
+own `relationship_type` names -- any of the nine `cases.models.RelationshipType`
+accepts. When several entities tie above the threshold, the best-scoring one wins
+by a deterministic `(-score, nes_id)` sort, so some binds WILL name the wrong
+namesake. That is the accepted cost of the mode; every such bind is marked
+`[UNCERTAIN]` on the console and carries a `promoted over:` reason in
+`*.binds.jsonl`, which is how they are found again. Measured on the 142-row
+labelled set: precision 0.872, recall 0.872, and all five wrong binds are
+Election Commission candidate records rather than namesake mix-ups.
 
-ALSO NOT PORTED: the brief's suggested `validate_entity_item` function
-(canonical-`nes_id` + accused-only-`outcome` validation) does not exist
-ANYWHERE in the donor's history -- `git log --all -p -- casework/
-enrich_related_entities.py` never defines it. It matches the CURRENT
-`EntityPatchItemSerializer`'s rules, not any donor behavior, so per this
-task's "donor is the source of truth" mandate it is not implemented here.
-Same phantom-function shape as `normalise_missing_details` (14b) and
-`validate_timeline_items`-under-a-different-name (14c) -- flagged for the
-dispatcher, not silently added.
-=======================================================================================
+TWO REFUSALS SURVIVE THAT MODE, both because they are not "uncertain" at all:
+
+* A CROSS-SCRIPT-ONLY MATCH (`is_cross_script_only`). Overriding the other vetoes
+  accepts a known risk about a name that DID match; overriding this one asserts a
+  match the matcher rejects, because the score exists only through romanisation.
+  कमल थापा scores 0.96 against a `Kamala Thapa` entity and 0.00 against
+  कमला थापा -- binding it names a woman in a case charging a man.
+* AN UNREADABLE ENTITY DOCUMENT (`apply_document_veto`'s fail-closed branch). One
+  403 or 502 would otherwise bind whichever namesake sorted first with nothing
+  having been checked at all.
+
+`--strict` is the conservative pipeline: an ambiguity or a veto goes to the review
+report instead of binding. Same labelled set: precision 1.000, recall 0.846.
+
+Either way a name with NO NES candidate goes to the no-match report -- there is
+nothing to choose between, and this module never creates an NES entity.
+
+EVERY name comes from the extraction. `accused` is a section the LLM may use like
+any other; it is NOT also read from the case's NGM court record. That path was
+removed: it needs neither a document nor an LLM, so living here put it behind five
+gates it has no use for -- the already-enriched skip, the MARKDOWN-role
+prerequisite, the no-source gate, the empty-prompt gate, and an LLM failure. A case
+with a complete court record and five named defendants bound none of them whenever
+its press-release PDF lacked a MARKDOWN role, and a token-cap failure on
+078-CR-0001 cost that case all five. `casework/court_record.py` is kept and fully
+tested but unwired, pending a decision on giving it its own CLI.
+
+`casework.enrich_related_entities.plan_case_entities`
+builds a per-case write plan from the resolver's decisions and
+`apply_entity_plan` executes it as a single conditional (`If-Match`) whole-list
+replace of `/entities` -- never a partial patch, so an existing bind and its
+notes are always preserved via `merge_entity_binds`. Writes are DRAFT-only
+(`REQUIRED_WRITE_STATE`) and dry-run by default: `--dry-run` prints what WOULD
+bind without writing anything; `--apply` is required to actually write, and
+even then `CaseworkApi` itself refuses a non-loopback host unless
+`--allow-remote-writes` is also passed -- never pass that against production.
 
 Usage:
     uv run python -m casework.enrich_related_entities --dry-run
     uv run python -m casework.enrich_related_entities --slug case-0123
     uv run python -m casework.enrich_related_entities --limit 10 --verbose
-    uv run python -m casework.enrich_related_entities --apply   # still writes NOTHING
+    uv run python -m casework.enrich_related_entities --apply   # loopback only
 """
 
 import argparse
+import json
 import logging
 import sys
 import time
+from dataclasses import dataclass, field
+from pathlib import Path
 
 from casework.common.api import CaseworkApi
 from casework.common.cli import (
@@ -109,10 +120,50 @@ from casework.common.pipeline import (
     unmet_prerequisites,
 )
 from casework.common.select import select_for_run
+# `defendant_names` is deliberately NOT imported. Reading accused from the case's
+# NGM court record was removed from this enricher: it needs no document and no LLM,
+# so it does not belong behind this module's five document/LLM gates (a case with a
+# perfect court record bound zero defendants whenever its press-release PDF lacked a
+# MARKDOWN role, or the LLM call failed). `casework/court_record.py` and its tests
+# are kept intact, unwired, pending a decision on giving it its own CLI.
+from casework.court_record import CHARGED
+from casework.entity_resolver import (
+    BIND,
+    MIN_BIND_SCORE,
+    NO_MATCH,
+    REVIEW,
+    Decision,
+    apply_document_veto,
+    is_cross_script_only,
+    normalise_name,
+    resolve,
+)
+from jawafdehi_shared.entities.ids import is_valid_entity_iri
 
 log = logging.getLogger("casework.enrich_related_entities")
 
 STAGE = STAGES["entities"]
+
+# The output cap for one extraction. THE ONE PLACE this port deliberately departs
+# from the donor's `max_tokens=2000`, and it is not a tuning preference -- 2000 is
+# now too small to hold a valid response, so the call fails outright rather than
+# returning less:
+#
+#   RuntimeError: claude_cli failed (rc=1): ... "API Error: Claude's response
+#   exceeded the 2000 output token maximum."
+#
+# Reproduced on 078-CR-0001 with --model sonnet, a five-defendant case. Two things
+# grew the response past the donor's cap: the extraction now asks for five sections
+# rather than two (accused/alleged/witness were added so the binder's widened scope
+# is reachable), and every name and note is Devanagari, which tokenises far worse
+# than Latin -- roughly 2-3 tokens per character, so a dozen names with Nepali notes
+# alone approaches 2000.
+#
+# 8000 matches `enrich_timeline.TIMELINE_MAX_TOKENS`, which carries the same
+# fixed-constant treatment for the same reason. A cap costs nothing unless the model
+# actually reaches it: billing is on tokens produced, not on the ceiling. There is
+# no env knob because no other constant in `casework.common` has one.
+EXTRACTION_MAX_TOKENS = 8000
 
 # ── Slicing constants (verbatim from the donor's `env_int(NAME, default)`
 # defaults). The donor read these via an `env_int()` helper that lived in the
@@ -161,9 +212,9 @@ Examples of WRONG location names:
 - "काठमाडौं" ← if only reason is court/CIAA office, SKIP
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PART 2 — RELATED ENTITIES (relationship_type="related")
+PART 2 — PEOPLE AND ORGANIZATIONS (relationship_type="related" unless stated)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Any person or organization connected to the case BEYOND the primary accused.
+Any person or organization connected to the case.
 Extract ALL of these categories that appear in the documents:
 
   GOVERNMENT BODIES — ministry, department, municipality, office whose funds were
@@ -190,11 +241,20 @@ Extract ALL of these categories that appear in the documents:
   and their investigation is directly relevant.
   Example: "रविन्द्र कुमार बुढाप्रिथी"  notes: "अनुसन्धान अधिकृत, CIAA"
 
-  WITNESSES/INVESTIGATORS — named inquiry officers, key witnesses.
-  Example: "रविन्द्र कुमार बुढाप्रिथी"  notes: "अनुसन्धान अधिकृत, CIAA"
-
 Notes must never be blank for related entities. Always describe the specific connection.
 Only extract entities with CONFIRMED connections — not people who were later acquitted.
+
+USE A MORE SPECIFIC relationship_type INSTEAD OF "related" when the documents make
+the role plain. Only these three; when in doubt use "related".
+
+  "accused" — a person the charge sheet (आरोपपत्र) names as a defendant.
+  Example: "गजेन्द्र प्रसाद राउत"  notes: "प्रतिवादी"
+
+  "alleged" — named as implicated in the documents, but NOT on the charge sheet.
+  Example: "नानी काजी थापा"  notes: "घुस लेनदेनमा संलग्न भनी उल्लेख, अभियोग लगाइएको छैन"
+
+  "witness" — a named inquiry officer or witness.
+  Example: "रविन्द्र कुमार बुढाप्रिथी"  notes: "अनुसन्धान अधिकृत, CIAA"
 
 PRIORITY ORDER: People and organizations DIRECTLY involved in the case events come first.
 Generic legal infrastructure (courts, attorney offices) should be skipped unless a
@@ -220,7 +280,7 @@ Output ONLY this JSON object, no other text:
   "entities": [
     {
       "entity_name": "Name exactly as in document",
-      "relationship_type": "location" or "related",
+      "relationship_type": "location", "related", "accused", "alleged" or "witness",
       "notes": "specific description"
     }
   ],
@@ -232,6 +292,723 @@ Output ONLY this JSON object, no other text:
   ]
 }
 """
+
+# Writes are DRAFT-only. This is also what makes the merge safe: the case read
+# BLANKS per-entity `notes` for non-casework viewers
+# (`cases/serializers.py::get_entities`), so merging a redacted snapshot into a
+# whole-list replace would wipe every existing note. `CaseViewSet.get_queryset`
+# makes DRAFT retrieve casework-only -- if we can read the case at all, the notes
+# we read are the real ones. IN_REVIEW is publicly retrievable, so it is NOT
+# safe to merge even though `select.ENRICHABLE_STATES` allows it for extraction.
+REQUIRED_WRITE_STATE = "DRAFT"
+
+# Mirrors `cases.models.RelationshipType.values`. Hardcoded because this module
+# is DB-free by design and must not import Django; a test asserts the two agree.
+RELATIONSHIP_TYPES = (
+    "alleged", "accused", "related", "witness", "opposition", "victim",
+    "location", "respondent", "petitioner",
+)
+
+
+def bind_relationship_type(entity):
+    """One bind's relationship type, lowercased and trimmed, from either key.
+
+    THE SINGLE PLACE that knows the case API is asymmetric about this field: a
+    bind is WRITTEN as `relationship_type` but READ BACK as `type`, and
+    `relationship_type` never appears on a read. Verified against 1,099
+    production binds -- the read values are accused, related, location,
+    respondent, petitioner and alleged, all under `type`.
+
+    This exists as a chokepoint because getting it wrong once already cost a
+    Critical: the pre-LLM skip checked `relationship_type` alone, so it matched
+    nothing and every case re-spent a premium LLM call on every run. The fix for
+    that bug hand-copied the tolerance to a second site rather than centralising
+    it, which left the same trap open for a third. Read the field only through
+    here, and a future third key name is a one-line change.
+
+    Returns "" when neither key is present, so a caller must supply its own
+    default rather than inherit a silent one.
+    """
+    if not isinstance(entity, dict):
+        return ""
+    return (entity.get("type") or entity.get("relationship_type") or "").strip().lower()
+
+
+def current_entity_binds(case):
+    """The case's existing binds in PATCH shape, order preserved.
+
+    The read shape carries `type`, `display_name`, `entity_type` and `outcome`;
+    the patch shape wants `relationship_type` and neither display field.
+    `outcome` is deliberately DROPPED: an omitted outcome stays absent from the
+    serializer's validated data, so the persist step preserves an accused bind's
+    existing verdict rather than resetting it to 'charged'.
+    """
+    binds = []
+    for entity in (case.get("entities") or []):
+        nes_id = (entity.get("nes_id") or "").strip()
+        if not nes_id:
+            continue
+        binds.append({
+            "nes_id": nes_id,
+            "relationship_type": bind_relationship_type(entity) or "related",
+            "notes": entity.get("notes") or "",
+        })
+    return binds
+
+
+def bind_key(item):
+    """The identity of a bind: `(nes_id, relationship_type)`.
+
+    NOT `nes_id` alone. The DB's uniqueness constraint is
+    `unique_case_entity_relationship_type` over
+    `("case", "nes_id", "relationship_type")` (`cases/models.py`), so one entity
+    may legitimately hold two binds on the same case under different sections --
+    an organisation that is both the `location` of the events and a `related`
+    party, say. Keying on `nes_id` alone silently dropped the second one, which
+    with the widened section scope is now a reachable case rather than a
+    theoretical one.
+
+    Idempotency is unaffected: a re-run produces the same pair, so it still
+    matches and is still skipped.
+    """
+    return ((item.get("nes_id") or "").strip(),
+            (item.get("relationship_type") or "").strip().lower())
+
+
+def merge_entity_binds(current, additions):
+    """Append each new bind not already present, preserving existing order.
+
+    Never reorders, never drops, never overwrites an existing bind -- the
+    whole-list replace makes any omission destructive, and an existing bind
+    carries a human's notes. "Already present" means the same
+    `(nes_id, relationship_type)` pair; see `bind_key`.
+    """
+    have = {bind_key(bind) for bind in current}
+    merged = list(current)
+    for item in additions:
+        key = bind_key(item)
+        if key in have:
+            continue
+        merged.append(item)
+        have.add(key)
+    return merged
+
+
+def validate_bind_item(item):
+    """Local mirror of `EntityPatchItemSerializer`'s rules, applied BEFORE the
+    request body is built so a bad item never reaches the API. Raises ValueError.
+    """
+    nes_id = (item.get("nes_id") or "").strip()
+    if not is_valid_entity_iri(nes_id):
+        raise ValueError(
+            f"not a canonical NES entity IRI: {nes_id!r} (want "
+            "https://<authority>/entity/<prefix>/<slug>)")
+    rel_type = item.get("relationship_type")
+    if rel_type not in RELATIONSHIP_TYPES:
+        raise ValueError(f"unknown relationship_type: {rel_type!r}")
+    if item.get("outcome") and rel_type != "accused":
+        raise ValueError(
+            f"outcome {item['outcome']!r} is only legal on an 'accused' bind, "
+            f"not {rel_type!r}")
+    return item
+
+
+@dataclass
+class EntityBindPlan:
+    slug: str
+    action: str  # WOULD_PATCH | NOOP | SKIP_STATE
+    # Diagnostics. Nothing in this module reads either one -- they exist so a
+    # caller inspecting a plan (a dry-run harness, a debugging session) can see
+    # the state the decision was made against and how many binds the case
+    # already carried. `bind_materials.BindPlan` DOES consume its equivalents,
+    # so do not assume these are wired up here by analogy with it.
+    state: str = ""
+    if_match: str | None = None
+    n_current: int = 0
+    # The section rides on the row for the same reason it does on `review`: bind
+    # identity is `(nes_id, relationship_type)`, so one entity can appear twice
+    # here under different sections and a `nes_id`-keyed lookup collapses them --
+    # both rows then report whichever section was written last.
+    bound: list = field(default_factory=list)    # (name, Decision, notes, section)
+    # The section is on the row because it belongs to the row: two extracted items
+    # can name the same person in different sections, so it cannot be recovered
+    # from the name afterwards. Carries the raw (lowercased) value for an
+    # unrecognised section, which is exactly what a caseworker needs to see.
+    review: list = field(default_factory=list)   # (name, Decision, section)
+    nomatch: list = field(default_factory=list)  # (name, Decision)
+    patch_items: list = field(default_factory=list)
+    reason: str = ""
+    # There are no separate accused lists. Every name this planner handles comes
+    # from `extracted_items` and lands in bound/review/nomatch, whatever section it
+    # was extracted under -- including `accused`. The three court-record lists that
+    # used to live here went with the court-record path.
+    #
+    # This is what keeps `plan_summary` honest: it derives `already_bound` by
+    # subtracting those three lists from the EXTRACTED name count, which only works
+    # while every name in them came from that count. A future source of names that
+    # is NOT an extraction cannot reuse these lists for exactly that reason.
+    #
+    # True once the resolution loop actually ran. False means the plan was
+    # refused up front (wrong state, or a payload with no `entities` key) and
+    # NO extracted name was ever looked at.
+    #
+    # Callers need this to read `bound`/`review`/`nomatch` correctly: all three
+    # are empty both when every name was already bound (a genuine NOOP) and
+    # when nothing was examined at all (a refusal). `plan_summary` derives
+    # `already_bound` by subtracting those three from the extracted count, so
+    # on a refusal it would report every name as already-bound. `reason` cannot
+    # stand in for this flag -- the no-ETag branch sets a reason and then
+    # carries on resolving.
+    examined: bool = False
+
+
+
+# Marks a bind that only exists because permissive mode overrode a veto. Written
+# into `Decision.reason` by `_promote_top_candidate` -- the ONLY producer -- and
+# read back by `is_promoted`. A named constant rather than a literal in two
+# places: the console marker and the `.binds.jsonl` audit field must agree, and
+# testing a reason string by eye is how they would drift apart.
+PROMOTED_PREFIX = "promoted over: "
+
+# Appended to the veto reason of the one REVIEW permissive mode will not promote,
+# so the review row explains itself. See `_promote_top_candidate`.
+NOT_PROMOTED_CROSS_SCRIPT = (
+    "not promoted even in permissive mode: the winning candidate carries no "
+    "Devanagari name, so its score comes from romanisation, which folds a "
+    "masculine name into its feminine form. Binding it would assert a match that "
+    "a same-script comparison refuses outright. Confirm by hand")
+
+
+def is_promoted(decision):
+    """True when this bind won by overriding a veto, so it is one to double-check."""
+    return decision.reason.startswith(PROMOTED_PREFIX)
+
+
+def _bind_row(slug, name, decision, notes, section, written):
+    """One `*.binds.jsonl` row.
+
+    `reason` is empty for a clean single-candidate match and carries the overridden
+    veto for a promoted one, so grepping this file for `promoted over:` lists every
+    bind that was a judgement call.
+    """
+    return {"slug": slug, "extracted": name, "role": section,
+            "nes_id": decision.nes_id, "score": decision.score,
+            "matched_name": decision.matched_name, "notes": notes,
+            "reason": decision.reason, "written": written}
+
+
+def _promote_top_candidate(decision, extracted_name):
+    """A vetoed/ambiguous REVIEW -> a BIND on its highest-scoring candidate.
+
+    This is the whole of "bind every name that matched something". `resolve`
+    returns REVIEW for ambiguity, truncation, name vetoes and province/institution
+    scope, and `apply_document_veto` adds the election-record one. Each of those
+    means "a candidate cleared the score threshold but something ELSE was
+    unproven", so each has a top candidate sitting right there in
+    `decision.candidates`.
+
+    Deterministic by construction: `resolve` sorts `candidates` by
+    `(-score, nes_id)`, so two entities tied at the same score always resolve to
+    the same one -- a re-run cannot silently pick a different entity than the
+    run before it. NO_MATCH is left alone: nothing scored, so there is nothing
+    to promote, and this module may never create an NES entity.
+
+    ONE REVIEW IS NEVER PROMOTED: a cross-script-only match (see
+    `is_cross_script_only`). There the NAME itself is what is unproven, so
+    promoting does not accept a known risk, it asserts a match the matcher rejects
+    -- कमल थापा scores 0.96 against a `Kamala Thapa` entity and 0.00 against
+    कमला थापा, so the bind would name a woman in a case charging a man. Checked
+    against the candidate rather than against `decision.reason`, because
+    `resolve` reports only the FIRST veto that fires: a name that is both
+    ambiguous and cross-script comes back reading "ambiguous", and a reason-text
+    check would promote it.
+
+    The remaining cost is explicit: a promoted ambiguity is a coin flip between
+    namesakes. `decision.reason` is carried into the bind's note so the row says
+    why it was uncertain, and `*.binds.jsonl` records the runners-up that lost.
+    """
+    if decision.verdict != REVIEW or not decision.candidates:
+        return decision
+    score, nes_id, matched = decision.candidates[0]
+    if score < MIN_BIND_SCORE:
+        return decision
+    if is_cross_script_only(extracted_name, matched):
+        # Say why this one stayed behind while permissive mode promoted its
+        # neighbours, or the row reads as an ordinary ambiguity that a caseworker
+        # would expect to have been bound like all the others.
+        return Decision(decision.verdict, decision.nes_id, decision.score,
+                        decision.matched_name,
+                        f"{decision.reason}; {NOT_PROMOTED_CROSS_SCRIPT}",
+                        decision.candidates)
+    return Decision(BIND, nes_id, score, matched,
+                    f"{PROMOTED_PREFIX}{decision.reason}", decision.candidates)
+
+
+def _resolve_with_vetoes(api, name, strict=False):
+    """One name -> one `Decision`. THE ONLY resolution path in this module: every
+    extracted name and every court-record `accused` name comes through here, so
+    no role can drift onto a different guard.
+
+    `strict=False` (the default) binds the best-scoring candidate whenever one
+    cleared the threshold, even if a veto fired -- with the two exceptions
+    `_promote_top_candidate` and the fail-closed branch below spell out: a
+    cross-script-only match and an unreadable entity document are never promoted.
+    `strict=True` restores the conservative behaviour: a veto means REVIEW and a
+    human decides.
+
+    Completeness goes IN, so `resolve` applies the truncation veto itself
+    alongside the ambiguity check it protects. `search_entities` knows whether it
+    ran out of results or stopped early; before this it threw that away and the
+    resolver had to guess from a row count. `search_entities` always returns a
+    `CandidateList` carrying the real answer. The `True` default covers a caller
+    that hands over a plain list -- a stub, or a hand-built set -- which is
+    describing exactly the candidates it means, so taking it at its word is right
+    rather than cautious-by-reflex. Nothing in production reaches the default.
+
+    A BIND then still needs the document veto: the search payload alone cannot
+    tell a real case subject from an Election Commission candidate record sharing
+    their name. The second read is wrapped so ANY exception maps to an unreadable
+    document, which the veto downgrades to REVIEW. Fail closed -- a transient
+    read failure must never let a BIND survive.
+    """
+    candidates = api.search_entities(name)
+    decision = resolve(name, candidates,
+                       candidates_complete=getattr(candidates, "complete", True))
+    if not decision.is_bind:
+        if strict:
+            return decision
+        # Promote BEFORE the document read, so a name that `resolve` vetoed still
+        # gets its winning candidate checked against its own document below
+        # rather than skipping that read entirely.
+        decision = _promote_top_candidate(decision, name)
+        if not decision.is_bind:
+            return decision
+
+    # What the first promotion overrode, if it happened. `apply_document_veto`
+    # REPLACES the reason, so without this the earlier veto is lost: a name that
+    # was ambiguous AND looked like an election record would end up recorded as
+    # only the second, and `*.binds.jsonl` -- the sole audit trail for permissive
+    # mode -- would under-report how uncertain the bind actually was.
+    overridden = decision.reason[len(PROMOTED_PREFIX):] if is_promoted(decision) else ""
+
+    read_error = None
+    try:
+        document = api.get_entity(decision.nes_id)
+    except Exception as exc:
+        document = None  # unreadable == unverified
+        read_error = str(exc)
+    readable = isinstance(document, dict) and bool(document)
+    decision = apply_document_veto(decision, document)
+    if overridden and decision.reason != f"{PROMOTED_PREFIX}{overridden}":
+        # The veto (or the unreadable-document branch) wrote over the reason.
+        decision = Decision(
+            decision.verdict, decision.nes_id, decision.score,
+            decision.matched_name, f"{decision.reason}; also {overridden}",
+            decision.candidates)
+    if read_error:
+        log.warning("get_entity(%s) failed while veto-checking %r: %s",
+                    decision.nes_id if decision.nes_id else "<downgraded>",
+                    name, read_error)
+        decision = Decision(
+            decision.verdict, decision.nes_id, decision.score,
+            decision.matched_name,
+            f"{decision.reason} (read error: {read_error!r})",
+            decision.candidates)
+    # An UNREADABLE document stays REVIEW even in permissive mode. Promoting a
+    # judgement veto ("this looks like an election-candidate record") is the
+    # uncertainty this mode was asked to accept; promoting a failed HTTP read is
+    # not -- one 403 or 502 would bind whichever namesake happened to sort first,
+    # with nothing having actually been matched against. Distinguished by whether
+    # the document came back, never by parsing the veto's reason text.
+    if not strict and readable:
+        decision = _promote_top_candidate(decision, name)
+    return decision
+
+
+def plan_case_entities(api, case, etag, extracted_items, strict=False):
+    """Resolve every extracted name for one case and build its write plan.
+
+    Guarantees: never plans a write for a non-DRAFT case, or for a case whose
+    payload does not carry an `entities` key at all (see below); only BIND
+    decisions that also survive the document veto and the truncation guard
+    reach `patch_items`; every item this planner adds is validated before it
+    lands there; and the merge emits NOOP when nothing changes, so a re-run is
+    idempotent.
+
+    No `required_state` parameter: an earlier version let a caller merge
+    against IN_REVIEW, which is exactly what REQUIRED_WRITE_STATE's own
+    reasoning above forbids -- IN_REVIEW is publicly retrievable, so a
+    non-casework read blanks `notes`, and merging that redacted snapshot into
+    the whole-list replace would wipe every existing note. Pinned directly so
+    there is no keyword that can reopen that hole.
+
+    `"entities" not in case` is refused rather than merged: `case.get(
+    "entities") or []` cannot tell "this case has no binds" from "this payload
+    does not carry binds at all" (e.g. a caller passed a trimmed dict). Both
+    server read paths do include `entities` today, so this is a defensive
+    guard against a payload shape that would otherwise silently plan a
+    destructive whole-list replace with every existing bind missing.
+
+    Every extracted name binds into the section its own `relationship_type`
+    names, for any of the nine the case API accepts. Three kinds of name do not
+    bind: an unrecognised section (no place to file it), a name no NES entity
+    matched at all (nothing to file), and an `accused` bind that would escalate an
+    entity the case already characterises another way (a human's call, not this
+    module's -- see the guard below).
+
+    Bind identity is `(nes_id, relationship_type)`, matching the DB's
+    `unique_case_entity_relationship_type` constraint, so one entity may hold two
+    binds on a case under different sections. A re-run still produces the same
+    pairs and so still writes nothing.
+
+    Scope is a deliberate product decision, not a safety margin, and it was
+    widened on request: an earlier version bound `related` only and read
+    `accused` solely from the NGM court record, refusing `location` and the rest
+    before spending a search. That cost recall -- the resolver bound 33 of 39
+    labelled names, the shipped allow-list only 26 -- and the recall is what was
+    wanted. `strict=True` restores the old refusals for anyone who needs them.
+
+    What this means in practice, stated plainly because it is the real cost: in
+    the default permissive mode a name with several equally-good namesakes binds
+    to whichever sorts first, so some binds WILL name the wrong person. The
+    run's `*.binds.jsonl` records the reason and the runners-up for every such
+    bind, which is the audit trail for finding them again.
+
+    EVERY name here comes from the extraction. `accused` is a section the LLM may
+    put a name in like any other; it is no longer also read from the case's NGM
+    court record. That path was removed because it needs neither a document nor an
+    LLM, so sitting inside this module put it behind five gates it has no use for --
+    a case with a complete court record bound zero defendants whenever its
+    press-release PDF lacked a MARKDOWN role, or the LLM call failed. See
+    `casework/court_record.py`, which is kept and tested but unwired.
+
+    TWO GUARDS SURVIVE PERMISSIVE MODE. Both draw the same line: the caller chose
+    to accept uncertainty ABOUT a match, not to invent one.
+
+    1. `apply_document_veto`'s FAIL-CLOSED branch. `api.get_entity` is wrapped in a
+       bare try/except, and ANY exception (timeout, 403, 502, a renamed/404 entity)
+       or an empty body means the document was never read -- which stays REVIEW.
+       Which namesake is right is a judgement the caller chose to accept; an HTTP
+       failure is not a judgement at all, and promoting it would bind on evidence
+       nobody ever saw. The exception's own text is folded into the reason (and
+       logged), so a misconfigured base URL is diagnosable rather than looking like
+       a real veto.
+    2. `_promote_top_candidate`'s CROSS-SCRIPT refusal. A candidate with no
+       Devanagari name only scored through romanisation, which folds a masculine
+       name into its feminine form; there the name itself is what is unproven, so
+       there is no "best-scoring match" to fall back on.
+    """
+    slug = case.get("slug")
+    state = case.get("state")
+    plan = EntityBindPlan(slug=slug, action="NOOP", state=state, if_match=etag)
+    if state != REQUIRED_WRITE_STATE:
+        plan.action = "SKIP_STATE"
+        plan.reason = f"state {state!r} != {REQUIRED_WRITE_STATE!r}"
+        return plan
+    if "entities" not in case:
+        plan.reason = (
+            "case payload has no 'entities' key -- absent is not empty; "
+            "refusing to plan a write from an incomplete read, since merging "
+            "would silently drop every existing bind via the whole-list "
+            "replace. Re-read the case (get_case_with_etag) before retrying.")
+        return plan
+    if not etag:
+        plan.reason = (
+            "no ETag was supplied for this read: the eventual write would go "
+            "unconditional (If-Match omitted), so a concurrent edit between "
+            "this read and that write would be silently clobbered rather than "
+            "rejected with 412. Surfaced here for visibility only -- Task 7's "
+            "write path is where this is actually enforced.")
+
+    # Past both refusals: every extracted name below really is looked at, so
+    # the three result lists can be read at face value from here on.
+    plan.examined = True
+
+    current = current_entity_binds(case)
+    plan.n_current = len(current)
+    have = {bind_key(bind) for bind in current}
+    # Which entities the case ALREADY characterises somehow, from the binds that
+    # existed before this run. Used only by the accused-escalation guard below;
+    # deliberately not updated as this run adds binds, because whether one
+    # extracted item precedes another in the LLM's output is arbitrary and must
+    # not decide whether a name is written or reviewed.
+    already_characterised = {nes_id for nes_id, _ in have}
+
+    additions = []
+    for item in extracted_items:
+        name = (item.get("entity_name") or "").strip()
+        if not name:
+            continue
+
+        # Bind into whatever section the extraction names, so long as the API
+        # accepts that section. This is a validity check, not a scope filter:
+        # `alleged`, `location`, `witness`, `victim` and the rest all bind now.
+        # An unrecognised value, an empty string and a missing key still go to
+        # review, because there is no section to put them in -- guessing one
+        # would file the entity under a relationship nobody asserted.
+        rel_type = (item.get("relationship_type") or "").strip().lower()
+        if rel_type not in RELATIONSHIP_TYPES:
+            plan.review.append((name, Decision(
+                REVIEW, None, 0.0, "",
+                f"relationship_type {item.get('relationship_type')!r} is not one "
+                f"of the {len(RELATIONSHIP_TYPES)} the case API accepts "
+                f"({', '.join(RELATIONSHIP_TYPES)}), so there is no section to "
+                "bind it into. Reported without spending a search request",
+                ()), rel_type))
+            continue
+
+        decision = _resolve_with_vetoes(api, name, strict=strict)
+
+        if decision.verdict == REVIEW:
+            plan.review.append((name, decision, rel_type))
+            continue
+        if decision.verdict == NO_MATCH:
+            plan.nomatch.append((name, decision))
+            continue
+
+        notes = (item.get("notes") or "").strip()
+        item_to_bind = {
+            "nes_id": decision.nes_id,
+            "relationship_type": rel_type,
+            "notes": notes,
+        }
+        if bind_key(item_to_bind) in have:
+            # This entity is already bound to this case IN THIS SECTION (by an
+            # earlier extracted name, or by a pre-existing bind) -- not a new
+            # addition, so it is not counted in `plan.bound` either. Counting it
+            # there would overstate "binds written" on every idempotent re-run.
+            #
+            # Keyed on the pair, so the same entity CAN still be added in a
+            # different section -- see `bind_key`.
+            continue
+
+        # ESCALATION TO `accused` IS NEVER AUTOMATIC. Keying the merge on the pair
+        # means a second section for an already-bound entity now gets written
+        # rather than silently dropped -- correct, and what the DB constraint
+        # allows. But `accused` is not just another section: it names a person as
+        # the subject of a corruption case and carries `outcome=CHARGED`. When the
+        # case already characterises this entity some other way, a human (or an
+        # earlier run) made that call, and upgrading it on an LLM's say-so is the
+        # one bind this module must not make by itself. It goes to review with the
+        # existing characterisation named, so the upgrade is a decision someone
+        # takes rather than a diff someone discovers.
+        if rel_type == "accused" and decision.nes_id in already_characterised:
+            existing = sorted(section for nes_id, section in have
+                              if nes_id == decision.nes_id)
+            plan.review.append((name, Decision(
+                REVIEW, decision.nes_id, decision.score, decision.matched_name,
+                f"would escalate to 'accused' an entity this case already binds as "
+                f"{', '.join(repr(s) for s in existing)}. An accused bind asserts "
+                "the person is the subject of the case and sets outcome=charged, so "
+                "it is not applied on top of an existing characterisation without a "
+                f"human. Original reason: {decision.reason or 'clean match'}",
+                decision.candidates), rel_type))
+            continue
+        # `outcome` is legal ONLY on an accused bind -- the DB enforces it with
+        # the `outcome_only_on_accused` CHECK constraint, and `validate_bind_item`
+        # mirrors that. Every case in this corpus is a Special Court `-CR-` case,
+        # so CIAA filed a charge sheet and 'charged' is true by construction.
+        if rel_type == "accused":
+            item_to_bind["outcome"] = CHARGED
+        # Recorded BEFORE `outcome` is added, so the key matches the one
+        # `bind_key` computed above -- it reads only the two identity fields, but
+        # adding the entry after the mutation would invite that to drift.
+        have.add(bind_key(item_to_bind))
+        additions.append(validate_bind_item(item_to_bind))
+        plan.bound.append((name, decision, notes, rel_type))
+
+    merged = merge_entity_binds(current, additions)
+    if merged != current:
+        plan.action = "WOULD_PATCH"
+        plan.patch_items = merged
+    return plan
+
+
+def _check_entity_plan(plan):
+    """Raise unless this plan may be written. THE ONLY COPY of the write
+    preconditions: `apply_entity_plan` enforces them, `entity_plan_refusal`
+    reports them without writing. Two copies would drift, and the direction they
+    would drift in is a dry run promising a bind a real run refuses.
+    """
+    if plan.action != "WOULD_PATCH":
+        raise ValueError(
+            f"apply_entity_plan called on a {plan.action} plan for {plan.slug!r}")
+    if not plan.if_match:
+        raise RuntimeError(
+            f"refusing unconditional whole-list entities replace for {plan.slug!r}: "
+            "no ETag was captured at read time, so a concurrent edit cannot be "
+            "detected and the destructive replace could silently clobber it")
+    for item in plan.patch_items:
+        validate_bind_item(item)
+
+
+def entity_plan_refusal(plan):
+    """Why a real `--apply` run would refuse this plan, or "" if it would write.
+
+    Exists so `would-bind` in a dry run means "would actually bind". The no-ETag
+    branch of `plan_case_entities` sets `plan.reason` and then KEEPS RESOLVING by
+    design, so such a plan reaches `action == "WOULD_PATCH"` with bound names on
+    it. Dry run used to print `WOULD BIND` for those and record `would-bind`,
+    while `--apply` hit `_check_entity_plan` and recorded `error` -- overstating,
+    in the one output whose entire job is to predict a real run.
+
+    Reports rather than raises, because a dry run is not an error path: the plan
+    is refused for this case and the run carries on.
+    """
+    try:
+        _check_entity_plan(plan)
+    except (ValueError, RuntimeError) as exc:
+        return str(exc)
+    return ""
+
+
+def apply_entity_plan(api, plan):
+    """Execute a WOULD_PATCH plan: whole-list replace of /entities, conditional
+    on the ETag captured at plan time.
+
+    Uses `replace_list` rather than `patch_field` -- both build the same
+    RFC-6902 op, but `replace_list` validates that 'entities' is a whole-list
+    path and carries the destructive-replace contract in its docstring.
+
+    Fails closed with no ETag: without If-Match the replace is unconditional and
+    a concurrent edit would be silently clobbered.
+
+    NEITHER RETRIES NOR FORCES. A 412 means someone else edited the case between
+    the read and this write, so the merged list is built on a stale snapshot and
+    writing it would drop their change. The 412 propagates out of
+    `api.replace_list`; `main()` catches it, records the case as `error` and emits
+    no bind row, so nothing claims a bind that never landed. An operator who wants
+    the bind re-runs the enricher, which re-reads the case and rebuilds the merge
+    against the current list. Do not add a retry loop here -- a retry that re-uses
+    `plan.patch_items` would re-send the same stale list.
+    """
+    _check_entity_plan(plan)
+    return api.replace_list(plan.slug, "entities", plan.patch_items,
+                            if_match=plan.if_match)
+
+
+def plan_summary(plan, extracted_items):
+    """Reconcile one case's plan against the names it was built from.
+
+    `plan_case_entities` (Task 6) drops a resolved BIND whose `nes_id` is
+    already bound on the case from `bound`, `review` AND `nomatch` alike --
+    correct behaviour for a re-run (there is nothing new to write), but it
+    means `len(bound) + len(review) + len(nomatch)` alone silently undercounts
+    the extracted names on every re-run: the already-bound ones just vanish.
+    Any summary built only from those three counts would be quietly wrong
+    every time this enricher is re-run over the same case.
+
+    Recomputed here rather than threaded through `plan_case_entities`, because
+    everything needed is already available to a caller that has both the plan
+    and the `extracted_items` it was built from: the number of extracted names
+    with a non-empty `entity_name` (the same "name" `plan_case_entities` skips
+    a blank of, before it even looks at `relationship_type`) minus how many of
+    those are accounted for in `bound`/`review`/`nomatch` is exactly the count
+    that was dropped as already-bound. No re-resolution, no extra searches --
+    just arithmetic over what the plan already recorded.
+    """
+    extracted = sum(
+        1 for item in extracted_items if (item.get("entity_name") or "").strip())
+    bound = len(plan.bound)
+    review = len(plan.review)
+    nomatch = len(plan.nomatch)
+    already_bound = extracted - (bound + review + nomatch)
+    return {
+        "extracted": extracted,
+        "bound": bound,
+        "review": review,
+        "nomatch": nomatch,
+        "already_bound": already_bound,
+    }
+
+
+def report_paths(paths):
+    """The three report files, sharing the run log's timestamp-and-run-id stem.
+
+    Guards against blindly slicing off the last 4 characters of any path: a
+    log path that genuinely ends in ".log" has that suffix stripped so the
+    reports share its stem; a log path that does NOT end in ".log" (a
+    different extension, or none) is used as-is rather than having its last 4
+    characters silently chopped off -- an unconditional slice would garble
+    the stem and scatter the three report files under a name nobody would
+    look for. Using the full path as the stem (rather than raising) keeps this
+    function tolerant of whatever `configure_run_logging` hands it; the worst
+    case is a slightly longer stem (e.g. ".log.binds.jsonl"), never data loss.
+    """
+    log_path = str(Path(paths["log"]))
+    suffix = ".log"
+    stem = log_path[: -len(suffix)] if log_path.endswith(suffix) else log_path
+    return {"binds": f"{stem}.binds.jsonl",
+            "review": f"{stem}.review.jsonl",
+            "nomatch": f"{stem}.nomatch.md"}
+
+
+def _md_cell(text):
+    """One Markdown table cell: pipes escaped, newlines flattened.
+
+    The no-match report's cells hold an LLM-extracted name and an NES title,
+    neither of which this module controls. A literal `|` or newline in either one
+    ends the cell early and shifts every column after it, so the row a caseworker
+    is meant to act on becomes unreadable -- and this report IS the queue.
+    """
+    return (str(text or "").replace("|", r"\|")
+            .replace("\r", " ").replace("\n", " "))
+
+
+def write_jsonl(path, rows):
+    """One JSON object per line, UTF-8, Devanagari unescaped.
+
+    Row-shape agnostic on purpose: `rows` is written exactly as given, one
+    `json.dumps` per line, so a caller building a review row that carries the
+    full candidate list -- so a reviewer can reproduce a decision from the
+    file alone -- is never narrowed to a fixed key set here.
+    """
+    with open(path, "w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def write_nomatch_report(path, rows):
+    """Unmatched names grouped by normalised form, most-recurring first.
+
+    Ranked by case count because the unmatched names are not one problem each --
+    the same district office recurs across cases, so creating a handful of NES
+    entities lets a re-run bind many. This file is the caseworker's queue; the
+    enricher creates nothing itself.
+
+    Keeps the BEST candidate seen per group: a normalised group can receive
+    several `(name, slug, Decision)` rows across different cases, and each
+    Decision carries its own `score`/`matched_name` for the closest NES
+    candidate that case's search turned up. Tracking only the FIRST row seen
+    per group (as opposed to the highest-scoring one) can show a caseworker a
+    worse candidate than one this run actually saw for the same name.
+    """
+    grouped = {}
+    for name, slug, decision in rows:
+        key = normalise_name(name)
+        entry = grouped.setdefault(
+            key, {"names": [], "slugs": [], "near": decision.matched_name,
+                  "score": decision.score})
+        if name not in entry["names"]:
+            entry["names"].append(name)
+        if slug not in entry["slugs"]:
+            entry["slugs"].append(slug)
+        if decision.score > entry["score"]:
+            entry["near"] = decision.matched_name
+            entry["score"] = decision.score
+    ordered = sorted(grouped.values(), key=lambda e: (-len(e["slugs"]), e["names"][0]))
+
+    lines = ["# Extracted names with no NES entity", "",
+             "Each of these needs an NES entity before a re-run can bind it. "
+             "Most-recurring first.", "",
+             "| Cases | Extracted name | Closest NES candidate | Score |",
+             "|---|---|---|---|"]
+    for entry in ordered:
+        near = _md_cell(entry["near"]) or "—"
+        names = " / ".join(_md_cell(name) for name in entry["names"])
+        lines.append(f"| {len(entry['slugs'])} | {names} "
+                     f"| {near} | {entry['score']:.2f} |")
+    Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _truncate_press_release(text, limit=None):
@@ -344,10 +1121,9 @@ def build_api(args):
     """Construct the client. Basic (local DEV_AUTH) unless a token is given.
 
     `allow_remote_writes` is threaded through here for uniformity with the
-    other five ported enrichers even though this module never calls
-    `patch_field`/`replace_list` -- see module docstring (EXTRACTION ONLY).
-    Passing it is harmless: it only changes what `CaseworkApi._patch` would
-    do, and `_patch` is never reached from this file.
+    other five ported enrichers; unlike them, this module DOES write --
+    `apply_entity_plan` calls `api.replace_list` -- so this flag genuinely
+    governs whether `--apply` is allowed to reach a non-loopback API base URL.
     """
     if args.api_token:
         return CaseworkApi(
@@ -362,17 +1138,27 @@ def build_api(args):
 
 
 def main(argv=None):
-    """Main entry point. EXTRACTION ONLY -- see module docstring. This never
-    calls `api.patch_field` or `api.replace_list`, regardless of `--dry-run`/
-    `--apply`."""
+    """Main entry point. Extracts entities via LLM, resolves each to an
+    existing NES entity, and binds it -- but only under `--apply`; `--dry-run`
+    (the default) prints what WOULD bind without calling `api.replace_list`.
+    See the module docstring for the write shape and the guarantees around it.
+    """
     ap = argparse.ArgumentParser(
         description=(
-            "Extract related and location entities from CIAA cases via LLM "
-            "(DB-free, EXTRACTION ONLY -- no /entities writes; see module docstring)."
+            "Extract related and location entities from CIAA cases via LLM, "
+            "resolve each to an existing NES entity, and bind it (dry-run by "
+            "default; see module docstring)."
         ),
-        epilog="Reads cases entirely over the Jawafdehi HTTP API. Writes nothing.",
+        epilog="Reads cases entirely over the Jawafdehi HTTP API. "
+               "Writes to /entities only under --apply.",
     )
     add_common_args(ap)
+    ap.add_argument(
+        "--strict", action="store_true",
+        help="Bind only when exactly one NES entity matched and no veto fired; "
+             "send ambiguities and vetoed matches to review instead. Off by "
+             "default: the default binds the best-scoring match for every name, "
+             "except a match that exists only across scripts.")
     args = ap.parse_args(argv)
 
     setup_logging(args.verbose)
@@ -412,13 +1198,35 @@ def main(argv=None):
         return report
 
     print(f"Found {total} matching case(s).")
-    print("  NOTE: this port performs EXTRACTION ONLY -- no /entities writes are")
-    print("  made, regardless of --dry-run/--apply. See module docstring for why.")
+    if args.dry_run:
+        print("  --dry-run: printing what WOULD bind; no /entities writes will be made.")
     if args.force:
-        print("  --force: re-extracting even for cases with entities already populated")
+        print("  --force: re-extracting even for cases with a 'related' bind already present")
+    if args.strict:
+        print("  --strict: a veto or an ambiguity means REVIEW, not a bind")
+    else:
+        print("  binding every matched name into the section it was extracted "
+              "under; on an ambiguity the best-scoring entity wins, so check "
+              "the run's .binds.jsonl for the ones that were uncertain")
 
     total_entities_extracted = 0
     total_accused_notes_extracted = 0
+    total_bound = total_review = total_nomatch = total_already_bound = 0
+    # Binds that only exist because permissive mode overrode a veto. Counted
+    # separately and printed on its own line: "we bound 40 things" and "9 of
+    # those 40 were a judgement call" are different facts, and rolling the
+    # second into the first is how the uncertain ones stop getting checked.
+    total_promoted = 0
+    # Cases skipped by the related-only idempotency gate. Reported separately
+    # because since the section widening they are not necessarily finished --
+    # see the gate's own comment below.
+    total_skipped_enriched = 0
+    # Binds that resolved and reached WOULD_PATCH, then lost at the write gate
+    # (`entity_plan_refusal` -- a missing ETag, say). They are neither bound nor
+    # reviewed nor unmatched, so without their own counter the zero-bind footer
+    # below blames the resolver for a refusal that happened after it.
+    total_refused_binds = 0
+    bind_rows, review_rows, nomatch_rows = [], [], []
 
     for idx, case in enumerate(cases, 1):
         slug = case.get("slug") or "?"
@@ -426,17 +1234,40 @@ def main(argv=None):
         log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                   step="start", status="start", detail=f"[{idx}/{total}] {title[:80]}")
 
-        # Donor: `get_target_cases(api, args, skip_field="entities")` (donor
-        # line 274) -- of the five ported enrichers, this was the only one
-        # missing the already-populated skip, so every run re-spent a
-        # premium-tier LLM call on cases whose `entities` were already set.
-        if case.get("entities") and not args.force:
+        # A `related` bind is the marker that this stage has already run on this
+        # case, and it stays the key. Measured on production: 162 of 3,003 cases
+        # carry binds but no `related` one, and a bare `case.get("entities")`
+        # test skipped every single one of them.
+        #
+        # THE KEY IS NOW A PROXY, NOT AN EQUIVALENCE, and this is the deliberate
+        # choice. `related` used to be exactly and only what this stage wrote;
+        # since the section scope widened it also writes `accused`, `location`,
+        # `alleged`, `witness` and the rest. So a case enriched by an earlier
+        # related-only run is skipped here with its location and accused names
+        # never resolved. Re-keying the gate would re-spend an LLM call on
+        # thousands of already-enriched cases, which is a cost decision for
+        # whoever runs the campaign -- so the skip is COUNTED and reported in the
+        # summary with the `--force` pointer instead of being silently correct-
+        # looking. Widened-scope work on an old case is a `--force` re-run.
+        #
+        # The API is asymmetric: `validate_bind_item` WRITES `relationship_
+        # type`, but the read path (`cases/services/nes_resolver.py`, via
+        # `CaseSerializer.get_entities`) sends the relationship type back
+        # under `type` -- `relationship_type` never appears on a read. Same
+        # tolerance `current_entity_binds` already applies just above, so a
+        # hand-built dict using either key still behaves correctly.
+        existing_related = [
+            bind for bind in (case.get("entities") or [])
+            if bind_relationship_type(bind) == "related"
+        ]
+        if existing_related and not args.force:
+            total_skipped_enriched += 1
             report.record(
                 slug, "entities", "already",
-                f"entities already {case['entities']}")
+                f"{len(existing_related)} 'related' bind(s) already present")
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                       step="idempotency", status="already",
-                      detail=f"entities already {case['entities']}")
+                      detail=f"{len(existing_related)} 'related' bind(s) already present")
             continue
 
         try:
@@ -496,7 +1327,7 @@ def main(argv=None):
             response_text = invoke_text(
                 system=SYSTEM_PROMPT,
                 content=user_prompt,
-                max_tokens=2000,
+                max_tokens=EXTRACTION_MAX_TOKENS,
                 tier=tier_for("entities"),
                 usage=usage,
             )
@@ -512,11 +1343,19 @@ def main(argv=None):
             continue
 
         entities_data, accused_notes = _parse_extraction_response(response_text)
+        # Only two things are dropped here: a non-dict, and an item with no name.
+        # Both are unrecordable -- `plan_case_entities` skips a nameless item
+        # without putting it in ANY of its three lists, so `plan_summary` would
+        # count it as already-bound (it derives that by subtraction).
+        #
+        # The relationship_type is deliberately NOT filtered here. It used to be
+        # (`in ("location", "related")`), which silently discarded every other
+        # section before the planner could see it -- so widening the planner to
+        # all nine types would have been dead code for seven of them. One place
+        # decides which sections are bindable, and that place is the planner.
         valid_items = [
             item for item in entities_data
-            if isinstance(item, dict)
-            and (item.get("entity_name") or "").strip()
-            and (item.get("relationship_type") or "").lower() in ("location", "related")
+            if isinstance(item, dict) and (item.get("entity_name") or "").strip()
         ]
 
         if not valid_items and not accused_notes:
@@ -530,18 +1369,125 @@ def main(argv=None):
 
         total_entities_extracted += len(valid_items)
         total_accused_notes_extracted += len(accused_notes)
+        log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                  step="extract", status="ok",
+                  detail=f"{len(valid_items)} entities + {len(accused_notes)} accused_notes")
 
-        log_event(
-            logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
-            step="extract", status="ok",
-            detail=(
-                f"{len(valid_items)} entities + {len(accused_notes)} accused_notes "
-                "extracted; 0 bound"))
+        # Re-read WITH the ETag so the whole-list replace is conditional. `detail`
+        # above came from `get_case`, which returns no ETag.
+        try:
+            fresh, etag = api.get_case_with_etag(slug)
+        except Exception as exc:
+            fresh, etag = detail, None
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                      step="fetch", status="fallback", detail=str(exc),
+                      level=logging.WARNING)
 
-        report.record(
-            slug, "entities", "extracted-unbound",
-            f"{len(valid_items)} entities + {len(accused_notes)} accused_notes "
-            "extracted; 0 bound -- nes_id resolution out of scope for this port")
+        plan = plan_case_entities(api, fresh, etag, valid_items,
+                                  strict=args.strict)
+
+        # Two refusals reach here and NEITHER looked at a single extracted
+        # name: a non-DRAFT state, and a payload with no `entities` key. Both
+        # must return before `plan_summary` runs -- it derives `already_bound`
+        # by subtracting bound/review/nomatch from the extracted count, and on
+        # a refusal all three are empty, so every name would be reported as
+        # already-bound over two report files that were never touched.
+        #
+        # Keyed on `plan.examined`, not on `action == "SKIP_STATE"`: the
+        # payload refusal leaves `action` at its "NOOP" default and would
+        # otherwise fall through into the genuine-NOOP branch below.
+        #
+        # A wrong state is routine (most cases are not DRAFT); a missing
+        # `entities` key means the caller handed over an incomplete read,
+        # which is a bug worth surfacing as an error rather than a skip.
+        if not plan.examined:
+            refused_state = plan.action == "SKIP_STATE"
+            report.record(slug, "entities",
+                          "skipped" if refused_state else "error", plan.reason)
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                      step="resolve", status="skipped" if refused_state else "error",
+                      detail=plan.reason,
+                      level=logging.WARNING if refused_state else logging.ERROR)
+            continue
+
+        # `role` is the section the extraction ASKED for, which the planner records
+        # per review row. It used to be hardcoded `"related"`, then looked up in a
+        # name-keyed dict -- both wrong, the second one whenever an extraction
+        # names the same person in two sections, where every row got the last
+        # section seen. The section is the most useful field on the row for triage,
+        # because it says whether an unresolved name was going to be an accused or
+        # a district.
+        for name, decision, section in plan.review:
+            review_rows.append({"slug": slug, "extracted": name,
+                                "role": section,
+                                "reason": decision.reason, "score": decision.score,
+                                "candidates": [list(c) for c in decision.candidates]})
+        for name, decision in plan.nomatch:
+            nomatch_rows.append((name, slug, decision))
+
+        counts = plan_summary(plan, valid_items)
+        total_review += counts["review"]
+        total_nomatch += counts["nomatch"]
+        total_already_bound += counts["already_bound"]
+
+        log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                  step="resolve", status="ok",
+                  detail=(f"{len(plan.bound)} bind, {len(plan.review)} review, "
+                          f"{len(plan.nomatch)} no-match"))
+
+        if plan.action == "NOOP":
+            report.record(slug, "entities", "already",
+                          f"{len(plan.review)} for review, {len(plan.nomatch)} no match")
+            continue
+
+        # plan.action == "WOULD_PATCH" from here on. Print/record a bind row
+        # only once it is genuinely true: in dry-run nothing is ever written,
+        # so "WOULD BIND" is accurate immediately; under --apply the write
+        # must actually succeed first -- a 412 or a missing ETag must never
+        # leave the console or `*.binds.jsonl` claiming a bind that never
+        # landed on the server.
+        if args.dry_run:
+            # A dry run predicts a real run, so it must apply the SAME
+            # preconditions `--apply` enforces. Without this, a plan with no
+            # captured ETag prints WOULD BIND here and errors under --apply.
+            refusal = entity_plan_refusal(plan)
+            if refusal:
+                total_refused_binds += len(plan.bound)
+                report.record(slug, "entities", "would-refuse", refusal)
+                log_event(logger, paths["events"], run_id=run_id, stage="entities",
+                          slug=slug, step="write", status="would-refuse",
+                          detail=refusal, level=logging.WARNING)
+                print(f"  WOULD REFUSE {len(plan.bound)} bind(s) on {slug}: {refusal}")
+                continue
+            total_bound += counts["bound"]
+            for name, decision, notes, section in plan.bound:
+                bind_rows.append(
+                    _bind_row(slug, name, decision, notes, section, False))
+                total_promoted += is_promoted(decision)
+                print(f"  WOULD BIND ({section}) {name}  ->  {decision.nes_id}  "
+                      f"(score {decision.score:.2f})"
+                      f"{'  [UNCERTAIN]' if is_promoted(decision) else ''}")
+            report.record(slug, "entities", "would-bind",
+                          f"{len(plan.bound)} would bind")
+            continue
+
+        try:
+            apply_entity_plan(api, plan)
+        except Exception as exc:
+            report.record(slug, "entities", "error", f"bind failed: {exc}")
+            log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                      step="write", status="error", detail=str(exc), level=logging.ERROR)
+            continue
+
+        total_bound += counts["bound"]
+        for name, decision, notes, section in plan.bound:
+            bind_rows.append(_bind_row(slug, name, decision, notes, section, True))
+            total_promoted += is_promoted(decision)
+            print(f"  BOUND ({section}) {name}  ->  {decision.nes_id}"
+                  f"{'  [UNCERTAIN]' if is_promoted(decision) else ''}")
+        report.record(slug, "entities", "bound", f"{len(plan.bound)} bound")
+        log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
+                  step="write", status="ok", detail=f"{len(plan.bound)} bound")
 
     stats = report.summary()
     print_summary(stats, args.dry_run, "Related-entity extraction")
@@ -551,14 +1497,69 @@ def main(argv=None):
         for reason, count in unmet_reasons.most_common():
             print(f"    {count} x {reason}")
 
-    # Surfaced unconditionally, never buried in per-case logs: a run that
-    # extracted N entities and bound zero must say so plainly here.
+    reports = report_paths(paths)
+    write_jsonl(reports["binds"], bind_rows)
+    write_jsonl(reports["review"], review_rows)
+    write_nomatch_report(reports["nomatch"], nomatch_rows)
+
     print()
     print(f"  TOTAL entities extracted across all cases: {total_entities_extracted}")
     print(f"  TOTAL accused notes extracted: {total_accused_notes_extracted}")
-    print(
-        "  TOTAL entities bound to cases: 0 (writes are intentionally disabled -- "
-        "nes_id resolution is out of scope for this port; see module docstring)")
+    if args.dry_run:
+        # Nothing was written -- say so, so this line can never be mistaken
+        # for a record of an actual write the way an unqualified "bound to
+        # cases" count could be.
+        print(f"  TOTAL entities that WOULD bind to cases (dry run, nothing "
+              f"written): {total_bound}")
+    else:
+        print(f"  TOTAL entities bound to cases: {total_bound}")
+    print(f"  TOTAL reported for human review: {total_review}  -> {reports['review']}")
+    print(f"  TOTAL with no NES match: {total_nomatch}  -> {reports['nomatch']}")
+    print(f"  TOTAL already bound (nothing to write): {total_already_bound}")
+    if total_skipped_enriched:
+        # Not necessarily finished, since the section scope widened after those
+        # cases were enriched -- see the idempotency gate's comment.
+        print(f"  {total_skipped_enriched} case(s) skipped as already enriched, on "
+              "the presence of a 'related' bind. A case enriched before the "
+              "section scope widened may still have accused/location/witness "
+              "names outstanding; re-run those with --force to pick them up.")
+    if total_refused_binds:
+        print(f"  {total_refused_binds} resolved bind(s) were REFUSED at the write "
+              "gate, not rejected by the matcher -- see the WOULD REFUSE lines "
+              "above for which precondition failed.")
+    if total_promoted:
+        print(f"  OF THOSE, {total_promoted} bind(s) overrode a veto -- an "
+              "ambiguity between namesakes, a province-scoped office, or an "
+              "election-candidate record. Each is marked [UNCERTAIN] above and "
+              f"carries a 'promoted over:' reason in {reports['binds']}. These "
+              "are the ones to spot-check first.")
+    if total_bound == 0:
+        if total_entities_extracted == 0:
+            # Reachable from three separate skip gates -- the idempotency skip,
+            # the prerequisite gate and the no-source gate -- plus an LLM that
+            # returns nothing. Without this branch the `else` below fires and
+            # claims every extracted name went to review or matched nothing, when
+            # no name was extracted at all and both files are empty.
+            print("  This run bound zero entities because it extracted none: every "
+                  "case was skipped before extraction, or the LLM returned nothing. "
+                  "The review and no-match files above are empty. The status counts "
+                  "in the summary say which gate each case hit.")
+        elif total_refused_binds:
+            # Checked before `total_already_bound` and before the generic else:
+            # these names DID match and WOULD have bound, so blaming review or a
+            # missing NES entity would send a caseworker looking for a resolver
+            # problem that is really a write-precondition one.
+            print(f"  This run bound zero entities, but {total_refused_binds} bind(s) "
+                  "resolved and were refused at the write gate rather than by the "
+                  "matcher. Fix the precondition named above and re-run; nothing is "
+                  "wrong with those matches.")
+        elif total_already_bound:
+            print(f"  This run bound zero NEW entities -- {total_already_bound} "
+                  "extracted name(s) were already bound on their case(s), nothing "
+                  "left to write for them.")
+        else:
+            print("  This run bound zero entities. Every extracted name either went "
+                  "to review or matched no NES entity -- see the two files above.")
 
     usage_summary = ""
     if usage.calls > 0:
