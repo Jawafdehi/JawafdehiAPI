@@ -183,6 +183,37 @@ STAGES = {
         requires_fields=("description",),
         requires_stages=("description",),
     ),
+    # `news` searches the open web for independent coverage, LLM-verifies each
+    # candidate is about THIS case, and binds the survivors as `evidence`.
+    #
+    # `requires_fields` is the whole search query, and every one of the three is
+    # a hard gate rather than an ordering preference:
+    #   - `title` because the query is built from the accused name, the location
+    #     and the organisation, all of which `news_search.build_queries` reads
+    #     off the title. 2,666 of 2,918 DRAFT titles are the importer's template
+    #     ("CIAA Special Court Case 076-CR-0182: बिनोद कुमार भूजेल समेत ५"),
+    #     which carries no विरुद्ध clause -- so `accused_names`' title fallback
+    #     returns the template string ITSELF as the "name" and every query is
+    #     garbage. That is why `card`, the sole owner of `title`, is a
+    #     `requires_stages` edge: this stage is worthless before it.
+    #   - `entities` because the accused NAMES are the query. The title fallback
+    #     exists for a real "X विरुद्ध Y" title, not for a template stub.
+    #   - `court_cases` because the case number is what lets the verifier answer
+    #     "high" instead of "medium" (see `news_search.VERIFY_SYSTEM_PROMPT`),
+    #     and `high` is the bind bar.
+    #
+    # `requires_materials` is deliberately EMPTY. The press release is passed to
+    # the verifier as context when a converted one exists and its absence is
+    # recorded, exactly as the donor did ("No official press release text
+    # available", donor:997) -- gating on it would strand the single-document
+    # cases the brief specifically requires this stage to be sampled on.
+    #
+    # `provides` is ("evidence",) -- the same whole-list path `bind` writes.
+    "news": Stage(
+        "news", provides=("evidence",),
+        requires_fields=("title", "entities", "court_cases"),
+        requires_stages=("card", "entities"),
+    ),
 }
 
 

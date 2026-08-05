@@ -38,6 +38,14 @@ TIERS = {
     # into this stage as `--only title`, and the brief resolves the conflict in
     # favour of cheap. See `casework/enrich_card.py`'s deviation 2.
     "card": "cheap",
+    # `news` is premium on the brief's authority and the donor's: the donor ran
+    # its authoritative verifier at tier="premium" (donor
+    # `enrich_news_articles.py:1073`) behind a cheap recall gate, and this port
+    # keeps both. The gate's cheap call is made explicitly with tier="cheap" in
+    # `news_search.verify_batch`, so this entry is the tier of the DECISION.
+    # Not a place to economise -- the decision is whether to publicly link named
+    # people to a corruption case.
+    "news": "premium",
 }
 DEFAULT_TIER = "cheap"
 
