@@ -1,30 +1,24 @@
 # Jawafdehi platform — ONE image, ONE Django project.
 #
 # NES, NGM and Jawafdehi run as Django apps in ONE project (config.settings)
-# served by ONE gunicorn. Build from the repo root:
+# served by ONE gunicorn ASGI deployment. Build from the repo root:
 #
 #   docker build -f Dockerfile -t jawafdehi-platform .
 #
 # It installs the single `jawafdehi` project, so one `uv sync` pulls every app
 # and every runtime dep (DuckDB/boto3, anthropic, jsonpatch, opensearch, etc.).
-FROM python:3.12-slim
+ARG PYTHON_IMAGE=python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.10.9@sha256:10902f58a1606787602f303954cea099626a4adb02acbac4c69920fe9d278f82
 
-# uv: fast, lockfile-driven installs.
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+FROM ${UV_IMAGE} AS uv
 
-# psycopg2-binary ships wheels, but keep the postgres client + a compiler, and
-# git (needed for Jawafdehi's git-sourced deps: nepal-entity-service, likhit).
+FROM ${PYTHON_IMAGE} AS builder
+
+COPY --from=uv /uv /uvx /bin/
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     git \
-    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
-
-# Cloud SQL server CA certificate for TLS database connections (applies to all
-# three databases).
-COPY cloudsql-ca.pem /etc/ssl/certs/cloudsql-ca.pem
-ENV DATABASE_SSL_CA_CERT_FILE=/etc/ssl/certs/cloudsql-ca.pem
-ENV DATABASE_SSL_MODE=verify-ca
 
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy PYTHONUNBUFFERED=1
 WORKDIR /app
@@ -48,6 +42,7 @@ COPY newsletter/ ./newsletter/
 COPY jobs/ ./jobs/
 COPY case_events/ ./case_events/
 COPY llm/ ./llm/
+COPY jawafdehi_mcp/ ./jawafdehi_mcp/
 COPY search/ ./search/
 COPY discovery/ ./discovery/
 COPY content/ ./content/
@@ -58,6 +53,9 @@ COPY templates/ ./templates/
 RUN uv sync --frozen --no-dev
 
 ENV DJANGO_SETTINGS_MODULE=config.settings
+# Fail-safe anonymous MCP profile. A trusted ingress may raise a public default
+# to internal per request; an internal deployment cannot be downgraded.
+ENV MCP_DEFAULT_MODE=public
 
 # Collect static at build time (skips the prod OIDC/secret guards via the
 # _BUILD_TIME_COMMANDS list in settings). STATIC_ROOT resolves under BASE_DIR
@@ -65,9 +63,37 @@ ENV DJANGO_SETTINGS_MODULE=config.settings
 RUN DEBUG=False SECRET_KEY=foo-bar ALLOWED_HOSTS=portal.jawafdehi.org \
     uv run python manage.py collectstatic --noinput
 
+FROM ${PYTHON_IMAGE} AS runtime
+
+COPY --from=uv /uv /uvx /bin/
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    antiword \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 10001 jawafdehi \
+    && useradd --system --uid 10001 --gid jawafdehi \
+       --create-home --home-dir /home/jawafdehi jawafdehi
+
+# Cloud SQL server CA certificate for TLS database connections (applies to all
+# three databases).
+COPY cloudsql-ca.pem /etc/ssl/certs/cloudsql-ca.pem
+ENV DATABASE_SSL_CA_CERT_FILE=/etc/ssl/certs/cloudsql-ca.pem
+ENV DATABASE_SSL_MODE=verify-ca
+ENV PYTHONUNBUFFERED=1
+ENV DJANGO_SETTINGS_MODULE=config.settings
+# Fail-safe anonymous MCP profile. A trusted ingress may raise a public default
+# to internal per request; an internal deployment cannot be downgraded.
+ENV MCP_DEFAULT_MODE=public
+
+WORKDIR /app
+COPY --from=builder --chown=jawafdehi:jawafdehi /app /app
+
+USER jawafdehi
+
 EXPOSE 8080
-CMD ["uv", "run", \
-     "gunicorn", "config.wsgi:application", \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/mcp/health').status==200 else 1)"
+CMD ["/app/.venv/bin/gunicorn", "config.asgi:application", \
      "--config", "config/gunicorn.py", \
-     "--bind", "0.0.0.0:8080", "--workers", "2", "--threads", "4", \
+     "--worker-class", "config.asgi_worker.BoundedUvicornWorker", \
+     "--bind", "0.0.0.0:8080", "--workers", "2", \
      "--timeout", "60", "--access-logfile", "-", "--error-logfile", "-"]

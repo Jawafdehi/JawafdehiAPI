@@ -388,13 +388,10 @@ severity, not by change number.
    `CaseworkAuthContext.tsx` consume this shape. Coordinate: either keep
    injecting a synthetic `"admin"` role for superusers, or update `roles.ts` +
    `isAdmin` to key on the payload's `is_admin` flag.
-10. **MCP still hardcodes the RETIRED `contributor` role name.**
-    `jawafdehi-mcp/identity.py:66` `_DEFAULT_WRITE_ROLES = ("contributor",
-    "admin", "moderator")`. It matches raw token role keys, independent of Django
-    groups. If Zitadel keeps the `contributor` key (see D), MCP keeps working;
-    if the key is renamed, MCP write-tool access breaks unless `MCP_WRITE_ROLES`
-    env or the default is updated. MCP tests (`test_identity.py:35` etc.) assert
-    the old set.
+10. **MCP catalog visibility is authentication-based, not role-based.**
+    Any verified bearer receives the full MCP tool catalog. Write tools forward
+    that bearer to Django, so the API's role and object-level permissions remain
+    authoritative; anonymous callers retain a restricted catalog.
 11. **`ReviewAssistant`→`JobPoller` MUST be a Group-row RENAME migration, not a
     mapping change.** The OIDC sync only *attaches existing* groups
     (`oidc.py:277`), never creates them. A mapping-only change would silently
@@ -431,8 +428,8 @@ severity, not by change number.
     mid-rollout maps to nothing (or to the remapped group). **Safe rollout
     order:** (1) update Django map to remap surviving keys, (2) apply DB
     migrations (rename JobPoller, delete Admin/Public/tiers, drop
-    Case.contributors), (3) update FE `roles.ts` + MCP write-role list, (4)
-    optionally `terraform apply` Zitadel last.
+    Case.contributors), (3) update FE `roles.ts`, (4) optionally `terraform
+    apply` Zitadel last. MCP catalog visibility does not depend on role names.
 
 ### F. Schema vs data migrations required
 

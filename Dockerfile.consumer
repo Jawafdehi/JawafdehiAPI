@@ -12,6 +12,10 @@
 ARG BASE_IMAGE=jawafdehi/jawafdehi-platform:main
 FROM ${BASE_IMAGE}
 
+HEALTHCHECK NONE
+
+USER root
+
 # Node.js 22 LTS via NodeSource (claude-code needs a recent Node). The slim base
 # lacks curl/gnupg needed to add the apt repo.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -25,10 +29,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # The claude_cli judge provider invokes this binary (settings.CLAUDE_CLI_BIN).
 RUN npm install -g --no-fund --no-audit @anthropic-ai/claude-code
 
-# Document conversion (likhit + markitdown) ships as the bigo-enrichment extra —
-# deliberately absent from the base API image (imported lazily, never at
-# startup). The consumer converts evidence sources locally, so it needs them.
-RUN uv sync --frozen --no-dev --extra bigo-enrichment
+# The embedded MCP puts likhit + MarkItDown in the base platform environment;
+# the consumer therefore needs no build-time dependency sync or git client.
+
+USER jawafdehi
 
 # Read-only by default (lists queued jobs and exits); the k8s CronJob overrides
 # this with `--apply --once` to actually drain the queue.

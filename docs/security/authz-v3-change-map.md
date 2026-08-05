@@ -239,12 +239,12 @@ accepted, not a bug. Listed here so it is a conscious decision, not a surprise.
   group-less dev superuser is locked out of the whole admin panel. This is why
   F2 is a blocker, not a polish item.
 
-### B18. MCP — `jawafdehi-mcp/identity.py:66`
-- `_DEFAULT_WRITE_ROLES = ("contributor", "admin", "moderator")` — keep
-  `contributor` (Zitadel key survives) + `moderator`; these still map to the
-  content role. No change strictly required since it matches token keys, but add
-  a comment. Tests (`test_identity.py:35`) assert the set — leave unless keys
-  change. **Out of scope for this PR unless we retire the `contributor` key.**
+### B18. MCP — `jawafdehi_mcp/identity.py`
+- MCP catalog visibility no longer maps token roles. Any verified bearer
+  receives the full tool catalog; anonymous callers retain their mode-specific
+  restricted catalogs.
+- Write tools forward the verified bearer to Django. The API's role and
+  object-level permissions remain the authorization boundary.
 
 ---
 

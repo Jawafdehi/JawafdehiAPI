@@ -43,7 +43,12 @@ from sentry_sdk.integrations.django import DjangoIntegration
 
 # Reuse the Jawafdehi project's structlog config (top-level `config` package,
 # importable via the services/jawafdehi editable install).
-from jawafdehi_shared.logging_config import configure_structlog
+from jawafdehi_mcp import __version__
+from jawafdehi_shared.logging_config import (
+    add_service_name,
+    configure_structlog,
+    drop_transport_noise,
+)
 
 load_dotenv()
 
@@ -78,6 +83,13 @@ def _drop_exec_originated_events(event, _hint):
     return event
 
 
+def _before_send(event, hint):
+    event = _drop_exec_originated_events(event, hint)
+    if event is None:
+        return None
+    return drop_transport_noise(event, hint)
+
+
 # Belt-and-suspenders: never ship events from local / dev runs even if a DSN
 # leaked into a developer's .env. Prod sets SENTRY_ENVIRONMENT=production.
 if _sentry_dsn and _sentry_environment.strip().lower() not in {
@@ -92,7 +104,8 @@ if _sentry_dsn and _sentry_environment.strip().lower() not in {
         traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "1.0")),
         send_default_pii=False,
         environment=_sentry_environment,
-        before_send=_drop_exec_originated_events,
+        release=os.getenv("SENTRY_RELEASE", f"jawafdehi@{__version__}"),
+        before_send=_before_send,
     )
 
 
@@ -229,6 +242,7 @@ LOGGING = {
                 _structlog.stdlib.add_logger_name,
                 _structlog.stdlib.add_log_level,
                 _structlog.stdlib.ExtraAdder(),
+                add_service_name,
             ],
         },
     },
@@ -371,6 +385,7 @@ MIDDLEWARE = [
 
 ROOT_URLCONF = "config.urls"
 WSGI_APPLICATION = "config.wsgi.application"
+ASGI_APPLICATION = "config.asgi.application"
 
 # django-auditlog: the audited manager (jawafdehi_shared.db.audited) logs one
 # LogEntry per changed row for a bulk ``QuerySet.update()`` / ``bulk_update()``
@@ -542,12 +557,13 @@ for _primary_alias, _read_env in _replica_url_env.items():
         DATABASES[_ro_alias] = dj_database_url.parse(_read_url)
         REPLICA_ALIASES[_primary_alias] = _ro_alias
 
-# Apply SSL options + connection pooling to every Postgres database.
+# Apply SSL options to every Postgres database. Django's persistent connections
+# are disabled under ASGI; production deployments should use an external pooler.
 for db_key in DATABASES:
     _apply_db_ssl_options(DATABASES[db_key])
     if DATABASES[db_key].get("ENGINE") == "django.db.backends.postgresql":
-        DATABASES[db_key]["CONN_MAX_AGE"] = 60
-        DATABASES[db_key]["CONN_HEALTH_CHECKS"] = True
+        DATABASES[db_key]["CONN_MAX_AGE"] = 0
+        DATABASES[db_key]["CONN_HEALTH_CHECKS"] = False
 
 DATABASE_ROUTERS = ["config.db_router.ServiceDatabaseRouter"]
 
@@ -641,6 +657,7 @@ OIDC_ROLES_CLAIM = os.getenv("OIDC_ROLES_CLAIM", "urn:zitadel:iam:org:project:ro
 OIDC_ALGORITHMS = get_env_list("OIDC_ALGORITHMS", "RS256")
 OIDC_LEEWAY = int(os.getenv("OIDC_LEEWAY", "30"))
 OIDC_JWKS_CACHE_SECONDS = int(os.getenv("OIDC_JWKS_CACHE_SECONDS", "300"))
+OIDC_JWKS_TIMEOUT = float(os.getenv("OIDC_JWKS_TIMEOUT", "10"))
 OIDC_SERVICE_ACCOUNT_SUBJECTS = get_env_list("OIDC_SERVICE_ACCOUNT_SUBJECTS")
 OIDC_SERVICE_ACCOUNT_ROLE = os.getenv("OIDC_SERVICE_ACCOUNT_ROLE", "contributor")
 
@@ -661,9 +678,15 @@ OIDC_RP_CLIENT_SECRET = os.getenv("OIDC_RP_CLIENT_SECRET", "")  # empty = public
 OIDC_USE_PKCE = True
 OIDC_RP_SIGN_ALGO = "RS256"
 OIDC_RP_SCOPES = "openid email profile"
-OIDC_OP_AUTHORIZATION_ENDPOINT = f"{ensure_trailing_slash(OIDC_ISSUER)}oauth/v2/authorize"
-OIDC_OP_TOKEN_ENDPOINT = f"{ensure_trailing_slash(OIDC_ISSUER)}oauth/v2/token"
-OIDC_OP_USER_ENDPOINT = f"{ensure_trailing_slash(OIDC_ISSUER)}oidc/v1/userinfo"
+OIDC_OP_AUTHORIZATION_ENDPOINT = os.getenv("OIDC_OP_AUTHORIZATION_ENDPOINT") or (
+    f"{ensure_trailing_slash(OIDC_ISSUER)}oauth/v2/authorize"
+)
+OIDC_OP_TOKEN_ENDPOINT = os.getenv("OIDC_OP_TOKEN_ENDPOINT") or (
+    f"{ensure_trailing_slash(OIDC_ISSUER)}oauth/v2/token"
+)
+OIDC_OP_USER_ENDPOINT = os.getenv("OIDC_OP_USER_ENDPOINT") or (
+    f"{ensure_trailing_slash(OIDC_ISSUER)}oidc/v1/userinfo"
+)
 OIDC_OP_JWKS_ENDPOINT = OIDC_JWKS_URI
 LOGIN_URL = "/oidc/authenticate/"
 LOGOUT_REDIRECT_URL = "/django-admin/login/"
@@ -751,9 +774,18 @@ WAGTAILADMIN_LOGIN_URL = LOGIN_URL
 # OIDCAuthentication stays FIRST so bearer tokens keep working unchanged; the
 # session/basic classes are additive and gated, so production auth is untouched.
 DEV_AUTH = env_flag("DEV_AUTH", False) and (DEBUG or TESTING)
+DEV_NGM_QUERY_TOKEN = (
+    os.getenv("DEV_NGM_QUERY_TOKEN", "") if DEV_AUTH and TESTING else ""
+)
+DEV_NGM_QUERY_USERNAME = os.getenv("DEV_NGM_QUERY_USERNAME", "mcp-query-e2e")
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
+        *(
+            ["jawafdehi_shared.auth.dev_service.DevelopmentQueryTokenAuthentication"]
+            if DEV_NGM_QUERY_TOKEN
+            else []
+        ),
         "jawafdehi_shared.auth.oidc.OIDCAuthentication",
         *(
             [

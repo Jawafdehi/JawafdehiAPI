@@ -231,6 +231,13 @@ def _enqueue_review_job(review, *, submitted_by=None):
 # stale-result 409 guard, leases, retries, and dedup. See docs/jobs-queue-design.md.
 
 
+def _normalized_review_slug(request):
+    raw_slug = request.query_params.get("slug")
+    if not raw_slug:
+        return None
+    return raw_slug.strip().strip("/") or None
+
+
 class ReviewListView(generics.ListAPIView):
     serializer_class = CaseReviewListSerializer
     permission_classes = [CanReadReview]
@@ -242,13 +249,9 @@ class ReviewListView(generics.ListAPIView):
         # ``?slug=`` scopes the flat list to one case's runs, newest-first (via
         # Meta.ordering). The per-case review page uses this to show a case's
         # whole run history without pulling the entire table.
-        slug = self.request.query_params.get("slug")
+        slug = _normalized_review_slug(self.request)
         if slug:
-            # Normalize like SubmitSerializer (strip whitespace + surrounding
-            # slashes) so "?slug=case-a/" and "?slug= case-a " still match.
-            slug = slug.strip().strip("/")
-            if slug:
-                qs = qs.filter(case__slug=slug)
+            qs = qs.filter(case__slug=slug)
         return qs
 
 
@@ -276,9 +279,12 @@ class GroupedReviewListView(generics.ListAPIView):
         # loading the whole CaseReview table into memory to group in Python.
         # exclude(case_id=None): a review whose backfill left it unlinked would
         # otherwise form a bogus None-group with an empty slug in the UI.
+        reviews = CaseReview.objects.exclude(case_id=None)
+        if slug := _normalized_review_slug(request):
+            reviews = reviews.filter(case__slug=slug)
+
         case_id_qs = (
-            CaseReview.objects.exclude(case_id=None)
-            .values("case_id")
+            reviews.values("case_id")
             .annotate(latest_created_at=Max("created_at"))
             .order_by("-latest_created_at")
             .values_list("case_id", flat=True)

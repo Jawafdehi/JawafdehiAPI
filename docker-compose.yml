@@ -23,7 +23,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./infra/postgres-init:/docker-entrypoint-initdb.d:ro
-    ports: ["${POSTGRES_PORT:-45432}:5432"]
+    ports: ["${COMPOSE_HOST_BIND:-0.0.0.0}:${POSTGRES_PORT:-45432}:5432"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
       interval: 5s
@@ -38,8 +38,8 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
     volumes: ["miniodata:/data"]
     ports:
-      - "${MINIO_API_PORT:-49000}:9000"
-      - "${MINIO_CONSOLE_PORT:-49001}:9001"
+      - "${COMPOSE_HOST_BIND:-0.0.0.0}:${MINIO_API_PORT:-49000}:9000"
+      - "${COMPOSE_HOST_BIND:-0.0.0.0}:${MINIO_CONSOLE_PORT:-49001}:9001"
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
       interval: 5s
@@ -67,7 +67,7 @@ services:
       memlock: { soft: -1, hard: -1 }
       nofile: { soft: 65536, hard: 65536 }
     volumes: ["osdata:/usr/share/opensearch/data"]
-    ports: ["${OPENSEARCH_PORT:-49200}:9200"]
+    ports: ["${COMPOSE_HOST_BIND:-0.0.0.0}:${OPENSEARCH_PORT:-49200}:9200"]
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
       interval: 10s
@@ -95,7 +95,7 @@ services:
       ZITADEL_MACHINE_IDENTIFICATION_HOSTNAME_ENABLED: "true"
     depends_on:
       postgres: { condition: service_healthy }
-    ports: ["${ZITADEL_PORT:-48080}:8080"]
+    ports: ["${COMPOSE_HOST_BIND:-0.0.0.0}:${ZITADEL_PORT:-48080}:8080"]
 
   # ── The consolidated platform (ONE Django project / image) ────────────────
   # NES, NGM and Jawafdehi run as apps in one process (config.settings).
@@ -110,8 +110,40 @@ services:
       NGM_DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/ngm
       DATABASE_SSL_MODE: disable
       OPENSEARCH_URL: http://opensearch:9200
-      OIDC_ISSUER: http://zitadel:8080
+      # Tokens carry Zitadel's browser-reachable external issuer. Back-channel
+      # endpoints use the service DNS name so the container can reach them.
+      OIDC_ISSUER: http://${ZITADEL_HOST:-localhost}:${ZITADEL_PORT:-48080}
+      OIDC_JWKS_URI: http://zitadel:8080/oauth/v2/keys
+      OIDC_OP_TOKEN_ENDPOINT: http://zitadel:8080/oauth/v2/token
+      OIDC_OP_USER_ENDPOINT: http://zitadel:8080/oidc/v1/userinfo
       OIDC_AUDIENCE: ${OIDC_AUDIENCE:-jawafdehi-platform-dev}
+      OIDC_JWKS_TIMEOUT: ${OIDC_JWKS_TIMEOUT:-10}
+      # The MCP protocol is served by this same process at /mcp. Default to the
+      # restricted anonymous tool profile when no trusted ingress mode header is
+      # present. Verified callers receive the full catalog; Django API
+      # permissions remain the write-authorization boundary.
+      MCP_DEFAULT_MODE: ${MCP_DEFAULT_MODE:-public}
+      # Two workers at 16 each keep direct-Postgres connection pressure bounded.
+      # Production should still put PgBouncer in front of every database.
+      ASGI_LIMIT_CONCURRENCY: ${ASGI_LIMIT_CONCURRENCY:-16}
+      OIDC_RESOURCE: ${OIDC_RESOURCE:-http://localhost:48000/mcp}
+      MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-}
+      MCP_ALLOWED_ORIGINS: ${MCP_ALLOWED_ORIGINS:-}
+      # Least-privilege bearer used only by the anonymous public SQL tool.
+      # Full-capability stdio credentials are never injected into the HTTP service.
+      MCP_QUERY_API_TOKEN: ${MCP_QUERY_API_TOKEN:-}
+      MCP_EMBEDDED_API_TIMEOUT: ${MCP_EMBEDDED_API_TIMEOUT:-30}
+      MCP_EMBEDDED_API_MAX_CONCURRENCY: ${MCP_EMBEDDED_API_MAX_CONCURRENCY:-16}
+      MCP_CONTROL_PLANE_TIMEOUT: ${MCP_CONTROL_PLANE_TIMEOUT:-30}
+      MCP_QUERY_TIMEOUT: ${MCP_QUERY_TIMEOUT:-15}
+      MCP_PROXY_HTTP_TIMEOUT: ${MCP_PROXY_HTTP_TIMEOUT:-30}
+      MCP_DOCUMENT_FETCH_TIMEOUT: ${MCP_DOCUMENT_FETCH_TIMEOUT:-20}
+      MCP_DOCUMENT_CONVERT_TIMEOUT: ${MCP_DOCUMENT_CONVERT_TIMEOUT:-120}
+      MCP_DOCUMENT_MAX_CONCURRENCY: ${MCP_DOCUMENT_MAX_CONCURRENCY:-2}
+      MCP_DOCUMENT_MAX_INPUT_BYTES: ${MCP_DOCUMENT_MAX_INPUT_BYTES:-26214400}
+      MCP_HTTP_MAX_REQUEST_BODY_BYTES: ${MCP_HTTP_MAX_REQUEST_BODY_BYTES:-105906176}
+      MCP_DOCUMENT_MAX_OUTPUT_CHARS: ${MCP_DOCUMENT_MAX_OUTPUT_CHARS:-5000000}
+      MCP_DOCUMENT_WORKER_MEMORY_BYTES: ${MCP_DOCUMENT_WORKER_MEMORY_BYTES:-1073741824}
       SECRET_KEY: ${PLATFORM_SECRET_KEY:-local-dev-only-9f3a2c7e1b6d4058a1e2c3d4e5f60718}
       DEBUG: "False"
       ALLOWED_HOSTS: "*"
@@ -125,7 +157,17 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       platform-migrate: { condition: service_completed_successfully }
-    ports: ["${PLATFORM_API_PORT:-48000}:8080"]
+    ports: ["${COMPOSE_HOST_BIND:-0.0.0.0}:${PLATFORM_API_PORT:-48000}:8080"]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,sys;
+          sys.exit(0 if urllib.request.urlopen('http://localhost:8080/mcp/health').status==200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
 
   # ── Frontend (Vite dev server) ────────────────────────────────────────────
   # Local-dev only: runs `vite` with hot reload, source bind-mounted. All /api,
@@ -158,7 +200,7 @@ services:
       # node_modules from being shadowed by the host mount.
       - ../frontend:/app
       - /app/node_modules
-    ports: ["${FRONTEND_PORT:-40114}:40114"]
+    ports: ["${COMPOSE_HOST_BIND:-0.0.0.0}:${FRONTEND_PORT:-40114}:40114"]
     depends_on:
       platform: { condition: service_started }
 
@@ -169,12 +211,15 @@ services:
   platform-migrate:
     image: jawafdehi-platform:latest
     build: { context: ., dockerfile: Dockerfile }
+    healthcheck:
+      disable: true
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/jawafdehi
       NES_DB_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/nes
       NGM_DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/ngm
       DATABASE_SSL_MODE: disable
-      OIDC_ISSUER: http://zitadel:8080
+      OIDC_ISSUER: http://${ZITADEL_HOST:-localhost}:${ZITADEL_PORT:-48080}
+      OIDC_JWKS_URI: http://zitadel:8080/oauth/v2/keys
       SECRET_KEY: ${PLATFORM_SECRET_KEY:-local-dev-only-9f3a2c7e1b6d4058a1e2c3d4e5f60718}
       DEBUG: "False"
       ALLOWED_HOSTS: "*"

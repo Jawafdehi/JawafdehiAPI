@@ -72,6 +72,20 @@ def test_grouped_groups_executions_by_slug():
 
 
 @pytest.mark.django_db
+def test_grouped_slug_filter_returns_only_that_case():
+    _review("case-a", case_title="Case A", status="done")
+    _review("case-a", case_title="Case A", status="done")
+    _review("case-b", case_title="Case B", status="done")
+
+    response = _reader_client().get(URL, {"slug": " /case-a/ "})
+
+    assert response.status_code == 200
+    assert response.data["count"] == 1
+    assert [group["slug"] for group in response.data["results"]] == ["case-a"]
+    assert len(response.data["results"][0]["executions"]) == 2
+
+
+@pytest.mark.django_db
 def test_grouped_latest_is_newest_execution():
     older = _review("case-c", case_title="Old title")
     newer = _review("case-c", case_title="New title")

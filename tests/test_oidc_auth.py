@@ -132,6 +132,24 @@ def _authenticate(token):
     return oidc_auth.OIDCAuthentication().authenticate(request)
 
 
+def test_jwks_client_uses_configured_timeout(settings, monkeypatch):
+    settings.OIDC_JWKS_TIMEOUT = 4.5
+    captured = {}
+    client = object()
+
+    def build_client(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return client
+
+    oidc_auth.reset_jwks_client()
+    monkeypatch.setattr(oidc_auth, "PyJWKClient", build_client)
+
+    assert oidc_auth._get_jwks_client() is client
+    assert captured["args"] == (settings.OIDC_JWKS_URI,)
+    assert captured["kwargs"]["timeout"] == 4.5
+
+
 # ---------------------------------------------------------------------------
 # (a) valid token -> authed user with groups synced from roles
 # ---------------------------------------------------------------------------

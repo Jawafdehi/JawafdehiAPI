@@ -10,6 +10,7 @@
 # cut over to :main (matches docker-publish-platform.yml).
 name: CI
 on:
+  workflow_call: {}
   push:
     branches: ['main', 'v2']
   pull_request:

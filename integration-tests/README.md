@@ -38,6 +38,7 @@ resource kind (no per-service prefix):
 | Materials        | `/api/materials/` |
 | Gated SQL / batch | `/api/query/`, `/api/ingestion/*` |
 | Unified search   | `/api/search/` |
+| MCP              | `/mcp` (streamable HTTP), `/mcp/health` (readiness) |
 | Discovery        | `/sitemap.xml`, `/.well-known/resourcesync`, `/robots.txt` |
 
 `.env` / `.env.example` set the single `PLATFORM_BASE_URL`; the legacy
@@ -76,6 +77,7 @@ tests/
   nes/            # entities API contract smoke tests (/api/entities)
   ngm/            # court-case API contract smoke tests (/api/courtcases/, gated /api/query/)
   jawafdehi/      # corruption-case API contract smoke tests (/api/cases/)
+  mcp/            # MCP health + protocol handshake on the same process
   cross_service/  # the real prize: multi-service flows, unified search, discovery
 fixtures/
   sample_data.py  # canonical sample records (NES entity, NGM case+party, doc source)

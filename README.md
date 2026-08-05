@@ -31,13 +31,15 @@ jawafdehi-api/
                           served at /api/cms/v2/; see ARCHITECTURE §3.5
   llm/                    provider-agnostic LLM invocation (bedrock/proxy/cli,
                           in-process — no HTTP surface); see ARCHITECTURE §3.6
+  jawafdehi_mcp/          embedded MCP server + tools; served at /mcp by ASGI
   docs/                   design docs + sourcing artifacts
 ```
 
 ## Principles (locked decisions)
-- **One Django project**, one image, in-process inter-app calls (NOT REST between
-  apps). Exception: the async review/jobs poller is a separate OIDC HTTP client by
-  design and can target a remote portal.
+- **One Django project**, one image and one ASGI deployment. Django and MCP share
+  the process and port; MCP-to-API calls use an in-memory ASGI transport, not a
+  network service hop. Exception: the async review/jobs poller is a separate OIDC
+  HTTP client by design and can target a remote portal.
 - **Database-per-service preserved** via `config.db_router.ServiceDatabaseRouter`:
   `entities`→`nes`, `courts`/`materials`→`ngm`, everything else→`default`. No
   cross-DB FKs/joins — join in app.
@@ -50,10 +52,12 @@ jawafdehi-api/
 uv sync                                      # install app + dev tools
 uv run python manage.py check                # one manage.py / one settings (config.settings)
 uv run python manage.py runserver 0.0.0.0:48000
+uv run uvicorn config.asgi:application --host 0.0.0.0 --port 48000  # API + /mcp
 docker build -t jawafdehi .                  # single image, context = repo root
 ```
 
 For the local dev stack (Postgres ×3, OpenSearch, MinIO) see `docker-compose.yml`.
+For MCP architecture and configuration see [`docs/mcp/README.md`](./docs/mcp/README.md).
 
 ## Working model
 Trunk is **`main`**. `origin` = the org (`Jawafdehi/JawafdehiAPI`), `fork` = the

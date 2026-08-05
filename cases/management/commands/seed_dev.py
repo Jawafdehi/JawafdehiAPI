@@ -1,9 +1,10 @@
 """Seed a minimal local-dev dataset + role users for the admin panel.
 
-DEV ONLY. Creates the standard groups, three login users (admin / moderator /
-caseworker, password == username), NES entities, NGM materials, courts, court
-cases, cases (one per state), and a blocklisted firm — enough to exercise every
-admin screen (incl. the case-edit entity linker + evidence/material picker).
+DEV ONLY. Creates the standard groups, five local users (admin / moderator /
+caseworker / readonly / MCP query principal, password == username), NES entities,
+NGM materials, courts, court cases, cases (one per state), and a blocklisted firm
+— enough to exercise every admin screen (incl. the case-edit entity linker +
+evidence/material picker).
 Idempotent: safe to re-run.
 
 Usage (with DEV_AUTH env, DEBUG=True):
@@ -56,10 +57,13 @@ MATERIALS = [
 # is Caseworker. The `moderator` username is kept for dev/E2E continuity but now
 # lands in the Caseworker group (moderator folded into caseworker).
 USERS = [
-    ("admin", [], True),
-    ("moderator", ["Caseworker"], False),
-    ("caseworker", ["Caseworker"], False),
-    ("readonly", ["ReadOnly"], False),
+    ("admin", [], True, True),
+    ("moderator", ["Caseworker"], False, True),
+    ("caseworker", ["Caseworker"], False, True),
+    ("readonly", ["ReadOnly"], False, True),
+    # Scope-only principal for the Zitadel-free MCP E2E query bearer. It must
+    # remain free of groups, direct permissions, staff, and superuser status.
+    ("mcp-query-e2e", [], False, False),
 ]
 
 CASES = [
@@ -76,12 +80,12 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         call_command("create_groups")
 
-        for name, groups, su in USERS:
+        for name, groups, su, staff in USERS:
             u, _ = User.objects.get_or_create(
                 username=name, defaults={"email": f"{name}@local.test"}
             )
             u.set_password(name)
-            u.is_staff = True
+            u.is_staff = staff
             u.is_superuser = su
             u.save()
             u.groups.clear()

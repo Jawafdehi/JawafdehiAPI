@@ -11,14 +11,17 @@ a monolith**; this doc describes the shipped result, not the journey.
 
 ## 1. Shape: one Django monolith, three databases
 
-- **One Django project** in the `jawafdehi-api` repo (trunk `main`), one WSGI, one
-  image, runs at **`:48000`**. (The R1 collapse flattened the earlier
+- **One Django project** in the `jawafdehi-api` repo (trunk `main`), one ASGI
+  deployment, one image, runs at **`:48000`**. The same ASGI process serves the
+  streamable-HTTP MCP endpoint at **`/mcp`**; MCP is not a sidecar or separate
+  service. (The R1 collapse flattened the earlier
   `monolith/` + `services/{nes,ngm,jawafdehi}/` layout into top-level apps.)
 - **Apps** (all top-level dirs, in `INSTALLED_APPS`): `entities` (NES), `courts`
   + `materials` (NGM), the Jawafdehi apps `cases` + `review`, plus the
   platform-level `search`, `discovery`, `jobs`, `content` (headless Wagtail CMS —
   the "Newsroom"; see §3.5), and `llm` (a provider-agnostic LLM invocation layer —
-  see §3.6). Project glue lives in the top-level `config/` package (`settings.py`,
+  see §3.6). `jawafdehi_mcp/` contains the embedded MCP protocol server and tool
+  registry. Project glue lives in the top-level `config/` package (`settings.py`,
   `urls.py`, `wsgi.py`, `asgi.py`, `db_router.py`). _(The `case_workflows` app was
   dropped — migration `cases/migrations/0040_drop_case_workflows_tables.py`.)_
 - **Database-per-service preserved** via a DB **router** (`config.db_router.
@@ -30,12 +33,18 @@ a monolith**; this doc describes the shipped result, not the journey.
   `/api/…` by design — it can target a **remote** portal (see
   `review/ngm_client.py`, `review/jds_client.py`, `jobs-queue-design.md`); that is
   a poller, not a revived internal REST proxy.
+- **MCP-to-API calls are in-process.** Existing API paths remain the contract and
+  still enforce OIDC, permissions, and serializers, but `httpx.ASGITransport`
+  dispatches them directly to Django instead of opening a loopback connection.
+  Streamable HTTP is stateless so Gunicorn workers and pod replicas do not need
+  MCP session affinity. See [`mcp/README.md`](./mcp/README.md).
 - **uv workspace** (not poetry): one top-level `pyproject.toml` + `uv.lock`. The
   cross-app libs live in the top-level **`jawafdehi_shared/`** package:
   `auth.oidc`, `entities.ids`, `search.opensearch` + `search.mappings` +
   `search.transliterate`, `drf.base`.
-- **Testing:** engine-agnostic; SQLite fallback per DB alias for the full suite
-  (~1057 unit tests pass). Integration tests target the one host `:48000`.
+- **Testing:** engine-agnostic; SQLite fallback per DB alias for the full suite,
+  including the migrated MCP tests. Integration tests target the one host
+  `:48000`.
 
 ## 2. Identity: schema.org JSON-LD keyed by `@id` IRIs
 

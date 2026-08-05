@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 
 import jwt
 from django.conf import settings
@@ -117,6 +118,8 @@ DEFAULT_ROLE_TO_GROUP = {
 # management commands) without import-time failures.
 _jwks_client: PyJWKClient | None = None
 _jwks_lock = threading.Lock()
+_jwks_last_refresh = 0.0
+_JWKS_MIN_REFRESH_INTERVAL = 60.0
 
 
 def _get_jwks_client() -> PyJWKClient:
@@ -139,6 +142,7 @@ def _get_jwks_client() -> PyJWKClient:
                     jwks_uri,
                     cache_keys=True,
                     lifespan=getattr(settings, "OIDC_JWKS_CACHE_SECONDS", 300),
+                    timeout=getattr(settings, "OIDC_JWKS_TIMEOUT", 10),
                     headers={
                         "User-Agent": getattr(
                             settings,
@@ -157,9 +161,71 @@ def reset_jwks_client() -> None:
     Test hook: lets tests inject a fresh client / re-read settings between
     cases. Not used in production.
     """
-    global _jwks_client
+    global _jwks_client, _jwks_last_refresh
     with _jwks_lock:
         _jwks_client = None
+        _jwks_last_refresh = 0.0
+
+
+def _signing_key_for(token: str):
+    """Resolve a signing key without allowing unknown kids to force fetch storms."""
+    global _jwks_last_refresh
+
+    client = _get_jwks_client()
+    # Keep compatibility with simple test doubles and older PyJWT clients.
+    if not hasattr(client, "get_signing_keys") or not hasattr(client, "match_kid"):
+        return client.get_signing_key_from_jwt(token)
+
+    header = jwt.get_unverified_header(token)
+    kid = header.get("kid")
+    if not isinstance(kid, str) or not kid:
+        raise jwt.exceptions.PyJWKClientError("Token header is missing a key id")
+
+    with _jwks_lock:
+        signing_keys = client.get_signing_keys(refresh=False)
+        signing_key = client.match_kid(signing_keys, kid)
+        if signing_key is not None:
+            return signing_key
+
+        now = time.monotonic()
+        if now - _jwks_last_refresh < _JWKS_MIN_REFRESH_INTERVAL:
+            raise jwt.exceptions.PyJWKClientError(
+                f'Unable to find a signing key that matches: "{kid}"'
+            )
+
+        # Record before network I/O so a failing JWKS endpoint is also bounded.
+        _jwks_last_refresh = now
+        signing_keys = client.get_signing_keys(refresh=True)
+        signing_key = client.match_kid(signing_keys, kid)
+        if signing_key is None:
+            raise jwt.exceptions.PyJWKClientError(
+                f'Unable to find a signing key that matches: "{kid}"'
+            )
+        return signing_key
+
+
+def decode_oidc_token(token: str) -> dict:
+    """Validate one access token using the platform's authoritative OIDC policy."""
+    try:
+        signing_key = _signing_key_for(token)
+        return jwt.decode(
+            token,
+            signing_key.key,
+            # Pin the algorithm; never trust the alg in the token header.
+            algorithms=getattr(settings, "OIDC_ALGORITHMS", ["RS256"]),
+            audience=settings.OIDC_AUDIENCE,
+            issuer=settings.OIDC_ISSUER,
+            options={"require": ["exp", "iat", "iss", "aud", "sub"]},
+            leeway=getattr(settings, "OIDC_LEEWAY", 30),
+        )
+    except jwt.ExpiredSignatureError:
+        raise exceptions.AuthenticationFailed("Token has expired.")
+    except jwt.InvalidAudienceError:
+        raise exceptions.AuthenticationFailed("Invalid token audience.")
+    except jwt.InvalidIssuerError:
+        raise exceptions.AuthenticationFailed("Invalid token issuer.")
+    except jwt.PyJWTError as exc:
+        raise exceptions.AuthenticationFailed(f"Invalid token: {exc}")
 
 
 def extract_role_keys(claims: dict) -> set[str]:
@@ -220,27 +286,7 @@ class OIDCAuthentication(authentication.BaseAuthentication):
         return (user, claims)
 
     def _decode(self, token: str) -> dict:
-        try:
-            signing_key = _get_jwks_client().get_signing_key_from_jwt(token)
-            return jwt.decode(
-                token,
-                signing_key.key,
-                # Pin the algorithm; never trust the alg in the token header
-                # (defends against alg-confusion / alg=none).
-                algorithms=getattr(settings, "OIDC_ALGORITHMS", ["RS256"]),
-                audience=settings.OIDC_AUDIENCE,
-                issuer=settings.OIDC_ISSUER,
-                options={"require": ["exp", "iat", "iss", "aud", "sub"]},
-                leeway=getattr(settings, "OIDC_LEEWAY", 30),
-            )
-        except jwt.ExpiredSignatureError:
-            raise exceptions.AuthenticationFailed("Token has expired.")
-        except jwt.InvalidAudienceError:
-            raise exceptions.AuthenticationFailed("Invalid token audience.")
-        except jwt.InvalidIssuerError:
-            raise exceptions.AuthenticationFailed("Invalid token issuer.")
-        except jwt.PyJWTError as exc:
-            raise exceptions.AuthenticationFailed(f"Invalid token: {exc}")
+        return decode_oidc_token(token)
 
     def _sync_user(self, claims: dict):
         """Get-or-create the Django user for ``sub`` and sync its groups.
