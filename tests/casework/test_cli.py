@@ -78,6 +78,26 @@ def test_model_default_is_empty_not_haiku():
     assert _parse([]).model == ""
 
 
+def test_the_model_help_lists_the_tiers_the_registry_actually_holds():
+    """Review finding 11. The help text used to name the premium stages by hand,
+    and went stale the moment `description` and `card` were registered -- it
+    promised "premium stages (bigo, timeline, allegations, entities)" to an
+    operator reading `--help` to find out what a run would cost.
+
+    Deriving it from `llm.TIERS` is what stops that recurring.
+    """
+    import argparse
+
+    from casework.common.llm import TIERS
+
+    parser = add_common_args(argparse.ArgumentParser())
+    help_text = parser.format_help()
+    for stage, tier in TIERS.items():
+        assert stage in help_text, f"{stage} is registered but absent from --model help"
+    assert "description" in help_text and "card" in help_text
+    assert "premium stages (bigo, timeline, allegations, entities)" not in help_text
+
+
 def test_provider_default_is_claude_cli():
     assert _parse([]).provider == "claude_cli"
 
@@ -293,6 +313,33 @@ def test_configure_run_logging_uses_env_var_for_default_log_dir(monkeypatch, tmp
         assert Path(paths["log"]).parent == tmp_path
     finally:
         _cleanup_logger(stage)
+
+
+def test_api_token_defaults_to_the_environment(monkeypatch):
+    """`basic_auth_from_env`'s error text tells operators to set
+    JAWAFDEHI_API_TOKEN, and the documented production invocation exports it.
+    Without this default, following that instruction failed with the very
+    message that gave it."""
+    monkeypatch.setenv("JAWAFDEHI_API_TOKEN", "eyJ-token")
+    parser = argparse.ArgumentParser()
+    add_common_args(parser)
+    assert parser.parse_args([]).api_token == "eyJ-token"
+
+
+def test_an_explicit_api_token_flag_wins_over_the_environment(monkeypatch):
+    monkeypatch.setenv("JAWAFDEHI_API_TOKEN", "from-env")
+    parser = argparse.ArgumentParser()
+    add_common_args(parser)
+    assert parser.parse_args(["--api-token", "from-flag"]).api_token == "from-flag"
+
+
+def test_api_token_is_empty_when_unset(monkeypatch):
+    """Empty, not None -- `build_api` branches on truthiness to fall back to
+    local Basic auth."""
+    monkeypatch.delenv("JAWAFDEHI_API_TOKEN", raising=False)
+    parser = argparse.ArgumentParser()
+    add_common_args(parser)
+    assert parser.parse_args([]).api_token == ""
 
 
 def test_configure_run_logging_falls_back_to_repo_root_work_dir(monkeypatch, tmp_path):

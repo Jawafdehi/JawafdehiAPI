@@ -21,12 +21,23 @@ import os
 #   enrich_timeline.py:518          tier="premium"
 #   enrich_allegations.py:350       tier="premium"
 #   enrich_related_entities.py:421  tier="premium"
+#   enrich_description.py:576       tier="premium"
+#   enrich_card.py:337              tier="cheap"
 TIERS = {
     "bigo": "premium",
     "tags": "cheap",
     "timeline": "premium",
     "allegations": "premium",
     "entities": "premium",
+    "description": "premium",
+    # `card` is cheap on the donor's own authority (enrich_card.py:337) and on
+    # the merits: it fetches no source document, only summarising a
+    # `description` already on the case. NOTE the donor's OTHER title writer,
+    # the standalone `enrich_title.py`, used tier="premium" (line 275) for the
+    # same no-fetch inputs -- the two donors disagreed. `enrich_title.py` folds
+    # into this stage as `--only title`, and the brief resolves the conflict in
+    # favour of cheap. See `casework/enrich_card.py`'s deviation 2.
+    "card": "cheap",
 }
 DEFAULT_TIER = "cheap"
 

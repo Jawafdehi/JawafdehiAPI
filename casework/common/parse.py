@@ -62,19 +62,76 @@ def balanced_array(text: str, start: int):
     return _balanced_span(text, start, "[", "]")
 
 
+def strip_fence(text: str) -> str:
+    """Drop a leading ```-fenced block's fences, returning the body.
+
+    Returns `text` unchanged when there is no complete fence pair.
+    """
+    if "```" not in text:
+        return text
+    start = text.find("```")
+    nl = text.find("\n", start)
+    if nl == -1:
+        return text
+    end = text.find("```", nl + 1)
+    if end == -1:
+        return text
+    return text[nl + 1 : end].strip()
+
+
+def parse_object_response(response_text, required_key=None, *, predicate=None):
+    """First balanced JSON OBJECT in the response that the caller accepts.
+
+    ``parse_extraction_response`` only ever returns a LIST -- it is shaped for
+    ``{"allegations": [...]}`` replies. A reply whose payload is a long STRING
+    (``{"description": "### क) …"}``) needs its own parser.
+
+    Every ``{`` position is tried, not just ``text.find("{")``: a model reply
+    can open with an unrelated object (a preamble, an echoed tool argument)
+    before the real payload, and stopping at the first brace returns None on
+    exactly those. Ported from the donor's ``_parse_response``
+    (``0321a85:casework/enrich_description.py``).
+
+    ``predicate`` narrows acceptance beyond "the key is present" and is what
+    keeps the SCAN going past a near-miss: the judge parser needs
+    ``adequate`` to be a real bool, so an object carrying ``{"adequate":
+    "yes"}`` has to be rejected and the next ``{`` tried, not returned. Pass
+    ``required_key`` for the plain case, ``predicate`` for the rest, or both.
+
+    Returns the parsed dict, or None.
+    """
+    import json
+
+    if required_key is None and predicate is None:
+        raise ValueError("parse_object_response needs a required_key or a predicate")
+
+    text = strip_fence((response_text or "").strip())
+    for obj_start in range(len(text)):
+        if text[obj_start] != "{":
+            continue
+        block = balanced_object(text, obj_start)
+        if block is None:
+            continue
+        try:
+            obj = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if required_key is not None and required_key not in obj:
+            continue
+        if predicate is not None and not predicate(obj):
+            continue
+        return obj
+    return None
+
+
 def parse_extraction_response(response_text, wrapper_keys):
     """Extract a JSON array from an LLM response (handles ```fences``` and
     {"<key>": [...]} wrappers). Returns the list, or None."""
     import json
 
-    text = (response_text or "").strip()
-    if "```" in text:
-        start = text.find("```")
-        nl = text.find("\n", start)
-        if nl != -1:
-            end = text.find("```", nl)
-            if end != -1:
-                text = text[nl + 1 : end].strip()
+    text = strip_fence((response_text or "").strip())
 
     obj_start = text.find("{")
     if obj_start != -1:

@@ -43,6 +43,16 @@ from casework.common.materials import markdown_link, materials_of_type
 PRESS_TYPES = ("press_release", "ciaa_press_release", "charge_sheet")
 COURT_TYPES = ("court_order",)
 
+#: What counts as a REAL description, as opposed to a stub. Donor-verbatim from
+#: `enrich_description`'s `_has_substantial_description`.
+#:
+#: Shared, not duplicated, because two stages must agree on the answer.
+#: `enrich_description` uses it to decide a case is already done;
+#: `enrich_card` uses it to refuse to write a card grounded in nothing. When
+#: only the first held the number, `unmet_prerequisites`' emptiness test was
+#: the card's whole defence -- and it passes a whitespace-only description.
+SUBSTANTIAL_DESCRIPTION_CHARS = 600
+
 
 @dataclass(frozen=True)
 class Stage:
@@ -139,6 +149,39 @@ STAGES = {
         "entities", provides=("entities",),
         requires_materials=PRESS_TYPES + COURT_TYPES,
         requires_stages=("convert",),
+    ),
+    # `description` writes the long public narrative. It reads the charge
+    # sheet, the press release AND the verdict, so it gates on both material
+    # families -- the same PRESS+COURT pair as `timeline`/`entities`, and for
+    # the same reason: a court-order-only case is still describable, so
+    # gating on PRESS_TYPES alone would strand it.
+    #
+    # provides is ("description",) ONLY -- deliberately NOT ("description",
+    # "title"). The donor regenerated `Case.title` as a side effect of this
+    # pass; this port drops that (see `casework/enrich_description.py`'s
+    # docstring) and `title` has exactly one owner, `enrich_card`. Naming
+    # "title" here would be the phantom-`provides` mistake documented on
+    # `allegations` above: an idempotency check reading `provides` would call
+    # a case title-complete that this stage never touched.
+    "description": Stage(
+        "description", provides=("description",),
+        requires_materials=PRESS_TYPES + COURT_TYPES,
+        requires_stages=("convert",),
+    ),
+    # `card` writes the two listing-card fields. It reads NO material -- both
+    # fields derive from the `description` already on the case, exactly like
+    # `tags` derives from case fields -- so `requires_materials` is empty and
+    # gating it on a converted document would strand every case whose
+    # description came from somewhere else.
+    #
+    # Unlike `tags`, though, `description` IS a hard gate here, not just an
+    # ordering preference: a card built from an empty description is a card
+    # built from nothing. Hence `requires_fields` AND `requires_stages` --
+    # `requires_stages` alone only orders, it never checks.
+    "card": Stage(
+        "card", provides=("title", "short_description"),
+        requires_fields=("description",),
+        requires_stages=("description",),
     ),
 }
 

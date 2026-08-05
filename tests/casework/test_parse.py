@@ -1,4 +1,7 @@
-from casework.common.parse import balanced_object, is_valid_iso_date, parse_extraction_response
+from casework.common.parse import (
+    balanced_object, is_valid_iso_date, parse_extraction_response,
+    parse_object_response, strip_fence,
+)
 
 
 def test_balanced_object_ignores_braces_inside_strings():
@@ -80,3 +83,56 @@ def test_is_valid_iso_date():
     assert not is_valid_iso_date("2024-13-01")
     assert not is_valid_iso_date("2081-01-15xx")
     assert not is_valid_iso_date(None)
+
+
+# --------------------------------------------------------------------------
+# parse_object_response -- the object-shaped reply (description enricher)
+# --------------------------------------------------------------------------
+
+
+def test_parse_object_response_returns_the_whole_dict():
+    body = '{"description": "### क) अभियोगदावीको सार", "title": "शीर्षक"}'
+    obj = parse_object_response(body, "description")
+    assert obj["description"] == "### क) अभियोगदावीको सार"
+    assert obj["title"] == "शीर्षक"
+
+
+def test_parse_object_response_scans_past_a_leading_unrelated_object():
+    """Every `{` is tried, not just `text.find("{")`.
+
+    A reply that opens with an unrelated object -- a preamble, an echoed tool
+    argument -- returns None under a first-brace-only parser, which is exactly
+    the donor bug this scan exists to avoid.
+    """
+    body = '{"thinking": "let me see"} \n\n {"description": "असली विवरण"}'
+    assert parse_object_response(body, "description") == {"description": "असली विवरण"}
+
+
+def test_parse_object_response_handles_a_fenced_block():
+    body = 'यहाँ छ:\n```json\n{"description": "विवरण"}\n```'
+    assert parse_object_response(body, "description") == {"description": "विवरण"}
+
+
+def test_parse_object_response_survives_a_brace_inside_a_quoted_value():
+    body = '{"description": "दफा ३ {क} अनुसार", "n": 1}'
+    assert parse_object_response(body, "description")["description"] == "दफा ३ {क} अनुसार"
+
+
+def test_parse_object_response_returns_none_when_the_key_is_absent():
+    assert parse_object_response('{"other": 1}', "description") is None
+
+
+def test_parse_object_response_returns_none_for_a_bare_array():
+    # A list is not an object; the description contract is an object.
+    assert parse_object_response('["विवरण"]', "description") is None
+
+
+def test_parse_object_response_returns_none_for_empty_and_none_input():
+    assert parse_object_response("", "description") is None
+    assert parse_object_response(None, "description") is None
+
+
+def test_strip_fence_leaves_text_without_a_closing_fence_alone():
+    # A truncated response must not have its whole body eaten by a half fence.
+    assert strip_fence('```json\n{"description": "विवरण"}') == (
+        '```json\n{"description": "विवरण"}')
