@@ -53,9 +53,6 @@ COPY templates/ ./templates/
 RUN uv sync --frozen --no-dev
 
 ENV DJANGO_SETTINGS_MODULE=config.settings
-# Fail-safe anonymous MCP profile. A trusted ingress may raise a public default
-# to internal per request; an internal deployment cannot be downgraded.
-ENV MCP_DEFAULT_MODE=public
 
 # Collect static at build time (skips the prod OIDC/secret guards via the
 # _BUILD_TIME_COMMANDS list in settings). STATIC_ROOT resolves under BASE_DIR
@@ -80,9 +77,6 @@ ENV DATABASE_SSL_CA_CERT_FILE=/etc/ssl/certs/cloudsql-ca.pem
 ENV DATABASE_SSL_MODE=verify-ca
 ENV PYTHONUNBUFFERED=1
 ENV DJANGO_SETTINGS_MODULE=config.settings
-# Fail-safe anonymous MCP profile. A trusted ingress may raise a public default
-# to internal per request; an internal deployment cannot be downgraded.
-ENV MCP_DEFAULT_MODE=public
 
 WORKDIR /app
 COPY --from=builder --chown=jawafdehi:jawafdehi /app /app

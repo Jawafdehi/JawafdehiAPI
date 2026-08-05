@@ -176,6 +176,11 @@ Court IDs (court_identifier):
         except httpx.HTTPError as e:
             logger.error("ngm_query_http_error", error=str(e), category="http")
             return _error_response(f"HTTP error: {e}")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — tool boundary: an unexpected fault is a result
+            # Deliberately generic to the caller. This tool is reachable
+            # ANONYMOUSLY, and the Django view it fronts already returns only
+            # "Database query failed" for the same reason: an unexpected
+            # exception's text can carry SQL, schema or connection detail. The
+            # full traceback goes to the log via logger.exception.
             logger.exception("ngm_query_unexpected_error", error=str(e))
-            return _error_response(f"Unexpected error: {e}")
+            return _error_response("Unexpected error running the query.")

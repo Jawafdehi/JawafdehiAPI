@@ -182,19 +182,24 @@ def _resource_metadata_url(base_url: str | None) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, metadata_path, "", ""))
 
 
-def _protected_resource_metadata(base_url: str | None = None) -> dict:
+def _protected_resource_metadata(base_url: str) -> dict:
     """RFC 9728 Protected Resource Metadata so OAuth clients discover the
     authorization server (Zitadel, Design 1a) and the scopes to request.
 
     ``base_url`` is the absolute canonical URL of this MCP server (see
-    _canonical_base_url); falls back to OIDC_API_AUDIENCE for hostless callers."""
+    :func:`_canonical_base_url`) and is REQUIRED. There is deliberately no
+    fallback to OIDC_API_AUDIENCE: RFC 9728 defines ``resource`` as the
+    resource's URL, and an audience identifier is not one. With a single endpoint
+    there is exactly one canonical URL, so a caller that cannot supply it is a
+    misconfigured deployment — which the sole caller reports as a 503 rather than
+    advertising a document no client can use."""
     raw_audience = get_oidc_config("OIDC_API_AUDIENCE")
     if isinstance(raw_audience, (list, tuple)):
         audience = str(raw_audience[0]) if raw_audience else ""
     else:
         audience = str(raw_audience or "").strip()
     issuer = str(get_oidc_config("OIDC_ISSUER") or "").strip()
-    resource = base_url or audience
+    resource = base_url
     # offline_access must be advertised for clients (e.g. Claude Code) to request
     # a refresh token; the project-aud urn puts our project id in the token
     # audience so the API + this server accept the bearer.
@@ -322,6 +327,41 @@ class JawafdehiMCPServer:
         path = scope.get("path", "")
         method = scope.get("method", "GET").upper()
         headers = dict(scope.get("headers", []))
+
+        # Readiness is answered BEFORE the Host allowlist, deliberately. A
+        # Kubernetes httpGet probe defaults Host to the pod IP, which is not in
+        # MCP_ALLOWED_HOSTS and should not have to be — validating it here would
+        # 421 every probe and the pod would never be marked ready. That would
+        # also contradict the rule just below, where a missing OIDC_RESOURCE is
+        # deliberately kept from failing the probe.
+        #
+        # Safe because this endpoint takes no credential, reads no request data,
+        # and returns one of two fixed strings. DNS-rebinding protection exists
+        # to keep a browser off the MCP *protocol* endpoint, which is still
+        # guarded below.
+        if path == "/health":
+            if method != "GET":
+                await self._send_response(
+                    send,
+                    405,
+                    [("content-type", "text/plain"), ("allow", "GET")],
+                    b"method not allowed",
+                )
+                return
+            # Lifespan readiness only. A missing OIDC_RESOURCE is NOT unready:
+            # the anonymous read catalog serves correctly without it, and failing
+            # the probe would take down a pod that is doing its job. The
+            # misconfiguration surfaces on the metadata endpoint, which 503s, and
+            # on every authenticated call.
+            ready = self._ready
+            await self._send_response(
+                send,
+                200 if ready else 503,
+                [("content-type", "text/plain")],
+                b"ready" if ready else b"not ready",
+            )
+            return
+
         host = headers.get(b"host", b"").decode(errors="replace").strip()
         if not _matches_allowed_header(
             host,
@@ -347,28 +387,12 @@ class JawafdehiMCPServer:
             )
             return
 
-        if path in {"/health", WELL_KNOWN_PROTECTED_RESOURCE} and method != "GET":
+        if path == WELL_KNOWN_PROTECTED_RESOURCE and method != "GET":
             await self._send_response(
                 send,
                 405,
                 [("content-type", "text/plain"), ("allow", "GET")],
                 b"method not allowed",
-            )
-            return
-        if path == "/health":
-            # Lifespan readiness only. A missing OIDC_RESOURCE is NOT unready:
-            # the anonymous read catalog serves correctly without it, and failing
-            # the probe would take down a pod that is doing its job. The
-            # misconfiguration surfaces on the metadata endpoint below, which
-            # 503s, and on every authenticated call.
-            ready = self._ready
-            status_code = 200 if ready else 503
-            body = b"ready" if ready else b"not ready"
-            await self._send_response(
-                send,
-                status_code,
-                [("content-type", "text/plain")],
-                body,
             )
             return
         if path == WELL_KNOWN_PROTECTED_RESOURCE:

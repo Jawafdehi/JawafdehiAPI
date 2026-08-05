@@ -16,6 +16,7 @@ from jawafdehi_mcp.server import (
     _get_allowed_tools,
     _has_api_token,
     _is_tool_allowed,
+    call_tool,
 )
 
 
@@ -151,6 +152,60 @@ class TestAllowedTools:
             assert len(tools) == len(TOOL_MAP)
         finally:
             current_user_identity.set(None)
+
+
+class TestCallToolEnforcesTheCatalog:
+    """The catalog must gate INVOCATION, not just what `tools/list` advertises.
+
+    These go through ``call_tool`` rather than asserting ``_is_tool_allowed``,
+    because the predicate being correct is worth nothing if the dispatcher stops
+    consulting it. Deleting the check in ``call_tool`` previously left the whole
+    suite green — for ``convert_to_markdown``, which no ``/api/`` permission backs,
+    that check is the only thing standing between an anonymous caller and the tool.
+    """
+
+    pytestmark = pytest.mark.asyncio(loop_scope="function")
+
+    @pytest.mark.security
+    @pytest.mark.parametrize(
+        "tool_name",
+        ["convert_to_markdown", "create_jawafdehi_case", "manage_jobs"],
+    )
+    async def test_anonymous_invocation_is_refused(self, monkeypatch, tool_name):
+        monkeypatch.delenv("JAWAFDEHI_API_TOKEN", raising=False)
+        token = current_user_identity.set(None)
+        try:
+            with pytest.raises(ValueError, match=tool_name):
+                await call_tool(tool_name, {})
+        finally:
+            current_user_identity.reset(token)
+
+    @pytest.mark.security
+    async def test_anonymous_invocation_of_unconfigured_query_tool_is_refused(
+        self, monkeypatch
+    ):
+        monkeypatch.delenv("JAWAFDEHI_API_TOKEN", raising=False)
+        monkeypatch.delenv("MCP_QUERY_API_TOKEN", raising=False)
+        token = current_user_identity.set(None)
+        try:
+            with pytest.raises(ValueError, match="ngm_query_judicial"):
+                await call_tool("ngm_query_judicial", {"query": "SELECT 1"})
+        finally:
+            current_user_identity.reset(token)
+
+    async def test_anonymous_invocation_of_an_allowed_tool_is_not_refused(
+        self, monkeypatch
+    ):
+        """The guard must refuse the right things and only those."""
+        monkeypatch.delenv("JAWAFDEHI_API_TOKEN", raising=False)
+        token = current_user_identity.set(None)
+        try:
+            result = await call_tool(
+                "convert_date", {"dates": ["2023-01-15"], "mode": "ad_to_bs"}
+            )
+        finally:
+            current_user_identity.reset(token)
+        assert "Converted AD 2023-01-15 to BS" in result[0].text
 
 
 class TestIsToolAllowed:

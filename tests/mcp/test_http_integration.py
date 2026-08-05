@@ -344,19 +344,25 @@ class TestMiddleware:
 
 
 class TestProtectedResourceMetadata:
-    def test_resource_defaults_to_audience(self, monkeypatch):
-        monkeypatch.delenv("OIDC_RESOURCE", raising=False)
+    def test_resource_is_the_url_never_the_audience(self, monkeypatch):
+        """RFC 9728 `resource` is a URL; the old audience fallback is gone.
+
+        It was unreachable anyway — the only caller 503s on a falsy base — but it
+        was still documented and asserted, which is how a non-conformant document
+        would have come back.
+        """
         monkeypatch.setenv("OIDC_API_AUDIENCE", "aud-1")
         monkeypatch.setenv("OIDC_ISSUER", "https://iss.x.org")
-        meta = _protected_resource_metadata()
-        assert meta["resource"] == "aud-1"
+        meta = _protected_resource_metadata("https://api.jawafdehi.org/mcp")
+        assert meta["resource"] == "https://api.jawafdehi.org/mcp"
+        assert meta["resource"] != "aud-1"
         assert meta["bearer_methods_supported"] == ["header"]
 
     def test_host_aware_resource_and_scopes(self, monkeypatch):
         monkeypatch.setenv("OIDC_API_AUDIENCE", "proj-9")
         monkeypatch.setenv("OIDC_ISSUER", "https://auth.x.org")
-        meta = _protected_resource_metadata("https://mcp-internal.x.org")
-        assert meta["resource"] == "https://mcp-internal.x.org"
+        meta = _protected_resource_metadata("https://api.jawafdehi.org/mcp")
+        assert meta["resource"] == "https://api.jawafdehi.org/mcp"
         # Design 1a: point at Zitadel directly.
         assert meta["authorization_servers"] == ["https://auth.x.org"]
         # Refresh + project-audience scopes advertised.
@@ -473,6 +479,52 @@ class TestSingleDoor:
             send,
         )
         assert json.loads(send.body)["resource"] == "https://api.jawafdehi.org/mcp"
+
+    @pytest.mark.parametrize(
+        "host",
+        [
+            b"10.42.3.17:8080",  # k8s httpGet defaults Host to the pod IP
+            b"jawafdehi-api-7d9f.default.svc",
+            b"portal.jawafdehi.org",  # some other name fronting the same pod
+        ],
+    )
+    async def test_health_answers_any_host(self, mcp_server, monkeypatch, host):
+        """A readiness probe must not have to satisfy the Host allowlist.
+
+        The regression this guards: the Host check used to run first, so a k8s
+        probe (Host = pod IP) got 421 and the pod was never marked ready. Invisible
+        locally, because the Dockerfile and compose healthchecks both use localhost.
+        """
+        monkeypatch.setenv("OIDC_RESOURCE", "https://api.jawafdehi.org/mcp")
+        mcp_server._ready = True
+        send = _SendRecorder()
+        await mcp_server._handle_http(
+            _make_scope([(b"host", host)], path="/health", method="GET"),
+            _dummy_receive,
+            send,
+        )
+        assert send.status == 200
+        assert send.body == b"ready"
+
+    @pytest.mark.security
+    async def test_host_allowlist_still_guards_the_protocol_endpoint(self, mcp_server):
+        """Exempting /health must not have exempted anything else."""
+        send = _SendRecorder()
+        await mcp_server._handle_http(
+            _make_scope([(b"host", b"10.42.3.17:8080")]),
+            _dummy_receive,
+            send,
+        )
+        assert send.status == 421
+
+    async def test_health_rejects_non_get(self, mcp_server):
+        send = _SendRecorder()
+        await mcp_server._handle_http(
+            _make_scope([(b"host", b"10.42.3.17:8080")], path="/health", method="POST"),
+            _dummy_receive,
+            send,
+        )
+        assert send.status == 405
 
     async def test_health_does_not_depend_on_oidc_resource(
         self, mcp_server, monkeypatch
