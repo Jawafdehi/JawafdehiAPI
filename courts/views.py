@@ -383,16 +383,33 @@ class QueryView(APIView):
             if max_response_bytes is not None
             else query_guard.default_max_response_bytes()
         )
+        # Postgres refuses SET TRANSACTION once a statement has run in the current
+        # transaction (25001 active_sql_transaction). Read this BEFORE opening the
+        # block below: if a caller already has one open, atomic() gives us a
+        # savepoint rather than a fresh transaction and the access-mode change
+        # would error out. In that case fall back to the statement timeout alone —
+        # read-only enforcement is defence in depth behind query_guard's
+        # SELECT-only allowlist, so degrading it beats failing the request.
+        nested = connection.in_atomic_block
         start = time.perf_counter()
         with transaction.atomic(using=ngm_alias):
             with connection.cursor() as cursor:
                 if connection.vendor == "postgresql":
-                    cursor.execute("SET TRANSACTION READ ONLY")
+                    if not nested:
+                        cursor.execute("SET TRANSACTION READ ONLY")
+                    # SET LOCAL is scoped to the savepoint, so it is safe either way.
                     cursor.execute("SET LOCAL statement_timeout = %s", [timeout_ms])
                 cursor.execute(query)
                 columns = (
                     [c[0] for c in cursor.description] if cursor.description else []
                 )
+                # Measuring means encoding each row here and again in the response
+                # renderer — deliberate. Encoding once and keeping the fragments to
+                # reuse would hold the rows AND their JSON in memory at the same
+                # time, which is the peak this cap exists to prevent; and any
+                # cheaper estimate would have to be conservative enough to reject
+                # results that would in fact have fit. The extra CPU is bounded by
+                # max_rows, so it is paid only on the largest allowed responses.
                 response_bytes = len(
                     json.dumps(
                         {"columns": columns, "rows": []},

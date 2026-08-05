@@ -584,12 +584,17 @@ class TestLegitimateSelectAllowed(_QuerySecurityBase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
 
-def test_postgres_execution_uses_read_only_transaction_and_local_timeout():
+def _mock_postgres_connection(*, in_atomic_block):
     cursor = MagicMock()
     cursor.description = [("identifier",)]
     cursor.fetchmany.side_effect = [[("supreme",)], []]
-    connection = MagicMock(vendor="postgresql")
+    connection = MagicMock(vendor="postgresql", in_atomic_block=in_atomic_block)
     connection.cursor.return_value.__enter__.return_value = cursor
+    return connection, cursor
+
+
+def test_postgres_execution_uses_read_only_transaction_and_local_timeout():
+    connection, cursor = _mock_postgres_connection(in_atomic_block=False)
 
     with (
         patch.object(views.router, "db_for_read", return_value="ngm"),
@@ -608,6 +613,33 @@ def test_postgres_execution_uses_read_only_transaction_and_local_timeout():
     atomic.assert_called_once_with(using="ngm")
     assert cursor.execute.call_args_list == [
         (("SET TRANSACTION READ ONLY",),),
+        (("SET LOCAL statement_timeout = %s", [2500]),),
+        (("SELECT identifier FROM courts",),),
+    ]
+    assert result["rows"] == [["supreme"]]
+
+
+def test_postgres_execution_skips_access_mode_inside_an_open_transaction():
+    """Postgres rejects SET TRANSACTION once a statement has run (25001).
+
+    If a caller already holds a transaction, ``atomic()`` yields a savepoint
+    rather than a fresh transaction, so issuing the access-mode change would
+    error the request out. The statement timeout still applies — ``SET LOCAL`` is
+    savepoint-scoped — and SELECT-only enforcement remains query_guard's job.
+    """
+    connection, cursor = _mock_postgres_connection(in_atomic_block=True)
+
+    with (
+        patch.object(views.router, "db_for_read", return_value="ngm"),
+        patch.object(views, "connections", {"ngm": connection}),
+        patch.object(views.transaction, "atomic", return_value=nullcontext()),
+    ):
+        result = views.QueryView._execute_select(
+            "SELECT identifier FROM courts",
+            timeout_seconds=2.5,
+        )
+
+    assert cursor.execute.call_args_list == [
         (("SET LOCAL statement_timeout = %s", [2500]),),
         (("SELECT identifier FROM courts",),),
     ]

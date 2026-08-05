@@ -70,20 +70,21 @@ def _authorization_offered(headers: dict[bytes, bytes]) -> bool:
     return bool(headers.get(b"authorization", b"").strip())
 
 
-def _bearer_challenge(error: str, headers: dict[bytes, bytes]) -> str:
+def _bearer_challenge(error: str) -> str:
     """Build a ``WWW-Authenticate`` value, pointing at RFC 9728 metadata."""
     challenge = f'Bearer error="{error}"'
-    rm_url = _resource_metadata_url(_canonical_base_url(headers))
+    rm_url = _resource_metadata_url(_canonical_base_url())
     if rm_url:
         challenge += f', resource_metadata="{rm_url}"'
     return challenge
 
 
-def _canonical_base_url(_headers: dict[bytes, bytes] | None = None) -> str | None:
+def _canonical_base_url() -> str | None:
     """Absolute base URL of this MCP server for RFC 9728 metadata.
 
-    Only the trusted OIDC_RESOURCE configuration may define security metadata.
-    Request Host and forwarding headers are intentionally never consulted."""
+    Takes no request input on purpose. Only the trusted OIDC_RESOURCE
+    configuration may define security metadata, so Host and forwarding headers
+    cannot reach this decision rather than merely being ignored by it."""
     configured = (os.getenv("OIDC_RESOURCE") or "").strip()
     if not configured:
         return None
@@ -398,7 +399,7 @@ class JawafdehiMCPServer:
         if path == WELL_KNOWN_PROTECTED_RESOURCE:
             # Always advertised. This is now the only way a client discovers how
             # to authenticate, since an anonymous request is not challenged.
-            base = _canonical_base_url(headers)
+            base = _canonical_base_url()
             if not base:
                 await self._send_json(
                     send,
@@ -428,7 +429,7 @@ class JawafdehiMCPServer:
                     "detail": "Authorization header is not a Bearer credential.",
                 },
                 extra_headers=[
-                    ("www-authenticate", _bearer_challenge("invalid_request", headers))
+                    ("www-authenticate", _bearer_challenge("invalid_request"))
                 ],
             )
             return
@@ -445,7 +446,7 @@ class JawafdehiMCPServer:
                     401,
                     {"error": "invalid_token", "detail": str(exc)},
                     extra_headers=[
-                        ("www-authenticate", _bearer_challenge("invalid_token", headers))
+                        ("www-authenticate", _bearer_challenge("invalid_token"))
                     ],
                 )
                 return

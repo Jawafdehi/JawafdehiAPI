@@ -137,15 +137,20 @@ class TestSigningKeyRefetch:
         platform_oidc._jwks_last_refresh = 0.0
         token = _mint(rsa_key, headers={"kid": "unknown"})
 
-        # First miss checks the cache and then performs one forced refresh.
+        # Two cached reads per miss: one outside _jwks_lock (kept out of it so a
+        # slow JWKS endpoint cannot serialise every authentication) and one
+        # re-check inside it, so a kid a concurrent refresh just landed is found
+        # instead of being rejected by the rate limit below.
         with pytest.raises(jwt.exceptions.PyJWKClientError):
             platform_oidc._signing_key_for(token)
-        assert calls == [False, True]
+        assert calls == [False, False, True]
 
         # An immediate second miss checks the cache but cannot force network I/O.
         with pytest.raises(jwt.exceptions.PyJWKClientError):
             platform_oidc._signing_key_for(token)
-        assert calls == [False, True, False]
+        assert calls == [False, False, True, False, False]
+        # The property that matters: exactly one forced refresh across both.
+        assert calls.count(True) == 1
 
     def test_refetch_allowed_after_interval(self, monkeypatch, rsa_key):
         calls = []
@@ -168,7 +173,7 @@ class TestSigningKeyRefetch:
             platform_oidc._signing_key_for(
                 _mint(rsa_key, headers={"kid": "still-unknown"})
             )
-        assert calls == [False, True]
+        assert calls == [False, False, True]
 
 
 class TestBuildIdentity:

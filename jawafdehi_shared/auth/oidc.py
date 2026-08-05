@@ -181,9 +181,26 @@ def _signing_key_for(token: str):
     if not isinstance(kid, str) or not kid:
         raise jwt.exceptions.PyJWKClientError("Token header is missing a key id")
 
+    # Deliberately OUTSIDE _jwks_lock. On a cold or expired cache PyJWT falls
+    # through from the cache read to a network fetch here, and holding the lock
+    # across that I/O serialises every concurrent authentication in the process:
+    # N requests against a slow JWKS endpoint queue up to N * OIDC_JWKS_TIMEOUT
+    # instead of overlapping. The cost of staying out here is at most one round
+    # of redundant parallel fetches on a cold start — PyJWT caches on success,
+    # so the round after it is an in-memory hit — which is strictly cheaper than
+    # a serial queue. On the warm-cache happy path the lock is never taken.
+    signing_key = client.match_kid(client.get_signing_keys(refresh=False), kid)
+    if signing_key is not None:
+        return signing_key
+
+    # Only the rate-limited refresh needs mutual exclusion, because it is the
+    # one thing that must happen at most once per _JWKS_MIN_REFRESH_INTERVAL no
+    # matter how many unknown kids arrive at once.
     with _jwks_lock:
-        signing_keys = client.get_signing_keys(refresh=False)
-        signing_key = client.match_kid(signing_keys, kid)
+        # Re-check under the lock: a concurrent refresh may have just landed
+        # this kid, in which case spending the refresh budget again is waste.
+        # Cheap — a refresh by that thread left the cache warm.
+        signing_key = client.match_kid(client.get_signing_keys(refresh=False), kid)
         if signing_key is not None:
             return signing_key
 

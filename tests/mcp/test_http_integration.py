@@ -5,6 +5,7 @@ ContextVar lifecycle, 401 on bad tokens, anonymous fallback, and the health /
 protected-resource-metadata endpoints.
 """
 
+import inspect
 import json
 
 import pytest
@@ -378,22 +379,27 @@ class TestHeaderHelpers:
         assert not hasattr(http_server, "MCP_DEFAULT_MODE")
         assert not hasattr(http_server, "VALID_MODES")
 
-    def test_canonical_base_prefers_configured_over_client_host(self, monkeypatch):
+    def test_canonical_base_comes_from_configuration(self, monkeypatch):
         monkeypatch.setenv("OIDC_RESOURCE", "https://mcp-internal.jawafdehi.org/mcp")
-        # A spoofed X-Forwarded-Host / Host must NOT steer the advertised URL.
-        base = _canonical_base_url(
-            {b"x-forwarded-host": b"evil.example", b"host": b"evil.example"}
-        )
-        assert base == "https://mcp-internal.jawafdehi.org/mcp"
+        assert _canonical_base_url() == "https://mcp-internal.jawafdehi.org/mcp"
 
-    def test_canonical_base_ignores_host_when_unset(self, monkeypatch):
+    def test_canonical_base_accepts_no_request_input(self):
+        """Header immunity is structural, not a policy this function applies.
+
+        Nothing about a request can reach the advertised security metadata,
+        because there is no parameter through which it could. The behavioural
+        counterpart is ``test_metadata_ignores_spoofed_host``, which proves it
+        end to end over the real handler.
+        """
+        assert not inspect.signature(_canonical_base_url).parameters
+
+    def test_canonical_base_is_none_when_unset(self, monkeypatch):
         monkeypatch.delenv("OIDC_RESOURCE", raising=False)
-        base = _canonical_base_url({b"host": b"mcp-internal.x.org"})
-        assert base is None
+        assert _canonical_base_url() is None
 
     def test_canonical_base_rejects_invalid_config(self, monkeypatch):
         monkeypatch.setenv("OIDC_RESOURCE", "https://user:pass@mcp.example/mcp")
-        assert _canonical_base_url({}) is None
+        assert _canonical_base_url() is None
 
     def test_path_resource_uses_rfc9728_metadata_location(self):
         assert _resource_metadata_url("https://mcp-internal.x.org/mcp") == (

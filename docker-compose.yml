@@ -123,7 +123,6 @@ services:
       # one regardless of role, and Django API permissions remain the
       # authorization boundary for what those tools can actually do.
       # Two workers at 16 each keep direct-Postgres connection pressure bounded.
-      # Production should still put PgBouncer in front of every database.
       ASGI_LIMIT_CONCURRENCY: ${ASGI_LIMIT_CONCURRENCY:-16}
       OIDC_RESOURCE: ${OIDC_RESOURCE:-http://localhost:48000/mcp}
       MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-}

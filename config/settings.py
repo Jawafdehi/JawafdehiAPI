@@ -557,8 +557,14 @@ for _primary_alias, _read_env in _replica_url_env.items():
         DATABASES[_ro_alias] = dj_database_url.parse(_read_url)
         REPLICA_ALIASES[_primary_alias] = _ro_alias
 
-# Apply SSL options to every Postgres database. Django's persistent connections
-# are disabled under ASGI; production deployments should use an external pooler.
+# Apply SSL options to every Postgres database, and disable Django's persistent
+# connections. Connection lifetime is not dependable under ASGI: `connections` is
+# a thread_critical Local (django.db.utils.ConnectionHandler), while the
+# request_finished signal that runs close_old_connections is sent from the event
+# loop, so the handler does not necessarily see the connection that served the
+# request. CONN_MAX_AGE = 0 keeps that from turning into idle backends that
+# nothing reclaims; the cost is one connect per request, which is part of why
+# ASGI_LIMIT_CONCURRENCY bounds how many can be in flight per worker.
 for db_key in DATABASES:
     _apply_db_ssl_options(DATABASES[db_key])
     if DATABASES[db_key].get("ENGINE") == "django.db.backends.postgresql":
