@@ -3,7 +3,7 @@
 import pytest
 from mcp.types import CallToolResult
 
-from jawafdehi_mcp.identity import current_request_mode, current_user_identity
+from jawafdehi_mcp.identity import current_user_identity
 from jawafdehi_mcp.request_context import current_transport
 from jawafdehi_mcp.server import TOOL_CALLS, TOOL_DURATION, call_tool
 
@@ -32,7 +32,6 @@ async def test_completed_tool_call_records_count_and_duration():
     )
 
     identity_token = current_user_identity.set(None)
-    mode_token = current_request_mode.set("public")
     transport_token = current_transport.set("http")
     try:
         result = await call_tool(
@@ -41,7 +40,6 @@ async def test_completed_tool_call_records_count_and_duration():
         )
     finally:
         current_transport.reset(transport_token)
-        current_request_mode.reset(mode_token)
         current_user_identity.reset(identity_token)
 
     assert "Converted AD 2023-01-15 to BS" in result[0].text
@@ -73,13 +71,11 @@ async def test_error_result_records_failed_outcome():
     )
 
     identity_token = current_user_identity.set(None)
-    mode_token = current_request_mode.set("public")
     transport_token = current_transport.set("http")
     try:
         result = await call_tool("convert_date", {})
     finally:
         current_transport.reset(transport_token)
-        current_request_mode.reset(mode_token)
         current_user_identity.reset(identity_token)
 
     assert isinstance(result, CallToolResult)

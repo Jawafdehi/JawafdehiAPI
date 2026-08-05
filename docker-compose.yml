@@ -118,11 +118,10 @@ services:
       OIDC_OP_USER_ENDPOINT: http://zitadel:8080/oidc/v1/userinfo
       OIDC_AUDIENCE: ${OIDC_AUDIENCE:-jawafdehi-platform-dev}
       OIDC_JWKS_TIMEOUT: ${OIDC_JWKS_TIMEOUT:-10}
-      # The MCP protocol is served by this same process at /mcp. Default to the
-      # restricted anonymous tool profile when no trusted ingress mode header is
-      # present. Verified callers receive the full catalog; Django API
-      # permissions remain the write-authorization boundary.
-      MCP_DEFAULT_MODE: ${MCP_DEFAULT_MODE:-public}
+      # The MCP protocol is served by this same process at /mcp. Anonymous
+      # callers get a fixed read-only catalog; any verified bearer gets the full
+      # one regardless of role, and Django API permissions remain the
+      # authorization boundary for what those tools can actually do.
       # Two workers at 16 each keep direct-Postgres connection pressure bounded.
       # Production should still put PgBouncer in front of every database.
       ASGI_LIMIT_CONCURRENCY: ${ASGI_LIMIT_CONCURRENCY:-16}

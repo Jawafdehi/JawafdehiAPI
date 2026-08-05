@@ -15,13 +15,11 @@ from jawafdehi_mcp.http_server import (
     _bearer_from_headers,
     _canonical_base_url,
     _max_request_body_size,
-    _mode_from_headers,
     _protected_resource_metadata,
     _resource_metadata_url,
 )
 from jawafdehi_mcp.identity import (
-    PUBLIC_HOST_TOOL_NAMES,
-    current_request_mode,
+    ANONYMOUS_TOOL_NAMES,
     current_user_identity,
 )
 from jawafdehi_mcp.oidc import OIDCError
@@ -84,7 +82,6 @@ def captured(mcp_server, monkeypatch):
     async def _recorder(scope, receive, send):
         seen["identity"] = current_user_identity.get()
         seen["bearer"] = jawafdehi_bearer_token.get()
-        seen["mode"] = current_request_mode.get()
         seen["transport"] = current_transport.get()
         seen["allowed_tools"] = {tool.name for tool in _get_allowed_tools()}
 
@@ -144,19 +141,17 @@ class TestMiddleware:
         assert current_user_identity.get() is None
 
     async def test_no_bearer_is_anonymous(self, mcp_server, captured, monkeypatch):
-        monkeypatch.setenv("MCP_DEFAULT_MODE", "public")
         monkeypatch.setenv("MCP_QUERY_API_TOKEN", "query-only-token")
         scope = _make_scope([])
         await mcp_server._handle_http(scope, _dummy_receive, _SendRecorder())
         assert captured["identity"] is None
         assert captured["bearer"] is None
         assert captured["transport"] == "http"
-        assert captured["allowed_tools"] == PUBLIC_HOST_TOOL_NAMES
+        assert captured["allowed_tools"] == ANONYMOUS_TOOL_NAMES
 
     async def test_no_bearer_hides_sql_without_query_token(
         self, mcp_server, captured, monkeypatch
     ):
-        monkeypatch.setenv("MCP_DEFAULT_MODE", "public")
         monkeypatch.delenv("MCP_QUERY_API_TOKEN", raising=False)
 
         await mcp_server._handle_http(
@@ -165,9 +160,58 @@ class TestMiddleware:
             _SendRecorder(),
         )
 
-        assert captured["allowed_tools"] == PUBLIC_HOST_TOOL_NAMES - {
+        assert captured["allowed_tools"] == ANONYMOUS_TOOL_NAMES - {
             "ngm_query_judicial"
         }
+
+    @pytest.mark.security
+    async def test_anonymous_cannot_reach_the_document_converter(
+        self, mcp_server, captured, monkeypatch
+    ):
+        """convert_to_markdown needs authentication; no /api/ route gates it."""
+        monkeypatch.setenv("MCP_QUERY_API_TOKEN", "query-only-token")
+
+        await mcp_server._handle_http(
+            _make_scope([]),
+            _dummy_receive,
+            _SendRecorder(),
+        )
+
+        assert "convert_to_markdown" not in captured["allowed_tools"]
+
+    async def test_roleless_bearer_reaches_the_document_converter(
+        self, mcp_server, captured, monkeypatch
+    ):
+        """...but any verified bearer does, with no role required."""
+
+        async def _resolve(token):
+            return {"sub": "u2", "email": "noroles@x.org", "roles": []}
+
+        monkeypatch.setattr(http_server, "resolve_bearer_identity", _resolve)
+
+        await mcp_server._handle_http(
+            _make_scope([(b"authorization", b"Bearer good-token")]),
+            _dummy_receive,
+            _SendRecorder(),
+        )
+
+        assert "convert_to_markdown" in captured["allowed_tools"]
+
+    @pytest.mark.security
+    async def test_spoofed_mode_header_has_no_effect(
+        self, mcp_server, captured, monkeypatch
+    ):
+        """The doors are gone: x-mcp-mode is now just an unknown header."""
+        monkeypatch.setenv("MCP_QUERY_API_TOKEN", "query-only-token")
+
+        await mcp_server._handle_http(
+            _make_scope([(b"x-mcp-mode", b"internal")]),
+            _dummy_receive,
+            _SendRecorder(),
+        )
+
+        assert captured["identity"] is None
+        assert captured["allowed_tools"] == ANONYMOUS_TOOL_NAMES
 
     @pytest.mark.security
     async def test_hostile_host_is_rejected(self, mcp_server):
@@ -241,26 +285,13 @@ class TestMiddleware:
         await mcp_server._handle_http(scope, _dummy_receive, send)
         assert send.status == 200
 
-    async def test_internal_health_requires_canonical_resource(
-        self, mcp_server, monkeypatch
-    ):
-        monkeypatch.delenv("OIDC_RESOURCE", raising=False)
-        monkeypatch.setenv("MCP_DEFAULT_MODE", "internal")
-        mcp_server._ready = True
-        send = _SendRecorder()
-
-        await mcp_server._handle_http(
-            _make_scope([], path="/health", method="GET"),
-            _dummy_receive,
-            send,
-        )
-
-        assert send.status == 503
-        assert send.body == b"not ready"
-
     async def test_protected_resource_metadata(self, mcp_server, monkeypatch):
         monkeypatch.setenv("OIDC_ISSUER", "https://auth.x.org")
         monkeypatch.setenv("OIDC_API_AUDIENCE", "proj-1")
+        # Required now: the single door advertises one canonical resource URL.
+        # There is no longer an audience-identifier fallback, which RFC 9728 did
+        # not permit anyway (``resource`` must be the resource's URL).
+        monkeypatch.setenv("OIDC_RESOURCE", "https://api.jawafdehi.org/mcp")
         send = _SendRecorder()
         scope = _make_scope(
             [],
@@ -270,7 +301,7 @@ class TestMiddleware:
         await mcp_server._handle_http(scope, _dummy_receive, send)
         assert send.status == 200
         meta = json.loads(send.body)
-        assert meta["resource"] == "proj-1"
+        assert meta["resource"] == "https://api.jawafdehi.org/mcp"
         assert meta["authorization_servers"] == ["https://auth.x.org"]
 
     @pytest.mark.parametrize(
@@ -334,29 +365,12 @@ class TestProtectedResourceMetadata:
 
 
 class TestHeaderHelpers:
-    def test_mode_from_headers(self):
-        assert _mode_from_headers({b"x-mcp-mode": b"internal"}) == "internal"
-        assert _mode_from_headers({b"x-mcp-mode": b"Public"}) == "public"
-        assert _mode_from_headers({}) is None
-
-    def test_mode_defaults_to_env_floor(self, monkeypatch):
-        monkeypatch.setenv("MCP_DEFAULT_MODE", "public")
-        # Missing header falls back to the deployment floor...
-        assert _mode_from_headers({}) == "public"
-        # ...but an explicit ingress-injected stricter mode still wins.
-        assert _mode_from_headers({b"x-mcp-mode": b"internal"}) == "internal"
-
-    @pytest.mark.security
-    def test_internal_default_cannot_be_downgraded_by_header(self, monkeypatch):
-        monkeypatch.setenv("MCP_DEFAULT_MODE", "internal")
-        assert _mode_from_headers({b"x-mcp-mode": b"public"}) == "internal"
-        assert _mode_from_headers({b"x-mcp-mode": b"legacy"}) == "internal"
-        assert _mode_from_headers({b"x-mcp-mode": b"\xff"}) == "internal"
-
-    @pytest.mark.security
-    def test_invalid_default_mode_fails_closed(self, monkeypatch):
-        monkeypatch.setenv("MCP_DEFAULT_MODE", "legacy")
-        assert _mode_from_headers({}) == "public"
+    def test_no_mode_resolver_exists(self):
+        """The two doors are gone, and so is anything that resolved between them."""
+        assert not hasattr(http_server, "_mode_from_headers")
+        assert not hasattr(http_server, "MODE_HEADER")
+        assert not hasattr(http_server, "MCP_DEFAULT_MODE")
+        assert not hasattr(http_server, "VALID_MODES")
 
     def test_canonical_base_prefers_configured_over_client_host(self, monkeypatch):
         monkeypatch.setenv("OIDC_RESOURCE", "https://mcp-internal.jawafdehi.org/mcp")
@@ -391,121 +405,162 @@ class TestHeaderHelpers:
         assert _max_request_body_size() == 4 * 10 + 1024 * 1024
 
 
-class TestModeDoors:
+class TestSingleDoor:
+    """One endpoint, no header-selected doors.
+
+    The behavioral pivot from the two-door design: an anonymous request is
+    SERVED the read-only catalog rather than challenged, so the metadata document
+    below becomes the only way a client discovers how to authenticate.
+    """
+
     pytestmark = pytest.mark.asyncio(loop_scope="function")
 
-    async def test_internal_anonymous_gets_401_challenge(self, mcp_server, monkeypatch):
-        monkeypatch.setenv("OIDC_RESOURCE", "https://mcp-internal.x.org/mcp")
+    async def test_anonymous_is_served_not_challenged(self, mcp_server, captured):
         send = _SendRecorder()
-        scope = _make_scope([(b"x-mcp-mode", b"internal")])
-        await mcp_server._handle_http(scope, _dummy_receive, send)
+        await mcp_server._handle_http(_make_scope([]), _dummy_receive, send)
+        # Reached the session manager instead of short-circuiting on a 401.
+        assert send.status is None
+        assert captured["identity"] is None
+
+    async def test_metadata_is_always_served(self, mcp_server, monkeypatch):
+        monkeypatch.setenv("OIDC_API_AUDIENCE", "proj-1")
+        monkeypatch.setenv("OIDC_ISSUER", "https://auth.x.org")
+        monkeypatch.setenv("OIDC_RESOURCE", "https://api.jawafdehi.org/mcp")
+        send = _SendRecorder()
+        await mcp_server._handle_http(
+            _make_scope(
+                [],
+                path="/.well-known/oauth-protected-resource",
+                method="GET",
+            ),
+            _dummy_receive,
+            send,
+        )
+        assert send.status == 200
+        meta = json.loads(send.body)
+        assert meta["resource"] == "https://api.jawafdehi.org/mcp"
+        assert meta["authorization_servers"] == ["https://auth.x.org"]
+
+    async def test_metadata_requires_canonical_resource(self, mcp_server, monkeypatch):
+        monkeypatch.delenv("OIDC_RESOURCE", raising=False)
+        send = _SendRecorder()
+        await mcp_server._handle_http(
+            _make_scope(
+                [(b"x-forwarded-host", b"evil.example")],
+                path="/.well-known/oauth-protected-resource",
+                method="GET",
+            ),
+            _dummy_receive,
+            send,
+        )
+        assert send.status == 503
+        assert json.loads(send.body)["error"] == "server_configuration_error"
+        assert b"evil.example" not in send.body
+
+    @pytest.mark.security
+    async def test_metadata_ignores_spoofed_host(self, mcp_server, monkeypatch):
+        monkeypatch.setenv("OIDC_RESOURCE", "https://api.jawafdehi.org/mcp")
+        monkeypatch.setenv("OIDC_ISSUER", "https://auth.x.org")
+        monkeypatch.setenv("OIDC_API_AUDIENCE", "proj-1")
+        send = _SendRecorder()
+        await mcp_server._handle_http(
+            _make_scope(
+                [(b"x-forwarded-host", b"evil.example")],
+                path="/.well-known/oauth-protected-resource",
+                method="GET",
+            ),
+            _dummy_receive,
+            send,
+        )
+        assert json.loads(send.body)["resource"] == "https://api.jawafdehi.org/mcp"
+
+    async def test_health_does_not_depend_on_oidc_resource(
+        self, mcp_server, monkeypatch
+    ):
+        """A pod serving anonymous reads is ready even with OAuth unconfigured."""
+        monkeypatch.delenv("OIDC_RESOURCE", raising=False)
+        mcp_server._ready = True
+        send = _SendRecorder()
+        await mcp_server._handle_http(
+            _make_scope([], path="/health", method="GET"),
+            _dummy_receive,
+            send,
+        )
+        assert send.status == 200
+        assert send.body == b"ready"
+
+    async def test_invalid_token_challenge_points_at_metadata(
+        self, mcp_server, monkeypatch
+    ):
+        """A broken bearer is still rejected — and told where to authenticate."""
+        monkeypatch.setenv("OIDC_RESOURCE", "https://api.jawafdehi.org/mcp")
+
+        async def _resolve(token):
+            raise OIDCError("expired")
+
+        monkeypatch.setattr(http_server, "resolve_bearer_identity", _resolve)
+        send = _SendRecorder()
+        await mcp_server._handle_http(
+            _make_scope([(b"authorization", b"Bearer stale")]),
+            _dummy_receive,
+            send,
+        )
         assert send.status == 401
-        wa = dict(
+        challenge = dict(
             (k.decode(), v.decode())
             for k, v in next(
                 m["headers"]
                 for m in send.messages
                 if m["type"] == "http.response.start"
             )
-        )
-        assert "resource_metadata=" in wa["www-authenticate"]
-        assert "mcp-internal.x.org" in wa["www-authenticate"]
-
-    async def test_internal_mode_requires_canonical_resource(
-        self, mcp_server, monkeypatch
-    ):
-        monkeypatch.delenv("OIDC_RESOURCE", raising=False)
-        send = _SendRecorder()
-        scope = _make_scope(
-            [
-                (b"x-mcp-mode", b"internal"),
-                (b"x-forwarded-host", b"evil.example"),
-            ]
-        )
-        await mcp_server._handle_http(scope, _dummy_receive, send)
-        assert send.status == 503
-        assert json.loads(send.body)["error"] == "server_configuration_error"
-        assert b"evil.example" not in send.body
-
-    async def test_public_anonymous_proceeds(self, mcp_server, captured):
-        scope = _make_scope([(b"x-mcp-mode", b"public")])
-        await mcp_server._handle_http(scope, _dummy_receive, _SendRecorder())
-        assert captured["identity"] is None
-        assert captured["mode"] == "public"
-        # contextvar reset after request
-        assert current_request_mode.get() is None
-
-    async def test_legacy_anonymous_proceeds(self, mcp_server, captured):
-        scope = _make_scope([])
-        await mcp_server._handle_http(scope, _dummy_receive, _SendRecorder())
-        assert captured["identity"] is None
-        assert captured["mode"] is None
+        )["www-authenticate"]
+        assert 'error="invalid_token"' in challenge
+        assert "resource_metadata=" in challenge
+        assert "api.jawafdehi.org" in challenge
 
     @pytest.mark.security
-    async def test_invalid_mode_is_restricted_to_public(self, mcp_server, captured):
-        scope = _make_scope([(b"x-mcp-mode", b"legacy")])
-        await mcp_server._handle_http(scope, _dummy_receive, _SendRecorder())
+    @pytest.mark.parametrize(
+        "authorization",
+        [b"Token abc", b"Bearer", b"Bearer   ", b"garbage", b"Basic dXNlcjpwdw=="],
+    )
+    async def test_malformed_authorization_is_rejected_not_downgraded(
+        self, mcp_server, monkeypatch, authorization
+    ):
+        """A caller that tried to authenticate is told it failed.
+
+        The regression this guards: ``_bearer_from_headers`` returns None for
+        both "absent" and "unparseable", so without an explicit check a wrong
+        scheme silently received the ANONYMOUS catalog and a 200.
+        """
+        monkeypatch.setenv("OIDC_RESOURCE", "https://api.jawafdehi.org/mcp")
+        send = _SendRecorder()
+        await mcp_server._handle_http(
+            _make_scope([(b"authorization", authorization)]),
+            _dummy_receive,
+            send,
+        )
+        assert send.status == 401
+        assert json.loads(send.body)["error"] == "invalid_request"
+
+    async def test_absent_authorization_is_still_anonymous(self, mcp_server, captured):
+        """The other half: no header at all is anonymous, not an error."""
+        send = _SendRecorder()
+        await mcp_server._handle_http(_make_scope([]), _dummy_receive, send)
+        assert send.status is None
         assert captured["identity"] is None
-        assert captured["mode"] == "public"
 
-    async def test_metadata_ignores_spoofed_host_when_configured(
-        self, mcp_server, monkeypatch
-    ):
-        monkeypatch.setenv("OIDC_RESOURCE", "https://mcp-internal.jawafdehi.org/mcp")
-        monkeypatch.setenv("OIDC_ISSUER", "https://auth.x.org")
-        monkeypatch.setenv("OIDC_API_AUDIENCE", "proj-1")
-        send = _SendRecorder()
-        scope = _make_scope(
-            [
-                (b"x-mcp-mode", b"internal"),
-                (b"x-forwarded-host", b"evil.example"),
-            ],
-            path="/.well-known/oauth-protected-resource",
-            method="GET",
-        )
-        await mcp_server._handle_http(scope, _dummy_receive, send)
-        meta = json.loads(send.body)
-        assert meta["resource"] == "https://mcp-internal.jawafdehi.org/mcp"
-
-    async def test_public_hides_oauth_metadata(self, mcp_server):
-        send = _SendRecorder()
-        scope = _make_scope(
-            [(b"x-mcp-mode", b"public")],
-            path="/.well-known/oauth-protected-resource",
-            method="GET",
-        )
-        await mcp_server._handle_http(scope, _dummy_receive, send)
-        assert send.status == 404
-
-    async def test_internal_serves_canonical_metadata(self, mcp_server, monkeypatch):
-        monkeypatch.setenv("OIDC_API_AUDIENCE", "proj-1")
-        monkeypatch.setenv("OIDC_ISSUER", "https://auth.x.org")
-        monkeypatch.setenv("OIDC_RESOURCE", "https://mcp-internal.x.org/mcp")
-        send = _SendRecorder()
-        scope = _make_scope(
-            [(b"x-mcp-mode", b"internal")],
-            path="/.well-known/oauth-protected-resource",
-            method="GET",
-        )
-        await mcp_server._handle_http(scope, _dummy_receive, send)
-        assert send.status == 200
-        meta = json.loads(send.body)
-        assert meta["resource"] == "https://mcp-internal.x.org/mcp"
-        assert meta["authorization_servers"] == ["https://auth.x.org"]
-
-    async def test_internal_valid_token_proceeds(
-        self, mcp_server, captured, monkeypatch
-    ):
-        monkeypatch.setenv("OIDC_RESOURCE", "https://mcp-internal.x.org/mcp")
+    async def test_valid_token_proceeds(self, mcp_server, captured, monkeypatch):
+        monkeypatch.setenv("OIDC_RESOURCE", "https://api.jawafdehi.org/mcp")
         identity = {"sub": "u1", "email": "cw@x.org", "roles": ["contributor"]}
 
         async def _resolve(token):
             return identity
 
         monkeypatch.setattr(http_server, "resolve_bearer_identity", _resolve)
-        scope = _make_scope(
-            [(b"x-mcp-mode", b"internal"), (b"authorization", b"Bearer good")]
+        await mcp_server._handle_http(
+            _make_scope([(b"authorization", b"Bearer good")]),
+            _dummy_receive,
+            _SendRecorder(),
         )
-        await mcp_server._handle_http(scope, _dummy_receive, _SendRecorder())
         assert captured["identity"] == identity
-        assert captured["mode"] == "internal"
+        assert captured["allowed_tools"] == ALL_TOOL_NAMES

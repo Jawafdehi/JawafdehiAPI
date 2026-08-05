@@ -17,8 +17,11 @@ other traffic to Django. MCP uses stateless streamable HTTP, so requests can be
 served by any Gunicorn worker or pod without session affinity.
 
 Only the explicit MCP protocol, health, and protected-resource metadata paths
-are routed to MCP. `X-MCP-Mode` selects the authentication door after routing;
-it cannot turn another Django path into an MCP endpoint.
+are routed to MCP; no other Django path can become an MCP endpoint.
+
+There is **one** endpoint and one deployment — in production
+`https://api.jawafdehi.org/mcp`. There is no separate public/internal hostname
+and no ingress-injected mode header.
 
 MCP tools that consume Jawafdehi APIs retain the existing API contracts,
 authentication, permission checks, and serializers. In the embedded HTTP
@@ -37,26 +40,52 @@ path proxy is exposed.
 
 The embedded server reads the platform's `OIDC_ISSUER`, `OIDC_AUDIENCE`, and
 derived JWKS/userinfo settings. JWKS network fetches use the shared
-`OIDC_JWKS_TIMEOUT` bound. A trusted ingress may set:
+`OIDC_JWKS_TIMEOUT` bound.
 
-- `X-MCP-Mode: public`: anonymous callers receive the restricted public set.
-- `X-MCP-Mode: internal`: anonymous callers receive an OAuth challenge.
+One rule decides the catalog:
 
-`MCP_DEFAULT_MODE=public` is the safe fallback when the ingress header is
-absent. A header may raise that default to `internal`; an
-`MCP_DEFAULT_MODE=internal` deployment cannot be downgraded by a request
-header. Invalid values fail to the deployment's safe floor.
+| Caller | Catalog |
+|---|---|
+| Anonymous (no bearer) | the read-only `ANONYMOUS_TOOL_NAMES` set (13 tools) |
+| Any verified bearer, **any role including none** | all 26 tools |
+| stdio with `JAWAFDEHI_API_TOKEN` | all 26 (the service token is authentication) |
+
+An anonymous request is **not** challenged, because every anonymous tool wraps a
+REST route that is already `AllowAny` — `/api/entities`, `/api/search/`,
+`/api/materials/`, `/api/courts/`. Serving those through MCP grants nothing the
+API does not already serve without a token. A bearer that is *present but
+invalid* is still rejected with `401` and a `WWW-Authenticate` challenge; that is
+a broken caller, not an anonymous one.
+
+Two consequences of not challenging anonymous callers:
+
+- MCP clients begin an OAuth flow only on a `401`, so an anonymous client is
+  never prompted to log in — it simply sees the smaller catalog.
+  `get_current_user` is how a caller tells which side it is on, and
+  `GET /.well-known/oauth-protected-resource/mcp` is how it discovers where to
+  authenticate. That metadata document is therefore always served, and
+  `OIDC_RESOURCE` is **required** — the endpoint returns `503` without it.
+- `convert_to_markdown` is excluded from the anonymous set. It is one of the few
+  tools with no `/api/` route behind it, so the catalog is its only gate — and
+  that gate is enforced on `tools/call`, not merely on `tools/list`. It needs
+  authentication but no particular role.
+
+Catalog visibility is not an authorization grant. Tools forward the caller's
+verified bearer to Django, whose API permissions remain the final boundary for
+reads and writes — including the rules `docs/security/authz-model.md` pins on
+MCP as a principal: the `ngm.query` scope-only bypass and the service-account
+subject allowlist on `/api/caseworker/me`.
 
 MCP rejects unrecognized `Host` and `Origin` headers. The host and origin from
-`OIDC_RESOURCE` plus local loopback hosts are trusted automatically. A
-deployment with additional public/internal DNS names must list them in
-`MCP_ALLOWED_HOSTS` and browser origins in `MCP_ALLOWED_ORIGINS`.
+`OIDC_RESOURCE` plus local loopback hosts are trusted automatically; additional
+DNS names go in `MCP_ALLOWED_HOSTS` and browser origins in
+`MCP_ALLOWED_ORIGINS`.
 
-Any verified bearer receives the full MCP tool catalog, independent of its
-roles. Catalog visibility is not an authorization grant: tools forward that
-bearer to Django, whose API permissions remain the final boundary for reads and
-writes. Anonymous callers continue to receive only the catalog selected by the
-request mode.
+`GET /mcp/health` reports lifespan readiness only. A missing `OIDC_RESOURCE`
+does not make it unready: the anonymous read catalog still serves correctly, and
+failing the probe would remove a pod that is doing its job. That
+misconfiguration surfaces on the metadata endpoint and on every authenticated
+call instead.
 
 `JAWAFDEHI_API_TOKEN` enables service-authenticated stdio use. It is not
 injected into the HTTP platform process, never authenticates or elevates an HTTP

@@ -67,9 +67,8 @@ async def _asgi_request(
 @pytest.mark.asyncio
 async def test_composite_asgi_serves_django_and_mcp(monkeypatch):
     monkeypatch.delenv("JAWAFDEHI_API_TOKEN", raising=False)
-    monkeypatch.setenv("MCP_DEFAULT_MODE", "public")
     monkeypatch.setenv("JAWAFDEHI_API_BASE_URL", "http://testserver")
-    monkeypatch.setenv("OIDC_RESOURCE", "https://mcp-internal.example/mcp")
+    monkeypatch.setenv("OIDC_RESOURCE", "https://api.example/mcp")
     monkeypatch.setenv("OIDC_ISSUER", "https://auth.example")
     monkeypatch.setenv("OIDC_API_AUDIENCE", "test-project")
     monkeypatch.setattr(
@@ -183,7 +182,7 @@ async def test_composite_asgi_serves_django_and_mcp(monkeypatch):
     assert mcp_health[0] == 200
     assert json.loads(api_health[1]) == {"status": "ok", "service": "jawafdehi-api"}
     assert application._is_mcp_request({"path": "/mcp/not-a-route"}) is False
-    assert json.loads(metadata[1])["resource"] == ("https://mcp-internal.example/mcp")
+    assert json.loads(metadata[1])["resource"] == ("https://api.example/mcp")
     assert initialize[0] == 200
     server_info = json.loads(initialize[1])["result"]["serverInfo"]
     assert server_info["name"] == "jawafdehi-mcp"
@@ -236,8 +235,7 @@ async def test_roleless_bearer_gets_catalog_but_django_rejects_write(monkeypatch
         return {"sub": "roleless", "roles": []}
 
     monkeypatch.setenv("JAWAFDEHI_API_BASE_URL", "http://testserver")
-    monkeypatch.setenv("MCP_DEFAULT_MODE", "internal")
-    monkeypatch.setenv("OIDC_RESOURCE", "https://mcp-internal.example/mcp")
+    monkeypatch.setenv("OIDC_RESOURCE", "https://api.example/mcp")
     monkeypatch.setattr(http_server, "resolve_bearer_identity", resolve_identity)
     monkeypatch.setattr(
         "jawafdehi_shared.auth.oidc.OIDCAuthentication.authenticate",

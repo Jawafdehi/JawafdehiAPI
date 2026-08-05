@@ -13,7 +13,6 @@ from prometheus_client import Counter, Histogram
 
 from . import __version__
 from .identity import (
-    current_request_mode,
     current_user_identity,
     get_allowed_tool_names,
 )
@@ -114,8 +113,7 @@ def _get_runtime_allowed_tool_names() -> set[str]:
     if identity is None and _has_api_token():
         return ALL_TOOL_NAMES
 
-    mode = current_request_mode.get()
-    allowed = get_allowed_tool_names(identity, ALL_TOOL_NAMES, mode)
+    allowed = get_allowed_tool_names(identity, ALL_TOOL_NAMES)
     if identity is None and get_query_service_token() is None:
         allowed.discard("ngm_query_judicial")
     return allowed

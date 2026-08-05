@@ -18,7 +18,7 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
 
 from .configuration import get_oidc_config
-from .identity import current_request_mode, current_user_identity
+from .identity import current_user_identity
 from .oidc import OIDCError, resolve_bearer_identity
 from .request_context import current_transport, jawafdehi_bearer_token
 from .server import app as mcp_app
@@ -37,19 +37,6 @@ Send = Callable[[MutableMapping[str, Any]], Awaitable[None]]
 Headers = Iterable[tuple[str, str]]
 
 WELL_KNOWN_PROTECTED_RESOURCE = "/.well-known/oauth-protected-resource"
-MCP_RESOURCE_PATH = "/mcp"
-# Injected by the ingress (Traefik overwrites it, so a client value can't win):
-#   "internal" -> OAuth-gated door; unauthenticated requests get a 401 challenge
-#   "public"   -> anonymous door; restricted tools, OAuth never advertised
-#   absent     -> falls back to MCP_DEFAULT_MODE (the per-deployment floor),
-#                 else legacy/OWUI-facing in-cluster behavior (unchanged)
-MODE_HEADER = b"x-mcp-mode"
-# Per-deployment safe floor for the mode when the header is missing. Set to
-# "public" on the internet-facing deployment so a stripped/absent header can
-# never widen anonymous access to the fuller legacy read-only set (which
-# includes OCR + SQL); unset for the in-cluster OWUI deploy (legacy behavior).
-MODE_DEFAULT_ENV = "MCP_DEFAULT_MODE"
-VALID_MODES = frozenset({"public", "internal"})
 _LOCAL_ALLOWED_HOSTS = (
     "localhost",
     "localhost:*",
@@ -72,24 +59,24 @@ def _bearer_from_headers(headers: dict[bytes, bytes]) -> str | None:
     return parts[1].strip()
 
 
-def _mode_from_headers(headers: dict[bytes, bytes]) -> str | None:
-    """Resolve the door mode without weakening the deployment's mode floor."""
-    default_raw = (os.getenv(MODE_DEFAULT_ENV) or "").strip().lower()
-    if default_raw:
-        default_mode = default_raw if default_raw in VALID_MODES else "public"
-    else:
-        default_mode = None
+def _authorization_offered(headers: dict[bytes, bytes]) -> bool:
+    """Whether the caller sent an ``Authorization`` header of any shape.
 
-    # Internal is the stricter deployment posture. A request header may never
-    # downgrade it to the anonymous public door, even when an ingress fails to
-    # overwrite a client-supplied value.
-    if default_mode == "internal":
-        return "internal"
+    Distinguishes "anonymous" from "tried to authenticate and got it wrong".
+    ``_bearer_from_headers`` returns ``None`` for both, and with a single door
+    those two must not be treated alike: an anonymous caller is served, while a
+    malformed credential has to be told so.
+    """
+    return bool(headers.get(b"authorization", b"").strip())
 
-    raw = headers.get(MODE_HEADER, b"").decode(errors="replace").strip().lower()
-    if raw:
-        return raw if raw in VALID_MODES else "public"
-    return default_mode
+
+def _bearer_challenge(error: str, headers: dict[bytes, bytes]) -> str:
+    """Build a ``WWW-Authenticate`` value, pointing at RFC 9728 metadata."""
+    challenge = f'Bearer error="{error}"'
+    rm_url = _resource_metadata_url(_canonical_base_url(headers))
+    if rm_url:
+        challenge += f', resource_metadata="{rm_url}"'
+    return challenge
 
 
 def _canonical_base_url(_headers: dict[bytes, bytes] | None = None) -> str | None:
@@ -318,10 +305,19 @@ class JawafdehiMCPServer:
     ) -> None:
         """Authenticate the request's bearer token, then delegate to MCP.
 
-        Behavior varies by the ingress-injected mode (see MODE_HEADER):
-        ``internal`` challenges anonymous callers with a 401 so MCP clients
-        start OAuth; ``public`` serves anonymous callers a restricted tool set
-        and never advertises OAuth; absent = legacy behavior.
+        One door, one rule. A verified bearer resolves an identity and receives
+        the full catalog; an anonymous request proceeds with the read-only
+        anonymous catalog (see ``identity.ANONYMOUS_TOOL_NAMES``) rather than a
+        401, because every tool in that set wraps an ``AllowAny`` REST route that
+        ``/api/`` already serves anonymously. A bearer that is *present but
+        invalid* is still rejected with a challenge — that is a broken caller,
+        not an anonymous one.
+
+        Consequence worth knowing: MCP clients begin an OAuth flow only on a
+        401, so an anonymous client is never prompted to log in. It gets the
+        read-only catalog, and ``get_current_user`` is how it can tell. The
+        protected-resource metadata below is what makes authenticating
+        discoverable.
         """
         path = scope.get("path", "")
         method = scope.get("method", "GET").upper()
@@ -350,7 +346,6 @@ class JawafdehiMCPServer:
                 b"invalid origin header",
             )
             return
-        mode = _mode_from_headers(headers)
 
         if path in {"/health", WELL_KNOWN_PROTECTED_RESOURCE} and method != "GET":
             await self._send_response(
@@ -361,8 +356,12 @@ class JawafdehiMCPServer:
             )
             return
         if path == "/health":
-            configured = mode != "internal" or bool(_canonical_base_url(headers))
-            ready = self._ready and configured
+            # Lifespan readiness only. A missing OIDC_RESOURCE is NOT unready:
+            # the anonymous read catalog serves correctly without it, and failing
+            # the probe would take down a pod that is doing its job. The
+            # misconfiguration surfaces on the metadata endpoint below, which
+            # 503s, and on every authenticated call.
+            ready = self._ready
             status_code = 200 if ready else 503
             body = b"ready" if ready else b"not ready"
             await self._send_response(
@@ -373,20 +372,16 @@ class JawafdehiMCPServer:
             )
             return
         if path == WELL_KNOWN_PROTECTED_RESOURCE:
-            if mode == "public":
-                # The public door does not advertise OAuth.
-                await self._send_response(
-                    send, 404, [("content-type", "text/plain")], b"not found"
-                )
-                return
+            # Always advertised. This is now the only way a client discovers how
+            # to authenticate, since an anonymous request is not challenged.
             base = _canonical_base_url(headers)
-            if mode == "internal" and not base:
+            if not base:
                 await self._send_json(
                     send,
                     503,
                     {
                         "error": "server_configuration_error",
-                        "detail": "OIDC_RESOURCE is required for internal MCP.",
+                        "detail": "OIDC_RESOURCE is required to serve MCP metadata.",
                     },
                 )
                 return
@@ -395,60 +390,49 @@ class JawafdehiMCPServer:
 
         token = _bearer_from_headers(headers)
 
-        if mode == "internal" and not _canonical_base_url(headers):
-            await self._send_json(
-                send,
-                503,
-                {
-                    "error": "server_configuration_error",
-                    "detail": "OIDC_RESOURCE is required for internal MCP.",
-                },
-            )
-            return
-
-        # Internal door: an anonymous request is challenged so the MCP client
-        # begins the OAuth flow (clients only start auth on a 401/403).
-        if not token and mode == "internal":
-            rm_url = _resource_metadata_url(_canonical_base_url(headers))
-            challenge = f'Bearer resource_metadata="{rm_url}"' if rm_url else "Bearer"
+        # A credential we cannot parse is a malformed request, not an anonymous
+        # one (RFC 6750 §3.1 `invalid_request`). Without this branch a wrong
+        # scheme or an empty `Bearer` would fall through to the anonymous catalog
+        # with a 200, and the caller would never learn its header was wrong —
+        # exactly the silent degradation this door already risks.
+        if token is None and _authorization_offered(headers):
             await self._send_json(
                 send,
                 401,
-                {"error": "unauthorized", "detail": "authentication required"},
-                extra_headers=[("www-authenticate", challenge)],
+                {
+                    "error": "invalid_request",
+                    "detail": "Authorization header is not a Bearer credential.",
+                },
+                extra_headers=[
+                    ("www-authenticate", _bearer_challenge("invalid_request", headers))
+                ],
             )
             return
 
         token_ctx = None
         identity_ctx = None
-        transport_ctx = None
 
         if token:
             try:
                 identity = await resolve_bearer_identity(token)
             except OIDCError as exc:
-                challenge = 'Bearer error="invalid_token"'
-                if mode == "internal":
-                    rm_url = _resource_metadata_url(_canonical_base_url(headers))
-                    if rm_url:
-                        challenge += f', resource_metadata="{rm_url}"'
                 await self._send_json(
                     send,
                     401,
                     {"error": "invalid_token", "detail": str(exc)},
-                    extra_headers=[("www-authenticate", challenge)],
+                    extra_headers=[
+                        ("www-authenticate", _bearer_challenge("invalid_token", headers))
+                    ],
                 )
                 return
             token_ctx = jawafdehi_bearer_token.set(token)
             identity_ctx = current_user_identity.set(identity)
 
-        mode_ctx = current_request_mode.set(mode)
         transport_ctx = current_transport.set("http")
         try:
             await self.session_manager.handle_request(scope, receive, send)
         finally:
             current_transport.reset(transport_ctx)
-            current_request_mode.reset(mode_ctx)
             if identity_ctx is not None:
                 current_user_identity.reset(identity_ctx)
             if token_ctx is not None:

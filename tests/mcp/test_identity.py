@@ -1,9 +1,7 @@
 """Tests for authentication-aware MCP tool catalogs."""
 
 from jawafdehi_mcp.identity import (
-    PUBLIC_HOST_TOOL_NAMES,
-    PUBLIC_READ_ONLY_TOOL_NAMES,
-    anonymous_tool_names,
+    ANONYMOUS_TOOL_NAMES,
     get_allowed_tool_names,
 )
 
@@ -18,9 +16,9 @@ class TestGetAllowedToolNames:
         "submit_nes_change",
     }
 
-    def test_none_identity_returns_public_tools(self):
+    def test_none_identity_returns_anonymous_tools(self):
         result = get_allowed_tool_names(None, self.ALL_TOOLS)
-        assert result == PUBLIC_READ_ONLY_TOOL_NAMES & self.ALL_TOOLS
+        assert result == ANONYMOUS_TOOL_NAMES & self.ALL_TOOLS
 
     def test_authenticated_identity_returns_all_tools(self):
         identity = {"sub": "1", "email": "cw@x.org", "roles": ["contributor"]}
@@ -48,10 +46,10 @@ class TestGetAllowedToolNames:
         result = get_allowed_tool_names(identity, limited_tools)
         assert result == limited_tools
 
-    def test_get_current_user_is_public(self):
-        assert "get_current_user" in PUBLIC_READ_ONLY_TOOL_NAMES
+    def test_get_current_user_is_anonymous(self):
+        assert "get_current_user" in ANONYMOUS_TOOL_NAMES
 
-    def test_public_tools_set_does_not_include_write_tools(self):
+    def test_anonymous_set_does_not_include_write_tools(self):
         write_tools = {
             "create_jawafdehi_case",
             "patch_jawafdehi_case",
@@ -59,51 +57,23 @@ class TestGetAllowedToolNames:
             "upload_material_file",
             "ngm_extract_case_data",
         }
-        assert PUBLIC_READ_ONLY_TOOL_NAMES.isdisjoint(write_tools)
+        assert ANONYMOUS_TOOL_NAMES.isdisjoint(write_tools)
 
 
-class TestPublicHostToolSet:
-    def test_public_host_drops_ocr(self):
-        assert "convert_to_markdown" not in PUBLIC_HOST_TOOL_NAMES
+class TestAnonymousToolSet:
+    """One catalog, no request modes: the header-selected doors are gone."""
 
-    def test_public_host_keeps_reads(self):
-        assert "search_jawafdehi_cases" in PUBLIC_HOST_TOOL_NAMES
-        assert "get_jawafdehi_case" in PUBLIC_HOST_TOOL_NAMES
-        assert "ngm_query_judicial" in PUBLIC_HOST_TOOL_NAMES
+    def test_document_converter_requires_authentication(self):
+        # No /api/ route backs this tool, so the catalog is its only gate.
+        assert "convert_to_markdown" not in ANONYMOUS_TOOL_NAMES
 
-    def test_public_host_is_subset_of_read_only(self):
-        assert PUBLIC_HOST_TOOL_NAMES < PUBLIC_READ_ONLY_TOOL_NAMES
+    def test_anonymous_keeps_public_reads(self):
+        assert "search_jawafdehi_cases" in ANONYMOUS_TOOL_NAMES
+        assert "get_jawafdehi_case" in ANONYMOUS_TOOL_NAMES
+        # Public court record over a SELECT-gated plane.
+        assert "ngm_query_judicial" in ANONYMOUS_TOOL_NAMES
 
-    def test_anonymous_tool_names_public_mode(self):
-        assert anonymous_tool_names("public") == PUBLIC_HOST_TOOL_NAMES
-
-    def test_anonymous_tool_names_internal_mode_full_readonly(self):
-        assert anonymous_tool_names("internal") == PUBLIC_READ_ONLY_TOOL_NAMES
-
-    def test_anonymous_tool_names_legacy_mode_full_readonly(self):
-        assert anonymous_tool_names(None) == PUBLIC_READ_ONLY_TOOL_NAMES
-
-
-class TestModeAwareGating:
-    ALL_TOOLS = {
-        "search_jawafdehi_cases",
-        "convert_to_markdown",
-        "ngm_query_judicial",
-        "create_jawafdehi_case",
-    }
-
-    def test_anonymous_public_mode_excludes_ocr_keeps_sql(self):
-        result = get_allowed_tool_names(None, self.ALL_TOOLS, "public")
-        assert "convert_to_markdown" not in result
-        assert "ngm_query_judicial" in result
-        assert "search_jawafdehi_cases" in result
-
-    def test_anonymous_internal_mode_keeps_ocr_sql(self):
-        result = get_allowed_tool_names(None, self.ALL_TOOLS, "internal")
-        assert "convert_to_markdown" in result
-        assert "ngm_query_judicial" in result
-
-    def test_authenticated_identity_unaffected_by_public_mode(self):
+    def test_document_converter_needs_no_role_beyond_authentication(self):
+        all_tools = ANONYMOUS_TOOL_NAMES | {"convert_to_markdown"}
         identity = {"sub": "1", "roles": []}
-        result = get_allowed_tool_names(identity, self.ALL_TOOLS, "public")
-        assert result == self.ALL_TOOLS
+        assert "convert_to_markdown" in get_allowed_tool_names(identity, all_tools)

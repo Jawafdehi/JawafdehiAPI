@@ -5,8 +5,7 @@ from contextlib import contextmanager
 import pytest
 
 from jawafdehi_mcp.identity import (
-    PUBLIC_HOST_TOOL_NAMES,
-    PUBLIC_READ_ONLY_TOOL_NAMES,
+    ANONYMOUS_TOOL_NAMES,
     current_user_identity,
     get_allowed_tool_names,
 )
@@ -64,10 +63,10 @@ class TestHasApiToken:
 
 
 class TestGetAllowedToolNames:
-    def test_no_identity_returns_only_public(self):
+    def test_no_identity_returns_only_anonymous(self):
         all_names = set(TOOL_MAP.keys())
         result = get_allowed_tool_names(None, all_names)
-        assert result == PUBLIC_READ_ONLY_TOOL_NAMES
+        assert result == ANONYMOUS_TOOL_NAMES
 
     def test_authenticated_identity_returns_all(self):
         all_names = set(TOOL_MAP.keys())
@@ -95,16 +94,16 @@ class TestAllowedTools:
         current_user_identity.set(None)
         tools = _get_allowed_tools()
         tool_names = {t.name for t in tools}
-        assert tool_names == PUBLIC_READ_ONLY_TOOL_NAMES - {"ngm_query_judicial"}
+        assert tool_names == ANONYMOUS_TOOL_NAMES - {"ngm_query_judicial"}
 
-    def test_no_identity_with_query_token_returns_full_public_set(self, monkeypatch):
+    def test_no_identity_with_query_token_returns_full_anonymous_set(self, monkeypatch):
         monkeypatch.delenv("JAWAFDEHI_API_TOKEN", raising=False)
         monkeypatch.setenv("MCP_QUERY_API_TOKEN", "query-only-token")
         current_user_identity.set(None)
 
         tool_names = {tool.name for tool in _get_allowed_tools()}
 
-        assert tool_names == PUBLIC_READ_ONLY_TOOL_NAMES
+        assert tool_names == ANONYMOUS_TOOL_NAMES
 
     def test_token_mode_no_user_returns_all(self, monkeypatch):
         """A stdio service token with no identity receives all tools."""
@@ -129,7 +128,7 @@ class TestAllowedTools:
         current_user_identity.set(None)
         with _using_transport("http"):
             tool_names = {tool.name for tool in _get_allowed_tools()}
-        assert tool_names == PUBLIC_READ_ONLY_TOOL_NAMES - {"ngm_query_judicial"}
+        assert tool_names == ANONYMOUS_TOOL_NAMES - {"ngm_query_judicial"}
 
     def test_authenticated_identity_returns_all(self, monkeypatch):
         """An authenticated identity gets all tools."""
@@ -237,11 +236,11 @@ class TestPublicToolSetIntegrity:
         "convert_to_markdown",
     }
 
-    def test_all_public_tools_exist_in_tool_map(self):
-        for name in PUBLIC_READ_ONLY_TOOL_NAMES:
-            assert name in TOOL_MAP, f"Public tool '{name}' not found in TOOL_MAP"
+    def test_all_anonymous_tools_exist_in_tool_map(self):
+        for name in ANONYMOUS_TOOL_NAMES:
+            assert name in TOOL_MAP, f"Anonymous tool '{name}' not found in TOOL_MAP"
 
-    def test_public_tools_are_read_only(self):
+    def test_anonymous_tools_are_read_only(self):
         write_tool_names = {
             "create_jawafdehi_case",
             "delete_nes_entity",
@@ -255,10 +254,10 @@ class TestPublicToolSetIntegrity:
             "upload_material_file",
             "ngm_extract_case_data",
         }
-        assert PUBLIC_READ_ONLY_TOOL_NAMES.isdisjoint(write_tool_names)
+        assert ANONYMOUS_TOOL_NAMES.isdisjoint(write_tool_names)
 
-    def test_private_tools_not_in_public_set(self):
-        private_tools = set(TOOL_MAP.keys()) - PUBLIC_READ_ONLY_TOOL_NAMES
+    def test_private_tools_not_in_anonymous_set(self):
+        private_tools = set(TOOL_MAP.keys()) - ANONYMOUS_TOOL_NAMES
         assert len(private_tools) > 0
         assert "create_jawafdehi_case" in private_tools
         assert "upload_material_file" in private_tools
@@ -267,8 +266,8 @@ class TestPublicToolSetIntegrity:
         assert ALL_TOOL_NAMES == self.EXPECTED_ALL_TOOL_NAMES
         assert len(ALL_TOOL_NAMES) == 26
 
-    def test_private_tool_set(self):
-        assert ALL_TOOL_NAMES - PUBLIC_READ_ONLY_TOOL_NAMES == {
+    def test_authentication_required_tool_set(self):
+        assert ALL_TOOL_NAMES - ANONYMOUS_TOOL_NAMES == {
             "ngm_extract_case_data",
             "create_jawafdehi_case",
             "patch_jawafdehi_case",
@@ -281,16 +280,17 @@ class TestPublicToolSetIntegrity:
             "manage_case_update_proposals",
             "manage_casework_reviews",
             "manage_jobs",
+            # Authentication required, but no role beyond it — no /api/ route
+            # backs this tool, so the catalog is its only gate.
+            "convert_to_markdown",
         }
 
-    def test_public_tools_count(self):
+    def test_anonymous_tools_count(self):
         assert {
             "search_control_plane",
             "get_nes_entity_versions",
             "browse_materials",
             "browse_court_data",
-        }.issubset(PUBLIC_READ_ONLY_TOOL_NAMES)
-        assert len(PUBLIC_READ_ONLY_TOOL_NAMES) == 14
-        assert PUBLIC_HOST_TOOL_NAMES == PUBLIC_READ_ONLY_TOOL_NAMES - {
-            "convert_to_markdown"
-        }
+        }.issubset(ANONYMOUS_TOOL_NAMES)
+        assert len(ANONYMOUS_TOOL_NAMES) == 13
+        assert "convert_to_markdown" not in ANONYMOUS_TOOL_NAMES
