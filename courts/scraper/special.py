@@ -104,8 +104,10 @@ def parse_bench_page(
     soup = BeautifulSoup(html, "html.parser")
     hearing_date_ad = bs_to_ad(date_bs)
 
+    # `bool(x)` not `x` — see the note in courts/scraper/high.py: bs4's string
+    # matcher is a bool predicate, and `x and ...` yields the str when falsy.
     court_number_elem = soup.find(
-        "font", string=lambda x: x and "इजलास" in x and "नं" in x
+        "font", string=lambda x: bool(x) and "इजलास" in x and "नं" in x
     )
     court_number = (
         normalize_whitespace(court_number_elem.get_text()) if court_number_elem else ""
@@ -254,7 +256,7 @@ def parse_detail(html: str) -> ParsedEnrichment:
 
 def _parse_hearing_section(soup: BeautifulSoup) -> list[dict]:
     """Rows of the 'पेशी को विवरण' (hearing schedule) ``utivtbl`` table."""
-    heading = soup.find(string=lambda x: x and "पेशी को विवरण" in x)
+    heading = soup.find(string=lambda x: bool(x) and "पेशी को विवरण" in x)
     if not heading:
         return []
     parent_row = heading.find_parent("tr")

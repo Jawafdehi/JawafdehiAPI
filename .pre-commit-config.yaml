@@ -34,11 +34,29 @@ repos:
       - id: check-toml
       - id: check-yaml
 
-# ty (astral-sh) is deliberately NOT a hook yet. It is installed in the `dev`
-# group and configured in pyproject.toml under [tool.ty]; run it with
-# `uv run ty check`. At adoption it reported 1304 diagnostics on this tree, ~800
-# of them Django metaclass blind spots (`Model.objects`, DRF
-# `force_authenticate`) that ty cannot yet see through. The [tool.ty.rules]
-# block silences those families and leaves 30 real ones. Wire it in here only
-# once those 30 are at 0 and the silenced families can be re-enabled — see the
-# staged plan in pyproject.toml.
+  # ty is now a hook, and a `local` one — deliberately unlike the pinned ruff
+  # mirror above. That is not inconsistency: ty has to RESOLVE this project's
+  # third-party types (django-stubs, drf-stubs, django, DRF, wagtail, every
+  # runtime dep) to say anything useful, and a pre-commit-managed isolated env
+  # contains none of them. A mirror hook would report the whole tree as
+  # unresolved imports. Hermeticity is simply not on offer here; the project venv
+  # is the only environment in which the answer is correct.
+  #
+  # `pass_filenames: false` because the check is whole-project: ty needs the
+  # cross-module view, and the per-path scoping in [tool.ty.overrides] is keyed on
+  # paths it discovers itself.
+  #
+  # `files` covers pyproject.toml as well as sources, and that is not incidental.
+  # The obvious `types: [python]` looks right and is subtly wrong: pyproject.toml
+  # HOLDS the [tool.ty] config, so under a python-only trigger a commit that
+  # loosens a rule, widens an override, or drops a whole block skips the very
+  # check it just weakened. Verified by staging pyproject.toml alone — the hook
+  # reported "no files to check" and passed.
+  - repo: local
+    hooks:
+      - id: ty
+        name: ty check
+        entry: uv run ty check
+        language: system
+        files: '(\.pyi?$|^pyproject\.toml$)'
+        pass_filenames: false

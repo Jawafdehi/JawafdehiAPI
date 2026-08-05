@@ -14,6 +14,7 @@ repo root:
 from __future__ import annotations
 
 from datetime import date
+from typing import Any
 
 from django.test import TestCase
 
@@ -116,7 +117,10 @@ class MaterializeOrdersViaImporterTests(_NgmTestCase):
         }
 
     def _run(self, **over):
-        cfg = dict(
+        # Annotated for the same reason as courts/tests/test_import_courtcases.py
+        # ::_copy — an unannotated heterogeneous kwargs dict makes every splatted
+        # field the union of all its value types.
+        cfg: dict[str, Any] = dict(
             mode=ImportMode.COPY, courts=["supreme"], source_rows=[self._row()],
             materialize_orders=True, batch_size=10,
         )

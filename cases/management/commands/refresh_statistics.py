@@ -40,7 +40,6 @@ class Command(BaseCommand):
             route_reads_to_replica(attempt < _MAX_ATTEMPTS)
             try:
                 stats = refresh_statistics()
-                break
             except OperationalError as exc:
                 if attempt == _MAX_ATTEMPTS:
                     raise
@@ -50,10 +49,24 @@ class Command(BaseCommand):
                     f"{attempt}/{_MAX_ATTEMPTS} ({exc}); retrying in {backoff}s"
                 )
                 time.sleep(backoff)
+            else:
+                # Report on the success path rather than after the loop. The
+                # previous shape (`break`, then read `stats` below the loop) was
+                # correct only because the final attempt re-raises, so the loop
+                # can never fall through — a non-local invariant that a type
+                # checker flags as a possibly-unbound read, and that a later edit
+                # to _MAX_ATTEMPTS or the raise could quietly turn into a real
+                # NameError. Here `stats` is read only where it is provably bound.
+                #
+                # `finally` still runs before this returns, so the routing flag is
+                # cleared exactly as before; the only change is that the flag reset
+                # now happens after this write instead of before it, which nothing
+                # observes (it is a ContextVar, and this write does not read it).
+                self.stdout.write(
+                    self.style.SUCCESS(
+                        f"Statistics snapshot refreshed (last_updated={stats['last_updated']})"
+                    )
+                )
+                return
             finally:
                 route_reads_to_replica(False)
-        self.stdout.write(
-            self.style.SUCCESS(
-                f"Statistics snapshot refreshed (last_updated={stats['last_updated']})"
-            )
-        )

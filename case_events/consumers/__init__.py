@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import structlog
 
@@ -239,6 +239,15 @@ def select(only: list[str] | None = None) -> list[ConsumerSpec]:
 # reason jobs.registry guards its own consumer import: a broken handler module
 # should not make the registry itself unimportable, which would take down the
 # management command that reports the problem.
+if TYPE_CHECKING:
+    # The guarded import below binds `handlers` only when it succeeds, so to a
+    # type checker every `from case_events.consumers import handlers` (the tests
+    # do exactly that) reads as a possibly-missing member. Declare it
+    # unconditionally here: in any healthy build the name IS bound, and the
+    # try/except exists for the catastrophic case, not the normal one. This
+    # changes nothing at runtime — the guard below is still the real contract.
+    from . import handlers
+
 try:  # pragma: no cover - defensive import wiring
     from . import handlers  # noqa: F401,E402
 except Exception:  # noqa: BLE001

@@ -29,7 +29,7 @@ import logging
 import re
 import sys
 import time
-from typing import Optional
+from typing import NoReturn, Optional
 
 from casework.common.api import CaseworkApi
 from casework.common.cli import (
@@ -512,8 +512,15 @@ def main(argv=None):
         f"allow_remote_writes={args.allow_remote_writes}",
     )
 
-    def _die(step, exc):
-        """Record a pre-loop failure in the run log, then exit non-zero."""
+    def _die(step, exc) -> NoReturn:
+        """Record a pre-loop failure in the run log, then exit non-zero.
+
+        `NoReturn` is load-bearing, not decoration: every caller below is an
+        `except` handler whose *only* statement is `_die(...)`, so without it a
+        type checker reads `api`/`all_cases` as possibly-unbound at each later
+        use and reports six findings. It also states the contract the callers
+        already rely on — `_die` never falls through.
+        """
         detail = f"{type(exc).__name__}: {exc}"
         _run_event(logger, paths, run_id, step, "error", detail, level=logging.ERROR)
         log_run_footer(

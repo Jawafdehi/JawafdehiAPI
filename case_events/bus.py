@@ -226,11 +226,33 @@ class _Bus:
         if envelope.get("dedup_key"):
             headers["Nats-Msg-Id"] = envelope["dedup_key"]
 
-        try:
-            future = asyncio.run_coroutine_threadsafe(
-                self._js.publish(subject, body, headers=headers or None), self._loop
+        # Both of the next two blocks exist to keep a failed publish from ALSO
+        # orphaning a coroutine. `self._js.publish(...)` builds one eagerly, and a
+        # coroutine that is created and never awaited emits a "coroutine was never
+        # awaited" RuntimeWarning when it is collected. The suite is held at exactly
+        # one warning (see AGENTS.md), so a second one is a real signal and must not
+        # come from here.
+        #
+        # `_loop` is None until the bus starts, so check it BEFORE constructing the
+        # coroutine — there is nothing to clean up if we never build it.
+        loop = self._loop
+        if loop is None:
+            logger.warning(
+                "case_events.publish_failed", subject=subject, error="bus not started"
             )
+            return False
+
+        # A non-None loop can still be closed under us, and `call_soon_threadsafe`
+        # then raises before `run_coroutine_threadsafe` ever wraps the coroutine in a
+        # task — so nothing will await it and we have to close it by hand. Hence the
+        # separate name: an inline `self._js.publish(...)` argument leaves no handle
+        # to close. (The test helper in case_events/tests/test_bus.py already closes
+        # the coroutine in its `run_coroutine_threadsafe` stub for this same reason.)
+        coro = self._js.publish(subject, body, headers=headers or None)
+        try:
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
         except Exception as exc:  # noqa: BLE001 - loop may have died under us
+            coro.close()
             logger.warning("case_events.publish_failed", subject=subject, error=str(exc))
             return False
 

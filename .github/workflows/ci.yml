@@ -40,14 +40,20 @@ jobs:
       - name: Lint (ruff check)
         run: uv run ruff check .
 
-      # Type check, ADVISORY: reports into the log but never fails the build
-      # (`|| true`). ty is pre-1.0 and has no Django plugin, so it cannot see
-      # through the model metaclass — at adoption that was ~800 of 1304
-      # diagnostics on this tree. pyproject.toml's [tool.ty.rules] silences those
-      # families, leaving 30 real ones. Drop the `|| true` and make this a gate
-      # once those reach 0; see the staged plan in pyproject.toml.
-      - name: Type check (ty, advisory — does not fail the build)
-        run: uv run ty check || true
+      # Type check — a real GATE now (note: no `|| true`).
+      #
+      # What changed: ty still has no Django plugin, but django-stubs +
+      # djangorestframework-stubs close most of the metaclass blind spot from stub
+      # data alone, which a plugin was never needed for. That took the "all
+      # families on" count from 1560 to a tree this gate passes clean, and let four
+      # previously-silenced families (invalid-argument-type, not-subscriptable,
+      # unsupported-operator, invalid-assignment) become enforced.
+      #
+      # Still exempt, each with its measured cost written down in
+      # pyproject.toml's [tool.ty.rules]: `unresolved-attribute` (the one real
+      # plugin gap) and `unresolved-import` (optional lazy deps, permanent).
+      - name: Type check (ty)
+        run: uv run ty check
 
       # ``integration-tests/`` is a separate live-stack E2E suite (own pyproject + Makefile) that
       # hits a running monolith at PLATFORM_BASE_URL — it belongs in its own stack-up job, not this

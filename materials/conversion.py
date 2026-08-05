@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from . import jsonld
 from . import provenance
@@ -105,7 +105,7 @@ def enqueue_material_convert(material_iri: str, *, priority: int = 100):
     )
 
 
-def build_convert_payload(job) -> Optional[dict]:
+def build_convert_payload(job) -> dict:
     """``build_payload`` hook: resolve the source URLs for a claimed convert job.
 
     Reads the Material row named by ``payload['material_iri']`` and returns the

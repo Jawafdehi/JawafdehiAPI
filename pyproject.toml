@@ -166,34 +166,67 @@ dev = [
     "pytest-asyncio>=0.24",
     "pre-commit>=4.6.0",
     "ty>=0.0.66",
+    # Type-only stubs for the Django/DRF surface. EXACT pins, deliberately: a
+    # stub bump silently changes the diagnostic set the type gate is measured
+    # against, exactly as a ruff bump changes the lint gate (same reasoning as
+    # the pinned ruff mirror in .pre-commit-config.yaml). Bump these
+    # intentionally and re-measure, never incidentally.
+    #
+    # These do the heavy lifting that makes a type GATE possible at all — see
+    # the [tool.ty.rules] block below for the measurement. They are stubs, so
+    # they carry no runtime code and are dev-group only: they never enter the
+    # image. Verified inert: the full suite is unchanged with them installed.
+    "django-stubs==6.0.7",
+    "djangorestframework-stubs==3.17.1",
 ]
 
 # ---------------------------------------------------------------------------
-# ty (astral-sh) — type checking, ADVISORY, not yet a gate.
+# ty (astral-sh) — type checking, and a GATE.
 #
 # Run it:  uv run ty check
 #
-# ty is pre-1.0 (0.0.66 here) and has NO Django plugin, so it cannot see what
-# Django's model metaclass adds at runtime. Measured on this tree at the time of
-# adoption: 1304 diagnostics, of which ~800 (61%) are that blind spot —
-# 640 `X has no attribute objects` (the default Manager, injected by ModelBase)
-# and 110 `has no attribute force_authenticate` (DRF's APIClient). Those are
-# tool limitations, not defects in this code.
+# ty is a GATE: CI runs `uv run ty check` with no `|| true`, and
+# .pre-commit-config.yaml runs it too. It is still pre-1.0 (0.0.66; 0.0.67 is the
+# latest) and still has NO Django plugin.
 #
-# So the rules below are OFF for now, and ty is ADVISORY rather than a gate: CI
-# runs it with `|| true` (see ci.yml) and pre-commit does not run it at all. A
-# gate that reports 800 false positives trains people to ignore it. What IS
-# useful today is the 30 that remain once those families are silenced, which is
-# why the checker is installed and configured rather than skipped.
+# That last point used to be the blocker, and the reason it no longer is:
+# the metaclass blind spot turned out to be closable from STUB DATA, which needs
+# no plugin. django-stubs types field access through `__get__` overloads and
+# declares `objects`, so adding django-stubs + djangorestframework-stubs to the
+# dev group moved this tree, measured:
 #
-# The path to a real gate, in order:
-#   1. keep `unresolved-attribute` off until ty ships Django support (track
-#      astral-sh/ty#255 "django plugin"), or add django-stubs and re-measure;
-#   2. turn the small families on one at a time (`not-iterable`,
-#      `missing-argument`, `invalid-method-override` are single digits today);
-#   3. only then drop the `|| true` in ci.yml and add the hook to
-#      .pre-commit-config.yaml.
-# ---------------------------------------------------------------------------
+#     all families on, no stubs .............. 1560   (1174 unresolved-attribute,
+#                                                      of which 809 `objects`
+#                                                      and 110 force_authenticate)
+#     all families on, with stubs ..............676   (pre-fix; the same
+#                                                      measurement on the SHIPPED
+#                                                      tree is 551)
+#     ...after the fixes in this change .........0 against the config below
+#
+# Provenance, so the next person can re-derive rather than trust. Only the 0 and
+# the 551 are reproducible as-is; 1560 and 676 are historical, read off single
+# `ty check` runs before the fixes landed, so do not expect 676 back. To redo the
+# "all families on" number without editing this file:
+#
+#     uv run ty check --config-file <a ty.toml holding only [environment]+[src]>
+#
+# and for one family, `uv run ty check -c "rules.<name>='error'"` (which is how
+# the 314 below was taken). Note `-c "overrides=[]"` does NOT clear the override
+# blocks — arrays do not replace, so it silently no-ops; use --config-file.
+# 1560 is the sum of the then-baseline (31) plus each silenced family measured on
+# its own via `--error <rule>`; the families are independent.
+#
+# `__str__` returning `CharField` went from 12 to 1 for the same reason. The
+# stubs cost 24 false `path()`/`re_path()` overload reports in URLconfs, handled
+# by the first override block below.
+#
+# django-stubs targets mypy and says so, so expect occasional friction of exactly
+# that kind rather than none. It is type-only, dev-group, never in the image, and
+# verified inert against the suite.
+#
+# The remaining exemptions are `unresolved-attribute` and `unresolved-import`;
+# both are argued, with their measured cost, in [tool.ty.rules] below. Track
+# astral-sh/ty#255 ("django plugin") — landing it is what closes the first one.
 # ---------------------------------------------------------------------------
 # ruff — the lint gate (CI runs exactly `uv run ruff check .`).
 #
@@ -279,19 +312,228 @@ exclude = [
 ]
 
 [tool.ty.rules]
-# --- Django/DRF blind spots: off until ty understands the metaclass. ---
+# --- The ONE family still off tree-wide. -----------------------------------
+# `unresolved-attribute` is the django-stubs *plugin* gap, and it is the only
+# thing django-stubs cannot close from stubs alone. What remains after the stubs
+# land (measured on this tree): 109 in source, 205 in tests. The source ones are
+# dominated by things a mypy plugin synthesises and a stub file cannot —
+# implicit FK id columns (`court_id` x17, `case_id` x8), reverse relation
+# accessors (`courtcase_references`, `material_references`), and the custom-User
+# surface (`groups`, `is_superuser`) reached through `get_user_model()`, which is
+# typed `type[AbstractBaseUser]`.
+#
+# Closing it needs one of: ty gaining a Django plugin (track astral-sh/ty#255 —
+# still absent as of 0.0.67), hand-declaring every FK's `_id` and every
+# `related_name` on the 26 models, or abandoning `get_user_model()` across 38
+# call sites. The first is free and coming; the other two trade a documented
+# Django practice for type purity. So: off, with the cost written down.
 unresolved-attribute = "ignore"
-# `Model.objects.filter(...)` returns Any to ty, so anything derived from a
-# queryset trips these three.
+
+# `unresolved-import` is off for a different and permanent reason: this tree
+# imports genuinely OPTIONAL dependencies lazily inside function bodies, guarded
+# by try/except ImportError, and they are absent from the base image on purpose.
+# The full set as of this change: markitdown, playwright.sync_api, pymupdf,
+# fitz, likhit.converters, npttf2utf, cloudpathlib, markdownify. Two more are
+# django-stubs re-export gaps rather than optional deps
+# (`django.template.loader.engines`, `django.test.testcases.
+# DatabaseOperationForbidden`) — both resolve fine at runtime.
+unresolved-import = "ignore"
+
+# --- Bug-shaped rules, explicitly ON (ty ships them off by default). ---
+# These two ask "can this name actually be unbound here?", which is a runtime
+# NameError/ImportError question rather than a typing-purity one, so they are
+# worth having even while the Django-shaped families above are still settling.
+# They earned their place: the 7 + 3 they reported were a missing `NoReturn` on
+# `casework.enrich_missing_bigo._die` (6), a genuinely non-local possibly-unbound
+# read in `refresh_statistics` (1), and `case_events.consumers.handlers` being
+# bound only inside a defensive try/except (3). All fixed at the definition site
+# rather than suppressed at the call sites.
+possibly-unresolved-reference = "error"
+possibly-missing-import = "error"
+
+# NOTE what is NOT listed here: `invalid-argument-type`, `not-subscriptable`,
+# `unsupported-operator` and `invalid-assignment` were all `"ignore"` before this
+# change and are now at ty's default (error), i.e. GATED. They were silenced as
+# "queryset returns Any" collateral; with django-stubs installed that premise
+# mostly evaporated, and what was left turned out to be four real fix families —
+# unnarrowed Optionals, and heterogeneous `dict(...)` splatted into a typed
+# constructor (six annotated lines accounted for 91 diagnostics across
+# `ImportConfig`, `OpenAI` and `Field.formfield`). Of that 91, **26 are
+# source-side**, each verified by reverting the annotation and re-running:
+# `OpenAI` 16, `Field.formfield` 9, bs4 `find(attrs=...)` 1. The remainder was
+# `ImportConfig` in test files, which the tests block below now exempts anyway —
+# so those four test-side annotations are documentation, not gate-load-bearing.
+#
+# They are enforced everywhere EXCEPT the tests and source-file override blocks
+# below, which name the places not yet converted (the urls.py block below governs
+# a different rule and is unrelated). That list is meant to shrink; deleting an entry
+# is how a file opts in, exactly as deleting a `per-file-ignores` line is how a
+# directory opts into ANN.
+
+# ---------------------------------------------------------------------------
+# Per-path rule overrides. ty DOES have a select-for-one-path primitive (unlike
+# ruff, which is why the ANN gate above has to be inverted through
+# per-file-ignores). Prefer an override here over scattering inline
+# `# ty: ignore` comments across a whole family.
+# ---------------------------------------------------------------------------
+[[tool.ty.overrides]]
+# django-stubs types `path()`/`re_path()` with overloads whose `view` must be
+# `Callable[..., HttpResponseBase]`. Neither DRF's `@api_view`-decorated
+# functions nor `.as_view()` results match any overload, so EVERY route in the
+# tree gets reported — 24 findings, all confined to URLconfs (review 8,
+# discovery 6, jobs 4, entities 3, materials 3).
+#
+# Verified false, not deferred: `path("auth/me/", views.me_view)` in
+# review/urls.py is valid Django that runs in production and is covered by the
+# suite. This is django-stubs/ty friction (django-stubs targets mypy, and says
+# so), not a defect in these files.
+#
+# The suppression is per-FILE rather than per-line because a URLconf is
+# essentially nothing but `path()` calls — there is no other call shape here for
+# it to mask. Re-check this on a django-stubs bump; if the overloads gain an
+# `Any`-tolerant arm, delete the whole block.
+include = ["**/urls.py"]
+
+[tool.ty.overrides.rules]
+no-matching-overload = "ignore"
+
+# ---------------------------------------------------------------------------
+[[tool.ty.overrides]]
+# TESTS: the four newly-gated families are off here — 168 findings' worth,
+# re-derived on the shipped tree: 93 invalid-argument-type, 47 not-subscriptable,
+# 18 unsupported-operator, 10 invalid-assignment.
+#
+# This mirrors the ANN policy above, which exempts tests permanently, and for a
+# related reason: a test double's whole job is to stand in for a shape it does
+# not statically have. Concretely, within THESE four families it is Optional
+# helper returns used without a guard (all 47 not-subscriptable are "cannot
+# subscript None") and `None`/double stand-ins passed where the real type is
+# declared — `ModelAdmin(site=None)` 15, `Job | None` into `finalize` 12,
+# `HTTPError.__init__` 9. tests/casework/test_enrich_timeline.py (28) and
+# materials/tests/test_nkp_parse.py (15) are the two biggest files.
+#
+# NOT this block: the double-attribute noise (`_casework_run_paths`, `calls`) and
+# most of the `APIClient`/`get_user_model()` surface are `unresolved-attribute`,
+# which is off tree-wide above — 205 of its 314 are in tests.
+#
+# `not-iterable` is here for the same reason and is NOT one of the four: unittest
+# `Mock.await_args`/`call_args` are typed `None` until the mock is called, so the
+# standard `args, kwargs = m.await_args` unpack after an
+# `assert_awaited_once()` reads as "unpacking None". It is the exact same
+# stand-in-shape argument as the 47 "cannot subscript None" above, just a
+# different rule name. 3 findings, all in tests/mcp/test_jawafdehi_write_tools.py.
+#
+# This is a deliberate trade, not an oversight: it does mean a genuine type
+# mistake in a test body goes unreported. Judged worth it because the same
+# mistake almost always shows up as a FAILING test, which is a louder signal
+# than a diagnostic — whereas in source there is no such backstop.
+include = [
+    "tests/**",
+    "**/tests/**",
+    "**/test_*.py",
+    "**/conftest.py",
+    "conftest.py",
+]
+
+[tool.ty.overrides.rules]
 invalid-argument-type = "ignore"
 not-subscriptable = "ignore"
 unsupported-operator = "ignore"
-# Django settings are assembled dynamically (`from config.settings import *`),
-# and test doubles are assigned over typed attributes on purpose.
 invalid-assignment = "ignore"
-# Optional third-party imports guarded by try/except ImportError (markitdown,
-# indic_transliteration) legitimately do not resolve in every environment.
-unresolved-import = "ignore"
+not-iterable = "ignore"
+
+# ---------------------------------------------------------------------------
+[[tool.ty.overrides]]
+# SOURCE files not yet converted to the four gated families — 30 findings across
+# 14 files, enumerated rather than blanketed so the remaining work is visible and
+# countable. DELETE AN ENTRY TO OPT THE FILE IN; do that only once
+# `ty check <file>` is actually 0, or the gate goes red for everyone.
+#
+# Roughly what is in here, so the next person does not have to re-triage:
+#   * discovery/views.py (9) — Django's `sitemap`/`Sitemap` generics plus
+#     decorator-application artifacts (`Expected TypeVar, found def ...`).
+#   * courts/scraper/{special,district,orders}.py (7) — bs4 attribute values are
+#     `str | AttributeValueList`, so `in`/`get` on them needs coercing first;
+#     same family as the fixes already made in high.py.
+#   * content/management/commands/seed_updates.py (3) — front-matter dict values
+#     are `str | list | dict` and are passed straight to `str` parameters.
+#   * the remaining singles are unnarrowed Optionals and one `Mapping` being
+#     subscript-assigned (cases/serializers.py).
+include = [
+    "cases/api_views.py",
+    "cases/serializers.py",
+    "cases/services/ciaa_draft_case_service.py",
+    "cases/widgets.py",
+    "case_events/consumers/runner.py",
+    "content/management/commands/seed_updates.py",
+    "courts/importer.py",
+    "courts/management/commands/scrape_court_orders.py",
+    "courts/scraper/district.py",
+    "courts/scraper/orders.py",
+    "courts/scraper/special.py",
+    "discovery/views.py",
+    "jawafdehi_shared/search/transliterate.py",
+    "llm/providers/base.py",
+]
+
+[tool.ty.overrides.rules]
+invalid-argument-type = "ignore"
+not-subscriptable = "ignore"
+unsupported-operator = "ignore"
+invalid-assignment = "ignore"
+
+# ---------------------------------------------------------------------------
+[[tool.ty.overrides]]
+# ARRIVED WITH PR #427 (MCP server into the monolith), which merged while ty was
+# still advisory — so this code was never checked against the gated families. 16
+# findings across 5 files, kept SEPARATE from the block above rather than folded
+# into it, because clearing them needs two extra rules off
+# (`invalid-return-type`, `no-matching-overload`) and the 14 files above must not
+# silently acquire that wider exemption. Same opt-in rule: delete an entry once
+# `ty check <file>` is 0.
+#
+# Two of these files are NOT new, and that is the interesting part. #427
+# promoted `markitdown`, `httpcore` and `likhit` from extras into the main
+# dependency set. They had been UNRESOLVED imports before — a family this config
+# exempts permanently — so everything downstream of them inferred as `Unknown`
+# and nothing could fire. Now they resolve, the types are real, and genuine
+# mismatches surface in files nobody touched:
+#   * review/converter.py (1) — monkeypatches markitdown's
+#     `nepali_pdf._run_full_page_ocr`; the replacement is unannotated, so it is
+#     `-> Unknown` against a declared `-> DocumentConverterResult`.
+#   * materials/sourcing/ppmo/ocr.py (2) — page-index Optional used as a list
+#     subscript and in a `tuple[int, bytes]`.
+# The lesson worth keeping: THIS GATE'S DIAGNOSTIC SET IS A FUNCTION OF THE
+# RESOLVED DEPENDENCY SET. Adding a dependency can turn previously-`Unknown`
+# code into checked code, so a red gate after a dep bump is not necessarily
+# anyone's edit. Re-measure, do not assume a merge broke something.
+#
+# The genuinely new code:
+#   * jawafdehi_mcp/tools/ngm_extract.py (7) — 6 of the 7 are one root cause:
+#     `arguments.get()` is `Any | None` and the guard is `if not all([a, b, c])`,
+#     which ty does not treat as narrowing. Fixing it is a 3-line change and
+#     WORTH DOING, but not in a tooling PR — see the note in AGENTS.md; two real
+#     defects hide behind it (`_validate_environment` is annotated
+#     `tuple[str, str]` while its source can yield a None token, and `sql_quote`
+#     assumes `str` but gets whatever JSON the MCP client sent).
+#   * jawafdehi_mcp/tools/document_converter.py (5) — `SpawnProcess` passed where
+#     `Process` is declared (3), a `str | int` header value, and a private
+#     `_network_backend` monkeypatch on httpcore's pool.
+#   * jawafdehi_mcp/configuration.py (1) — module-level `None` assigned to a
+#     `LazySettings`-typed name.
+include = [
+    "jawafdehi_mcp/configuration.py",
+    "jawafdehi_mcp/tools/document_converter.py",
+    "jawafdehi_mcp/tools/ngm_extract.py",
+    "materials/sourcing/ppmo/ocr.py",
+    "review/converter.py",
+]
+
+[tool.ty.overrides.rules]
+invalid-argument-type = "ignore"
+invalid-assignment = "ignore"
+invalid-return-type = "ignore"
+no-matching-overload = "ignore"
 
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "config.settings"
