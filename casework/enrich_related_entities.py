@@ -594,7 +594,7 @@ def _resolve_with_vetoes(api, name, strict=False):
     read_error = None
     try:
         document = api.get_entity(decision.nes_id)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - unreadable == unverified, which is a valid verdict
         document = None  # unreadable == unverified
         read_error = str(exc)
     readable = isinstance(document, dict) and bool(document)
@@ -1377,7 +1377,7 @@ def main(argv=None):
         # above came from `get_case`, which returns no ETag.
         try:
             fresh, etag = api.get_case_with_etag(slug)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - falls back to the stale detail; the case still runs
             fresh, etag = detail, None
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                       step="fetch", status="fallback", detail=str(exc),
@@ -1473,7 +1473,7 @@ def main(argv=None):
 
         try:
             apply_entity_plan(api, plan)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - a bind failure is recorded per-case and the run continues
             report.record(slug, "entities", "error", f"bind failed: {exc}")
             log_event(logger, paths["events"], run_id=run_id, stage="entities", slug=slug,
                       step="write", status="error", detail=str(exc), level=logging.ERROR)
