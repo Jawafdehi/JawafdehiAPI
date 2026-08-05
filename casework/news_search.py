@@ -72,6 +72,13 @@ CANDIDATE_BATCH_SIZE = 12                  # donor:898
 SEARCH_RETRY_MAX = 3                       # donor:316
 MIN_ARTICLE_CHARS = 100                    # donor:1132, 1218
 
+#: Shortest evidence note that may be BOUND. Not a donor constant -- the donor
+#: bound whatever the model returned. Measured floor across the 33 news notes on
+#: the 15 IN_REVIEW cases is 351 chars (median 494, max 759); this sits well below
+#: that so a terse-but-complete note still binds, while a `salvage_json`-repaired
+#: truncation cannot masquerade as one. See `Verdict.is_bindable`.
+MIN_NOTE_CHARS = 120
+
 # The donor sent a self-identifying UA to DuckDuckGo and a browser-ish one to
 # article hosts. Kept split: the WAF note in `casework/common/materials.py`
 # (`fetch_markdown` sends a browser UA because the WAF 403s anything else) is
@@ -157,6 +164,10 @@ class SkipReason(str, Enum):
     #: is broken, where a pile of rejections is a normal day.
     VERIFY_FAILED = "premium verifier FAILED to answer (run is unreliable)"
     EVENT_TYPE_FULL = "an article for this event type is already bound"
+    #: Verified, and would otherwise have been bindable, but `--max-articles` was
+    #: already filled. Counted rather than dropped: these cost premium tokens, and
+    #: a `medium` verdict cut off here still owes the reviewer a near-miss line.
+    BUDGET_REACHED = "verified but --max-articles already filled"
 
 
 @dataclass
@@ -197,14 +208,23 @@ class Verdict:
         All four conditions are load-bearing. `high` is the bar (see the module
         docstring). `event_type` must be a real lifecycle value because the
         per-event cap and the bind ordering both key on it. `summary` must be
-        present because it IS the evidence note -- binding without one is the
-        `bind_materials.py:143` blank-note behaviour this port exists to avoid.
+        SUBSTANTIAL because it IS the evidence note -- binding without one is the
+        `bind_materials.py:143` blank-note behaviour this port exists to avoid,
+        and a one-line note is that behaviour with extra steps.
+
+        The length floor is not cosmetic. `salvage_json` repairs a reply truncated
+        at `max_tokens` by closing the open string, so an overflowing verify call
+        yields a note cut off mid-sentence -- `"यो समाचार लेख यस मुद्दा (080-CR-0136) मा"`
+        and nothing more. Non-blank, so the old check passed it, and it would then
+        be published as a case's evidence note. The measured production floor is
+        351 chars (median 494, max 759); `MIN_NOTE_CHARS` sits well under that so a
+        genuinely terse but complete note still binds, while a truncation cannot.
         """
         return bool(
             self.relevant
             and self.confidence == "high"
             and self.event_type in EVENT_LIFECYCLE_ORDER
-            and self.summary.strip()
+            and len(self.summary.strip()) >= MIN_NOTE_CHARS
         )
 
 
@@ -318,6 +338,27 @@ def parse_date_string(value):
     return None
 
 
+#: A CIAA case reported in the news falls comfortably inside this window. The
+#: lower bound is generous (the oldest cases in the corpus are FY076-era); the
+#: upper bound is the real guard -- a Bikram Sambat year read as Gregorian lands
+#: ~57 years ahead, so anything beyond next year is a mis-parse rather than a
+#: scoop. Checked against the article's own claimed date only; nothing here
+#: converts BS to AD.
+PUBLICATION_YEAR_MIN = 1990
+PUBLICATION_YEAR_MAX_AHEAD = 1
+
+
+def _is_plausible_publication_date(parsed):
+    """False for a date no real article could carry (chiefly a BS year)."""
+    if parsed is None:
+        return False
+    if parsed.year < PUBLICATION_YEAR_MIN:
+        return False
+    # `date.today()` rather than a frozen constant: this is a live plausibility
+    # bound, and a hardcoded year would silently start rejecting real articles.
+    return parsed.year <= date.today().year + PUBLICATION_YEAR_MAX_AHEAD
+
+
 def extract_publication_date(html):
     """The article's own publication date, or None. Donor-verbatim (donor:269)."""
     safe = _truncate_for_regex(html)
@@ -331,12 +372,25 @@ def extract_publication_date(html):
         match = re.search(pattern, safe, re.IGNORECASE)
         if match:
             parsed = parse_date_string(match.group(1))
-            if parsed is not None:
+            # Checked here too, not just on the Devanagari fallback: a site that
+            # renders Bikram Sambat in its prose often also emits it in
+            # `"datePublished"`, and `%Y-%m-%d` parses "2082-04-20" happily.
+            if parsed is not None and _is_plausible_publication_date(parsed):
                 return parsed
-    match = re.search(r"(?:प्रकाशित|मिति)[:\s]*(\d{4})[-/](\d{1,2})[-/](\d{1,2})", safe)
+    # ASCII digits ONLY, and a plausibility range. `\d` matches Devanagari ०-९
+    # and `int()` accepts them, so `प्रकाशित: २०८२-०४-२०` -- an extremely common
+    # Nepali byline -- parsed as date(2082, 4, 20). That is a Bikram Sambat date
+    # read as Gregorian: 56 years in the future. Deviation A makes the date part
+    # of the material IRI, so a BS date corrupts the idempotency key as well as
+    # publishing a fabricated `datePublished` on a PUBLIC material. Converting BS
+    # to AD here is out of scope (`convert_date` owns that); refusing the date is
+    # correct, and deviation A already reports a dateless article as a skip.
+    match = re.search(r"(?:प्रकाशित|मिति)[:\s]*([0-9]{4})[-/]([0-9]{1,2})[-/]([0-9]{1,2})",
+                      safe)
     if match:
         try:
-            return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+            parsed = date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+            return parsed if _is_plausible_publication_date(parsed) else None
         except ValueError:
             pass
     return None
@@ -424,11 +478,28 @@ def screen_body(text, title, url):
 
 
 def extract_ddg_redirect(url):
-    """The real URL behind a DuckDuckGo `uddg=` redirect. Donor-verbatim (donor:299)."""
+    """The real URL behind a DuckDuckGo `uddg=` redirect.
+
+    NOT donor-verbatim, deliberately. The donor unquoted `uddg` a second time
+    after `parse_qs` had already percent-decoded it (donor:299), which
+    double-decodes the target:
+
+    - A Devanagari slug comes back as literal Devanagari, and
+      `urllib.request.urlopen` then raises `UnicodeEncodeError: 'ascii' codec`.
+      `WebClient.get` swallows that into `(None, None)`, so every Nepali news
+      article with a Devanagari path was reported as a dead host -- silently, and
+      exactly for the articles this enricher exists to find.
+    - A target containing a literal `%20` arrives as `%2520`, decodes once to
+      `%20` and again to a space: a DIFFERENT URL, which was then fetched, hashed
+      into `news_material_ident` and stored as the material's RAW link.
+
+    `parse_qs` already did the one decode the redirect calls for, so this returns
+    its output unchanged.
+    """
     if "uddg=" not in url:
         return url
     uddg = urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get("uddg", [""])[0]
-    return urllib.parse.unquote(uddg) if uddg else url
+    return uddg or url
 
 
 _DDG_LINK_RE = re.compile(
@@ -464,12 +535,18 @@ class WebClient:
     fetch / archive-save each hold their own minimum interval and a retry is
     spaced like any other call.
 
-    THE CACHE IS PER-RUN AND IN-PROCESS ONLY. A batch searches the same accused
+    THE CACHE IS PER-CASE AND IN-PROCESS ONLY. A case searches the same accused
     name under several query templates and the same URL surfaces repeatedly, so
-    within one run a repeat is free. It is deliberately NOT a disk cache: the
+    within one case a repeat is free. It is deliberately NOT a disk cache: the
     project closed PR #409 (`casework/common/llm_cache.py`) because a cache that
     outlives a prompt revision serves a stale artefact as if it were fresh, and
     a cached news page has exactly the same defect.
+
+    `clear_cache()` between cases keeps it bounded. The hit rate lives entirely
+    inside one case -- two different cases share no candidate URLs -- while a
+    run-lifetime cache retained every decoded search page and full article body
+    until the process exited. Over a 238-case bulk run that is thousands of
+    documents at 50-300 KB each, held for no benefit.
     """
 
     def __init__(self, search_delay=1.5, fetch_delay=0.5, save_delay=6.0, timeout=20):
@@ -479,6 +556,21 @@ class WebClient:
         self._last = {}
         self._cache = {}
         self.calls = {"search": 0, "fetch": 0, "archive": 0, "save": 0}
+
+    def invalidate(self, url, kind):
+        """Forget one cached response so the next `get` is a real request.
+
+        Public because two call sites need it and both were reaching into
+        `_cache` directly -- which a client stub (the tests' `FakeWeb`) does not
+        implement, so the branches that did it were untestable. A cached MISS is
+        the hazard: retrying after a failure, or re-querying an archive
+        availability endpoint after asking for a capture, both have to bypass it.
+        """
+        self._cache.pop((kind, url), None)
+
+    def clear_cache(self):
+        """Drop every cached response. Called between cases, not between runs."""
+        self._cache.clear()
 
     def _throttled(self, kind):
         delay = self.delays.get(kind, 0.0)
@@ -580,10 +672,20 @@ def search(client, query):
                         attempt, SEARCH_RETRY_MAX, query[:60], status, delay)
             # The client caches by (kind, url), so a bare retry would replay
             # the cached failure. Drop the entry so the retry is a real request.
-            client._cache.pop(("search", url), None)
+            client.invalidate(url, "search")
             time.sleep(delay)
-    log.warning("search failed after %d attempts for %r", SEARCH_RETRY_MAX, query[:60])
-    return []
+    # Every attempt came back with no body at all -- a transport error, a 403 or a
+    # 429. That is the backend declining to answer, NOT a query that matched
+    # nothing, and returning `[]` here collapsed the two: a host blocked with 403
+    # on every request produced one "no article cleared the verification gate"
+    # NOOP per case and a green summary across all 238. The anomaly-page check
+    # above only catches the ONE signature measured on 2026-08-05 (a 202 body);
+    # this covers every other way the backend can refuse.
+    raise SearchUnavailable(
+        f"the search backend did not answer after {SEARCH_RETRY_MAX} attempts "
+        f"(last status {status!r}). Zero candidates from an unanswered query is "
+        f"indistinguishable from 'no coverage exists' -- refusing to report that "
+        f"as a result.")
 
 
 def fetch_article(client, candidate):
@@ -625,14 +727,23 @@ def is_archive_url(url):
     return any(host == h or host.endswith("." + h) for h in ARCHIVE_HOSTS)
 
 
-def closest_snapshot(client, url):
+def closest_snapshot(client, url, *, fresh=False):
     """The closest existing Wayback snapshot of `url`, or None.
 
     Normalises the returned scheme to https -- the availability API sometimes
     answers http (add_news_permalinks:228).
+
+    `fresh=True` drops any cached answer first. Required after a Save Page Now
+    request: the client caches by (kind, url), so the post-save re-query replayed
+    the pre-save MISS and the whole `save_missing` branch could never return a
+    permalink. Every article that was not already archived silently got none,
+    having paid a 6s-throttled SPN request for it.
     """
     query = urllib.parse.urlencode({"url": url})
-    status, body = client.get(f"{AVAILABILITY_API}?{query}", "archive",
+    availability_url = f"{AVAILABILITY_API}?{query}"
+    if fresh:
+        client.invalidate(availability_url, "archive")
+    status, body = client.get(availability_url, "archive",
                               headers={"User-Agent": ARCHIVE_UA})
     if status != 200 or not body:
         return None
@@ -669,8 +780,9 @@ def resolve_permalink(client, url, *, save_missing=True):
     # SPN returns the capture location in a header urllib does not expose
     # through `get`, so re-query availability rather than parse the response --
     # the same fallback the donor used when the header was absent
-    # (add_news_permalinks:262).
-    return closest_snapshot(client, url)
+    # (add_news_permalinks:262). `fresh=True` is load-bearing: without it this
+    # replays the cached pre-save miss and always answers None.
+    return closest_snapshot(client, url, fresh=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1127,6 +1239,26 @@ def _parse_verdict(row):
     )
 
 
+#: Answer budget per verified candidate, and the reasoning headroom on top.
+#: The old `min(6000, 400 + 500 * n)` capped a full 12-candidate batch at 6,000
+#: tokens. Each row carries an English `reason` plus a Devanagari `summary` the
+#: prompt asks to run 350-500 characters, and Devanagari costs well under one
+#: character per token -- so twelve rows reached the cap before any reasoning
+#: tokens, and `salvage_json` turned the overflow into partial verdicts and notes
+#: truncated mid-sentence rather than an error. The same budgeting trap this repo
+#: already fixed once in PR #411/#412.
+VERIFY_TOKENS_PER_CANDIDATE = 900
+VERIFY_TOKENS_REASONING_HEADROOM = 8000
+VERIFY_TOKENS_CEILING = 32000
+
+
+def verify_max_tokens(n_survivors):
+    """Answer budget for one verify call. Scales with the batch, with headroom."""
+    return min(VERIFY_TOKENS_CEILING,
+               VERIFY_TOKENS_REASONING_HEADROOM
+               + VERIFY_TOKENS_PER_CANDIDATE * max(1, n_survivors))
+
+
 def verify_batch(articles, case, invoke_json, usage, press_release_text=None,
                  tier="premium"):
     """Two-tier verification of one batch. Returns `[(Article, Verdict)]`.
@@ -1151,15 +1283,25 @@ def verify_batch(articles, case, invoke_json, usage, press_release_text=None,
         invoke_json, GATE_SYSTEM_PROMPT, _batch_prompt(context, articles),
         min(4000, 200 + 200 * len(articles)), "cheap", usage)
     gate = _verdicts_from_response(gate_result, len(articles))
-    if gate:
-        survivor_indexes = [i for i in range(len(articles))
-                            if (gate.get(i) or {}).get("relevant")]
-    else:
-        # Fail OPEN at the gate -- a cheap-tier error or an unparseable reply
-        # escalates the whole batch to premium rather than dropping it
-        # (donor:1064). The gate is a cost optimisation; the premium tier is the
-        # decision, so a broken gate must not become a silent rejection.
-        survivor_indexes = list(range(len(articles)))
+    # Fail OPEN at the gate -- a cheap-tier error or an unparseable reply
+    # escalates to premium rather than dropping the candidate (donor:1064). The
+    # gate is a cost optimisation; the premium tier is the decision, so a broken
+    # gate must not become a silent rejection.
+    #
+    # PER INDEX, not per batch. `if gate:` was truthy as soon as ONE row parsed,
+    # so a reply truncated at max_tokens -- which `llm.invoke.salvage_json`
+    # repairs into a PARTIAL results array, exactly the case it exists for --
+    # left every unanswered index falling through `gate.get(i) -> None` to
+    # GATE_REJECTED. Seven of twelve fetched candidates could be recorded as "not
+    # plausibly this case" when the gate never judged them, with nothing saying
+    # the answer was incomplete. An index the gate did not answer is an index the
+    # gate did not reject.
+    survivor_indexes = [i for i in range(len(articles))
+                        if i not in gate or (gate.get(i) or {}).get("relevant")]
+    if len(gate) < len(articles):
+        log.warning("  cheap gate answered %d/%d candidates; escalating the "
+                    "%d unanswered to premium rather than dropping them",
+                    len(gate), len(articles), len(articles) - len(gate))
 
     out = [(article, Verdict(relevant=False, reason=str(SkipReason.GATE_REJECTED)))
            for article in articles]
@@ -1169,7 +1311,7 @@ def verify_batch(articles, case, invoke_json, usage, press_release_text=None,
     survivors = [articles[i] for i in survivor_indexes]
     verify_result, verify_error = _llm_json(
         invoke_json, VERIFY_SYSTEM_PROMPT, _batch_prompt(context, survivors),
-        min(6000, 400 + 500 * len(survivors)), tier, usage)
+        verify_max_tokens(len(survivors)), tier, usage)
     verdicts = _verdicts_from_response(verify_result, len(survivors))
     for position, original_index in enumerate(survivor_indexes):
         row = verdicts.get(position)

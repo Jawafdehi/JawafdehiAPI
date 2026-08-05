@@ -113,7 +113,7 @@ from casework.common.cli import (
     setup_logging,
 )
 from casework.common.llm import bootstrap, tier_for
-from casework.common.materials import material_iri, materials_of_type, raw_links, source_chunks
+from casework.common.materials import materials_of_type, raw_links, source_chunks
 from casework.common.pipeline import PRESS_TYPES, STAGES, RunReport, unmet_prerequisites
 from casework.common.review import ReviewRow, build_review_file
 from casework.common.select import select_for_run
@@ -256,11 +256,16 @@ def _select_accepted(pairs, outcome, budget, event_counts):
 
     A relevant-but-not-high verdict becomes a `NearMiss` (deviation B); an
     irrelevant one a skip. Returns the number accepted from this batch.
+
+    EVERY pair is classified, including once the budget is full. The budget guards
+    only the ACCEPT, and it used to `break` the whole loop instead: remaining pairs
+    fell out of `accepted`, `near_misses` and `skipped` alike, so premium tokens
+    were spent on verdicts that left no trace in the counts or the review file --
+    and a `medium` verdict past the cap vanished, breaking deviation B's promise
+    that a near miss is always reported for a human to confirm.
     """
     taken = 0
     for article, verdict in pairs:
-        if len(outcome.accepted) >= budget:
-            break
         if not verdict.relevant:
             if verdict.failed:
                 reason = SkipReason.VERIFY_FAILED
@@ -276,6 +281,10 @@ def _select_accepted(pairs, outcome, budget, event_counts):
         if event_counts[verdict.event_type] >= MAX_ARTICLES_PER_EVENT_TYPE:
             outcome.add_skip(article.url, SkipReason.EVENT_TYPE_FULL,
                              f"event_type={verdict.event_type}")
+            continue
+        if len(outcome.accepted) >= budget:
+            outcome.add_skip(article.url, SkipReason.BUDGET_REACHED,
+                             f"--max-articles budget of {budget} already filled")
             continue
         outcome.accepted.append((article, verdict))
         event_counts[verdict.event_type] += 1
@@ -348,8 +357,19 @@ def collect_for_case(case, client, invoke_json, usage, *, max_articles,
     queries are tried up to `RETRY_MAX` times (donor:1412).
     """
     outcome = SearchOutcome()
-    budget = max_articles
+    # `max_articles` is a per-case TOTAL, so the budget for THIS run is what is
+    # left of it. Using it as the run's addition let a case already carrying 4
+    # news entries take 5 more under `--max-articles 5` -- 9 on a case documented
+    # to cap at 5, written through a destructive whole-list replace. The
+    # saturation skip in `_process_case` reads the same constant as a total
+    # (`n_current >= args.max_articles`), so the two disagreed.
+    # `--force` means "treat this case as fresh", so it restores the full budget
+    # as well as ignoring what is already bound -- otherwise forcing a saturated
+    # case would search, verify and then accept nothing.
+    budget = max_articles if force else max(0, max_articles - count_news_evidence(case))
     already_bound = set() if force else bound_news_urls(case)
+    if budget <= 0:
+        return outcome
     # Starts empty rather than seeded from the case, because `event_type` is not
     # persisted on an evidence row (deviation 3) -- there is nothing on the case
     # to seed it FROM. Cross-run safety comes from the saturation gate and the
@@ -447,7 +467,28 @@ def _material_doc(article, note, permalink):
         raise AssertionError(
             f"source_type=NEWS shaped material_type={material_type!r}, expected "
             f"{NEWS_MATERIAL_TYPE!r}; the JSON-LD shaper's mapping changed")
-    return material_iri(NEWS_MATERIAL_SOURCE, ident), doc
+    # Take the shaper's OWN `@id` rather than re-deriving it. `documentsource_to_
+    # jsonld` builds `@id` through `build_source_material_iri`, which reads
+    # `iri_base()` ($JAWAFDEHI_IRI_BASE) and normalises the ident (`:`->`.`,
+    # lowercase, out-of-grammar chars -> `-`); `materials.material_iri` hardcodes
+    # `https://jawafdehi.org` and normalises nothing. The two agree only while
+    # JAWAFDEHI_IRI_BASE is unset and the ident needs no normalising -- otherwise
+    # the material was created at one IRI and the evidence bound to another, and
+    # since the server validates evidence IRI grammar without checking that the
+    # material exists, the case would ship a valid-looking reference to nothing.
+    doc_iri = doc.get("@id")
+    if not doc_iri:                              # pragma: no cover -- contract check
+        raise AssertionError(
+            "documentsource_to_jsonld returned a document with no @id; the "
+            "evidence bind has no authoritative IRI to point at")
+    # The source segment is still asserted rather than assumed: 48 of the 50 news
+    # materials in the lake are `/material/news/<ident>`, and a shaper change that
+    # moved the segment would silently start a second parallel IRI family.
+    if f"/material/{NEWS_MATERIAL_SOURCE}/" not in doc_iri:   # pragma: no cover
+        raise AssertionError(
+            f"expected a /material/{NEWS_MATERIAL_SOURCE}/ IRI, got {doc_iri!r}; "
+            f"the JSON-LD shaper's source segment changed")
+    return doc_iri, doc
 
 
 def plan_case(case, etag, outcome, *, client=None, save_permalinks=True):
@@ -600,9 +641,11 @@ def _review_row(slug, status, plan, note=""):
 
 
 def _event_of(plan, article):
-    for _, _, _, candidate in plan.materials:
-        if candidate is article:
-            break
+    """The lifecycle event type the verifier gave `article`, or "?".
+
+    Looks it up on `outcome.accepted`, which is where the verdict lives --
+    `plan.materials` keeps the note but drops the verdict it came from.
+    """
     for accepted_article, verdict in plan.outcome.accepted:
         if accepted_article is article:
             return verdict.event_type
@@ -681,6 +724,12 @@ def main(argv=None):
 
     for index, summary in enumerate(cases, 1):
         slug = summary.get("slug") or "?"
+        # The web cache earns its hit rate WITHIN a case (the same URL surfaces
+        # under several query templates); two cases share no candidates. Clearing
+        # per case keeps it bounded -- a run-lifetime cache held every decoded
+        # search page and full article body until the process exited, which over
+        # 238 cases is thousands of documents at 50-300 KB each for no benefit.
+        client.clear_cache()
         try:
             _process_case(api, client, slug, index, total, args, invoke_json, usage,
                           report, review, logger, paths, run_id)
@@ -785,8 +834,14 @@ def _process_case(api, client, slug, index, total, args, invoke_json, usage,
           f"{len(outcome.accepted)} accepted, {len(outcome.near_misses)} near-miss, "
           f"{len(outcome.skipped)} skipped ({_skip_summary(outcome)})")
 
-    plan = plan_case(detail, etag, outcome, client=client,
-                     save_permalinks=not args.dry_run)
+    # `--no-permalink` sets args.permalink=False and MUST be honoured here; it was
+    # registered, documented, and then never read, so `--apply --no-permalink`
+    # still resolved a snapshot and still fired a 6s-throttled Save Page Now per
+    # article. `client=None` is what actually suppresses the archive lookup, since
+    # `plan_case` only touches the archive when it has a client.
+    plan = plan_case(detail, etag, outcome,
+                     client=client if args.permalink else None,
+                     save_permalinks=args.permalink and not args.dry_run)
 
     note_parts = []
     # Lead with this one. A case whose verifier never answered looks exactly like

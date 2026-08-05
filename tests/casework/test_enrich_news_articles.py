@@ -23,10 +23,13 @@ That is measured against the same labelled set with the real verifier and
 reported in this task's `findings.md`; it is a prompt property, not a code one.
 """
 
+import collections
 import json
 import logging
+import pathlib
 import sys
 import types
+import urllib.parse
 from datetime import date
 
 import pytest
@@ -72,31 +75,63 @@ def article_html(title, text, published="2024-05-12"):
 class FakeWeb:
     """Stands in for `news_search.WebClient`. Serves canned pages, records calls.
 
-    Implements exactly the surface the module uses -- `get(url, kind, headers=,
-    expect_html=)`, `calls` -- so it can be swapped in without touching the code
-    under test. A URL with no canned page returns `(404, None)`, which is what a
-    dead news host looks like; nothing here can reach the network.
+    Implements the surface the module uses -- `get(url, kind, headers=,
+    expect_html=)`, `invalidate`, `clear_cache`, `calls` -- so it can be swapped
+    in without touching the code under test. A URL with no canned page returns
+    `(404, None)`, which is what a dead news host looks like; nothing here can
+    reach the network.
+
+    It CACHES like the real client, and that is deliberate. The fake used to have
+    no cache at all, which made it silently incapable of catching the two bugs the
+    cache causes: `search`'s retry replaying a cached failure, and
+    `resolve_permalink`'s post-save re-query replaying the cached pre-save miss.
+    A fake that cannot reproduce the real client's memory is not a stand-in for it.
     """
 
-    def __init__(self, pages=None, search_results=None, snapshot=None):
+    def __init__(self, pages=None, search_results=None, snapshot=None,
+                 snapshot_after_save=None):
         self.pages = dict(pages or {})
         self.search_results = list(search_results or [])
         self.snapshot = snapshot
+        #: What the availability API answers AFTER a Save Page Now request, so a
+        #: test can assert the SPN branch actually yields a permalink.
+        self.snapshot_after_save = snapshot_after_save
+        self.saved = []
         self.calls = {"search": 0, "fetch": 0, "archive": 0, "save": 0}
         self.requested = []
+        self._cache = {}
+
+    def invalidate(self, url, kind):
+        self._cache.pop((kind, url), None)
+
+    def clear_cache(self):
+        self._cache.clear()
 
     def get(self, url, kind, headers=None, expect_html=False):
+        key = (kind, url)
+        if key in self._cache:
+            return self._cache[key]
         self.calls[kind] = self.calls.get(kind, 0) + 1
         self.requested.append((kind, url))
+        result = self._serve(url, kind)
+        self._cache[key] = result
+        return result
+
+    def _serve(self, url, kind):
         if kind == "search":
             return 200, ddg_html(self.search_results)
         if kind == "archive":
+            if self.saved and self.snapshot_after_save:
+                return 200, json.dumps(
+                    {"archived_snapshots": {"closest": {"available": True,
+                                                        "url": self.snapshot_after_save}}})
             if self.snapshot is None:
                 return 429, None            # Wayback rate-limited, as seen in prod
             return 200, json.dumps(
                 {"archived_snapshots": {"closest": {"available": True,
                                                     "url": self.snapshot}}})
         if kind == "save":
+            self.saved.append(url)
             return 200, ""
         page = self.pages.get(url)
         return (200, page) if page is not None else (404, None)
@@ -901,6 +936,221 @@ def test_the_stage_gates_on_the_three_query_fields():
         case[field] = [] if field != "title" else ""
         unmet = unmet_prerequisites(STAGES["news"], case)
         assert any(field in reason for reason in unmet), field
+
+
+def test_the_stage_needs_an_accused_not_merely_some_entity():
+    """A case carrying only `location`/`related` binds must NOT be attempted.
+
+    "entities is non-empty" let it through, and `accused_names` then fell back to
+    the importer's template title, so 12 searches and a premium batch were spent
+    on queries built from "CIAA Special Court Case 076-CR-0182: …".
+    """
+    from casework.common.pipeline import STAGES, unmet_prerequisites
+
+    case = case_payload()
+    case["entities"] = [
+        {"display_name": "Tokha Municipality, Kathmandu", "type": "location"},
+        {"display_name": "जलस्रोत अनुसन्धान विकास केन्द्र", "type": "related"},
+    ]
+    unmet = unmet_prerequisites(STAGES["news"], case)
+    assert any("accused" in reason for reason in unmet), unmet
+    # And it must not double-report when entities is empty outright.
+    empty = case_payload()
+    empty["entities"] = []
+    assert len(unmet_prerequisites(STAGES["news"], empty)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Regressions from the code review. Each of these shipped once.
+# ---------------------------------------------------------------------------
+
+
+def test_a_bikram_sambat_byline_is_refused_not_read_as_gregorian():
+    """`प्रकाशित: २०८२-०४-२०` parsed as date(2082, 4, 20) -- 57 years ahead.
+
+    `\\d` matches Devanagari ०-९ and `int()` accepts them. Deviation A puts the
+    date in the material IRI, so a BS date corrupted the idempotency key AND
+    published a fabricated `datePublished` on a public material.
+    """
+    assert ns.extract_publication_date("<p>प्रकाशित: २०८२-०४-२०</p>") is None
+    # Same year arriving through a meta tag, where %Y-%m-%d parses it happily.
+    assert ns.extract_publication_date(
+        '<html>"datePublished": "2082-04-20"</html>') is None
+    # A real Gregorian date still works.
+    assert ns.extract_publication_date(
+        '<html>"datePublished": "2024-08-18"</html>') == date(2024, 8, 18)
+    assert ns.extract_publication_date(
+        "<p>प्रकाशित: 2024-08-18</p>") == date(2024, 8, 18)
+
+
+def test_a_ddg_redirect_is_decoded_exactly_once():
+    """The donor unquoted `uddg` after `parse_qs` had already decoded it.
+
+    A Devanagari slug came back as literal Devanagari, which `urlopen` cannot
+    encode -- so every Nepali article with a Devanagari path looked like a dead
+    host. A literal `%20` decoded to a space: a different URL, then fetched and
+    hashed into the material ident.
+    """
+    target = "https://setopati.test/समाचार"
+    encoded = urllib.parse.quote(target, safe=":/")
+    href = "//duckduckgo.com/l/?uddg=" + urllib.parse.quote(encoded, safe="") + "&rut=x"
+    out = ns.extract_ddg_redirect(href)
+    assert out == encoded
+    assert out.isascii(), "a non-ascii URL cannot be fetched at all"
+
+    percent = "https://x.test/a%20b"
+    assert ns.extract_ddg_redirect(
+        "//duckduckgo.com/l/?uddg=" + urllib.parse.quote(percent, safe="")) == percent
+
+
+def test_save_page_now_actually_yields_a_permalink():
+    """The post-save availability re-query was served from the cache.
+
+    It replayed the pre-save MISS, so the whole `save_missing` branch could never
+    return a permalink -- every unarchived article paid a 6s-throttled SPN request
+    for nothing.
+    """
+    web = FakeWeb(snapshot=None,
+                  snapshot_after_save="https://web.archive.org/web/2024/x")
+    got = ns.resolve_permalink(web, "https://ekantipur.test/a",
+                                        save_missing=True)
+    assert web.saved, "Save Page Now was never requested"
+    assert got == "https://web.archive.org/web/2024/x"
+
+
+def test_a_partial_cheap_gate_reply_escalates_the_unanswered_to_premium():
+    """`if gate:` was truthy on one parsed row, so unanswered indexes were
+    marked GATE_REJECTED instead of escalating -- the opposite of fail-open."""
+    articles = [
+        ns.Article(url=f"https://ekantipur.test/{i}", title=f"t{i}",
+                            text="x" * 400, published=date(2024, 7, 1))
+        for i in range(4)
+    ]
+    seen = {}
+
+    def invoke_json(*, system, content, max_tokens, tier, usage=None):
+        if tier == "cheap":
+            # Answers ONLY index 0: a reply truncated at max_tokens and repaired
+            # by salvage_json looks exactly like this.
+            return {"results": [{"index": 0, "relevant": True}]}
+        seen["n"] = content.count("Candidate ")
+        return {"results": [{"index": i, "relevant": False, "reason": "no"}
+                            for i in range(seen["n"])]}
+
+    ns.verify_batch(articles, case_payload(), invoke_json,
+                             FakeUsage(), tier="premium")
+    assert seen["n"] == 4, (
+        "the 3 candidates the gate never judged must still reach premium")
+
+
+def test_a_truncated_note_is_not_bindable():
+    """`salvage_json` closes an open string, so an overflowing verify reply yields
+    a note cut off mid-sentence. Non-blank passed the old check and would have
+    been published as a case's evidence note."""
+    truncated = ns.Verdict(
+        relevant=True, confidence="high", event_type="verdict",
+        summary="यो समाचार लेख यस मुद्दा (080-CR-0136) मा")
+    assert not truncated.is_bindable
+    full = ns.Verdict(
+        relevant=True, confidence="high", event_type="verdict",
+        summary="य" * ns.MIN_NOTE_CHARS)
+    assert full.is_bindable
+
+
+def test_an_unanswered_search_raises_rather_than_reporting_zero_results():
+    """403/429 on every attempt returned `[]`, which reads as 'no coverage
+    exists'. Only the one measured 202 anomaly body was caught."""
+
+    class Blocked(FakeWeb):
+        def _serve(self, url, kind):
+            return 403, None
+
+    with pytest.raises(ns.SearchUnavailable):
+        ns.search(Blocked(), "अख्तियार मुद्दा")
+
+
+def _case_with_news(n):
+    case = case_payload()
+    case["evidence"] = [
+        {"material_iri": f"https://jawafdehi.org/material/news/2024010{i}.aaaaaaaa",
+         "additional_details": "n",
+         "material": {"material_type": "news", "urls": [
+             {"link": f"https://old.test/{i}", "role": "RAW"}]}}
+        for i in range(n)
+    ]
+    return case
+
+
+def test_max_articles_is_a_total_not_a_per_run_addition():
+    """A case with 4 news entries and --max-articles 5 could take 5 MORE.
+
+    The saturation skip reads the constant as a TOTAL
+    (`n_current >= args.max_articles`) while the selector read it as this run's
+    addition, so the two disagreed and a case documented to cap at 5 could reach 9
+    -- through a destructive whole-list replace.
+    """
+    # Already at the cap: no budget left, so it must not even build queries.
+    outcome = en.collect_for_case(
+        _case_with_news(4), FakeWeb(), lambda **kw: {}, FakeUsage(), max_articles=4)
+    assert not outcome.accepted
+    assert not outcome.queries, "a saturated case must not spend a single search"
+
+    # One slot left of five: the budget is the REMAINDER, not another five.
+    pairs = [
+        (ns.Article(url=f"https://a.test/{i}", title="t", text="x",
+                    published=date(2024, 7, i + 1)),
+         ns.Verdict(relevant=True, confidence="high", event_type=event,
+                    summary="य" * 200))
+        for i, event in enumerate(("filing", "hearing", "verdict"))
+    ]
+    partial = ns.SearchOutcome()
+    en._select_accepted(pairs, partial, 5 - 4, collections.Counter())
+    assert len(partial.accepted) == 1, (
+        "4 bound + --max-articles 5 must admit exactly 1 more")
+
+
+def test_the_budget_records_what_it_cuts_off_instead_of_dropping_it():
+    """A bare `break` dropped remaining verified pairs out of accepted,
+    near_misses AND skipped -- premium tokens spent, nothing in the review file,
+    and a `medium` verdict past the cap vanished silently."""
+    outcome = ns.SearchOutcome()
+    outcome.accepted.append(("already", "there"))
+    pairs = [
+        (ns.Article(url="https://a.test/1", title="t", text="x",
+                             published=date(2024, 7, 1)),
+         ns.Verdict(relevant=True, confidence="high", event_type="filing",
+                             summary="य" * 200)),
+        (ns.Article(url="https://a.test/2", title="t", text="x",
+                             published=date(2024, 7, 2)),
+         ns.Verdict(relevant=True, confidence="medium", event_type="filing",
+                             summary="य" * 200)),
+    ]
+    en._select_accepted(pairs, outcome, 1, collections.Counter())
+    assert len(outcome.accepted) == 1, "the budget still caps the accept"
+    assert [s.reason for s in outcome.skipped] == [
+        ns.SkipReason.BUDGET_REACHED]
+    assert len(outcome.near_misses) == 1, (
+        "a medium verdict past the cap is still owed to the reviewer")
+
+
+def test_no_permalink_actually_suppresses_the_archive_lookup():
+    """`--no-permalink` set args.permalink and nothing ever read it."""
+    parser = en.build_parser()
+    assert parser.parse_args([]).permalink is True
+    assert parser.parse_args(["--no-permalink"]).permalink is False
+    assert "args.permalink" in pathlib.Path(
+        en.__file__).read_text(), (
+        "the flag must be READ, not merely registered")
+
+
+def test_the_material_iri_comes_from_the_shapers_own_id():
+    """Re-deriving it with a hardcoded host could bind evidence to an IRI the
+    material was not created at, and the server does not check existence."""
+    iri, doc = en._material_doc(
+        ns.Article(url="https://ekantipur.test/a", title="t",
+                            text="x" * 400, published=date(2024, 8, 18)),
+        "य" * 200, None)
+    assert iri == doc["@id"]
 
 
 @pytest.fixture(autouse=True)
