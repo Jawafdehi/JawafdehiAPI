@@ -41,6 +41,7 @@ from django.utils import timezone
 from jawafdehi_shared.entities.ids import build_courtcase_iri
 from courts import search_index
 from courts.models import CaseEntity, Court, CourtCase, CourtCaseHearing
+from courts.case_status import PENDING, outcome_from_hearings, parse_case_status
 from courts.normalize import (
     best_effort_normalize,
     is_verdict_sentinel,
@@ -126,6 +127,7 @@ class ImportResult:
     dq_special_flagged: int = 0
     dq_case_type_normalized: int = 0
     dq_verdict_judge_derived: int = 0
+    dq_hearing_verdict_promoted: int = 0
     skipped: int = 0
     failed: int = 0
     errors: list[dict[str, Any]] = field(default_factory=list)
@@ -140,6 +142,7 @@ class ImportResult:
             "dq_special_flagged": self.dq_special_flagged,
             "dq_case_type_normalized": self.dq_case_type_normalized,
             "dq_verdict_judge_derived": self.dq_verdict_judge_derived,
+            "dq_hearing_verdict_promoted": self.dq_hearing_verdict_promoted,
             "skipped": self.skipped,
             "failed": self.failed,
             "errors": list(self.errors),
@@ -593,6 +596,109 @@ class CourtCaseImporter:
         # enrichment detail page never carries it for special court, and only
         # inconsistently for high/district) instead of re-accumulating.
         self._derive_verdict_judge(case, row)
+
+        # (6) a case DECIDED on its hearing sheet but still "ongoing" on its own
+        # row. Runs after (5) so the deciding judge is already in place on the row
+        # this may be about to mark decided.
+        self._promote_hearing_verdict(case, row)
+
+    def _promote_hearing_verdict(self, case: CourtCase, row: Any) -> None:
+        """Mark a case decided when its own hearing sheet says a verdict was given.
+
+        The court delivers judgment, the sitting is written to
+        ``court_case_hearings`` with ``case_status='फैसला'``, and the CASE row is
+        never updated — it keeps ``case_status='चलिरहेको'`` and a NULL
+        ``verdict_date_ad`` indefinitely. Measured on prod 2026-08-04: **105
+        special-court cases in that state, 104 of them decided during 2026**, with
+        ``updated_at`` AFTER the verdict — so the scraper did touch the row and
+        still left it reading "ongoing". A stale ``updated_at`` is not the tell.
+
+        Why it matters beyond the column: ``case_events.producers.dockets``
+        ``verdict_signals`` selects on ``verdict_date_ad__isnull=False``, so none of
+        those 104 verdicts could ever raise ``jaw.signal.docket.verdict.entered``.
+        The companion ``hearing_signals`` reads a 48h stateless window, so a
+        judgment more than two days old is past recall. Three of the 104 back
+        PUBLISHED Jawafdehi cases that still describe themselves as विचाराधीन weeks
+        after judgment, one of them still asserting a damages claim the court threw
+        out. Promoting the column lets the existing producer pick them up.
+
+        Conservative on every axis: fires only when ``verdict_date_ad`` is NULL,
+        never overwrites a verdict already recorded, and takes the disposition from
+        :func:`courts.case_status.outcome_from_hearings`, which ignores
+        interlocutory orders and bench referrals and yields nothing for an
+        ``order_type`` it does not recognise. Marked
+        ``extra_data._dq.verdict_promoted_from_hearing`` so it is reversible and
+        auditable. Idempotent: a second pass finds the verdict set and returns.
+        """
+        if case.verdict_date_ad:
+            return
+        hearings = self._case_hearings(case, row)
+        if not hearings:
+            return
+        outcome = outcome_from_hearings(
+            [
+                {
+                    "case_status": h.get("case_status"),
+                    "decision_type": h.get("decision_type"),
+                    "date": h.get("hearing_date_bs"),
+                }
+                for h in hearings
+            ]
+        )
+        if not outcome or not outcome.verdict_date_bs:
+            return
+        # Prefer the row's OWN hearing_date_ad over re-converting the BS date: it
+        # is what the scraper recorded, and ``bs_to_ad`` is known to differ by a
+        # day from the gazette on some BS 2083 dates.
+        ad_by_bs = {
+            h.get("hearing_date_bs"): h.get("hearing_date_ad")
+            for h in hearings
+            if h.get("hearing_date_bs") and h.get("hearing_date_ad")
+        }
+        verdict_date_ad = ad_by_bs.get(outcome.verdict_date_bs) or outcome.verdict_date_ad
+        if not verdict_date_ad:
+            return
+
+        updates: dict[str, Any] = {
+            "verdict_date_bs": outcome.verdict_date_bs,
+            "verdict_date_ad": verdict_date_ad,
+        }
+        if not case.verdict_type and outcome.verdict_type:
+            updates["verdict_type"] = outcome.verdict_type
+        # A row cannot be both decided and "ongoing". Only a value the parser
+        # RECOGNISES as pending is replaced — anything else is left alone rather
+        # than guessed at.
+        if parse_case_status(case.case_status).lifecycle_status == PENDING:
+            updates["case_status"] = f"फैसला (मिती: {outcome.verdict_date_bs})"
+
+        if case.extra_data is None or isinstance(case.extra_data, dict):
+            extra = dict(case.extra_data or {})
+            existing_dq = extra.get("_dq")
+            dq = dict(existing_dq) if isinstance(existing_dq, dict) else {}
+            dq["verdict_promoted_from_hearing"] = True
+            if case.case_status and "case_status" in updates:
+                dq.setdefault("case_status_raw", case.case_status)
+            extra["_dq"] = dq
+            updates["extra_data"] = extra
+        self._update_case(case, **updates)
+        self.res.dq_hearing_verdict_promoted += 1
+
+    def _case_hearings(self, case: CourtCase, row: Any) -> list[dict[str, Any]]:
+        """This case's sittings, oldest first, as plain dicts.
+
+        Chronological order is load-bearing: ``outcome_from_hearings`` keeps the
+        LAST disposing sitting, because a case can be decided, reopened on review
+        and decided again.
+        """
+        if isinstance(row, dict):
+            hearings = list(row.get("hearings") or [])
+            return sorted(hearings, key=lambda h: h.get("hearing_date_ad") or "")
+        return list(
+            CourtCaseHearing.objects.using("ngm")
+            .filter(court_id=case.court_id, case_number=case.case_number)
+            .order_by("hearing_date_ad")
+            .values("case_status", "decision_type", "hearing_date_bs", "hearing_date_ad")
+        )
 
     def _flag_special_defendants(self, case: CourtCase, row: Any) -> None:
         if self._read_only and not isinstance(row, CourtCase):
