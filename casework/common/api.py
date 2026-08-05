@@ -409,6 +409,70 @@ class CaseworkApi:
         self._entity_doc_cache[ref] = document
         return document
 
+    # ------------------------------------------------------------------
+    # The MATERIAL plane. Cases own no documents (docs/jawafdehi/
+    # adr-cases-own-no-documents.md), so a document's own reusable abstract
+    # lives on the Material JSON-LD, not on the case -- a different endpoint,
+    # a different body shape, and a SHARED store: one material is cited by
+    # many cases and by NGM, so a bad write here propagates everywhere.
+    # ------------------------------------------------------------------
+
+    def get_material_with_etag(self, iri, timeout=60):
+        """One material JSON-LD doc PLUS its ETag, by canonical `@id` IRI.
+
+        Returns ``(doc, etag)``; `etag` is None when the server sends none --
+        which is the truth for a DERIVED court-case material, since those have
+        no stored row and cannot be patched either (`materials/views.py::
+        _stored_etag`). `patch_material` echoes the token back as `If-Match`.
+
+        THE HEADER LOOKUP IS CASE-INSENSITIVE ON PURPOSE. The server sets
+        `ETag`; `http.client` normalises header case, so a literal `["ETag"]`
+        lookup can miss and yield None -- and every material write then goes
+        unconditional with nothing logged about it. `email.message.Message.get`
+        is already case-insensitive, which is why this reads through `.get`
+        rather than indexing a plain dict.
+
+        A read, so the write-guard in `_request` never applies -- usable
+        against production.
+        """
+        url = self.base_url + "/materials/?" + urllib.parse.urlencode({"iri": iri})
+        with self._request("GET", url, headers=self._headers(), timeout=timeout) as r:
+            doc = json.loads(r.read().decode())
+            headers = getattr(r, "headers", None)
+            etag = headers.get("ETag") if headers is not None else None
+            return doc, etag
+
+    def patch_material(self, iri, ops, timeout=60, if_match=None):
+        """Apply an RFC-6902 `ops` list to one material's stored JSON-LD.
+
+        `PATCH /api/materials/?iri=<full-iri>` with `{"patch_ops": [...]}` --
+        the envelope `materials/views.py::_patch_material` reads. NGM-role
+        gated server-side; `materials/patch_validation.py` rejects the whole
+        patch if any op targets an immutable path (`/@id`, `/@context`,
+        `/@type`, `/additionalType`).
+
+        WRITE-GUARDED LIKE EVERY OTHER WRITE. This goes through `_request`,
+        which refuses any write method to a non-loopback host unless
+        `allow_remote_writes=True` -- so a script that can only write cases on
+        loopback cannot write materials anywhere else either. That symmetry is
+        the point: the material store is shared with NGM and with every case
+        citing the document, so it is the LAST plane that should have a weaker
+        guard than the case plane.
+
+        Pass `if_match` (the ETag from `get_material_with_etag`) to make the
+        write conditional -- a 412 then means the document changed since it was
+        read, so re-read before deciding whether it still needs writing.
+        """
+        url = self.base_url + "/materials/?" + urllib.parse.urlencode({"iri": iri})
+        body = json.dumps({"patch_ops": ops}, ensure_ascii=False).encode("utf-8")
+        headers = self._headers(PATCH_CONTENT_TYPE)
+        if if_match:
+            headers["If-Match"] = if_match
+        with self._request("PATCH", url, data=body,
+                           headers=headers, timeout=timeout) as r:
+            raw = r.read().decode()
+            return json.loads(raw) if raw.strip() else {}
+
     def _patch(self, slug, ops, timeout=60, if_match=None):
         """The choke point for FIELD writes (`patch_field`, `replace_list`) --
         NOT "every write": `convert.py`'s `upload_markdown` writes via a

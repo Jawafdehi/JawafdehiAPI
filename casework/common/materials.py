@@ -136,6 +136,52 @@ def typed_materials(case, types=None):
     return out
 
 
+#: Language tag every value this package writes into a material's language maps.
+#: The corpus is Nepali; `materials/jsonld.py` tags stored Devanagari as `ne`.
+MATERIAL_LANG = "ne"
+DESCRIPTION_PATH = "/description"
+
+
+def description_text(material_doc):
+    """The material's stored abstract as plain text, or `""` when it has none.
+
+    `description` is a LANGUAGE MAP, not a string: `MATERIAL_CONTEXT` in
+    `materials/jsonld.py` declares it as
+    `{"@id": "schema:description", "@container": "@language"}`, and the shaper
+    writes `doc["description"] = {"ne": ...}`. Reading it as a string would make
+    every populated material look blank and invite an overwrite -- which is the
+    one thing the "only when blank" rule exists to prevent.
+
+    Tolerates three shapes because the store holds more than one: the `ne` map
+    (what the shapers write), a map in some other language, and a legacy bare
+    string. Anything whitespace-only reads as blank.
+    """
+    raw = (material_doc or {}).get("description")
+    if isinstance(raw, str):
+        return raw.strip()
+    if isinstance(raw, dict):
+        # `ne` first (the corpus language), then any other tag that carries
+        # text -- an English abstract still means "not blank".
+        for key in (MATERIAL_LANG, *sorted(k for k in raw if k != MATERIAL_LANG)):
+            value = raw.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def description_ops(text, lang=MATERIAL_LANG):
+    """RFC-6902 ops writing `text` as the material's abstract.
+
+    `add`, NOT `replace`: RFC-6902 `replace` requires the target path to already
+    exist, and the materials this stage writes to have no `description` key at
+    all (verified on production press releases and court orders, 2026-08-05).
+    `add` creates the key when it is missing and replaces the value when it is
+    present, so one op covers both. The value is a language map for the reason
+    `description_text` documents.
+    """
+    return [{"op": "add", "path": DESCRIPTION_PATH, "value": {lang: text}}]
+
+
 def fetch_markdown(link, timeout=60):
     req = urllib.request.Request(link, headers={"User-Agent": BROWSER_UA})
     with urllib.request.urlopen(req, timeout=timeout) as r:

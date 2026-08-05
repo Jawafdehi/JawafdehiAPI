@@ -183,6 +183,29 @@ STAGES = {
         requires_fields=("description",),
         requires_stages=("description",),
     ),
+    # `evidence_notes` writes a per-entry note on what each bound document is
+    # and why it matters to THIS case, plus the document's own reusable
+    # abstract on the shared Material.
+    #
+    # THE NAME IS NOT `evidence`, deliberately. `bind_materials.py` already
+    # owns the `evidence` array -- it appends bindings with a blank
+    # `additional_details` by design (`bind_materials.py:143`) and this stage is
+    # the downstream pass that fills them. Two stages registered under one
+    # field name would collide in the ledger's per-(slug, stage) accounting, so
+    # the stage is named for what it writes (the notes) while `provides` still
+    # names the field it writes them into.
+    #
+    # It gates on both material families, like `timeline`/`entities`/
+    # `description`: a court-order-only case still has a document to describe,
+    # so gating on PRESS_TYPES alone would strand it. And `requires_fields` is
+    # empty on purpose -- the note is derived from the document plus whatever
+    # allegations the case already carries, so requiring a populated case field
+    # would strand exactly the bare DRAFT cases this stage exists for.
+    "evidence_notes": Stage(
+        "evidence_notes", provides=("evidence",),
+        requires_materials=PRESS_TYPES + COURT_TYPES,
+        requires_stages=("convert",),
+    ),
 }
 
 

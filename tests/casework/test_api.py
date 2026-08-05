@@ -1,7 +1,9 @@
 import base64
+import email.message
 import json
 import logging
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import pytest
@@ -1040,3 +1042,158 @@ def test_get_court_case_entities_stops_when_next_is_null(monkeypatch):
     api.get_court_case_entities("special", "080-cr-0111")
 
     assert len(seen) == 1
+
+
+# ---------------------------------------------------------------------------
+# The MATERIAL write -- `PATCH /api/materials/?iri=<full-iri>` with an RFC-6902
+# `patch_ops` list (`materials/views.py::_patch_material`).
+#
+# This is the second write plane a casework script can reach, and the reason
+# these guard tests exist at all: a script that can write cases on loopback only
+# but materials ANYWHERE is a hole in the no-production-writes constraint. The
+# materials store is also SHARED with NGM, so a bad write here propagates to
+# every case citing that document.
+# ---------------------------------------------------------------------------
+
+_MAT_IRI = "https://jawafdehi.org/material/ciaa_press_release/2579"
+_ABSTRACT_OPS = [
+    {"op": "add", "path": "/description", "value": {"ne": "यो प्रेस विज्ञप्ति हो।"}}
+]
+
+
+def test_patch_material_raises_for_non_loopback_without_opt_in(monkeypatch):
+    monkeypatch.setattr(urllib.request, "urlopen", _failing_urlopen)
+    api = CaseworkApi(base_url="https://example.invalid", token="t")
+
+    with pytest.raises(RuntimeError, match="example.invalid"):
+        api.patch_material(_MAT_IRI, _ABSTRACT_OPS)
+
+
+def test_patch_material_allowed_for_loopback_by_default(monkeypatch):
+    calls = []
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_spy(calls))
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+
+    api.patch_material(_MAT_IRI, _ABSTRACT_OPS)
+
+    assert len(calls) == 1
+
+
+def test_patch_material_allowed_for_non_loopback_with_opt_in(monkeypatch):
+    calls = []
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_spy(calls))
+    api = CaseworkApi(
+        base_url="https://example.invalid", token="t", allow_remote_writes=True
+    )
+
+    api.patch_material(_MAT_IRI, _ABSTRACT_OPS)
+
+    assert len(calls) == 1
+
+
+def test_patch_material_sends_patch_ops_under_the_iri_query_param(monkeypatch):
+    calls = []
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_spy(calls))
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+
+    api.patch_material(_MAT_IRI, _ABSTRACT_OPS)
+
+    req = calls[0]
+    assert req.method == "PATCH"
+    assert req.full_url.startswith("http://127.0.0.1:48010/api/materials/?iri=")
+    assert urllib.parse.quote(_MAT_IRI, safe="") in req.full_url
+    assert json.loads(req.data.decode()) == {"patch_ops": _ABSTRACT_OPS}
+    # `application/json`, never `application/json-patch+json` -- DRF registers
+    # no parser for the latter and 415s (same contract as the case PATCH).
+    assert req.headers["Content-type"] == "application/json"
+
+
+def test_patch_material_writes_devanagari_unescaped(monkeypatch):
+    """`ensure_ascii=False`, like every other write on this client. A body full
+    of `\\u092f` is accepted by the server but unreadable in a request log, and
+    the abstract being written IS Nepali."""
+    calls = []
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_spy(calls))
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+
+    api.patch_material(_MAT_IRI, _ABSTRACT_OPS)
+
+    assert "यो प्रेस विज्ञप्ति हो।".encode() in calls[0].data
+
+
+def test_patch_material_echoes_the_etag_as_if_match(monkeypatch):
+    calls = []
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_spy(calls))
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+
+    api.patch_material(_MAT_IRI, _ABSTRACT_OPS, if_match='"abc123"')
+
+    assert calls[0].headers["If-match"] == '"abc123"'
+
+
+def test_patch_material_omits_if_match_when_none_was_captured(monkeypatch):
+    calls = []
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_spy(calls))
+    api = CaseworkApi(base_url="http://127.0.0.1:48010", token="t")
+
+    api.patch_material(_MAT_IRI, _ABSTRACT_OPS)
+
+    assert "If-match" not in calls[0].headers
+
+
+def test_get_material_is_a_read_so_the_write_guard_never_fires(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        _urlopen_spy(
+            calls,
+            body='{"@id": "x", "description": {"ne": "क"}}'.encode(),
+        ),
+    )
+    api = CaseworkApi(base_url="https://api.jawafdehi.org", token="t")
+
+    doc, etag = api.get_material_with_etag(_MAT_IRI)
+
+    assert doc["description"] == {"ne": "क"}
+    assert calls[0].method == "GET"
+
+
+def test_get_material_with_etag_captures_the_response_etag(monkeypatch):
+    """The ETag must come back, because it is the only thing that can make the
+    material write conditional -- without it `patch_material` sends no If-Match
+    and a concurrent edit is overwritten with nothing logged about it.
+
+    The fake's headers are a real `email.message.Message`, which is what
+    `http.client.HTTPResponse.headers` actually is. A plain dict would be an
+    unfaithful double: `Message` lookup is case-insensitive, a dict is not, so a
+    dict-backed test would demand defensive code for a shape production never
+    produces.
+    """
+    headers = email.message.Message()
+    headers["ETag"] = '"deadbeef"'
+
+    class _RespWithEtag(_FakeHTTPResponse):
+        pass
+
+    resp = _RespWithEtag(body=b'{"@id": "x"}')
+    resp.headers = headers
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: resp)
+    api = CaseworkApi(base_url="https://api.jawafdehi.org", token="t")
+
+    _, etag = api.get_material_with_etag(_MAT_IRI)
+
+    assert etag == '"deadbeef"'
+
+
+def test_get_material_with_etag_returns_none_when_the_server_sends_no_etag(monkeypatch):
+    """A DERIVED court-case material has no stored row and therefore no version
+    token (`materials/views.py::_stored_etag`). `None` has to survive as `None`
+    so the caller can tell "unconditional" from "conditional"."""
+    resp = _FakeHTTPResponse(body=b'{"@id": "x"}')
+    resp.headers = email.message.Message()
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: resp)
+    api = CaseworkApi(base_url="https://api.jawafdehi.org", token="t")
+
+    _, etag = api.get_material_with_etag(_MAT_IRI)
+
+    assert etag is None

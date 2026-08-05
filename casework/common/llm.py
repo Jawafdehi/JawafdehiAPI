@@ -38,6 +38,11 @@ TIERS = {
     # into this stage as `--only title`, and the brief resolves the conflict in
     # favour of cheap. See `casework/enrich_card.py`'s deviation 2.
     "card": "cheap",
+    # `evidence_notes` is premium on the donor's own authority
+    # (enrich_evidence.py:447 at 0321a85, tier="premium") and on the merits: it
+    # reads the source DOCUMENT to say what the document is, which is the same
+    # shape as `description`.
+    "evidence_notes": "premium",
 }
 DEFAULT_TIER = "cheap"
 

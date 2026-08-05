@@ -264,3 +264,53 @@ def test_probe_material_reports_none_status_on_transport_error():
     from casework.common.materials import probe_material
     pr = probe_material(_StubApi(urllib.error.URLError("x")), "ag", "1")
     assert pr.status is None and pr.verdict is None
+
+
+# ---------------------------------------------------------------------------
+# The material JSON-LD `description` -- the reusable document abstract this
+# stage writes. It is a LANGUAGE MAP (`{"ne": "..."}`), not a bare string:
+# `materials/jsonld.py::MATERIAL_CONTEXT` declares
+# `"description": {"@id": "schema:description", "@container": "@language"}`.
+# Verified against the live store 2026-08-05: a charge_sheet carries
+# `description: {"ne": "नारायणी अस्पताल, ..."}`, and press releases / court
+# orders carry no `description` key at all.
+# ---------------------------------------------------------------------------
+
+
+def test_description_text_reads_the_nepali_language_map():
+    from casework.common.materials import description_text
+    assert description_text({"description": {"ne": "यो अभियोगपत्र हो।"}}) == "यो अभियोगपत्र हो।"
+
+
+def test_description_text_is_empty_when_the_key_is_absent():
+    from casework.common.materials import description_text
+    assert description_text({"@id": "x", "name": {"ne": "क"}}) == ""
+
+
+def test_description_text_accepts_a_legacy_bare_string():
+    """Not every stored row need be a language map -- a bare string must read as
+    populated, or the "only when blank" rule would overwrite it."""
+    from casework.common.materials import description_text
+    assert description_text({"description": "legacy plain string"}) == "legacy plain string"
+
+
+def test_description_text_falls_back_to_any_language_when_ne_is_absent():
+    from casework.common.materials import description_text
+    assert description_text({"description": {"en": "An English abstract."}}) == (
+        "An English abstract.")
+
+
+def test_description_text_treats_a_whitespace_only_map_as_empty():
+    from casework.common.materials import description_text
+    assert description_text({"description": {"ne": "   \n "}}) == ""
+
+
+def test_description_ops_uses_add_so_a_missing_key_is_created():
+    """RFC-6902 `replace` requires the path to exist, and the materials this
+    stage targets have NO `description` key (verified on prod press releases and
+    court orders). `add` both creates and overwrites, so it is the only op that
+    works on a blank material."""
+    from casework.common.materials import description_ops
+    assert description_ops("यो प्रेस विज्ञप्ति हो।") == [
+        {"op": "add", "path": "/description", "value": {"ne": "यो प्रेस विज्ञप्ति हो।"}}
+    ]

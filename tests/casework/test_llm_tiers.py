@@ -96,3 +96,9 @@ def test_bootstrap_dev_true_still_forces_claude_cli(monkeypatch):
 
     assert os.environ["REVIEW_LLM_PROVIDER_PREMIUM"] == "claude_cli"
     assert os.environ["CLAUDE_CLI_MODEL_PREMIUM"] == "haiku"
+
+
+def test_evidence_notes_is_premium():
+    """It reads the source document itself -- the same shape as `description`,
+    and the brief registers it premium for that reason."""
+    assert tier_for("evidence_notes") == "premium"

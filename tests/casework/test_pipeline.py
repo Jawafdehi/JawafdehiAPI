@@ -2,7 +2,8 @@
 import pytest
 
 from casework.common.pipeline import (
-    RunReport, STAGES, order_stages, unmet_prerequisites,
+    COURT_TYPES, PRESS_TYPES, RunReport, STAGES, order_stages,
+    unmet_prerequisites,
 )
 
 CASE_NO_MD = {"slug": "a", "evidence": [
@@ -273,3 +274,44 @@ def test_allegations_provides_only_key_allegations():
     Donor patches exactly one field (enrich_allegations.py:303).
     """
     assert STAGES["allegations"].provides == ("key_allegations",)
+
+
+# ---------------------------------------------------------------------------
+# `evidence_notes` -- the per-evidence-entry note stage.
+# ---------------------------------------------------------------------------
+
+
+def test_evidence_notes_is_registered():
+    assert "evidence_notes" in STAGES
+
+
+def test_evidence_notes_is_not_named_evidence():
+    """`bind_materials.py` already owns the `evidence` array. Two stages
+    claiming one field breaks the ledger's per-(slug, stage) accounting, so the
+    note stage must NOT be called `evidence`."""
+    assert "evidence" not in STAGES
+
+
+def test_evidence_notes_provides_the_evidence_array():
+    assert STAGES["evidence_notes"].provides == ("evidence",)
+
+
+def test_evidence_notes_requires_press_and_court_materials():
+    """It reads the DOCUMENT to describe it, so a case with neither family bound
+    has nothing to write a note from."""
+    assert STAGES["evidence_notes"].requires_materials == PRESS_TYPES + COURT_TYPES
+
+
+def test_evidence_notes_declares_convert_dependency():
+    assert STAGES["evidence_notes"].requires_stages == ("convert",)
+
+
+def test_evidence_notes_requires_no_case_field():
+    """A note describes a document's role, which is derivable from the document
+    plus the case's allegations. Gating on a populated case field would strand
+    the bare DRAFT cases that are the entire point of the stage."""
+    assert STAGES["evidence_notes"].requires_fields == ()
+
+
+def test_convert_precedes_evidence_notes():
+    assert order_stages(["evidence_notes", "convert"]) == ["convert", "evidence_notes"]
