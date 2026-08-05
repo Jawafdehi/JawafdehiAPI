@@ -21,7 +21,20 @@ class SignalSource(models.TextChoices):
 # was dropped: a Case has no legal-status field (only the editorial ``state``
 # workflow), so status facts belong in the timeline, and ``raw_patch`` is the
 # escape hatch for anything the typed intents don't cover. See case_proposals.apply.
-SUPPORTED_INTENT_TYPES = ("append_timeline_entry", "link_material", "raw_patch")
+#
+# ``set_entity_outcome`` is typed rather than left to ``raw_patch`` because
+# ``raw_patch`` deliberately cannot reach ``entities`` at all: an outcome write is
+# a relationship write guarded by the ``outcome_only_on_accused`` CHECK, so a
+# generic JSON patch over Case scalars is the wrong instrument. Without it the
+# single most consequential enrichment a verdict produces — moving an acquitted
+# defendant off ``charged`` — had no reviewable path, and the August 2026 docket
+# sweep found 71 such rows live on published cases.
+SUPPORTED_INTENT_TYPES = (
+    "append_timeline_entry",
+    "link_material",
+    "raw_patch",
+    "set_entity_outcome",
+)
 
 
 class CaseUpdateProposal(models.Model):

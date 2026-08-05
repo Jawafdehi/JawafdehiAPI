@@ -17,7 +17,13 @@ from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
 from cases.caseworker_serializers import CasePatchSerializer, TimelineItemSerializer
-from cases.models import Case, CaseMaterialReference, validate_material_iri
+from cases.models import (
+    Case,
+    CaseMaterialReference,
+    RelationshipOutcome,
+    RelationshipType,
+    validate_material_iri,
+)
 
 from .models import SUPPORTED_INTENT_TYPES
 
@@ -109,6 +115,8 @@ def apply_intent(case, intent):
         result = _link_material(case, intent)
     elif itype == "raw_patch":
         result = _raw_patch(case, intent)
+    elif itype == "set_entity_outcome":
+        result = _set_entity_outcome(case, intent)
     else:
         # Every accepted type is applyable — the serializer and this dispatch share
         # one vocabulary, so there is no "staged but uncommittable" middle state.
@@ -194,3 +202,96 @@ def _raw_patch(case, intent):
     if updates:
         Case.objects.filter(pk=case.pk).update(updated_at=timezone.now(), **updates)
     return {"patched_fields": sorted(updates.keys())}
+
+
+# Terminal outcomes a proposal may set. ``charged`` is excluded on purpose: it is
+# the default a relationship already starts at, so "propose charged" is either a
+# no-op or a regression from a decided verdict back to undecided — and un-deciding
+# a case is not an enrichment, it is a correction that belongs in the admin with a
+# human looking at why.
+PROPOSABLE_OUTCOMES = frozenset(
+    {
+        RelationshipOutcome.CONVICTED,
+        RelationshipOutcome.ACQUITTED,
+        RelationshipOutcome.ABATED,
+    }
+)
+
+
+def _set_entity_outcome(case, intent):
+    """Set the verdict outcome on this case's ACCUSED entity relationships.
+
+    The one enrichment ``raw_patch`` cannot express, because ``entities`` is not a
+    Case scalar: it is a relationship guarded by the ``outcome_only_on_accused``
+    CHECK constraint. Resolving every ``nes_id`` against THIS case's own
+    relationships first is what makes that safe — a proposal cannot reach an
+    entity it was not already bound to, and cannot set an outcome on a
+    non-accused role (which the DB would reject with an IntegrityError, i.e. a
+    500 where a 400 belongs).
+
+    All-or-nothing by design. A verdict is one fact about every defendant, so a
+    partial application would leave the case asserting that some of the acquitted
+    are still merely charged — the exact defect this intent exists to remove.
+    """
+    outcomes = (intent or {}).get("outcomes")
+    if not isinstance(outcomes, list) or not outcomes:
+        raise ValidationError(
+            {"intent": "set_entity_outcome requires a non-empty `outcomes` list."}
+        )
+
+    # Only ACCUSED relationships are addressable; anything else is rejected below
+    # with the role named, rather than failing the CHECK constraint at write time.
+    by_nes_id = {rel.nes_id: rel for rel in case.entity_relationships.all()}
+    resolved = []
+    for item in outcomes:
+        if not isinstance(item, dict):
+            raise ValidationError({"intent": "each `outcomes` entry must be an object."})
+        nes_id, outcome = item.get("nes_id"), item.get("outcome")
+        if not nes_id or not outcome:
+            raise ValidationError(
+                {"intent": "each `outcomes` entry requires `nes_id` and `outcome`."}
+            )
+        if outcome not in PROPOSABLE_OUTCOMES:
+            raise ValidationError(
+                {
+                    "intent": (
+                        f"outcome '{outcome}' is not proposable. "
+                        f"Allowed: {sorted(PROPOSABLE_OUTCOMES)}."
+                    )
+                }
+            )
+        rel = by_nes_id.get(nes_id)
+        if rel is None:
+            raise ValidationError(
+                {"intent": f"'{nes_id}' is not an entity of case '{case.slug}'."}
+            )
+        if rel.relationship_type != RelationshipType.ACCUSED:
+            raise ValidationError(
+                {
+                    "intent": (
+                        f"'{nes_id}' is bound as '{rel.relationship_type}', not accused; "
+                        "an outcome is meaningful only for the accused role."
+                    )
+                }
+            )
+        resolved.append((rel, outcome))
+
+    changed = []
+    for rel, outcome in resolved:
+        if rel.outcome == outcome:
+            continue
+        previous = rel.outcome
+        rel.outcome = outcome
+        # ``save()`` (not ``queryset.update()``) so the model's own normalisation
+        # and ``full_clean()`` run, exactly as the admin edit path does. No
+        # ``update_fields``: this model has no ``updated_at``, and narrowing the
+        # write would skip nothing worth skipping on a single-column change.
+        rel.save()
+        changed.append({"nes_id": rel.nes_id, "from": previous, "to": outcome})
+
+    if changed:
+        # A relationship-only write never touches the Case row, so bump
+        # ``updated_at`` — the ETag/optimistic-concurrency basis — exactly like
+        # the relation-only PATCH path does.
+        Case.objects.filter(pk=case.pk).update(updated_at=timezone.now())
+    return {"outcomes_changed": changed, "unchanged": len(resolved) - len(changed)}
