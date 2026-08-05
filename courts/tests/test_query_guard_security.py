@@ -515,6 +515,68 @@ class TestLegitimateSelectAllowed(_QuerySecurityBase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["rows"], [["deleted-case", True]])
 
+    # -- public_projection: a caller may ASK to be narrowed ------------------
+    #
+    # The embedded MCP server serves ngm_query_judicial anonymously using a shared
+    # service account, so "does this principal hold a role?" is the wrong question
+    # for those requests — the answer depends on how that account was provisioned,
+    # and getting it wrong publishes the internal plane to the open internet. The
+    # flag lets the client state that a request is not made on a person's behalf.
+
+    def test_public_projection_flag_narrows_a_role_bearing_caller(self):
+        """The flag wins over the caller's own entitlement."""
+        CourtCase.objects.create(case_number="live-case", court_id="supreme")
+        CourtCase.objects.create(
+            case_number="deleted-case",
+            court_id="supreme",
+            is_deleted=True,
+        )
+
+        resp = self._post(
+            "SELECT case_number FROM court_cases ORDER BY case_number",
+            public_projection=True,
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["rows"], [["live-case"]])
+
+    def test_public_projection_flag_hides_internal_columns_from_a_role_holder(self):
+        resp = self._post(
+            "SELECT is_deleted FROM court_cases",
+            public_projection=True,
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @pytest.mark.security
+    def test_public_projection_flag_is_one_way(self):
+        """A falsy flag must never WIDEN a caller that had no entitlement.
+
+        Otherwise the flag would be a privilege-escalation parameter: anyone could
+        post ``public_projection: false`` and read the internal plane.
+        """
+        CourtCase.objects.create(case_number="live-case", court_id="supreme")
+        CourtCase.objects.create(
+            case_number="deleted-case",
+            court_id="supreme",
+            is_deleted=True,
+        )
+        self.client.force_authenticate(
+            user=self.nobody, token={"scope": "openid ngm.query"}
+        )
+
+        resp = self.client.post(
+            QUERY_URL,
+            {
+                "query": "SELECT case_number FROM court_cases ORDER BY case_number",
+                "public_projection": False,
+            },
+            format="json",
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["rows"], [["live-case"]])
+
     def test_columns_resembling_keywords_are_not_false_positives(self):
         # Column names that merely CONTAIN a forbidden keyword as a substring
         # (updated_at) must not trip the \bword\b denylist.

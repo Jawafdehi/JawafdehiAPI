@@ -162,7 +162,23 @@ explicitly in any centralization:
    `can_change_case`.
 4. **OAuth scope bypass (NGM SQL).** `HasNgmQueryAccess` accepts the
    `ngm.query` scope on the token *instead of* a role — for scope-only machine
-   clients (MCP).
+   clients (MCP). **Disclosure is a second, separate decision:** whether
+   `POST /query` applies `apply_public_projection` (hiding `is_deleted`,
+   soft-deleted rows and internal columns) normally follows
+   `has_ngm_query_role`, i.e. Group membership. A request may also set
+   `public_projection: true` in the body to force the narrow plane regardless of
+   its own entitlement. That flag is **one-way** — it can only turn the
+   projection on, never off — so it is safe to honour from an untrusted body, and
+   a falsy value grants nothing.
+
+   The embedded MCP server sets it on every anonymous `ngm_query_judicial`
+   request, because those authenticate as a shared service account rather than a
+   person. Without it, the safety of an unauthenticated internet-facing SQL
+   surface would depend on that account never being provisioned with `ReadOnly`
+   or an NGM role — `_sync_user` rewrites Group membership from the token's role
+   claims on every request, so such drift would silently publish the internal
+   plane. Requests carrying a real caller's forwarded bearer are unaffected, and
+   local stdio callers keep the internal plane.
 5. **Service-account subject allowlist.** `/caseworker/me` gates on `sub ∈
    OIDC_SERVICE_ACCOUNT_SUBJECTS`, orthogonal to Group roles.
 6. **Superuser sync + admin `is_staff`.** `admin` role ⇒ `is_superuser`;

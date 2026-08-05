@@ -314,8 +314,24 @@ class QueryView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # ``public_projection: true`` lets a caller REQUEST the narrower plane
+        # even when its own roles would grant the internal one. It is deliberately
+        # one-way — it can only turn the projection ON, never off — so honouring
+        # it from an untrusted body is safe.
+        #
+        # This exists because "is this caller entitled to internal columns?" and
+        # "is this request being made on someone's behalf?" are different
+        # questions, and only the client knows the second. The embedded MCP server
+        # serves ``ngm_query_judicial`` to ANONYMOUS callers using a shared
+        # service-account token, so role membership on that account is the wrong
+        # thing to infer disclosure from: provisioning it with ReadOnly (or any
+        # NGM role) would silently hand the unprojected plane — soft-deleted rows,
+        # ``is_deleted``, every internal column — to the open internet. MCP now
+        # sets this flag on those requests, so the guarantee no longer rests on
+        # how that account happens to be configured.
+        force_public_projection = bool(body.get("public_projection"))
         executable_sql = sql
-        if not has_ngm_query_role(request.user):
+        if force_public_projection or not has_ngm_query_role(request.user):
             executable_sql = query_guard.apply_public_projection(sql)
         capped = query_guard.apply_row_cap(executable_sql, max_rows)
         try:

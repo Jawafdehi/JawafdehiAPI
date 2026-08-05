@@ -13,7 +13,11 @@ from typing import Any
 import httpx
 import structlog
 
-from ..request_context import get_forwarded_headers, get_query_service_token
+from ..request_context import (
+    get_forwarded_headers,
+    get_query_service_token,
+    is_local_stdio_transport,
+)
 
 logger = structlog.get_logger()
 
@@ -116,11 +120,27 @@ async def execute_ngm_proxy_query(
     if token:
         headers["Authorization"] = f"Bearer {token}"
     # A forwarded caller bearer (HTTP transport) overrides the service token.
-    headers.update(get_forwarded_headers())
+    forwarded = get_forwarded_headers()
+    headers.update(forwarded)
+
+    body: dict[str, Any] = {"query": query, "timeout_seconds": timeout}
+    # No forwarded bearer over HTTP means this request authenticates as the shared
+    # MCP service account rather than as a person — the anonymous
+    # ``ngm_query_judicial`` path. Ask the API for the narrower public plane
+    # explicitly instead of letting it infer disclosure from that account's role
+    # membership, which would leak the internal plane to the open internet if the
+    # account were ever provisioned with ReadOnly or an NGM role.
+    #
+    # Computed here rather than at the call sites so it cannot be forgotten by a
+    # new one. stdio is excluded deliberately: there the token belongs to a
+    # trusted local operator who is entitled to the internal plane, and that is
+    # the behaviour this must not change.
+    if not forwarded and not is_local_stdio_transport():
+        body["public_projection"] = True
 
     response = await client.post(
         f"{base_url}/api/query/",
-        json={"query": query, "timeout_seconds": timeout},
+        json=body,
         headers=headers,
         timeout=_get_proxy_http_timeout(),
     )

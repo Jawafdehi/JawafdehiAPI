@@ -76,6 +76,14 @@ reads and writes — including the rules `docs/security/authz-model.md` pins on
 MCP as a principal: the `ngm.query` scope-only bypass and the service-account
 subject allowlist on `/api/caseworker/me`.
 
+`ngm_query_judicial` is the one anonymous tool that does not run as the caller:
+with no bearer to forward it authenticates with `MCP_QUERY_API_TOKEN`, a shared
+service account. Those requests therefore send `public_projection: true`, which
+forces the API's narrow public plane no matter what roles that account holds.
+The flag is one-way — it can only narrow — so the guarantee does not depend on
+how the account is provisioned. A forwarded caller bearer is unaffected, and
+local stdio keeps the internal plane.
+
 MCP rejects unrecognized `Host` and `Origin` headers. The host and origin from
 `OIDC_RESOURCE` plus local loopback hosts are trusted automatically; additional
 DNS names go in `MCP_ALLOWED_HOSTS` and browser origins in
