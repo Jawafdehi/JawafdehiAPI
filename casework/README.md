@@ -427,8 +427,24 @@ Read `*.created.jsonl` before an apply. Its `outcome` column is the whole story:
 | `created` / `would-create` | A new NES entity, bound to the case |
 | `already-exists` | Someone got there first (409); bound to theirs |
 | `reused` | A second spelling of a name created earlier in this run |
-| `skipped` | No prefix, a prefix whose parent branch does not exist, or no slug |
+| `skipped` | One of the four gates below refused it; the `reason` column says which |
 | `error` | The POST failed; the name stays unmatched, the case keeps its other binds |
+
+#### What is allowed to become an entity
+
+Four gates run in front of every POST, cheapest and most categorical first. A refused
+name still **binds** whatever it matched — these gate creation only.
+
+| Gate | Refuses |
+|------|---------|
+| Section | Anything from the `location` section. NES already holds all 77 districts under official codes (`location/district/jhapa-np0104`), so a location created here is always a duplicate or junk |
+| Name shape | `_name_vetoes`: a composite `Activity - Location`, a lone token, an all-generic institution name |
+| `is_named_entity` | Anything the extraction did not confirm names one specific thing. A **missing** field refuses too |
+| Identity | No prefix, a prefix whose parent branch does not exist, or no slug |
+
+`is_named_entity` fails closed on purpose. A prompt regression that drops the field shows
+up as `0 created` in the summary, which is visible and fixable; defaulting the other way
+fills NES with entries nobody can delete.
 
 Three things to know before you run it:
 
@@ -438,9 +454,11 @@ Three things to know before you run it:
   came from, which is one source, not two.
 - **An already-enriched case creates nothing.** The idempotency gate skips any case
   already holding a `related` bind, before the create step runs. Use `--force`.
-- **The resolver's name vetoes no longer block anything.** Names it judged not to be
-  entities at all — `गैरकानूनी आर्जित घरजग्गा सम्पत्ति - काठमाडौं`, a description of
-  seized property — are created. Filtering them is a later pass.
+- **The slug comes from the English name when there is one.** Most firms in these court
+  orders are English names written in Devanagari, and transliterating them back gives
+  `phareshta-debhalapamenta-enda-indashtrija` for "Forest Development and Industries".
+  The IRI is permanent, so `created.jsonl` carries a `name_en` column worth reading
+  before an apply.
 
 ### 4. Consolidate run logs — `ledger`
 

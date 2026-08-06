@@ -144,12 +144,26 @@ class TestDonorFidelity:
         # silent edit to them is the failure this class exists to catch.
         for anchor in ("PART 1 — LOCATION ENTITIES",
                        "DO NOT extract accused home addresses",
-                       'The entity_name should include context in the format: '
-                       '"Organisation/Activity - Location"',
                        "PART 3 — ACCUSED NOTES",
                        "Only include primary accused persons. Keep notes under 80 chars."):
             assert anchor in donor["SYSTEM_PROMPT"], "anchor is not donor text"
             assert anchor in ere.SYSTEM_PROMPT
+
+    def test_the_composite_location_name_is_a_deliberate_divergence(self, donor):
+        # THE ONE DONOR RULE WE REFUSE. The donor tells the model to name a
+        # location "Organisation/Activity - Location", which is why the
+        # 2026-08-05 production run extracted `घरजग्गा सम्पत्ति - काठमाडौं` -- a
+        # description of seized property -- and was about to mint it as an NES
+        # entity. The composite also scores 0.00 against the canonical district
+        # it was meant to name, so it bound nothing either.
+        #
+        # Asserted against the donor as well as against us: if the donor text
+        # ever changes, this stops being a divergence and the test should be
+        # revisited rather than silently passing.
+        composite_rule = ('The entity_name should include context in the format: '
+                          '"Organisation/Activity - Location"')
+        assert composite_rule in donor["SYSTEM_PROMPT"]
+        assert composite_rule not in ere.SYSTEM_PROMPT
 
     def test_system_prompt_offers_every_section_the_binder_can_write(self):
         # Without this, widening `plan_case_entities` to all nine sections is dead
@@ -2831,10 +2845,12 @@ CREATE_RESPONSE = json.dumps({
     "entities": [
         {"entity_name": "हेम राज बिष्ट", "relationship_type": "accused",
          "entity_prefix": "person", "entity_type": "Person",
+         "is_named_entity": True, "name_en": "",
          "notes": "तत्कालीन प्रमुख"},
         {"entity_name": "वन निर्देशनालय, धनगढी", "relationship_type": "related",
          "entity_prefix": "organization/government/district/dfo",
          "entity_type": "GovernmentOrganization",
+         "is_named_entity": True, "name_en": "",
          "notes": "आरोपी कार्यरत रहेको निकाय"},
     ],
     "accused_notes": [],
@@ -2921,14 +2937,16 @@ def test_the_created_entity_cites_the_material_it_came_from(
 
 TWO_SPELLINGS_RESPONSE = json.dumps({
     "entities": [
-        {"entity_name": "वन निदेशनालय, धनगढी - कैलाली जिल्ला",
+        {"entity_name": "वन निदेशनालय, धनगढी",
          "relationship_type": "related",
          "entity_prefix": "organization/government/district/dfo",
-         "entity_type": "GovernmentOrganization", "notes": "क"},
-        {"entity_name": "वन निदेशनालय, धनगढी - कैलाली जिल्ला ",
-         "relationship_type": "location",
+         "entity_type": "GovernmentOrganization",
+         "is_named_entity": True, "name_en": "", "notes": "क"},
+        {"entity_name": "वन निदेशनालय, धनगढी ",
+         "relationship_type": "related",
          "entity_prefix": "organization/government/district/dfo",
-         "entity_type": "GovernmentOrganization", "notes": "ख"},
+         "entity_type": "GovernmentOrganization",
+         "is_named_entity": True, "name_en": "", "notes": "ख"},
     ],
     "accused_notes": [],
 })
@@ -2945,17 +2963,19 @@ def test_one_office_named_twice_creates_one_entity(
               argv=["--apply", "--create-entities"])
 
     assert len(api.create_entity_calls) == 1
-    # Both binds point at the single created entity, in their own sections.
+    # Two spellings, one entity, and one bind row -- the case cannot carry the
+    # same entity twice in the same section, so the second bind merges away.
     _slug, _path, items, _etag = api.replace_list_calls[0]
-    assert len({item["nes_id"] for item in items}) == 1
-    assert sorted(item["relationship_type"] for item in items) == [
-        "location", "related"]
+    assert len(items) == 1
+    assert items[0]["nes_id"].endswith("/vana-nideshanalaya-dhanagadhi")
+    assert items[0]["relationship_type"] == "related"
 
 
 BAD_PREFIX_RESPONSE = json.dumps({
     "entities": [
         {"entity_name": "हेम राज बिष्ट", "relationship_type": "accused",
-         "entity_prefix": "persen", "entity_type": "Person", "notes": "क"},
+         "entity_prefix": "persen", "entity_type": "Person",
+         "is_named_entity": True, "name_en": "", "notes": "क"},
     ],
     "accused_notes": [],
 })
@@ -3232,3 +3252,240 @@ def test_a_500_propagates_untouched():
         api.create_entity({"prefix": "person", "slug": "x", "type": "Person",
                            "name": {"ne": "क"}})
     assert "500" in str(caught.value)
+
+
+# --------------------------------------------------------------------------
+# Four gates in front of the POST.
+#
+# Creating an entity is permanent and public, so each gate refuses on a
+# different ground: the section it came from, the shape of the string, the
+# model's own verdict on whether the string names a thing, and identity.
+# A refused name still BINDS whatever it matched -- these gate creation only.
+# See docs/entity-extraction-hardening-design.md.
+# --------------------------------------------------------------------------
+
+
+LOCATION_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "काठमाडौं", "relationship_type": "location",
+         "entity_prefix": "location/district", "entity_type": "Place",
+         "is_named_entity": True, "name_en": "Kathmandu",
+         "notes": "जग्गा तथा शेयर लगानी रहेको जिल्ला"},
+    ],
+    "accused_notes": [],
+})
+
+
+def test_a_location_is_never_created_even_when_everything_else_is_valid(
+    monkeypatch, patched_fetch_markdown
+):
+    # NES already holds all 77 districts under official codes
+    # (location/district/kailali-np0771). A location this pipeline creates is
+    # therefore always a duplicate of a canonical district or junk -- there is
+    # no third case.
+    case = dict(PRESS_ONLY_CASE, slug="case-location-nocreate", entities=[])
+    api = _SearchStubApi([case], {"काठमाडौं": []})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: LOCATION_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    assert api.create_entity_calls == []
+    row, = _created_rows()
+    assert row["outcome"] == "skipped"
+    assert "location" in row["reason"]
+
+
+COMPOSITE_RELATED_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "घरजग्गा सम्पत्ति - काठमाडौं", "relationship_type": "related",
+         "entity_prefix": "organization", "entity_type": "Organization",
+         "is_named_entity": True, "name_en": "Real estate property - Kathmandu",
+         "notes": "जफत गरिएको सम्पत्ति"},
+    ],
+    "accused_notes": [],
+})
+
+
+def test_a_composite_name_in_the_related_section_is_never_created(
+    monkeypatch, patched_fetch_markdown
+):
+    # The backstop. `_name_vetoes` catches nothing in the current production
+    # sample that the location gate does not already catch, but a composite
+    # reaching the RELATED section would otherwise create junk for free -- and
+    # the model claiming is_named_entity=True does not make it a thing.
+    case = dict(PRESS_ONLY_CASE, slug="case-composite-related", entities=[])
+    api = _SearchStubApi([case], {"घरजग्गा सम्पत्ति - काठमाडौं": []})
+    _run_main(monkeypatch, api,
+              invoke_text_stub=lambda **kw: COMPOSITE_RELATED_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    assert api.create_entity_calls == []
+    row, = _created_rows()
+    assert row["outcome"] == "skipped"
+    assert "composite" in row["reason"]
+
+
+def _named_entity_response(flag):
+    """One related company, with `is_named_entity` set to whatever `flag` is.
+
+    `flag is None` omits the key entirely -- the prompt-regression shape.
+    """
+    entity = {"entity_name": "सामुदायिक वन उपभोक्ता समूह",
+              "relationship_type": "related",
+              "entity_prefix": "organization", "entity_type": "Organization",
+              "name_en": "Community Forest User Group",
+              "notes": "रुख कटान गरिएको भनिएको समूह"}
+    if flag is not None:
+        entity["is_named_entity"] = flag
+    return json.dumps({"entities": [entity], "accused_notes": []})
+
+
+def test_is_named_entity_false_blocks_creation(monkeypatch, patched_fetch_markdown):
+    # "Community Forest User Group" is a category of body, not a named one.
+    # `_name_vetoes` misses it: the generic rule needs EVERY word in its
+    # 53-word list, and सामुदायिक and समूह are not in it. Only the model,
+    # which read the passage, can tell.
+    case = dict(PRESS_ONLY_CASE, slug="case-not-named", entities=[])
+    api = _SearchStubApi([case], {"सामुदायिक वन उपभोक्ता समूह": []})
+    _run_main(monkeypatch, api,
+              invoke_text_stub=lambda **kw: _named_entity_response(False),
+              argv=["--apply", "--create-entities"])
+
+    assert api.create_entity_calls == []
+    row, = _created_rows()
+    assert row["outcome"] == "skipped"
+    assert "named entity" in row["reason"]
+
+
+def test_a_missing_is_named_entity_blocks_creation(
+    monkeypatch, patched_fetch_markdown
+):
+    # FAIL CLOSED. A prompt regression that drops the field shows up as
+    # `0 created` in the summary, which is visible and fixable. Defaulting the
+    # other way fills NES with junk that cannot be deleted.
+    case = dict(PRESS_ONLY_CASE, slug="case-flag-absent", entities=[])
+    api = _SearchStubApi([case], {"सामुदायिक वन उपभोक्ता समूह": []})
+    _run_main(monkeypatch, api,
+              invoke_text_stub=lambda **kw: _named_entity_response(None),
+              argv=["--apply", "--create-entities"])
+
+    assert api.create_entity_calls == []
+    row, = _created_rows()
+    assert row["outcome"] == "skipped"
+
+
+def test_is_named_entity_true_still_creates(monkeypatch, patched_fetch_markdown):
+    case = dict(PRESS_ONLY_CASE, slug="case-named-true", entities=[])
+    api = _SearchStubApi([case], {"सामुदायिक वन उपभोक्ता समूह": []})
+    _run_main(monkeypatch, api,
+              invoke_text_stub=lambda **kw: _named_entity_response(True),
+              argv=["--apply", "--create-entities"])
+
+    payload, = api.create_entity_calls
+    assert payload["slug"] == "community-forest-user-group"
+
+
+def test_a_gated_name_still_binds_when_the_resolver_matched_it(
+    monkeypatch, patched_fetch_markdown
+):
+    # The gates stop CREATION, never binding. A location that matches its
+    # canonical district must still reach the case.
+    case = dict(PRESS_ONLY_CASE, slug="case-gate-still-binds", entities=[])
+    api = _SearchStubApi([case], {"काठमाडौं": [
+        {"id": "https://jawafdehi.org/entity/location/district/kathmandu-np0261",
+         "title": {"ne": "काठमाडौं", "en": "Kathmandu"}, "score": 112.6},
+    ]})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: LOCATION_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    assert api.create_entity_calls == []
+    _slug, _path, items, _etag = api.replace_list_calls[0]
+    assert [i["nes_id"] for i in items] == [
+        "https://jawafdehi.org/entity/location/district/kathmandu-np0261"]
+
+
+# --------------------------------------------------------------------------
+# The English name reaches the payload, not just the slug.
+# --------------------------------------------------------------------------
+
+
+def test_the_payload_carries_both_names_when_english_is_supplied(
+    monkeypatch, patched_fetch_markdown
+):
+    # Canonical NES entities carry both ({"ne": "काठमाडौं", "en": "Kathmandu"}).
+    # Ours carried `ne` only, so every entity we created was missing its
+    # English name for the English UI and for search.
+    case = dict(PRESS_ONLY_CASE, slug="case-payload-en", entities=[])
+    api = _SearchStubApi([case], {"सामुदायिक वन उपभोक्ता समूह": []})
+    _run_main(monkeypatch, api,
+              invoke_text_stub=lambda **kw: _named_entity_response(True),
+              argv=["--apply", "--create-entities"])
+
+    payload, = api.create_entity_calls
+    assert payload["name"] == {"ne": "सामुदायिक वन उपभोक्ता समूह",
+                               "en": "Community Forest User Group"}
+
+
+NO_ENGLISH_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "हेम राज बिष्ट", "relationship_type": "accused",
+         "entity_prefix": "person", "entity_type": "Person",
+         "is_named_entity": True, "name_en": "",
+         "notes": "तत्कालीन प्रमुख"},
+    ],
+    "accused_notes": [],
+})
+
+
+def test_the_payload_omits_the_english_name_rather_than_sending_it_blank(
+    monkeypatch, patched_fetch_markdown
+):
+    case = dict(PRESS_ONLY_CASE, slug="case-payload-no-en", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": []})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: NO_ENGLISH_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    payload, = api.create_entity_calls
+    assert payload["name"] == {"ne": "हेम राज बिष्ट"}
+    assert payload["slug"] == "hema-raja-bishta"
+
+
+# --------------------------------------------------------------------------
+# The prompt itself.
+# --------------------------------------------------------------------------
+
+
+def test_the_prompt_asks_for_both_new_fields():
+    assert "is_named_entity" in ere.SYSTEM_PROMPT
+    assert "name_en" in ere.SYSTEM_PROMPT
+
+
+def test_the_prompt_no_longer_teaches_the_composite_location_name():
+    # Line 204 used to mandate "Organisation/Activity - Location", which is why
+    # `घरजग्गा सम्पत्ति - काठमाडौं` was extracted at all. Both dry-run cases
+    # produced one, and the composite also scores 0.00 against the canonical
+    # district it was supposed to name.
+    assert "Activity - Location" not in ere.SYSTEM_PROMPT
+    # The composite survives only as a labelled counter-example. Showing the
+    # model the exact string it used to emit, marked WRONG, beats deleting it.
+    correct, _sep, wrong = ere.SYSTEM_PROMPT.partition(
+        "Examples of WRONG location names:")
+    assert "स्वास्थ्य उपकरण खरिद - जनकपुरधाम" not in correct
+    assert "स्वास्थ्य उपकरण खरिद - जनकपुरधाम" in wrong
+
+
+def test_the_prompt_no_longer_demands_blank_location_notes():
+    # The activity context moves out of the name and into notes, so the old
+    # "leave notes BLANK" rule would now throw it away.
+    assert 'Leave notes BLANK ("") for all location entities' not in ere.SYSTEM_PROMPT
+
+
+def test_the_prompt_rules_out_media_that_only_reported_the_case():
+    # `नयाँ पत्रिका` was extracted as `related` for publishing the story. A
+    # newspaper that reported a case is a source, not a participant.
+    assert "नयाँ पत्रिका" in ere.SYSTEM_PROMPT
+
+
+def test_the_creation_block_explains_both_new_fields():
+    section = ere.prefix_prompt_section(["person", "organization"])
+    assert "is_named_entity" in section
+    assert "name_en" in section

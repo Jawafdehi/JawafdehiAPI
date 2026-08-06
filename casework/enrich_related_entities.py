@@ -137,6 +137,7 @@ from casework.entity_resolver import (
     NO_MATCH,
     REVIEW,
     Decision,
+    _name_vetoes,
     apply_document_veto,
     normalise_name,
     resolve,
@@ -200,17 +201,21 @@ STRICT RULES:
 - DO NOT extract the location of courts or government inquiry offices.
 - Extract 1 location for simple cases. Extract 2-3 only if the case genuinely spans
   multiple districts.
-- Leave notes BLANK ("") for all location entities.
-- The entity_name should include context in the format: "Organisation/Activity - Location"
+- The entity_name must be the PLACE NAME ALONE. Never combine it with an activity,
+  an organisation, or anything else. The place is the entity; what happened there
+  belongs in notes.
+- Put the activity context in notes instead, in Nepali.
 
-Examples of CORRECT location entity names:
-- "साझा भण्डार सहकारी - सुर्खेत जिल्ला"
-- "स्वास्थ्य उपकरण खरिद - जनकपुरधाम"
-- "भरत ताल निर्माण परियोजना - सर्लाही जिल्ला"
-- "नापी कार्यालय - खैरहनी नगरपालिका"
-- (if no specific activity context, just the location name: "काठमाडौं")
+Examples of CORRECT location entities:
+- "सुर्खेत"      notes: "साझा भण्डार सहकारीको कारोबार भएको जिल्ला"
+- "जनकपुरधाम"    notes: "स्वास्थ्य उपकरण खरिद भएको स्थान"
+- "सर्लाही"      notes: "भरत ताल निर्माण परियोजना रहेको जिल्ला"
+- "खैरहनी नगरपालिका"  notes: "नापी कार्यालयको कारोबार भएको नगरपालिका"
+- "काठमाडौं"     notes: "जग्गा तथा शेयर लगानी रहेको जिल्ला"
 
 Examples of WRONG location names:
+- "स्वास्थ्य उपकरण खरिद - जनकपुरधाम" ← an activity glued to a place, NEVER do this
+- "घरजग्गा सम्पत्ति - काठमाडौं" ← a description of property, not a place
 - "तनहुँ जिल्ला" ← accused home address, SKIP
 - "काठमाडौं" ← if only reason is court/CIAA office, SKIP
 
@@ -243,6 +248,12 @@ Extract ALL of these categories that appear in the documents:
   Only extract named CIAA investigation officers if they are specifically named
   and their investigation is directly relevant.
   Example: "रविन्द्र कुमार बुढाप्रिथी"  notes: "अनुसन्धान अधिकृत, CIAA"
+
+  MEDIA — DO NOT extract a newspaper, portal or broadcaster whose only role was
+  REPORTING the case. It is a source, not a participant.
+  Example of what to SKIP: "नयाँ पत्रिका" (published the story that prompted the
+  complaint). Extract a media organisation only when it is itself accused, owns
+  assets at issue, or received the funds.
 
 Notes must never be blank for related entities. Always describe the specific connection.
 Only extract entities with CONFIRMED connections — not people who were later acquitted.
@@ -286,6 +297,8 @@ Output ONLY this JSON object, no other text:
       "relationship_type": "location", "related", "accused", "alleged" or "witness",
       "entity_prefix": "the category from the list below",
       "entity_type": "Person", "Organization", "GovernmentOrganization" or "Place",
+      "is_named_entity": true or false,
+      "name_en": "the name in English, or \"\" if you cannot give one",
       "notes": "specific description"
     }
   ],
@@ -321,6 +334,38 @@ A district is `location/district`.
 
 Set `entity_type` to match: `Person` for a person, `GovernmentOrganization` for
 a state body, `Organization` for a company or NGO, `Place` for a location.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+IS THIS A NAMED THING? (is_named_entity)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Set `is_named_entity` to true ONLY when the string names ONE SPECIFIC thing that
+exists in the world and could be looked up in a register. Set it to false when
+the string is a CATEGORY of thing, a description, or a phrase.
+
+  true   "विध मानेजमेन्ट प्रा.लि."      one registered company
+  true   "हेम राज विष्ट"                 one person
+  true   "कर्मचारी सञ्चय कोष"            one named state fund
+  false  "सामुदायिक वन उपभोक्ता समूह"   a KIND of group, not one named group
+  false  "घरजग्गा सम्पत्ति"              a description of property
+  false  "ठेक्का प्राप्त गर्ने कम्पनी"    a role, not a name
+
+When false, the entity is still recorded against the case but no new register
+entry is made for it. When you are unsure, answer false.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ENGLISH NAME (name_en)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Give the name in English. Many Nepali documents write English company names in
+Devanagari -- convert those BACK to the English they came from rather than
+spelling them out phonetically.
+
+  "फरेष्ट डेभलपमेन्ट एण्ड इण्डष्ट्रिज"  ->  "Forest Development and Industries"
+  "ग्लोवल वाइल्ड फार्मिङ प्रा.लि."      ->  "Global Wild Farming Pvt. Ltd."
+  "कर्मचारी सञ्चय कोष"                  ->  "Employees Provident Fund"
+  "हेम राज विष्ट"                        ->  "Hem Raj Bista"
+
+Return "" if you genuinely cannot give one. Never guess a company's registered
+English name when the document does not support it.
 """
 
 
@@ -352,6 +397,11 @@ RELATIONSHIP_TYPES = (
     "alleged", "accused", "related", "witness", "opposition", "victim",
     "location", "respondent", "petitioner",
 )
+
+#: The one section that never creates. NES holds all 77 districts from a
+#: gazetteer ingest, keyed by official code (`location/district/jhapa-np0104`),
+#: so anything this stage would mint here is a duplicate or junk.
+LOCATION_SECTION = "location"
 
 #: Where a section the API rejects lands. `related` and not a guess at the
 #: intended meaning: it is what the extraction prompt already defaults to
@@ -1020,12 +1070,14 @@ def create_entities_for_unmatched(api, plan, items_by_name, live_prefixes,
         item = items_by_name.get(name) or {}
         prefix = (item.get("entity_prefix") or "").strip().lower()
         etype = (item.get("entity_type") or "").strip()
+        name_en = (item.get("name_en") or "").strip()
         row = {"slug": plan.slug, "extracted": name, "role": section,
                "prefix": prefix, "type": etype, "citation": citation,
-               "nes_id": "", "outcome": "", "reason": ""}
+               "name_en": name_en, "nes_id": "", "outcome": "", "reason": ""}
 
-        slug = entity_slug(name)
-        refusal = _cannot_create(prefix, etype, slug, live_prefixes)
+        slug = entity_slug(name, name_en)
+        refusal = _cannot_create(prefix, etype, slug, live_prefixes,
+                                 section=section, name=name, item=item)
         if refusal:
             row.update(outcome="skipped", reason=refusal)
             rows.append(row)
@@ -1046,7 +1098,7 @@ def create_entities_for_unmatched(api, plan, items_by_name, live_prefixes,
         else:
             try:
                 created = api.create_entity(_authoring_payload(
-                    prefix, slug, etype, name, citation))
+                    prefix, slug, etype, name, citation, name_en))
                 iri = created.get("@id") or iri
                 row.update(outcome="created", nes_id=iri)
             except EntityAlreadyExists:
@@ -1065,13 +1117,40 @@ def create_entities_for_unmatched(api, plan, items_by_name, live_prefixes,
     return bind_items, still_unmatched, rows
 
 
-def _cannot_create(prefix, etype, slug, live_prefixes):
+def _cannot_create(prefix, etype, slug, live_prefixes, *, section, name, item):
     """Why this name cannot become an entity, or "" when it can.
 
     One function so every refusal reads the same way in `created.jsonl`, and so
-    the order is fixed: identity first (is there a prefix and a type at all),
-    then whether the prefix may be used, then whether the name yields a slug.
+    the order is fixed: cheapest and most categorical first.
+
+    1. SECTION. NES already holds all 77 districts under official codes
+       (`location/district/kailali-np0771`), from a gazetteer ingest. A location
+       created here is therefore always a duplicate of a canonical district or
+       junk -- there is no third case. Bind them, never mint them.
+    2. NAME SHAPE. `_name_vetoes` is the resolver's own judgement that a string
+       is too weak to identify anything: a composite `Activity - Location`, a
+       lone token, an all-generic institution name. It no longer blocks binding
+       (2026-08-05), but a string the resolver will not trust to MATCH is not
+       one to CREATE from.
+    3. THE MODEL'S VERDICT. `is_named_entity` is the only gate that can tell
+       `सामुदायिक वन उपभोक्ता समूह` -- a kind of group -- from a named one.
+       `_name_vetoes` cannot: its generic rule needs EVERY word in a 53-word
+       list, and neither सामुदायिक nor समूह is in it.
+
+       ABSENT MEANS NO. A prompt regression that drops the field then surfaces
+       as `0 created` in the summary, which is visible and fixable; defaulting
+       the other way fills NES with entries nobody can delete.
+    4. IDENTITY. Prefix, type, slug -- can we even build an IRI.
     """
+    if section == LOCATION_SECTION:
+        return ("location entities are bind-only: NES already holds the "
+                "canonical districts under official codes")
+    veto = _name_vetoes(name)
+    if veto:
+        return f"name is not creatable: {veto}"
+    if item.get("is_named_entity") is not True:
+        return ("extraction did not confirm this is a specific named entity "
+                "(is_named_entity)")
     if not prefix or not etype:
         return "extraction gave no entity_prefix/entity_type"
     if not prefix_is_creatable(prefix, live_prefixes):
@@ -1083,17 +1162,23 @@ def _cannot_create(prefix, etype, slug, live_prefixes):
     return ""
 
 
-def _authoring_payload(prefix, slug, etype, name, citation):
+def _authoring_payload(prefix, slug, etype, name, citation, name_en=""):
     """The API's authoring form for a create POST.
 
     No `@id`: `normalize_authoring_payload` builds it from prefix+slug and
     validates the shape while doing so (`entities/write_validation.py:113`).
 
     `name` is a language map keyed `ne`, because every name here comes out of a
-    Nepali court document and claiming it as English would be wrong. `citation`
-    is a free-form schema.org property the authoring path copies through
-    verbatim; it is omitted rather than sent empty when the case had no source
-    material to name.
+    Nepali court document. `en` joins it when the extraction supplied one:
+    canonical NES entities carry both (`{"ne": "काठमाडौं", "en": "Kathmandu"}`)
+    and every entity this stage created before 2026-08-06 was missing its
+    English name, so it was invisible to the English UI and to English search.
+    Omitted rather than sent blank -- an empty `en` is a claim that the name has
+    no English form, which is different from not knowing it.
+
+    `citation` is a free-form schema.org property the authoring path copies
+    through verbatim; it is omitted rather than sent empty when the case had no
+    source material to name.
     """
     payload = {
         "prefix": prefix,
@@ -1102,6 +1187,8 @@ def _authoring_payload(prefix, slug, etype, name, citation):
         "name": {"ne": name},
         "change_description": "Created by casework.enrich_related_entities",
     }
+    if name_en:
+        payload["name"]["en"] = name_en
     if citation:
         payload["citation"] = citation
     return payload

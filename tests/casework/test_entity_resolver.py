@@ -14,6 +14,7 @@ from casework.entity_resolver import (
     ELECTION_RECORD_MARKERS,
     MIN_BIND_SCORE,
     NO_MATCH,
+    _name_vetoes,
     PROVINCE_NAME_FORMS,
     REVIEW,
     apply_document_veto,
@@ -1066,3 +1067,72 @@ def test_the_devanagari_title_is_preferred_when_both_are_present():
         "अनिष श्रेष्ठ", "Anish Shrestha")
     # And it still binds that way -- this fix must not break Latin extractions.
     assert resolve("Anish Shrestha", [candidate]).verdict == BIND
+
+
+# --------------------------------------------------------------------------
+# A district name is one token, and that is not a weakness.
+#
+# The single-token veto exists because a lone token is a weak anchor in an open
+# name space -- one surname, one word of a firm's name. Districts are the
+# opposite: a closed gazetteer of 77, ingested with official codes
+# (location/district/jhapa-np0104), where the whole name IS one token. Vetoing
+# them means the location section can never bind anything, which is what the
+# 2026-08-06 extraction hardening found. See
+# docs/entity-extraction-hardening-design.md.
+# --------------------------------------------------------------------------
+
+
+def test_a_single_token_district_name_binds_its_gazetteer_entry():
+    district = _candidate(
+        "https://jawafdehi.org/entity/location/district/kathmandu-np0261",
+        ne="काठमाडौं", en="Kathmandu")
+    decision = resolve("काठमाडौं", [district])
+    assert decision.verdict == BIND
+    assert decision.nes_id.endswith("/location/district/kathmandu-np0261")
+
+
+def test_a_single_token_province_name_binds_too():
+    province = _candidate(
+        "https://jawafdehi.org/entity/location/province/koshi-np01",
+        ne="कोशी", en="Koshi")
+    assert resolve("कोशी", [province]).verdict == BIND
+
+
+def test_the_exemption_does_not_reach_the_bare_location_prefix():
+    # `location/` holds countries and hand-added places with no gazetteer code.
+    # A lone token there is the weak anchor the veto was written for -- and
+    # `test_single_token_name_goes_to_review` pins the country case.
+    place = _candidate("https://jawafdehi.org/entity/location/kathamadaum-98646f",
+                       ne="काठमाडौं")
+    decision = resolve("काठमाडौं", [place])
+    assert decision.verdict == REVIEW
+    assert "single token" in decision.reason
+
+
+def test_the_exemption_does_not_reach_organisations():
+    org = _candidate("https://jawafdehi.org/entity/organization/kathamadaum",
+                     ne="काठमाडौं")
+    assert resolve("काठमाडौं", [org]).verdict == REVIEW
+
+
+def test_a_composite_name_is_still_vetoed_against_a_district():
+    # The exemption is for the single-token rule only. `घरजग्गा सम्पत्ति -
+    # काठमाडौं` describes seized property; matching it to Kathmandu district
+    # would assert the description IS the district.
+    district = _candidate(
+        "https://jawafdehi.org/entity/location/district/kathmandu-np0261",
+        ne="काठमाडौं", en="Kathmandu")
+    decision = resolve("घरजग्गा सम्पत्ति - काठमाडौं", [district])
+    assert decision.verdict != BIND
+    # Refused on score here, before the veto is consulted -- but the veto is
+    # still armed behind it, and it is the one the CREATE gate relies on.
+    assert "composite" in _name_vetoes("घरजग्गा सम्पत्ति - काठमाडौं",
+                                       district["id"])
+
+
+def test_name_vetoes_without_a_candidate_still_refuses_a_single_token():
+    # The create gate calls it with no candidate at all
+    # (`enrich_related_entities._cannot_create`). Nothing to exempt against,
+    # so every veto stays on.
+    assert "single token" in _name_vetoes("काठमाडौं")
+    assert _name_vetoes("काठमाडौं", None) == _name_vetoes("काठमाडौं")

@@ -6,7 +6,11 @@ they live apart from `enrich_related_entities` and are tested without a harness.
 
 import pytest
 
-from casework.entity_identity import entity_slug, prefix_is_creatable
+from casework.entity_identity import (
+    MAX_SLUG_LENGTH,
+    entity_slug,
+    prefix_is_creatable,
+)
 
 # The live prefix list is `SELECT DISTINCT prefix` over existing entities
 # (`entities/persistence.py:313`), so it is whatever is in use -- not a
@@ -123,3 +127,64 @@ def test_a_deeper_leaf_needs_its_immediate_parent_not_just_a_grandparent():
     # any ancestor rather than the immediate parent would let a typo'd middle
     # segment through.
     assert prefix_is_creatable("organization/government/revenue/customs", LIVE) is False
+
+
+# --------------------------------------------------------------------------
+# The English name decides the slug.
+#
+# These firms are English names WRITTEN IN DEVANAGARI, so sounding them back
+# out gives `phareshta-debhalapamenta-enda-indashtrija` for "Forest Development
+# and Industries". The IRI is permanent, so that is not merely ugly: a
+# caseworker adding the same firm by hand authors
+# `forest-development-and-industries`, and NES ends up holding the company
+# twice with nothing linking the two.
+# --------------------------------------------------------------------------
+
+
+def test_slug_prefers_the_english_name_when_the_extraction_supplies_one():
+    slug = entity_slug("फरेष्ट डेभलपमेन्ट एण्ड इण्डष्ट्रिज",
+                       name_en="Forest Development and Industries")
+    assert slug == "forest-development-and-industries"
+
+
+def test_slug_transliterates_when_no_english_name_is_supplied():
+    # Unchanged behaviour: a genuinely Nepali name has no English form to
+    # prefer, and transliteration is right for it.
+    assert entity_slug("हेम राज विष्ट") == "hema-raja-vishta"
+
+
+def test_slug_falls_back_to_transliteration_when_english_yields_nothing():
+    # The model returned punctuation, or a string of nothing sluggable. Falling
+    # back beats returning "" -- "" makes the caller skip a real entity.
+    assert entity_slug("हेम राज विष्ट", name_en="!!!") == "hema-raja-vishta"
+
+
+def test_slug_falls_back_when_the_english_name_is_blank():
+    assert entity_slug("हेम राज विष्ट", name_en="") == "hema-raja-vishta"
+
+
+def test_slug_falls_back_when_the_english_name_is_not_a_string():
+    assert entity_slug("हेम राज विष्ट", name_en=123) == "hema-raja-vishta"
+
+
+def test_an_english_slug_is_length_capped_like_any_other():
+    long_en = "Global Wild Farming and Agroforestry and Timber and Nursery " \
+              "and Plantation Private Limited Company"
+    slug = entity_slug("ग्लोवल वाइल्ड फार्मिङ", name_en=long_en)
+    assert len(slug) <= MAX_SLUG_LENGTH
+    # Cut on a hyphen, so the slug never ends mid-word.
+    assert not slug.endswith("-")
+    assert long_en.lower().startswith(slug.split("-")[0])
+
+
+def test_an_english_slug_is_stable_across_calls():
+    # A re-run must find the entity it created, not mint a second one.
+    args = ("ग्लोवल वाइल्ड फार्मिङ एण्ड एग्रोफरेष्ट्री प्रा.लि.",)
+    kwargs = {"name_en": "Global Wild Farming and Agroforestry Pvt. Ltd."}
+    assert entity_slug(*args, **kwargs) == entity_slug(*args, **kwargs)
+
+
+def test_the_english_slug_drops_punctuation_the_iri_grammar_forbids():
+    slug = entity_slug("विध मानेजमेन्ट प्रा.लि.",
+                       name_en="Vidh Management Pvt. Ltd.")
+    assert slug == "vidh-management-pvt-ltd"

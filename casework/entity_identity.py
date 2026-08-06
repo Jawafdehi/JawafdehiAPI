@@ -40,8 +40,33 @@ MAX_SLUG_LENGTH = 80
 _PREFIX_RE = re.compile(r"^[a-z0-9_]+(?:/[a-z0-9_]+){0,3}$")
 
 
-def entity_slug(name: str) -> str:
+def _slugify(text) -> str:
+    """Lowercase, hyphenate, trim to `MAX_SLUG_LENGTH`. "" if nothing survives."""
+    if not text or not isinstance(text, str):
+        return ""
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    if len(slug) > MAX_SLUG_LENGTH:
+        # Cut at a hyphen so the slug ends on a whole word rather than mid-name.
+        slug = slug[:MAX_SLUG_LENGTH].rsplit("-", 1)[0].strip("-")
+    # The grammar is `[a-z0-9][a-z0-9-]*`, so a slug starting with a digit is
+    # fine but one starting with a hyphen is not. `strip("-")` covers it.
+    return slug if len(slug) <= MAX_IRI_LENGTH else slug[:MAX_SLUG_LENGTH]
+
+
+def entity_slug(name: str, name_en=None) -> str:
     """A stable, IRI-legal slug for `name`, or "" if nothing usable survives.
+
+    Prefers `name_en`, the English name the extraction supplies. Most company
+    names in these court orders are English written in Devanagari, and sounding
+    them back out is unusable: `फरेष्ट डेभलपमेन्ट एण्ड इण्डष्ट्रिज` transliterates to
+    `phareshta-debhalapamenta-enda-indashtrija`, where the English name gives
+    `forest-development-and-industries`. The IRI is permanent and a caseworker
+    authoring that firm by hand would write the second, so preferring the
+    English name is what keeps NES from holding the company twice.
+
+    Falls back to transliteration whenever `name_en` yields no slug -- absent,
+    blank, punctuation, or not a string. Falling back beats returning "": ""
+    makes the caller skip an entity it could have created.
 
     Returns "" rather than raising: a name of pure punctuation has no slug, and
     the caller's job is to skip and record it, not to build an invalid IRI.
@@ -59,20 +84,16 @@ def entity_slug(name: str) -> str:
     Stability matters more than beauty. The same name must slug identically on
     every run, or a re-run creates a second entity instead of finding the first.
     """
+    english = _slugify(name_en)
+    if english:
+        return english
+
     if not name or not isinstance(name, str):
         return ""
 
     # `biṣṭa` -> `bishta`, `dhanagaḍhī` -> `dhanagadhi`: the sound map first, then
     # the remaining combining marks stripped.
-    ascii_only = _colloquial_fold(to_roman(name))
-
-    slug = re.sub(r"[^a-z0-9]+", "-", ascii_only.lower()).strip("-")
-    if len(slug) > MAX_SLUG_LENGTH:
-        # Cut at a hyphen so the slug ends on a whole word rather than mid-name.
-        slug = slug[:MAX_SLUG_LENGTH].rsplit("-", 1)[0].strip("-")
-    # The grammar is `[a-z0-9][a-z0-9-]*`, so a slug starting with a digit is
-    # fine but one starting with a hyphen is not. `strip("-")` covers it.
-    return slug if len(slug) <= MAX_IRI_LENGTH else slug[:MAX_SLUG_LENGTH]
+    return _slugify(_colloquial_fold(to_roman(name)))
 
 
 def prefix_is_creatable(prefix, live_prefixes) -> bool:
