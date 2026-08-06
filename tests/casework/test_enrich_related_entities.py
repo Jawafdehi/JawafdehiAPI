@@ -3766,6 +3766,32 @@ def test_a_failed_prefix_read_costs_one_case_not_the_whole_run(
     assert api.create_entity_calls == []
 
 
+def test_an_unreadable_prefix_list_does_not_blame_the_prefix(
+    monkeypatch, patched_fetch_markdown
+):
+    # `read_live_prefixes` returns None rather than [] so a failed read cannot
+    # be mistaken for "no prefix is in use" -- but `prefix_is_creatable` folds
+    # both to an empty set, so every name came back refused for a reason that
+    # was never checked. `person` is in use in production; telling a caseworker
+    # its parent branch does not exist sends them to fix nothing.
+    case = dict(PRESS_ONLY_CASE, slug="case-prefix-502-reason", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [], "वन निर्देशनालय, धनगढी": []})
+
+    def boom(timeout=60):
+        raise urllib.error.HTTPError("u", 502, "Bad Gateway", {}, None)
+    api.entity_prefixes = boom
+
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    rows = _created_rows()
+    assert rows, "the refused names must still reach created.jsonl"
+    for row in rows:
+        assert row["outcome"] == "skipped"
+        assert "could not be read" in row["reason"]
+        assert "parent branch does not exist" not in row["reason"]
+
+
 def test_an_uncanonical_created_iri_costs_one_name_not_the_run(
     monkeypatch, patched_fetch_markdown
 ):

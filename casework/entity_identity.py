@@ -14,8 +14,6 @@ guard here is ours.
 
 import re
 
-from jawafdehi_shared.entities.ids import MAX_IRI_LENGTH
-
 # `_colloquial_fold` is private to that module, and imported anyway: it owns the
 # sound-spelling map (ś→sh, ṣ→sh, ṛ→ri) that makes `बिष्ट` read as `bishta`
 # rather than `bista`. Folding the diacritics here instead -- plain NFKD, which
@@ -50,7 +48,11 @@ def _slugify(text) -> str:
         slug = slug[:MAX_SLUG_LENGTH].rsplit("-", 1)[0].strip("-")
     # The grammar is `[a-z0-9][a-z0-9-]*`, so a slug starting with a digit is
     # fine but one starting with a hyphen is not. `strip("-")` covers it.
-    return slug if len(slug) <= MAX_IRI_LENGTH else slug[:MAX_SLUG_LENGTH]
+    #
+    # No second length check against MAX_IRI_LENGTH: 80 is already far under
+    # 300, so it could never fire, and reading like an independent cap invites
+    # someone to raise MAX_SLUG_LENGTH and trust a guard that was never there.
+    return slug
 
 
 def entity_slug(name: str, name_en=None) -> str:

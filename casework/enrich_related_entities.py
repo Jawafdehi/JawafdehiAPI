@@ -899,12 +899,10 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
     current = current_entity_binds(case)
     plan.n_current = len(current)
     have = {bind_key(bind) for bind in current}
-    # Which entities the case ALREADY characterises somehow, from the binds that
-    # existed before this run. Used only by the accused-escalation guard below;
-    # deliberately not updated as this run adds binds, because whether one
-    # extracted item precedes another in the LLM's output is arbitrary and must
-    # not decide whether a name is written or reviewed.
-    already_characterised = {nes_id for nes_id, _ in have}
+    # No `already_characterised` set here any more. It existed only to feed the
+    # accused-escalation guard, and the accused section is refused outright now
+    # -- see `_bind_one`. Rebuilding it per case would cost a set build and
+    # leave a future reader hunting for the guard it used to serve.
 
     additions = []
     for item in extracted_items:
@@ -959,7 +957,7 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
         # One name, possibly several binds -- see `qualifying_binds`.
         for bind_decision in qualifying_binds(decision):
             _bind_one(plan, name, bind_decision, rel_type, notes, have,
-                      already_characterised, additions)
+                      additions)
 
     merged = merge_entity_binds(current, additions)
     if merged != current:
@@ -968,8 +966,7 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
     return plan
 
 
-def _bind_one(plan, name, decision, rel_type, notes, have,
-              already_characterised, additions):
+def _bind_one(plan, name, decision, rel_type, notes, have, additions):
     """Add ONE (entity, section) bind to `plan`, or record why it was not added.
 
     Split out of `plan_case_entities` when one extracted name became able to
@@ -1092,8 +1089,10 @@ def read_live_prefixes(api):
     """The live prefix list, or None when it could not be read.
 
     None, not []: an empty list would look like "no prefix is in use" and make
-    `prefix_is_creatable` refuse every category, so the caller would silently
-    create nothing and report a reason that was never true.
+    `prefix_is_creatable` refuse every category. `prefix_is_creatable` itself
+    cannot tell the two apart (`set(live_prefixes or ())`), so the distinction
+    is only worth anything because `_cannot_create` checks for None BEFORE
+    calling it and says what actually happened.
 
     Every other API call in the per-case loop is wrapped so one case's failure
     does not cost the run. This one was not, and it is called from inside that
@@ -1239,7 +1238,10 @@ def _cannot_create(prefix, etype, slug, live_prefixes, *, section, name, item):
        ABSENT MEANS NO. A prompt regression that drops the field then surfaces
        as `0 created` in the summary, which is visible and fixable; defaulting
        the other way fills NES with entries nobody can delete.
-    4. IDENTITY. Prefix, type, slug -- can we even build an IRI.
+    4. IDENTITY. Prefix, type, slug -- can we even build an IRI. An unreadable
+       prefix list is refused here too, but says so in as many words: it is the
+       one refusal that reports a failure to check rather than a check that
+       failed.
     """
     if section == LOCATION_SECTION:
         return ("location entities are bind-only: NES already holds the "
@@ -1252,6 +1254,15 @@ def _cannot_create(prefix, etype, slug, live_prefixes, *, section, name, item):
                 "(is_named_entity)")
     if not prefix or not etype:
         return "extraction gave no entity_prefix/entity_type"
+    if live_prefixes is None:
+        # NOT a judgement on the prefix -- nothing was checked. `read_live_
+        # prefixes` returns None for exactly this case, but `prefix_is_creatable`
+        # folds None and [] to the same empty set, so without this branch a
+        # transient 502 reports every name as having an unusable prefix. That
+        # sentence is false for a prefix as ordinary as `person`, and it sends a
+        # caseworker to fix a prefix that was never the problem.
+        return (f"the live entity prefix list could not be read, so {prefix!r} "
+                "was never checked -- retry this case")
     if not prefix_is_creatable(prefix, live_prefixes):
         return (f"prefix {prefix!r} is not in use and its parent branch does not "
                 "exist, so creating it would strand the entity where no search "
@@ -1604,9 +1615,11 @@ def main(argv=None):
     ap.add_argument(
         "--create-entities", action="store_true",
         help="Create an NES entity for each extracted name that matches none, "
-             "then bind it. OFF BY DEFAULT and independent of --apply, so "
+             "then bind it. OFF BY DEFAULT and never implied by --apply, so "
              "upgrading this enricher cannot make an existing --apply run start "
-             "writing to NES. Entities created this way are published with NO "
+             "writing to NES. It does not override the dry run either: without "
+             "--apply nothing is POSTed and the run only reports what it would "
+             "create. Entities created this way are published with NO "
              "sources -- the 2-distinct-publisher rule lives in "
              "`manage.py bulk_ingest`, not on the API's create path.")
     ap.add_argument(
@@ -1614,7 +1627,9 @@ def main(argv=None):
         help="Bind only when exactly one NES entity matched and no veto fired; "
              "send ambiguities and vetoed matches to review instead. Off by "
              "default: the default binds the best-scoring match for every name, "
-             "except a match that exists only across scripts.")
+             "including a match that exists only across scripts -- that refusal "
+             "was removed on 2026-08-05, so a case charging कमल थापा can bind a "
+             "Kamala Thapa entity.")
     args = ap.parse_args(argv)
 
     setup_logging(args.verbose)

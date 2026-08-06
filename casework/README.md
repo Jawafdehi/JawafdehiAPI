@@ -406,8 +406,9 @@ Most do not: production run `645b1483` (case 078-CR-0038) extracted 13 names and
 matched **none**, because NES holds almost no institution a CIAA court order names.
 
 `--create-entities` creates them, then binds them. It is **off by default and
-independent of `--apply`**, so upgrading the enricher cannot make an existing
-`--apply` run start writing to NES.
+never implied by `--apply`**, so upgrading the enricher cannot make an existing
+`--apply` run start writing to NES. It does not override the dry run either —
+without `--apply` the flag only reports what it would create.
 
 ```bash
 # Dry run: reports every entity it would create, creates nothing
@@ -415,18 +416,22 @@ uv run python -m casework.enrich_related_entities \
     --slug case-078-cr-0038-ciaa-special-court-case-078-cr-9a \
     --create-entities --dry-run
 
-# Write: all four flags together
+# Write to production. --allow-remote-writes is only the guard; the write still
+# needs somewhere to go and something to authenticate with
 uv run python -m casework.enrich_related_entities --batch-csv batch.csv \
-    --create-entities --apply --allow-remote-writes
+    --create-entities --apply \
+    --api-base-url https://api.jawafdehi.org \
+    --api-token "$JAWAFDEHI_API_TOKEN" --allow-remote-writes
 ```
 
 Read `*.created.jsonl` before an apply. Its `outcome` column is the whole story:
 
 | Outcome | Meaning |
 |---------|---------|
-| `created` / `would-create` | A new NES entity, bound to the case |
+| `created` | The POST succeeded and the entity is bound to the case |
+| `would-create` | Dry run: eligible to create, but nothing was POSTed and nothing bound. An `--apply` run would create it |
 | `already-exists` | Someone got there first (409); bound to theirs |
-| `reused` | A second spelling of a name created earlier in this run |
+| `reused` | A name created earlier in this run under the same prefix |
 | `skipped` | One of the four gates below refused it; the `reason` column says which |
 | `error` | The POST failed; the name stays unmatched, the case keeps its other binds |
 
