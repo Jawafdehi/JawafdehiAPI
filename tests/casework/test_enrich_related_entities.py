@@ -1262,9 +1262,10 @@ def test_strict_buckets_review_and_nomatch_separately():
 
 def test_permissive_binds_the_ambiguity_and_still_cannot_bind_a_nomatch():
     # The default mode's whole point, and its limit. An ambiguity between two
-    # same-name entities resolves to the first by the `(-score, nes_id)` sort and
-    # binds; a name with NO candidate stays in nomatch, because there is nothing
-    # to promote and this module may never create an NES entity.
+    # same-name entities binds BOTH of them (2026-08-05: no review queue, the
+    # later filtering pass decides which is real); a name with NO candidate stays
+    # in nomatch, because there is nothing to bind. Creating one is the create
+    # step's job and requires `--create-entities`.
     anish_a = {"id": "https://jawafdehi.org/entity/person/anish-shrestha-219986",
                "title": {"ne": "अनिष श्रेष्‍ठ"}, "score": 182.17}
     anish_b = {"id": "https://jawafdehi.org/entity/person/anish-shrestha-285096",
@@ -1279,11 +1280,14 @@ def test_permissive_binds_the_ambiguity_and_still_cannot_bind_a_nomatch():
         {"entity_name": "खगेन्द्र पराजुली", "relationship_type": "related", "notes": "ख"}])
 
     assert plan.action == "WOULD_PATCH"
-    assert len(plan.bound) == 1
+    assert len(plan.bound) == 2
     assert plan.review == []
     assert len(plan.nomatch) == 1
+    # Both namesakes bound, in the deterministic `(-score, nes_id)` order so a
+    # re-run produces the same list rather than a reshuffled one.
+    assert [d.nes_id for _n, d, _notes, _s in plan.bound] == [
+        anish_a["id"], anish_b["id"]]
     _name, decision, _notes, _section = plan.bound[0]
-    assert decision.nes_id == anish_a["id"]      # first by the deterministic sort
     assert is_promoted(decision)
     assert "ambiguous" in decision.reason
 
@@ -1317,41 +1321,31 @@ KAMALA_IRI = "https://jawafdehi.org/entity/person/kamala-thapa-4f21ac"
 KAMALA_LATIN_ONLY = {"id": KAMALA_IRI, "title": {"en": "Kamala Thapa"}, "score": 190.0}
 
 
-def test_permissive_mode_refuses_to_promote_a_cross_script_only_match():
-    # THE ONE VETO PERMISSIVE MODE LEAVES STANDING. Every other promotion binds a
-    # name that matched, on grounds outside the name; this one would bind a name
-    # that did not match at all -- कमला थापा is a woman, कमल थापा is a man, and
-    # only romanisation makes them equal. The extracted name must stay in review
-    # even though its top candidate scores 0.96, well over MIN_BIND_SCORE.
+def test_permissive_mode_now_binds_a_cross_script_only_match():
+    # WAS THE ONE VETO PERMISSIVE MODE LEFT STANDING, and it is gone by decision
+    # (2026-08-05): this stage produces no review queue.
+    #
+    # Keeping the original reasoning on the record, because the test no longer
+    # states it: every other promotion binds a name that matched on grounds
+    # outside the name, while this one binds a name that did not match at all.
+    # कमला थापा is a woman, कमल थापा is a man, and only romanisation makes them
+    # equal -- 0.96 across scripts, 0.00 within Devanagari. So this bind can name
+    # a different person than the case charges, and the later filtering pass is
+    # what catches it.
     case = {"slug": "case-kamal", "state": "DRAFT", "entities": []}
     api = _SearchStubApi([case], {"कमल थापा": [KAMALA_LATIN_ONLY]})
     plan = plan_case_entities(api, case, 'W/"e"', [
         {"entity_name": "कमल थापा", "relationship_type": "accused", "notes": "क"}])
 
-    assert plan.action == "NOOP"
-    assert plan.patch_items == []
-    assert plan.bound == []
-    assert len(plan.review) == 1
-    _name, decision, section = plan.review[0]
-    assert decision.nes_id is None
-    assert section == "accused"
-    assert "across scripts" in decision.reason
-    assert "not promoted" in decision.reason
-    # The candidate is preserved so a caseworker can confirm or reject it by hand;
-    # only the automatic bind is refused.
-    assert decision.candidates[0][1] == KAMALA_IRI
-    # And the document was never fetched: a name this module will not bind must
-    # not cost an HTTP round trip either.
-    assert api.get_entity_calls == []
+    assert plan.action == "WOULD_PATCH"
+    assert plan.review == []
+    assert [item["nes_id"] for item in plan.patch_items] == [KAMALA_IRI]
 
 
-def test_a_cross_script_match_is_refused_even_when_another_veto_reports_first():
-    # The reason `_promote_top_candidate` checks the CANDIDATE and not
-    # `decision.reason`. `resolve` reports only the first veto that fires, and
-    # ambiguity is checked before the cross-script guard -- so a name that is both
-    # comes back reading "ambiguous", and a reason-text check would promote it,
-    # restoring the exact wrong bind. Two Latin-only namesakes, both above
-    # threshold: the reason says ambiguous, the refusal must still happen.
+def test_a_cross_script_match_is_bound_even_when_another_veto_reports_first():
+    # Two Latin-only namesakes, both above threshold. `resolve` reports only the
+    # first veto that fires and ambiguity is checked before the cross-script
+    # guard, so the reason reads "ambiguous". Both now bind.
     second = {"id": "https://jawafdehi.org/entity/person/kamala-thapa-9b7e10",
               "title": {"en": "Kamala Thapa"}, "score": 188.0}
     case = {"slug": "case-kamal-2", "state": "DRAFT", "entities": []}
@@ -1359,11 +1353,9 @@ def test_a_cross_script_match_is_refused_even_when_another_veto_reports_first():
     plan = plan_case_entities(api, case, 'W/"e"', [
         {"entity_name": "कमल थापा", "relationship_type": "accused", "notes": "क"}])
 
-    assert plan.bound == []
-    _name, decision, _section = plan.review[0]
-    assert "ambiguous" in decision.reason      # the veto that reported
-    assert "not promoted" in decision.reason   # the refusal that still applies
-    assert decision.nes_id is None
+    assert plan.review == []
+    assert sorted(item["nes_id"] for item in plan.patch_items) == sorted(
+        [KAMALA_IRI, second["id"]])
 
 
 def test_a_same_script_candidate_is_still_promoted_over_its_veto():
@@ -1498,19 +1490,22 @@ def test_each_review_row_reports_its_own_section():
     assert [section for _n, _d, section in plan.review] == ["alleged", "witness"]
 
 
-def test_an_unrecognised_section_is_reported_verbatim_on_its_review_row():
-    # The row exists to tell a caseworker what the model actually said, so the raw
-    # value is what goes on it -- not "" and not a guessed section.
+def test_an_unrecognised_section_is_recorded_verbatim_when_it_is_coerced():
+    # WAS a review row carrying the raw value. The row is gone, but the raw value
+    # still has to be recoverable: a relabelled section is a claim nobody made,
+    # so `plan.coerced` keeps what the model actually said, lowercased.
+    #
+    # The name is now searched, where before the bad section short-circuited it.
+    # That is a real added cost -- one search request per coerced name -- and it
+    # is the price of not failing the whole case's PATCH on one bad label.
     case = {"slug": "case-bad-section", "state": "DRAFT", "entities": []}
     api = _SearchStubApi([case], {})
     plan = plan_case_entities(api, case, 'W/"e"', [
         {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "Suspect", "notes": "क"}])
 
-    _name, decision, section = plan.review[0]
-    assert section == "suspect"
-    assert "is not one of the" in decision.reason
-    # Refused before a search request was spent.
-    assert api.search_calls == []
+    assert plan.review == []
+    assert plan.coerced == [("अनिष श्रेष्ठ", "suspect", "related")]
+    assert api.search_calls != []
 
 
 # --- Correction 1: the document veto (Task 5's `apply_document_veto`) -----
@@ -1731,42 +1726,35 @@ def test_a_valid_section_binds_however_the_llm_cased_it(relationship_type, expec
 
 
 @pytest.mark.parametrize("relationship_type", ["", "organization", "Related party", None])
-def test_a_section_the_api_does_not_accept_reviews_without_searching(relationship_type):
-    # There is no section to bind these into, and guessing one would file the
-    # entity under a relationship nobody asserted. Refused BEFORE any search, so
-    # a malformed extraction costs no request.
+def test_a_section_the_api_does_not_accept_is_coerced_and_still_binds(relationship_type):
+    # WAS refused before any search, so a malformed extraction cost no request.
+    # Now coerced to `related` and bound: one unaccepted section fails the whole
+    # case's PATCH, so the name that would have been held is the cheap loss and
+    # every other bind on the case is the expensive one.
     case = {"slug": "case-scope", "state": "DRAFT", "entities": []}
     api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
     plan = plan_case_entities(api, case, 'W/"e"', [
         {"entity_name": "अंकुर खत्री", "relationship_type": relationship_type,
          "notes": "क"}])
 
-    assert plan.action == "NOOP"
-    assert plan.patch_items == []
-    assert plan.bound == []
-    assert len(plan.review) == 1
-    name, decision, _section = plan.review[0]
-    assert name == "अंकुर खत्री"
-    assert decision.nes_id is None
-    assert api.search_calls == []
-    assert api.get_entity_calls == []
+    assert plan.action == "WOULD_PATCH"
+    assert plan.review == []
+    assert [item["relationship_type"] for item in plan.patch_items] == ["related"]
+    assert [c[1] for c in plan.coerced] == [(relationship_type or "").strip().lower()]
 
 
-
-
-def test_plan_treats_a_missing_relationship_type_as_out_of_scope():
-    # The allow-list's other half: a missing key must fail the same way as an
-    # explicit "location" -- previously this was "safe" only because a filter
-    # in the unrelated `main()` function happened to drop such items first, a
-    # coupling this planner should not have to rely on.
+def test_plan_coerces_a_missing_relationship_type_rather_than_holding_it():
+    # The allow-list's other half: a missing key coerces the same way an
+    # unrecognised string does, so the planner never depends on `main()` having
+    # filtered such items out first.
     case = {"slug": "case-missing-type", "state": "DRAFT", "entities": []}
     api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
     plan = plan_case_entities(api, case, 'W/"e"', [
         {"entity_name": "अंकुर खत्री", "notes": "क"}])  # no relationship_type at all
 
-    assert plan.action == "NOOP"
-    assert len(plan.review) == 1
-    assert api.search_calls == []
+    assert plan.action == "WOULD_PATCH"
+    assert plan.review == []
+    assert plan.coerced == [("अंकुर खत्री", "", "related")]
 
 
 # --- Item 2 (important): a case payload with no "entities" key -----------
@@ -2201,8 +2189,12 @@ def test_plan_summary_reconciles_when_permissive_mode_promotes_the_ambiguity():
     ]
     plan = plan_case_entities(api, case, 'W/"e"', extracted_items)
 
+    # bound=3 from 3 names: अंकुर once, अनिष TWICE (both namesakes qualify). The
+    # buckets deliberately no longer sum to `extracted` -- `bound` counts rows,
+    # and `already_bound` is derived from names that produced no row at all, so
+    # the old subtraction's -1 cannot come back.
     assert plan_summary(plan, extracted_items) == {
-        "extracted": 3, "bound": 2, "review": 0, "nomatch": 1, "already_bound": 0,
+        "extracted": 3, "bound": 3, "review": 0, "nomatch": 1, "already_bound": 0,
     }
 
 
@@ -2349,12 +2341,13 @@ def test_dry_run_bind_rows_are_marked_unwritten(
 
     binds = [json.loads(line) for line
              in Path(_report_files()["binds"]).read_text(encoding="utf-8").splitlines()]
-    # Two rows in the default mode: the clean match, plus the promoted ambiguity.
-    # Both must be marked unwritten -- a promoted bind is still only a prediction
-    # in a dry run.
-    assert [b["written"] for b in binds] == [False, False]
+    # THREE rows in the default mode: the clean match, plus BOTH namesakes of the
+    # ambiguity. Every one marked unwritten -- a promoted bind is still only a
+    # prediction in a dry run.
+    assert [b["written"] for b in binds] == [False, False, False]
     assert api.replace_list_calls == []
-    assert [b["reason"].startswith(PROMOTED_PREFIX) for b in binds] == [False, True]
+    assert [b["reason"].startswith(PROMOTED_PREFIX) for b in binds] == [
+        False, True, True]
 
 
 TWO_SECTION_RESPONSE = json.dumps({
@@ -2630,3 +2623,158 @@ def test_extraction_sidecar_records_accused_notes(
     assert notes == [{"slug": "case-accused-notes",
                       "name": "हेम राज बिष्ट",
                       "notes": "वन अधिकृत, वन निर्देशनालय धनगढी"}]
+
+
+# --------------------------------------------------------------------------
+# Draft-case enrichment binds or creates -- it never reviews.
+#
+# Gaurav set this on 2026-08-05: deciding which entities deserve to exist is a
+# later pass, so this stage stops producing a review queue. Three behaviours
+# change, each pinned below.
+# --------------------------------------------------------------------------
+
+
+TWO_NAMESAKES_ABOVE_THRESHOLD = {
+    "अनिष श्रेष्ठ": [
+        {"id": "https://jawafdehi.org/entity/person/anish-shrestha-219986",
+         "title": {"ne": "अनिष श्रेष्‍ठ"}, "score": 182.17},
+        {"id": "https://jawafdehi.org/entity/person/anish-shrestha-285096",
+         "title": {"ne": "अनिष श्रेष्ठ"}, "score": 182.17},
+    ],
+}
+
+
+def test_ambiguity_binds_every_qualifying_candidate():
+    # Was: promote the top candidate, drop the runners-up. Now: bind all of them
+    # and let the later filtering pass decide. Two NES rows scoring identically
+    # are usually one person entered twice; when they are two different people
+    # sharing a name, both get bound and a human unpicks it later.
+    case = {"slug": "case-both-namesakes", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], TWO_NAMESAKES_ABOVE_THRESHOLD)
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related",
+         "notes": "क"}])
+
+    assert plan.action == "WOULD_PATCH"
+    assert plan.review == []
+    bound_ids = sorted(item["nes_id"] for item in plan.patch_items)
+    assert bound_ids == [
+        "https://jawafdehi.org/entity/person/anish-shrestha-219986",
+        "https://jawafdehi.org/entity/person/anish-shrestha-285096",
+    ]
+    # One extracted name, two bind rows -- both must be reported, or binds.jsonl
+    # under-reports what reached the case.
+    assert len(plan.bound) == 2
+
+
+def test_ambiguity_still_reviews_nothing_under_strict():
+    # `--strict` is untouched: it remains the conservative pipeline for anyone
+    # who wants an ambiguity held rather than bound.
+    case = {"slug": "case-strict-ambiguity", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], TWO_NAMESAKES_ABOVE_THRESHOLD)
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related",
+         "notes": "क"}], strict=True)
+
+    assert plan.bound == []
+    assert len(plan.review) == 1
+
+
+def test_a_candidate_below_the_threshold_is_not_bound_alongside_a_qualifying_one():
+    # "Bind every qualifying candidate" means every one at or above
+    # MIN_BIND_SCORE, not every one the search returned. A weak near-miss riding
+    # along on a strong match would bind an unrelated entity.
+    case = {"slug": "case-one-strong-one-weak", "state": "DRAFT", "entities": []}
+    strong = {"id": "https://jawafdehi.org/entity/person/anish-shrestha-219986",
+              "title": {"ne": "अनिष श्रेष्ठ"}, "score": 182.17}
+    weak = {"id": "https://jawafdehi.org/entity/person/anisha-shah-111111",
+            "title": {"ne": "अनिशा शाह"}, "score": 12.0}
+    api = _SearchStubApi([case], {"अनिष श्रेष्ठ": [strong, weak]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related",
+         "notes": "क"}])
+
+    assert [item["nes_id"] for item in plan.patch_items] == [
+        "https://jawafdehi.org/entity/person/anish-shrestha-219986"]
+
+
+def test_cross_script_only_match_is_bound_not_held():
+    # REVERSES `test_permissive_mode_refuses_to_promote_a_cross_script_only_match`.
+    # That veto was the one permissive mode left standing, because कमल (a man)
+    # and कमला (a woman) score 0.96 across scripts and 0.00 within Devanagari --
+    # so this bind names a different person than the case charges. Bound anyway
+    # per the 2026-08-05 decision: no review queue in this stage.
+    case = {"slug": "case-kamal-bound", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"कमल थापा": [KAMALA_LATIN_ONLY]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "कमल थापा", "relationship_type": "accused", "notes": "क"}])
+
+    assert plan.action == "WOULD_PATCH"
+    assert plan.review == []
+    assert [item["nes_id"] for item in plan.patch_items] == [KAMALA_IRI]
+
+
+def test_an_unaccepted_relationship_type_is_coerced_to_related():
+    # Was: review, because there was no section to bind into. Now: coerced to
+    # `related`, the prompt's own default. This is not cosmetic -- PATCH
+    # /entities validates the whole list, so one unaccepted section fails every
+    # bind on the case, not just its own row.
+    case = {"slug": "case-bad-section", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "supervisor",
+         "notes": "क"}])
+
+    assert plan.review == []
+    assert [item["relationship_type"] for item in plan.patch_items] == ["related"]
+
+
+def test_a_missing_relationship_type_is_coerced_to_related():
+    case = {"slug": "case-no-section", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "notes": "क"}])
+
+    assert plan.review == []
+    assert [item["relationship_type"] for item in plan.patch_items] == ["related"]
+
+
+def test_the_coercion_is_recorded_so_a_reader_can_see_it_happened():
+    # A silently relabelled section is a section nobody asserted. The original
+    # value rides on the plan so the run log and the reports can name it.
+    case = {"slug": "case-coercion-recorded", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "supervisor",
+         "notes": "क"}])
+
+    assert plan.coerced == [("अंकुर खत्री", "supervisor", "related")]
+
+
+def test_coercion_does_not_fire_for_an_accepted_section():
+    case = {"slug": "case-good-section", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "witness",
+         "notes": "क"}])
+
+    assert plan.coerced == []
+    assert [item["relationship_type"] for item in plan.patch_items] == ["witness"]
+
+
+def test_accused_escalation_still_needs_a_human():
+    # The one review this stage KEEPS. Escalating an already-characterised entity
+    # to `accused` sets outcome=charged and asserts the person is the subject of
+    # the case. Removing the review queue did not remove this guard, because the
+    # alternative is not "bind it later", it is "publish a charge on an LLM's
+    # say-so".
+    case = {"slug": "case-escalation", "state": "DRAFT",
+            "entities": [{"nes_id": ANKUR_IRI, "type": "related",
+                          "notes": "पहिले नै जोडिएको"}]}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "accused",
+         "notes": "क"}])
+
+    assert len(plan.review) == 1
+    assert "escalate to 'accused'" in plan.review[0][1].reason

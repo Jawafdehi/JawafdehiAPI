@@ -46,16 +46,19 @@ namesake. That is the accepted cost of the mode; every such bind is marked
 labelled set: precision 0.872, recall 0.872, and all five wrong binds are
 Election Commission candidate records rather than namesake mix-ups.
 
-TWO REFUSALS SURVIVE THAT MODE, both because they are not "uncertain" at all:
+ONE REFUSAL SURVIVES THAT MODE:
 
-* A CROSS-SCRIPT-ONLY MATCH (`is_cross_script_only`). Overriding the other vetoes
-  accepts a known risk about a name that DID match; overriding this one asserts a
-  match the matcher rejects, because the score exists only through romanisation.
-  कमल थापा scores 0.96 against a `Kamala Thapa` entity and 0.00 against
-  कमला थापा -- binding it names a woman in a case charging a man.
 * AN UNREADABLE ENTITY DOCUMENT (`apply_document_veto`'s fail-closed branch). One
   403 or 502 would otherwise bind whichever namesake sorted first with nothing
   having been checked at all.
+
+A CROSS-SCRIPT-ONLY MATCH USED TO BE THE SECOND, and is now bound (2026-08-05:
+this stage produces no review queue, and which entities are real is a later
+pass). The risk it guarded is real and unmitigated: कमल थापा scores 0.96 against
+a `Kamala Thapa` entity and 0.00 against कमला थापा, so the bind can name a woman
+in a case charging a man. `resolve` still reports the veto, so the reason text
+survives on the bind row in `*.binds.jsonl` -- that file is where such a bind is
+found again.
 
 `--strict` is the conservative pipeline: an ambiguity or a veto goes to the review
 report instead of binding. Same labelled set: precision 1.000, recall 0.846.
@@ -134,7 +137,6 @@ from casework.entity_resolver import (
     REVIEW,
     Decision,
     apply_document_veto,
-    is_cross_script_only,
     normalise_name,
     resolve,
 )
@@ -309,6 +311,12 @@ RELATIONSHIP_TYPES = (
     "location", "respondent", "petitioner",
 )
 
+#: Where a section the API rejects lands. `related` and not a guess at the
+#: intended meaning: it is what the extraction prompt already defaults to
+#: ("PART 2 -- PEOPLE AND ORGANIZATIONS (relationship_type=\"related\" unless
+#: stated)"), so a coerced row claims exactly what an unstated one would.
+DEFAULT_RELATIONSHIP_TYPE = "related"
+
 
 def bind_relationship_type(entity):
     """One bind's relationship type, lowercased and trimmed, from either key.
@@ -439,6 +447,10 @@ class EntityBindPlan:
     # cannot be recovered from the name afterwards, and on a run where nothing
     # resolves this list is the ONLY record of what each name was said to be.
     nomatch: list = field(default_factory=list)  # (name, Decision, section)
+    # Sections the extraction named that the case API will not accept, rewritten
+    # to `related`. Recorded because a silently relabelled section is a section
+    # nobody asserted -- the run log and the reports name the original.
+    coerced: list = field(default_factory=list)  # (name, original, "related")
     patch_items: list = field(default_factory=list)
     reason: str = ""
     # There are no separate accused lists. Every name this planner handles comes
@@ -473,15 +485,6 @@ class EntityBindPlan:
 # testing a reason string by eye is how they would drift apart.
 PROMOTED_PREFIX = "promoted over: "
 
-# Appended to the veto reason of the one REVIEW permissive mode will not promote,
-# so the review row explains itself. See `_promote_top_candidate`.
-NOT_PROMOTED_CROSS_SCRIPT = (
-    "not promoted even in permissive mode: the winning candidate carries no "
-    "Devanagari name, so its score comes from romanisation, which folds a "
-    "masculine name into its feminine form. Binding it would assert a match that "
-    "a same-script comparison refuses outright. Confirm by hand")
-
-
 def is_promoted(decision):
     """True when this bind won by overriding a veto, so it is one to double-check."""
     return decision.reason.startswith(PROMOTED_PREFIX)
@@ -501,50 +504,61 @@ def _bind_row(slug, name, decision, notes, section, written):
 
 
 def _promote_top_candidate(decision, extracted_name):
-    """A vetoed/ambiguous REVIEW -> a BIND on its highest-scoring candidate.
+    """A vetoed/ambiguous REVIEW -> a BIND, verdict flipped on the top candidate.
 
-    This is the whole of "bind every name that matched something". `resolve`
-    returns REVIEW for ambiguity, truncation, name vetoes and province/institution
-    scope, and `apply_document_veto` adds the election-record one. Each of those
-    means "a candidate cleared the score threshold but something ELSE was
-    unproven", so each has a top candidate sitting right there in
-    `decision.candidates`.
+    `resolve` returns REVIEW for ambiguity, truncation, name vetoes,
+    cross-script and province/institution scope, and `apply_document_veto` adds
+    the election-record one. Each means "a candidate cleared the score threshold
+    but something ELSE was unproven", so each has candidates to bind.
+
+    Flips the verdict only. WHICH candidates are bound is `qualifying_binds`'
+    decision, and since 2026-08-05 that is all of them, not just this one --
+    every veto here is now overridden, including the cross-script match this
+    function used to refuse (see the module docstring for the risk that carries).
 
     Deterministic by construction: `resolve` sorts `candidates` by
-    `(-score, nes_id)`, so two entities tied at the same score always resolve to
-    the same one -- a re-run cannot silently pick a different entity than the
-    run before it. NO_MATCH is left alone: nothing scored, so there is nothing
-    to promote, and this module may never create an NES entity.
+    `(-score, nes_id)`, so a re-run binds the same entities in the same order.
+    NO_MATCH is left alone -- nothing scored, so there is nothing to promote, and
+    creating an entity is the create step's job, not this one's.
 
-    ONE REVIEW IS NEVER PROMOTED: a cross-script-only match (see
-    `is_cross_script_only`). There the NAME itself is what is unproven, so
-    promoting does not accept a known risk, it asserts a match the matcher rejects
-    -- कमल थापा scores 0.96 against a `Kamala Thapa` entity and 0.00 against
-    कमला थापा, so the bind would name a woman in a case charging a man. Checked
-    against the candidate rather than against `decision.reason`, because
-    `resolve` reports only the FIRST veto that fires: a name that is both
-    ambiguous and cross-script comes back reading "ambiguous", and a reason-text
-    check would promote it.
-
-    The remaining cost is explicit: a promoted ambiguity is a coin flip between
-    namesakes. `decision.reason` is carried into the bind's note so the row says
-    why it was uncertain, and `*.binds.jsonl` records the runners-up that lost.
+    The cost stays explicit: `decision.reason` is carried onto the bind row so
+    `*.binds.jsonl` says why the bind was uncertain and lists the candidates.
     """
     if decision.verdict != REVIEW or not decision.candidates:
         return decision
     score, nes_id, matched = decision.candidates[0]
     if score < MIN_BIND_SCORE:
         return decision
-    if is_cross_script_only(extracted_name, matched):
-        # Say why this one stayed behind while permissive mode promoted its
-        # neighbours, or the row reads as an ordinary ambiguity that a caseworker
-        # would expect to have been bound like all the others.
-        return Decision(decision.verdict, decision.nes_id, decision.score,
-                        decision.matched_name,
-                        f"{decision.reason}; {NOT_PROMOTED_CROSS_SCRIPT}",
-                        decision.candidates)
     return Decision(BIND, nes_id, score, matched,
                     f"{PROMOTED_PREFIX}{decision.reason}", decision.candidates)
+
+
+def qualifying_binds(decision):
+    """Every candidate on `decision` that may be bound, as its own `Decision`.
+
+    One extracted name can produce SEVERAL binds. `resolve` reports an ambiguity
+    as a single REVIEW naming the top candidate; promoting it used to keep that
+    one and drop the rest. Since 2026-08-05 every candidate at or above
+    `MIN_BIND_SCORE` is bound and the later filtering pass decides -- two NES
+    rows scoring identically are usually one entity entered twice, and when they
+    are two different people sharing a name, both land and a human unpicks it.
+
+    Only candidates at or above the threshold. "Bind every candidate that
+    qualified" is not "bind everything the search returned": a weak near-miss
+    riding along on a strong match would bind an unrelated entity.
+
+    Falls back to `[decision]` when there are no candidates to enumerate, which
+    is what a hand-built BIND looks like.
+    """
+    if decision.verdict != BIND:
+        return []
+    qualifying = [c for c in (decision.candidates or ())
+                  if c[0] >= MIN_BIND_SCORE]
+    if not qualifying:
+        return [decision]
+    return [Decision(BIND, nes_id, score, matched,
+                     decision.reason, decision.candidates)
+            for score, nes_id, matched in qualifying]
 
 
 def _resolve_with_vetoes(api, name, strict=False):
@@ -743,22 +757,19 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
         if not name:
             continue
 
-        # Bind into whatever section the extraction names, so long as the API
-        # accepts that section. This is a validity check, not a scope filter:
-        # `alleged`, `location`, `witness`, `victim` and the rest all bind now.
-        # An unrecognised value, an empty string and a missing key still go to
-        # review, because there is no section to put them in -- guessing one
-        # would file the entity under a relationship nobody asserted.
+        # Bind into whatever section the extraction names. `alleged`, `location`,
+        # `witness`, `victim` and the rest all bind.
+        #
+        # A section the API does not accept is COERCED to `related` rather than
+        # held: `related` is what the prompt itself defaults to, and the coercion
+        # is not cosmetic. `PATCH /entities` validates the whole list, so one
+        # unaccepted section fails every bind on the case rather than only its own
+        # row -- holding the name back would cost the other binds nothing, but
+        # letting it through would cost them everything.
         rel_type = (item.get("relationship_type") or "").strip().lower()
         if rel_type not in RELATIONSHIP_TYPES:
-            plan.review.append((name, Decision(
-                REVIEW, None, 0.0, "",
-                f"relationship_type {item.get('relationship_type')!r} is not one "
-                f"of the {len(RELATIONSHIP_TYPES)} the case API accepts "
-                f"({', '.join(RELATIONSHIP_TYPES)}), so there is no section to "
-                "bind it into. Reported without spending a search request",
-                ()), rel_type))
-            continue
+            plan.coerced.append((name, rel_type, DEFAULT_RELATIONSHIP_TYPE))
+            rel_type = DEFAULT_RELATIONSHIP_TYPE
 
         decision = _resolve_with_vetoes(api, name, strict=strict)
 
@@ -770,61 +781,82 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
             continue
 
         notes = (item.get("notes") or "").strip()
-        item_to_bind = {
-            "nes_id": decision.nes_id,
-            "relationship_type": rel_type,
-            "notes": notes,
-        }
-        if bind_key(item_to_bind) in have:
-            # This entity is already bound to this case IN THIS SECTION (by an
-            # earlier extracted name, or by a pre-existing bind) -- not a new
-            # addition, so it is not counted in `plan.bound` either. Counting it
-            # there would overstate "binds written" on every idempotent re-run.
-            #
-            # Keyed on the pair, so the same entity CAN still be added in a
-            # different section -- see `bind_key`.
-            continue
-
-        # ESCALATION TO `accused` IS NEVER AUTOMATIC. Keying the merge on the pair
-        # means a second section for an already-bound entity now gets written
-        # rather than silently dropped -- correct, and what the DB constraint
-        # allows. But `accused` is not just another section: it names a person as
-        # the subject of a corruption case and carries `outcome=CHARGED`. When the
-        # case already characterises this entity some other way, a human (or an
-        # earlier run) made that call, and upgrading it on an LLM's say-so is the
-        # one bind this module must not make by itself. It goes to review with the
-        # existing characterisation named, so the upgrade is a decision someone
-        # takes rather than a diff someone discovers.
-        if rel_type == "accused" and decision.nes_id in already_characterised:
-            existing = sorted(section for nes_id, section in have
-                              if nes_id == decision.nes_id)
-            plan.review.append((name, Decision(
-                REVIEW, decision.nes_id, decision.score, decision.matched_name,
-                f"would escalate to 'accused' an entity this case already binds as "
-                f"{', '.join(repr(s) for s in existing)}. An accused bind asserts "
-                "the person is the subject of the case and sets outcome=charged, so "
-                "it is not applied on top of an existing characterisation without a "
-                f"human. Original reason: {decision.reason or 'clean match'}",
-                decision.candidates), rel_type))
-            continue
-        # `outcome` is legal ONLY on an accused bind -- the DB enforces it with
-        # the `outcome_only_on_accused` CHECK constraint, and `validate_bind_item`
-        # mirrors that. Every case in this corpus is a Special Court `-CR-` case,
-        # so CIAA filed a charge sheet and 'charged' is true by construction.
-        if rel_type == "accused":
-            item_to_bind["outcome"] = CHARGED
-        # Recorded BEFORE `outcome` is added, so the key matches the one
-        # `bind_key` computed above -- it reads only the two identity fields, but
-        # adding the entry after the mutation would invite that to drift.
-        have.add(bind_key(item_to_bind))
-        additions.append(validate_bind_item(item_to_bind))
-        plan.bound.append((name, decision, notes, rel_type))
+        # One name, possibly several binds -- see `qualifying_binds`.
+        for bind_decision in qualifying_binds(decision):
+            _bind_one(plan, name, bind_decision, rel_type, notes, have,
+                      already_characterised, additions)
 
     merged = merge_entity_binds(current, additions)
     if merged != current:
         plan.action = "WOULD_PATCH"
         plan.patch_items = merged
     return plan
+
+
+def _bind_one(plan, name, decision, rel_type, notes, have,
+              already_characterised, additions):
+    """Add ONE (entity, section) bind to `plan`, or record why it was not added.
+
+    Split out of `plan_case_entities` when one extracted name became able to
+    produce several binds -- the body was a `continue`-driven block inside that
+    loop, and `continue` cannot mean "next candidate" and "next name" at once.
+    Mutates `plan`, `have` and `additions`: the caller's loop owns them, and this
+    is the only writer of a bind row.
+    """
+    item_to_bind = {
+        "nes_id": decision.nes_id,
+        "relationship_type": rel_type,
+        "notes": notes,
+    }
+    if bind_key(item_to_bind) in have:
+        # This entity is already bound to this case IN THIS SECTION (by an
+        # earlier extracted name, or by a pre-existing bind) -- not a new
+        # addition, so it is not counted in `plan.bound` either. Counting it
+        # there would overstate "binds written" on every idempotent re-run.
+        #
+        # Keyed on the pair, so the same entity CAN still be added in a
+        # different section -- see `bind_key`.
+        return
+
+    # ESCALATION TO `accused` IS NEVER AUTOMATIC. Keying the merge on the pair
+    # means a second section for an already-bound entity now gets written
+    # rather than silently dropped -- correct, and what the DB constraint
+    # allows. But `accused` is not just another section: it names a person as
+    # the subject of a corruption case and carries `outcome=CHARGED`. When the
+    # case already characterises this entity some other way, a human (or an
+    # earlier run) made that call, and upgrading it on an LLM's say-so is the
+    # one bind this module must not make by itself. It goes to review with the
+    # existing characterisation named, so the upgrade is a decision someone
+    # takes rather than a diff someone discovers.
+    #
+    # THE ONE REVIEW THIS STAGE STILL PRODUCES. Dropping the review queue
+    # (2026-08-05) did not drop this: the alternative is not "bind it later",
+    # it is "publish a charge on an LLM's say-so".
+    if rel_type == "accused" and decision.nes_id in already_characterised:
+        existing = sorted(section for nes_id, section in have
+                          if nes_id == decision.nes_id)
+        plan.review.append((name, Decision(
+            REVIEW, decision.nes_id, decision.score, decision.matched_name,
+            f"would escalate to 'accused' an entity this case already binds as "
+            f"{', '.join(repr(s) for s in existing)}. An accused bind asserts "
+            "the person is the subject of the case and sets outcome=charged, so "
+            "it is not applied on top of an existing characterisation without a "
+            f"human. Original reason: {decision.reason or 'clean match'}",
+            decision.candidates), rel_type))
+        return
+
+    # `outcome` is legal ONLY on an accused bind -- the DB enforces it with
+    # the `outcome_only_on_accused` CHECK constraint, and `validate_bind_item`
+    # mirrors that. Every case in this corpus is a Special Court `-CR-` case,
+    # so CIAA filed a charge sheet and 'charged' is true by construction.
+    if rel_type == "accused":
+        item_to_bind["outcome"] = CHARGED
+    # Recorded BEFORE `outcome` is added, so the key matches the one
+    # `bind_key` computed above -- it reads only the two identity fields, but
+    # adding the entry after the mutation would invite that to drift.
+    have.add(bind_key(item_to_bind))
+    additions.append(validate_bind_item(item_to_bind))
+    plan.bound.append((name, decision, notes, rel_type))
 
 
 def _check_entity_plan(plan):
@@ -903,19 +935,31 @@ def plan_summary(plan, extracted_items):
 
     Recomputed here rather than threaded through `plan_case_entities`, because
     everything needed is already available to a caller that has both the plan
-    and the `extracted_items` it was built from: the number of extracted names
-    with a non-empty `entity_name` (the same "name" `plan_case_entities` skips
-    a blank of, before it even looks at `relationship_type`) minus how many of
-    those are accounted for in `bound`/`review`/`nomatch` is exactly the count
-    that was dropped as already-bound. No re-resolution, no extra searches --
-    just arithmetic over what the plan already recorded.
+    and the `extracted_items` it was built from. No re-resolution, no extra
+    searches -- just arithmetic over what the plan already recorded.
+
+    THE BUCKETS DO NOT SUM TO `extracted`. `bound` counts bind ROWS, and since
+    2026-08-05 one extracted name can produce several of them, so
+    `bound + review + nomatch` can exceed the number of names. `already_bound`
+    is therefore derived from which NAMES produced no row at all, not by
+    subtracting row counts -- the subtraction reconciled to -1 on the first
+    ambiguity.
     """
-    extracted = sum(
-        1 for item in extracted_items if (item.get("entity_name") or "").strip())
+    names = [(item.get("entity_name") or "").strip() for item in extracted_items]
+    names = [name for name in names if name]
+    extracted = len(names)
     bound = len(plan.bound)
     review = len(plan.review)
     nomatch = len(plan.nomatch)
-    already_bound = extracted - (bound + review + nomatch)
+    # `bound` counts bind ROWS and one name can now produce several of them (see
+    # `qualifying_binds`), so `extracted - (bound + review + nomatch)` goes
+    # NEGATIVE on an ambiguity -- 3 names, 3 binds, 1 no-match reconciled to -1.
+    # A name is "accounted for" when it produced at least one row anywhere; the
+    # rest are the ones the already-bound check dropped.
+    accounted = ({row[0] for row in plan.bound}
+                 | {row[0] for row in plan.review}
+                 | {row[0] for row in plan.nomatch})
+    already_bound = sum(1 for name in names if name not in accounted)
     return {
         "extracted": extracted,
         "bound": bound,
