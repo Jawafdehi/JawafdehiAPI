@@ -913,7 +913,8 @@ def _truncation_veto(candidates, winner_id, candidates_complete) -> str:
 
 
 def resolve(extracted_name: str, candidates: list[dict],
-            candidates_complete: bool = True) -> Decision:
+            candidates_complete: bool = True,
+            prefer_gazetteer: bool = False) -> Decision:
     """Decide what to do with one LLM-extracted name.
 
     BIND only when exactly ONE NES entity scores at or above MIN_BIND_SCORE and
@@ -958,6 +959,29 @@ def resolve(extracted_name: str, candidates: list[dict],
                         scored[0][2] if scored else "",
                         "no NES entity scored at or above the bind threshold",
                         frozen)
+
+    # NES holds some places twice: `झापा` is both `location/district/jhapa-np0104`
+    # and `location/jhapa`, scoring 146.20 each, so run c92ad032 bound one
+    # district onto the case as two rows. Where the coded gazetteer entry is
+    # among the qualifiers, it is the one to keep -- it carries the government
+    # district code, and the un-coded twin is a hand-added duplicate.
+    #
+    # AFTER qualification, never before. Filtering the candidate list up front
+    # would let a coded entry that matched badly take the bind from an un-coded
+    # one that matched well, or drop the name to NO_MATCH outright. Narrowing
+    # the qualifying set can only ever pick between entities already good enough
+    # to bind.
+    #
+    # `frozen` keeps every candidate, so the dropped twin still reaches the
+    # report and the duplicate stays visible.
+    #
+    # Only the location section asks for this. Anywhere else, two entities
+    # scoring alike is the ambiguity it looks like.
+    if prefer_gazetteer and len(qualifying) > 1:
+        coded = {nes_id for nes_id in qualifying if names_a_gazetteer_place(nes_id)}
+        if coded:
+            qualifying = coded
+            scored = [row for row in scored if row[1] in coded]
 
     # Every veto below refuses the SAME way -- downgrade the winning candidate
     # to REVIEW with a reason -- so the construction lives in one place. A new

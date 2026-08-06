@@ -663,7 +663,7 @@ def qualifying_binds(decision):
             for score, nes_id, matched in qualifying]
 
 
-def _resolve_with_vetoes(api, name, strict=False):
+def _resolve_with_vetoes(api, name, strict=False, *, section=""):
     """One name -> one `Decision`. THE ONLY resolution path in this module: every
     extracted name and every court-record `accused` name comes through here, so
     no role can drift onto a different guard.
@@ -691,8 +691,12 @@ def _resolve_with_vetoes(api, name, strict=False):
     read failure must never let a BIND survive.
     """
     candidates = api.search_entities(name)
+    # Only the location section prefers the coded gazetteer entry over an
+    # un-coded twin -- see `resolve`. Everywhere else two entities scoring alike
+    # is a real ambiguity.
     decision = resolve(name, candidates,
-                       candidates_complete=getattr(candidates, "complete", True))
+                       candidates_complete=getattr(candidates, "complete", True),
+                       prefer_gazetteer=(section == LOCATION_SECTION))
     if not decision.is_bind:
         if strict:
             return decision
@@ -873,7 +877,8 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
             plan.coerced.append((name, rel_type, DEFAULT_RELATIONSHIP_TYPE))
             rel_type = DEFAULT_RELATIONSHIP_TYPE
 
-        decision = _resolve_with_vetoes(api, name, strict=strict)
+        decision = _resolve_with_vetoes(api, name, strict=strict,
+                                        section=rel_type)
 
         if decision.verdict == REVIEW:
             plan.review.append((name, decision, rel_type))
