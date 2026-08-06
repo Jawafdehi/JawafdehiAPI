@@ -1449,7 +1449,10 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
     - `ngm`: NGM (judicial) coverage — court-case / court totals, by-court-type
       breakdown, court-cases-per-year (`by_year`) and per-court-level-per-year
       (`by_court_type_year`), and completeness percentages (NES-resolved /
-      registration date / document sources)
+      registration date / document sources). Both per-year breakdowns are keyed
+      by `bs_year` — the **Bikram Sambat** registration year taken from the court
+      register, not a Gregorian one (BS 2081 runs mid-April 2024 to mid-April
+      2025), covering the most recent 25 years on record
     - `materials`: NGM materials (development-project / document dataset) coverage —
       total, by-type / by-source breakdowns, and completeness percentages
       (description / url / date)
