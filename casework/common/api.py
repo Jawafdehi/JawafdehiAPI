@@ -276,13 +276,20 @@ class CaseworkApi:
                                timeout=timeout) as r:
                 return json.loads(r.read().decode())
         except urllib.error.HTTPError as exc:
-            # 422 covers both a duplicate IRI and a malformed payload. Only the
-            # body separates them, and only the duplicate is recoverable.
+            # A duplicate IRI is 409 ENTITY_EXISTS, NOT 422. The view's 422 is for
+            # validation (`entities/views.py:219`); the duplicate check raises a
+            # ValueError that `_map_service_value_error` turns into 409
+            # (`entities/views.py:420`). Verified against the local harness --
+            # keying this off 422 made every re-run record `error` and rebind
+            # nothing, which no stubbed test caught because the stub chose the
+            # status.
+            if exc.code == 409:
+                raise EntityAlreadyExists(
+                    exc.read().decode(errors="replace")) from exc
             if exc.code == 422:
-                detail = exc.read().decode(errors="replace")
-                if "already exists" in detail:
-                    raise EntityAlreadyExists(detail) from exc
-                raise ValueError(f"entity create rejected: {detail}") from exc
+                raise ValueError(
+                    "entity create rejected: "
+                    f"{exc.read().decode(errors='replace')}") from exc
             raise
 
     # The list endpoint's server-side default is 20 per page, so walking all

@@ -359,6 +359,10 @@ RELATIONSHIP_TYPES = (
 #: stated)"), so a coerced row claims exactly what an unstated one would.
 DEFAULT_RELATIONSHIP_TYPE = "related"
 
+#: `created.jsonl` outcomes that yielded an IRI the case can bind. The other two
+#: -- `skipped` and `error` -- leave the name in `nomatch`.
+CREATED_OUTCOMES = frozenset({"created", "would-create", "already-exists", "reused"})
+
 
 def bind_relationship_type(entity):
     """One bind's relationship type, lowercased and trimmed, from either key.
@@ -493,6 +497,12 @@ class EntityBindPlan:
     # to `related`. Recorded because a silently relabelled section is a section
     # nobody asserted -- the run log and the reports name the original.
     coerced: list = field(default_factory=list)  # (name, original, "related")
+    # Names the create step made an entity for. They are REMOVED from `nomatch`
+    # once created, so without this list `plan_summary` sees a name that produced
+    # no row anywhere and counts it as already-bound -- which reported all 12
+    # entities the first production dry run would have created as work that did
+    # not need doing.
+    created: list = field(default_factory=list)  # names
     patch_items: list = field(default_factory=list)
     reason: str = ""
     # There are no separate accused lists. Every name this planner handles comes
@@ -1143,13 +1153,18 @@ def plan_summary(plan, extracted_items):
     # rest are the ones the already-bound check dropped.
     accounted = ({row[0] for row in plan.bound}
                  | {row[0] for row in plan.review}
-                 | {row[0] for row in plan.nomatch})
+                 | {row[0] for row in plan.nomatch}
+                 # A created name left `nomatch` and produced no row in the other
+                 # two either, so it has to be named here or it reads as
+                 # already-bound.
+                 | set(plan.created))
     already_bound = sum(1 for name in names if name not in accounted)
     return {
         "extracted": extracted,
         "bound": bound,
         "review": review,
         "nomatch": nomatch,
+        "created": len(plan.created),
         "already_bound": already_bound,
     }
 
@@ -1720,6 +1735,11 @@ def main(argv=None):
                 dry_run=args.dry_run, run_entities=run_entities)
             created_rows.extend(created)
             plan.nomatch = still_unmatched
+            # Only outcomes that produced an IRI to bind. `skipped` and `error`
+            # stay in `nomatch`, which already accounts for them, and counting
+            # them here would report entities we did not create.
+            plan.created = [row["extracted"] for row in created
+                            if row["outcome"] in CREATED_OUTCOMES]
             for row in created:
                 log_event(logger, paths["events"], run_id=run_id, stage="entities",
                           slug=slug, step="create", status=row["outcome"],
@@ -1821,16 +1841,28 @@ def main(argv=None):
     print()
     print(f"  TOTAL entities extracted across all cases: {total_entities_extracted}")
     print(f"  TOTAL accused notes extracted: {total_accused_notes_extracted}")
+    # "matched an EXISTING entity" and not just "bound": with --create-entities a
+    # created entity is bound too, and it is counted on the create line below.
+    # Reading 0 here while 13 entities reach the case is the kind of misreport
+    # this stage's reporting was rebuilt to stop.
     if args.dry_run:
         # Nothing was written -- say so, so this line can never be mistaken
         # for a record of an actual write the way an unqualified "bound to
         # cases" count could be.
-        print(f"  TOTAL entities that WOULD bind to cases (dry run, nothing "
-              f"written): {total_bound}")
+        print(f"  TOTAL that WOULD bind to an EXISTING NES entity (dry run, "
+              f"nothing written): {total_bound}")
     else:
-        print(f"  TOTAL entities bound to cases: {total_bound}")
+        print(f"  TOTAL bound to an EXISTING NES entity: {total_bound}")
     print(f"  TOTAL reported for human review: {total_review}  -> {reports['review']}")
     print(f"  TOTAL with no NES match: {total_nomatch}  -> {reports['nomatch']}")
+    if created_rows:
+        verb = "WOULD create" if args.dry_run else "created"
+        made = sum(1 for row in created_rows if row["outcome"] in CREATED_OUTCOMES)
+        print(f"  TOTAL NES entities {verb}: {made}  -> {reports['created']}")
+        for outcome in ("skipped", "error"):
+            n = sum(1 for row in created_rows if row["outcome"] == outcome)
+            if n:
+                print(f"    {n} {outcome} (left unmatched)")
     print(f"  TOTAL already bound (nothing to write): {total_already_bound}")
     if total_skipped_enriched:
         # Not necessarily finished, since the section scope widened after those

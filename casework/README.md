@@ -132,7 +132,7 @@ flowchart LR
 | tags | `enrich_tags` | `tags` | `patch_field` | yes ¹ | cheap |
 | timeline | `enrich_timeline` | `timeline` | `patch_field` | yes ¹ | premium |
 | allegations | `enrich_allegations` | `key_allegations` | `patch_field` | yes ¹ | premium |
-| entities | `enrich_related_entities` | `entities` | `patch_field` | yes ¹ | premium |
+| entities | `enrich_related_entities` | `entities` (+ NES entities with `--create-entities`) | `patch_field`, `POST /api/entities` | yes ¹ | premium |
 | ledger | `ledger` | ledger JSON (local file) | none (reads run logs) | local file | — |
 
 ¹ Remote write requires **`--apply` + `--allow-remote-writes` + `--api-token`** together.
@@ -154,6 +154,18 @@ Each run gets a `run_id` and writes two files under `work/enricher-runs/`
 
 - `…-<stage>-<run_id>.log` — human-readable, UTC-timestamped
 - `…-<stage>-<run_id>.events.jsonl` — one JSON event per case/step
+
+`enrich_related_entities` writes five more, sharing that stem. The first two are the
+answer to "what did the model actually find", which the counts in the log do not give
+you — they survive a run that binds nothing:
+
+| File | Holds |
+|------|-------|
+| `.extracted.jsonl` | Every extracted name with its section and notes, per case |
+| `.accused_notes.jsonl` | The `accused_notes` array |
+| `.binds.jsonl` | Each bind, with the candidates that lost |
+| `.created.jsonl` | Each entity created or refused, with the reason |
+| `.nomatch.md` | Names still unmatched, grouped, with a Role column |
 
 `ledger.py` folds all `*.events.jsonl` into a **current-state ledger** keyed by
 `(slug, stage)`, latest-by-timestamp, ignoring non-outcome statuses
@@ -382,10 +394,53 @@ uv run python -m casework.enrich_missing_bigo \
 | tags | `uv run python -m casework.enrich_tags --dry-run` | `… --apply` (add `--no-llm` for rules-only) |
 | timeline | `uv run python -m casework.enrich_timeline --dry-run` | `… --apply` |
 | allegations | `uv run python -m casework.enrich_allegations --dry-run` | `… --apply` |
-| entities | `uv run python -m casework.enrich_related_entities --dry-run` | `… --apply` |
+| entities | `uv run python -m casework.enrich_related_entities --dry-run` | `… --apply` (add `--create-entities` to create missing NES entities) |
 
 For every "Apply (loopback)" cell above, the **remote/production** form adds:
 `--api-base-url https://api.jawafdehi.org --api-token "$JAWAFDEHI_API_TOKEN" --allow-remote-writes`.
+
+#### Creating the NES entities a case needs — `--create-entities`
+
+`enrich_related_entities` binds extracted names to NES entities that already exist.
+Most do not: production run `645b1483` (case 078-CR-0038) extracted 13 names and
+matched **none**, because NES holds almost no institution a CIAA court order names.
+
+`--create-entities` creates them, then binds them. It is **off by default and
+independent of `--apply`**, so upgrading the enricher cannot make an existing
+`--apply` run start writing to NES.
+
+```bash
+# Dry run: reports every entity it would create, creates nothing
+uv run python -m casework.enrich_related_entities \
+    --slug case-078-cr-0038-ciaa-special-court-case-078-cr-9a \
+    --create-entities --dry-run
+
+# Write: all four flags together
+uv run python -m casework.enrich_related_entities --batch-csv batch.csv \
+    --create-entities --apply --allow-remote-writes
+```
+
+Read `*.created.jsonl` before an apply. Its `outcome` column is the whole story:
+
+| Outcome | Meaning |
+|---------|---------|
+| `created` / `would-create` | A new NES entity, bound to the case |
+| `already-exists` | Someone got there first (409); bound to theirs |
+| `reused` | A second spelling of a name created earlier in this run |
+| `skipped` | No prefix, a prefix whose parent branch does not exist, or no slug |
+| `error` | The POST failed; the name stays unmatched, the case keeps its other binds |
+
+Three things to know before you run it:
+
+- **Entities are created with no sources.** `POST /api/entities` validates `@id`,
+  `@type` and `name` and nothing else; the 2-distinct-publisher rule lives in
+  `manage.py bulk_ingest`. Each entity carries a `citation` naming the document it
+  came from, which is one source, not two.
+- **An already-enriched case creates nothing.** The idempotency gate skips any case
+  already holding a `related` bind, before the create step runs. Use `--force`.
+- **The resolver's name vetoes no longer block anything.** Names it judged not to be
+  entities at all — `गैरकानूनी आर्जित घरजग्गा सम्पत्ति - काठमाडौं`, a description of
+  seized property — are created. Filtering them is a later pass.
 
 ### 4. Consolidate run logs — `ledger`
 

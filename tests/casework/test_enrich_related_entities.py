@@ -877,7 +877,7 @@ def test_summary_reports_the_three_counts_separately(
               argv=["--dry-run"])
     out = capsys.readouterr().out
     assert "TOTAL entities extracted across all cases: 2" in out
-    assert "TOTAL entities that WOULD bind to cases (dry run, nothing written): 0" in out
+    assert "TOTAL that WOULD bind to an EXISTING NES entity (dry run, nothing written): 0" in out
     assert "TOTAL reported for human review:" in out
     assert "TOTAL with no NES match:" in out
     assert "bound zero" in out.lower()
@@ -940,7 +940,7 @@ def test_summary_uses_plan_summary_so_already_bound_names_do_not_vanish(
 
     out = capsys.readouterr().out
     assert "TOTAL entities extracted across all cases: 2" in out
-    assert "TOTAL entities bound to cases: 1" in out
+    assert "TOTAL bound to an EXISTING NES entity: 1" in out
     assert "TOTAL already bound (nothing to write): 1" in out
     assert "TOTAL reported for human review: 0" in out
     assert "TOTAL with no NES match: 0" in out
@@ -2199,7 +2199,7 @@ def test_plan_summary_reconciles_on_the_ordinary_bind_review_nomatch_split():
     # `already_bound` subtraction and drive it negative, which is what the three
     # court-record keys that used to sit here existed to avoid.
     assert summary == {
-        "extracted": 3, "bound": 1, "review": 1, "nomatch": 1, "already_bound": 0,
+        "extracted": 3, "bound": 1, "review": 1, "nomatch": 1, "created": 0, "already_bound": 0,
     }
 
 
@@ -2230,7 +2230,7 @@ def test_plan_summary_reconciles_when_permissive_mode_promotes_the_ambiguity():
     # and `already_bound` is derived from names that produced no row at all, so
     # the old subtraction's -1 cannot come back.
     assert plan_summary(plan, extracted_items) == {
-        "extracted": 3, "bound": 3, "review": 0, "nomatch": 1, "already_bound": 0,
+        "extracted": 3, "bound": 3, "review": 0, "nomatch": 1, "created": 0, "already_bound": 0,
     }
 
 
@@ -2326,7 +2326,7 @@ def test_a_failed_write_leaves_no_bound_row_and_no_bound_claim(
     out = capsys.readouterr().out
 
     assert "  BOUND " not in out
-    assert "TOTAL entities bound to cases: 0" in out
+    assert "TOTAL bound to an EXISTING NES entity: 0" in out
     assert api.replace_list_calls == []
     assert Path(_report_files()["binds"]).read_text(encoding="utf-8") == ""
     statuses = [r["status"] for r in report.rows if r["slug"] == "case-write-fails"]
@@ -2443,7 +2443,7 @@ def test_dry_run_refuses_what_apply_refuses_instead_of_promising_a_bind(
     assert "WOULD BIND" not in out
     assert "WOULD REFUSE" in out
     assert "no ETag" in out
-    assert "TOTAL entities that WOULD bind to cases (dry run, nothing written): 0" in out
+    assert "TOTAL that WOULD bind to an EXISTING NES entity (dry run, nothing written): 0" in out
     statuses = [r["status"] for r in report.rows if r["slug"] == "case-dry-no-etag"]
     assert statuses == ["would-refuse"]
     assert Path(_report_files()["binds"]).read_text(encoding="utf-8") == ""
@@ -3133,3 +3133,102 @@ def test_the_category_list_ships_with_the_flag(
               argv=["--dry-run", "--create-entities"])
     assert "ENTITY CATEGORY" in seen["system"]
     assert "organization/government/district/dfo" in seen["system"]
+
+
+def test_a_created_name_is_not_counted_as_already_bound():
+    # Found on the first production dry run (226fb34b, case 078-CR-0038): 13
+    # extracted, 1 bound, 12 would-create, 0 no-match -- reported as "already
+    # bound (nothing to write): 12". The create step removes a name from
+    # `plan.nomatch`, so it produced no row in bound/review/nomatch and the
+    # accounted-for check counted it as dropped-because-already-bound. Every
+    # created entity was reported as work that did not need doing.
+    plan = ere.EntityBindPlan(slug="case-count", action="NOOP", examined=True)
+    plan.bound = [("नागरिक लगानी कोष", None, "क", "related")]
+    plan.created = ["हेम राज विष्ट", "सविना आले"]
+    items = [{"entity_name": "नागरिक लगानी कोष"},
+             {"entity_name": "हेम राज विष्ट"},
+             {"entity_name": "सविना आले"}]
+
+    summary = ere.plan_summary(plan, items)
+    assert summary["created"] == 2
+    assert summary["already_bound"] == 0
+
+
+def test_a_genuinely_already_bound_name_is_still_counted():
+    # The counter must keep working: a name that resolved to an entity already on
+    # the case in that section produces no row anywhere, and that IS
+    # already-bound.
+    plan = ere.EntityBindPlan(slug="case-count-2", action="NOOP", examined=True)
+    plan.bound = [("नागरिक लगानी कोष", None, "क", "related")]
+    items = [{"entity_name": "नागरिक लगानी कोष"},
+             {"entity_name": "पहिले नै जोडिएको नाम"}]
+
+    summary = ere.plan_summary(plan, items)
+    assert summary["already_bound"] == 1
+    assert summary["created"] == 0
+
+
+# --------------------------------------------------------------------------
+# CaseworkApi.create_entity's error mapping.
+#
+# Found by the local harness run, not by a unit test: the first version keyed
+# already-exists off 422, which is what the view returns for a VALIDATION
+# failure. A duplicate IRI goes through `_map_service_value_error` instead and
+# comes back 409 ENTITY_EXISTS (`entities/views.py:420`), so every re-run
+# recorded `error` and rebound nothing.
+# --------------------------------------------------------------------------
+
+
+def _http_error(code, body):
+    import io
+    import urllib.error
+
+    return urllib.error.HTTPError(
+        "http://127.0.0.1:48010/api/entities", code, "err", {},
+        io.BytesIO(body.encode("utf-8")))
+
+
+def _api_raising(exc):
+    from casework.common.api import CaseworkApi
+
+    api = CaseworkApi("http://127.0.0.1:48010", basic=("u", "p"))
+
+    def boom(*a, **kw):
+        raise exc
+
+    api._request = boom
+    return api
+
+
+def test_a_409_conflict_becomes_entity_already_exists():
+    from casework.common.api import EntityAlreadyExists
+
+    api = _api_raising(_http_error(409, json.dumps({"error": {
+        "code": "ENTITY_EXISTS",
+        "message": "Entity https://jawafdehi.org/entity/person/hema-raja-vishta "
+                   "already exists"}})))
+    with pytest.raises(EntityAlreadyExists):
+        api.create_entity({"prefix": "person", "slug": "hema-raja-vishta",
+                           "type": "Person", "name": {"ne": "हेम राज विष्ट"}})
+
+
+def test_a_422_validation_failure_is_not_mistaken_for_a_conflict():
+    # 422 is the view's VALIDATION status. Treating it as already-exists would
+    # bind a nonexistent IRI on every malformed payload.
+    from casework.common.api import EntityAlreadyExists
+
+    api = _api_raising(_http_error(422, json.dumps({"error": {
+        "code": "VALIDATION_ERROR",
+        "message": "@type must be a known schema.org/jawafdehi type"}})))
+    with pytest.raises(ValueError) as caught:
+        api.create_entity({"prefix": "person", "slug": "x", "type": "Nonsense",
+                           "name": {"ne": "क"}})
+    assert not isinstance(caught.value, EntityAlreadyExists)
+
+
+def test_a_500_propagates_untouched():
+    api = _api_raising(_http_error(500, "boom"))
+    with pytest.raises(Exception) as caught:
+        api.create_entity({"prefix": "person", "slug": "x", "type": "Person",
+                           "name": {"ne": "क"}})
+    assert "500" in str(caught.value)
