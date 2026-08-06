@@ -2177,3 +2177,112 @@ def test_the_donor_templates_are_kept_so_reach_can_only_grow():
     queries = " ".join(ns.build_queries(case))
     assert "अख्तियार मुद्दा दायर" in queries      # donor filing
     assert "विरुद्ध भ्रष्टाचार मुद्दा दायर" in queries   # measured filing
+
+
+# ---------------------------------------------------------------------------
+# Devanagari name recovery. NES stores Latin names; Nepali newsrooms write
+# Devanagari. Measured on the labelled set: 3 of the 4 articles we could not
+# find ARE in Google's index and their headlines carry the exact keywords we
+# search for -- only the name was in the wrong script.
+# ---------------------------------------------------------------------------
+
+def test_the_skeleton_guard_accepts_real_spellings_and_rejects_wrong_names():
+    for latin, dev in [("Bikal Poudel", "विकल पौडेल"),
+                       ("Gajendra Maharjan", "गजेन्द्र महर्जन"),
+                       ("Surendra Bahadur Bisht", "सुरेन्द्र बहादुर विष्ट"),
+                       ("Dinesh Prasad Yadav", "दिनेश प्रसाद यादव")]:
+        assert ns.devanagari_names_match(latin, dev), (latin, dev)
+    assert not ns.devanagari_names_match("Bikal Poudel", "रामप्रसाद शर्मा")
+    assert not ns.devanagari_names_match("Bikal Poudel", "")
+    assert not ns.devanagari_names_match("", "विकल पौडेल")
+
+
+def test_a_wrong_name_from_the_model_is_dropped_not_searched():
+    """A hallucinated name would send the whole search after another person and
+    report the result as 'no coverage exists' -- the silent zero this module
+    refuses everywhere else."""
+    case = {"title": "t", "description": "", "key_allegations": [],
+            "entities": [{"display_name": "Bikal Poudel", "type": "accused"}]}
+
+    def fake_invoke(**kwargs):
+        return {"names": {"Bikal Poudel": "रामप्रसाद शर्मा"}}
+
+    got = ns.generate_devanagari_names(case, fake_invoke, FakeUsage())
+    assert got == {}, "a name that fails the skeleton check must not be used"
+
+
+def test_a_good_name_from_the_model_is_kept():
+    case = {"title": "t", "description": "", "key_allegations": [],
+            "entities": [{"display_name": "Bikal Poudel", "type": "accused"}]}
+
+    def fake_invoke(**kwargs):
+        return {"names": {"Bikal Poudel": "विकल पौडेल"}}
+
+    assert ns.generate_devanagari_names(case, fake_invoke, FakeUsage()) == {
+        "Bikal Poudel": "विकल पौडेल"}
+
+
+def test_a_dead_model_costs_query_quality_not_correctness():
+    case = {"title": "t", "description": "", "key_allegations": [],
+            "entities": [{"display_name": "Bikal Poudel", "type": "accused"}]}
+
+    def dead(**kwargs):
+        raise RuntimeError("529 Overloaded")
+
+    assert ns.generate_devanagari_names(case, dead, FakeUsage()) == {}
+    # The run must still produce queries, in Latin.
+    queries = ns.build_queries(case, devanagari_names={})
+    assert queries and any("Bikal Poudel" in q for q in queries)
+
+
+def test_devanagari_templates_get_the_devanagari_name_english_ones_do_not():
+    """Mixing scripts inside one query is the bug: 'Bikal Poudel विशेष अदालत
+    ठहर' against an article that says 'विकल पौडेल'."""
+    case = {"title": "t", "key_allegations": [], "court_cases": [],
+            "entities": [{"display_name": "Bikal Poudel", "type": "accused"}],
+            "timeline": [{"date": "2026-02-05", "date_bs": "2082-10-22",
+                          "title": "विशेष अदालतको ठहर", "description": ""}]}
+    queries = ns.build_queries(case,
+                               devanagari_names={"Bikal Poudel": "विकल पौडेल"})
+    devanagari = [q for q in queries if "ठहर" in q or "सफाइ" in q]
+    assert devanagari
+    for q in devanagari:
+        assert "विकल पौडेल" in q, q
+        assert "Bikal Poudel" not in q, f"mixed-script query survived: {q}"
+    english = [q for q in queries if ns.is_english_query(q)]
+    assert english and all("Bikal Poudel" in q or "Nepal" in q for q in english)
+
+
+def test_no_devanagari_name_leaves_every_query_exactly_as_it_was():
+    """The recovery is an improvement, not a dependency -- a case where the
+    model returns nothing must search precisely what it searched before."""
+    case = {"title": "t", "key_allegations": [], "court_cases": [],
+            "entities": [{"display_name": "Bikal Poudel", "type": "accused"}],
+            "timeline": []}
+    assert ns.build_queries(case) == ns.build_queries(case, devanagari_names={})
+
+
+def test_the_enricher_asks_for_the_devanagari_name():
+    src = pathlib.Path(en.__file__).read_text()
+    assert "generate_devanagari_names(case, invoke_json, usage)" in src
+    assert "devanagari_names=devanagari" in src
+
+
+def test_the_short_name_queries_survive_the_models_queries():
+    """Measured on the labelled set with Serper, 2026-08-06: the model's queries
+    ALONE scored 5/10 against the short queries' 6/10, because it over-specifies
+    and the plain name query that had been finding the article stopped being
+    sent. The model still earns its place -- it found the one article no name
+    query reaches, via the project name -- so both are searched, short first."""
+    case = {"title": "t", "key_allegations": [], "court_cases": [], "timeline": [],
+            "entities": [{"display_name": "Jiban Bahadur Shahi", "type": "accused"}]}
+    llm = ["Nepal CIAA investigation Nepal Airlines A330-200 widebody aircraft "
+           "purchase Jiban Bahadur Shahi corruption"]
+    queries = ns.build_queries(case, llm_english_queries=llm)
+    assert any(q.startswith("Jiban Bahadur Shahi CIAA Nepal corruption")
+               for q in queries), queries
+    assert any("A330-200" in q for q in queries), (
+        "the model's query must still be searched, not dropped")
+    short_at = next(i for i, q in enumerate(queries) if "CIAA Nepal corruption" in q)
+    long_at = next(i for i, q in enumerate(queries) if "A330-200" in q)
+    assert short_at < long_at, "the short query must be spent first"

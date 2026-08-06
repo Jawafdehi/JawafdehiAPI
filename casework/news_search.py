@@ -1605,12 +1605,17 @@ def timeline_events(case):
     return found
 
 
-def _event_queries(primary, case):
+def _event_queries(primary, case, devanagari_primary=""):
     """Event queries, ordered so the stages this case reached come first.
 
     Both template sets are emitted -- the donor's and the corpus-measured one --
     with a year appended where the timeline supplies one. Donor templates are
     never dropped, so this can only add reach, never take it away.
+
+    A Devanagari template gets the Devanagari name when one survived the
+    skeleton check, and the Latin name otherwise. Mixing scripts inside one
+    query -- "Bikal Poudel विशेष अदालत ठहर" against an article that says
+    "विकल पौडेल" -- is what left 3 findable articles unfound.
     """
     if not primary or len(primary) < 3:
         return []
@@ -1627,7 +1632,13 @@ def _event_queries(primary, case):
         templates = (EVENT_QUERY_TEMPLATES_MEASURED.get(event_type, [])
                      + EVENT_QUERY_TEMPLATES.get(event_type, []))
         for index, template in enumerate(templates):
-            base = template.format(name=primary)
+            # A Devanagari template needs a Devanagari name; an English one
+            # must keep the Latin. Decided per template, not per case, because
+            # both kinds sit in the same list.
+            name = (devanagari_primary
+                    if devanagari_primary and DEVANAGARI_RE.search(template)
+                    else primary)
+            base = template.format(name=name)
             queries.append(base)
             year = _year_term(reached.get(event_type))
             # One year-qualified variant, on the FIRST template of a stage that
@@ -1662,7 +1673,7 @@ def _year_term(years):
     return bs.translate(_ASCII_TO_DEVANAGARI_DIGITS) if bs else ""
 
 
-def build_queries(case, llm_english_queries=None):
+def build_queries(case, llm_english_queries=None, devanagari_names=None):
     """Up to `QUERY_LIMIT` search queries for one case. Donor-verbatim (donor:757).
 
     Prioritises accused name + location + corruption keywords over the case
@@ -1675,14 +1686,27 @@ def build_queries(case, llm_english_queries=None):
     names = accused_names(case)
     primary = _clean(names[0]) if names else ""
 
-    events = _event_queries(primary, case)
+    devanagari_primary = ""
+    if names and devanagari_names:
+        devanagari_primary = (devanagari_names.get(names[0])
+                              or devanagari_names.get(primary) or "")
+    events = _event_queries(primary, case, devanagari_primary)
 
-    english = list(llm_english_queries or [])
-    if not english:
-        roman = romanize_devanagari(primary)
-        if roman and len(roman) >= 3:
-            english += [f"{roman} CIAA Nepal corruption",
-                        f"{roman} Nepal special court case"]
+    # The two short name queries come FIRST and always, with the model's
+    # queries after -- not instead of. Measured on the labelled set, Serper,
+    # 2026-08-06: the model's queries alone scored 5/10 against the short
+    # queries' 6/10, because it over-specifies ("Nepal CIAA investigation Nepal
+    # Airlines A330-200 widebody aircraft purchase Jiban...") and the plain
+    # "Jiban Bahadur Shahi CIAA Nepal corruption" that had found the article at
+    # rank 7 was no longer being sent. But the model also found the one article
+    # no name query reaches -- the Melamchi case, via the PROJECT name and the
+    # contractor. The two are complementary and the budget has room for both.
+    roman = romanize_devanagari(primary)
+    english = []
+    if roman and len(roman) >= 3:
+        english += [f"{roman} CIAA Nepal corruption",
+                    f"{roman} Nepal special court case"]
+    english += list(llm_english_queries or [])
 
     general = []
     location = extract_location_from_title(title)
@@ -1820,6 +1844,13 @@ DATES IN THE SUMMARY — this note is stored permanently, so a date that only ma
 ENGLISH_QUERY_SYSTEM_PROMPT = (
     "You are a Nepal-focused news search assistant. Output only clean search queries.")
 
+DEVANAGARI_NAME_SYSTEM_PROMPT = (
+    "You transcribe Nepali personal names into Devanagari for search. Copy the "
+    "spelling from the case text you are given whenever it appears there; do "
+    "not invent a spelling you cannot see. If you are unsure of a name, omit "
+    "it -- a missing entry costs one search query, a wrong one sends the whole "
+    "search after the wrong person. Output only the JSON object asked for.")
+
 # Donor excerpt budgets for the verify prompt (donor:1010).
 VERIFY_EXCERPT_CHARS = 900
 VERIFY_EXCERPT_CHARS_DEVANAGARI = 700
@@ -1906,6 +1937,100 @@ def generate_english_queries(case, invoke_json, usage):
         return []
     return [q for q in queries
             if isinstance(q, str) and is_english_query(q) and len(q) > 10][:5]
+
+
+#: Letters Nepali romanisation renders interchangeably, folded to one symbol so
+#: "Bikal"/"wikl" and "Bisht"/"wist" compare equal.
+_SKELETON_FOLD = {"w": "b", "v": "b", "f": "p", "z": "j", "x": "s",
+                  "c": "k", "q": "k"}
+
+
+def name_skeleton(name):
+    """Consonants only, interchangeable letters folded, doubles collapsed.
+
+    The only reliable way to compare a NES Latin name with a Devanagari one.
+    Both transliteration directions are lossy -- `romanize_devanagari` drops
+    inherent vowels ("गजेन्द्र महर्जन" -> "gjendr mhrjn") and ITRANS the other
+    way emits "Bइकल् Pओउदेल्" -- but the consonant sequence survives both, so
+    "Gajendra Maharjan" and its Devanagari spelling both reduce to "gjndrmhrjn".
+    """
+    stripped = re.sub(r"[^a-z]", "", (name or "").lower())
+    folded = "".join(_SKELETON_FOLD.get(ch, ch) for ch in stripped
+                     if ch not in "aeiou")
+    return re.sub(r"(.)\1+", r"\1", folded)
+
+
+def devanagari_names_match(latin, devanagari):
+    """Is `devanagari` a plausible spelling of the Latin `latin`?
+
+    The guard on the LLM. A hallucinated or drifted name would produce queries
+    that quietly match nothing -- reported as "no coverage exists", which is the
+    silent zero this module refuses everywhere else. Comparing skeletons costs
+    nothing and turns a wrong name into a discarded one.
+    """
+    want, got = name_skeleton(latin), name_skeleton(romanize_devanagari(devanagari))
+    if len(want) < 3 or len(got) < 3:
+        return False
+    # Not equality: romanisation of a conjunct can add or drop one consonant
+    # ("प्रसाद" -> "prsad"/"prasad"), so require containment either way.
+    return want == got or want in got or got in want
+
+
+def generate_devanagari_names(case, invoke_json, usage):
+    """`{latin_name: devanagari_name}` for the accused, cheap tier, guarded.
+
+    NES stores `display_name` in Latin ("Bikal Poudel") while Nepali newsrooms
+    write Devanagari ("विकल पौडेल"), so every Devanagari query template was
+    interpolating a Latin name and matching the wrong script. Measured on the
+    labelled set: 3 of the 4 articles we could not find ARE in Google's index,
+    and their headlines carry the exact keywords we search for -- only the name
+    was in the wrong script.
+
+    An LLM rather than a transliteration table because the failures are
+    structural, not phonetic: three-word names, `Dr.` prefixes, aliases, and
+    organisations defeated a deterministic matcher on 16 of 24 real cases. The
+    model also has the case's own Devanagari prose in front of it, so it is
+    extracting a spelling that already exists in the record, not inventing one.
+
+    Every answer is checked with `devanagari_names_match` and dropped if it
+    disagrees. A failure here costs query quality, never correctness.
+    """
+    names = accused_names(case)
+    if not names:
+        return {}
+    prompt = (
+        "Give the Nepali (Devanagari) spelling of each accused person's name "
+        "below, as it would be written in a Nepali news report. The case text "
+        "that follows already contains these names -- copy the spelling from "
+        "it rather than transliterating. Skip anything that is an organisation "
+        "rather than a person, and drop titles like Dr. or Mr.\n"
+        'Respond with ONLY: {"names": {"<latin>": "<devanagari>"}}\n\n'
+        f"Accused: {', '.join(names[:5])}\n\n"
+        f"Case title: {case.get('title') or ''}\n"
+        f"Case text: {(case.get('description') or '')[:2000]}"
+    )
+    result, _error = _llm_json(invoke_json, DEVANAGARI_NAME_SYSTEM_PROMPT, prompt,
+                               400, "cheap", usage)
+    table = (result or {}).get("names")
+    if not isinstance(table, dict):
+        return {}
+
+    verified = {}
+    for latin, devanagari in table.items():
+        if not isinstance(latin, str) or not isinstance(devanagari, str):
+            continue
+        devanagari = devanagari.strip()
+        if not DEVANAGARI_RE.search(devanagari):
+            continue
+        if not devanagari_names_match(latin, devanagari):
+            log.debug("dropped Devanagari name %r for %r: skeleton mismatch",
+                      devanagari, latin)
+            continue
+        verified[latin] = devanagari
+    if table and not verified:
+        log.warning("every Devanagari name the model returned failed the "
+                    "skeleton check; falling back to Latin names in queries")
+    return verified
 
 
 def _verdicts_from_response(result, n_items):

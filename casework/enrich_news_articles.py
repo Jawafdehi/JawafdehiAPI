@@ -138,6 +138,7 @@ from casework.news_search import (
     default_budget_for,
     fallback_queries,
     fetch_article,
+    generate_devanagari_names,
     generate_english_queries,
     news_material_ident,
     normalize_article_url,
@@ -385,7 +386,12 @@ def collect_for_case(case, client, invoke_json, usage, *, max_articles,
     event_counts = collections.Counter()
 
     english = generate_english_queries(case, invoke_json, usage)
-    outcome.queries = build_queries(case, llm_english_queries=english)
+    # Second cheap-tier call, for the Devanagari spelling of the accused. NES
+    # stores Latin names, so without this every Devanagari template searches
+    # "Bikal Poudel विशेष अदालत ठहर" while the article says "विकल पौडेल".
+    devanagari = generate_devanagari_names(case, invoke_json, usage)
+    outcome.queries = build_queries(case, llm_english_queries=english,
+                                    devanagari_names=devanagari)
     if not outcome.queries:
         return outcome
 
