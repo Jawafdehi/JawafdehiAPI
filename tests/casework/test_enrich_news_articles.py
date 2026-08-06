@@ -2071,3 +2071,109 @@ def test_the_exhaustion_message_names_the_provider_and_the_window(tmp_path):
         budget.spend()
     assert "serper" in str(exc.value)
     assert "does not refresh" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# Timeline-aware queries. Every constant below is measured against the 138
+# deduplicated news articles bound to PUBLISHED cases, so the tests assert the
+# MEASUREMENT held, not that the code does what it happens to do.
+# ---------------------------------------------------------------------------
+
+def _timeline_case(entries, accused="Bikal Poudel"):
+    return {"title": "test case", "key_allegations": [], "court_cases": [],
+            "entities": [{"display_name": accused, "type": "accused"}],
+            "timeline": entries}
+
+
+def test_the_timeline_says_which_stages_a_case_reached():
+    case = _timeline_case([
+        {"date": "2023-08-29", "date_bs": "2080-05-12",
+         "title": "अनुसन्धान प्रतिवेदन पेश", "description": ""},
+        {"date": "2025-05-13", "date_bs": "2082-01-30",
+         "title": "अख्तियारद्वारा अभियोगपत्र दायर", "description": ""},
+        {"date": "2026-02-05", "date_bs": "2082-10-22",
+         "title": "विशेष अदालतको आंशिक ठहर फैसला", "description": ""},
+    ])
+    reached = ns.timeline_events(case)
+    assert set(reached) == {"investigation", "filing", "verdict"}
+    assert reached["verdict"] == ("2026", "2082")
+    assert "appeal" not in reached, (
+        "a case that never went to appeal must not spend a slot asking for one")
+
+
+def test_the_verdict_is_asked_about_before_the_investigation():
+    """19 of 61 published cases carry a verdict no article covers, so on a
+    decided case the verdict query must not queue behind an investigation one.
+
+    Asserted on `_event_queries`, and on the DEVANAGARI block of the final
+    list, because `normalize_search_queries` promotes the first four English
+    queries to the front regardless of stage (donor:523). Stage ordering
+    governs everything after that block, and asserting otherwise would be
+    asserting against the donor's pinned interleave.
+    """
+    case = _timeline_case([
+        {"date": "2023-01-01", "date_bs": "2079-09-17",
+         "title": "अनुसन्धान सुरु", "description": ""},
+        {"date": "2026-02-05", "date_bs": "2082-10-22",
+         "title": "विशेष अदालतको ठहर", "description": ""},
+    ])
+    raw = ns._event_queries("Bikal Poudel", case)
+    assert "ठहर" in raw[0], raw[:3]
+
+    devanagari = [q for q in ns.build_queries(case)
+                  if not ns.is_english_query(q)]
+    verdict_at = next(i for i, q in enumerate(devanagari) if "ठहर" in q)
+    invest_at = next((i for i, q in enumerate(devanagari)
+                      if "अनुसन्धान" in q), 99)
+    assert verdict_at < invest_at, devanagari
+
+
+def test_the_year_is_devanagari_and_bs_never_ad():
+    """Measured over 135 published-case bodies: the BS year appears as २०८२ in
+    33% and 2082 in 9%. The AD year matched 100% -- page furniture, so it
+    discriminates nothing while still costing a slot."""
+    case = _timeline_case([{"date": "2026-02-05", "date_bs": "2082-10-22",
+                            "title": "विशेष अदालतको ठहर", "description": ""}])
+    queries = ns.build_queries(case)
+    dated = [q for q in queries if "२०८२" in q]
+    assert dated, queries
+    assert not any("2082" in q or "2026" in q for q in queries), (
+        "Latin digits and the AD year must not reach a query")
+
+
+def test_the_year_never_replaces_the_bare_query():
+    """The BS year is in only a third of articles, so a year-only query would
+    lose the other two thirds."""
+    case = _timeline_case([{"date": "2026-02-05", "date_bs": "2082-10-22",
+                            "title": "विशेष अदालतको ठहर", "description": ""}])
+    queries = ns.build_queries(case)
+    bare = [q for q in queries if "ठहर" in q and "२०८२" not in q]
+    assert bare, "the unqualified verdict query must still be searched"
+
+
+def test_a_case_with_no_timeline_still_asks_about_every_stage():
+    queries = ns.build_queries(_timeline_case([]))
+    assert queries and not any("२०" in q for q in queries), (
+        "no timeline means no year is known -- none may be invented")
+
+
+def test_the_measured_templates_use_the_words_that_actually_occur():
+    """Guards the corpus measurement. Share of the 135 article bodies:
+    अख्तियार 64%, भ्रष्टाचार 63%, विशेष अदालत 57%, बिगो 41%, ठहर 20% --
+    against फैसला 10%, सुनुवाइ 5%, पुनरावेदन 3%."""
+    joined = " ".join(t for ts in ns.EVENT_QUERY_TEMPLATES_MEASURED.values()
+                      for t in ts)
+    for common in ("अख्तियार", "भ्रष्टाचार", "विशेष अदालत", "बिगो", "ठहर"):
+        assert common in joined, f"{common} is frequent and must be searched"
+    assert "सुनुवाइ" not in joined, (
+        "सुनुवाइ appears in 0 of 138 headlines and 5% of bodies; the donor "
+        "template keeps it, the measured set must not add it back")
+
+
+def test_the_donor_templates_are_kept_so_reach_can_only_grow():
+    """The measured set is ADDITIONAL. Dropping a donor template would silently
+    remove a query that may be the only one finding some article."""
+    case = _timeline_case([])
+    queries = " ".join(ns.build_queries(case))
+    assert "अख्तियार मुद्दा दायर" in queries      # donor filing
+    assert "विरुद्ध भ्रष्टाचार मुद्दा दायर" in queries   # measured filing

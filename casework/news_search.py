@@ -135,6 +135,43 @@ EVENT_QUERY_TEMPLATES = {                                                      #
                    "{name} सर्वोच्च अदालत फैसला"],
 }
 
+#: Second template set, built from the words that actually occur in the 138
+#: deduplicated news articles bound to PUBLISHED cases (measured 2026-08-06).
+#: The donor's set above was written from intuition and several of its terms
+#: barely exist in the corpus it is meant to match -- share of article BODIES:
+#:
+#:     अख्तियार 64%   भ्रष्टाचार 63%   मुद्दा दायर 57%   विशेष अदालत 57%
+#:     बिगो 41%       ठहर 20%          फैसला 10%         सुनुवाइ 5%
+#:     सर्वोच्च 8%     पुनरावेदन 3%      पेशी 1%           थुनामा 1%
+#:
+#: So the verdict template searched `फैसला` while `ठहर` is twice as common, and
+#: the hearing template searched `सुनुवाइ`, which appears in ZERO headlines. The
+#: donor set is kept and still searched first -- these are additional, never a
+#: replacement, so a query that used to work still runs.
+EVENT_QUERY_TEMPLATES_MEASURED = {
+    EVENT_INVESTIGATION: ["{name} अख्तियार अनुसन्धान भ्रष्टाचार"],
+    EVENT_FILING: ["{name} विरुद्ध भ्रष्टाचार मुद्दा दायर",
+                   "{name} अख्तियार बिगो भ्रष्टाचार"],
+    # `सुनुवाइ`/`पेशी` are effectively absent from the corpus AND only 2 of 169
+    # bound articles are hearing coverage, so there is little to find. Custody
+    # orders are what actually get reported at this stage.
+    EVENT_HEARING: ["{name} थुनामा पुर्पक्ष विशेष अदालत"],
+    EVENT_VERDICT: ["{name} विशेष अदालत ठहर भ्रष्टाचार",
+                    "{name} सफाइ विशेष अदालत"],
+    EVENT_APPEAL: ["{name} सर्वोच्च अदालत पुनरावेदन भ्रष्टाचार"],
+}
+
+#: Words that mark a timeline entry as a given lifecycle stage. Used to work out
+#: which stages a case has actually REACHED, so query slots are not spent asking
+#: for a verdict on a case still under investigation.
+TIMELINE_EVENT_WORDS = {
+    EVENT_APPEAL: ("पुनरावेदन", "सर्वोच्च"),
+    EVENT_VERDICT: ("ठहर", "फैसला", "सफाइ", "सजाय", "कैद", "जरिवाना"),
+    EVENT_HEARING: ("थुनामा", "पुर्पक्ष", "पेशी", "सुनुवाइ", "बहस", "बयान"),
+    EVENT_FILING: ("अभियोगपत्र", "आरोपपत्र", "मुद्दा दायर", "दायर"),
+    EVENT_INVESTIGATION: ("अनुसन्धान", "छानबिन", "उजुरी", "पक्राउ", "प्रतिवेदन"),
+}
+
 DEVANAGARI_RE = re.compile(r"[ऀ-ॿ]")
 
 # Web-archive endpoints, from the permalinks donor (add_news_permalinks:42-46).
@@ -1533,21 +1570,112 @@ def _clean(name):
     return re.sub(r"\s+", " ", name or "").strip()
 
 
+def timeline_events(case):
+    """`{event_type: (ad_year, bs_year)}` for the stages this case reached.
+
+    Read off the case's own timeline, which nothing in the query builder used
+    to look at. Two things come out of it, both measured against production:
+
+    * WHICH stages to ask about. 19 of 61 published cases carry a verdict in
+      their timeline that no bound article covers, while hearing coverage is 2
+      articles in 169 -- so slots spent on stages a case never reached are pure
+      waste, and the verdict is where the missing coverage actually is.
+    * WHICH YEAR to ask about. `{name} फैसला विशेष अदालत` competes with every
+      year of that person's coverage; the timeline knows the verdict landed in
+      2082 BS / 2026 AD.
+
+    The latest entry per stage wins: a case that was heard three times is best
+    found by its most recent hearing, and re-tries can fall back to the rest.
+    """
+    found = {}
+    for entry in (case.get("timeline") or []):
+        text = f"{entry.get('title') or ''} {entry.get('description') or ''}"
+        for event_type, words in TIMELINE_EVENT_WORDS.items():
+            if not any(word in text for word in words):
+                continue
+            ad = (entry.get("date") or "")[:4]
+            bs = (entry.get("date_bs") or "")[:4]
+            if not (ad.isdigit() or bs.isdigit()):
+                continue
+            previous = found.get(event_type)
+            if previous is None or (ad or "") >= (previous[0] or ""):
+                found[event_type] = (ad if ad.isdigit() else "",
+                                     bs if bs.isdigit() else "")
+            break          # first (most specific) stage wins for this entry
+    return found
+
+
+def _event_queries(primary, case):
+    """Event queries, ordered so the stages this case reached come first.
+
+    Both template sets are emitted -- the donor's and the corpus-measured one --
+    with a year appended where the timeline supplies one. Donor templates are
+    never dropped, so this can only add reach, never take it away.
+    """
+    if not primary or len(primary) < 3:
+        return []
+    reached = timeline_events(case)
+    # Stages the case reached, most advanced first: the verdict is both the
+    # least-covered stage in production and the most newsworthy, so it should
+    # not queue behind an investigation query on a decided case.
+    ordered = sorted(reached, key=lambda e: EVENT_LIFECYCLE_ORDER.get(e, 9),
+                     reverse=True)
+    ordered += [e for e in ALL_EVENT_TYPES if e not in reached]
+
+    queries = []
+    for event_type in ordered:
+        templates = (EVENT_QUERY_TEMPLATES_MEASURED.get(event_type, [])
+                     + EVENT_QUERY_TEMPLATES.get(event_type, []))
+        for index, template in enumerate(templates):
+            base = template.format(name=primary)
+            queries.append(base)
+            year = _year_term(reached.get(event_type))
+            # One year-qualified variant, on the FIRST template of a stage that
+            # is under-covered. Measured share of article bodies carrying the
+            # BS year at all is 33%, so a year narrows the query for a third of
+            # the corpus and excludes the rest -- it earns a slot beside the
+            # plain query, never instead of it, and not on every template.
+            if year and index == 0 and event_type in YEAR_QUALIFIED_EVENTS:
+                queries.append(f"{base} {year}")
+    return queries
+
+
+#: Stages worth spending a year-qualified slot on. Verdict and appeal are where
+#: production coverage is missing (19 of 61 published cases have an uncovered
+#: verdict) and where a bare name query loses to the filing-day story that got
+#: an order of magnitude more pickup.
+YEAR_QUALIFIED_EVENTS = (EVENT_VERDICT, EVENT_APPEAL)
+
+
+def _year_term(years):
+    """The BS year in Devanagari digits, which is how Nepali reports print it.
+
+    Measured over the 135 published-case articles with body text: the BS year
+    appears as `२०८२` in 33% and as `2082` in 9%. The AD year is NOT used --
+    it matched 100% of pages, which is page furniture (datelines, copyright
+    footers) rather than the story, so as a query term it discriminates
+    nothing while still costing a slot.
+    """
+    if not years:
+        return ""
+    bs = years[1]
+    return bs.translate(_ASCII_TO_DEVANAGARI_DIGITS) if bs else ""
+
+
 def build_queries(case, llm_english_queries=None):
     """Up to `QUERY_LIMIT` search queries for one case. Donor-verbatim (donor:757).
 
     Prioritises accused name + location + corruption keywords over the case
     number, which mostly surfaces court/admin pages rather than newsrooms.
+    Measured against the 138 articles bound to published cases: the case number
+    appears in 0 of 138 headlines, so it earns no slot; the accused's name
+    reaches the article BODY in 89%, so it earns every slot it has.
     """
     title = case.get("title") or ""
     names = accused_names(case)
     primary = _clean(names[0]) if names else ""
 
-    events = []
-    if primary and len(primary) >= 3:
-        for event_type in ALL_EVENT_TYPES:
-            for template in EVENT_QUERY_TEMPLATES.get(event_type, []):
-                events.append(template.format(name=primary))
+    events = _event_queries(primary, case)
 
     english = list(llm_english_queries or [])
     if not english:
