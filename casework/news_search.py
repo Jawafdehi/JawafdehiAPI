@@ -52,11 +52,15 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from enum import Enum
 from html.parser import HTMLParser
+from pathlib import Path
 
 log = logging.getLogger("casework.news_search")
+
+# casework/news_search.py -> casework -> <repo-root>
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # ---------------------------------------------------------------------------
 # Donor-pinned constants. Changing any of these changes what the run finds, so
@@ -652,13 +656,17 @@ class WebClient:
     """
 
     def __init__(self, search_delay=1.5, fetch_delay=0.5, save_delay=6.0, timeout=20,
-                 proxy=None):
+                 proxy=None, budget=None):
         self.delays = {"search": search_delay, "fetch": fetch_delay,
                        "archive": 0.0, "save": save_delay}
         self.timeout = timeout
         self._last = {}
         self._cache = {}
         self.calls = {"search": 0, "fetch": 0, "archive": 0, "save": 0}
+        #: Charged per billable query. Held HERE rather than in each provider
+        #: so a new provider cannot forget it -- every one of them reaches the
+        #: network through `get` or `post_json` and nowhere else.
+        self.budget = budget
         # An explicit `proxy=""` disables the tunnel even when the env var is
         # set, which is how the tests keep themselves off any real socket.
         spec = os.environ.get(SOCKS_PROXY_ENV, "") if proxy is None else proxy
@@ -683,6 +691,20 @@ class WebClient:
     def clear_cache(self):
         """Drop every cached response. Called between cases, not between runs."""
         self._cache.clear()
+
+    def _charge(self, kind):
+        """Debit the budget for one billable request, before it is sent.
+
+        Only `search` counts. Fetching an article body hits the publisher, not
+        the paid API, and archiving hits the Wayback Machine -- charging those
+        would exhaust the cap on requests nobody bills us for.
+
+        Called after the cache check on purpose: a cache hit sends nothing, so
+        charging it would bill us for a request that never left the process and
+        make the ledger disagree with the provider's own count.
+        """
+        if kind == "search" and self.budget is not None:
+            self.budget.spend()
 
     def _throttled(self, kind):
         delay = self.delays.get(kind, 0.0)
@@ -715,6 +737,7 @@ class WebClient:
         key = (kind, url)
         if key in self._cache:
             return self._cache[key]
+        self._charge(kind)
         self._throttled(kind)
         self.calls[kind] = self.calls.get(kind, 0) + 1
         request = urllib.request.Request(url, headers=headers or FETCH_HEADERS)
@@ -762,6 +785,7 @@ class WebClient:
         key = (kind, f"{url}#{hashlib.sha256(body).hexdigest()[:16]}")
         if key in self._cache:
             return self._cache[key]
+        self._charge(kind)
         self._throttled(kind)
         self.calls[kind] = self.calls.get(kind, 0) + 1
         request = urllib.request.Request(
@@ -803,6 +827,110 @@ class SearchUnavailable(RuntimeError):
     against 238 cases would have produced 238 empty rows and a green summary.
     Raised instead, so the run says the backend is down.
     """
+
+
+class SearchBudgetExceeded(SearchUnavailable):
+    """The run hit its cap on billable search queries.
+
+    Deliberately a `SearchUnavailable` subclass: the enricher already treats
+    that as "abort the whole run, keep what shipped", which is exactly right
+    here. Continuing would write one "found nothing" row per remaining case --
+    a review file that looks like a completed run and means nothing.
+    """
+
+
+#: Ledger of billable queries, so the cap survives across runs.
+_DEFAULT_LEDGER = _REPO_ROOT / "work" / "search-budget.json"
+
+#: Monthly cap applied when the operator names no other. Sits just under
+#: Brave's $5 credit (~1,000 queries at $5/1,000) so the free allowance is
+#: never silently overspent. Only used for KEYED providers -- see
+#: `default_budget_for`.
+DEFAULT_KEYED_BUDGET = 900
+
+SEARCH_BUDGET_ENV = "CASEWORK_SEARCH_BUDGET"
+SEARCH_LEDGER_ENV = "CASEWORK_SEARCH_LEDGER"
+
+
+def default_budget_for(provider):
+    """Monthly query cap for `provider`; 0 means uncapped.
+
+    The cap exists because a keyed provider bills a card -- Brave charges past
+    its $5 credit with no ceiling of its own. DuckDuckGo cannot bill anyone, so
+    capping it would only interrupt a legitimate long run for no benefit: a
+    238-case pass is ~2,900 queries and would trip any credit-sized limit.
+    """
+    if provider == DEFAULT_SEARCH_PROVIDER:
+        return 0
+    return DEFAULT_KEYED_BUDGET
+
+
+class SearchBudget:
+    """A hard ceiling on billable search queries, persisted across runs.
+
+    A per-run limit is not enough. Brave's card is charged the moment the $5
+    monthly credit runs out and Brave publishes no spending cap, so three
+    accidental re-runs of a 300-query batch spend the month's allowance and
+    then start billing. The ledger is a JSON file keyed by calendar month; the
+    count resets on its own when the month rolls over, matching how the credit
+    is granted.
+
+    Written after every query rather than at the end of the run, because the
+    runs this guards against are the ones that die badly -- a crash or a
+    `Ctrl-C` must not roll the counter back to zero.
+    """
+
+    def __init__(self, limit, path=None, now=None):
+        self.limit = int(limit or 0)
+        self.path = Path(path or os.environ.get(SEARCH_LEDGER_ENV)
+                         or _DEFAULT_LEDGER)
+        # Injectable so the month-rollover branch is testable without waiting
+        # for a month to pass.
+        self._now = now or (lambda: datetime.now(timezone.utc))
+        self.month = self._now().strftime("%Y-%m")
+        self.spent = self._load()
+
+    def _load(self):
+        try:
+            data = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            return 0
+        if not isinstance(data, dict) or data.get("month") != self.month:
+            return 0          # a new month restores the whole allowance
+        try:
+            return max(0, int(data.get("spent") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _save(self):
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps({"month": self.month,
+                                             "spent": self.spent}))
+        except OSError as exc:
+            # An unwritable ledger must not kill a run that is otherwise fine,
+            # but it silently removes the protection -- so say so, loudly, once
+            # per failure rather than at the end.
+            log.warning("could not write the search budget ledger at %s: %s. "
+                        "The cap will not survive this process.", self.path, exc)
+
+    def remaining(self):
+        return None if not self.limit else max(0, self.limit - self.spent)
+
+    def spend(self, n=1):
+        """Charge `n` queries, or raise `SearchBudgetExceeded` before spending.
+
+        Refuses BEFORE the request goes out, so the query that would breach the
+        cap is never billed.
+        """
+        if self.limit and self.spent + n > self.limit:
+            raise SearchBudgetExceeded(
+                f"search budget exhausted: {self.spent} of {self.limit} queries "
+                f"already spent this month ({self.month}). Nothing was sent. "
+                f"Raise it with --search-budget, or reset by editing "
+                f"{self.path}.")
+        self.spent += n
+        self._save()
 
 
 #: Markers of the anti-bot interstitial described on `SearchUnavailable`. Matched

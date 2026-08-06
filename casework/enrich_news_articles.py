@@ -96,6 +96,7 @@ Usage:
 import argparse
 import collections
 import logging
+import os
 import sys
 import time
 import urllib.parse
@@ -120,16 +121,21 @@ from casework.common.select import select_for_run
 from casework.news_search import (
     ALL_EVENT_TYPES,
     CANDIDATE_BATCH_SIZE,
+    DEFAULT_KEYED_BUDGET,
     DEFAULT_SEARCH_PROVIDER,
     EVENT_LIFECYCLE_ORDER,
     EVENT_OTHER,
     MAX_ARTICLES_PER_EVENT_TYPE,
+    QUERY_LIMIT,
+    SEARCH_BUDGET_ENV,
     NearMiss,
+    SearchBudget,
     SearchOutcome,
     SearchUnavailable,
     SkipReason,
     WebClient,
     build_queries,
+    default_budget_for,
     fallback_queries,
     fetch_article,
     generate_english_queries,
@@ -604,6 +610,14 @@ def build_parser():
     parser.add_argument("--save-delay", type=float, default=6.0,
                         help="Minimum seconds between Wayback Save Page Now "
                              "requests, which are rate-limited (default 6.0).")
+    parser.add_argument("--search-budget", type=int, default=None,
+                        help="Hard cap on billable search queries this calendar "
+                             "month, counted in a ledger that survives across "
+                             "runs. 0 disables it. Defaults to "
+                             f"${SEARCH_BUDGET_ENV}, else {DEFAULT_KEYED_BUDGET} "
+                             "for a keyed provider and uncapped for duckduckgo. "
+                             "The run aborts rather than sending the query that "
+                             "would breach it.")
     parser.add_argument("--no-permalink", dest="permalink", action="store_false",
                         default=True,
                         help="Do not attach a web-archive PERMALINK alongside the "
@@ -685,6 +699,51 @@ def _press_release_text(detail):
     return "\n\n".join(text for _, _, text in chunks), unmet
 
 
+def _build_budget(args, provider_name):
+    """The `SearchBudget` for this run, or None when uncapped.
+
+    Resolution order is --search-budget, then $CASEWORK_SEARCH_BUDGET, then a
+    per-provider default. An explicit 0 at either of the first two disables the
+    cap; that has to be distinguishable from "not given", which is why the
+    argparse default is None rather than 0.
+    """
+    if args.search_budget is not None:
+        limit = args.search_budget
+    else:
+        raw = (os.environ.get(SEARCH_BUDGET_ENV) or "").strip()
+        if raw:
+            try:
+                limit = int(raw)
+            except ValueError as exc:
+                raise SystemExit(
+                    f"${SEARCH_BUDGET_ENV}={raw!r} is not a whole number") from exc
+        else:
+            limit = default_budget_for(provider_name)
+    if limit < 0:
+        raise SystemExit("--search-budget must be non-negative (0 disables it)")
+    return SearchBudget(limit) if limit else None
+
+
+def _check_budget_fits(budget, n_cases):
+    """Warn before the run if the selected batch cannot finish inside the cap.
+
+    Worth its own check rather than letting `SearchBudget.spend` abort midway:
+    stopping at case 19 of 25 leaves a review file that is silently partial,
+    and the operator would rather cut the batch than discover that afterwards.
+    Only a warning -- a case often spends fewer than `QUERY_LIMIT` queries, so
+    the estimate is a ceiling and refusing outright would be wrong.
+    """
+    if budget is None or not n_cases:
+        return
+    needed = n_cases * QUERY_LIMIT
+    remaining = budget.remaining()
+    if needed > remaining:
+        affordable = remaining // QUERY_LIMIT
+        print(f"  WARNING: {n_cases} cases need up to {needed} queries but only "
+              f"{remaining} remain. The run will abort partway. Roughly "
+              f"{affordable} cases fit -- consider --limit {affordable}.")
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     if args.max_articles < 0:
@@ -719,9 +778,11 @@ def main(argv=None):
     # run header printed, which reads like the run started and then broke.
     try:
         provider_name, _ = resolve_search_provider()
+        budget = _build_budget(args, provider_name)
         client = WebClient(search_delay=args.search_delay,
                            fetch_delay=args.fetch_delay,
-                           save_delay=args.save_delay)
+                           save_delay=args.save_delay,
+                           budget=budget)
     except SearchUnavailable as exc:
         # SystemExit, not `return report`. `main()` is invoked bare at the bottom
         # of this file, so returning exits 0 and a misconfigured provider, a
@@ -733,9 +794,18 @@ def main(argv=None):
               f"(the case API and the LLM stay on the local interface)")
     if provider_name != DEFAULT_SEARCH_PROVIDER:
         print(f"  search provider: {provider_name}")
+    if budget is not None:
+        # Printed BEFORE the run, because the number the operator needs is
+        # "will this batch fit", and afterwards is too late to act on it.
+        print(f"  search budget: {budget.remaining()} of {budget.limit} queries "
+              f"left this month ({budget.month}); "
+              f"up to {QUERY_LIMIT} are spent per case")
+    else:
+        print("  search budget: uncapped")
 
     cases = select_for_run(list(api.iter_cases()), args)
     total = len(cases)
+    _check_budget_fits(budget, total)
     log_run_header(logger, stage=STAGE_NAME, base_url=args.api_base_url,
                    dry_run=args.dry_run, provider=args.provider, model=args.model,
                    n_selected=total, run_id=run_id, paths=paths)

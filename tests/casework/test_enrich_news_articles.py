@@ -106,6 +106,9 @@ class FakeWeb:
         #: -- but the ATTRIBUTE has to exist or the fake stops standing in for
         #: the real thing, which is how the preflight broke nine tests at once.
         self.proxy = ""
+        #: Same reason. The real client charges a budget per search; these tests
+        #: are uncapped, but the attribute must exist for the fake to stand in.
+        self.budget = None
 
     def invalidate(self, url, kind):
         self._cache.pop((kind, url), None)
@@ -1757,3 +1760,244 @@ def test_bind_materials_records_the_reciprocal_duplicate_contract():
     src = pathlib.Path(en.__file__).parent.joinpath("bind_materials.py").read_text()
     assert src.count("DELIBERATELY DUPLICATED") == 2
     assert "enrich_news_articles" in src
+
+
+# ---------------------------------------------------------------------------
+# Search budget. Brave bills the saved card past its $5 monthly credit and
+# publishes no spending cap of its own, so this is the only thing standing
+# between a runaway loop and a real charge. Tested at the seam it is enforced
+# at -- the client -- not at the provider functions, because the point of
+# putting it in the client is that a NEW provider cannot forget it.
+# ---------------------------------------------------------------------------
+
+def _budget(tmp_path, limit, spent=None, month=None):
+    path = tmp_path / "search-budget.json"
+    if spent is not None:
+        path.write_text(json.dumps({"month": month or
+                                    ns.datetime.now(ns.timezone.utc).strftime("%Y-%m"),
+                                    "spent": spent}))
+    return ns.SearchBudget(limit, path=path)
+
+
+def test_the_budget_refuses_the_query_that_would_breach_it(tmp_path):
+    budget = _budget(tmp_path, limit=3)
+    for _ in range(3):
+        budget.spend()
+    with pytest.raises(ns.SearchBudgetExceeded) as exc:
+        budget.spend()
+    assert budget.spent == 3, "the refused query must not be charged"
+    assert "Nothing was sent" in str(exc.value)
+
+
+def test_budget_exhaustion_aborts_the_whole_run_not_one_case():
+    """`SearchBudgetExceeded` must be a `SearchUnavailable`: the enricher already
+    treats that as abort-the-run, and continuing would write one 'found nothing'
+    row per remaining case -- a review file that looks complete and is not."""
+    assert issubclass(ns.SearchBudgetExceeded, ns.SearchUnavailable)
+
+
+def test_the_ledger_survives_across_runs(tmp_path):
+    """A per-run cap is no protection: three re-runs of a 300-query batch spend
+    the month. The count has to persist."""
+    first = _budget(tmp_path, limit=10)
+    for _ in range(4):
+        first.spend()
+    second = ns.SearchBudget(10, path=tmp_path / "search-budget.json")
+    assert second.spent == 4, "a fresh process must see what the last one spent"
+    assert second.remaining() == 6
+
+
+def test_a_new_month_restores_the_allowance(tmp_path):
+    """The credit is granted monthly, so the ledger resets with it -- otherwise
+    the cap silently becomes permanent."""
+    path = tmp_path / "search-budget.json"
+    path.write_text(json.dumps({"month": "1999-01", "spent": 900}))
+    budget = ns.SearchBudget(900, path=path)
+    assert budget.spent == 0
+
+
+def test_a_corrupt_or_missing_ledger_does_not_kill_the_run(tmp_path):
+    path = tmp_path / "search-budget.json"
+    assert ns.SearchBudget(10, path=path).spent == 0        # missing
+    path.write_text("{not json")
+    assert ns.SearchBudget(10, path=path).spent == 0        # corrupt
+    path.write_text(json.dumps({"month": "1999-01", "spent": "many"}))
+    assert ns.SearchBudget(10, path=path).spent == 0        # wrong type
+
+
+def test_an_unwritable_ledger_warns_rather_than_failing(tmp_path, caplog):
+    """Losing the ledger must not sink an otherwise fine run, but it removes the
+    protection silently -- so it has to say so."""
+    budget = ns.SearchBudget(10, path=tmp_path / "nodir" / "x" / "b.json")
+    budget.path = tmp_path            # a directory: write_text always fails
+    caplog.set_level(logging.WARNING, logger="casework.news_search")
+    budget.spend()
+    assert any("search budget ledger" in r.getMessage() for r in caplog.records)
+    assert budget.spent == 1, "the run continues; only the persistence is lost"
+
+
+def test_only_search_is_charged_not_fetching_or_archiving(tmp_path, monkeypatch):
+    """Fetching an article hits the publisher and archiving hits Wayback. Neither
+    is billed by the search provider, and charging them would exhaust the cap on
+    requests nobody invoices us for."""
+    budget = _budget(tmp_path, limit=100)
+    client = ns.WebClient(search_delay=0, fetch_delay=0, save_delay=0,
+                          proxy="", budget=budget)
+    monkeypatch.setattr(client, "_opener", _OpenerReturning("<html></html>"))
+    for kind in ("fetch", "archive", "save"):
+        client.get(f"https://example.test/{kind}", kind)
+    assert budget.spent == 0
+    client.get("https://example.test/q", "search")
+    assert budget.spent == 1
+
+
+def test_a_cached_search_is_not_charged_twice(tmp_path, monkeypatch):
+    """A cache hit sends nothing, so charging it would bill us for a request that
+    never left the process and make the ledger disagree with the provider."""
+    budget = _budget(tmp_path, limit=100)
+    client = ns.WebClient(search_delay=0, fetch_delay=0, proxy="", budget=budget)
+    monkeypatch.setattr(client, "_opener", _OpenerReturning("<html></html>"))
+    client.get("https://example.test/same", "search")
+    client.get("https://example.test/same", "search")
+    assert budget.spent == 1
+
+
+def test_the_post_providers_cannot_bypass_the_budget(tmp_path, monkeypatch):
+    """Serper and Tavily are POST-only. A cap enforced on `get` alone would be
+    silently absent for two of the five providers."""
+    budget = _budget(tmp_path, limit=100)
+    client = ns.WebClient(search_delay=0, proxy="", budget=budget)
+    monkeypatch.setattr(client, "_opener", _OpenerReturning('{"organic": []}'))
+    client.post_json("https://example.test/s", "search", {"q": "क"})
+    assert budget.spent == 1
+
+
+def test_an_exhausted_budget_stops_the_request_reaching_the_network(tmp_path):
+    budget = _budget(tmp_path, limit=1, spent=1)
+    client = ns.WebClient(search_delay=0, proxy="", budget=budget)
+
+    class _Explode:
+        def open(self, *a, **k):
+            raise AssertionError("the request must never be sent")
+
+    client._opener = _Explode()
+    with pytest.raises(ns.SearchBudgetExceeded):
+        client.get("https://example.test/q", "search")
+
+
+def test_duckduckgo_is_uncapped_but_keyed_providers_are_not():
+    """The cap exists because a keyed provider bills a card. DuckDuckGo cannot,
+    and a 238-case pass is ~2,900 queries -- any credit-sized limit would abort
+    a legitimate free run."""
+    assert ns.default_budget_for("duckduckgo") == 0
+    for keyed in ("brave", "serper", "tavily", "google_cse"):
+        assert ns.default_budget_for(keyed) == ns.DEFAULT_KEYED_BUDGET
+
+
+class _OpenerReturning:
+    """Minimal stand-in for the client's urllib opener. Never touches a socket."""
+
+    def __init__(self, body):
+        self.body = body
+
+    def open(self, request, timeout=None):
+        return _Response(self.body)
+
+
+class _Response:
+    def __init__(self, body):
+        self.body = body.encode()
+        self.status = 200
+        self.headers = _Headers()
+
+    def read(self):
+        return self.body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _Headers:
+    def get(self, name, default=None):
+        return "text/html" if name.lower() == "content-type" else default
+
+    def get_content_charset(self):
+        return "utf-8"
+
+
+class ExhaustedWeb(FakeWeb):
+    """A client whose budget ran out mid-run, exactly as the real one behaves."""
+
+    def get(self, url, kind, headers=None, expect_html=False, error_body=False):
+        if kind == "search":
+            raise ns.SearchBudgetExceeded(
+                "search budget exhausted: 900 of 900 queries already spent this "
+                "month (2026-08). Nothing was sent.")
+        return super().get(url, kind, headers=headers, expect_html=expect_html,
+                           error_body=error_body)
+
+
+def test_an_exhausted_budget_aborts_the_run_and_writes_nothing(monkeypatch,
+                                                               tmp_path):
+    """End-to-end proof the cap actually stops the enricher. A budget that only
+    raised deep in the client, and got swallowed by a per-case handler, would
+    keep spending on every remaining case -- which is the failure it exists to
+    prevent."""
+    api = FakeApi(case_payload())
+    review = tmp_path / "review.md"
+    report = run_main(monkeypatch, api, ExhaustedWeb(), stub_invoke_json(),
+                      ["--review-file", str(review)])
+    assert report.summary() == {"error": 1}
+    assert "budget exhausted" in review.read_text(encoding="utf-8")
+    assert api.materials == [] and api.replaced == [], (
+        "an aborted run must not have written anything")
+
+
+def test_search_budget_resolution_prefers_the_flag_then_the_env(monkeypatch,
+                                                                tmp_path):
+    monkeypatch.setenv(ns.SEARCH_LEDGER_ENV, str(tmp_path / "b.json"))
+    monkeypatch.setenv(ns.SEARCH_BUDGET_ENV, "50")
+    flag = en._build_budget(types.SimpleNamespace(search_budget=7), "brave")
+    assert flag.limit == 7, "--search-budget must win over the env var"
+    env = en._build_budget(types.SimpleNamespace(search_budget=None), "brave")
+    assert env.limit == 50
+    monkeypatch.delenv(ns.SEARCH_BUDGET_ENV)
+    fallback = en._build_budget(types.SimpleNamespace(search_budget=None), "brave")
+    assert fallback.limit == ns.DEFAULT_KEYED_BUDGET
+
+
+def test_an_explicit_zero_disables_the_cap_but_absent_does_not(monkeypatch,
+                                                               tmp_path):
+    """`0` and "not given" have to stay distinguishable, or an operator who wants
+    an uncapped free-provider run silently gets the keyed default instead."""
+    monkeypatch.setenv(ns.SEARCH_LEDGER_ENV, str(tmp_path / "b.json"))
+    monkeypatch.delenv(ns.SEARCH_BUDGET_ENV, raising=False)
+    assert en._build_budget(types.SimpleNamespace(search_budget=0), "brave") is None
+    assert en._build_budget(types.SimpleNamespace(search_budget=None),
+                            "duckduckgo") is None
+    assert en._build_budget(types.SimpleNamespace(search_budget=None),
+                            "brave") is not None
+
+
+def test_a_bad_search_budget_is_rejected_not_ignored(monkeypatch, tmp_path):
+    monkeypatch.setenv(ns.SEARCH_LEDGER_ENV, str(tmp_path / "b.json"))
+    monkeypatch.setenv(ns.SEARCH_BUDGET_ENV, "lots")
+    with pytest.raises(SystemExit):
+        en._build_budget(types.SimpleNamespace(search_budget=None), "brave")
+    monkeypatch.delenv(ns.SEARCH_BUDGET_ENV)
+    with pytest.raises(SystemExit):
+        en._build_budget(types.SimpleNamespace(search_budget=-1), "brave")
+
+
+def test_the_preflight_warns_when_the_batch_cannot_fit(tmp_path, capsys):
+    """Aborting at case 19 of 25 leaves a review file that is silently partial.
+    The operator would rather cut the batch than find out afterwards."""
+    budget = ns.SearchBudget(100, path=tmp_path / "b.json")
+    en._check_budget_fits(budget, n_cases=25)
+    out = capsys.readouterr().out
+    assert "WARNING" in out and "--limit 8" in out, out
+    en._check_budget_fits(ns.SearchBudget(1000, path=tmp_path / "c.json"), 25)
+    assert "WARNING" not in capsys.readouterr().out
