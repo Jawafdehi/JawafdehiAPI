@@ -2979,6 +2979,53 @@ def test_one_office_named_twice_creates_one_entity(
     assert items[0]["relationship_type"] == "related"
 
 
+# The other half of the dedup: two names that are the same STRING but not the
+# same THING. A person and a school can carry one name -- the run cache is
+# keyed on the prefix as well for exactly this reason, because the two live at
+# different IRIs (`person/...` and `organization/...`) and the server would
+# never 409 one against the other. Keyed on the name alone, the second case
+# binds a PERSON entity as the organisation in a corruption case.
+HOMONYM_PERSON_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "श्रीकृष्ण श्रेष्ठ", "relationship_type": "related",
+         "entity_prefix": "person", "entity_type": "Person",
+         "is_named_entity": True, "name_en": "", "notes": "क"},
+    ],
+    "accused_notes": [],
+})
+
+HOMONYM_ORG_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "श्रीकृष्ण श्रेष्ठ", "relationship_type": "related",
+         "entity_prefix": "organization", "entity_type": "Organization",
+         "is_named_entity": True, "name_en": "", "notes": "ख"},
+    ],
+    "accused_notes": [],
+})
+
+
+def test_the_same_name_under_a_different_prefix_is_not_reused(
+    monkeypatch, patched_fetch_markdown
+):
+    person_case = dict(PRESS_ONLY_CASE, slug="case-homonym-person", entities=[])
+    org_case = dict(PRESS_ONLY_CASE, slug="case-homonym-org", entities=[])
+    api = _SearchStubApi([person_case, org_case], {"श्रीकृष्ण श्रेष्ठ": []})
+    replies = iter([HOMONYM_PERSON_RESPONSE, HOMONYM_ORG_RESPONSE])
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: next(replies),
+              argv=["--apply", "--create-entities"])
+
+    assert [p["prefix"] for p in api.create_entity_calls] == ["person", "organization"]
+    bound = [items[0]["nes_id"] for _s, _p, items, _e in api.replace_list_calls]
+    assert bound == [
+        "https://jawafdehi.org/entity/person/shrikrishna-shreshtha",
+        "https://jawafdehi.org/entity/organization/shrikrishna-shreshtha",
+    ]
+    # And the report agrees with itself: a row's prefix and its IRI can no
+    # longer disagree, which is what a name-keyed reuse used to write.
+    for row in _created_rows():
+        assert f"/entity/{row['prefix']}/" in row["nes_id"]
+
+
 BAD_PREFIX_RESPONSE = json.dumps({
     "entities": [
         {"entity_name": "हेम राज बिष्ट", "relationship_type": "related",

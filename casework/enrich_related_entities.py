@@ -1102,11 +1102,21 @@ def create_entities_for_unmatched(api, plan, items_by_name, live_prefixes,
     merge into the case, the `plan.nomatch` entries no entity could be made for,
     and one report row per name for `*.created.jsonl`.
 
-    `run_entities` maps a normalised name to an IRI already created THIS RUN, and
-    is shared across cases on purpose. Case 078-CR-0038 named the Dhangadhi
-    forest directorate twice in one extraction; without it, that case creates two
-    entities on its first run, and two cases naming the same office create two
-    more.
+    `run_entities` maps `(prefix, normalised name)` to an IRI already created
+    THIS RUN, and is shared across cases on purpose. Case 078-CR-0038 named the
+    Dhangadhi forest directorate twice in one extraction; without it, that case
+    creates two entities on its first run, and two cases naming the same office
+    create two more.
+
+    THE PREFIX IS PART OF THE KEY, and must stay part of it. A person and an
+    organisation can carry the same name, and they live at different IRIs
+    (`person/ram-bahadur-thapa`, `organization/ram-bahadur-thapa`) that the
+    server will never 409 against each other. Keyed on the name alone, the
+    second case reuses the first's IRI and binds a PERSON as the organisation
+    in a corruption case. The name still carries within a prefix, so two
+    spellings of one office -- or one office whose `name_en` the model wrote
+    differently in two cases, which would otherwise slug apart -- still collapse
+    to one entity.
 
     A dry run POSTs nothing and still reports the IRI it would have used, built
     from the same prefix and slug, so the printed patch is the one an `--apply`
@@ -1137,7 +1147,7 @@ def create_entities_for_unmatched(api, plan, items_by_name, live_prefixes,
             still_unmatched.append((name, decision, section))
             continue
 
-        key = normalise_name(name)
+        key = (prefix, normalise_name(name))
         if key in run_entities:
             # Same office, second spelling. Reuse rather than create a twin.
             row.update(outcome="reused", nes_id=run_entities[key])
@@ -1654,9 +1664,10 @@ def main(argv=None):
     # Collected BEFORE resolution, so they survive a run where nothing binds.
     extracted_rows, accused_notes_rows = [], []
     created_rows = []
-    # Entities created THIS RUN, keyed by normalised name and shared across
-    # cases: the same district office recurs, and each extra creation is a
-    # duplicate NES entity nobody asked for.
+    # Entities created THIS RUN, keyed by `(prefix, normalised name)` and shared
+    # across cases: the same district office recurs, and each extra creation is a
+    # duplicate NES entity nobody asked for. The prefix is in the key so a
+    # shared name cannot collapse two categories -- see the call site.
     run_entities = {}
     # Fetched on first use, not at startup -- see the call site.
     live_prefixes = None
