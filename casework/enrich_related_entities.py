@@ -130,7 +130,6 @@ from casework.common.select import select_for_run
 # perfect court record bound zero defendants whenever its press-release PDF lacked a
 # MARKDOWN role, or the LLM call failed). `casework/court_record.py` and its tests
 # are kept intact, unwired, pending a decision on giving it its own CLI.
-from casework.court_record import CHARGED
 from casework.entity_resolver import (
     BIND,
     MIN_BIND_SCORE,
@@ -258,11 +257,13 @@ Extract ALL of these categories that appear in the documents:
 Notes must never be blank for related entities. Always describe the specific connection.
 Only extract entities with CONFIRMED connections — not people who were later acquitted.
 
-USE A MORE SPECIFIC relationship_type INSTEAD OF "related" when the documents make
-the role plain. Only these three; when in doubt use "related".
+DO NOT EXTRACT THE DEFENDANTS. The people the charge sheet (आरोपपत्र) names are
+already held in the court record and are read from there, not from this text.
+Extracting them here would guess at names the court record states exactly.
+Skip them entirely — do not list them under any relationship_type.
 
-  "accused" — a person the charge sheet (आरोपपत्र) names as a defendant.
-  Example: "गजेन्द्र प्रसाद राउत"  notes: "प्रतिवादी"
+USE A MORE SPECIFIC relationship_type INSTEAD OF "related" when the documents make
+the role plain. Only these two; when in doubt use "related".
 
   "alleged" — named as implicated in the documents, but NOT on the charge sheet.
   Example: "नानी काजी थापा"  notes: "घुस लेनदेनमा संलग्न भनी उल्लेख, अभियोग लगाइएको छैन"
@@ -294,7 +295,7 @@ Output ONLY this JSON object, no other text:
   "entities": [
     {
       "entity_name": "Name exactly as in document",
-      "relationship_type": "location", "related", "accused", "alleged" or "witness",
+      "relationship_type": "location", "related", "alleged" or "witness",
       "entity_prefix": "the category from the list below",
       "entity_type": "Person", "Organization", "GovernmentOrganization" or "Place",
       "is_named_entity": true or false,
@@ -397,6 +398,12 @@ RELATIONSHIP_TYPES = (
     "alleged", "accused", "related", "witness", "opposition", "victim",
     "location", "respondent", "petitioner",
 )
+
+#: The section this enricher refuses outright. Defendants come from the NGM
+#: court record (`casework/court_record.py::defendant_names`), which states them
+#: instead of guessing, and an accused bind is the only one that may carry
+#: `outcome`. Confirmed with Gaurav's supervisor on 2026-08-06.
+ACCUSED_SECTION = "accused"
 
 #: The one section that never creates. NES holds all 77 districts from a
 #: gazetteer ingest, keyed by official code (`location/district/jhapa-np0104`),
@@ -517,6 +524,29 @@ def validate_bind_item(item):
     return item
 
 
+def validate_new_bind(item):
+    """`validate_bind_item` plus the one rule that applies only to NEW binds.
+
+    Split deliberately. `apply_entity_plan` validates every row of the
+    whole-list PATCH, and that list carries binds the case ALREADY has -- a
+    human's accused bind, or one the court-record path wrote. Refusing accused
+    there would make any such case unpatchable, which is the opposite of the
+    intent: those binds are the authoritative ones.
+
+    What this module may not do is PROPOSE an accused bind of its own.
+    Defendants come from the NGM court record
+    (`casework/court_record.py::defendant_names`), which states them rather
+    than guessing. `plan_case_entities` drops the section before resolution, so
+    this is the backstop for a caller assembling additions by hand.
+    """
+    validate_bind_item(item)
+    if item.get("relationship_type") == ACCUSED_SECTION:
+        raise ValueError(
+            "this enricher does not propose 'accused' binds: defendants come "
+            "from the NGM court record, not the LLM")
+    return item
+
+
 @dataclass
 class EntityBindPlan:
     slug: str
@@ -553,6 +583,9 @@ class EntityBindPlan:
     # entities the first production dry run would have created as work that did
     # not need doing.
     created: list = field(default_factory=list)  # names
+    #: (name, section) the extraction produced for a section this enricher does
+    #: not own. Only `accused` today -- reported, never bound, never created.
+    court_record_only: list = field(default_factory=list)
     patch_items: list = field(default_factory=list)
     reason: str = ""
     # There are no separate accused lists. Every name this planner handles comes
@@ -877,6 +910,25 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
             plan.coerced.append((name, rel_type, DEFAULT_RELATIONSHIP_TYPE))
             rel_type = DEFAULT_RELATIONSHIP_TYPE
 
+        # THE LLM DOES NOT SUPPLY DEFENDANTS. `GET /courtcases/<court>/<number>/
+        # entities` states them exactly -- for 078-CR-0038, हेम राज विष्ट and
+        # रुबी जि.सी. विष्ट, the same two the extraction guessed at -- and
+        # `casework/court_record.py` already reads it.
+        #
+        # Dropped rather than coerced to `related`. Coercing would bind a
+        # defendant under a section that understates their role, and it would
+        # still bind every namesake the search returned.
+        #
+        # This is also what closes the CHARGED hole: an accused bind carries
+        # `outcome = CHARGED`, and since 2026-08-05 one name binds EVERY
+        # candidate at or above the threshold, so an ambiguous accused name
+        # recorded every namesake as charged -- 13 of them for `संजय प्रसाद
+        # यादव`, per `resolve`'s own docstring. With the section gone the path
+        # does not exist to narrow.
+        if rel_type == ACCUSED_SECTION:
+            plan.court_record_only.append((name, rel_type))
+            continue
+
         decision = _resolve_with_vetoes(api, name, strict=strict,
                                         section=rel_type)
 
@@ -925,44 +977,18 @@ def _bind_one(plan, name, decision, rel_type, notes, have,
         # different section -- see `bind_key`.
         return
 
-    # ESCALATION TO `accused` IS NEVER AUTOMATIC. Keying the merge on the pair
-    # means a second section for an already-bound entity now gets written
-    # rather than silently dropped -- correct, and what the DB constraint
-    # allows. But `accused` is not just another section: it names a person as
-    # the subject of a corruption case and carries `outcome=CHARGED`. When the
-    # case already characterises this entity some other way, a human (or an
-    # earlier run) made that call, and upgrading it on an LLM's say-so is the
-    # one bind this module must not make by itself. It goes to review with the
-    # existing characterisation named, so the upgrade is a decision someone
-    # takes rather than a diff someone discovers.
-    #
-    # THE ONE REVIEW THIS STAGE STILL PRODUCES. Dropping the review queue
-    # (2026-08-05) did not drop this: the alternative is not "bind it later",
-    # it is "publish a charge on an LLM's say-so".
-    if rel_type == "accused" and decision.nes_id in already_characterised:
-        existing = sorted(section for nes_id, section in have
-                          if nes_id == decision.nes_id)
-        plan.review.append((name, Decision(
-            REVIEW, decision.nes_id, decision.score, decision.matched_name,
-            f"would escalate to 'accused' an entity this case already binds as "
-            f"{', '.join(repr(s) for s in existing)}. An accused bind asserts "
-            "the person is the subject of the case and sets outcome=charged, so "
-            "it is not applied on top of an existing characterisation without a "
-            f"human. Original reason: {decision.reason or 'clean match'}",
-            decision.candidates), rel_type))
-        return
-
-    # `outcome` is legal ONLY on an accused bind -- the DB enforces it with
-    # the `outcome_only_on_accused` CHECK constraint, and `validate_bind_item`
-    # mirrors that. Every case in this corpus is a Special Court `-CR-` case,
-    # so CIAA filed a charge sheet and 'charged' is true by construction.
-    if rel_type == "accused":
-        item_to_bind["outcome"] = CHARGED
+    # NO `accused` BRANCH HERE, DELIBERATELY. This used to escalate-guard an
+    # accused bind and stamp `outcome = CHARGED`. `plan_case_entities` now
+    # refuses the section outright, so both were unreachable -- and code that
+    # can stamp CHARGED, sitting in a module that must never write an accused
+    # bind, is a hazard waiting for someone to move the filter. The refusal
+    # that replaced them is at the write boundary in `validate_bind_item`,
+    # where it is reachable and tested.
     # Recorded BEFORE `outcome` is added, so the key matches the one
     # `bind_key` computed above -- it reads only the two identity fields, but
     # adding the entry after the mutation would invite that to drift.
     have.add(bind_key(item_to_bind))
-    additions.append(validate_bind_item(item_to_bind))
+    additions.append(validate_new_bind(item_to_bind))
     plan.bound.append((name, decision, notes, rel_type))
 
 
@@ -1201,12 +1227,13 @@ def _authoring_payload(prefix, slug, etype, name, citation, name_en=""):
 
 def _created_bind(iri, section, item):
     """One bind item for a just-created entity, validated like any other."""
+    # No accused branch: `validate_new_bind` refuses the section outright, so
+    # stamping `outcome = CHARGED` here would only build an item that cannot
+    # pass validation.
     bind = {"nes_id": iri,
             "relationship_type": section,
             "notes": (item.get("notes") or "").strip()}
-    if section == "accused":
-        bind["outcome"] = CHARGED
-    return validate_bind_item(bind)
+    return validate_new_bind(bind)
 
 
 def plan_summary(plan, extracted_items):

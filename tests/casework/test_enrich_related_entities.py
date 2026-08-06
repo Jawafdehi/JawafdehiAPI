@@ -38,7 +38,6 @@ import pytest
 from casework import enrich_related_entities as ere
 from casework.common.api import CandidateList, ENTITY_SEARCH_MAX_PAGES, ENTITY_SEARCH_PAGE_SIZE
 from casework.common.api import EntityAlreadyExists
-from casework.court_record import CHARGED
 from casework.enrich_related_entities import (
     PROMOTED_PREFIX,
     RELATIONSHIP_TYPES,
@@ -170,7 +169,10 @@ class TestDonorFidelity:
         # code: the LLM never emits anything but the two the donor asked for.
         # Asserted against the prompt's own output-format line so the two cannot
         # drift apart.
-        offered = {"location", "related", "accused", "alleged", "witness"}
+        # `accused` is deliberately absent: this module no longer writes it
+        # (2026-08-06). Defendants come from the NGM court record, which states
+        # them instead of guessing -- see `validate_new_bind`.
+        offered = {"location", "related", "alleged", "witness"}
         format_line = next(
             line for line in ere.SYSTEM_PROMPT.splitlines()
             if line.strip().startswith('"relationship_type"'))
@@ -1385,7 +1387,7 @@ def test_permissive_mode_now_binds_a_cross_script_only_match():
     case = {"slug": "case-kamal", "state": "DRAFT", "entities": []}
     api = _SearchStubApi([case], {"कमल थापा": [KAMALA_LATIN_ONLY]})
     plan = plan_case_entities(api, case, 'W/"e"', [
-        {"entity_name": "कमल थापा", "relationship_type": "accused", "notes": "क"}])
+        {"entity_name": "कमल थापा", "relationship_type": "related", "notes": "क"}])
 
     assert plan.action == "WOULD_PATCH"
     assert plan.review == []
@@ -1401,7 +1403,7 @@ def test_a_cross_script_match_is_bound_even_when_another_veto_reports_first():
     case = {"slug": "case-kamal-2", "state": "DRAFT", "entities": []}
     api = _SearchStubApi([case], {"कमल थापा": [KAMALA_LATIN_ONLY, second]})
     plan = plan_case_entities(api, case, 'W/"e"', [
-        {"entity_name": "कमल थापा", "relationship_type": "accused", "notes": "क"}])
+        {"entity_name": "कमल थापा", "relationship_type": "related", "notes": "क"}])
 
     assert plan.review == []
     assert sorted(item["nes_id"] for item in plan.patch_items) == sorted(
@@ -1419,7 +1421,7 @@ def test_a_same_script_candidate_is_still_promoted_over_its_veto():
     case = {"slug": "case-kamal-3", "state": "DRAFT", "entities": []}
     api = _SearchStubApi([case], {"कमल थापा": [thapa_a, thapa_b]})
     plan = plan_case_entities(api, case, 'W/"e"', [
-        {"entity_name": "कमल थापा", "relationship_type": "accused", "notes": "क"}])
+        {"entity_name": "कमल थापा", "relationship_type": "related", "notes": "क"}])
 
     assert plan.review == []
     _name, decision, _notes, _section = plan.bound[0]
@@ -1435,7 +1437,7 @@ def test_strict_mode_also_refuses_a_cross_script_only_match():
     case = {"slug": "case-kamal-strict", "state": "DRAFT", "entities": []}
     api = _SearchStubApi([case], {"कमल थापा": [KAMALA_LATIN_ONLY]})
     plan = plan_case_entities(api, case, 'W/"e"', [
-        {"entity_name": "कमल थापा", "relationship_type": "accused", "notes": "क"}],
+        {"entity_name": "कमल थापा", "relationship_type": "related", "notes": "क"}],
         strict=True)
 
     assert plan.bound == []
@@ -1476,11 +1478,12 @@ def test_the_same_entity_and_section_twice_is_planned_once():
     assert len(plan.bound) == 1
 
 
-def test_an_accused_bind_never_escalates_an_already_characterised_entity():
-    # The most consequential bind this module can write, and the one it will not
-    # write on its own: the case already binds this person as `related`, and an
-    # `accused` bind would assert they are the subject of the case AND set
-    # outcome=charged. A human decides that, so it goes to review.
+def test_an_accused_extraction_never_touches_an_existing_bind():
+    # This used to be the escalation guard: an `accused` bind on an entity the
+    # case already binds as `related` would assert they are the subject of the
+    # case AND set outcome=charged, so it went to review. The guard is now moot
+    # -- accused never reaches the binder at all (2026-08-06, confirmed with
+    # Gaurav's supervisor: defendants come from the NGM court record).
     case = {"slug": "case-escalate", "state": "DRAFT", "entities": [
         {"nes_id": ANKUR_IRI, "type": "related", "notes": "मानव-लिखित टिप्पणी"}]}
     api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
@@ -1489,10 +1492,8 @@ def test_an_accused_bind_never_escalates_an_already_characterised_entity():
 
     assert plan.action == "NOOP"
     assert plan.bound == []
-    _name, decision, section = plan.review[0]
-    assert section == "accused"
-    assert "would escalate to 'accused'" in decision.reason
-    assert "'related'" in decision.reason          # names what the case already says
+    assert plan.review == []          # no review either -- there is nothing to decide
+    assert plan.court_record_only == [("अंकुर खत्री", "accused")]
     # The existing bind and its human note are untouched.
     assert plan.patch_items == []
 
@@ -1511,17 +1512,18 @@ def test_a_non_accused_section_does_join_an_already_characterised_entity():
         (SURKHET_IRI, "related"), (SURKHET_IRI, "location")]
 
 
-def test_an_accused_bind_is_written_when_the_entity_is_new_to_the_case():
-    # The guard keys on an EXISTING characterisation, so a first-time accused
-    # bind is unaffected -- this is the ordinary path and must stay open.
+def test_a_first_time_accused_is_not_written_either():
+    # Not a narrowing of the old escalation guard -- a removal of the path. Even
+    # with a clean case, an unambiguous name and a perfect match, nothing is
+    # written, because the court record already states who the defendants are.
     case = {"slug": "case-first-accused", "state": "DRAFT", "entities": []}
     api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
     plan = plan_case_entities(api, case, 'W/"e"', [
         {"entity_name": "अंकुर खत्री", "relationship_type": "accused", "notes": "क"}])
 
-    assert plan.action == "WOULD_PATCH"
-    assert plan.patch_items == [{"nes_id": ANKUR_IRI, "relationship_type": "accused",
-                                 "notes": "क", "outcome": "charged"}]
+    assert plan.action == "NOOP"
+    assert plan.patch_items == []
+    assert plan.court_record_only == [("अंकुर खत्री", "accused")]
 
 
 def test_each_review_row_reports_its_own_section():
@@ -1726,7 +1728,7 @@ def test_a_location_and_a_related_item_each_bind_into_their_own_section():
     assert len(plan.bound) == 2
 
 
-def test_an_accused_extraction_binds_as_accused_and_carries_the_charged_outcome():
+def test_an_accused_extraction_writes_nothing():
     # `accused` is the one section with an extra requirement: the DB's
     # `outcome_only_on_accused` CHECK makes `outcome` legal here and nowhere
     # else, and every case in this corpus is a Special Court `-CR-` case, so
@@ -1737,9 +1739,11 @@ def test_an_accused_extraction_binds_as_accused_and_carries_the_charged_outcome(
     plan = plan_case_entities(api, case, 'W/"e"', [
         {"entity_name": "अंकुर खत्री", "relationship_type": "accused", "notes": "क"}])
 
-    assert plan.action == "WOULD_PATCH"
-    assert plan.patch_items == [{"nes_id": ANKUR_IRI, "relationship_type": "accused",
-                                 "outcome": CHARGED, "notes": "क"}]
+    # No bind, and therefore no `outcome` -- which is the point. `outcome` is
+    # legal only on an accused bind, so with the section gone this module can
+    # never send one.
+    assert plan.action == "NOOP"
+    assert plan.patch_items == []
 
 
 # --------------------------------------------------------------------------
@@ -2572,13 +2576,13 @@ def test_nomatch_rows_carry_the_section_they_were_extracted_under():
     api = _SearchStubApi([case], {"हेम राज बिष्ट": [],
                                   "वन निर्देशनालय, धनगढी": []})
     plan = plan_case_entities(api, case, 'W/"e"', [
-        {"entity_name": "हेम राज बिष्ट", "relationship_type": "accused",
+        {"entity_name": "हेम राज बिष्ट", "relationship_type": "related",
          "notes": "क"},
         {"entity_name": "वन निर्देशनालय, धनगढी", "relationship_type": "location",
          "notes": "ख"}], strict=True)
 
     assert [(name, section) for name, _decision, section in plan.nomatch] == [
-        ("हेम राज बिष्ट", "accused"),
+        ("हेम राज बिष्ट", "related"),
         ("वन निर्देशनालय, धनगढी", "location"),
     ]
 
@@ -2587,13 +2591,13 @@ def test_nomatch_report_shows_the_section_for_each_unmatched_name(tmp_path):
     # The report IS the caseworker's queue for creating NES entities. Creating a
     # person and creating a district office are different jobs, and the queue
     # could not tell them apart.
-    rows = [("हेम राज बिष्ट", "case-a", _nomatch_decision(), "accused"),
+    rows = [("हेम राज बिष्ट", "case-a", _nomatch_decision(), "related"),
             ("वन निर्देशनालय, धनगढी", "case-b", _nomatch_decision(), "location")]
     out = tmp_path / "run.nomatch.md"
     write_nomatch_report(out, rows)
 
     lines = out.read_text(encoding="utf-8").splitlines()
-    assert "accused" in next(line for line in lines if "हेम राज" in line)
+    assert "related" in next(line for line in lines if "हेम राज" in line)
     assert "location" in next(line for line in lines if "निर्देशनालय" in line)
 
 
@@ -2622,7 +2626,7 @@ def test_report_paths_includes_the_new_sidecars():
 
 NOTHING_RESOLVES_RESPONSE = json.dumps({
     "entities": [
-        {"entity_name": "हेम राज बिष्ट", "relationship_type": "accused",
+        {"entity_name": "हेम राज बिष्ट", "relationship_type": "related",
          "notes": "तत्कालीन प्रमुख"},
         {"entity_name": "मानस नर्सरी, धनगढी", "relationship_type": "related",
          "notes": "ठेक्का पाएको फर्म"},
@@ -2650,7 +2654,7 @@ def test_extraction_sidecar_records_every_name_when_nothing_resolves(
             .read_text(encoding="utf-8").splitlines()]
 
     assert [(r["extracted"], r["relationship_type"]) for r in rows] == [
-        ("हेम राज बिष्ट", "accused"),
+        ("हेम राज बिष्ट", "related"),
         ("मानस नर्सरी, धनगढी", "related"),
     ]
     assert rows[0]["notes"] == "तत्कालीन प्रमुख"
@@ -2757,7 +2761,7 @@ def test_cross_script_only_match_is_bound_not_held():
     case = {"slug": "case-kamal-bound", "state": "DRAFT", "entities": []}
     api = _SearchStubApi([case], {"कमल थापा": [KAMALA_LATIN_ONLY]})
     plan = plan_case_entities(api, case, 'W/"e"', [
-        {"entity_name": "कमल थापा", "relationship_type": "accused", "notes": "क"}])
+        {"entity_name": "कमल थापा", "relationship_type": "related", "notes": "क"}])
 
     assert plan.action == "WOULD_PATCH"
     assert plan.review == []
@@ -2812,7 +2816,7 @@ def test_coercion_does_not_fire_for_an_accepted_section():
     assert [item["relationship_type"] for item in plan.patch_items] == ["witness"]
 
 
-def test_accused_escalation_still_needs_a_human():
+def test_an_accused_name_never_reaches_the_case_at_all():
     # The one review this stage KEEPS. Escalating an already-characterised entity
     # to `accused` sets outcome=charged and asserts the person is the subject of
     # the case. Removing the review queue did not remove this guard, because the
@@ -2826,8 +2830,11 @@ def test_accused_escalation_still_needs_a_human():
         {"entity_name": "अंकुर खत्री", "relationship_type": "accused",
          "notes": "क"}])
 
-    assert len(plan.review) == 1
-    assert "escalate to 'accused'" in plan.review[0][1].reason
+    # Nothing to escalate and nothing to review: the section is refused before
+    # resolution runs, so the case keeps exactly what it had.
+    assert plan.review == []
+    assert plan.patch_items == []
+    assert plan.court_record_only == [("अंकुर खत्री", "accused")]
 
 
 # --------------------------------------------------------------------------
@@ -2843,7 +2850,7 @@ def test_accused_escalation_still_needs_a_human():
 
 CREATE_RESPONSE = json.dumps({
     "entities": [
-        {"entity_name": "हेम राज बिष्ट", "relationship_type": "accused",
+        {"entity_name": "हेम राज बिष्ट", "relationship_type": "related",
          "entity_prefix": "person", "entity_type": "Person",
          "is_named_entity": True, "name_en": "",
          "notes": "तत्कालीन प्रमुख"},
@@ -2898,7 +2905,7 @@ def test_creates_an_entity_for_an_unmatched_name_and_binds_it(
     _slug, _path, items, _etag = api.replace_list_calls[0]
     sections = {item["nes_id"].rsplit("/", 2)[-2]: item["relationship_type"]
                 for item in items}
-    assert sections["person"] == "accused"
+    assert sections["person"] == "related"
     assert sections["dfo"] == "related"
 
 
@@ -2973,7 +2980,7 @@ def test_one_office_named_twice_creates_one_entity(
 
 BAD_PREFIX_RESPONSE = json.dumps({
     "entities": [
-        {"entity_name": "हेम राज बिष्ट", "relationship_type": "accused",
+        {"entity_name": "हेम राज बिष्ट", "relationship_type": "related",
          "entity_prefix": "persen", "entity_type": "Person",
          "is_named_entity": True, "name_en": "", "notes": "क"},
     ],
@@ -3427,7 +3434,7 @@ def test_the_payload_carries_both_names_when_english_is_supplied(
 
 NO_ENGLISH_RESPONSE = json.dumps({
     "entities": [
-        {"entity_name": "हेम राज बिष्ट", "relationship_type": "accused",
+        {"entity_name": "हेम राज बिष्ट", "relationship_type": "related",
          "entity_prefix": "person", "entity_type": "Person",
          "is_named_entity": True, "name_en": "",
          "notes": "तत्कालीन प्रमुख"},
@@ -3489,3 +3496,134 @@ def test_the_creation_block_explains_both_new_fields():
     section = ere.prefix_prompt_section(["person", "organization"])
     assert "is_named_entity" in section
     assert "name_en" in section
+
+
+# --------------------------------------------------------------------------
+# The LLM does not supply accused. The court record does.
+#
+# `GET /courtcases/<court>/<number>/entities` returns the defendants CIAA
+# actually charged -- for 078-CR-0038, हेम राज विष्ट and रुबी जि.सी. विष्ट, the
+# same two the extraction guessed at. `casework/court_record.py` already reads
+# it and is deliberately unwired here (see the import comment at line 127).
+#
+# THE HARM THIS REMOVES: an accused bind carries `outcome = CHARGED`, and since
+# 2026-08-05 one extracted name binds EVERY candidate above the threshold. An
+# ambiguous accused name therefore recorded every namesake as charged in a
+# corruption case -- `resolve`'s own docstring names 13 same-name entities for
+# `संजय प्रसाद यादव`. Dropping the section removes the path entirely rather than
+# narrowing it.
+# --------------------------------------------------------------------------
+
+
+ACCUSED_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "हेम राज बिष्ट", "relationship_type": "accused",
+         "entity_prefix": "person", "entity_type": "Person",
+         "is_named_entity": True, "name_en": "Hem Raj Bista",
+         "notes": "प्रतिवादी"},
+        {"entity_name": "नानी काजी थापा", "relationship_type": "alleged",
+         "entity_prefix": "person", "entity_type": "Person",
+         "is_named_entity": True, "name_en": "Nani Kaji Thapa",
+         "notes": "घुस लेनदेनमा संलग्न भनी उल्लेख"},
+    ],
+    "accused_notes": [],
+})
+
+
+def test_an_extracted_accused_is_never_bound(monkeypatch, patched_fetch_markdown):
+    case = dict(PRESS_ONLY_CASE, slug="case-accused-dropped", entities=[])
+    api = _SearchStubApi([case], {
+        "हेम राज बिष्ट": [{"id": "https://jawafdehi.org/entity/person/hem-raj-bista",
+                            "title": {"ne": "हेम राज बिष्ट"}, "score": 180.0}],
+        "नानी काजी थापा": [{"id": "https://jawafdehi.org/entity/person/nani-kaji-thapa",
+                             "title": {"ne": "नानी काजी थापा"}, "score": 180.0}],
+    })
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: ACCUSED_RESPONSE,
+              argv=["--apply"])
+
+    _slug, _path, items, _etag = api.replace_list_calls[0]
+    sections = {item["relationship_type"] for item in items}
+    assert "accused" not in sections
+    # The alleged name is untouched -- it is not in the court record, so the
+    # extraction is the only source for it.
+    assert sections == {"alleged"}
+
+
+def test_an_extracted_accused_is_never_created(monkeypatch, patched_fetch_markdown):
+    # Creation must not sneak an accused in through the other door.
+    case = dict(PRESS_ONLY_CASE, slug="case-accused-nocreate", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [], "नानी काजी थापा": []})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: ACCUSED_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    posted = [p["slug"] for p in api.create_entity_calls]
+    assert "hem-raj-bista" not in posted
+    assert posted == ["nani-kaji-thapa"]
+
+
+def test_a_dropped_accused_is_reported_not_silently_discarded(
+    monkeypatch, patched_fetch_markdown
+):
+    case = dict(PRESS_ONLY_CASE, slug="case-accused-reported", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [], "नानी काजी थापा": []})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: ACCUSED_RESPONSE,
+              argv=["--dry-run"])
+
+    rows = [json.loads(line) for line in
+            Path(_report_files()["extracted"]).read_text(encoding="utf-8").splitlines()]
+    dropped = [r for r in rows if r["extracted"] == "हेम राज बिष्ट"]
+    assert dropped, "the accused name must still reach extracted.jsonl"
+    assert dropped[0]["relationship_type"] == "accused"
+
+
+def test_no_bind_this_module_writes_can_carry_a_charged_outcome(
+    monkeypatch, patched_fetch_markdown
+):
+    # `outcome` is legal only on an accused bind (the `outcome_only_on_accused`
+    # CHECK constraint). With accused gone, this module can never send one.
+    case = dict(PRESS_ONLY_CASE, slug="case-no-outcome", entities=[])
+    api = _SearchStubApi([case], {
+        "हेम राज बिष्ट": [{"id": "https://jawafdehi.org/entity/person/hem-raj-bista",
+                            "title": {"ne": "हेम राज बिष्ट"}, "score": 180.0}],
+        "नानी काजी थापा": [{"id": "https://jawafdehi.org/entity/person/nani-kaji-thapa",
+                             "title": {"ne": "नानी काजी थापा"}, "score": 180.0}],
+    })
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: ACCUSED_RESPONSE,
+              argv=["--apply"])
+
+    _slug, _path, items, _etag = api.replace_list_calls[0]
+    assert all(not item.get("outcome") for item in items)
+
+
+def test_the_prompt_no_longer_offers_accused_as_a_relationship_type():
+    assert '"accused"' not in ere.SYSTEM_PROMPT
+    assert "relationship_type" in ere.SYSTEM_PROMPT      # the others survive
+    assert '"alleged"' in ere.SYSTEM_PROMPT
+    assert '"witness"' in ere.SYSTEM_PROMPT
+
+
+def test_the_prompt_says_where_defendants_actually_come_from():
+    assert "court record" in ere.SYSTEM_PROMPT
+
+
+def test_the_carry_through_validator_still_accepts_an_existing_accused_bind():
+    # THE TRAP THE SPLIT AVOIDS. `apply_entity_plan` validates every row of the
+    # whole-list PATCH, including binds the case already had. A human's accused
+    # bind -- or one the court-record path wrote -- must survive that, or the
+    # case becomes unpatchable and we destroy the authoritative record.
+    existing = {"nes_id": ANKUR_IRI, "relationship_type": "accused",
+                "outcome": "charged", "notes": "मानव-लिखित"}
+    assert ere.validate_bind_item(existing) == existing
+
+
+def test_this_module_may_not_propose_an_accused_bind_of_its_own():
+    proposed = {"nes_id": ANKUR_IRI, "relationship_type": "accused",
+                "notes": "क"}
+    with pytest.raises(ValueError, match="court record"):
+        ere.validate_new_bind(proposed)
+
+
+def test_the_new_bind_validator_still_applies_the_generic_rules():
+    with pytest.raises(ValueError, match="canonical NES entity IRI"):
+        ere.validate_new_bind({"nes_id": "not-an-iri",
+                               "relationship_type": "related", "notes": ""})
