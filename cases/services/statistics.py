@@ -23,7 +23,7 @@ import json
 
 from django.db import connections
 from django.db.models import Count, Q, Sum
-from django.db.models.functions import ExtractYear
+from django.db.models.functions import Substr
 from django.utils import timezone
 
 # NES + NGM models live in sibling apps; the DB router (config.db_router) sends
@@ -48,6 +48,18 @@ STATISTICS_SNAPSHOT_KEY = "statistics"
 def _pct(part: int, whole: int) -> float:
     """Percentage of ``part`` over ``whole``, 1 dp; 0.0 when ``whole`` is 0."""
     return round((part / whole) * 100, 1) if whole else 0.0
+
+
+def _bs_year(value: str | None) -> int | None:
+    """Bikram Sambat year from a stored ``registration_date_bs``, or None.
+
+    The column is free text written by the scrapers, so the year is the leading
+    four characters of ``YYYY-MM-DD`` (``YYYY/MM/DD`` works out the same). Values
+    that are not four decimal digits — empty strings, truncated dates — return
+    None so one bad row is dropped instead of failing the whole aggregation.
+    """
+    digits = (value or "").strip()
+    return int(digits) if len(digits) == 4 and digits.isdecimal() else None
 
 
 def compute_statistics() -> dict:
@@ -353,26 +365,45 @@ def _ngm_metrics():
     )
 
     # Court cases filed per year, and per court level per year (the matrix). Both
-    # key off the indexed registration_date_ad; cases with no registration date
-    # are excluded so a null year never appears as a column. Capped to the most
-    # recent N years so an outlier/dirty registration year cannot make the matrix
-    # grow unbounded (the heatmap has one column per kept year).
+    # bucket on the Bikram Sambat registration year, which is the calendar the
+    # court registers themselves are written in: the scrapers read
+    # registration_date_bs off the register and DERIVE registration_date_ad from
+    # it. Bucketing on the AD column instead would be doubly wrong for a BS axis —
+    # the BS year turns in mid-April, so every AD year straddles two BS years and
+    # no relabelling can unmix them. Nor is it a coverage trade-off: every case
+    # missing a BS date is also missing the AD one (prod, 2026-08: 1,694,773 rows
+    # carry BS vs 1,694,688 AD), so this buckets marginally MORE cases.
+    #
+    # Grouping happens in SQL on the leading four characters; the cast to int
+    # happens in Python via _bs_year so an unparseable value drops its row rather
+    # than erroring the aggregation. Capped to the most recent N years so an
+    # outlier/dirty registration year cannot make the matrix grow unbounded (the
+    # heatmap paints one column per kept year) — the cap is also what excludes the
+    # stray implausible years the register carries (BS 2007, 2029: one case each).
     _MATRIX_YEARS = 25
-    dated = CourtCase.objects.exclude(registration_date_ad__isnull=True).annotate(
-        year=ExtractYear("registration_date_ad")
+    dated = CourtCase.objects.exclude(registration_date_bs__isnull=True).annotate(
+        bs=Substr("registration_date_bs", 1, 4)
     )
-    year_rows = list(
-        dated.values("year").annotate(count=Count("case_number")).order_by("year")
-    )
-    # Keep the most-recent N years, but return them ascending (frontend order).
-    kept_years = {row["year"] for row in year_rows[-_MATRIX_YEARS:]}
-    by_year = [row for row in year_rows if row["year"] in kept_years]
-    by_court_type_year = [
-        row
-        for row in dated.values("court__court_type", "year")
+    year_rows = [
+        {"bs_year": year, "count": row["count"]}
+        for row in dated.values("bs")
         .annotate(count=Count("case_number"))
-        .order_by("court__court_type", "year")
-        if row["year"] in kept_years
+        .order_by("bs")
+        if (year := _bs_year(row["bs"])) is not None
+    ]
+    # Keep the most-recent N years, but return them ascending (frontend order).
+    kept_years = {row["bs_year"] for row in year_rows[-_MATRIX_YEARS:]}
+    by_year = [row for row in year_rows if row["bs_year"] in kept_years]
+    by_court_type_year = [
+        {
+            "court__court_type": row["court__court_type"],
+            "bs_year": year,
+            "count": row["count"],
+        }
+        for row in dated.values("court__court_type", "bs")
+        .annotate(count=Count("case_number"))
+        .order_by("court__court_type", "bs")
+        if (year := _bs_year(row["bs"])) is not None and year in kept_years
     ]
 
     nes_resolved = (

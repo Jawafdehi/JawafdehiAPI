@@ -795,6 +795,7 @@ class TestNgmMetrics:
         CourtCase.objects.create(
             case_number="082-OA-0001",
             court=district,
+            registration_date_bs="2082-09-27",
             registration_date_ad=date(2026, 1, 11),
             nes_id="https://jawafdehi.org/entity/person/ram",
             document_sources=[{"document_id": "ngm:doc:1"}],
@@ -805,6 +806,7 @@ class TestNgmMetrics:
         CourtCase.objects.create(
             case_number="082-CR-0003",
             court=supreme,
+            registration_date_bs="2082-10-18",
             registration_date_ad=date(2026, 2, 1),
         )
 
@@ -830,15 +832,16 @@ class TestNgmMetrics:
         }
         assert by_court_type == {"district": 2, "supreme": 1}
 
-        # Court-cases-per-year and per-court-level-per-year (the bare case with
-        # no registration date is excluded, so only the 2 dated cases count).
-        by_year = {row["year"]: row["count"] for row in ngm["by_year"]}
-        assert by_year == {2026: 2}
+        # Court-cases-per-year and per-court-level-per-year, bucketed on the BS
+        # registration year (the bare case with no registration date is excluded,
+        # so only the 2 dated cases count).
+        by_year = {row["bs_year"]: row["count"] for row in ngm["by_year"]}
+        assert by_year == {2082: 2}
         by_type_year = {
-            (row["court__court_type"], row["year"]): row["count"]
+            (row["court__court_type"], row["bs_year"]): row["count"]
             for row in ngm["by_court_type_year"]
         }
-        assert by_type_year == {("district", 2026): 1, ("supreme", 2026): 1}
+        assert by_type_year == {("district", 2082): 1, ("supreme", 2082): 1}
 
         # Materials now live in their own top-level block, not under ngm.
         mats = payload["materials"]
@@ -863,6 +866,48 @@ class TestNgmMetrics:
         assert ngm["completeness"]["nes_resolved"] == pytest.approx(33.3)
         assert ngm["completeness"]["with_registration_date"] == pytest.approx(66.7)
         assert ngm["completeness"]["with_document_sources"] == pytest.approx(33.3)
+
+    def test_per_year_buckets_follow_the_bs_year_not_the_ad_one(self, api_client):
+        # The BS year turns in mid-April, so a single AD year spans two of them.
+        # These two cases share AD 2026 but sit in different BS years — proof the
+        # buckets key off registration_date_bs and not the derived AD column.
+        from datetime import date
+
+        court = Court.objects.create(
+            identifier="lalitpurdc",
+            court_type="district",
+            full_name_nepali="जिल्ला अदालत ललितपुर",
+            full_name_english="District Court Lalitpur",
+        )
+        CourtCase.objects.create(
+            case_number="082-OA-1001",
+            court=court,
+            registration_date_bs="2082-12-06",
+            registration_date_ad=date(2026, 3, 20),
+        )
+        CourtCase.objects.create(
+            case_number="083-OA-1002",
+            court=court,
+            registration_date_bs="2083-02-06",
+            registration_date_ad=date(2026, 5, 20),
+        )
+        # Unparseable BS date: dropped from the breakdown, never bucketed as 0.
+        CourtCase.objects.create(
+            case_number="083-OA-1003",
+            court=court,
+            registration_date_bs="",
+            registration_date_ad=date(2026, 5, 21),
+        )
+
+        ngm = api_client.get("/api/statistics/").json()["ngm"]
+        assert {row["bs_year"]: row["count"] for row in ngm["by_year"]} == {
+            2082: 1,
+            2083: 1,
+        }
+        assert {
+            (row["court__court_type"], row["bs_year"]): row["count"]
+            for row in ngm["by_court_type_year"]
+        } == {("district", 2082): 1, ("district", 2083): 1}
 
     def test_materials_exclude_soft_deleted(self, api_client):
         # Soft-deleted materials are off every read plane (retrieve/search/sitemap
