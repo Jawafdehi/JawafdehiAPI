@@ -3269,7 +3269,7 @@ def test_a_500_propagates_untouched():
 # different ground: the section it came from, the shape of the string, the
 # model's own verdict on whether the string names a thing, and identity.
 # A refused name still BINDS whatever it matched -- these gate creation only.
-# See docs/entity-extraction-hardening-design.md.
+# The order is fixed in `_cannot_create`, which carries the reasoning for each.
 # --------------------------------------------------------------------------
 
 

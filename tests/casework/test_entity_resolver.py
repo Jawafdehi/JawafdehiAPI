@@ -1085,8 +1085,8 @@ def test_the_devanagari_title_is_preferred_when_both_are_present():
 # opposite: a closed gazetteer of 77, ingested with official codes
 # (location/district/jhapa-np0104), where the whole name IS one token. Vetoing
 # them means the location section can never bind anything, which is what the
-# 2026-08-06 extraction hardening found. See
-# docs/entity-extraction-hardening-design.md.
+# 2026-08-06 extraction hardening found once the prompt stopped gluing an
+# activity onto the front of every place name.
 # --------------------------------------------------------------------------
 
 
