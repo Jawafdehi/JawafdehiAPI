@@ -598,6 +598,31 @@ def build_socks_opener(spec):
     return urllib.request.build_opener(_HTTPHandler, _HTTPSHandler)
 
 
+#: Query parameters that carry a credential. Google's Custom Search API is the
+#: reason this exists: it takes the key in the QUERY STRING with no header
+#: alternative, unlike Brave/Serper/Tavily, so the URL itself is a secret.
+_SECRET_QUERY_PARAMS = ("key", "api_key", "apikey", "token", "subscription-token")
+
+
+def redact_url(url):
+    """`url` with any credential-bearing query parameter masked.
+
+    A URL reaches a log line on transport failure, and for google_cse that URL
+    contains the API key. Cheap insurance against a credential landing in a run
+    log that then gets pasted into an issue.
+    """
+    parts = urllib.parse.urlsplit(url)
+    if not parts.query:
+        return url
+    pairs = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+    if not any(k.lower() in _SECRET_QUERY_PARAMS for k, _ in pairs):
+        return url
+    masked = [(k, "REDACTED" if k.lower() in _SECRET_QUERY_PARAMS else v)
+              for k, v in pairs]
+    return urllib.parse.urlunsplit(
+        parts._replace(query=urllib.parse.urlencode(masked)))
+
+
 class WebClient:
     """Throttled, cached HTTP reads for search / article / archive.
 
@@ -695,7 +720,7 @@ class WebClient:
         except urllib.error.HTTPError as exc:
             result = (exc.code, None)
         except Exception as exc:  # noqa: BLE001
-            log.debug("GET %s failed: %s", url[:90], exc)
+            log.debug("GET %s failed: %s", redact_url(url)[:120], exc)
             result = (None, None)
         self._cache[key] = result
         return result
@@ -884,6 +909,61 @@ def search_tavily(client, query):
                    for r in (p.get("results") or [])])
 
 
+#: Google's free tier. Small, but it is the only provider that can be signed up
+#: for without a payment card, which is why it exists here.
+GOOGLE_CSE_FREE_QUERIES_PER_DAY = 100
+
+
+def search_google_cse(client, query):
+    """Google Programmable Search, JSON API. GET, key + engine id in the query.
+
+    TWO credentials, unlike every other provider: `GOOGLE_CSE_API_KEY` and
+    `GOOGLE_CSE_CX`, the id of the Programmable Search Engine itself. A key
+    without a cx returns 400, which would otherwise read as a mystery.
+
+    The free tier is 100 queries/day. At `QUERY_LIMIT` = 12 that is 8 cases a
+    day, so a bulk run WILL exhaust it partway through -- which is fine, because
+    a case already carrying its news evidence gets budget 0 on the next run and
+    is skipped. Resuming tomorrow continues where the quota stopped.
+
+    Exhaustion must not read as a bad key: both arrive as HTTP 403 and the
+    operator's next action is completely different (wait vs re-issue). Google
+    puts the distinction in the body, so it is pulled out here rather than left
+    to `_provider_results`.
+
+    Shape is from the vendor schema and is UNVERIFIED against a live key.
+    """
+    key = _keyed("GOOGLE_CSE_API_KEY", "google_cse")
+    cx = (os.environ.get("GOOGLE_CSE_CX") or "").strip()
+    if not cx:
+        raise SearchUnavailable(
+            "GOOGLE_CSE_API_KEY is set but $GOOGLE_CSE_CX is not. Google needs "
+            "both: the API key, and the id of the Programmable Search Engine to "
+            "query (create one at programmablesearchengine.google.com and set it "
+            "to search the entire web).")
+    url = ("https://www.googleapis.com/customsearch/v1?"
+           + urllib.parse.urlencode({
+               "key": key, "cx": cx, "q": query,
+               # `num` maxes out at 10 on this API; asking for more is a 400.
+               "num": min(SEARCH_RESULTS_PER_QUERY, 10)}))
+    status, body = client.get(url, "search",
+                              headers={"Accept": "application/json"})
+    lowered = (body or "").lower()
+    if status == 403 and ("dailylimitexceeded" in lowered
+                          or "quota" in lowered or "ratelimitexceeded" in lowered):
+        raise SearchUnavailable(
+            f"google_cse daily quota exhausted "
+            f"({GOOGLE_CSE_FREE_QUERIES_PER_DAY}/day on the free tier). This is "
+            f"NOT a bad key -- wait for the quota to reset and re-run; cases "
+            f"already bound are skipped, so the run resumes where it stopped.")
+    return _provider_results(
+        status, body, "google_cse",
+        # No "items" key at all is Google's genuine no-match, not an error.
+        lambda p: [{"title": r.get("title"), "url": r.get("link"),
+                    "snippet": r.get("snippet")}
+                   for r in (p.get("items") or [])])
+
+
 #: name -> callable(client, query) -> [{title, url, snippet}]. Every entry obeys
 #: one contract: `[]` means the query genuinely matched nothing, and anything
 #: else raises `SearchUnavailable`.
@@ -892,6 +972,7 @@ SEARCH_PROVIDERS = {
     "brave": search_brave,
     "serper": search_serper,
     "tavily": search_tavily,
+    "google_cse": search_google_cse,
 }
 
 

@@ -1488,3 +1488,97 @@ def test_a_broken_bs_conversion_still_yields_the_gregorian_anchor(monkeypatch):
     import jawafdehi_shared.dates as shared_dates
     monkeypatch.setattr(shared_dates, "ad_to_bs", lambda _: None)
     assert ns.format_publication_date(date(2024, 6, 16)) == "2024-06-16"
+
+
+# ---------------------------------------------------------------------------
+# Google Programmable Search. The only provider signable-up without a payment
+# card, so it is the one this project can actually reach -- at 100 queries/day.
+# ---------------------------------------------------------------------------
+
+GOOGLE_BODY = json.dumps({"items": [
+    {"title": "विकल पौडेललाई कैद",
+     "link": "https://ekantipur.test/2024/08/bikal",
+     "snippet": "विशेष अदालतको फैसला"},
+]})
+
+
+def test_google_cse_normalises_link_and_snippet(monkeypatch):
+    monkeypatch.setenv("GOOGLE_CSE_API_KEY", "k")
+    monkeypatch.setenv("GOOGLE_CSE_CX", "cx123")
+    got = ns.search(RecordedApi(200, GOOGLE_BODY), "क", provider="google_cse")
+    assert got == [{"title": "विकल पौडेललाई कैद",
+                    "url": "https://ekantipur.test/2024/08/bikal",
+                    "snippet": "विशेष अदालतको फैसला"}]
+
+
+def test_google_cse_without_a_cx_says_so_instead_of_400ing(monkeypatch):
+    """Two credentials, unlike every other provider. A key with no engine id
+    returns a bare 400 from Google, which reads as a mystery."""
+    monkeypatch.setenv("GOOGLE_CSE_API_KEY", "k")
+    monkeypatch.delenv("GOOGLE_CSE_CX", raising=False)
+    with pytest.raises(ns.SearchUnavailable) as exc:
+        ns.search(RecordedApi(), "क", provider="google_cse")
+    assert "GOOGLE_CSE_CX" in str(exc.value)
+    assert "programmablesearchengine" in str(exc.value)
+
+
+def test_google_cse_quota_exhaustion_is_not_reported_as_a_bad_key(monkeypatch):
+    """Both arrive as HTTP 403 and the operator's next action is opposite:
+    wait for the reset, versus re-issue the credential."""
+    monkeypatch.setenv("GOOGLE_CSE_API_KEY", "k")
+    monkeypatch.setenv("GOOGLE_CSE_CX", "cx123")
+    body = json.dumps({"error": {"code": 403, "errors": [
+        {"reason": "dailyLimitExceeded",
+         "message": "Quota exceeded for quota metric 'Queries'"}]}})
+    with pytest.raises(ns.SearchUnavailable) as exc:
+        ns.search(RecordedApi(403, body), "क", provider="google_cse")
+    msg = str(exc.value)
+    assert "quota exhausted" in msg and "NOT a bad key" in msg
+    assert "rejected the API key" not in msg
+
+
+def test_google_cse_a_genuinely_bad_key_still_says_bad_key(monkeypatch):
+    monkeypatch.setenv("GOOGLE_CSE_API_KEY", "k")
+    monkeypatch.setenv("GOOGLE_CSE_CX", "cx123")
+    body = json.dumps({"error": {"code": 403, "errors": [
+        {"reason": "forbidden", "message": "API key not valid"}]}})
+    with pytest.raises(ns.SearchUnavailable) as exc:
+        ns.search(RecordedApi(403, body), "क", provider="google_cse")
+    assert "rejected the API key" in str(exc.value)
+
+
+def test_google_cse_no_items_key_is_a_genuine_no_match(monkeypatch):
+    """Google omits "items" entirely when nothing matched. That is [], not an
+    error -- the distinction this module turns on."""
+    monkeypatch.setenv("GOOGLE_CSE_API_KEY", "k")
+    monkeypatch.setenv("GOOGLE_CSE_CX", "cx123")
+    body = json.dumps({"searchInformation": {"totalResults": "0"}})
+    assert ns.search(RecordedApi(200, body), "क", provider="google_cse") == []
+
+
+def test_google_cse_never_asks_for_more_than_the_api_allows(monkeypatch):
+    """`num` maxes out at 10; a larger value is a 400."""
+    monkeypatch.setenv("GOOGLE_CSE_API_KEY", "k")
+    monkeypatch.setenv("GOOGLE_CSE_CX", "cx123")
+    cap = []
+    ns.search(RecordedApi(200, GOOGLE_BODY, capture=cap), "क",
+              provider="google_cse")
+    num = int(urllib.parse.parse_qs(
+        urllib.parse.urlparse(cap[0][1]).query)["num"][0])
+    assert 1 <= num <= 10
+
+
+def test_a_credential_in_the_query_string_is_redacted_before_logging():
+    """google_cse takes its key in the URL -- no header option -- and that URL
+    reaches a debug log on transport failure."""
+    red = ns.redact_url(
+        "https://www.googleapis.com/customsearch/v1"
+        "?key=AIzaSyREAL_SECRET_VALUE&cx=abc123&q=%E0%A4%95&num=8")
+    assert "AIzaSyREAL_SECRET_VALUE" not in red
+    assert "key=REDACTED" in red
+    assert "cx=abc123" in red, "only the secret is masked, not the whole query"
+
+
+def test_redaction_leaves_an_ordinary_url_untouched():
+    url = "https://html.duckduckgo.com/html/?q=nepal+corruption"
+    assert ns.redact_url(url) == url
