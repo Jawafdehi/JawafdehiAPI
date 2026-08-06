@@ -1156,3 +1156,184 @@ def test_the_material_iri_comes_from_the_shapers_own_id():
 @pytest.fixture(autouse=True)
 def _quiet(caplog):
     caplog.set_level(logging.CRITICAL, logger="casework.news_search")
+
+
+# ---------------------------------------------------------------------------
+# Swappable search providers. DuckDuckGo blocks datacentre addresses (measured
+# 2026-08-06 from AS31898: 1/6 queries answered, and 45s/90s pacing did not
+# help), so the backend has to be configurable. These fixtures are the vendors'
+# published response shapes -- no live key exists in this repo, so a real
+# credential is still owed one smoke query before any bulk run.
+# ---------------------------------------------------------------------------
+
+BRAVE_BODY = json.dumps({"web": {"results": [
+    {"title": "विकल पौडेललाई कैद",
+     "url": "https://ekantipur.test/2024/08/bikal",
+     "description": "विशेष अदालतको फैसला"},
+    {"title": "no url row", "url": "", "description": "dropped"},
+]}})
+
+SERPER_BODY = json.dumps({"organic": [
+    {"title": "अख्तियारको आरोपपत्र",
+     "link": "https://setopati.test/2024/06/ciaa",
+     "snippet": "३२ जनाविरुद्ध"},
+]})
+
+TAVILY_BODY = json.dumps({"results": [
+    {"title": "मेलम्ची बहस",
+     "url": "https://ratopati.test/2024/07/melamchi",
+     "content": "अन्तिम बहस सुरु"},
+]})
+
+
+class RecordedApi:
+    """Serves one canned reply to `get`/`post_json`, recording what was sent."""
+
+    def __init__(self, status=200, body="", *, capture=None):
+        self.status, self.body = status, body
+        self.capture = capture if capture is not None else []
+        self.calls = {"search": 0}
+
+    def get(self, url, kind, headers=None, expect_html=False):
+        self.calls[kind] = self.calls.get(kind, 0) + 1
+        self.capture.append(("GET", url, dict(headers or {})))
+        return self.status, self.body
+
+    def post_json(self, url, kind, payload, headers=None):
+        self.calls[kind] = self.calls.get(kind, 0) + 1
+        self.capture.append(("POST", url, dict(headers or {}), payload))
+        return self.status, self.body
+
+
+@pytest.mark.parametrize("provider,env,body,expected_url,expected_snippet", [
+    ("brave", "BRAVE_SEARCH_API_KEY", BRAVE_BODY,
+     "https://ekantipur.test/2024/08/bikal", "विशेष अदालतको फैसला"),
+    ("serper", "SERPER_API_KEY", SERPER_BODY,
+     "https://setopati.test/2024/06/ciaa", "३२ जनाविरुद्ध"),
+    ("tavily", "TAVILY_API_KEY", TAVILY_BODY,
+     "https://ratopati.test/2024/07/melamchi", "अन्तिम बहस सुरु"),
+])
+def test_each_keyed_provider_normalises_to_the_same_shape(
+        provider, env, body, expected_url, expected_snippet, monkeypatch):
+    """Every backend must hand `collect_for_case` identical dicts. The vendors
+    disagree on field names (`description`/`snippet`/`content`, `url`/`link`),
+    and getting that mapping wrong yields candidates with no snippet -- which
+    the verifier then grades on a title alone."""
+    monkeypatch.setenv(ns.SEARCH_PROVIDER_ENV, provider)
+    monkeypatch.setenv(env, "test-key")
+    api = RecordedApi(200, body)
+    results = ns.search(api, "विकल पौडेल")
+    assert [r["url"] for r in results] == [expected_url]
+    assert results[0]["snippet"] == expected_snippet
+    assert results[0]["title"]
+
+
+def test_a_missing_key_refuses_rather_than_falling_back_to_duckduckgo():
+    """A silent downgrade would serve the anti-bot page the key exists to
+    escape, and report every case as having no coverage."""
+    with pytest.raises(ns.SearchUnavailable) as exc:
+        ns.search(RecordedApi(), "क", provider="brave")
+    assert "BRAVE_SEARCH_API_KEY" in str(exc.value)
+    assert "duckduckgo" in str(exc.value)
+
+
+@pytest.mark.parametrize("status,marker", [
+    (401, "rejected the API key"),
+    (403, "rejected the API key"),
+    (429, "rate-limited or out of quota"),
+    (500, "returned HTTP 500"),
+])
+def test_a_provider_refusal_raises_and_never_reads_as_no_coverage(
+        status, marker, monkeypatch):
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "k")
+    with pytest.raises(ns.SearchUnavailable) as exc:
+        ns.search(RecordedApi(status, "denied"), "क", provider="brave")
+    assert marker in str(exc.value)
+
+
+def test_an_html_error_page_is_not_mistaken_for_empty_results(monkeypatch):
+    """A 200 carrying a proxy/WAF HTML page must not decode to zero results."""
+    monkeypatch.setenv("SERPER_API_KEY", "k")
+    with pytest.raises(ns.SearchUnavailable) as exc:
+        ns.search(RecordedApi(200, "<html>gateway</html>"), "क",
+                  provider="serper")
+    assert "not JSON" in str(exc.value)
+
+
+def test_a_keyed_provider_may_still_return_a_genuine_empty(monkeypatch):
+    """The distinction the module turns on: refusal raises, no-match is []."""
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "k")
+    assert ns.search(RecordedApi(200, json.dumps({"web": {"results": []}})),
+                     "क", provider="brave") == []
+
+
+def test_results_are_capped_per_query(monkeypatch):
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "k")
+    many = {"web": {"results": [
+        {"title": f"t{i}", "url": f"https://x.test/{i}", "description": "s"}
+        for i in range(40)]}}
+    got = ns.search(RecordedApi(200, json.dumps(many)), "क", provider="brave")
+    assert len(got) == ns.SEARCH_RESULTS_PER_QUERY
+
+
+def test_the_key_travels_in_the_header_not_the_query_string(monkeypatch):
+    """A key in the URL lands in logs, caches and the client's cache key."""
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "secret-key")
+    cap = []
+    ns.search(RecordedApi(200, BRAVE_BODY, capture=cap), "क", provider="brave")
+    method, url, headers = cap[0][0], cap[0][1], cap[0][2]
+    assert method == "GET"
+    assert "secret-key" not in url
+    assert headers["X-Subscription-Token"] == "secret-key"
+
+
+def test_default_provider_is_still_duckduckgo(monkeypatch):
+    monkeypatch.delenv(ns.SEARCH_PROVIDER_ENV, raising=False)
+    assert ns.resolve_search_provider()[0] == "duckduckgo"
+
+
+def test_an_unknown_provider_name_is_refused_not_ignored(monkeypatch):
+    monkeypatch.setenv(ns.SEARCH_PROVIDER_ENV, "gogle")
+    with pytest.raises(ns.SearchUnavailable) as exc:
+        ns.resolve_search_provider()
+    assert "gogle" in str(exc.value)
+
+
+def test_post_cache_keys_on_the_body_not_just_the_url(monkeypatch):
+    """Every Serper/Tavily query POSTs to ONE url. Keying the cache on the url
+    alone would serve query 1's articles as the answer to all twelve."""
+    client = ns.WebClient(search_delay=0)
+    served = iter([(200, json.dumps({"organic": [
+        {"title": "a", "link": "https://a.test/1", "snippet": "s"}]})),
+        (200, json.dumps({"organic": [
+            {"title": "b", "link": "https://b.test/2", "snippet": "s"}]}))])
+
+    def fake_urlopen(request, timeout=None):
+        status, body = next(served)
+        return _FakeResponse(status, body)
+
+    monkeypatch.setattr(ns.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setenv("SERPER_API_KEY", "k")
+    first = ns.search(client, "पहिलो", provider="serper")
+    second = ns.search(client, "दोस्रो", provider="serper")
+    assert first[0]["url"] != second[0]["url"], (
+        "two different queries must not share one cache entry")
+    assert client.calls["search"] == 2
+
+
+class _FakeResponse:
+    def __init__(self, status, body):
+        self.status = status
+        self._body = body.encode("utf-8")
+        self.headers = types.SimpleNamespace(
+            get_content_charset=lambda: "utf-8",
+            get=lambda k, d=None: "application/json")
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False

@@ -45,6 +45,7 @@ prints for a human and the writer never touches.
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 import urllib.error
@@ -616,6 +617,47 @@ class WebClient:
         self._cache[key] = result
         return result
 
+    def post_json(self, url, kind, payload, headers=None):
+        """`(status, text)` for a JSON POST. Same never-raises contract as `get`.
+
+        Exists because two of the keyed search providers (Serper, Tavily) are
+        POST-only. Routed through the same throttle, cache and call counter as
+        `get` so a provider swap does not quietly bypass the pacing -- the whole
+        point of this class.
+
+        The cache key folds in a hash of the body: one URL serves every query,
+        so keying on the URL alone would serve the first query's results to all
+        twelve. On an HTTPError the body IS read and returned, unlike `get`:
+        a keyed provider puts the reason ("invalid key", "quota exceeded") in
+        the 4xx body, and that has to reach the operator.
+        """
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        key = (kind, f"{url}#{hashlib.sha256(body).hexdigest()[:16]}")
+        if key in self._cache:
+            return self._cache[key]
+        self._throttled(kind)
+        self.calls[kind] = self.calls.get(kind, 0) + 1
+        request = urllib.request.Request(
+            url, data=body, method="POST",
+            headers={"Content-Type": "application/json",
+                     "Accept": "application/json", **(headers or {})})
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                charset = response.headers.get_content_charset() or "utf-8"
+                result = (response.status,
+                          response.read().decode(charset, errors="replace"))
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read().decode("utf-8", errors="replace")[:400]
+            except Exception:  # noqa: BLE001
+                detail = ""
+            result = (exc.code, detail or None)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("POST %s failed: %s", url[:90], exc)
+            result = (None, None)
+        self._cache[key] = result
+        return result
+
 
 class SearchUnavailable(RuntimeError):
     """The search backend answered, but not with results.
@@ -641,12 +683,172 @@ class SearchUnavailable(RuntimeError):
 _ANOMALY_MARKERS = ("anomaly", "detected unusual activity", "verify you are")
 
 
-def search(client, query):
-    """`[{title, url, snippet}]` for one query.
+#: Env var naming the backend. Default keeps the donor's behaviour exactly.
+SEARCH_PROVIDER_ENV = "CASEWORK_SEARCH_PROVIDER"
+DEFAULT_SEARCH_PROVIDER = "duckduckgo"
+
+
+def _keyed(env_name, provider):
+    """The API key for `provider`, or a `SearchUnavailable` explaining its absence.
+
+    Raising beats falling back to DuckDuckGo. A silent downgrade would hand back
+    the anti-bot page the operator configured a key precisely to escape, and the
+    run would report zero candidates per case -- the exact silent failure
+    `SearchUnavailable` exists to prevent.
+    """
+    key = (os.environ.get(env_name) or "").strip()
+    if not key:
+        raise SearchUnavailable(
+            f"{SEARCH_PROVIDER_ENV}={provider} but ${env_name} is unset or empty. "
+            f"Refusing to fall back to duckduckgo, which is blocked from this "
+            f"host and would report every case as having no coverage.")
+    return key
+
+
+def _provider_results(status, body, provider, extract):
+    """Normalise one keyed provider's reply, or raise `SearchUnavailable`.
+
+    `extract` maps the decoded JSON to `[{title, url, snippet}]`. Anything that
+    is not a clean 2xx with parseable JSON is the backend declining to answer,
+    never an empty result set -- the distinction this whole module turns on.
+    """
+    if status is None:
+        raise SearchUnavailable(f"{provider} did not answer (transport error).")
+    if status == 401 or status == 403:
+        raise SearchUnavailable(
+            f"{provider} rejected the API key (HTTP {status}): {(body or '')[:200]}")
+    if status == 429:
+        raise SearchUnavailable(
+            f"{provider} rate-limited or out of quota (HTTP 429): "
+            f"{(body or '')[:200]}")
+    if status >= 400 or not body:
+        raise SearchUnavailable(
+            f"{provider} returned HTTP {status}: {(body or '')[:200]}")
+    try:
+        payload = json.loads(body)
+    except ValueError as exc:
+        raise SearchUnavailable(
+            f"{provider} returned HTTP {status} with a body that is not JSON "
+            f"({exc}). First 200 chars: {body[:200]!r}") from exc
+    results = []
+    for row in extract(payload) or []:
+        url = (row.get("url") or "").strip()
+        if not url:
+            continue
+        results.append({"title": (row.get("title") or "").strip(),
+                        "url": url,
+                        "snippet": (row.get("snippet") or "").strip()})
+        if len(results) >= SEARCH_RESULTS_PER_QUERY:
+            break
+    return results
+
+
+def search_brave(client, query):
+    """Brave Search API. GET, key in `X-Subscription-Token`.
+
+    UNVERIFIED AGAINST A LIVE KEY -- no Brave/Serper/Tavily credential exists in
+    this repo or environment, so the response shapes below come from each
+    vendor's published schema and are covered only by recorded-fixture tests.
+    Run one real query and check the count before trusting a bulk run.
+    """
+    key = _keyed("BRAVE_SEARCH_API_KEY", "brave")
+    url = ("https://api.search.brave.com/res/v1/web/search?"
+           + urllib.parse.urlencode({"q": query,
+                                     "count": SEARCH_RESULTS_PER_QUERY}))
+    status, body = client.get(url, "search",
+                              headers={"Accept": "application/json",
+                                       "X-Subscription-Token": key})
+    return _provider_results(
+        status, body, "brave",
+        lambda p: [{"title": r.get("title"), "url": r.get("url"),
+                    "snippet": r.get("description")}
+                   for r in ((p.get("web") or {}).get("results") or [])])
+
+
+def search_serper(client, query):
+    """Serper.dev — Google's index as JSON. POST, key in `X-API-KEY`.
+
+    See the caveat on `search_brave`: shape is from the vendor schema, untested
+    against a live key.
+    """
+    key = _keyed("SERPER_API_KEY", "serper")
+    status, body = client.post_json(
+        "https://google.serper.dev/search", "search",
+        {"q": query, "num": SEARCH_RESULTS_PER_QUERY, "gl": "np"},
+        headers={"X-API-KEY": key})
+    return _provider_results(
+        status, body, "serper",
+        lambda p: [{"title": r.get("title"), "url": r.get("link"),
+                    "snippet": r.get("snippet")}
+                   for r in (p.get("organic") or [])])
+
+
+def search_tavily(client, query):
+    """Tavily. POST, key as a bearer token.
+
+    See the caveat on `search_brave`: shape is from the vendor schema, untested
+    against a live key.
+    """
+    key = _keyed("TAVILY_API_KEY", "tavily")
+    status, body = client.post_json(
+        "https://api.tavily.com/search", "search",
+        {"query": query, "max_results": SEARCH_RESULTS_PER_QUERY},
+        headers={"Authorization": f"Bearer {key}"})
+    return _provider_results(
+        status, body, "tavily",
+        lambda p: [{"title": r.get("title"), "url": r.get("url"),
+                    "snippet": r.get("content")}
+                   for r in (p.get("results") or [])])
+
+
+#: name -> callable(client, query) -> [{title, url, snippet}]. Every entry obeys
+#: one contract: `[]` means the query genuinely matched nothing, and anything
+#: else raises `SearchUnavailable`.
+SEARCH_PROVIDERS = {
+    "duckduckgo": lambda client, query: search_duckduckgo(client, query),
+    "brave": search_brave,
+    "serper": search_serper,
+    "tavily": search_tavily,
+}
+
+
+def resolve_search_provider(name=None):
+    """`(name, callable)` for the configured backend. Raises on an unknown name."""
+    chosen = (name or os.environ.get(SEARCH_PROVIDER_ENV)
+              or DEFAULT_SEARCH_PROVIDER).strip().lower()
+    if chosen not in SEARCH_PROVIDERS:
+        raise SearchUnavailable(
+            f"unknown search provider {chosen!r}. Set ${SEARCH_PROVIDER_ENV} to "
+            f"one of: {', '.join(sorted(SEARCH_PROVIDERS))}.")
+    return chosen, SEARCH_PROVIDERS[chosen]
+
+
+def search(client, query, provider=None):
+    """`[{title, url, snippet}]` for one query, from the configured backend.
 
     Returns `[]` only for a genuine no-match. Raises `SearchUnavailable` when the
     backend is refusing to serve results at all, so the caller can stop rather
     than record a silent zero per case.
+    """
+    _, fn = resolve_search_provider(provider)
+    return fn(client, query)
+
+
+def search_duckduckgo(client, query):
+    """Scrape DuckDuckGo's HTML endpoint. The donor's backend, and the default.
+
+    BLOCKED FROM DATACENTRE ADDRESSES. Measured 2026-08-06 from this host
+    (Oracle Cloud, AS31898): 1 of 6 Nepali queries answered, the rest HTTP 202
+    with an anti-bot page, and pacing does not help -- gaps of 45s and 90s were
+    refused too. A browser User-Agent does not fix it either; the block keys on
+    the address, not the identity. The same query from a residential connection
+    returns results.
+
+    The donor DID work: production's news materials were created 2026-06-08. It
+    ran from an unblocked machine -- these sandboxes did not exist yet. So this
+    is not a regression in the code and not necessarily a tightening upstream;
+    the execution moved onto an address search engines refuse. Configure a keyed
+    provider instead.
 
     Retries a transport error / 403 / 429 with the donor's exponential backoff
     (donor:322): `5 * 3**attempt`, i.e. 5s then 15s, on top of the client's own
