@@ -16,10 +16,11 @@ class EntityAlreadyExists(Exception):
     Its own type because the caller's response is to BIND the existing entity,
     not to record an error: someone -- a caseworker, or an earlier run over the
     same case -- got there first, which is the outcome we wanted. The server
-    reports it as 422 from `PublicationService.create_entity`'s duplicate-`@id`
-    check (`entities/services/publication/service.py:68`), the same status a
-    genuinely malformed payload returns, so the body text is the only thing that
-    separates the two.
+    answers 409 `ENTITY_EXISTS`: `_map_service_value_error` maps the duplicate
+    `@id` check (`entities/services/publication/service.py:68`) to 409, and
+    reserves 422 for `validate_create_payload` failures (`entities/views.py:220,
+    420`). Keyed on the status alone -- an earlier version keyed on 422, and
+    every re-run then recorded `error` and rebound nothing.
     """
 
 

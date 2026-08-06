@@ -31,6 +31,7 @@ import logging
 import subprocess
 import sys
 import types
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -3627,3 +3628,48 @@ def test_the_new_bind_validator_still_applies_the_generic_rules():
     with pytest.raises(ValueError, match="canonical NES entity IRI"):
         ere.validate_new_bind({"nes_id": "not-an-iri",
                                "relationship_type": "related", "notes": ""})
+
+
+def test_a_failed_prefix_read_costs_one_case_not_the_whole_run(
+    monkeypatch, patched_fetch_markdown
+):
+    # Every other API call in the per-case loop is wrapped so one case's failure
+    # does not cost the run. `entity_prefixes` was not, so a single 502 aborted
+    # a 3,000-case batch -- and at the second call site, after entities had
+    # already been created and cases already PATCHed.
+    case = dict(PRESS_ONLY_CASE, slug="case-prefix-502", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [], "वन निर्देशनालय, धनगढी": []})
+
+    def boom(timeout=60):
+        raise urllib.error.HTTPError("u", 502, "Bad Gateway", {}, None)
+    api.entity_prefixes = boom
+
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    # The run survived and created nothing, rather than raising out of main().
+    assert api.create_entity_calls == []
+
+
+def test_an_uncanonical_created_iri_costs_one_name_not_the_run(
+    monkeypatch, patched_fetch_markdown
+):
+    # `_created_bind` validates, and validation RAISES. The per-name handler
+    # only wrapped the POST, so a server answering with an off-authority `@id`
+    # escaped both it and the call site, killing the run after entities had
+    # already been created.
+    case = dict(PRESS_ONLY_CASE, slug="case-bad-iri", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [], "वन निर्देशनालय, धनगढी": []})
+    real_create = api.create_entity
+
+    def odd_iri(payload, timeout=60):
+        real_create(payload, timeout)
+        return {"@id": "https://elsewhere.example/entity/person/x"}
+    api.create_entity = odd_iri
+
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    rows = _created_rows()
+    assert [r["outcome"] for r in rows] == ["error", "error"]
+    assert all("canonical NES entity IRI" in r["reason"] for r in rows)

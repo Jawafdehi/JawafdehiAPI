@@ -638,7 +638,7 @@ def _bind_row(slug, name, decision, notes, section, written):
             "reason": decision.reason, "written": written}
 
 
-def _promote_top_candidate(decision, extracted_name):
+def _promote_top_candidate(decision):
     """A vetoed/ambiguous REVIEW -> a BIND, verdict flipped on the top candidate.
 
     `resolve` returns REVIEW for ambiguity, truncation, name vetoes,
@@ -702,9 +702,10 @@ def _resolve_with_vetoes(api, name, strict=False, *, section=""):
     no role can drift onto a different guard.
 
     `strict=False` (the default) binds the best-scoring candidate whenever one
-    cleared the threshold, even if a veto fired -- with the two exceptions
-    `_promote_top_candidate` and the fail-closed branch below spell out: a
-    cross-script-only match and an unreadable entity document are never promoted.
+    cleared the threshold, even if a veto fired -- with ONE exception, which the
+    fail-closed branch below spells out: an unreadable entity document is never
+    promoted. The cross-script refusal that used to be the second exception was
+    removed on 2026-08-05, so `कमल थापा` can now bind a `Kamala Thapa` entity.
     `strict=True` restores the conservative behaviour: a veto means REVIEW and a
     human decides.
 
@@ -736,7 +737,7 @@ def _resolve_with_vetoes(api, name, strict=False, *, section=""):
         # Promote BEFORE the document read, so a name that `resolve` vetoed still
         # gets its winning candidate checked against its own document below
         # rather than skipping that read entirely.
-        decision = _promote_top_candidate(decision, name)
+        decision = _promote_top_candidate(decision)
         if not decision.is_bind:
             return decision
 
@@ -777,7 +778,7 @@ def _resolve_with_vetoes(api, name, strict=False, *, section=""):
     # with nothing having actually been matched against. Distinguished by whether
     # the document came back, never by parsing the veto's reason text.
     if not strict and readable:
-        decision = _promote_top_candidate(decision, name)
+        decision = _promote_top_candidate(decision)
     return decision
 
 
@@ -849,10 +850,12 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
        nobody ever saw. The exception's own text is folded into the reason (and
        logged), so a misconfigured base URL is diagnosable rather than looking like
        a real veto.
-    2. `_promote_top_candidate`'s CROSS-SCRIPT refusal. A candidate with no
-       Devanagari name only scored through romanisation, which folds a masculine
-       name into its feminine form; there the name itself is what is unproven, so
-       there is no "best-scoring match" to fall back on.
+    THE CROSS-SCRIPT REFUSAL IS GONE. It used to be the second guard: a
+    candidate with no Devanagari name only scored through romanisation, which
+    folds a masculine name into its feminine form. Removed on 2026-08-05 when
+    the review queue was dropped, so a case charging `कमल थापा` can now bind a
+    `Kamala Thapa` entity. Recorded here because this is the function that plans
+    the write, and a reader must not infer a guard that no longer exists.
     """
     slug = case.get("slug")
     state = case.get("state")
@@ -1072,6 +1075,25 @@ def source_citation_iri(case):
     return ""
 
 
+def read_live_prefixes(api):
+    """The live prefix list, or None when it could not be read.
+
+    None, not []: an empty list would look like "no prefix is in use" and make
+    `prefix_is_creatable` refuse every category, so the caller would silently
+    create nothing and report a reason that was never true.
+
+    Every other API call in the per-case loop is wrapped so one case's failure
+    does not cost the run. This one was not, and it is called from inside that
+    loop -- a single 502 aborted the whole batch, and at the create-step call
+    site it did so after entities had already been POSTed.
+    """
+    try:
+        return api.entity_prefixes()
+    except Exception as exc:  # noqa: BLE001 - a transient read must cost one case, not the run
+        log.warning("could not read the live entity prefixes: %s", exc)
+        return None
+
+
 def create_entities_for_unmatched(api, plan, items_by_name, live_prefixes,
                                   citation, *, dry_run, run_entities):
     """Create an NES entity for each unmatched name, then bind it.
@@ -1141,9 +1163,23 @@ def create_entities_for_unmatched(api, plan, items_by_name, live_prefixes,
                 still_unmatched.append((name, decision, section))
                 continue
 
+        # `_created_bind` VALIDATES, and validation raises. A server answering
+        # with an off-authority `@id` -- a redirect, a differently-configured
+        # `iri_base()` -- escaped the POST's handler above, which wraps only the
+        # request, and the call site has none. That killed the run after
+        # entities had already been created. Same treatment as a failed POST:
+        # the name is recorded and left unmatched, the case keeps its others.
+        try:
+            bind = _created_bind(iri, section, item)
+        except ValueError as exc:
+            row.update(outcome="error", reason=str(exc), nes_id="")
+            rows.append(row)
+            still_unmatched.append((name, decision, section))
+            continue
+
         run_entities[key] = iri
         rows.append(row)
-        bind_items.append(_created_bind(iri, section, item))
+        bind_items.append(bind)
 
     return bind_items, still_unmatched, rows
 
@@ -1724,7 +1760,7 @@ def main(argv=None):
         # something. Fetched once per run, here as well as at the create step,
         # because the prompt is built first.
         if args.create_entities and live_prefixes is None:
-            live_prefixes = api.entity_prefixes()
+            live_prefixes = read_live_prefixes(api)
 
         try:
             response_text = invoke_text(
@@ -1789,7 +1825,7 @@ def main(argv=None):
             })
         for note in accused_notes:
             if isinstance(note, dict):
-                accused_notes_rows.append({"slug": slug, **note})
+                accused_notes_rows.append({**note, "slug": slug})
 
         # Re-read WITH the ETag so the whole-list replace is conditional. `detail`
         # above came from `get_case`, which returns no ETag.
@@ -1846,7 +1882,7 @@ def main(argv=None):
             if live_prefixes is None:
                 # Fetched once per run, lazily: a run that creates nothing (no
                 # unmatched name, or the flag off) must not pay for it.
-                live_prefixes = api.entity_prefixes()
+                live_prefixes = read_live_prefixes(api)
             created_binds, still_unmatched, created = create_entities_for_unmatched(
                 api, plan, {(i.get("entity_name") or "").strip(): i
                             for i in valid_items},
