@@ -16,6 +16,7 @@ import time
 import uuid
 
 import sentry_sdk
+from django.conf import settings
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import serializers, status
@@ -252,7 +253,13 @@ class UnifiedSearchView(APIView):
             response=response,
             took_ms=took_ms,
         )
-        return Response(response)
+        api_response = Response(response)
+        # Without this header, browser RUM sees every search request as
+        # transferSize: 0 with no timing breakdown (cross-origin timing is
+        # opaque by default) — the site's most important request is invisible
+        # to real-user monitoring.
+        api_response["Timing-Allow-Origin"] = settings.FRONTEND_BASE_URL
+        return api_response
 
 
 class SearchClickSerializer(serializers.Serializer):
