@@ -782,6 +782,19 @@ def _resolve_with_vetoes(api, name, strict=False, *, section=""):
     return decision
 
 
+def bind_section(item):
+    """The section one extracted item will actually bind into.
+
+    The coercion in one place because two callers must agree on the answer.
+    `plan_case_entities` files the item under this section, and the creation
+    stage looks its metadata back up BY that section -- so a caller that read
+    the raw `relationship_type` instead would miss every coerced item and
+    refuse it for having no prefix.
+    """
+    rel_type = (item.get("relationship_type") or "").strip().lower()
+    return rel_type if rel_type in RELATIONSHIP_TYPES else DEFAULT_RELATIONSHIP_TYPE
+
+
 def plan_case_entities(api, case, etag, extracted_items, strict=False):
     """Resolve every extracted name for one case and build its write plan.
 
@@ -908,10 +921,10 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
         # unaccepted section fails every bind on the case rather than only its own
         # row -- holding the name back would cost the other binds nothing, but
         # letting it through would cost them everything.
-        rel_type = (item.get("relationship_type") or "").strip().lower()
-        if rel_type not in RELATIONSHIP_TYPES:
-            plan.coerced.append((name, rel_type, DEFAULT_RELATIONSHIP_TYPE))
-            rel_type = DEFAULT_RELATIONSHIP_TYPE
+        raw_type = (item.get("relationship_type") or "").strip().lower()
+        rel_type = bind_section(item)
+        if rel_type != raw_type:
+            plan.coerced.append((name, raw_type, rel_type))
 
         # THE LLM DOES NOT SUPPLY DEFENDANTS. `GET /courtcases/<court>/<number>/
         # entities` states them exactly -- for 078-CR-0038, हेम राज विष्ट and
@@ -1094,13 +1107,22 @@ def read_live_prefixes(api):
         return None
 
 
-def create_entities_for_unmatched(api, plan, items_by_name, live_prefixes,
+def create_entities_for_unmatched(api, plan, items_by_key, live_prefixes,
                                   citation, *, dry_run, run_entities):
     """Create an NES entity for each unmatched name, then bind it.
 
     Returns `(bind_items, still_unmatched, rows)`: the validated bind items to
     merge into the case, the `plan.nomatch` entries no entity could be made for,
     and one report row per name for `*.created.jsonl`.
+
+    `items_by_key` maps `(name, bind_section(item))` back to the extracted item
+    the metadata must come from -- the prefix, the type, the English name, the
+    notes and the `is_named_entity` gate. KEYED ON THE SECTION TOO, because one
+    name can be extracted twice under two sections with contradictory metadata,
+    and keyed on the name alone both `plan.nomatch` entries read whichever the
+    model emitted last. That is not a tie-break, it is a safety gate decided by
+    output order: a contractor extracted as `related` with `is_named_entity:
+    true` was refused because a same-named `witness` row said false.
 
     `run_entities` maps `(prefix, normalised name)` to an IRI already created
     THIS RUN, and is shared across cases on purpose. Case 078-CR-0038 named the
@@ -1130,7 +1152,7 @@ def create_entities_for_unmatched(api, plan, items_by_name, live_prefixes,
     bind_items, still_unmatched, rows = [], [], []
 
     for name, decision, section in plan.nomatch:
-        item = items_by_name.get(name) or {}
+        item = items_by_key.get((name, section)) or {}
         prefix = (item.get("entity_prefix") or "").strip().lower()
         etype = (item.get("entity_type") or "").strip()
         name_en = (item.get("name_en") or "").strip()
@@ -1895,8 +1917,8 @@ def main(argv=None):
                 # unmatched name, or the flag off) must not pay for it.
                 live_prefixes = read_live_prefixes(api)
             created_binds, still_unmatched, created = create_entities_for_unmatched(
-                api, plan, {(i.get("entity_name") or "").strip(): i
-                            for i in valid_items},
+                api, plan, {((i.get("entity_name") or "").strip(),
+                             bind_section(i)): i for i in valid_items},
                 live_prefixes, source_citation_iri(detail),
                 dry_run=args.dry_run, run_entities=run_entities)
             created_rows.extend(created)

@@ -3026,6 +3026,74 @@ def test_the_same_name_under_a_different_prefix_is_not_reused(
         assert f"/entity/{row['prefix']}/" in row["nes_id"]
 
 
+# One name, two sections, contradictory metadata. `items_by_name` used to key on
+# the name alone, so BOTH `plan.nomatch` entries read whichever item the model
+# happened to emit last -- here the `person`/`is_named_entity: False` one, which
+# fails the creation gate and takes the legitimate contractor down with it.
+CROSSED_SECTIONS_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "गोरखा निर्माण सेवा", "relationship_type": "related",
+         "entity_prefix": "organization/contractor",
+         "entity_type": "Organization", "is_named_entity": True,
+         "name_en": "Gorkha Construction Services", "notes": "ठेक्का पाएको फर्म"},
+        {"entity_name": "गोरखा निर्माण सेवा", "relationship_type": "witness",
+         "entity_prefix": "person", "entity_type": "Person",
+         "is_named_entity": False, "name_en": "", "notes": "साक्षी"},
+    ],
+    "accused_notes": [],
+})
+
+
+def test_each_section_reads_its_own_extracted_item(
+    monkeypatch, patched_fetch_markdown
+):
+    case = dict(PRESS_ONLY_CASE, slug="case-crossed-sections", entities=[])
+    api = _SearchStubApi([case], {"गोरखा निर्माण सेवा": []})
+    _run_main(monkeypatch, api,
+              invoke_text_stub=lambda **kw: CROSSED_SECTIONS_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    # The contractor is created from its OWN item -- its prefix, its English
+    # name, its `is_named_entity`. The witness row is refused by its own.
+    assert [p["prefix"] for p in api.create_entity_calls] == ["organization/contractor"]
+    assert api.create_entity_calls[0]["slug"] == "gorkha-construction-services"
+
+    by_role = {row["role"]: row for row in _created_rows()}
+    assert by_role["related"]["outcome"] == "created"
+    assert by_role["witness"]["outcome"] == "skipped"
+    assert "is_named_entity" in by_role["witness"]["reason"]
+
+
+COERCED_SECTION_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "साझा भण्डार सहकारी", "relationship_type": "employer",
+         "entity_prefix": "organization", "entity_type": "Organization",
+         "is_named_entity": True, "name_en": "Sajha Bhandar Cooperative",
+         "notes": "क"},
+    ],
+    "accused_notes": [],
+})
+
+
+def test_a_coerced_section_still_finds_its_own_item(
+    monkeypatch, patched_fetch_markdown
+):
+    # The other half of keying on the section: `employer` is not a section the
+    # API accepts, so the planner coerces it to `related` and files the name
+    # under THAT. A lookup keyed on the raw `relationship_type` misses, the item
+    # comes back empty, and a perfectly good name is refused for having no
+    # prefix -- a silent loss, since "no prefix" reads like a model failure.
+    case = dict(PRESS_ONLY_CASE, slug="case-coerced-section", entities=[])
+    api = _SearchStubApi([case], {"साझा भण्डार सहकारी": []})
+    _run_main(monkeypatch, api,
+              invoke_text_stub=lambda **kw: COERCED_SECTION_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    assert [p["prefix"] for p in api.create_entity_calls] == ["organization"]
+    row = _created_rows()[0]
+    assert (row["role"], row["outcome"]) == ("related", "created")
+
+
 BAD_PREFIX_RESPONSE = json.dumps({
     "entities": [
         {"entity_name": "हेम राज बिष्ट", "relationship_type": "related",
