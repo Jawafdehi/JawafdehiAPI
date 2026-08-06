@@ -101,7 +101,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from casework.common.api import CaseworkApi
+from casework.common.api import CaseworkApi, EntityAlreadyExists
 from casework.common.cli import (
     add_common_args,
     basic_auth_from_env,
@@ -113,7 +113,8 @@ from casework.common.cli import (
     setup_logging,
 )
 from casework.common.llm import bootstrap, tier_for
-from casework.common.materials import source_text
+from casework.common.materials import source_chunks, source_text
+from casework.entity_identity import entity_slug, prefix_is_creatable
 from casework.common.parse import parse_extraction_response
 from casework.common.pipeline import (
     COURT_TYPES,
@@ -140,7 +141,7 @@ from casework.entity_resolver import (
     normalise_name,
     resolve,
 )
-from jawafdehi_shared.entities.ids import is_valid_entity_iri
+from jawafdehi_shared.entities.ids import build_entity_iri, is_valid_entity_iri
 
 log = logging.getLogger("casework.enrich_related_entities")
 
@@ -283,6 +284,8 @@ Output ONLY this JSON object, no other text:
     {
       "entity_name": "Name exactly as in document",
       "relationship_type": "location", "related", "accused", "alleged" or "witness",
+      "entity_prefix": "the category from the list below",
+      "entity_type": "Person", "Organization", "GovernmentOrganization" or "Place",
       "notes": "specific description"
     }
   ],
@@ -294,6 +297,45 @@ Output ONLY this JSON object, no other text:
   ]
 }
 """
+
+#: Appended to `SYSTEM_PROMPT` when `--create-entities` is on, carrying the live
+#: category list. Only then: without the flag nothing is created, and asking for
+#: two fields nobody reads would spend prompt budget on a case where the budget
+#: is already the binding constraint (`PROMPT_HARD_MAX`).
+#:
+#: The list arrives from `GET /api/entity_prefixes` rather than being hardcoded,
+#: because it is `SELECT DISTINCT prefix` over live entities and grows. A
+#: hardcoded copy would silently refuse categories that exist.
+PREFIX_PROMPT_TEMPLATE = """
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ENTITY CATEGORY (entity_prefix)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Every entity needs a category. CHOOSE FROM THIS LIST ONLY -- a value not on it
+is discarded and the entity is not created:
+
+{prefixes}
+
+Pick the most specific one that fits. A person is always `person`. A district
+forest office is `organization/government/district/dfo`, not `organization`.
+A district is `location/district`.
+
+Set `entity_type` to match: `Person` for a person, `GovernmentOrganization` for
+a state body, `Organization` for a company or NGO, `Place` for a location.
+"""
+
+
+def prefix_prompt_section(live_prefixes):
+    """The category instructions for `SYSTEM_PROMPT`, or "" with no prefixes.
+
+    Returns "" rather than a template with an empty list: an instruction to
+    choose from nothing would make the model invent values, and every invented
+    value is then discarded by `prefix_is_creatable` -- an expensive way to
+    produce no entities.
+    """
+    if not live_prefixes:
+        return ""
+    listed = "\n".join(f"  {p}" for p in sorted(live_prefixes))
+    return PREFIX_PROMPT_TEMPLATE.format(prefixes=listed)
 
 # Writes are DRAFT-only. This is also what makes the merge safe: the case read
 # BLANKS per-entity `notes` for non-casework viewers
@@ -922,6 +964,149 @@ def apply_entity_plan(api, plan):
                             if_match=plan.if_match)
 
 
+def source_citation_iri(case):
+    """The material IRI to cite on an entity created from this case, or "".
+
+    The first press-release or court-order material with converted text, in that
+    order -- the same documents the extraction read, so the citation names a
+    document that actually mentions the entity. Empty when neither is present,
+    which the caller records rather than papering over: an entity created here
+    has no other provenance, and the API's create path enforces none.
+    """
+    for types in (PRESS_TYPES, COURT_TYPES):
+        chunks, _unmet = source_chunks(case, types=types)
+        for _mtype, iri, _text in chunks:
+            if iri:
+                return iri
+    return ""
+
+
+def create_entities_for_unmatched(api, plan, items_by_name, live_prefixes,
+                                  citation, *, dry_run, run_entities):
+    """Create an NES entity for each unmatched name, then bind it.
+
+    Returns `(bind_items, still_unmatched, rows)`: the validated bind items to
+    merge into the case, the `plan.nomatch` entries no entity could be made for,
+    and one report row per name for `*.created.jsonl`.
+
+    `run_entities` maps a normalised name to an IRI already created THIS RUN, and
+    is shared across cases on purpose. Case 078-CR-0038 named the Dhangadhi
+    forest directorate twice in one extraction; without it, that case creates two
+    entities on its first run, and two cases naming the same office create two
+    more.
+
+    A dry run POSTs nothing and still reports the IRI it would have used, built
+    from the same prefix and slug, so the printed patch is the one an `--apply`
+    run would send.
+
+    Nothing here raises. A name that cannot become an entity -- no prefix, a
+    prefix with no existing parent, an unslugifiable name, a failed POST -- is
+    recorded and left in `still_unmatched`, so one bad name costs the case
+    nothing else.
+    """
+    bind_items, still_unmatched, rows = [], [], []
+
+    for name, decision, section in plan.nomatch:
+        item = items_by_name.get(name) or {}
+        prefix = (item.get("entity_prefix") or "").strip().lower()
+        etype = (item.get("entity_type") or "").strip()
+        row = {"slug": plan.slug, "extracted": name, "role": section,
+               "prefix": prefix, "type": etype, "citation": citation,
+               "nes_id": "", "outcome": "", "reason": ""}
+
+        slug = entity_slug(name)
+        refusal = _cannot_create(prefix, etype, slug, live_prefixes)
+        if refusal:
+            row.update(outcome="skipped", reason=refusal)
+            rows.append(row)
+            still_unmatched.append((name, decision, section))
+            continue
+
+        key = normalise_name(name)
+        if key in run_entities:
+            # Same office, second spelling. Reuse rather than create a twin.
+            row.update(outcome="reused", nes_id=run_entities[key])
+            rows.append(row)
+            bind_items.append(_created_bind(run_entities[key], section, item))
+            continue
+
+        iri = build_entity_iri(prefix, slug)
+        if dry_run:
+            row.update(outcome="would-create", nes_id=iri)
+        else:
+            try:
+                created = api.create_entity(_authoring_payload(
+                    prefix, slug, etype, name, citation))
+                iri = created.get("@id") or iri
+                row.update(outcome="created", nes_id=iri)
+            except EntityAlreadyExists:
+                # Someone got there first. That is the outcome we wanted.
+                row.update(outcome="already-exists", nes_id=iri)
+            except Exception as exc:  # noqa: BLE001 - one name's failure must not cost the case its other binds
+                row.update(outcome="error", reason=str(exc))
+                rows.append(row)
+                still_unmatched.append((name, decision, section))
+                continue
+
+        run_entities[key] = iri
+        rows.append(row)
+        bind_items.append(_created_bind(iri, section, item))
+
+    return bind_items, still_unmatched, rows
+
+
+def _cannot_create(prefix, etype, slug, live_prefixes):
+    """Why this name cannot become an entity, or "" when it can.
+
+    One function so every refusal reads the same way in `created.jsonl`, and so
+    the order is fixed: identity first (is there a prefix and a type at all),
+    then whether the prefix may be used, then whether the name yields a slug.
+    """
+    if not prefix or not etype:
+        return "extraction gave no entity_prefix/entity_type"
+    if not prefix_is_creatable(prefix, live_prefixes):
+        return (f"prefix {prefix!r} is not in use and its parent branch does not "
+                "exist, so creating it would strand the entity where no search "
+                "filter reaches")
+    if not slug:
+        return "name yields no IRI-legal slug"
+    return ""
+
+
+def _authoring_payload(prefix, slug, etype, name, citation):
+    """The API's authoring form for a create POST.
+
+    No `@id`: `normalize_authoring_payload` builds it from prefix+slug and
+    validates the shape while doing so (`entities/write_validation.py:113`).
+
+    `name` is a language map keyed `ne`, because every name here comes out of a
+    Nepali court document and claiming it as English would be wrong. `citation`
+    is a free-form schema.org property the authoring path copies through
+    verbatim; it is omitted rather than sent empty when the case had no source
+    material to name.
+    """
+    payload = {
+        "prefix": prefix,
+        "slug": slug,
+        "type": etype,
+        "name": {"ne": name},
+        "change_description": "Created by casework.enrich_related_entities",
+    }
+    if citation:
+        payload["citation"] = citation
+    return payload
+
+
+def _created_bind(iri, section, item):
+    """One bind item for a just-created entity, validated like any other."""
+    bind = {"nes_id": iri,
+            "relationship_type": section,
+            "notes": (item.get("notes") or "").strip()}
+    if section == "accused":
+        bind["outcome"] = CHARGED
+    return validate_bind_item(bind)
+
+
 def plan_summary(plan, extracted_items):
     """Reconcile one case's plan against the names it was built from.
 
@@ -1215,6 +1400,14 @@ def main(argv=None):
     )
     add_common_args(ap)
     ap.add_argument(
+        "--create-entities", action="store_true",
+        help="Create an NES entity for each extracted name that matches none, "
+             "then bind it. OFF BY DEFAULT and independent of --apply, so "
+             "upgrading this enricher cannot make an existing --apply run start "
+             "writing to NES. Entities created this way are published with NO "
+             "sources -- the 2-distinct-publisher rule lives in "
+             "`manage.py bulk_ingest`, not on the API's create path.")
+    ap.add_argument(
         "--strict", action="store_true",
         help="Bind only when exactly one NES entity matched and no veto fired; "
              "send ambiguities and vetoed matches to review instead. Off by "
@@ -1290,6 +1483,13 @@ def main(argv=None):
     bind_rows, review_rows, nomatch_rows = [], [], []
     # Collected BEFORE resolution, so they survive a run where nothing binds.
     extracted_rows, accused_notes_rows = [], []
+    created_rows = []
+    # Entities created THIS RUN, keyed by normalised name and shared across
+    # cases: the same district office recurs, and each extra creation is a
+    # duplicate NES entity nobody asked for.
+    run_entities = {}
+    # Fetched on first use, not at startup -- see the call site.
+    live_prefixes = None
 
     for idx, case in enumerate(cases, 1):
         slug = case.get("slug") or "?"
@@ -1386,9 +1586,16 @@ def main(argv=None):
                       detail="empty prompt after truncation", level=logging.WARNING)
             continue
 
+        # The category list rides on the system prompt only when we might create
+        # something. Fetched once per run, here as well as at the create step,
+        # because the prompt is built first.
+        if args.create_entities and live_prefixes is None:
+            live_prefixes = api.entity_prefixes()
+
         try:
             response_text = invoke_text(
-                system=SYSTEM_PROMPT,
+                system=SYSTEM_PROMPT + prefix_prompt_section(
+                    live_prefixes if args.create_entities else None),
                 content=user_prompt,
                 max_tokens=EXTRACTION_MAX_TOKENS,
                 tier=tier_for("entities"),
@@ -1499,6 +1706,35 @@ def main(argv=None):
                                 "role": section,
                                 "reason": decision.reason, "score": decision.score,
                                 "candidates": [list(c) for c in decision.candidates]})
+        # CREATE, then bind. Only reachable with --create-entities; without it
+        # `plan.nomatch` is untouched and this enricher behaves exactly as before.
+        if args.create_entities and plan.nomatch:
+            if live_prefixes is None:
+                # Fetched once per run, lazily: a run that creates nothing (no
+                # unmatched name, or the flag off) must not pay for it.
+                live_prefixes = api.entity_prefixes()
+            created_binds, still_unmatched, created = create_entities_for_unmatched(
+                api, plan, {(i.get("entity_name") or "").strip(): i
+                            for i in valid_items},
+                live_prefixes, source_citation_iri(detail),
+                dry_run=args.dry_run, run_entities=run_entities)
+            created_rows.extend(created)
+            plan.nomatch = still_unmatched
+            for row in created:
+                log_event(logger, paths["events"], run_id=run_id, stage="entities",
+                          slug=slug, step="create", status=row["outcome"],
+                          detail=f"{row['extracted']} -> {row['nes_id'] or row['reason']}",
+                          level=logging.WARNING if row["outcome"] in
+                          ("skipped", "error") else logging.INFO)
+            if created_binds:
+                # `patch_items` is already the merged whole list on a WOULD_PATCH
+                # plan; on a NOOP it is empty and the case's own binds are the
+                # base. Merging against the wrong one would drop every existing
+                # bind, because this PATCH replaces the entire list.
+                base = plan.patch_items or current_entity_binds(fresh)
+                plan.patch_items = merge_entity_binds(base, created_binds)
+                plan.action = "WOULD_PATCH"
+
         for name, decision, section in plan.nomatch:
             nomatch_rows.append((name, slug, decision, section))
 
@@ -1579,6 +1815,7 @@ def main(argv=None):
     write_jsonl(reports["review"], review_rows)
     write_jsonl(reports["extracted"], extracted_rows)
     write_jsonl(reports["accused_notes"], accused_notes_rows)
+    write_jsonl(reports["created"], created_rows)
     write_nomatch_report(reports["nomatch"], nomatch_rows)
 
     print()

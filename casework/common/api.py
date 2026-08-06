@@ -3,10 +3,24 @@ import base64
 import json
 import logging
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost")
+
+
+class EntityAlreadyExists(Exception):
+    """A create POST hit an entity that is already there.
+
+    Its own type because the caller's response is to BIND the existing entity,
+    not to record an error: someone -- a caseworker, or an earlier run over the
+    same case -- got there first, which is the outcome we wanted. The server
+    reports it as 422 from `PublicationService.create_entity`'s duplicate-`@id`
+    check (`entities/services/publication/service.py:68`), the same status a
+    genuinely malformed payload returns, so the body text is the only thing that
+    separates the two.
+    """
 
 
 class CandidateList(list):
@@ -223,6 +237,53 @@ class CaseworkApi:
             url += ("&" if "?" in url else "?") + urllib.parse.urlencode(params)
         with self._request("GET", url, headers=self._headers(), timeout=timeout) as r:
             return json.loads(r.read().decode())
+
+    def entity_prefixes(self, timeout=60):
+        """Every entity prefix currently in use, from `GET /api/entity_prefixes`.
+
+        A READ, so it is safe against production and unaffected by the write
+        guard. Not a whitelist: the endpoint answers `SELECT DISTINCT prefix`
+        over live entities (`entities/persistence.py:313`), so it reports what
+        exists rather than what is permitted -- which is exactly why
+        `casework.entity_identity.prefix_is_creatable` has to decide, and why an
+        unchecked prefix would ratify itself by appearing here on the next call.
+        """
+        return list(self.get("/entity_prefixes", timeout=timeout).get("prefixes") or ())
+
+    def create_entity(self, payload, timeout=60):
+        """POST one NES entity. Returns the created document (with its `@id`).
+
+        Raises `EntityAlreadyExists` when the IRI is taken, so the caller can
+        bind the existing entity instead of failing the case.
+
+        Goes through `_request` rather than `self.get`/`_patch`, the same way
+        `convert.py`'s `upload_markdown` does, which is what puts it under the
+        host write-guard: a non-loopback POST is refused unless
+        `allow_remote_writes` is set. No second guard to keep in step.
+
+        The payload is the API's authoring form -- `prefix`, `slug`, `type`,
+        `name` plus any schema.org properties, which
+        `normalize_authoring_payload` copies through verbatim
+        (`entities/write_validation.py:113`). It builds the `@id` from
+        prefix+slug itself, so we never send one.
+        """
+        url = self.base_url + "/entities"
+        body = json.dumps(payload).encode("utf-8")
+        headers = dict(self._headers())
+        headers["Content-Type"] = "application/json"
+        try:
+            with self._request("POST", url, data=body, headers=headers,
+                               timeout=timeout) as r:
+                return json.loads(r.read().decode())
+        except urllib.error.HTTPError as exc:
+            # 422 covers both a duplicate IRI and a malformed payload. Only the
+            # body separates them, and only the duplicate is recoverable.
+            if exc.code == 422:
+                detail = exc.read().decode(errors="replace")
+                if "already exists" in detail:
+                    raise EntityAlreadyExists(detail) from exc
+                raise ValueError(f"entity create rejected: {detail}") from exc
+            raise
 
     # The list endpoint's server-side default is 20 per page, so walking all
     # 3,003 cases costs 151 round trips -- ~2m45s against production, paid by

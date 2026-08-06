@@ -37,6 +37,7 @@ import pytest
 
 from casework import enrich_related_entities as ere
 from casework.common.api import CandidateList, ENTITY_SEARCH_MAX_PAGES, ENTITY_SEARCH_PAGE_SIZE
+from casework.common.api import EntityAlreadyExists
 from casework.court_record import CHARGED
 from casework.enrich_related_entities import (
     PROMOTED_PREFIX,
@@ -217,11 +218,19 @@ class TestDonorFidelity:
         source = _donor_source()
         assert 'api.create_entity(display_name=name, nes_id="")' in source
 
-    def test_donor_has_no_create_entity_method_on_current_api(self):
-        # CaseworkApi (this branch) genuinely has no create_entity method --
-        # confirms the donor's write path is not just discouraged but
-        # structurally impossible to call as written.
-        assert not hasattr(ere.CaseworkApi, "create_entity")
+    def test_the_donor_create_entity_call_is_still_impossible_to_make(self):
+        # `CaseworkApi` DOES have `create_entity` now -- the --create-entities
+        # step needs it. The donor's CALL remains impossible, which is what this
+        # guard was always about: it minted an entity from a `display_name` and a
+        # blank `nes_id`, with no prefix, no type and therefore no IRI. Ours takes
+        # the API's authoring payload and the IRI comes from prefix+slug, so the
+        # donor's signature raises instead of quietly creating a nameless entity.
+        import inspect
+
+        params = inspect.signature(ere.CaseworkApi.create_entity).parameters
+        assert "display_name" not in params
+        assert "nes_id" not in params
+        assert "payload" in params
 
 
 # --------------------------------------------------------------------------
@@ -1171,6 +1180,33 @@ class _SearchStubApi(_StubApi):
         self.etag = 'W/"abc123"'
         self.search_calls = []
         self.get_entity_calls = []
+        # Entity creation. `create_entity_calls` records the payload as sent;
+        # `create_conflicts` holds `<prefix>/<slug>` values that answer as though
+        # the entity already exists, and `create_errors` maps one to the
+        # exception the POST should raise instead.
+        self.create_entity_calls = []
+        self.create_conflicts = set()
+        self.create_errors = {}
+        self.live_prefixes = [
+            "person",
+            "location", "location/district",
+            "organization", "organization/contractor",
+            "organization/government", "organization/government/department",
+            "organization/government/district/dfo",
+        ]
+
+    def entity_prefixes(self, timeout=60):
+        return list(self.live_prefixes)
+
+    def create_entity(self, payload, timeout=60):
+        self.create_entity_calls.append(dict(payload))
+        ref = f"{payload['prefix']}/{payload['slug']}"
+        if ref in self.create_errors:
+            raise self.create_errors[ref]
+        if ref in self.create_conflicts:
+            raise EntityAlreadyExists(f"Entity {ref} already exists")
+        return {"@id": f"https://jawafdehi.org/entity/{ref}",
+                "@type": payload.get("type"), "name": payload.get("name")}
 
     def search_entities(self, query, **kw):
         self.search_calls.append(query)
@@ -2778,3 +2814,322 @@ def test_accused_escalation_still_needs_a_human():
 
     assert len(plan.review) == 1
     assert "escalate to 'accused'" in plan.review[0][1].reason
+
+
+# --------------------------------------------------------------------------
+# Creating the NES entity a name has no match for, then binding it.
+#
+# `--create-entities`, default OFF, on top of `--apply`. POST /api/entities has
+# no sourcing gate (`entities/validation.py:150` checks @id, @type and name and
+# nothing else) and the 2-distinct-publisher rule lives only in
+# `manage.py bulk_ingest`, so entities created here publish unsourced. Accepted
+# on 2026-08-05.
+# --------------------------------------------------------------------------
+
+
+CREATE_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "हेम राज बिष्ट", "relationship_type": "accused",
+         "entity_prefix": "person", "entity_type": "Person",
+         "notes": "तत्कालीन प्रमुख"},
+        {"entity_name": "वन निर्देशनालय, धनगढी", "relationship_type": "related",
+         "entity_prefix": "organization/government/district/dfo",
+         "entity_type": "GovernmentOrganization",
+         "notes": "आरोपी कार्यरत रहेको निकाय"},
+    ],
+    "accused_notes": [],
+})
+
+
+def _created_rows():
+    return [json.loads(line) for line in Path(_report_files()["created"])
+            .read_text(encoding="utf-8").splitlines()]
+
+
+def test_no_entity_is_created_without_the_flag_even_under_apply(
+    monkeypatch, patched_fetch_markdown
+):
+    # THE SAFETY PROPERTY THAT MATTERS MOST. Creation opts in on TOP of --apply,
+    # never with it, so upgrading this enricher cannot make an existing --apply
+    # run start writing to NES.
+    case = dict(PRESS_ONLY_CASE, slug="case-no-flag", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [],
+                                  "वन निर्देशनालय, धनगढी": []})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
+              argv=["--apply"])
+
+    assert api.create_entity_calls == []
+    # Both names stay unmatched and reach the no-match report, exactly as before.
+    assert Path(_report_files()["created"]).read_text(encoding="utf-8") == ""
+
+
+def test_creates_an_entity_for_an_unmatched_name_and_binds_it(
+    monkeypatch, patched_fetch_markdown
+):
+    case = dict(PRESS_ONLY_CASE, slug="case-create-bind", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [],
+                                  "वन निर्देशनालय, धनगढी": []})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    # Both names were POSTed, under the prefix the extraction named.
+    posted = sorted((p["prefix"], p["slug"]) for p in api.create_entity_calls)
+    assert posted == [
+        ("organization/government/district/dfo", "vana-nirdeshanalaya-dhanagadhi"),
+        ("person", "hema-raja-bishta"),
+    ]
+    # ...and both reached the case, in the section the extraction gave them.
+    _slug, _path, items, _etag = api.replace_list_calls[0]
+    sections = {item["nes_id"].rsplit("/", 2)[-2]: item["relationship_type"]
+                for item in items}
+    assert sections["person"] == "accused"
+    assert sections["dfo"] == "related"
+
+
+def test_a_dry_run_creates_nothing_but_reports_what_it_would_create(
+    monkeypatch, patched_fetch_markdown
+):
+    case = dict(PRESS_ONLY_CASE, slug="case-create-dry", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [],
+                                  "वन निर्देशनालय, धनगढी": []})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
+              argv=["--dry-run", "--create-entities"])
+
+    assert api.create_entity_calls == []
+    assert api.replace_list_calls == []
+    rows = _created_rows()
+    assert [r["outcome"] for r in rows] == ["would-create", "would-create"]
+    assert {r["extracted"] for r in rows} == {"हेम राज बिष्ट",
+                                             "वन निर्देशनालय, धनगढी"}
+
+
+def test_the_created_entity_cites_the_material_it_came_from(
+    monkeypatch, patched_fetch_markdown
+):
+    # An entity created here has no sources, which the 2-publisher rule would
+    # otherwise hold as staged. The citation is what keeps it traceable to the
+    # document that justified it.
+    case = dict(PRESS_ONLY_CASE, slug="case-create-citation", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [],
+                                  "वन निर्देशनालय, धनगढी": []})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    citations = {p["citation"] for p in api.create_entity_calls}
+    assert citations == {"https://jawafdehi.org/material/ciaa/press_releases/1"}
+
+
+TWO_SPELLINGS_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "वन निदेशनालय, धनगढी - कैलाली जिल्ला",
+         "relationship_type": "related",
+         "entity_prefix": "organization/government/district/dfo",
+         "entity_type": "GovernmentOrganization", "notes": "क"},
+        {"entity_name": "वन निदेशनालय, धनगढी - कैलाली जिल्ला ",
+         "relationship_type": "location",
+         "entity_prefix": "organization/government/district/dfo",
+         "entity_type": "GovernmentOrganization", "notes": "ख"},
+    ],
+    "accused_notes": [],
+})
+
+
+def test_one_office_named_twice_creates_one_entity(
+    monkeypatch, patched_fetch_markdown
+):
+    # Case 078-CR-0038 named the Dhangadhi forest directorate twice. Without the
+    # within-run dedup that case creates two entities on its first run.
+    case = dict(PRESS_ONLY_CASE, slug="case-two-spellings", entities=[])
+    api = _SearchStubApi([case], {})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: TWO_SPELLINGS_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    assert len(api.create_entity_calls) == 1
+    # Both binds point at the single created entity, in their own sections.
+    _slug, _path, items, _etag = api.replace_list_calls[0]
+    assert len({item["nes_id"] for item in items}) == 1
+    assert sorted(item["relationship_type"] for item in items) == [
+        "location", "related"]
+
+
+BAD_PREFIX_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "हेम राज बिष्ट", "relationship_type": "accused",
+         "entity_prefix": "persen", "entity_type": "Person", "notes": "क"},
+    ],
+    "accused_notes": [],
+})
+
+
+def test_a_prefix_with_no_existing_parent_is_skipped_not_posted(
+    monkeypatch, patched_fetch_markdown
+):
+    # `persen` is a typo'd root: not in use and with no parent to vouch for it.
+    # Creating it would strand the entity where no search filter reaches, and the
+    # bad prefix would then report as live via /api/entity_prefixes.
+    case = dict(PRESS_ONLY_CASE, slug="case-bad-prefix", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": []})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: BAD_PREFIX_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    assert api.create_entity_calls == []
+    rows = _created_rows()
+    assert [r["outcome"] for r in rows] == ["skipped"]
+    assert "persen" in rows[0]["reason"]
+
+
+def test_an_already_exists_response_binds_the_existing_entity(
+    monkeypatch, patched_fetch_markdown
+):
+    # Someone got there first, which is the good case. `create_entity` raises on a
+    # duplicate @id (`publication/service.py:68`); the run must bind that IRI
+    # rather than record an error.
+    case = dict(PRESS_ONLY_CASE, slug="case-already-exists", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [],
+                                  "वन निर्देशनालय, धनगढी": []})
+    api.create_conflicts = {"person/hema-raja-bishta"}
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    _slug, _path, items, _etag = api.replace_list_calls[0]
+    assert "https://jawafdehi.org/entity/person/hema-raja-bishta" in {
+        item["nes_id"] for item in items}
+    outcomes = {r["extracted"]: r["outcome"] for r in _created_rows()}
+    assert outcomes["हेम राज बिष्ट"] == "already-exists"
+
+
+def test_a_failed_post_skips_that_name_and_keeps_the_rest_of_the_case(
+    monkeypatch, patched_fetch_markdown
+):
+    # One name's POST failing must not cost the case its other binds.
+    case = dict(PRESS_ONLY_CASE, slug="case-post-fails", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [],
+                                  "वन निर्देशनालय, धनगढी": []})
+    api.create_errors = {"person/hema-raja-bishta": RuntimeError("500 boom")}
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    _slug, _path, items, _etag = api.replace_list_calls[0]
+    bound_ids = {item["nes_id"] for item in items}
+    assert "https://jawafdehi.org/entity/person/hema-raja-bishta" not in bound_ids
+    assert any("dfo" in nes_id for nes_id in bound_ids)
+    outcomes = {r["extracted"]: r["outcome"] for r in _created_rows()}
+    assert outcomes["हेम राज बिष्ट"] == "error"
+
+
+def test_creation_preserves_binds_already_on_the_case(
+    monkeypatch, patched_fetch_markdown
+):
+    # PATCH /entities replaces the WHOLE list. A create step that sent only its
+    # new entities would delete the press release and court order binds someone
+    # attached last month.
+    # The existing bind is `accused`, NOT `related`, on purpose: the idempotency
+    # gate counts `related` binds only, so a case carrying one is skipped whole
+    # and never reaches the create step at all (see the test below).
+    existing = {"nes_id": ANKUR_IRI, "type": "accused", "outcome": "charged",
+                "notes": "पहिलेको टिप्पणी"}
+    case = dict(PRESS_ONLY_CASE, slug="case-preserve", entities=[existing])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [],
+                                  "वन निर्देशनालय, धनगढी": []})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    _slug, _path, items, _etag = api.replace_list_calls[0]
+    kept = [item for item in items if item["nes_id"] == ANKUR_IRI]
+    assert len(kept) == 1
+    assert kept[0]["notes"] == "पहिलेको टिप्पणी"
+    assert len(items) == 3       # the existing one plus the two created
+
+
+def test_a_case_with_a_related_bind_never_reaches_the_create_step(
+    monkeypatch, patched_fetch_markdown
+):
+    # A LIMITATION, PINNED RATHER THAN FIXED. The idempotency gate skips a case
+    # that already holds any `related` bind, and it runs before anything else --
+    # so on an already-enriched case, --create-entities creates nothing, however
+    # many unmatched names that case has. `--force` is the way past it.
+    #
+    # Left alone deliberately: widening the gate changes which cases every run of
+    # this enricher touches, which deserves its own measurement rather than
+    # riding along with entity creation.
+    existing = {"nes_id": ANKUR_IRI, "type": "related", "notes": "पहिलेको"}
+    case = dict(PRESS_ONLY_CASE, slug="case-gated", entities=[existing])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [],
+                                  "वन निर्देशनालय, धनगढी": []})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    assert api.create_entity_calls == []
+    assert api.replace_list_calls == []
+
+
+def test_force_gets_past_the_gate_and_creates(
+    monkeypatch, patched_fetch_markdown
+):
+    existing = {"nes_id": ANKUR_IRI, "type": "related", "notes": "पहिलेको"}
+    case = dict(PRESS_ONLY_CASE, slug="case-forced", entities=[existing])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [],
+                                  "वन निर्देशनालय, धनगढी": []})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
+              argv=["--apply", "--create-entities", "--force"])
+
+    assert len(api.create_entity_calls) == 2
+    _slug, _path, items, _etag = api.replace_list_calls[0]
+    assert ANKUR_IRI in {item["nes_id"] for item in items}
+
+
+def test_the_prefix_section_lists_every_live_category():
+    section = ere.prefix_prompt_section(
+        ["person", "organization/government/district/dfo", "location/district"])
+    assert "person" in section
+    assert "organization/government/district/dfo" in section
+    # Sorted, so two runs over the same prefix list build a byte-identical
+    # prompt. A reshuffled list is a different prompt for no reason.
+    assert section.index("location/district") < section.index("person")
+
+
+def test_the_prefix_section_is_empty_without_prefixes():
+    # An instruction to choose from an empty list makes the model invent values,
+    # and every invented value is then discarded -- an expensive way to create
+    # nothing.
+    assert ere.prefix_prompt_section([]) == ""
+    assert ere.prefix_prompt_section(None) == ""
+
+
+def test_the_system_prompt_asks_for_the_two_new_fields():
+    assert "entity_prefix" in ere.SYSTEM_PROMPT
+    assert "entity_type" in ere.SYSTEM_PROMPT
+
+
+def test_the_category_list_is_absent_from_the_prompt_without_the_flag(
+    monkeypatch, patched_fetch_markdown
+):
+    # Two fields nobody reads cost prompt budget on a stage where the budget is
+    # already the binding constraint, so the list only ships when it can be used.
+    case = dict(PRESS_ONLY_CASE, slug="case-no-prefix-prompt", entities=[])
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    seen = {}
+
+    def stub(**kw):
+        seen.update(kw)
+        return json.dumps({"entities": [], "accused_notes": []})
+
+    _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+    assert "ENTITY CATEGORY" not in seen["system"]
+
+
+def test_the_category_list_ships_with_the_flag(
+    monkeypatch, patched_fetch_markdown
+):
+    case = dict(PRESS_ONLY_CASE, slug="case-prefix-prompt", entities=[])
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    seen = {}
+
+    def stub(**kw):
+        seen.update(kw)
+        return json.dumps({"entities": [], "accused_notes": []})
+
+    _run_main(monkeypatch, api, invoke_text_stub=stub,
+              argv=["--dry-run", "--create-entities"])
+    assert "ENTITY CATEGORY" in seen["system"]
+    assert "organization/government/district/dfo" in seen["system"]
