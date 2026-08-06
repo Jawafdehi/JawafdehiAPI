@@ -721,7 +721,7 @@ def _build_budget(args, provider_name):
             limit = default_budget_for(provider_name)
     if limit < 0:
         raise SystemExit("--search-budget must be non-negative (0 disables it)")
-    return SearchBudget(limit) if limit else None
+    return SearchBudget(limit, provider_name) if limit else None
 
 
 def _check_budget_fits(budget, n_cases):
@@ -797,8 +797,10 @@ def main(argv=None):
     if budget is not None:
         # Printed BEFORE the run, because the number the operator needs is
         # "will this batch fit", and afterwards is too late to act on it.
-        print(f"  search budget: {budget.remaining()} of {budget.limit} queries "
-              f"left this month ({budget.month}); "
+        window = {"once": "in total", "day": "today"}.get(budget.period,
+                                                          "this month")
+        print(f"  search budget: {budget.remaining()} of {budget.limit} "
+              f"{provider_name} queries left {window} ({budget.bucket}); "
               f"up to {QUERY_LIMIT} are spent per case")
     else:
         print("  search budget: uncapped")

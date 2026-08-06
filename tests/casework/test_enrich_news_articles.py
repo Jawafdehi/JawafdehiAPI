@@ -1770,13 +1770,14 @@ def test_bind_materials_records_the_reciprocal_duplicate_contract():
 # putting it in the client is that a NEW provider cannot forget it.
 # ---------------------------------------------------------------------------
 
-def _budget(tmp_path, limit, spent=None, month=None):
+def _budget(tmp_path, limit, spent=None, provider="brave"):
     path = tmp_path / "search-budget.json"
+    budget = ns.SearchBudget(limit, provider, path=path)
     if spent is not None:
-        path.write_text(json.dumps({"month": month or
-                                    ns.datetime.now(ns.timezone.utc).strftime("%Y-%m"),
-                                    "spent": spent}))
-    return ns.SearchBudget(limit, path=path)
+        budget.spent = spent
+        budget._save()
+        budget = ns.SearchBudget(limit, provider, path=path)
+    return budget
 
 
 def test_the_budget_refuses_the_query_that_would_breach_it(tmp_path):
@@ -1802,7 +1803,7 @@ def test_the_ledger_survives_across_runs(tmp_path):
     first = _budget(tmp_path, limit=10)
     for _ in range(4):
         first.spend()
-    second = ns.SearchBudget(10, path=tmp_path / "search-budget.json")
+    second = ns.SearchBudget(10, "brave", path=tmp_path / "search-budget.json")
     assert second.spent == 4, "a fresh process must see what the last one spent"
     assert second.remaining() == 6
 
@@ -1811,24 +1812,26 @@ def test_a_new_month_restores_the_allowance(tmp_path):
     """The credit is granted monthly, so the ledger resets with it -- otherwise
     the cap silently becomes permanent."""
     path = tmp_path / "search-budget.json"
-    path.write_text(json.dumps({"month": "1999-01", "spent": 900}))
-    budget = ns.SearchBudget(900, path=path)
-    assert budget.spent == 0
+    path.write_text(json.dumps({"spent": {"brave": {"bucket": "1999-01",
+                                                    "spent": 900}}}))
+    assert ns.SearchBudget(900, "brave", path=path).spent == 0
 
 
 def test_a_corrupt_or_missing_ledger_does_not_kill_the_run(tmp_path):
     path = tmp_path / "search-budget.json"
-    assert ns.SearchBudget(10, path=path).spent == 0        # missing
+    assert ns.SearchBudget(10, "brave", path=path).spent == 0        # missing
     path.write_text("{not json")
-    assert ns.SearchBudget(10, path=path).spent == 0        # corrupt
-    path.write_text(json.dumps({"month": "1999-01", "spent": "many"}))
-    assert ns.SearchBudget(10, path=path).spent == 0        # wrong type
+    assert ns.SearchBudget(10, "brave", path=path).spent == 0        # corrupt
+    path.write_text(json.dumps({"spent": {"brave": "many"}}))
+    assert ns.SearchBudget(10, "brave", path=path).spent == 0        # wrong type
+    path.write_text(json.dumps({"month": "2026-08", "spent": 5}))
+    assert ns.SearchBudget(10, "brave", path=path).spent == 0        # old format
 
 
 def test_an_unwritable_ledger_warns_rather_than_failing(tmp_path, caplog):
     """Losing the ledger must not sink an otherwise fine run, but it removes the
     protection silently -- so it has to say so."""
-    budget = ns.SearchBudget(10, path=tmp_path / "nodir" / "x" / "b.json")
+    budget = ns.SearchBudget(10, "brave", path=tmp_path / "nodir" / "x" / "b.json")
     budget.path = tmp_path            # a directory: write_text always fails
     caplog.set_level(logging.WARNING, logger="casework.news_search")
     budget.spend()
@@ -1891,7 +1894,7 @@ def test_duckduckgo_is_uncapped_but_keyed_providers_are_not():
     a legitimate free run."""
     assert ns.default_budget_for("duckduckgo") == 0
     for keyed in ("brave", "serper", "tavily", "google_cse"):
-        assert ns.default_budget_for(keyed) == ns.DEFAULT_KEYED_BUDGET
+        assert ns.default_budget_for(keyed) > 0
 
 
 class _OpenerReturning:
@@ -1995,9 +1998,76 @@ def test_a_bad_search_budget_is_rejected_not_ignored(monkeypatch, tmp_path):
 def test_the_preflight_warns_when_the_batch_cannot_fit(tmp_path, capsys):
     """Aborting at case 19 of 25 leaves a review file that is silently partial.
     The operator would rather cut the batch than find out afterwards."""
-    budget = ns.SearchBudget(100, path=tmp_path / "b.json")
+    budget = ns.SearchBudget(100, "brave", path=tmp_path / "b.json")
     en._check_budget_fits(budget, n_cases=25)
     out = capsys.readouterr().out
     assert "WARNING" in out and "--limit 8" in out, out
-    en._check_budget_fits(ns.SearchBudget(1000, path=tmp_path / "c.json"), 25)
+    en._check_budget_fits(ns.SearchBudget(1000, "brave", path=tmp_path / "c.json"),
+                          25)
     assert "WARNING" not in capsys.readouterr().out
+
+
+def test_each_provider_gets_its_own_count(tmp_path):
+    """The original bug: one shared counter. Serper's one-time 2,500 and Brave's
+    monthly ~1,000 are separate allowances, so spending one must not consume the
+    other."""
+    path = tmp_path / "b.json"
+    brave = ns.SearchBudget(900, "brave", path=path)
+    serper = ns.SearchBudget(2200, "serper", path=path)
+    for _ in range(50):
+        serper.spend()
+    assert ns.SearchBudget(900, "brave", path=path).spent == 0
+    assert ns.SearchBudget(2200, "serper", path=path).spent == 50
+    brave.spend()
+    assert ns.SearchBudget(2200, "serper", path=path).spent == 50, (
+        "writing one provider's row must not erase the other's")
+
+
+def test_a_one_time_allowance_never_resets(tmp_path):
+    """Serper's 2,500 credits are granted ONCE. A month-keyed counter would hand
+    the whole allowance back every 1st and quietly overspend it."""
+    path = tmp_path / "b.json"
+    jan = ns.SearchBudget(2200, "serper", path=path,
+                          now=lambda: ns.datetime(2026, 1, 5,
+                                                  tzinfo=ns.timezone.utc))
+    jan.spend()
+    later = ns.SearchBudget(2200, "serper", path=path,
+                            now=lambda: ns.datetime(2027, 9, 5,
+                                                    tzinfo=ns.timezone.utc))
+    assert later.spent == 1, "a one-time quota must not refresh with the calendar"
+
+
+def test_a_daily_allowance_resets_daily(tmp_path):
+    """Google's 100 is per DAY. A monthly counter would refuse for the rest of
+    the month after one busy afternoon."""
+    path = tmp_path / "b.json"
+    day1 = ns.SearchBudget(90, "google_cse", path=path,
+                           now=lambda: ns.datetime(2026, 8, 6,
+                                                   tzinfo=ns.timezone.utc))
+    day1.spend()
+    day2 = ns.SearchBudget(90, "google_cse", path=path,
+                           now=lambda: ns.datetime(2026, 8, 7,
+                                                   tzinfo=ns.timezone.utc))
+    assert day2.spent == 0
+
+
+def test_the_quota_table_matches_each_vendors_real_allowance():
+    """These caps are the only thing standing between a run and a real charge or
+    a burnt one-time allowance, so the periods are asserted, not assumed."""
+    assert ns.quota_period_for("serper") == "once"
+    assert ns.quota_period_for("google_cse") == "day"
+    assert ns.quota_period_for("brave") == "month"
+    assert ns.quota_period_for("tavily") == "month"
+    for provider, (cap, _period) in ns.PROVIDER_QUOTAS.items():
+        assert cap > 0, provider
+
+
+def test_the_exhaustion_message_names_the_provider_and_the_window(tmp_path):
+    """Two providers share the ledger, so 'budget exhausted' without a name
+    sends the operator to the wrong dashboard."""
+    budget = ns.SearchBudget(1, "serper", path=tmp_path / "b.json")
+    budget.spend()
+    with pytest.raises(ns.SearchBudgetExceeded) as exc:
+        budget.spend()
+    assert "serper" in str(exc.value)
+    assert "does not refresh" in str(exc.value)

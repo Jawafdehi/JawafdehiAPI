@@ -851,62 +851,106 @@ DEFAULT_KEYED_BUDGET = 900
 SEARCH_BUDGET_ENV = "CASEWORK_SEARCH_BUDGET"
 SEARCH_LEDGER_ENV = "CASEWORK_SEARCH_LEDGER"
 
+#: `(cap, period)` per keyed provider, measured against each vendor's published
+#: free allowance on 2026-08-06 and set a little under it so the free tier is
+#: never overspent by a rounding error.
+#:
+#: The PERIOD is what that vendor actually refreshes on, and getting it wrong is
+#: not cosmetic. Serper's 2,500 credits are granted ONCE, so a month-keyed
+#: counter would hand the whole allowance back every 1st and quietly overspend
+#: it; Google's 100 is daily, so a monthly counter would refuse all month after
+#: one busy afternoon. One shared counter across providers was the original bug:
+#: they have separate quotas, so 300 Serper queries must not consume Brave's.
+PROVIDER_QUOTAS = {
+    "brave": (900, "month"),        # $5 credit ~= 1,000 queries at $5/1,000
+    "serper": (2200, "once"),       # 2,500 free credits, NOT recurring
+    "tavily": (900, "month"),       # 1,000 credits/month
+    "google_cse": (90, "day"),      # 100/day
+}
+
 
 def default_budget_for(provider):
-    """Monthly query cap for `provider`; 0 means uncapped.
+    """Query cap for `provider`; 0 means uncapped.
 
-    The cap exists because a keyed provider bills a card -- Brave charges past
-    its $5 credit with no ceiling of its own. DuckDuckGo cannot bill anyone, so
-    capping it would only interrupt a legitimate long run for no benefit: a
-    238-case pass is ~2,900 queries and would trip any credit-sized limit.
+    The cap exists because a keyed provider draws on a paid or finite
+    allowance. DuckDuckGo has neither -- it cannot bill anyone -- so capping it
+    would only interrupt a legitimate long run for no benefit: a 238-case pass
+    is ~2,900 queries and would trip any credit-sized limit.
     """
     if provider == DEFAULT_SEARCH_PROVIDER:
         return 0
-    return DEFAULT_KEYED_BUDGET
+    return PROVIDER_QUOTAS.get(provider, (DEFAULT_KEYED_BUDGET, "month"))[0]
+
+
+def quota_period_for(provider):
+    """`"month"`, `"day"` or `"once"` -- when `provider` restores its allowance."""
+    return PROVIDER_QUOTAS.get(provider, (DEFAULT_KEYED_BUDGET, "month"))[1]
 
 
 class SearchBudget:
-    """A hard ceiling on billable search queries, persisted across runs.
+    """A hard ceiling on one provider's queries, persisted across runs.
 
     A per-run limit is not enough. Brave's card is charged the moment the $5
     monthly credit runs out and Brave publishes no spending cap, so three
     accidental re-runs of a 300-query batch spend the month's allowance and
-    then start billing. The ledger is a JSON file keyed by calendar month; the
-    count resets on its own when the month rolls over, matching how the credit
-    is granted.
+    then start billing.
+
+    The ledger holds a SEPARATE count per provider, because their quotas are
+    separate: spending Serper's one-time 2,500 must not consume Brave's monthly
+    ~1,000. Each count is filed under the bucket its vendor refreshes on, so it
+    resets exactly when the real allowance does -- and `"once"` never resets,
+    which is the whole point for Serper.
 
     Written after every query rather than at the end of the run, because the
     runs this guards against are the ones that die badly -- a crash or a
     `Ctrl-C` must not roll the counter back to zero.
     """
 
-    def __init__(self, limit, path=None, now=None):
+    def __init__(self, limit, provider, path=None, period=None, now=None):
         self.limit = int(limit or 0)
+        self.provider = provider
+        self.period = period or quota_period_for(provider)
         self.path = Path(path or os.environ.get(SEARCH_LEDGER_ENV)
                          or _DEFAULT_LEDGER)
-        # Injectable so the month-rollover branch is testable without waiting
-        # for a month to pass.
+        # Injectable so the rollover branches are testable without waiting for
+        # a day or a month to pass.
         self._now = now or (lambda: datetime.now(timezone.utc))
-        self.month = self._now().strftime("%Y-%m")
+        self.bucket = self._bucket()
         self.spent = self._load()
 
-    def _load(self):
+    def _bucket(self):
+        if self.period == "once":
+            return "once"
+        if self.period == "day":
+            return self._now().strftime("%Y-%m-%d")
+        return self._now().strftime("%Y-%m")
+
+    def _read_all(self):
+        """Every provider's row, or `{}` if the file is absent or unreadable."""
         try:
             data = json.loads(self.path.read_text())
         except (OSError, ValueError):
-            return 0
-        if not isinstance(data, dict) or data.get("month") != self.month:
-            return 0          # a new month restores the whole allowance
+            return {}
+        rows = data.get("spent") if isinstance(data, dict) else None
+        return rows if isinstance(rows, dict) else {}
+
+    def _load(self):
+        row = self._read_all().get(self.provider)
+        if not isinstance(row, dict) or row.get("bucket") != self.bucket:
+            return 0          # a new period restores the whole allowance
         try:
-            return max(0, int(data.get("spent") or 0))
+            return max(0, int(row.get("spent") or 0))
         except (TypeError, ValueError):
             return 0
 
     def _save(self):
+        # Read-modify-write rather than overwrite: two providers share this file
+        # and a plain dump would erase whichever one is not running.
+        rows = self._read_all()
+        rows[self.provider] = {"bucket": self.bucket, "spent": self.spent}
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps({"month": self.month,
-                                             "spent": self.spent}))
+            self.path.write_text(json.dumps({"spent": rows}, indent=2))
         except OSError as exc:
             # An unwritable ledger must not kill a run that is otherwise fine,
             # but it silently removes the protection -- so say so, loudly, once
@@ -924,9 +968,12 @@ class SearchBudget:
         cap is never billed.
         """
         if self.limit and self.spent + n > self.limit:
+            window = {"once": "in total (this allowance does not refresh)",
+                      "day": f"today ({self.bucket})"}.get(
+                          self.period, f"this month ({self.bucket})")
             raise SearchBudgetExceeded(
-                f"search budget exhausted: {self.spent} of {self.limit} queries "
-                f"already spent this month ({self.month}). Nothing was sent. "
+                f"{self.provider} search budget exhausted: {self.spent} of "
+                f"{self.limit} queries already spent {window}. Nothing was sent. "
                 f"Raise it with --search-budget, or reset by editing "
                 f"{self.path}.")
         self.spent += n
