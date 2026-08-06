@@ -1302,17 +1302,24 @@ def test_an_unknown_provider_name_is_refused_not_ignored(monkeypatch):
 def test_post_cache_keys_on_the_body_not_just_the_url(monkeypatch):
     """Every Serper/Tavily query POSTs to ONE url. Keying the cache on the url
     alone would serve query 1's articles as the answer to all twelve."""
-    client = ns.WebClient(search_delay=0)
+    client = ns.WebClient(search_delay=0, proxy="")
     served = iter([(200, json.dumps({"organic": [
         {"title": "a", "link": "https://a.test/1", "snippet": "s"}]})),
         (200, json.dumps({"organic": [
             {"title": "b", "link": "https://b.test/2", "snippet": "s"}]}))])
 
-    def fake_urlopen(request, timeout=None):
-        status, body = next(served)
-        return _FakeResponse(status, body)
+    class _Op:
+        """Patched at the OPENER, not at `urllib.request.urlopen`. Patching the
+        module function let this test escape to the live network the moment
+        `WebClient` started routing through `self._opener` -- it really did POST
+        to serper.dev once, and got a 403. The client's own seam is the only
+        one that stays true when the transport changes."""
 
-    monkeypatch.setattr(ns.urllib.request, "urlopen", fake_urlopen)
+        def open(self, request, timeout=None):
+            status, body = next(served)
+            return _FakeResponse(status, body)
+
+    monkeypatch.setattr(client, "_opener", _Op())
     monkeypatch.setenv("SERPER_API_KEY", "k")
     first = ns.search(client, "पहिलो", provider="serper")
     second = ns.search(client, "दोस्रो", provider="serper")
@@ -1337,3 +1344,84 @@ class _FakeResponse:
 
     def __exit__(self, *exc):
         return False
+
+
+# ---------------------------------------------------------------------------
+# SOCKS tunnel. A search API key needs a payment card, so the fallback for a
+# blocked host is an SSH reverse tunnel (`ssh -R 1080`) from an unblocked
+# connection. urllib cannot speak SOCKS unaided; these cover the seam.
+# ---------------------------------------------------------------------------
+
+
+def test_no_proxy_configured_leaves_the_client_on_the_plain_opener():
+    client = ns.WebClient(proxy="")
+    assert client.proxy == ""
+    assert not any(type(h).__name__.startswith("_Tunnelled")
+                   for h in client._opener.handlers)
+
+
+def test_the_proxy_is_read_from_the_environment(monkeypatch):
+    monkeypatch.setenv(ns.SOCKS_PROXY_ENV, "127.0.0.1:1080")
+    assert ns.WebClient().proxy == "127.0.0.1:1080"
+
+
+def test_an_explicit_empty_proxy_overrides_the_environment(monkeypatch):
+    """Tests and loopback smokes must be able to stay off the tunnel."""
+    monkeypatch.setenv(ns.SOCKS_PROXY_ENV, "127.0.0.1:1080")
+    assert ns.WebClient(proxy="").proxy == ""
+
+
+@pytest.mark.parametrize("spec", ["1080", "not-a-port", "127.0.0.1:", ""])
+def test_a_malformed_proxy_spec_is_refused_with_the_expected_form(spec):
+    with pytest.raises(ns.SearchUnavailable) as exc:
+        ns._parse_proxy(spec)
+    assert "127.0.0.1:1080" in str(exc.value), "the message must show the form"
+
+
+def test_the_tunnel_does_not_capture_the_whole_process(monkeypatch):
+    """THE POINT OF THE SCOPED OPENER. The common PySocks recipe replaces
+    `socket.socket` globally, which would route the case API and the LLM
+    provider through the operator's personal connection as a side effect of a
+    search workaround. Only this client's sockets may move."""
+    import socket as socket_module
+    original = socket_module.socket
+    client = ns.WebClient(proxy="127.0.0.1:1080")
+    assert socket_module.socket is original, "global socket was monkeypatched"
+    assert any(type(h).__name__ == "_TunnelledHTTPSHandler" or
+               type(h).__name__.startswith("_HTTPS")
+               for h in client._opener.handlers), "no tunnelled handler installed"
+
+
+def test_a_tunnelled_client_still_throttles_and_caches(monkeypatch):
+    """A proxy swap must not bypass the pacing -- the reason WebClient exists."""
+    opened = []
+
+    class _Op:
+        def open(self, request, timeout=None):
+            opened.append(request.full_url)
+            return _FakeResponse(200, "{}")
+
+    client = ns.WebClient(proxy="", search_delay=0)
+    monkeypatch.setattr(client, "_opener", _Op())
+    client.get("https://x.test/a", "search")
+    client.get("https://x.test/a", "search")
+    assert len(opened) == 1, "the cache must still short-circuit the second call"
+    assert client.calls["search"] == 1
+
+
+@pytest.fixture(autouse=True)
+def _no_live_network(monkeypatch):
+    """Enforce this module's docstring. Nothing enforced it, and a test really
+    did POST to serper.dev once -- it patched `urllib.request.urlopen` while
+    `WebClient` had moved to `self._opener`, so the stub silently stopped
+    intercepting and the call went out. Patch at a seam the transport cannot
+    slip out of: the socket itself."""
+    import socket as socket_module
+
+    def _refuse(self, address):
+        raise AssertionError(
+            f"a test tried to open a real connection to {address!r}. Stub the "
+            f"client's `_opener` (or use FakeWeb) rather than patching "
+            f"`urllib.request.urlopen`, which the transport no longer calls.")
+
+    monkeypatch.setattr(socket_module.socket, "connect", _refuse)

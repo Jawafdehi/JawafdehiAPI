@@ -525,6 +525,79 @@ def parse_ddg_html(html):
     return results[:SEARCH_RESULTS_PER_QUERY]
 
 
+#: `host:port` of a SOCKS5 proxy for THIS module's traffic only. Set when the run
+#: happens on a host search engines refuse (see `search_duckduckgo`) and an SSH
+#: reverse tunnel from an unblocked connection is carrying the queries:
+#:
+#:     ssh -R 1080 you@sandbox                    # laptop, keeps the tunnel up
+#:     export CASEWORK_SOCKS_PROXY=127.0.0.1:1080 # sandbox
+SOCKS_PROXY_ENV = "CASEWORK_SOCKS_PROXY"
+
+
+def _parse_proxy(spec):
+    host, sep, port = spec.strip().rpartition(":")
+    if not sep or not port.isdigit():
+        raise SearchUnavailable(
+            f"${SOCKS_PROXY_ENV}={spec!r} is not host:port "
+            f"(e.g. 127.0.0.1:1080).")
+    return host or "127.0.0.1", int(port)
+
+
+def build_socks_opener(spec):
+    """A urllib opener whose sockets dial out through a SOCKS5 proxy.
+
+    SCOPED TO THIS MODULE'S CLIENT ON PURPOSE. The usual PySocks recipe --
+    `socks.set_default_proxy()` then `socket.socket = socks.socksocket` -- is
+    process-global, so it would push the case API and the LLM provider through
+    the tunnel as well. Those must stay on the local interface: the API is
+    reached over loopback during a smoke run, and routing an operator's personal
+    connection into the write path is not something a search workaround should
+    do silently.
+
+    `rdns=True` resolves hostnames at the proxy. Resolving locally would leak
+    every news host into this machine's DNS and, worse, could resolve to an
+    address the tunnel's exit cannot reach.
+    """
+    import http.client
+
+    try:
+        import socks
+    except ImportError as exc:  # pragma: no cover - exercised by the message test
+        raise SearchUnavailable(
+            f"${SOCKS_PROXY_ENV} is set but PySocks is not installed. "
+            f"Install it with `uv pip install PySocks`, or `uv sync --extra "
+            f"casework-proxy`.") from exc
+
+    proxy_host, proxy_port = _parse_proxy(spec)
+
+    def _dial(address, timeout):
+        sock = socks.socksocket()
+        sock.set_proxy(socks.SOCKS5, proxy_host, proxy_port, rdns=True)
+        if isinstance(timeout, (int, float)):
+            sock.settimeout(timeout)
+        sock.connect(address)
+        return sock
+
+    class _TunnelledHTTPS(http.client.HTTPSConnection):
+        def connect(self):
+            sock = _dial((self.host, self.port), self.timeout)
+            self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+    class _TunnelledHTTP(http.client.HTTPConnection):
+        def connect(self):
+            self.sock = _dial((self.host, self.port), self.timeout)
+
+    class _HTTPSHandler(urllib.request.HTTPSHandler):
+        def https_open(self, req):
+            return self.do_open(_TunnelledHTTPS, req, context=self._context)
+
+    class _HTTPHandler(urllib.request.HTTPHandler):
+        def http_open(self, req):
+            return self.do_open(_TunnelledHTTP, req)
+
+    return urllib.request.build_opener(_HTTPHandler, _HTTPSHandler)
+
+
 class WebClient:
     """Throttled, cached HTTP reads for search / article / archive.
 
@@ -550,13 +623,23 @@ class WebClient:
     documents at 50-300 KB each, held for no benefit.
     """
 
-    def __init__(self, search_delay=1.5, fetch_delay=0.5, save_delay=6.0, timeout=20):
+    def __init__(self, search_delay=1.5, fetch_delay=0.5, save_delay=6.0, timeout=20,
+                 proxy=None):
         self.delays = {"search": search_delay, "fetch": fetch_delay,
                        "archive": 0.0, "save": save_delay}
         self.timeout = timeout
         self._last = {}
         self._cache = {}
         self.calls = {"search": 0, "fetch": 0, "archive": 0, "save": 0}
+        # An explicit `proxy=""` disables the tunnel even when the env var is
+        # set, which is how the tests keep themselves off any real socket.
+        spec = os.environ.get(SOCKS_PROXY_ENV, "") if proxy is None else proxy
+        self.proxy = spec.strip()
+        #: `build_opener()` with no handlers still installs a ProxyHandler that
+        #: reads `https_proxy`, so an ordinary HTTP proxy keeps working here with
+        #: no SOCKS involvement and no extra dependency.
+        self._opener = (build_socks_opener(self.proxy) if self.proxy
+                        else urllib.request.build_opener())
 
     def invalidate(self, url, kind):
         """Forget one cached response so the next `get` is a real request.
@@ -598,7 +681,7 @@ class WebClient:
         self.calls[kind] = self.calls.get(kind, 0) + 1
         request = urllib.request.Request(url, headers=headers or FETCH_HEADERS)
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with self._opener.open(request, timeout=self.timeout) as response:
                 if expect_html:
                     content_type = (response.headers.get("content-type") or "").lower()
                     if ("text/html" not in content_type
@@ -642,7 +725,7 @@ class WebClient:
             headers={"Content-Type": "application/json",
                      "Accept": "application/json", **(headers or {})})
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with self._opener.open(request, timeout=self.timeout) as response:
                 charset = response.headers.get_content_charset() or "utf-8"
                 result = (response.status,
                           response.read().decode(charset, errors="replace"))
