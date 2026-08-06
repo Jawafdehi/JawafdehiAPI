@@ -50,7 +50,13 @@ def test_dev_auth_forced_off_in_production():
     import sys
 
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    env = {
+    # Annotated, not inferred: ty widens an unannotated dict to
+    # `dict[Unknown | str, None | str]` after the `env.pop("TESTING", None)` below
+    # (the None default leaks into the VALUE type), which then fails to satisfy
+    # `subprocess.run(env=...)`'s `Mapping[str, str]`. The annotation states the
+    # type the dict actually has. Isolated against ty 0.0.66 — a `.pop` with a
+    # None default should not affect the mapping's own type.
+    env: dict[str, str] = {
         **os.environ,
         "DEV_AUTH": "true",
         "DEBUG": "False",

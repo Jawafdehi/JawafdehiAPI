@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from io import StringIO
+from typing import Any
 from unittest import mock
 
 from django.core.management import call_command
@@ -74,7 +75,12 @@ def _hearing(**over):
 
 
 def _copy(rows, **cfg):
-    options = dict(
+    # `dict[str, Any]`, not inferred: a heterogeneous dict infers its value type as
+    # the union of every entry, and `ImportConfig(**options)` then sees EVERY field
+    # as `ImportMode | list[str] | ... | int`. That one splat accounted for 55 of
+    # the tree's type diagnostics. `Any` is correct here — the dict is a kwargs
+    # carrier whose values are deliberately of differing types.
+    options: dict[str, Any] = dict(
         mode=ImportMode.COPY, courts=["supreme"], source_rows=rows, batch_size=10
     )
     options.update(cfg)
@@ -334,7 +340,7 @@ class VerdictJudgeDeriveTests(_NgmTestCase):
             decision_type="अन्तिम आदेश", judge_names="मा. न्या. श्री एकमा. न्या. श्री दुई",
             scraped_at=_SCRAPED,
         )
-        cfg = dict(mode=ImportMode.INPLACE, courts=["special"])
+        cfg: dict[str, Any] = dict(mode=ImportMode.INPLACE, courts=["special"])
         first = CourtCaseImporter(ImportConfig(**cfg)).run()
         self.assertEqual(first.dq_verdict_judge_derived, 1)
         case = CourtCase.objects.using("ngm").get(case_number="082-CR-0007")
@@ -398,7 +404,7 @@ class InplaceModeTests(_NgmTestCase):
             court=court, case_number="081-CR-0400", status="enriched",
             case_type="080-cp-1852 लेनदेन",
         )
-        cfg = dict(mode=ImportMode.INPLACE, courts=["supreme"])
+        cfg: dict[str, Any] = dict(mode=ImportMode.INPLACE, courts=["supreme"])
         first = CourtCaseImporter(ImportConfig(**cfg)).run()
         self.assertEqual(first.dq_case_type_normalized, 1)
         case = CourtCase.objects.using("ngm").get(

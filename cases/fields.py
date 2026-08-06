@@ -7,6 +7,7 @@ plus ``HttpsURLField`` (a Django-6-ready ``URLField``).
 
 import re
 from datetime import datetime
+from typing import Any
 
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -37,7 +38,11 @@ class HttpsURLField(models.URLField):
     """
 
     def formfield(self, **kwargs):
-        return super().formfield(**{"assume_scheme": "https", **kwargs})
+        # Bound with an explicit `dict[str, Any]` rather than splatted inline: the
+        # merged literal otherwise infers a `str`-ish value type and every one of
+        # `formfield`'s differently-typed parameters is reported against it.
+        merged: dict[str, Any] = {"assume_scheme": "https", **kwargs}
+        return super().formfield(**merged)
 
 
 class TextListField(models.JSONField):

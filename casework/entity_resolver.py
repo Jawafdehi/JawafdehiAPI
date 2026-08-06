@@ -769,7 +769,14 @@ def qualified_siblings(extracted: str, candidates: list[dict],
             continue
         title = result.get("title") or {}
         for form in (title.get("ne"), title.get("en")):
-            longer = name_tokens(form or "")
+            # Skip a missing form up front. Previously `name_tokens(form or "")`
+            # gave a falsy form an empty token list, which `len(longer) <= len(small)`
+            # below then always dropped (0 <= len(small) holds for any small) — so
+            # this is the same outcome reached directly instead of via the length
+            # test. `out` is a list[str]; keep None out of it explicitly.
+            if not form:
+                continue
+            longer = name_tokens(form)
             if len(longer) <= len(small):
                 continue
             if all(tokens_equal(a, b) for a, b in zip(small, longer)):

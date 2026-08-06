@@ -537,8 +537,14 @@ def outcome_from_hearings(hearings) -> HearingOutcome | None:
                 (v for k, v in _HEARING_DECISION_MAP.items() if _order_key(k) in decision),
                 None,
             )
-            if verdict is None:
-                continue
+        # Hoisted out of the fallback branch so it guards BOTH paths with one check.
+        # `classify_order_type` only sets a verdict for the terminal/compound buckets
+        # (its docstring says so, and both arms return a dict hit), so on the
+        # non-fallback path this never fires — but the invariant lives in that
+        # function's prose, not its `tuple[str, str | None]` return type. Checking it
+        # here is what keeps a verdict-less HearingOutcome unconstructable.
+        if verdict is None:
+            continue
         date_bs = _ws(hearing.get("date") or hearing.get("hearing_date"))
         date_ad = None
         if date_bs:

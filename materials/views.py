@@ -843,12 +843,23 @@ def _list_materials(request) -> Response:
 
     paginator = PlatformCursorPagination()
     page = paginator.paginate_queryset(qs, request)
+
     # Authed callers get the cached visibility + policy per row (for the admin
     # table); anon callers get the raw JSON-LD unchanged.
-    docs = [
-        _with_admin_visibility(row) if can_see_nonpublic else row.data for row in page
-    ]
-    return paginator.get_paginated_response(docs)
+    def _render(rows):
+        return [
+            _with_admin_visibility(row) if can_see_nonpublic else row.data
+            for row in rows
+        ]
+
+    # `paginate_queryset` is Optional-returning: DRF returns None when a paginator
+    # declines to paginate. PlatformCursorPagination (a CursorPagination) never
+    # does, so this is unreachable today — but `get_paginated_response` REQUIRES a
+    # completed paginate_queryset, so the None branch cannot just fall through to
+    # it. Same shape as courts/views.py::_paginated, which is the house pattern.
+    if page is None:
+        return Response(_render(qs))
+    return paginator.get_paginated_response(_render(page))
 
 
 @api_view(["GET", "POST", "PATCH", "DELETE"])

@@ -240,8 +240,18 @@ class CaseAdminForm(forms.ModelForm):
             new_state = cleaned_data.get("state")
 
             if old_state != new_state and self.request:
+                # `cleaned_data.get("state")` is Optional and deliberately passed
+                # through unnarrowed: short-circuiting on None here would SKIP the
+                # permission check entirely, which is the one outcome that must not
+                # happen. Note it does not *refuse* on None either —
+                # `can_transition_case_state` never reads `to_state` at all (see
+                # cases/rules/predicates.py), so its verdict is the caller's role
+                # and nothing else. None is therefore harmless to pass and unsafe
+                # to branch on, which is why the value goes through as-is.
                 if not can_transition_case_state(
-                    self.request.user, self.instance, new_state
+                    self.request.user,
+                    self.instance,
+                    new_state,  # ty: ignore[invalid-argument-type]
                 ):
                     errors["state"] = (
                         f"You do not have permission to transition from {old_state} to {new_state}. "
@@ -649,11 +659,22 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
     def has_delete_permission(self, request, obj=None):
         return False
 
-    def get_form(self, request, obj=None, **kwargs):
-        """Pass request to form for role-based field customization."""
-        form_class = super().get_form(request, obj, **kwargs)
+    def get_form(self, request, obj=None, change=False, **kwargs):
+        """Pass request to form for role-based field customization.
 
-        class FormWithRequest(form_class):
+        `change` is named explicitly to match `ModelAdmin.get_form`. Django passes
+        it as a keyword, so it previously arrived inside `**kwargs` and was
+        forwarded that way — which means capturing it here makes forwarding it
+        below mandatory, not optional. Dropping it would silently hand `super()`
+        a default `change=False` on every edit-form render.
+        """
+        form_class = super().get_form(request, obj, change=change, **kwargs)
+
+        # Subclassing a base held in a variable is genuinely beyond static
+        # modelling — `form_class` is whatever `super().get_form()` built for this
+        # request. The dynamic subclass is the mechanism by which `request` reaches
+        # the form, so there is no static shape to rewrite this into.
+        class FormWithRequest(form_class):  # ty: ignore[unsupported-base]
             def __new__(cls, *args, **kwargs):
                 kwargs["request"] = request
                 return form_class(*args, **kwargs)

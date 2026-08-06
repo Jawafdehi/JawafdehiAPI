@@ -341,8 +341,19 @@ class CaseScraper:
             ),
         )
 
+        # Same Optional-`response.text` trap as the phase-1 extraction above, which
+        # was already fixed there and not here: a blocked/empty candidate yields
+        # None, and `model_validate_json(None)` fails with a pydantic type error
+        # about the *schema* rather than saying the model returned nothing.
+        text = response.text
+        if text is None:
+            raise RuntimeError(
+                "Gemini returned no text for the phase-2 structuring "
+                "(blocked or empty candidate)."
+            )
+
         # Parse and validate the case
-        case = Case.model_validate_json(response.text)
+        case = Case.model_validate_json(text)
 
         self.log("  Validation successful")
         return case

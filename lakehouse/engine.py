@@ -72,15 +72,20 @@ def build_s3_secret_sql(
     no endpoint is the AWS-S3 path).
     """
     s3 = settings.s3
-    if not s3.is_configured:
+    # Bound to locals so the credentials actually NARROW. `S3Settings.is_configured`
+    # is exactly `bool(access_key_id and secret_access_key)` (see lakehouse/config.py),
+    # but it is a property, so testing it tells a type checker nothing about the two
+    # fields. The condition below is that same one, spelled where it narrows.
+    key_id, secret = s3.access_key_id, s3.secret_access_key
+    if not (key_id and secret):
         raise RuntimeError(
             "S3/R2 credentials not configured (set AWS_ACCESS_KEY_ID / "
             "AWS_SECRET_ACCESS_KEY); see ngm.lakehouse.config."
         )
     parts = [
         "TYPE s3",
-        f"KEY_ID {_quote(s3.access_key_id)}",
-        f"SECRET {_quote(s3.secret_access_key)}",
+        f"KEY_ID {_quote(key_id)}",
+        f"SECRET {_quote(secret)}",
         f"REGION {_quote(s3.region)}",
         f"URL_STYLE {_quote(s3.url_style)}",
         f"USE_SSL {'true' if s3.use_ssl else 'false'}",
@@ -108,11 +113,15 @@ def build_catalog_secret_sql(
             "ICEBERG_WAREHOUSE); see ngm.lakehouse.config."
         )
     parts = ["TYPE iceberg"]
-    if cat.uses_oauth2:
+    # Inlined rather than `if cat.uses_oauth2:` for the narrowing reason above —
+    # `uses_oauth2` is defined as exactly this conjunction (lakehouse/config.py).
+    client_id, client_secret = cat.client_id, cat.client_secret
+    oauth2_server_uri = cat.oauth2_server_uri
+    if client_id and client_secret and oauth2_server_uri:
         parts += [
-            f"CLIENT_ID {_quote(cat.client_id)}",
-            f"CLIENT_SECRET {_quote(cat.client_secret)}",
-            f"OAUTH2_SERVER_URI {_quote(cat.oauth2_server_uri)}",
+            f"CLIENT_ID {_quote(client_id)}",
+            f"CLIENT_SECRET {_quote(client_secret)}",
+            f"OAUTH2_SERVER_URI {_quote(oauth2_server_uri)}",
         ]
         if cat.oauth2_scope:
             parts.append(f"OAUTH2_SCOPE {_quote(cat.oauth2_scope)}")
@@ -135,13 +144,16 @@ def build_attach_sql(
 ) -> str:
     """Render the ``ATTACH ... (TYPE iceberg, SECRET ..., ENDPOINT ...)`` call."""
     cat = settings.catalog
-    if not cat.is_configured:
+    # `CatalogSettings.is_configured` is exactly `bool(uri and warehouse)`; bind both
+    # so they narrow (same reasoning as build_s3_secret_sql above).
+    uri, warehouse = cat.uri, cat.warehouse
+    if not (uri and warehouse):
         raise RuntimeError("Iceberg catalog not configured; see ngm.lakehouse.config.")
     return (
-        f"ATTACH {_quote(cat.warehouse)} AS {alias} (\n"
+        f"ATTACH {_quote(warehouse)} AS {alias} (\n"
         f"    TYPE iceberg,\n"
         f"    SECRET {secret_name},\n"
-        f"    ENDPOINT {_quote(cat.uri)}\n"
+        f"    ENDPOINT {_quote(uri)}\n"
         f");"
     )
 

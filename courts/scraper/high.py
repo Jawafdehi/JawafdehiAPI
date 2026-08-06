@@ -76,7 +76,17 @@ def parse_bench_list(html: str) -> list[dict[str, str]]:
         cells = row.find_all("td")
         if len(cells) < 2:
             continue
-        match = _SEND_DATA_RE.search(row.get("onclick", ""))
+        # bs4 types an attribute value as `str | list[str]`, because multi-valued
+        # attributes (class, rel) parse to a list. `onclick` is never multi-valued,
+        # but join rather than assume: a malformed page should not raise TypeError
+        # out of the middle of a cause-list parse.
+        raw_onclick = row.get("onclick", "")
+        onclick = (
+            raw_onclick
+            if isinstance(raw_onclick, str)
+            else " ".join(raw_onclick or [])
+        )
+        match = _SEND_DATA_RE.search(onclick)
         if not match:
             continue
         benches.append(
@@ -106,7 +116,10 @@ def parse_bench_page(
     soup = BeautifulSoup(html, "html.parser")
     hearing_date_ad = bs_to_ad(date_bs)
 
-    bench_type_elem = soup.find("h4", string=lambda x: x and "इजलास" in x)
+    # `bool(x) and ...` rather than `x and ...`: the latter evaluates to `x` (a
+    # str) when falsy, and bs4's string matcher is a predicate returning bool.
+    # Same truthiness for bs4, honest type for the reader.
+    bench_type_elem = soup.find("h4", string=lambda x: bool(x) and "इजलास" in x)
     bench_type = (
         normalize_whitespace(bench_type_elem.get_text()) if bench_type_elem else ""
     )

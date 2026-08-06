@@ -445,7 +445,9 @@ class TestMaterialProducer:
             "court_order",
             data={"@id": "https://jawafdehi.org/material/court_order/abc", "isPartOf": {"@id": case_iri}},
         )
-        _, payload, refs, _ = material_producer.signal_for(m)
+        signal = material_producer.signal_for(m)
+        assert signal is not None, "a court_order with isPartOf must emit a signal"
+        _, payload, refs, _ = signal
 
         assert payload["part_of"] == case_iri
         assert case_iri in refs
@@ -457,7 +459,9 @@ class TestMaterialProducer:
 
     def test_a_press_release_with_no_case_still_emits(self):
         """CIAA releases generally name no docket; that is not a broken signal."""
-        _, payload, refs, _ = material_producer.signal_for(self.material("ciaa_press_release"))
+        signal = material_producer.signal_for(self.material("ciaa_press_release"))
+        assert signal is not None, "a press release with no docket must still emit"
+        _, payload, refs, _ = signal
         assert payload["part_of"] == ""
         assert refs  # its own IRI is still a ref
 

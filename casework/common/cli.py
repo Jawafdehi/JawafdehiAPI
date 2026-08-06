@@ -214,7 +214,12 @@ def _utc_iso_now() -> str:
 
 class _UTCFormatter(logging.Formatter):
     """Formatter whose %(asctime)s is UTC, not local time."""
-    converter = time.gmtime
+    # `converter = time.gmtime` is the idiom the stdlib logging cookbook
+    # prescribes for UTC timestamps. typeshed declares `Formatter.converter` as a
+    # plain callable attribute while `time.gmtime` is an overloaded builtin, so
+    # the assignment reads as an incompatible method override. Idiom is correct;
+    # the checker cannot line the two shapes up.
+    converter = time.gmtime  # ty: ignore[invalid-method-override]
 
 
 class _RunContextFilter(logging.Filter):

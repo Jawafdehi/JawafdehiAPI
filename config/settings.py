@@ -499,18 +499,24 @@ def _sqlite_alias(file_name: str, test_name: str) -> dict:
     }
 
 
+# Read once each, rather than calling `os.getenv` twice per alias (once to test and
+# once to pass). Two calls mean the value handed to `parse()` is not provably the
+# non-empty one the test checked.
+_NES_DB_URL = os.getenv("NES_DB_URL")
+_NGM_DB_URL = os.getenv("NGM_DATABASE_URL")
+
 DATABASES = {
     "default": dj_database_url.config(default="sqlite:///db.sqlite3"),
     # nes DB — the NES entity store.
     "nes": (
-        dj_database_url.parse(os.getenv("NES_DB_URL"))
-        if os.getenv("NES_DB_URL")
+        dj_database_url.parse(_NES_DB_URL)
+        if _NES_DB_URL
         else _sqlite_alias("db_nes.sqlite3", "test_nes.sqlite3")
     ),
     # ngm DB — courts/materials.
     "ngm": (
-        dj_database_url.parse(os.getenv("NGM_DATABASE_URL"))
-        if os.getenv("NGM_DATABASE_URL")
+        dj_database_url.parse(_NGM_DB_URL)
+        if _NGM_DB_URL
         else _sqlite_alias("db_ngm.sqlite3", "test_ngm.sqlite3")
     ),
 }

@@ -903,8 +903,11 @@ def _collect_case_text(case: dict) -> str:
         for cc in case.get("court_cases") or []:
             if isinstance(cc, str):
                 parts.append(cc)
-    if case.get("description"):
-        parts.append(case.get("description"))
+    # Bind once, then test: the previous shape called `.get` twice, so the value
+    # joined below was not provably the non-empty one the guard checked.
+    description = case.get("description")
+    if description:
+        parts.append(description)
     return " ".join(parts).lower()
 
 

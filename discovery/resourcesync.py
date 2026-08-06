@@ -59,7 +59,9 @@ def _rs_md(capability: str, *, at: datetime | None = None, extra: dict | None = 
     """One ``<rs:md>`` element with a ``capability`` (+ optional attrs)."""
     attrs = [f'capability={quoteattr(capability)}']
     if at is not None:
-        attrs.append(f'at={quoteattr(_iso(at))}')
+        # `at` is already known non-None here, so format it directly: `_iso` exists
+        # to accept an Optional and returns one, which would only re-widen it.
+        attrs.append(f'at={quoteattr(at.isoformat())}')
     for key, value in (extra or {}).items():
         attrs.append(f"{key}={quoteattr(str(value))}")
     return f"  <rs:md {' '.join(attrs)}/>"
