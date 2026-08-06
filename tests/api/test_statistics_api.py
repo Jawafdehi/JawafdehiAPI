@@ -898,6 +898,13 @@ class TestNgmMetrics:
             registration_date_bs="",
             registration_date_ad=date(2026, 5, 21),
         )
+        # A two-digit stub carries no year either, so it goes the same way.
+        CourtCase.objects.create(
+            case_number="083-OA-1004",
+            court=court,
+            registration_date_bs="20",
+            registration_date_ad=None,
+        )
 
         ngm = api_client.get("/api/statistics/").json()["ngm"]
         assert {row["bs_year"]: row["count"] for row in ngm["by_year"]} == {
@@ -908,6 +915,32 @@ class TestNgmMetrics:
             (row["court__court_type"], row["bs_year"]): row["count"]
             for row in ngm["by_court_type_year"]
         } == {("district", 2082): 1, ("district", 2083): 1}
+
+    def test_year_buckets_merge_every_spelling_of_the_same_bs_year(self, api_client):
+        # The SQL groups on the raw four-character prefix, so one BS year can
+        # arrive as several groups: the canonical date, the slash form, a bare
+        # year, and Devanagari digits (which _bs_year reads as the same number).
+        # Left unmerged these would plot one year as four points, and the string
+        # ordering — Devanagari sorts after ASCII — would pick the wrong 25.
+        court = Court.objects.create(
+            identifier="bhaktapurdc",
+            court_type="district",
+            full_name_nepali="जिल्ला अदालत भक्तपुर",
+            full_name_english="District Court Bhaktapur",
+        )
+        for i, stored in enumerate(["2082-01-15", "2082/02/20", "2082", "२०८२-०३-०१"]):
+            CourtCase.objects.create(
+                case_number=f"082-OA-200{i}",
+                court=court,
+                registration_date_bs=stored,
+            )
+
+        ngm = api_client.get("/api/statistics/").json()["ngm"]
+        assert [row["bs_year"] for row in ngm["by_year"]] == [2082]
+        assert ngm["by_year"] == [{"bs_year": 2082, "count": 4}]
+        assert ngm["by_court_type_year"] == [
+            {"court__court_type": "district", "bs_year": 2082, "count": 4}
+        ]
 
     def test_materials_exclude_soft_deleted(self, api_client):
         # Soft-deleted materials are off every read plane (retrieve/search/sitemap

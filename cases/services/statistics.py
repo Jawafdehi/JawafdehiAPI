@@ -20,6 +20,7 @@ request-blocking recompute or an error.
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 
 from django.db import connections
 from django.db.models import Count, Q, Sum
@@ -54,9 +55,14 @@ def _bs_year(value: str | None) -> int | None:
     """Bikram Sambat year from a stored ``registration_date_bs``, or None.
 
     The column is free text written by the scrapers, so the year is the leading
-    four characters of ``YYYY-MM-DD`` (``YYYY/MM/DD`` works out the same). Values
-    that are not four decimal digits — empty strings, truncated dates — return
-    None so one bad row is dropped instead of failing the whole aggregation.
+    four characters of ``YYYY-MM-DD`` (``YYYY/MM/DD`` works out the same).
+    Deliberately reads the YEAR rather than validating the whole date: a value
+    whose month or day is missing or nonsense still tells us which year the case
+    was registered, and dropping it would lose a case we can place. Only a
+    leading four characters that are not decimal digits — an empty string, a
+    two-digit stub — gives None, so one bad row is dropped instead of erroring
+    the whole aggregation. Devanagari digits count as decimal and convert, which
+    is why callers must merge on the returned int, not the raw prefix.
     """
     digits = (value or "").strip()
     return int(digits) if len(digits) == 4 and digits.isdecimal() else None
@@ -376,7 +382,12 @@ def _ngm_metrics():
     #
     # Grouping happens in SQL on the leading four characters; the cast to int
     # happens in Python via _bs_year so an unparseable value drops its row rather
-    # than erroring the aggregation. Capped to the most recent N years so an
+    # than erroring the aggregation. The SQL groups are STRINGS, and several can
+    # normalise to the same year — "2082-01-15" and a bare "2082" are two groups,
+    # and so is a Devanagari "२०८२", which _bs_year reads as 2082 too. So sum into
+    # a dict keyed by the normalised int; leaving them separate would plot one
+    # year as two points and make the string ordering (Devanagari sorts after
+    # ASCII) pick the wrong 25. Capped to the most recent N years so an
     # outlier/dirty registration year cannot make the matrix grow unbounded (the
     # heatmap paints one column per kept year) — the cap is also what excludes the
     # stray implausible years the register carries (BS 2007, 2029: one case each).
@@ -384,26 +395,27 @@ def _ngm_metrics():
     dated = CourtCase.objects.exclude(registration_date_bs__isnull=True).annotate(
         bs=Substr("registration_date_bs", 1, 4)
     )
-    year_rows = [
-        {"bs_year": year, "count": row["count"]}
-        for row in dated.values("bs")
-        .annotate(count=Count("case_number"))
-        .order_by("bs")
-        if (year := _bs_year(row["bs"])) is not None
-    ]
-    # Keep the most-recent N years, but return them ascending (frontend order).
-    kept_years = {row["bs_year"] for row in year_rows[-_MATRIX_YEARS:]}
-    by_year = [row for row in year_rows if row["bs_year"] in kept_years]
+    totals: dict[int, int] = defaultdict(int)
+    for row in dated.values("bs").annotate(count=Count("case_number")):
+        year = _bs_year(row["bs"])
+        if year is not None:
+            totals[year] += row["count"]
+    # Keep the most-recent N years, and return them ascending (frontend order).
+    kept_years = set(sorted(totals)[-_MATRIX_YEARS:])
+    by_year = [{"bs_year": year, "count": totals[year]} for year in sorted(kept_years)]
+
+    matrix: dict[tuple[str, int], int] = defaultdict(int)
+    for row in dated.values("court__court_type", "bs").annotate(
+        count=Count("case_number")
+    ):
+        year = _bs_year(row["bs"])
+        if year in kept_years:
+            matrix[(row["court__court_type"], year)] += row["count"]
     by_court_type_year = [
-        {
-            "court__court_type": row["court__court_type"],
-            "bs_year": year,
-            "count": row["count"],
-        }
-        for row in dated.values("court__court_type", "bs")
-        .annotate(count=Count("case_number"))
-        .order_by("court__court_type", "bs")
-        if (year := _bs_year(row["bs"])) is not None and year in kept_years
+        {"court__court_type": court_type, "bs_year": year, "count": count}
+        for (court_type, year), count in sorted(
+            matrix.items(), key=lambda item: (item[0][0] or "", item[0][1])
+        )
     ]
 
     nes_resolved = (
