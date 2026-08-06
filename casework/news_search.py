@@ -172,6 +172,19 @@ TIMELINE_EVENT_WORDS = {
     EVENT_INVESTIGATION: ("अनुसन्धान", "छानबिन", "उजुरी", "पक्राउ", "प्रतिवेदन"),
 }
 
+#: The same stages in English, for sorting the queries the MODEL returns.
+#: `generate_english_queries` asks for "one query per event type" in lifecycle
+#: order, and only the first `QUERY_RESERVED_ENGLISH_SLOTS` are sent -- so
+#: without a re-sort the verdict and appeal queries are always the ones cut,
+#: on exactly the cases whose timeline says the verdict is what to look for.
+EVENT_WORDS_EN = {
+    EVENT_APPEAL: ("appeal", "supreme court"),
+    EVENT_VERDICT: ("verdict", "convict", "acquit", "sentenc", "ruling", "fined"),
+    EVENT_HEARING: ("hearing", "custody", "remand", "testimony", "detention"),
+    EVENT_FILING: ("charge sheet", "chargesheet", "indict", "filed", "prosecut"),
+    EVENT_INVESTIGATION: ("investigat", "probe", "complaint", "arrest", "raid"),
+}
+
 DEVANAGARI_RE = re.compile(r"[ऀ-ॿ]")
 
 # Web-archive endpoints, from the permalinks donor (add_news_permalinks:42-46).
@@ -935,8 +948,16 @@ class SearchBudget:
     The ledger holds a SEPARATE count per provider, because their quotas are
     separate: spending Serper's one-time 2,500 must not consume Brave's monthly
     ~1,000. Each count is filed under the bucket its vendor refreshes on, so it
-    resets exactly when the real allowance does -- and `"once"` never resets,
-    which is the whole point for Serper.
+    resets when the real allowance does -- and `"once"` never resets, which is
+    the whole point for Serper.
+
+    Buckets are keyed in UTC, which is exact for `"month"` but approximate for
+    the one `"day"` provider: Google CSE resets its 100/day at midnight
+    US/Pacific, so a run between 00:00 and ~08:00 UTC sees a fresh local bucket
+    while Google is still counting the previous day. The cap is then optimistic
+    by up to the previous day's spend and Google, not the ledger, is what stops
+    the run. Not worth a timezone dependency while `google_cse` stays a
+    fallback provider -- but do not read the day bucket as authoritative.
 
     Written after every query rather than at the end of the run, because the
     runs this guards against are the ones that die badly -- a crash or a
@@ -969,7 +990,18 @@ class SearchBudget:
         except (OSError, ValueError):
             return {}
         rows = data.get("spent") if isinstance(data, dict) else None
-        return rows if isinstance(rows, dict) else {}
+        if isinstance(rows, dict):
+            return rows
+        if rows is not None:
+            # A ledger we cannot read resets the counter to zero, which hands
+            # back an allowance that may already be spent -- on Brave that is
+            # the difference between the free credit and a charged card. It
+            # must not be the quiet path.
+            log.warning("the search budget ledger at %s is not in the expected "
+                        "format, so this run starts from zero spent. Check it "
+                        "against the provider's own usage page before a large "
+                        "batch.", self.path)
+        return {}
 
     def _load(self):
         row = self._read_all().get(self.provider)
@@ -1586,6 +1618,15 @@ def timeline_events(case):
 
     The latest entry per stage wins: a case that was heard three times is best
     found by its most recent hearing, and re-tries can fall back to the rest.
+    "Latest" is decided on the WHOLE date, not the year: BS rolls over in
+    mid-April, so two verdict entries in the same AD year can sit in different
+    BS years and picking the wrong one narrows the query onto a year the story
+    was not filed under.
+
+    A stage counts as reached whether or not its entry carries a usable date.
+    The date is needed for the year term and nothing else, so requiring one
+    would drop the stage ORDERING too -- and an undated `विशेष अदालतको ठहर`
+    entry is still proof the case reached a verdict.
     """
     found = {}
     for entry in (case.get("timeline") or []):
@@ -1593,24 +1634,80 @@ def timeline_events(case):
         for event_type, words in TIMELINE_EVENT_WORDS.items():
             if not any(word in text for word in words):
                 continue
-            ad = (entry.get("date") or "")[:4]
-            bs = (entry.get("date_bs") or "")[:4]
-            if not (ad.isdigit() or bs.isdigit()):
-                continue
+            ad_date = (entry.get("date") or "")
+            ad, bs = ad_date[:4], (entry.get("date_bs") or "")[:4]
             previous = found.get(event_type)
-            if previous is None or (ad or "") >= (previous[0] or ""):
-                found[event_type] = (ad if ad.isdigit() else "",
+            if previous is None or ad_date >= previous[0]:
+                found[event_type] = (ad_date,
+                                     ad if ad.isdigit() else "",
                                      bs if bs.isdigit() else "")
             break          # first (most specific) stage wins for this entry
-    return found
+    # The full date was only needed to pick a winner; callers want the years.
+    return {event: (ad, bs) for event, (_sort_key, ad, bs) in found.items()}
+
+
+def _stage_priority(case):
+    """Lifecycle stages, the ones this case reached first, most advanced first.
+
+    The verdict is both the least-covered stage in production and the most
+    newsworthy, so on a decided case it must not queue behind an investigation
+    query. Stages the timeline does not mention still follow, in lifecycle
+    order -- an empty timeline is the whole DRAFT backlog and must keep the
+    full spread.
+    """
+    reached = timeline_events(case)
+    ordered = sorted(reached, key=lambda e: EVENT_LIFECYCLE_ORDER.get(e, 9),
+                     reverse=True)
+    return ordered + [e for e in ALL_EVENT_TYPES if e not in reached], reached
+
+
+def _order_by_stage(queries, case, words_by_stage):
+    """`queries` re-sorted so the stages this case reached come first.
+
+    Stable, and anything that matches no stage keeps its position at the back
+    rather than being dropped -- a query the map does not recognise is still a
+    query, and the map is a keyword heuristic, not an authority.
+    """
+    if not queries:
+        return []
+    ordered, _reached = _stage_priority(case)
+    rank = {event: index for index, event in enumerate(ordered)}
+
+    def key(item):
+        index, query = item
+        lowered = query.lower()
+        for event, words in words_by_stage.items():
+            if any(word in lowered for word in words):
+                return (rank.get(event, len(rank)), index)
+        return (len(rank), index)
+
+    return [q for _, q in sorted(enumerate(queries), key=key)]
 
 
 def _event_queries(primary, case, devanagari_primary=""):
-    """Event queries, ordered so the stages this case reached come first.
+    """Event queries, BREADTH FIRST: one per stage before any stage gets two.
 
-    Both template sets are emitted -- the donor's and the corpus-measured one --
-    with a year appended where the timeline supplies one. Donor templates are
-    never dropped, so this can only add reach, never take it away.
+    The ordering is the load-bearing part. `build_queries` reserves
+    `QUERY_RESERVED_EVENT_SLOTS` (4) slots for this list and truncates the rest
+    away, so emitting all of a stage's templates before moving to the next
+    stage spends every slot on one or two stages. Measured on a case with a
+    verdict in its timeline, that put 5 verdict queries in the 12 sent and
+    dropped filing and hearing entirely -- while `मुद्दा दायर` (filing) is in
+    57% of article bodies, the single most common phrase in the corpus.
+
+    Round-robin instead: the first pass takes each stage's best template, the
+    second pass its next, and so on. The 4 reserved slots therefore always
+    cover 4 DIFFERENT stages, led by whichever one the timeline points at.
+
+    The breadth defect above is DETERMINISTIC -- read off the sent list, no
+    provider involved. The recall effect is not measurable on the labelled set:
+    four orderings run against Serper through one shared cache on 2026-08-06
+    scored 7/6/6/6 of 10, and the same configuration scored 5, 6 and 7 across
+    three runs the same afternoon, because several hits sit at rank 7 of 8 and
+    Serper's ranking drifts hour to hour. Ten cases cannot resolve a difference
+    of one. This ordering is chosen for the defect it provably fixes, NOT on a
+    claim that it finds more -- and the same caveat applies to the
+    corpus-measured template set, which has never been shown to improve recall.
 
     A Devanagari template gets the Devanagari name when one survived the
     skeleton check, and the Latin name otherwise. Mixing scripts inside one
@@ -1619,18 +1716,13 @@ def _event_queries(primary, case, devanagari_primary=""):
     """
     if not primary or len(primary) < 3:
         return []
-    reached = timeline_events(case)
-    # Stages the case reached, most advanced first: the verdict is both the
-    # least-covered stage in production and the most newsworthy, so it should
-    # not queue behind an investigation query on a decided case.
-    ordered = sorted(reached, key=lambda e: EVENT_LIFECYCLE_ORDER.get(e, 9),
-                     reverse=True)
-    ordered += [e for e in ALL_EVENT_TYPES if e not in reached]
+    ordered, reached = _stage_priority(case)
 
-    queries = []
+    by_stage = {}
     for event_type in ordered:
         templates = (EVENT_QUERY_TEMPLATES_MEASURED.get(event_type, [])
                      + EVENT_QUERY_TEMPLATES.get(event_type, []))
+        queries = []
         for index, template in enumerate(templates):
             # A Devanagari template needs a Devanagari name; an English one
             # must keep the Latin. Decided per template, not per case, because
@@ -1646,9 +1738,24 @@ def _event_queries(primary, case, devanagari_primary=""):
             # BS year at all is 33%, so a year narrows the query for a third of
             # the corpus and excludes the rest -- it earns a slot beside the
             # plain query, never instead of it, and not on every template.
+            #
+            # Being a round-2 entry, it reaches the wire only when the front
+            # block leaves room -- in practice on cases whose title yields no
+            # location, organisation or keywords, so `general` is short. That
+            # is the right way round: where the title IS rich, a location query
+            # is the better use of the slot. Still UNMEASURED either way; every
+            # labelled pair has `published=None`, so no run has exercised it.
             if year and index == 0 and event_type in YEAR_QUALIFIED_EVENTS:
                 queries.append(f"{base} {year}")
-    return queries
+        by_stage[event_type] = queries
+
+    interleaved = []
+    for round_index in range(max((len(q) for q in by_stage.values()), default=0)):
+        for event_type in ordered:
+            queries = by_stage[event_type]
+            if round_index < len(queries):
+                interleaved.append(queries[round_index])
+    return interleaved
 
 
 #: Stages worth spending a year-qualified slot on. Verdict and appeal are where
@@ -1686,27 +1793,51 @@ def build_queries(case, llm_english_queries=None, devanagari_names=None):
     names = accused_names(case)
     primary = _clean(names[0]) if names else ""
 
-    devanagari_primary = ""
-    if names and devanagari_names:
-        devanagari_primary = (devanagari_names.get(names[0])
-                              or devanagari_names.get(primary) or "")
+    # Keyed by the NES name (see `generate_devanagari_names`), under both the
+    # raw and the cleaned spelling so either lookup lands.
+    devanagari_by_name = {}
+    for raw, spelling in (devanagari_names or {}).items():
+        devanagari_by_name[raw] = spelling
+        devanagari_by_name[_clean(raw)] = spelling
+
+    def in_devanagari(clean_name):
+        """The Devanagari spelling for a Devanagari template, else the Latin.
+
+        Every Devanagari template needs this, not just the event ones -- the
+        `general` block below is half Devanagari too, and leaving the Latin
+        name in those queries reproduces the exact mixed-script miss the
+        Devanagari names exist to fix.
+        """
+        return devanagari_by_name.get(clean_name, clean_name)
+
+    devanagari_primary = devanagari_by_name.get(primary, "") if primary else ""
     events = _event_queries(primary, case, devanagari_primary)
 
-    # The two short name queries come FIRST and always, with the model's
-    # queries after -- not instead of. Measured on the labelled set, Serper,
-    # 2026-08-06: the model's queries alone scored 5/10 against the short
-    # queries' 6/10, because it over-specifies ("Nepal CIAA investigation Nepal
-    # Airlines A330-200 widebody aircraft purchase Jiban...") and the plain
-    # "Jiban Bahadur Shahi CIAA Nepal corruption" that had found the article at
-    # rank 7 was no longer being sent. But the model also found the one article
-    # no name query reaches -- the Melamchi case, via the PROJECT name and the
+    # The two short name queries come FIRST, with the model's queries after --
+    # not instead of. Measured on the labelled set, Serper, 2026-08-06: the
+    # model's queries alone scored 5/10 against the short queries' 6/10,
+    # because it over-specifies ("Nepal CIAA investigation Nepal Airlines
+    # A330-200 widebody aircraft purchase Jiban...") and the plain "Jiban
+    # Bahadur Shahi CIAA Nepal corruption" that had found the article at rank 7
+    # was no longer being sent. But the model also found the one article no
+    # name query reaches -- the Melamchi case, via the PROJECT name and the
     # contractor. The two are complementary and the budget has room for both.
+    #
+    # EXCEPT when the NES name is itself Devanagari. `romanize_devanagari` is a
+    # lossy hand table -- "जीवन बहादुर शाही" comes back "jiwn bhadur shahi",
+    # the exact defect the model's own prompt calls out ("Bahadur not
+    # wahadur") -- so promoting it would spend two of the four English slots on
+    # a misspelling and displace the model's correct romanisation. There it
+    # stays the donor's last resort, used only if the model returned nothing.
+    llm_english = _order_by_stage(list(llm_english_queries or []), case,
+                                  EVENT_WORDS_EN)
     roman = romanize_devanagari(primary)
-    english = []
-    if roman and len(roman) >= 3:
-        english += [f"{roman} CIAA Nepal corruption",
-                    f"{roman} Nepal special court case"]
-    english += list(llm_english_queries or [])
+    short = ([f"{roman} CIAA Nepal corruption", f"{roman} Nepal special court case"]
+             if roman and len(roman) >= 3 else [])
+    if primary and DEVANAGARI_RE.search(primary):
+        english = llm_english + short
+    else:
+        english = short + llm_english
 
     general = []
     location = extract_location_from_title(title)
@@ -1717,8 +1848,8 @@ def build_queries(case, llm_english_queries=None, devanagari_names=None):
             continue
         if index == 0:
             if location:
-                general += [f'"{clean}" {location} भ्रष्टाचार',
-                            f"{clean} {location} अख्तियार"]
+                general += [f'"{in_devanagari(clean)}" {location} भ्रष्टाचार',
+                            f"{in_devanagari(clean)} {location} अख्तियार"]
         else:
             general.append(f"{clean} CIAA corruption Nepal")
     if org:
@@ -1730,9 +1861,12 @@ def build_queries(case, llm_english_queries=None, devanagari_names=None):
         clean = _clean(name)
         if clean and len(clean) >= 3:
             for keyword in extract_corruption_keywords(case.get("key_allegations"))[:2]:
-                general.append(f"{clean} {keyword} Nepal")
+                # The keyword decides the script: `घुस Nepal` is Devanagari.
+                who = in_devanagari(clean) if DEVANAGARI_RE.search(keyword) else clean
+                general.append(f"{who} {keyword} Nepal")
     if primary and len(primary) > 3 and location:
-        general += [f"{primary} {location} भ्रष्टाचार", f"{primary} {location} अख्तियार"]
+        general += [f"{in_devanagari(primary)} {location} भ्रष्टाचार",
+                    f"{in_devanagari(primary)} {location} अख्तियार"]
 
     english, events, general = _dedupe(english), _dedupe(events), _dedupe(general)
     n_english = min(QUERY_RESERVED_ENGLISH_SLOTS, len(english))
@@ -1941,8 +2075,21 @@ def generate_english_queries(case, invoke_json, usage):
 
 #: Letters Nepali romanisation renders interchangeably, folded to one symbol so
 #: "Bikal"/"wikl" and "Bisht"/"wist" compare equal.
-_SKELETON_FOLD = {"w": "b", "v": "b", "f": "p", "z": "j", "x": "s",
-                  "c": "k", "q": "k"}
+#:
+#: `c` is deliberately NOT folded to `k`. `romanize_devanagari` spells च as
+#: "ch" and ख as "kh", so the fold made those two identical and
+#: `devanagari_names_match("Chandra Khadka", "खन्द्र छड्का")` returned True --
+#: a swapped-syllable name passing the only guard against a hallucinated one.
+#: Dropping it costs nothing: "Chandra" and "chndr" already share a skeleton.
+_SKELETON_FOLD = {"w": "b", "v": "b", "f": "p", "z": "j", "x": "s", "q": "k"}
+
+
+#: Titles NES carries in `display_name` but a news report does not print, and
+#: which `generate_devanagari_names`' prompt tells the model to drop. Stripped
+#: before comparing, or the model's correct answer for "Dr. Bikal Poudel" reads
+#: as two consonants short and the guard rejects it.
+_HONORIFIC_RE = re.compile(
+    r"^(dr|mr|mrs|ms|miss|prof|er|adv|sri|shri|hon)\b\.?\s*", re.IGNORECASE)
 
 
 def name_skeleton(name):
@@ -1954,7 +2101,8 @@ def name_skeleton(name):
     way emits "Bइकल् Pओउदेल्" -- but the consonant sequence survives both, so
     "Gajendra Maharjan" and its Devanagari spelling both reduce to "gjndrmhrjn".
     """
-    stripped = re.sub(r"[^a-z]", "", (name or "").lower())
+    name = _HONORIFIC_RE.sub("", (name or "").strip())
+    stripped = re.sub(r"[^a-z]", "", name.lower())
     folded = "".join(_SKELETON_FOLD.get(ch, ch) for ch in stripped
                      if ch not in "aeiou")
     return re.sub(r"(.)\1+", r"\1", folded)
@@ -1971,9 +2119,16 @@ def devanagari_names_match(latin, devanagari):
     want, got = name_skeleton(latin), name_skeleton(romanize_devanagari(devanagari))
     if len(want) < 3 or len(got) < 3:
         return False
-    # Not equality: romanisation of a conjunct can add or drop one consonant
-    # ("प्रसाद" -> "prsad"/"prasad"), so require containment either way.
-    return want == got or want in got or got in want
+    if want == got:
+        return True
+    # Not equality alone: romanisation of a conjunct can add or drop one
+    # consonant ("प्रसाद" -> "prsad"/"prasad"). But containment on its own
+    # accepts any superset, so a model that answered "विकल पौडेल पण्डित शर्मा"
+    # for "Bikal Poudel" -- a second person's name appended -- passed the
+    # guard. Bound the slack to the one consonant the conjunct explains.
+    if abs(len(want) - len(got)) > 1:
+        return False
+    return want in got or got in want
 
 
 def generate_devanagari_names(case, invoke_json, usage):
@@ -1994,8 +2149,20 @@ def generate_devanagari_names(case, invoke_json, usage):
 
     Every answer is checked with `devanagari_names_match` and dropped if it
     disagrees. A failure here costs query quality, never correctness.
+
+    Keyed by the NES NAME, not by the key the model echoed back. The prompt
+    tells it to drop "Dr."/"Mr.", so for `display_name` "Dr. Bikal Poudel" it
+    correctly answers `{"Bikal Poudel": "विकल पौडेल"}` -- and `build_queries`,
+    looking up the NES name, used to miss and fall back to the mixed-script
+    query this whole function exists to prevent. Silently, because the table
+    was non-empty so nothing warned.
     """
-    names = accused_names(case)
+    # A name already in Devanagari needs no transcription, and asking for one
+    # wastes a cheap-tier call to get an answer the skeleton check must then
+    # reject: `name_skeleton` keeps only `[a-z]`, so a Devanagari `latin` side
+    # reduces to "" and every entry fails. That fired the "the model failed"
+    # warning on cases where the model was right and the queries already were.
+    names = [n for n in accused_names(case) if not DEVANAGARI_RE.search(n)]
     if not names:
         return {}
     prompt = (
@@ -2016,17 +2183,22 @@ def generate_devanagari_names(case, invoke_json, usage):
         return {}
 
     verified = {}
-    for latin, devanagari in table.items():
-        if not isinstance(latin, str) or not isinstance(devanagari, str):
+    for devanagari in table.values():
+        if not isinstance(devanagari, str):
             continue
         devanagari = devanagari.strip()
         if not DEVANAGARI_RE.search(devanagari):
             continue
-        if not devanagari_names_match(latin, devanagari):
-            log.debug("dropped Devanagari name %r for %r: skeleton mismatch",
-                      devanagari, latin)
+        # Matched against the NES names rather than the model's own key, so the
+        # check compares the answer with what we asked about instead of with
+        # the model's restatement of the question.
+        match = next((n for n in names
+                      if devanagari_names_match(n, devanagari)), None)
+        if match is None:
+            log.debug("dropped Devanagari name %r: matches no accused name",
+                      devanagari)
             continue
-        verified[latin] = devanagari
+        verified.setdefault(match, devanagari)
     if table and not verified:
         log.warning("every Devanagari name the model returned failed the "
                     "skeleton check; falling back to Latin names in queries")

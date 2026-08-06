@@ -2053,13 +2053,32 @@ def test_a_daily_allowance_resets_daily(tmp_path):
 
 def test_the_quota_table_matches_each_vendors_real_allowance():
     """These caps are the only thing standing between a run and a real charge or
-    a burnt one-time allowance, so the periods are asserted, not assumed."""
-    assert ns.quota_period_for("serper") == "once"
-    assert ns.quota_period_for("google_cse") == "day"
-    assert ns.quota_period_for("brave") == "month"
-    assert ns.quota_period_for("tavily") == "month"
+    a burnt one-time allowance, so both halves are pinned to the vendor's
+    published free tier as measured on 2026-08-06 -- each a little under it, so
+    a rounding error cannot overspend. `cap > 0` is not enough: a `brave` cap
+    typo'd to 9000 passes that and bills the card ten times over."""
+    assert ns.PROVIDER_QUOTAS == {
+        "brave": (900, "month"),        # $5 credit ~= 1,000 at $5/1,000
+        "serper": (2200, "once"),       # 2,500 free credits, NOT recurring
+        "tavily": (900, "month"),       # 1,000 credits/month
+        "google_cse": (90, "day"),      # 100/day
+    }
     for provider, (cap, _period) in ns.PROVIDER_QUOTAS.items():
-        assert cap > 0, provider
+        assert cap == ns.default_budget_for(provider), provider
+
+
+def test_an_unreadable_ledger_says_so_instead_of_resetting_quietly(tmp_path,
+                                                                   caplog):
+    """A ledger we cannot parse resets the counter to zero, which hands back an
+    allowance that may already be spent. On Brave that is the difference
+    between the free credit and a charged card, so it must not be silent."""
+    ledger = tmp_path / "b.json"
+    ledger.write_text(json.dumps({"month": "2026-08", "spent": 870}))
+    caplog.set_level(logging.WARNING, logger="casework.news_search")
+    budget = ns.SearchBudget(900, "brave", path=ledger)
+    assert budget.spent == 0
+    assert any("not in the expected format" in r.getMessage()
+               for r in caplog.records), [r.getMessage() for r in caplog.records]
 
 
 def test_the_exhaustion_message_names_the_provider_and_the_window(tmp_path):
@@ -2128,6 +2147,57 @@ def test_the_verdict_is_asked_about_before_the_investigation():
     assert verdict_at < invest_at, devanagari
 
 
+def test_the_latest_entry_wins_on_the_whole_date_not_the_year():
+    """BS rolls over in mid-April, so two verdicts in one AD year can sit in
+    different BS years. Comparing only `[:4]` left the winner to list order and
+    could narrow the query onto the year the story was NOT filed under."""
+    case = _timeline_case([
+        {"date": "2026-11-20", "date_bs": "2083-08-04",
+         "title": "विशेष अदालतको ठहर", "description": ""},
+        {"date": "2026-01-10", "date_bs": "2082-09-26",
+         "title": "विशेष अदालतको ठहर", "description": ""},
+    ])
+    assert ns.timeline_events(case)["verdict"] == ("2026", "2083")
+
+
+def test_an_undated_entry_still_marks_the_stage_as_reached():
+    """The date is needed for the year term and nothing else. Requiring one
+    dropped the stage ORDERING too, so an undated `ठहर` entry left the verdict
+    queries at the tail, where truncation removes them."""
+    case = _timeline_case([{"title": "विशेष अदालतको ठहर फैसला",
+                            "description": ""}])
+    assert ns.timeline_events(case) == {"verdict": ("", "")}
+    assert "ठहर" in ns._event_queries("Bikal Poudel", case)[0]
+
+
+def test_the_models_english_queries_are_stage_ordered_too():
+    """`generate_english_queries` asks for one query per event type in
+    lifecycle order and only `QUERY_RESERVED_ENGLISH_SLOTS` are sent, so
+    without a re-sort the verdict and appeal queries are always the ones cut --
+    on exactly the cases whose timeline says the verdict is what to look for."""
+    case = _timeline_case([{"date": "2026-02-05", "date_bs": "2082-10-22",
+                            "title": "विशेष अदालतको ठहर", "description": ""}])
+    llm = ["Bikal Poudel CIAA investigation Nepal",
+           "Bikal Poudel charge sheet filed special court",
+           "Bikal Poudel hearing custody Nepal",
+           "Bikal Poudel verdict convicted special court",
+           "Bikal Poudel supreme court appeal"]
+    ordered = ns._order_by_stage(llm, case, ns.EVENT_WORDS_EN)
+    assert "verdict" in ordered[0], ordered
+    assert set(ordered) == set(llm), "re-sorting must not drop a query"
+
+
+def test_a_query_matching_no_stage_keeps_its_place_at_the_back():
+    """The English map is a keyword heuristic, not an authority. A query it
+    does not recognise is still a query."""
+    case = _timeline_case([])
+    llm = ["Melamchi drinking water project contractor scandal",
+           "Bikal Poudel CIAA investigation Nepal"]
+    ordered = ns._order_by_stage(llm, case, ns.EVENT_WORDS_EN)
+    assert ordered == ["Bikal Poudel CIAA investigation Nepal",
+                       "Melamchi drinking water project contractor scandal"]
+
+
 def test_the_year_is_devanagari_and_bs_never_ad():
     """Measured over 135 published-case bodies: the BS year appears as २०८२ in
     33% and 2082 in 9%. The AD year matched 100% -- page furniture, so it
@@ -2152,9 +2222,34 @@ def test_the_year_never_replaces_the_bare_query():
 
 
 def test_a_case_with_no_timeline_still_asks_about_every_stage():
-    queries = ns.build_queries(_timeline_case([]))
-    assert queries and not any("२०" in q for q in queries), (
+    """The DRAFT backlog has no timeline at all, so an empty one must keep the
+    full lifecycle spread rather than collapsing onto a default stage."""
+    case = _timeline_case([])
+    raw = ns._event_queries("Bikal Poudel", case)
+    for event_type in ns.ALL_EVENT_TYPES:
+        words = ns.TIMELINE_EVENT_WORDS[event_type]
+        assert any(any(w in q for w in words) for q in raw), (
+            f"{event_type} is not asked about at all")
+    assert not any("२०" in q for q in ns.build_queries(case)), (
         "no timeline means no year is known -- none may be invented")
+
+
+def test_the_reserved_event_slots_cover_four_different_stages():
+    """The load-bearing property of the round-robin, and the regression that
+    review caught: emitting all of a stage's templates before moving on spent
+    5 of the 12 sent slots on `verdict` and dropped `filing` and `hearing`
+    entirely -- while `मुद्दा दायर` is the most common phrase in the corpus
+    (57% of bodies). One query per stage before any stage gets two.
+    """
+    case = _timeline_case([{"date": "2026-02-05", "date_bs": "2082-10-22",
+                            "title": "विशेष अदालतको ठहर", "description": ""}])
+    lead = ns._event_queries("Bikal Poudel", case)[:ns.QUERY_RESERVED_EVENT_SLOTS]
+    hit = [event for event, words in ns.TIMELINE_EVENT_WORDS.items()
+           if any(any(w in q for w in words) for q in lead)]
+    assert len(hit) == ns.QUERY_RESERVED_EVENT_SLOTS, (
+        f"the {ns.QUERY_RESERVED_EVENT_SLOTS} reserved slots cover only "
+        f"{sorted(hit)}")
+    assert "ठहर" in lead[0], "the stage the timeline points at must lead"
 
 
 def test_the_measured_templates_use_the_words_that_actually_occur():
@@ -2170,13 +2265,24 @@ def test_the_measured_templates_use_the_words_that_actually_occur():
         "template keeps it, the measured set must not add it back")
 
 
-def test_the_donor_templates_are_kept_so_reach_can_only_grow():
-    """The measured set is ADDITIONAL. Dropping a donor template would silently
-    remove a query that may be the only one finding some article."""
+def test_the_donor_templates_are_still_candidates_behind_the_measured_ones():
+    """Both sets are offered for every stage, measured first.
+
+    NOT "reach can only grow" -- that claim was wrong and this test used to
+    assert it. `build_queries` truncates to `QUERY_LIMIT`, so adding templates
+    necessarily pushes others off the wire; on a rich title the donor filing
+    query is one of them. What is guaranteed is that no donor template is
+    DELETED: it stays a candidate, ranked behind the corpus-measured one, and
+    the retry ladder in `fallback_queries` can still reach it.
+    """
     case = _timeline_case([])
-    queries = " ".join(ns.build_queries(case))
-    assert "अख्तियार मुद्दा दायर" in queries      # donor filing
-    assert "विरुद्ध भ्रष्टाचार मुद्दा दायर" in queries   # measured filing
+    offered = " ".join(ns._event_queries("Bikal Poudel", case))
+    assert "अख्तियार मुद्दा दायर" in offered            # donor filing
+    assert "विरुद्ध भ्रष्टाचार मुद्दा दायर" in offered   # measured filing
+    for event_type, templates in ns.EVENT_QUERY_TEMPLATES.items():
+        for template in templates:
+            assert template.format(name="Bikal Poudel") in offered, (
+                f"donor template for {event_type} was deleted, not deprioritised")
 
 
 # ---------------------------------------------------------------------------
@@ -2209,6 +2315,31 @@ def test_a_wrong_name_from_the_model_is_dropped_not_searched():
 
     got = ns.generate_devanagari_names(case, fake_invoke, FakeUsage())
     assert got == {}, "a name that fails the skeleton check must not be used"
+
+
+def test_the_guard_rejects_a_swapped_syllable_name():
+    """`romanize_devanagari` writes च as "ch" and ख as "kh", so folding `c`->`k`
+    made चन्द्र and खन्द्र identical and a swapped-syllable name passed the only
+    guard against a hallucinated one."""
+    assert not ns.devanagari_names_match("Chandra Khadka", "खन्द्र छड्का")
+    assert ns.devanagari_names_match("Chandra Khadka", "चन्द्र खड्का")
+
+
+def test_the_guard_rejects_a_second_name_appended():
+    """Containment on its own accepts any superset, so a model that answered
+    with two people's names passed. The slack is bounded to the one consonant a
+    conjunct romanisation actually explains."""
+    assert not ns.devanagari_names_match("Bikal Poudel", "विकल पौडेल पण्डित शर्मा")
+    assert ns.devanagari_names_match("Bikal Poudel", "विकल पौडेल")
+
+
+def test_an_honorific_does_not_break_the_guard():
+    """NES carries `Dr.` in `display_name`; a news report does not print it and
+    the prompt tells the model to drop it. The comparison has to drop it too,
+    or the model's correct answer reads two consonants short and is rejected."""
+    assert ns.devanagari_names_match("Dr. Bikal Poudel", "विकल पौडेल")
+    assert ns.devanagari_names_match("Prof. Gajendra Maharjan", "गजेन्द्र महर्जन")
+    assert not ns.devanagari_names_match("Dr. Bikal Poudel", "रामप्रसाद शर्मा")
 
 
 def test_a_good_name_from_the_model_is_kept():
@@ -2253,13 +2384,91 @@ def test_devanagari_templates_get_the_devanagari_name_english_ones_do_not():
     assert english and all("Bikal Poudel" in q or "Nepal" in q for q in english)
 
 
-def test_no_devanagari_name_leaves_every_query_exactly_as_it_was():
-    """The recovery is an improvement, not a dependency -- a case where the
-    model returns nothing must search precisely what it searched before."""
+def test_no_devanagari_name_falls_back_to_the_latin_one():
+    """The recovery is an improvement, not a dependency. When the model returns
+    nothing, the Devanagari templates keep the Latin name -- the donor's
+    behaviour -- rather than emitting a nameless or empty query."""
     case = {"title": "t", "key_allegations": [], "court_cases": [],
             "entities": [{"display_name": "Bikal Poudel", "type": "accused"}],
             "timeline": []}
     assert ns.build_queries(case) == ns.build_queries(case, devanagari_names={})
+    # Only the name-bearing templates -- a title-keyword query carries no name
+    # by design.
+    devanagari = [q for q in ns._event_queries("Bikal Poudel", case, "")
+                  if ns.DEVANAGARI_RE.search(q)]
+    assert devanagari
+    for q in devanagari:
+        assert "Bikal Poudel" in q, f"a Devanagari template lost its name: {q}"
+
+
+def test_the_devanagari_name_is_keyed_by_the_nes_name_not_the_models_key():
+    """The prompt tells the model to drop `Dr.`/`Mr.`, so for a NES
+    `display_name` of "Dr. Bikal Poudel" it correctly answers under the key
+    "Bikal Poudel". `build_queries` looks up the NES name, so keying the table
+    on the model's echo made the lookup miss -- silently, because the table was
+    non-empty and nothing warned -- and re-sent the mixed-script query this
+    whole feature exists to prevent."""
+    case = {"title": "t", "key_allegations": [], "court_cases": [],
+            "description": "विकल पौडेल विरुद्ध भ्रष्टाचार", "timeline": [],
+            "entities": [{"display_name": "Dr. Bikal Poudel", "type": "accused"}]}
+    def fake_invoke(**kwargs):
+        return {"names": {"Bikal Poudel": "विकल पौडेल"}}
+
+    table = ns.generate_devanagari_names(case, fake_invoke, FakeUsage())
+    assert table == {"Dr. Bikal Poudel": "विकल पौडेल"}
+    for q in ns.build_queries(case, devanagari_names=table):
+        assert not (ns.DEVANAGARI_RE.search(q) and "Bikal" in q), (
+            f"mixed-script query survived: {q}")
+
+
+def test_a_devanagari_nes_name_needs_no_model_call():
+    """`name_skeleton` keeps only `[a-z]`, so a Devanagari name on the Latin
+    side reduces to "" and every answer fails the guard. Asking anyway burnt a
+    cheap-tier call per case and logged a warning blaming the model for a
+    question it should never have been asked."""
+    calls = []
+
+    def spy(*args, **kwargs):
+        calls.append(1)
+        return {"names": {}}
+
+    case = {"title": "t", "key_allegations": [], "court_cases": [], "timeline": [],
+            "entities": [{"display_name": "जीवन बहादुर शाही", "type": "accused"}]}
+    assert ns.generate_devanagari_names(case, spy, None) == {}
+    assert not calls, "no transcription is needed, so no call may be made"
+
+
+def test_the_general_block_is_in_devanagari_too():
+    """`_event_queries` was not the only place interpolating a name into a
+    Devanagari template -- `general` holds three more, and they get four
+    reserved slots at the front of the sent list."""
+    case = {"title": "काठमाडौं महानगरपालिका भ्रष्टाचार मुद्दा",
+            "key_allegations": ["घुस लिएको"], "court_cases": [], "timeline": [],
+            "entities": [{"display_name": "Bikal Poudel", "type": "accused"}]}
+    queries = ns.build_queries(case,
+                               devanagari_names={"Bikal Poudel": "विकल पौडेल"})
+    for q in queries:
+        assert not (ns.DEVANAGARI_RE.search(q) and "Bikal" in q), (
+            f"mixed-script query survived: {q}")
+
+
+def test_a_devanagari_nes_name_keeps_the_lossy_table_out_of_the_front_slots():
+    """`romanize_devanagari` is a lossy hand table: "जीवन बहादुर शाही" comes
+    back "jiwn bhadur shahi" -- the exact defect the model's own prompt calls
+    out. Promoting it would spend 2 of the 4 English slots on a misspelling and
+    displace the model's correct romanisation, so on a Devanagari NES name it
+    goes back to being the donor's last resort."""
+    case = {"title": "t", "key_allegations": [], "court_cases": [], "timeline": [],
+            "entities": [{"display_name": "जीवन बहादुर शाही", "type": "accused"}]}
+    good = ["Jiban Bahadur Shahi CIAA corruption Nepal",
+            "Jiban Bahadur Shahi special court verdict"]
+    queries = ns.build_queries(case, llm_english_queries=good)
+    english = [q for q in queries if ns.is_english_query(q)]
+    lossy = [i for i, q in enumerate(english) if "jiwn" in q]
+    model = [i for i, q in enumerate(english) if "Jiban Bahadur Shahi" in q]
+    assert model and lossy, english
+    assert max(model) < min(lossy), (
+        f"the lossy hand table outranked the model's romanisation: {english}")
 
 
 def test_the_enricher_asks_for_the_devanagari_name():

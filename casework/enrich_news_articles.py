@@ -126,6 +126,7 @@ from casework.news_search import (
     EVENT_LIFECYCLE_ORDER,
     EVENT_OTHER,
     MAX_ARTICLES_PER_EVENT_TYPE,
+    PROVIDER_QUOTAS,
     QUERY_LIMIT,
     SEARCH_BUDGET_ENV,
     NearMiss,
@@ -617,13 +618,19 @@ def build_parser():
                         help="Minimum seconds between Wayback Save Page Now "
                              "requests, which are rate-limited (default 6.0).")
     parser.add_argument("--search-budget", type=int, default=None,
-                        help="Hard cap on billable search queries this calendar "
-                             "month, counted in a ledger that survives across "
-                             "runs. 0 disables it. Defaults to "
-                             f"${SEARCH_BUDGET_ENV}, else {DEFAULT_KEYED_BUDGET} "
-                             "for a keyed provider and uncapped for duckduckgo. "
-                             "The run aborts rather than sending the query that "
-                             "would breach it.")
+                        help="Hard cap on billable search queries, counted in a "
+                             "ledger that survives across runs. 0 disables it. "
+                             f"Defaults to ${SEARCH_BUDGET_ENV}, else the "
+                             "provider's own free allowance over the window that "
+                             "provider refreshes on: "
+                             + ", ".join(
+                                 f"{name} {cap}/{period}"
+                                 for name, (cap, period) in sorted(
+                                     PROVIDER_QUOTAS.items()))
+                             + f"; {DEFAULT_KEYED_BUDGET}/month for any other "
+                             "keyed provider, and uncapped for duckduckgo. Note "
+                             "'once' does not refresh. The run aborts rather "
+                             "than sending the query that would breach it.")
     parser.add_argument("--no-permalink", dest="permalink", action="store_false",
                         default=True,
                         help="Do not attach a web-archive PERMALINK alongside the "
