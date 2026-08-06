@@ -1425,3 +1425,66 @@ def _no_live_network(monkeypatch):
             f"`urllib.request.urlopen`, which the transport no longer calls.")
 
     monkeypatch.setattr(socket_module.socket, "connect", _refuse)
+
+
+# ---------------------------------------------------------------------------
+# The date rule. Notes were carrying relative and year-less dates -- "hearing
+# began आइतबार", "acquitted असार १८ गते" -- into a permanently stored record.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("ad,expected_bs,expected_nepali", [
+    (date(2024, 6, 16), "2081-03-02", "२०८१ असार २"),
+    (date(2024, 8, 18), "2081-05-02", "२०८१ भदौ २"),
+    (date(2023, 4, 14), "2080-01-01", "२०८० बैशाख १"),   # Nepali new year
+])
+def test_the_publication_date_is_rendered_in_both_calendars(
+        ad, expected_bs, expected_nepali):
+    """Converted IN CODE. An LLM doing AD<->BS arithmetic is how a provenance
+    note ends up citing a date that never existed."""
+    rendered = ns.format_publication_date(ad)
+    assert ad.isoformat() in rendered
+    assert expected_bs in rendered
+    assert expected_nepali in rendered
+
+
+def test_an_undated_article_renders_empty_rather_than_guessing():
+    assert ns.format_publication_date(None) == ""
+
+
+def test_the_prompt_actually_carries_the_publication_date():
+    """The rule below is unfollowable without this. The candidate block listed
+    Title/URL/Excerpt only, so a model told to resolve "आइतबार" into a real date
+    had nothing to resolve it against."""
+    prompt = ns._batch_prompt("ctx", [ns.Article(
+        url="https://ekantipur.test/a", title="t", text="x" * 300,
+        published=date(2024, 6, 16))])
+    assert "Published: 2024-06-16" in prompt
+    assert "२०८१ असार २" in prompt
+
+
+def test_a_dateless_candidate_says_unknown_and_does_not_crash():
+    prompt = ns._batch_prompt("ctx", [ns.Article(
+        url="https://ekantipur.test/a", title="t", text="x" * 300,
+        published=None)])
+    assert "Published: unknown" in prompt
+
+
+def test_the_verify_prompt_states_the_date_rule():
+    p = ns.VERIFY_SYSTEM_PROMPT
+    assert "आइतबार" in p, "the relative-day ban must name a concrete example"
+    assert "COPY from it" in p, "the model must copy the date, not convert it"
+    assert "omit the date rather than guessing" in p
+    # A date the article itself states has no entry on the "Published" line, so
+    # a model forbidden from converting fell back to Latin script -- one bound
+    # note came back reading "18 February 2024" inside Devanagari prose.
+    assert "18 February 2024" in p and "Latin-script date" in p, (
+        "the rule must cover dates stated IN the article, not just the byline")
+
+
+def test_a_broken_bs_conversion_still_yields_the_gregorian_anchor(monkeypatch):
+    """`ad_to_bs` is best-effort (out-of-range year, missing `nepali` package).
+    Losing the BS half must not lose the anchor that makes 'आइतबार' resolvable."""
+    import jawafdehi_shared.dates as shared_dates
+    monkeypatch.setattr(shared_dates, "ad_to_bs", lambda _: None)
+    assert ns.format_publication_date(date(2024, 6, 16)) == "2024-06-16"

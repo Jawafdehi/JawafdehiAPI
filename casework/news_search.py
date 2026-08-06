@@ -1377,6 +1377,12 @@ State the case number, what specifically the article confirms (amounts, named
 defendants, ऐन/दफा, the outcome), and close by placing its evidentiary weight —
 whether it is a primary record (a verdict it reports directly) or secondary
 journalistic corroboration. Ground every claim in the excerpt; invent nothing.
+
+DATES IN THE SUMMARY — this note is stored permanently, so a date that only made sense on the day the article ran is worthless to the caseworker who reads it in three years:
+- NEVER copy a relative day from the article. "आइतबारदेखि बहस सुरु भयो" tells a later reader nothing. Resolve it against the candidate's "Published" line and write the actual date.
+- ALWAYS carry the year. "असार १८ गते" without a year is unusable; "२०८१ असार १८ गते" is a fact.
+- For the article's own publication date, write Bikram Sambat first with Gregorian in brackets: २०८१ असार २ (16 June 2024). The "Published" line gives you both calendars — COPY from it. Do not convert between AD and BS yourself, and do not infer a BS date the line does not state. If "Published" is unknown and the article gives only a relative day, omit the date rather than guessing one.
+- For a date the ARTICLE ITSELF states (a filing date, a hearing date, a verdict date), keep whichever calendar the article used and do NOT convert it — but always write it in Devanagari: "सन् २०२४ फेब्रुअरी १८", never "18 February 2024". A Latin-script date in a Nepali note is a defect.
 """
 
 ENGLISH_QUERY_SYSTEM_PROMPT = (
@@ -1491,12 +1497,56 @@ def _verdicts_from_response(result, n_items):
     return verdicts
 
 
+#: Bikram Sambat month names, indexed 1-12. Only test fixtures carried these
+#: before; the note register uses them (`२०८१ असार २`), so they belong in source.
+NEPALI_MONTHS = ("", "बैशाख", "जेठ", "असार", "साउन", "भदौ", "असोज",
+                 "कात्तिक", "मंसिर", "पुष", "माघ", "फागुन", "चैत")
+
+_ASCII_TO_DEVANAGARI_DIGITS = str.maketrans("0123456789", "०१२३४५६७८९")
+
+
+def format_publication_date(published):
+    """`published` rendered for the prompt in BOTH calendars, or `""`.
+
+    THE CONVERSION HAPPENS HERE, NOT IN THE MODEL. Asking an LLM for calendar
+    arithmetic across AD and BS is how a note ends up citing a date that never
+    existed, and this note is the one artefact whose job is provenance. The model
+    is handed both forms and told to copy, not compute.
+
+    Best-effort on the BS half: `ad_to_bs` is total and returns None for an
+    out-of-range year or a missing `nepali` package, in which case the AD date
+    alone still anchors any relative day in the article.
+    """
+    if not published:
+        return ""
+    gregorian = published.isoformat()
+    try:
+        from jawafdehi_shared.dates import ad_to_bs
+        bs = ad_to_bs(published)
+    except Exception:  # noqa: BLE001 - a date is never worth failing a run over
+        bs = None
+    if not bs:
+        return gregorian
+    try:
+        year, month, day = (int(part) for part in bs.split("-"))
+        nepali = (f"{year} {NEPALI_MONTHS[month]} {day}"
+                  .translate(_ASCII_TO_DEVANAGARI_DIGITS))
+    except (ValueError, IndexError):
+        return gregorian
+    return f"{gregorian} (BS {bs} = {nepali})"
+
+
 def _batch_prompt(case_context, articles):
     lines = []
     for index, article in enumerate(articles):
+        # The publication date was absent from this prompt entirely, which made
+        # the "resolve relative days" rule below unfollowable: a model told to
+        # convert "आइतबार" into a real date had no anchor to convert it against.
+        published = format_publication_date(getattr(article, "published", None))
         lines.append(f"Candidate {index}:\n"
                      f"Title: {article.title}\n"
                      f"URL: {article.url}\n"
+                     f"Published: {published or 'unknown'}\n"
                      f"Excerpt: {trim_excerpt(article.text.strip())}")
     return (f"CASE CONTEXT:\n{case_context}\n\n"
             "CANDIDATES (return exactly one result per index):\n\n"
