@@ -560,15 +560,18 @@ def build_socks_opener(spec):
     """
     import http.client
 
+    # Validate the SPEC before importing, so a typo is reported as a typo. The
+    # other order told an operator who wrote `CASEWORK_SOCKS_PROXY=1080` to go
+    # install PySocks, which would not have helped.
+    proxy_host, proxy_port = _parse_proxy(spec)
+
     try:
         import socks
-    except ImportError as exc:  # pragma: no cover - exercised by the message test
+    except ImportError as exc:
         raise SearchUnavailable(
             f"${SOCKS_PROXY_ENV} is set but PySocks is not installed. "
             f"Install it with `uv pip install PySocks`, or `uv sync --extra "
             f"casework-proxy`.") from exc
-
-    proxy_host, proxy_port = _parse_proxy(spec)
 
     def _dial(address, timeout):
         sock = socks.socksocket()
@@ -693,11 +696,21 @@ class WebClient:
             time.sleep(wait)
         self._last[kind] = time.monotonic()
 
-    def get(self, url, kind, headers=None, expect_html=False):
+    def get(self, url, kind, headers=None, expect_html=False, error_body=False):
         """`(status, text)` for a GET, or `(None, None)` on a transport error.
 
         Never raises: a dead news host is an ordinary outcome of searching the
         open web, and one of them must not end the case.
+
+        `error_body=True` returns the 4xx/5xx BODY instead of discarding it.
+        Off by default and opt-in per call on purpose: a keyed JSON provider puts
+        the reason in that body -- google_cse answers 403 for BOTH a revoked key
+        and daily-quota exhaustion, and only the body tells them apart, which the
+        operator needs because the next action is opposite (re-issue vs wait).
+        Returning it unconditionally would be worse than not having it: the HTML
+        callers test `if html:` and would hand a 403 error page to
+        `parse_ddg_html` or to `screen_body`, turning a refusal into "no results"
+        -- the silent zero this whole module is built to refuse.
         """
         key = (kind, url)
         if key in self._cache:
@@ -718,7 +731,13 @@ class WebClient:
                 charset = response.headers.get_content_charset() or "utf-8"
                 result = (response.status, body.decode(charset, errors="replace"))
         except urllib.error.HTTPError as exc:
-            result = (exc.code, None)
+            detail = None
+            if error_body:
+                try:
+                    detail = exc.read().decode("utf-8", errors="replace")[:2000]
+                except Exception:  # noqa: BLE001
+                    detail = None
+            result = (exc.code, detail)
         except Exception as exc:  # noqa: BLE001
             log.debug("GET %s failed: %s", redact_url(url)[:120], exc)
             result = (None, None)
@@ -761,7 +780,7 @@ class WebClient:
                 detail = ""
             result = (exc.code, detail or None)
         except Exception as exc:  # noqa: BLE001
-            log.debug("POST %s failed: %s", url[:90], exc)
+            log.debug("POST %s failed: %s", redact_url(url)[:120], exc)
             result = (None, None)
         self._cache[key] = result
         return result
@@ -847,8 +866,28 @@ def _provider_results(status, body, provider, extract):
         raise SearchUnavailable(
             f"{provider} returned HTTP {status} with JSON that is not an object "
             f"({type(payload).__name__}). First 200 chars: {body[:200]!r}")
+    # The payload being an object does not make its INNARDS well-shaped. Each
+    # `extract` walks `payload["web"]["results"]` and friends, and this loop then
+    # calls `row.get`. A shim answering `{"web": {"results": ["..."]}}` raises
+    # AttributeError from inside the lambda or from here -- which, not being
+    # SearchUnavailable, bypasses the enricher's abort handler and kills the run
+    # with a traceback. Same hazard as the top-level guard above, one level down.
+    try:
+        rows = extract(payload) or []
+    except (AttributeError, TypeError) as exc:
+        raise SearchUnavailable(
+            f"{provider} returned JSON this code cannot walk ({exc}). "
+            f"First 200 chars: {body[:200]!r}") from exc
+    if not isinstance(rows, (list, tuple)):
+        raise SearchUnavailable(
+            f"{provider} returned a result set that is not a list "
+            f"({type(rows).__name__}). First 200 chars: {body[:200]!r}")
     results = []
-    for row in extract(payload) or []:
+    for row in rows:
+        if not isinstance(row, dict):
+            raise SearchUnavailable(
+                f"{provider} returned a result row that is not an object "
+                f"({type(row).__name__}). First 200 chars: {body[:200]!r}")
         url = (row.get("url") or "").strip()
         if not url:
             continue
@@ -872,7 +911,7 @@ def search_brave(client, query):
     url = ("https://api.search.brave.com/res/v1/web/search?"
            + urllib.parse.urlencode({"q": query,
                                      "count": SEARCH_RESULTS_PER_QUERY}))
-    status, body = client.get(url, "search",
+    status, body = client.get(url, "search", error_body=True,
                               headers={"Accept": "application/json",
                                        "X-Subscription-Token": key})
     return _provider_results(
@@ -955,7 +994,7 @@ def search_google_cse(client, query):
                "key": key, "cx": cx, "q": query,
                # `num` maxes out at 10 on this API; asking for more is a 400.
                "num": min(SEARCH_RESULTS_PER_QUERY, 10)}))
-    status, body = client.get(url, "search",
+    status, body = client.get(url, "search", error_body=True,
                               headers={"Accept": "application/json"})
     lowered = (body or "").lower()
     if status == 403 and ("dailylimitexceeded" in lowered

@@ -24,6 +24,7 @@ reported in this task's `findings.md`; it is a prompt property, not a code one.
 """
 
 import collections
+import importlib.util
 import json
 import logging
 import pathlib
@@ -112,7 +113,7 @@ class FakeWeb:
     def clear_cache(self):
         self._cache.clear()
 
-    def get(self, url, kind, headers=None, expect_html=False):
+    def get(self, url, kind, headers=None, expect_html=False, error_body=False):
         key = (kind, url)
         if key in self._cache:
             return self._cache[key]
@@ -1199,9 +1200,16 @@ class RecordedApi:
         self.capture = capture if capture is not None else []
         self.calls = {"search": 0}
 
-    def get(self, url, kind, headers=None, expect_html=False):
+    def get(self, url, kind, headers=None, expect_html=False, error_body=False):
         self.calls[kind] = self.calls.get(kind, 0) + 1
         self.capture.append(("GET", url, dict(headers or {})))
+        # MODELS the real client rather than just accepting the argument: a
+        # 4xx/5xx body is DISCARDED unless the caller opted in. Handing the body
+        # back unconditionally is what let google_cse's quota-vs-revoked-key
+        # branch pass its test while being unreachable in production -- the real
+        # `get` returned `(403, None)` and the check read an empty string.
+        if self.status >= 400 and not error_body:
+            return self.status, None
         return self.status, self.body
 
     def post_json(self, url, kind, payload, headers=None):
@@ -1365,6 +1373,9 @@ def test_no_proxy_configured_leaves_the_client_on_the_plain_opener():
                    for h in client._opener.handlers)
 
 
+@pytest.mark.skipif(importlib.util.find_spec("socks") is None,
+                    reason="needs PySocks to build the opener; CI installs the "
+                           "casework-proxy extra so this runs there")
 def test_the_proxy_is_read_from_the_environment(monkeypatch):
     monkeypatch.setenv(ns.SOCKS_PROXY_ENV, "127.0.0.1:1080")
     assert ns.WebClient().proxy == "127.0.0.1:1080"
@@ -1383,6 +1394,10 @@ def test_a_malformed_proxy_spec_is_refused_with_the_expected_form(spec):
     assert "127.0.0.1:1080" in str(exc.value), "the message must show the form"
 
 
+@pytest.mark.skipif(importlib.util.find_spec("socks") is None,
+                    reason="PySocks absent: uv sync --extra casework-proxy. CI "
+                           "installs it so this DOES run there -- the skip is "
+                           "for a local venv without the optional extra.")
 def test_the_tunnel_does_not_capture_the_whole_process(monkeypatch):
     """THE POINT OF THE SCOPED OPENER. The common PySocks recipe replaces
     `socket.socket` globally, which would route the case API and the LLM
@@ -1635,3 +1650,110 @@ def test_the_enricher_preflights_search_config_before_touching_a_case():
     loop = src.index("for index, summary in enumerate(cases, 1):")
     assert preflight < loop, "config is validated after work has begun"
     assert "search is not configured" in src
+
+
+# ---------------------------------------------------------------------------
+# PR #429 review findings. Each of these shipped once.
+# ---------------------------------------------------------------------------
+
+
+def test_the_real_client_hands_a_4xx_body_to_a_provider_that_asks(monkeypatch):
+    """The quota-vs-revoked-key branch was UNREACHABLE. `get` returned
+    `(exc.code, None)` for an HTTPError, so google_cse's body check always read
+    "" and every 403 said "rejected the API key" -- sending the operator to
+    re-issue a credential when the fix was to wait for the reset."""
+    import io
+    import urllib.error
+
+    body = json.dumps({"error": {"code": 403, "errors": [
+        {"reason": "dailyLimitExceeded"}], "message": "Quota exceeded"}}).encode()
+
+    def raise_403(request, timeout=None):
+        raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", {},
+                                     io.BytesIO(body))
+
+    monkeypatch.setenv("GOOGLE_CSE_API_KEY", "k")
+    monkeypatch.setenv("GOOGLE_CSE_CX", "cx")
+    client = ns.WebClient(search_delay=0, proxy="")
+    monkeypatch.setattr(client, "_opener",
+                        types.SimpleNamespace(open=raise_403))
+    with pytest.raises(ns.SearchUnavailable) as exc:
+        ns.search(client, "क", provider="google_cse")
+    assert "quota exhausted" in str(exc.value)
+    assert "rejected the API key" not in str(exc.value)
+
+
+def test_an_html_error_page_is_still_never_parsed_as_search_results(monkeypatch):
+    """The counterpart risk of the fix above. `error_body` is opt-in precisely
+    so the HTML callers keep getting None on a 4xx -- handing a 403 error page to
+    `parse_ddg_html` would turn a refusal into "no coverage exists"."""
+    import io
+    import urllib.error
+
+    page = b"<html><body>403 Forbidden, go away</body></html>"
+
+    def raise_403(request, timeout=None):
+        raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", {},
+                                     io.BytesIO(page))
+
+    client = ns.WebClient(search_delay=0, proxy="")
+    monkeypatch.setattr(client, "_opener",
+                        types.SimpleNamespace(open=raise_403))
+    status, body = client.get("https://x.test/", "search")
+    assert (status, body) == (403, None), "the HTML path must not see the body"
+    assert client.get("https://y.test/", "search", error_body=True)[1] is not None
+
+
+@pytest.mark.parametrize("payload", [
+    {"web": {"results": ["a bare string"]}},
+    {"web": {"results": [42]}},
+    {"web": {"results": "not even a list"}},
+    {"web": []},
+])
+def test_a_malformed_result_row_raises_rather_than_crashing(payload, monkeypatch):
+    """The top-level object guard did not reach the rows. Each `extract` calls
+    `.get` per element, so a shim answering a list of strings raised
+    AttributeError -- past the abort handler, traceback, run dead."""
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "k")
+    try:
+        got = ns.search(RecordedApi(200, json.dumps(payload)), "क",
+                        provider="brave")
+    except ns.SearchUnavailable:
+        return                      # refused, which is the contract
+    assert got == [], f"a malformed payload must not yield candidates: {got!r}"
+
+
+def test_a_review_row_survives_an_article_with_no_title():
+    """`_review_row` runs on the ERROR path too, inside the except block, so a
+    TypeError here aborts before `review.write()` and loses the review file for
+    every case already processed."""
+    article = ns.Article(url="https://ekantipur.test/a", title=None,
+                         text="य" * 400, published=date(2024, 8, 18))
+    verdict = ns.Verdict(relevant=True, confidence="high", event_type="verdict",
+                         summary="य" * 400)
+    outcome = ns.SearchOutcome()
+    outcome.accepted.append((article, verdict))
+    plan = en.NewsPlan(slug="slug", action="WOULD_BIND", outcome=outcome,
+                       materials=[("https://jawafdehi.org/material/news/20240818.abc",
+                                   {}, "य" * 400, article)])
+    row = en._review_row("slug", "would-enrich", plan)
+    assert row is not None
+    assert any("news article" in str(src) for src in row.sources), (
+        "the source label must use the outlet fallback, not raise a TypeError")
+
+
+def test_a_failed_preflight_exits_non_zero(monkeypatch):
+    """`main()` is invoked bare, so `return report` exits 0 and a misconfigured
+    provider reports SUCCESS to a scheduler."""
+    src = pathlib.Path(en.__file__).read_text()
+    handler = src.index("search is not configured")
+    assert "raise SystemExit" in src[handler - 300:handler + 120], (
+        "the preflight must exit non-zero, like --max-articles validation")
+
+
+def test_bind_materials_records_the_reciprocal_duplicate_contract():
+    """Both stages PATCH the same destructive whole-list /evidence, so both
+    normalisers must stay identical. Only one side said so."""
+    src = pathlib.Path(en.__file__).parent.joinpath("bind_materials.py").read_text()
+    assert src.count("DELIBERATELY DUPLICATED") == 2
+    assert "enrich_news_articles" in src

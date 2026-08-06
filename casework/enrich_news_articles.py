@@ -629,7 +629,13 @@ def _review_row(slug, status, plan, note=""):
             f"  - URL: {article.url}\n"
             f"  - material: `{iri}`\n"
             f"  - note ({len(article_note)} chars): {article_note}")
-        sources.append((f"news · {article.outlet} · {article.title[:70]}",
+        # `title` is not guaranteed -- `_material_doc` already falls back for
+        # exactly this. Slicing None raises TypeError, and `_review_row` runs on
+        # the ERROR path too, inside the except block: the TypeError would escape
+        # `_process_case` and `main`, aborting before `review.write()` and losing
+        # the review file for every case already processed.
+        label = article.title or f"{article.outlet} news article"
+        sources.append((f"news · {article.outlet} · {label[:70]}",
                         iri, article.text))
     if plan.outcome.near_misses:
         lines.append("")
@@ -717,8 +723,11 @@ def main(argv=None):
                            fetch_delay=args.fetch_delay,
                            save_delay=args.save_delay)
     except SearchUnavailable as exc:
-        print(f"search is not configured: {exc}", file=sys.stderr)
-        return report
+        # SystemExit, not `return report`. `main()` is invoked bare at the bottom
+        # of this file, so returning exits 0 and a misconfigured provider, a
+        # missing key or a malformed proxy would report SUCCESS to a scheduler.
+        # Matches how --max-articles validation already fails above.
+        raise SystemExit(f"search is not configured: {exc}") from exc
     if client.proxy:
         print(f"  search + fetch via SOCKS proxy {client.proxy} "
               f"(the case API and the LLM stay on the local interface)")
