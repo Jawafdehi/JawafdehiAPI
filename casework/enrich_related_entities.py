@@ -435,7 +435,10 @@ class EntityBindPlan:
     # from the name afterwards. Carries the raw (lowercased) value for an
     # unrecognised section, which is exactly what a caseworker needs to see.
     review: list = field(default_factory=list)   # (name, Decision, section)
-    nomatch: list = field(default_factory=list)  # (name, Decision)
+    # The section rides here for the same reason it does on `bound`/`review`: it
+    # cannot be recovered from the name afterwards, and on a run where nothing
+    # resolves this list is the ONLY record of what each name was said to be.
+    nomatch: list = field(default_factory=list)  # (name, Decision, section)
     patch_items: list = field(default_factory=list)
     reason: str = ""
     # There are no separate accused lists. Every name this planner handles comes
@@ -763,7 +766,7 @@ def plan_case_entities(api, case, etag, extracted_items, strict=False):
             plan.review.append((name, decision, rel_type))
             continue
         if decision.verdict == NO_MATCH:
-            plan.nomatch.append((name, decision))
+            plan.nomatch.append((name, decision, rel_type))
             continue
 
         notes = (item.get("notes") or "").strip()
@@ -940,7 +943,14 @@ def report_paths(paths):
     stem = log_path[: -len(suffix)] if log_path.endswith(suffix) else log_path
     return {"binds": f"{stem}.binds.jsonl",
             "review": f"{stem}.review.jsonl",
-            "nomatch": f"{stem}.nomatch.md"}
+            "nomatch": f"{stem}.nomatch.md",
+            # `extracted` and `accused_notes` record the model's own answer
+            # BEFORE resolution, so a run that binds nothing still shows what it
+            # found. Run 645b1483 extracted 13 entities and 2 accused notes and
+            # left no trace of either beyond a count in the log.
+            "extracted": f"{stem}.extracted.jsonl",
+            "accused_notes": f"{stem}.accused_notes.jsonl",
+            "created": f"{stem}.created.jsonl"}
 
 
 def _md_cell(text):
@@ -984,15 +994,21 @@ def write_nomatch_report(path, rows):
     worse candidate than one this run actually saw for the same name.
     """
     grouped = {}
-    for name, slug, decision in rows:
+    for name, slug, decision, section in rows:
         key = normalise_name(name)
         entry = grouped.setdefault(
-            key, {"names": [], "slugs": [], "near": decision.matched_name,
-                  "score": decision.score})
+            key, {"names": [], "slugs": [], "sections": [],
+                  "near": decision.matched_name, "score": decision.score})
         if name not in entry["names"]:
             entry["names"].append(name)
         if slug not in entry["slugs"]:
             entry["slugs"].append(slug)
+        # EVERY section the group appeared under, not the first. A normalised
+        # group collects rows from different cases, and the same name can be
+        # extracted as `accused` in one and `location` in another. Showing only
+        # one tells a caseworker to create the wrong kind of entity.
+        if section and section not in entry["sections"]:
+            entry["sections"].append(section)
         if decision.score > entry["score"]:
             entry["near"] = decision.matched_name
             entry["score"] = decision.score
@@ -1001,12 +1017,13 @@ def write_nomatch_report(path, rows):
     lines = ["# Extracted names with no NES entity", "",
              "Each of these needs an NES entity before a re-run can bind it. "
              "Most-recurring first.", "",
-             "| Cases | Extracted name | Closest NES candidate | Score |",
-             "|---|---|---|---|"]
+             "| Cases | Extracted name | Role | Closest NES candidate | Score |",
+             "|---|---|---|---|---|"]
     for entry in ordered:
         near = _md_cell(entry["near"]) or "—"
         names = " / ".join(_md_cell(name) for name in entry["names"])
-        lines.append(f"| {len(entry['slugs'])} | {names} "
+        roles = " / ".join(_md_cell(s) for s in entry["sections"]) or "—"
+        lines.append(f"| {len(entry['slugs'])} | {names} | {roles} "
                      f"| {near} | {entry['score']:.2f} |")
     Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -1227,6 +1244,8 @@ def main(argv=None):
     # below blames the resolver for a refusal that happened after it.
     total_refused_binds = 0
     bind_rows, review_rows, nomatch_rows = [], [], []
+    # Collected BEFORE resolution, so they survive a run where nothing binds.
+    extracted_rows, accused_notes_rows = [], []
 
     for idx, case in enumerate(cases, 1):
         slug = case.get("slug") or "?"
@@ -1373,6 +1392,20 @@ def main(argv=None):
                   step="extract", status="ok",
                   detail=f"{len(valid_items)} entities + {len(accused_notes)} accused_notes")
 
+        # Record the extraction itself, here, before anything can drop it. Every
+        # later exit -- an ETag failure, a refused plan, a whole case of
+        # no-matches -- leaves these rows already written.
+        for item in valid_items:
+            extracted_rows.append({
+                "slug": slug,
+                "extracted": (item.get("entity_name") or "").strip(),
+                "relationship_type": (item.get("relationship_type") or "").strip().lower(),
+                "notes": (item.get("notes") or "").strip(),
+            })
+        for note in accused_notes:
+            if isinstance(note, dict):
+                accused_notes_rows.append({"slug": slug, **note})
+
         # Re-read WITH the ETag so the whole-list replace is conditional. `detail`
         # above came from `get_case`, which returns no ETag.
         try:
@@ -1422,8 +1455,8 @@ def main(argv=None):
                                 "role": section,
                                 "reason": decision.reason, "score": decision.score,
                                 "candidates": [list(c) for c in decision.candidates]})
-        for name, decision in plan.nomatch:
-            nomatch_rows.append((name, slug, decision))
+        for name, decision, section in plan.nomatch:
+            nomatch_rows.append((name, slug, decision, section))
 
         counts = plan_summary(plan, valid_items)
         total_review += counts["review"]
@@ -1500,6 +1533,8 @@ def main(argv=None):
     reports = report_paths(paths)
     write_jsonl(reports["binds"], bind_rows)
     write_jsonl(reports["review"], review_rows)
+    write_jsonl(reports["extracted"], extracted_rows)
+    write_jsonl(reports["accused_notes"], accused_notes_rows)
     write_nomatch_report(reports["nomatch"], nomatch_rows)
 
     print()

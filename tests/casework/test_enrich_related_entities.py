@@ -1999,9 +1999,9 @@ def test_nomatch_report_ranks_by_how_many_cases_a_name_appears_in(tmp_path):
     def d():
         return Decision(NM, None, 0.0, "", "no NES entity scored high enough", ())
 
-    rows = [("जिल्ला शिक्षा कार्यालय, दाङ", "case-a", d()),
-            ("जिल्ला शिक्षा कार्यालय, दाङ", "case-b", d()),
-            ("गुल्बा कोरी", "case-c", d())]
+    rows = [("जिल्ला शिक्षा कार्यालय, दाङ", "case-a", d(), "related"),
+            ("जिल्ला शिक्षा कार्यालय, दाङ", "case-b", d(), "related"),
+            ("गुल्बा कोरी", "case-c", d(), "accused")]
     out = tmp_path / "run.nomatch.md"
     write_nomatch_report(out, rows)
     text = out.read_text(encoding="utf-8")
@@ -2019,15 +2019,16 @@ def test_nomatch_report_escapes_table_breaking_characters(tmp_path):
     from casework.entity_resolver import Decision
 
     rows = [("मालपोत | कार्यालय", "case-a",
-             Decision(NM, None, 0.42, "जिल्ला\nकार्यालय", "no match", ()))]
+             Decision(NM, None, 0.42, "जिल्ला\nकार्यालय", "no match", ()),
+             "related")]
     out = tmp_path / "run.nomatch.md"
     write_nomatch_report(out, rows)
 
     row = next(line for line in out.read_text(encoding="utf-8").splitlines()
                if "मालपोत" in line)
-    # Four columns means four separators plus the two bounding ones; an unescaped
-    # pipe or newline would change that count.
-    assert row.count("|") - row.count(r"\|") == 5
+    # Five columns means five separators plus the bounding one; an unescaped pipe
+    # or newline would change that count.
+    assert row.count("|") - row.count(r"\|") == 6
     assert r"मालपोत \| कार्यालय" in row
     assert "जिल्ला कार्यालय" in row      # the newline became a space
     assert "\n" not in row
@@ -2104,8 +2105,8 @@ def test_nomatch_report_keeps_the_best_scoring_candidate_in_a_group(tmp_path):
     weak = Decision(NM, None, 0.40, "कमजोर मिल्दोजुल्दो", "no NES entity scored high enough", ())
     strong = Decision(NM, None, 0.83, "उत्तम मिल्दोजुल्दो", "no NES entity scored high enough", ())
     rows = [
-        ("जिल्ला शिक्षा कार्यालय, दाङ", "case-a", weak),
-        ("जिल्ला शिक्षा कार्यालय, दाङ", "case-b", strong),
+        ("जिल्ला शिक्षा कार्यालय, दाङ", "case-a", weak, "related"),
+        ("जिल्ला शिक्षा कार्यालय, दाङ", "case-b", strong, "related"),
     ]
     out = tmp_path / "run.nomatch.md"
     write_nomatch_report(out, rows)
@@ -2498,3 +2499,134 @@ def test_apply_over_a_case_that_already_has_a_bind_writes_both_rows(
          "notes": "तत्कालीन अध्यक्ष"},
         {"nes_id": ANKUR_IRI, "relationship_type": "related", "notes": "क"},
     ]
+
+
+# --------------------------------------------------------------------------
+# Extraction visibility -- what the model said, for every extracted name.
+#
+# Motivated by production run 645b1483 (2026-08-05, case 078-CR-0038): 13
+# entities extracted, 0 bind, 0 review, 13 no-match. The run recorded COUNTS
+# only, so the one thing a caseworker needed -- what each of the 13 names was
+# said to BE -- reached no file. `bound` and `review` rows already carry their
+# section; `nomatch` dropped it, and nothing recorded the extraction itself.
+# --------------------------------------------------------------------------
+
+
+def _nomatch_decision(score=0.0, near=""):
+    from casework.entity_resolver import NO_MATCH as NM
+    from casework.entity_resolver import Decision
+
+    return Decision(NM, None, score, near, "no NES entity scored high enough", ())
+
+
+def test_nomatch_rows_carry_the_section_they_were_extracted_under():
+    # The section is the most useful triage field on an unresolved row: it says
+    # whether the missing NES entity is an accused person or a district office.
+    # `bound` and `review` carry it for a documented reason -- two extracted
+    # items can name the same person under different sections, so it cannot be
+    # recovered from the name afterwards. That reasoning applies here unchanged.
+    case = {"slug": "case-nomatch-sections", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [],
+                                  "वन निर्देशनालय, धनगढी": []})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "हेम राज बिष्ट", "relationship_type": "accused",
+         "notes": "क"},
+        {"entity_name": "वन निर्देशनालय, धनगढी", "relationship_type": "location",
+         "notes": "ख"}], strict=True)
+
+    assert [(name, section) for name, _decision, section in plan.nomatch] == [
+        ("हेम राज बिष्ट", "accused"),
+        ("वन निर्देशनालय, धनगढी", "location"),
+    ]
+
+
+def test_nomatch_report_shows_the_section_for_each_unmatched_name(tmp_path):
+    # The report IS the caseworker's queue for creating NES entities. Creating a
+    # person and creating a district office are different jobs, and the queue
+    # could not tell them apart.
+    rows = [("हेम राज बिष्ट", "case-a", _nomatch_decision(), "accused"),
+            ("वन निर्देशनालय, धनगढी", "case-b", _nomatch_decision(), "location")]
+    out = tmp_path / "run.nomatch.md"
+    write_nomatch_report(out, rows)
+
+    lines = out.read_text(encoding="utf-8").splitlines()
+    assert "accused" in next(line for line in lines if "हेम राज" in line)
+    assert "location" in next(line for line in lines if "निर्देशनालय" in line)
+
+
+def test_nomatch_report_lists_every_section_a_grouped_name_appeared_under(tmp_path):
+    # The report groups by normalised name across cases, so one group can hold
+    # rows extracted under different sections. Showing only the first would tell
+    # a caseworker the name is a location when another case called it accused.
+    rows = [("सुर्खेत जिल्ला", "case-a", _nomatch_decision(), "location"),
+            ("सुर्खेत जिल्ला", "case-b", _nomatch_decision(), "related")]
+    out = tmp_path / "run.nomatch.md"
+    write_nomatch_report(out, rows)
+
+    row = next(line for line in out.read_text(encoding="utf-8").splitlines()
+               if "सुर्खेत" in line)
+    assert "location" in row and "related" in row
+
+
+def test_report_paths_includes_the_new_sidecars():
+    paths = {"log": "/tmp/20260805T121433Z-entities-645b1483.log"}
+    out = report_paths(paths)
+    stem = "20260805T121433Z-entities-645b1483"
+    assert out["extracted"].endswith(f"{stem}.extracted.jsonl")
+    assert out["accused_notes"].endswith(f"{stem}.accused_notes.jsonl")
+    assert out["created"].endswith(f"{stem}.created.jsonl")
+
+
+NOTHING_RESOLVES_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "हेम राज बिष्ट", "relationship_type": "accused",
+         "notes": "तत्कालीन प्रमुख"},
+        {"entity_name": "मानस नर्सरी, धनगढी", "relationship_type": "related",
+         "notes": "ठेक्का पाएको फर्म"},
+    ],
+    "accused_notes": [
+        {"name": "हेम राज बिष्ट", "notes": "वन अधिकृत, वन निर्देशनालय धनगढी"},
+    ],
+})
+
+
+def test_extraction_sidecar_records_every_name_when_nothing_resolves(
+    monkeypatch, patched_fetch_markdown
+):
+    # The run that motivated this: every extracted name failed to resolve, so
+    # binds.jsonl and review.jsonl were both empty and the $0.34 the extraction
+    # cost bought a report of counts. The sidecar is the only place the model's
+    # own answer survives a zero-bind run.
+    case = dict(PRESS_ONLY_CASE, slug="case-nothing-resolves", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [], "मानस नर्सरी, धनगढी": []})
+    _run_main(monkeypatch, api,
+              invoke_text_stub=lambda **kw: NOTHING_RESOLVES_RESPONSE,
+              argv=["--dry-run"])
+
+    rows = [json.loads(line) for line in Path(_report_files()["extracted"])
+            .read_text(encoding="utf-8").splitlines()]
+
+    assert [(r["extracted"], r["relationship_type"]) for r in rows] == [
+        ("हेम राज बिष्ट", "accused"),
+        ("मानस नर्सरी, धनगढी", "related"),
+    ]
+    assert rows[0]["notes"] == "तत्कालीन प्रमुख"
+    assert rows[0]["slug"] == "case-nothing-resolves"
+
+
+def test_extraction_sidecar_records_accused_notes(
+    monkeypatch, patched_fetch_markdown
+):
+    # accused_notes is a whole second section of the extraction that reached no
+    # output file at all -- the run log counted them and nothing else.
+    case = dict(PRESS_ONLY_CASE, slug="case-accused-notes", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [], "मानस नर्सरी, धनगढी": []})
+    _run_main(monkeypatch, api,
+              invoke_text_stub=lambda **kw: NOTHING_RESOLVES_RESPONSE,
+              argv=["--dry-run"])
+
+    notes = [json.loads(line) for line in Path(_report_files()["accused_notes"])
+             .read_text(encoding="utf-8").splitlines()]
+    assert notes == [{"slug": "case-accused-notes",
+                      "name": "हेम राज बिष्ट",
+                      "notes": "वन अधिकृत, वन निर्देशनालय धनगढी"}]
