@@ -120,6 +120,7 @@ from casework.common.select import select_for_run
 from casework.news_search import (
     ALL_EVENT_TYPES,
     CANDIDATE_BATCH_SIZE,
+    DEFAULT_SEARCH_PROVIDER,
     EVENT_LIFECYCLE_ORDER,
     EVENT_OTHER,
     MAX_ARTICLES_PER_EVENT_TYPE,
@@ -135,6 +136,7 @@ from casework.news_search import (
     news_material_ident,
     normalize_article_url,
     resolve_permalink,
+    resolve_search_provider,
     search,
     verify_batch,
 )
@@ -702,8 +704,26 @@ def main(argv=None):
     report = RunReport()
     review = build_review_file(args, stage=STAGE_NAME, field_name="evidence (news)",
                               run_id=run_id)
-    client = WebClient(search_delay=args.search_delay, fetch_delay=args.fetch_delay,
-                       save_delay=args.save_delay)
+    # PREFLIGHT, before any case is touched. Both of these read configuration and
+    # raise `SearchUnavailable` -- an unknown $CASEWORK_SEARCH_PROVIDER, a keyed
+    # provider with no key, a malformed $CASEWORK_SOCKS_PROXY, PySocks not
+    # installed. The client is built OUTSIDE the per-case try below, so without
+    # this the proxy cases surfaced as a bare traceback; the provider cases
+    # surfaced correctly but only after the case list had been fetched and the
+    # run header printed, which reads like the run started and then broke.
+    try:
+        provider_name, _ = resolve_search_provider()
+        client = WebClient(search_delay=args.search_delay,
+                           fetch_delay=args.fetch_delay,
+                           save_delay=args.save_delay)
+    except SearchUnavailable as exc:
+        print(f"search is not configured: {exc}", file=sys.stderr)
+        return report
+    if client.proxy:
+        print(f"  search + fetch via SOCKS proxy {client.proxy} "
+              f"(the case API and the LLM stay on the local interface)")
+    if provider_name != DEFAULT_SEARCH_PROVIDER:
+        print(f"  search provider: {provider_name}")
 
     cases = select_for_run(list(api.iter_cases()), args)
     total = len(cases)

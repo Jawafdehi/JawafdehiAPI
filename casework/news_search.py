@@ -838,6 +838,15 @@ def _provider_results(status, body, provider, extract):
         raise SearchUnavailable(
             f"{provider} returned HTTP {status} with a body that is not JSON "
             f"({exc}). First 200 chars: {body[:200]!r}") from exc
+    # Valid JSON is not necessarily an OBJECT. A proxy or error shim can answer
+    # `[]` or a bare string with a 200, and every `extract` below calls `.get`
+    # on this -- an AttributeError, which is NOT SearchUnavailable and so slips
+    # past the enricher's abort handler and kills the run with a traceback
+    # instead of "the backend is refusing to answer".
+    if not isinstance(payload, dict):
+        raise SearchUnavailable(
+            f"{provider} returned HTTP {status} with JSON that is not an object "
+            f"({type(payload).__name__}). First 200 chars: {body[:200]!r}")
     results = []
     for row in extract(payload) or []:
         url = (row.get("url") or "").strip()
@@ -1600,6 +1609,11 @@ def format_publication_date(published):
     """
     if not published:
         return ""
+    # A `datetime` slips through `date`-shaped call sites and `isoformat()` then
+    # emits "2024-06-16T10:30:00" -- a wall-clock time, in a permanent evidence
+    # note, for an article whose publication hour we do not actually know.
+    if isinstance(published, datetime):
+        published = published.date()
     gregorian = published.isoformat()
     try:
         from jawafdehi_shared.dates import ad_to_bs

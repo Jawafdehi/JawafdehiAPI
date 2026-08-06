@@ -100,6 +100,11 @@ class FakeWeb:
         self.calls = {"search": 0, "fetch": 0, "archive": 0, "save": 0}
         self.requested = []
         self._cache = {}
+        #: The real client exposes this and the enricher's preflight prints it.
+        #: Nothing here ever tunnels -- a fake that reaches the network is a bug
+        #: -- but the ATTRIBUTE has to exist or the fake stops standing in for
+        #: the real thing, which is how the preflight broke nine tests at once.
+        self.proxy = ""
 
     def invalidate(self, url, kind):
         self._cache.pop((kind, url), None)
@@ -1582,3 +1587,51 @@ def test_a_credential_in_the_query_string_is_redacted_before_logging():
 def test_redaction_leaves_an_ordinary_url_untouched():
     url = "https://html.duckduckgo.com/html/?q=nepal+corruption"
     assert ns.redact_url(url) == url
+
+
+# ---------------------------------------------------------------------------
+# Review findings on the provider/proxy/date work. Each of these shipped once.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("body", ["[]", '["a","b"]', '"a string"', "42"])
+def test_valid_json_that_is_not_an_object_raises_rather_than_crashing(
+        body, monkeypatch):
+    """Every `extract` calls `.get` on the parsed payload. A proxy or error shim
+    answering `[]` with a 200 produced an AttributeError -- which is NOT
+    SearchUnavailable, so it slipped past the enricher's abort handler and killed
+    the run with a traceback instead of naming the backend."""
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "k")
+    with pytest.raises(ns.SearchUnavailable) as exc:
+        ns.search(RecordedApi(200, body), "क", provider="brave")
+    assert "not an object" in str(exc.value)
+
+
+def test_a_datetime_publication_date_does_not_put_a_clock_time_in_the_note():
+    """`isoformat()` on a datetime emits "2024-06-16T10:30:00" -- a wall-clock
+    time we do not know, written into a permanent evidence note."""
+    from datetime import datetime
+    rendered = ns.format_publication_date(datetime(2024, 6, 16, 10, 30))
+    assert rendered.startswith("2024-06-16 ")
+    assert "T10:30" not in rendered
+    assert rendered == ns.format_publication_date(date(2024, 6, 16))
+
+
+def test_a_broken_proxy_is_reported_at_startup_not_as_a_traceback(monkeypatch,
+                                                                  capsys):
+    """`WebClient` is built OUTSIDE the per-case try, so a malformed
+    $CASEWORK_SOCKS_PROXY escaped as a bare traceback. The preflight catches it
+    before any case is touched."""
+    monkeypatch.setenv(ns.SOCKS_PROXY_ENV, "not-a-host-port")
+    with pytest.raises(ns.SearchUnavailable) as exc:
+        ns.WebClient()
+    assert "127.0.0.1:1080" in str(exc.value), "the message shows the form"
+
+
+def test_the_enricher_preflights_search_config_before_touching_a_case():
+    """The check must sit ahead of the case loop, not inside it."""
+    src = pathlib.Path(en.__file__).read_text()
+    preflight = src.index("resolve_search_provider()")
+    loop = src.index("for index, summary in enumerate(cases, 1):")
+    assert preflight < loop, "config is validated after work has begun"
+    assert "search is not configured" in src
