@@ -229,9 +229,13 @@ class _Bus:
         # Both of the next two blocks exist to keep a failed publish from ALSO
         # orphaning a coroutine. `self._js.publish(...)` builds one eagerly, and a
         # coroutine that is created and never awaited emits a "coroutine was never
-        # awaited" RuntimeWarning when it is collected. The suite is held at exactly
-        # one warning (see AGENTS.md), so a second one is a real signal and must not
-        # come from here.
+        # awaited" RuntimeWarning when it is collected — and, more to the point,
+        # means the publish silently did not happen on a path that returns a plain
+        # False. (An earlier version of this comment justified the care by "the
+        # suite is held at exactly one warning". Don't rely on that: the count is
+        # only low in a tree that has a `staticfiles/` directory, so it is not the
+        # tripwire it was described as. The orphaned-work argument stands on its
+        # own.)
         #
         # `_loop` is None until the bus starts, so check it BEFORE constructing the
         # coroutine — there is nothing to clean up if we never build it.
