@@ -38,6 +38,10 @@ TIERS = {
     # into this stage as `--only title`, and the brief resolves the conflict in
     # favour of cheap. See `casework/enrich_card.py`'s deviation 2.
     "card": "cheap",
+    # Registered because `test_stage_names_match_llm_tier_names` pins the pair,
+    # not because a model runs. `court_record` makes ZERO LLM calls -- a run
+    # that spends no tokens is its success case, not a shortfall.
+    "court_record": "cheap",
 }
 DEFAULT_TIER = "cheap"
 

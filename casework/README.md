@@ -133,6 +133,7 @@ flowchart LR
 | timeline | `enrich_timeline` | `timeline` | `patch_field` | yes ¹ | premium |
 | allegations | `enrich_allegations` | `key_allegations` | `patch_field` | yes ¹ | premium |
 | entities | `enrich_related_entities` | `entities` (+ NES entities with `--create-entities`) | `patch_field`, `POST /api/entities` | yes ¹ | premium |
+| court_record | `enrich_court_record` | `case_start_date`, `case_end_date`, `entities` (accused) (+ NES person entities) | `patch_case`, `POST /api/entities` | yes ¹ | — (no LLM) |
 | ledger | `ledger` | ledger JSON (local file) | none (reads run logs) | local file | — |
 
 ¹ Remote write requires **`--apply` + `--allow-remote-writes` + `--api-token`** together.
