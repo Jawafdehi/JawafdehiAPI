@@ -46,17 +46,31 @@ repos:
   # cross-module view, and the per-path scoping in [tool.ty.overrides] is keyed on
   # paths it discovers itself.
   #
-  # `files` covers pyproject.toml as well as sources, and that is not incidental.
-  # The obvious `types: [python]` looks right and is subtly wrong: pyproject.toml
-  # HOLDS the [tool.ty] config, so under a python-only trigger a commit that
-  # loosens a rule, widens an override, or drops a whole block skips the very
-  # check it just weakened. Verified by staging pyproject.toml alone — the hook
-  # reported "no files to check" and passed.
+  # `files` covers pyproject.toml and uv.lock as well as sources, and neither is
+  # incidental. The obvious `types: [python]` looks right and is subtly wrong on
+  # both counts:
+  #
+  #   pyproject.toml HOLDS the [tool.ty] config, so under a python-only trigger a
+  #   commit that loosens a rule, widens an override, or drops a whole block skips
+  #   the very check it just weakened.
+  #
+  #   uv.lock pins ty ITSELF, plus django-stubs, drf-stubs and every dep whose
+  #   types ty reads. A dependency bump therefore changes what the checker is and
+  #   what it knows while touching no `.py` file at all — upstream #436
+  #   (`chore(deps): bump likhit`) is exactly that shape. #436 also moved a
+  #   `pyproject.toml` line, so the pyproject entry alone would have caught it;
+  #   what the uv.lock entry adds is the bump that DOESN'T, i.e. a plain
+  #   `uv lock --upgrade` refresh, which moves pinned versions and nothing else.
+  #
+  # Both entries were verified the same way, and it is worth repeating if you
+  # change this regex: run `pre-commit run ty --files <the file>` against the
+  # config WITHOUT the entry and it reports "no files to check" and passes, which
+  # is the failure — then add the entry and the same command actually runs ty.
   - repo: local
     hooks:
       - id: ty
         name: ty check
         entry: uv run ty check
         language: system
-        files: '(\.pyi?$|^pyproject\.toml$)'
+        files: '(\.pyi?$|^pyproject\.toml$|^uv\.lock$)'
         pass_filenames: false

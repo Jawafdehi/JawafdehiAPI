@@ -302,7 +302,26 @@ class TestWhatAModelIsNotAllowedToDraft:
         on_result(job, good_result(confidence=0.8))
         assert not CaseUpdateProposal.objects.exists()
 
-    @pytest.mark.parametrize("confidence", [None, "high", float("nan"), 1.5, -0.1])
+    @pytest.mark.parametrize(
+        "confidence",
+        [
+            None,
+            "high",
+            float("nan"),
+            1.5,
+            -0.1,
+            # A JSON number has no size limit, so `json.loads` hands us a Python
+            # int this large and `float()` on it raises OverflowError — which is
+            # an ArithmeticError, not a TypeError or ValueError. Given an explicit
+            # id because the default one would be 401 digits wide.
+            pytest.param(10**400, id="too-big-for-a-float"),
+            # The float spelling is NOT the same case: JSON `1e400` parses to
+            # float("inf"), converts without complaint, and is stopped by the
+            # range check instead. Here so a fix aimed at one cannot regress the
+            # other.
+            pytest.param(float("inf"), id="inf"),
+        ],
+    )
     def test_a_confidence_that_is_not_a_number_in_range_stages_nothing(self, confidence):
         job = make_job(make_case())
         on_result(job, good_result(confidence=confidence))
@@ -368,6 +387,18 @@ class TestNoRejectionIsSilent:
             {"intent": {"type": "append_timeline_entry", "entry": {}}, "confidence": 0.9},
             {"intent": {"type": "append_timeline_entry", "entry": {"date": "2026-03-14", "title": "t"}}},
             ["nope"],
+            # A confidence too large to be a float. This is the case this class
+            # exists for: `float()` raises OverflowError, which is neither a
+            # TypeError nor a ValueError, so before the fix it escaped on_result
+            # entirely — and `finalize` would then have swallowed it, leaving a
+            # DONE job with no proposal and nothing recorded.
+            pytest.param(
+                {
+                    "intent": {"type": "append_timeline_entry", "entry": {"date": "2026-03-14", "title": "t"}},
+                    "confidence": 10**400,
+                },
+                id="confidence-too-big-for-a-float",
+            ),
         ],
     )
     def test_every_path_that_stages_nothing_leaves_a_reason_on_the_job(self, result):

@@ -193,40 +193,58 @@ dev = [
 # the metaclass blind spot turned out to be closable from STUB DATA, which needs
 # no plugin. django-stubs types field access through `__get__` overloads and
 # declares `objects`, so adding django-stubs + djangorestframework-stubs to the
-# dev group moved this tree, measured:
+# dev group cut the all-families count on this tree by well over half. The bulk
+# of what it removed was `Model.objects` and `force_authenticate` — things the
+# stubs simply declare.
 #
-#     all families on, no stubs .............. 1560   (1174 unresolved-attribute,
-#                                                      of which 809 `objects`
-#                                                      and 110 force_authenticate)
-#     all families on, with stubs ..............676   (pre-fix; the same
-#                                                      measurement on the SHIPPED
-#                                                      tree is 551)
-#     ...after the fixes in this change .........0 against the config below
+# The one figure worth asserting is the invariant CI enforces: ZERO diagnostics
+# against the config below.
 #
-# Provenance, so the next person can re-derive rather than trust. Only the 0 and
-# the 551 are reproducible as-is; 1560 and 676 are historical, read off single
-# `ty check` runs before the fixes landed, so do not expect 676 back. To redo the
-# "all families on" number without editing this file:
+# Every other WHOLE-TREE total that used to be written out here has been removed,
+# because they rot. Three of them were already wrong two rebases after being
+# measured: the tree grows, `main` moves under the branch, and a count in a
+# comment has no way to notice.
+#
+# The per-block counts in the two DEBT blocks (the SOURCE-files one and the PR
+# #427 one) are deliberately kept, and the difference is not arbitrary: those are
+# scoped to an explicit `include` list, so they move only when someone edits the
+# list they sit next to — and they are the numbers that tell you how much work an
+# opt-in costs. Both re-measured correct at the time this was written. A
+# whole-tree total has no such anchor.
+#
+# The past-tense counts further down ("these six annotations removed 91
+# diagnostics") are kept for the same reason: they describe a change that
+# happened, not a state that has to stay true.
+#
+# Re-derive rather than trust. The whole tree, all families on:
 #
 #     uv run ty check --config-file <a ty.toml holding only [environment]+[src]>
 #
-# and for one family, `uv run ty check -c "rules.<name>='error'"` (which is how
-# the 314 below was taken). Note `-c "overrides=[]"` does NOT clear the override
-# blocks — arrays do not replace, so it silently no-ops; use --config-file.
-# 1560 is the sum of the then-baseline (31) plus each silenced family measured on
-# its own via `--error <rule>`; the families are independent.
+# and for one family, `uv run ty check -c "rules.<name>='error'"`.
 #
-# `__str__` returning `CharField` went from 12 to 1 for the same reason. The
-# stubs cost 24 false `path()`/`re_path()` overload reports in URLconfs, handled
-# by the first override block below.
+# Two traps in that recipe, both of which hand you a confidently wrong number:
+#
+#   * `-c "overrides=[]"` does NOT clear the override blocks. TOML arrays do not
+#     replace, so it silently no-ops — you measure the CONFIGURED tree while
+#     believing you measured the raw one. Use --config-file, which does replace
+#     the project config wholesale.
+#
+#   * a run that reports 0 for a forced-on rule is indistinguishable from a path
+#     that was never analysed at all. To show a file really is covered, put a
+#     deliberate error in it and watch the gate report it.
+#
+# `__str__` returning `CharField` all but disappeared for the same reason. The
+# stubs also COST something: they make every `path()`/`re_path()` route in the
+# tree a false overload report, handled by the URLconf override block below.
 #
 # django-stubs targets mypy and says so, so expect occasional friction of exactly
 # that kind rather than none. It is type-only, dev-group, never in the image, and
 # verified inert against the suite.
 #
-# The remaining exemptions are `unresolved-attribute` and `unresolved-import`;
-# both are argued, with their measured cost, in [tool.ty.rules] below. Track
-# astral-sh/ty#255 ("django plugin") — landing it is what closes the first one.
+# One family is exempt tree-wide — `unresolved-attribute` — and it is argued in
+# [tool.ty.rules] below. Track astral-sh/ty#255 ("django plugin"); landing it is
+# what closes it. `unresolved-import` used to be the second tree-wide exemption
+# and is now ON, with four named files scoped out in override blocks of their own.
 # ---------------------------------------------------------------------------
 # ruff — the lint gate (CI runs exactly `uv run ruff check .`).
 #
@@ -314,30 +332,39 @@ exclude = [
 [tool.ty.rules]
 # --- The ONE family still off tree-wide. -----------------------------------
 # `unresolved-attribute` is the django-stubs *plugin* gap, and it is the only
-# thing django-stubs cannot close from stubs alone. What remains after the stubs
-# land (measured on this tree): 109 in source, 205 in tests. The source ones are
-# dominated by things a mypy plugin synthesises and a stub file cannot —
-# implicit FK id columns (`court_id` x17, `case_id` x8), reverse relation
-# accessors (`courtcase_references`, `material_references`), and the custom-User
-# surface (`groups`, `is_superuser`) reached through `get_user_model()`, which is
-# typed `type[AbstractBaseUser]`.
+# thing django-stubs cannot close from stubs alone. Roughly two thirds of what
+# remains is in tests; the source side is dominated by things a mypy plugin
+# synthesises and a stub file cannot — implicit FK id columns (`court_id`,
+# `case_id`), reverse relation accessors (`courtcase_references`,
+# `material_references`), and the custom-User surface (`groups`, `is_superuser`)
+# reached through `get_user_model()`, which is typed `type[AbstractBaseUser]`.
+# For the current figure, run the per-family recipe above.
 #
 # Closing it needs one of: ty gaining a Django plugin (track astral-sh/ty#255 —
 # still absent as of 0.0.67), hand-declaring every FK's `_id` and every
-# `related_name` on the 26 models, or abandoning `get_user_model()` across 38
-# call sites. The first is free and coming; the other two trade a documented
+# `related_name` across the model layer, or abandoning `get_user_model()`
+# tree-wide. The first is free and coming; the other two trade a documented
 # Django practice for type purity. So: off, with the cost written down.
 unresolved-attribute = "ignore"
 
-# `unresolved-import` is off for a different and permanent reason: this tree
-# imports genuinely OPTIONAL dependencies lazily inside function bodies, guarded
-# by try/except ImportError, and they are absent from the base image on purpose.
-# The full set as of this change: markitdown, playwright.sync_api, pymupdf,
-# fitz, likhit.converters, npttf2utf, cloudpathlib, markdownify. Two more are
-# django-stubs re-export gaps rather than optional deps
-# (`django.template.loader.engines`, `django.test.testcases.
-# DatabaseOperationForbidden`) — both resolve fine at runtime.
-unresolved-import = "ignore"
+# `unresolved-import` used to be off here, alongside `unresolved-attribute`. It is
+# now ON, and its exemptions are per-FILE in the two override blocks at the bottom
+# of this file.
+#
+# The reason for the move: a tree-wide `"ignore"` on this rule buys nothing except
+# silence about typos. An optional dep is a handful of known files, whereas the
+# rule's real value is catching `from cases.serialzers import ...` — a misspelling
+# that resolves to nothing, is invisible to both gates under a tree-wide ignore,
+# and blows up at import time in whatever environment first exercises that path.
+# Scoping it to four named files keeps the whole rest of the tree covered.
+#
+# Note the exempt set is a property of the ENVIRONMENT, not just the code: it is
+# the optional deps absent from `uv sync`'s venv. Most of what the old comment
+# here listed as optional (markitdown, pymupdf, fitz, likhit, npttf2utf,
+# markdownify) is in fact installed by the dev group, so ty resolves it and it
+# never needed an exemption. If a future change drops one of those from the dev
+# group, this gate will start reporting it — correctly. Add the file, don't
+# re-disable the rule.
 
 # --- Bug-shaped rules, explicitly ON (ty ships them off by default). ---
 # These two ask "can this name actually be unbound here?", which is a runtime
@@ -380,8 +407,8 @@ possibly-missing-import = "error"
 # django-stubs types `path()`/`re_path()` with overloads whose `view` must be
 # `Callable[..., HttpResponseBase]`. Neither DRF's `@api_view`-decorated
 # functions nor `.as_view()` results match any overload, so EVERY route in the
-# tree gets reported — 24 findings, all confined to URLconfs (review 8,
-# discovery 6, jobs 4, entities 3, materials 3).
+# tree gets reported. The findings are confined to URLconfs and scale with the
+# number of routes, which is why the count that used to sit here is gone.
 #
 # Verified false, not deferred: `path("auth/me/", views.me_view)` in
 # review/urls.py is valid Django that runs in production and is covered by the
@@ -399,29 +426,27 @@ no-matching-overload = "ignore"
 
 # ---------------------------------------------------------------------------
 [[tool.ty.overrides]]
-# TESTS: the four newly-gated families are off here — 168 findings' worth,
-# re-derived on the shipped tree: 93 invalid-argument-type, 47 not-subscriptable,
-# 18 unsupported-operator, 10 invalid-assignment.
+# TESTS: the four newly-gated families are off here.
 #
 # This mirrors the ANN policy above, which exempts tests permanently, and for a
 # related reason: a test double's whole job is to stand in for a shape it does
 # not statically have. Concretely, within THESE four families it is Optional
-# helper returns used without a guard (all 47 not-subscriptable are "cannot
+# helper returns used without a guard (every `not-subscriptable` here is "cannot
 # subscript None") and `None`/double stand-ins passed where the real type is
-# declared — `ModelAdmin(site=None)` 15, `Job | None` into `finalize` 12,
-# `HTTPError.__init__` 9. tests/casework/test_enrich_timeline.py (28) and
-# materials/tests/test_nkp_parse.py (15) are the two biggest files.
+# declared — `ModelAdmin(site=None)`, `Job | None` into `finalize`,
+# `HTTPError.__init__`.
 #
 # NOT this block: the double-attribute noise (`_casework_run_paths`, `calls`) and
 # most of the `APIClient`/`get_user_model()` surface are `unresolved-attribute`,
-# which is off tree-wide above — 205 of its 314 are in tests.
+# which is off tree-wide above.
 #
 # `not-iterable` is here for the same reason and is NOT one of the four: unittest
 # `Mock.await_args`/`call_args` are typed `None` until the mock is called, so the
 # standard `args, kwargs = m.await_args` unpack after an
 # `assert_awaited_once()` reads as "unpacking None". It is the exact same
-# stand-in-shape argument as the 47 "cannot subscript None" above, just a
-# different rule name. 3 findings, all in tests/mcp/test_jawafdehi_write_tools.py.
+# stand-in-shape argument as the "cannot subscript None" findings above, just a
+# different rule name; at time of writing all of them are in
+# tests/mcp/test_jawafdehi_write_tools.py.
 #
 # This is a deliberate trade, not an oversight: it does mean a genuine type
 # mistake in a test body goes unreported. Judged worth it because the same
@@ -441,6 +466,57 @@ not-subscriptable = "ignore"
 unsupported-operator = "ignore"
 invalid-assignment = "ignore"
 not-iterable = "ignore"
+
+# ---------------------------------------------------------------------------
+[[tool.ty.overrides]]
+# OPTIONAL DEPENDENCIES. Two modules this tree imports on purpose without
+# depending on: neither is in `[project]`, `[project.optional-dependencies]` or
+# the dev group, so neither is in the image or in `uv sync`'s venv, and ty is
+# right that it cannot resolve them.
+#
+#   cloudpathlib          — a one-off S3/R2 import command. The import is in a
+#                           try/except that re-raises with the install hint, and
+#                           Django only imports a command module when that command
+#                           is actually invoked.
+#   playwright.sync_api   — the browser fallback in the NKP crawler, imported
+#                           inside `PlaywrightFetcher.__init__` so the requests
+#                           transport works without a browser installed.
+#
+# Per-file rather than tree-wide: see the `unresolved-import` note in
+# [tool.ty.rules]. If either becomes a real dependency, delete its line.
+include = [
+    "cases/management/commands/import_ciaa_cases.py",
+    "materials/sourcing/nkp/crawl.py",
+]
+
+[tool.ty.overrides.rules]
+unresolved-import = "ignore"
+
+# ---------------------------------------------------------------------------
+[[tool.ty.overrides]]
+# django-stubs RE-EXPORT GAPS. Unlike the block above, these two are not missing
+# packages — they are names django-stubs declines to re-export from the module the
+# code imports them from. Both resolve at runtime; verified by importing each and
+# checking what comes back (`engines` is an `EngineHandler` instance,
+# `DatabaseOperationForbidden` is a class):
+#
+#   django.template.loader.engines                  -> llm/tests/test_templating.py
+#   django.test.testcases.DatabaseOperationForbidden -> tests/test_router_isolation.py
+#
+# Separate block because the exit condition is different: this one should be
+# re-checked on every django-stubs bump and deleted when the stubs export these,
+# whereas the optional-dependency block above is permanent.
+#
+# Deliberately NOT folded into the tests block above, even though both files are
+# tests it already matches. That block turns rules off for every test in the tree;
+# naming two files keeps a misspelled import in any OTHER test a failure.
+include = [
+    "llm/tests/test_templating.py",
+    "tests/test_router_isolation.py",
+]
+
+[tool.ty.overrides.rules]
+unresolved-import = "ignore"
 
 # ---------------------------------------------------------------------------
 [[tool.ty.overrides]]
