@@ -42,6 +42,15 @@ def test_deciding_hearing_is_picked_by_date_not_list_position():
     assert deciding_hearing([later, earlier]) == later
 
 
+def test_deciding_hearing_takes_the_latest_of_several_verdict_rows():
+    # Both rows pass the फैसला filter, so this can only pass by comparing
+    # dates -- neither decided[0] nor decided[-1] would satisfy both asserts.
+    first = {**DECIDED, "hearing_date_ad": "2024-01-01"}
+    last = {**DECIDED, "hearing_date_ad": "2024-06-04"}
+    assert deciding_hearing([first, last]) == last
+    assert deciding_hearing([last, first]) == last
+
+
 def test_deciding_hearing_ignores_non_deciding_rows():
     assert deciding_hearing([ADJOURNED]) is None
 
