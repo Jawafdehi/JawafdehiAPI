@@ -42,11 +42,17 @@ Usage:
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from casework.common.api import EntityAlreadyExists
+from casework.court_record import court_record_for_case
 from casework.entity_identity import entity_slug, prefix_is_creatable
 from casework.entity_resolver import normalise_name
+from casework.enrich_related_entities import (
+    bind_key,
+    merge_entity_binds,
+    validate_bind_item,
+)
 from courts.case_status import parse_case_status
 from jawafdehi_shared.entities.ids import (
     build_entity_iri,
@@ -276,3 +282,113 @@ def resolve_defendant(api, name, row_nes_id, *, citation, live_prefixes,
         return Resolution("", "failed", f"could not create the entity ({type(exc).__name__})")
     run_entities[key] = iri
     return Resolution(iri, "created")
+
+
+@dataclass
+class CasePlan:
+    """The write for one case, or the reason there isn't one."""
+    slug: str
+    status: str
+    fields: list = field(default_factory=list)
+    entities: object = None          # merged full list, or None for "no change"
+    if_match: str = ""
+    rows: list = field(default_factory=list)
+    skips: list = field(default_factory=list)
+
+
+def bind_outcome(records):
+    """The `outcome` every defendant on this case gets.
+
+    ACQUITTED only when every decided reference decided `सफाई` -- a whole-case
+    acquittal, which applies to each defendant and can only ever correct an
+    unfairly plain "Accused" label. Everything else is CHARGED, which is true by
+    construction: CIAA filed a charge sheet on every case in this corpus.
+
+    Never `convicted`. `ठहर` on a 19-defendant case does not say who, and
+    `आंशिक ठहर` means some were convicted and some cleared.
+    """
+    dispositions = [
+        (deciding_hearing(r.get("hearings")) or {}).get("decision_type") or ""
+        for r in records
+    ]
+    decided = [d for d in dispositions if d]
+    if decided and all(ACQUITTAL in d for d in decided):
+        return ACQUITTED
+    return CHARGED
+
+
+def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run):
+    """`(items, rows)` -- one bind per named defendant, plus a report row each.
+
+    De-duplicated by name across every court reference on the case, order
+    preserved, exactly like `defendant_names` does.
+    """
+    outcome = bind_outcome(records)
+    citation = (records[0].get("detail") or {}).get("material_id", "") if records else ""
+    items, rows, seen = [], [], set()
+    for record in records:
+        for party in record.get("parties") or ():
+            if (party.get("side") or "").strip().lower() != "defendant":
+                continue
+            name = (party.get("name") or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            got = resolve_defendant(
+                api, name, party.get("nes_id"), citation=citation,
+                live_prefixes=live_prefixes, run_entities=run_entities,
+                dry_run=dry_run)
+            row = {"slug": case.get("slug"), "name": name, "how": got.how,
+                   "nes_id": got.nes_id, "outcome": outcome, "reason": got.reason,
+                   "court_case": f"{record['court']}/{record['number']}"}
+            rows.append(row)
+            if not got.nes_id:
+                continue
+            item = {"nes_id": got.nes_id, "relationship_type": "accused",
+                    "outcome": outcome,
+                    "notes": f"प्रतिवादी — विशेष अदालत मुद्दा {record['number']}"}
+            try:
+                items.append(validate_bind_item(item))
+            except ValueError as exc:
+                row.update(how="failed", reason=str(exc))
+    return items, rows
+
+
+def plan_case(api, case, etag, *, live_prefixes, run_entities, dry_run):
+    """Build the write for one case. Reads the court record; writes nothing."""
+    slug = case.get("slug") or ""
+    if (case.get("state") or "").upper() != REQUIRED_WRITE_STATE:
+        return CasePlan(slug, "skip-state",
+                        skips=[f"state is {case.get('state')!r}, not "
+                               f"{REQUIRED_WRITE_STATE}"])
+
+    records, skips = court_record_for_case(api, case)
+    if not records:
+        return CasePlan(slug, "no-court-reference", skips=skips)
+
+    fields = []
+    if not case.get("case_start_date"):
+        if start := start_date(records):
+            fields.append(("case_start_date", start))
+    if not case.get("case_end_date"):
+        end, why = end_date(records)
+        if end:
+            fields.append(("case_end_date", end))
+        elif why:
+            skips.append(f"case_end_date left empty: {why}")
+
+    items, rows = _accused_binds(
+        api, case, records, live_prefixes=live_prefixes,
+        run_entities=run_entities, dry_run=dry_run)
+
+    current = list(case.get("entities") or [])
+    merged = merge_entity_binds(current, items)
+    # `merge_entity_binds` appends only what is missing, so an unchanged length
+    # means every proposed bind was already present -- send no list at all
+    # rather than a destructive replace with identical contents.
+    have = {bind_key(b) for b in current}
+    entities = merged if any(bind_key(i) not in have for i in items) else None
+
+    status = "would-patch" if (fields or entities is not None) else "nothing-to-do"
+    return CasePlan(slug, status, fields=fields, entities=entities,
+                    if_match=etag or "", rows=rows, skips=skips)

@@ -285,3 +285,113 @@ def test_is_person_never_raises_on_a_malformed_iri():
     assert _is_person("not-a-valid-iri") is False
     assert _is_person("") is False
     assert _is_person(None) is False
+
+
+from casework.enrich_court_record import ACQUITTED, CHARGED, bind_outcome, plan_case  # noqa: E402
+
+CASE_IRI = "https://jawafdehi.org/courtcase/special/079-cr-0151"
+
+
+class _PlanApi(_SearchApi):
+    def __init__(self, detail=None, hearings=(), parties=(), **kw):
+        super().__init__(**kw)
+        self._detail, self._hearings, self._parties = detail or {}, list(hearings), list(parties)
+
+    def get_courtcase(self, court, number, timeout=60):
+        return self._detail
+
+    def list_hearings(self, court, number, timeout=60):
+        return self._hearings
+
+    def get_court_case_entities(self, court, number, timeout=60):
+        return self._parties
+
+
+def _case(**over):
+    base = {"slug": "case-079-cr-0151", "state": "DRAFT", "court_cases": [CASE_IRI],
+            "case_start_date": None, "case_end_date": None, "entities": []}
+    base.update(over)
+    return base
+
+
+def _plan(api, case, **kw):
+    kw.setdefault("live_prefixes", ["person"])
+    kw.setdefault("run_entities", {})
+    kw.setdefault("dry_run", True)
+    return plan_case(api, case, 'W/"7"', **kw)
+
+
+def test_a_whole_case_acquittal_labels_every_defendant_acquitted():
+    assert bind_outcome([_record(hearings=[DECIDED])]) == ACQUITTED
+
+
+def test_a_conviction_still_labels_defendants_charged():
+    convicted = {**DECIDED, "decision_type": "ठहर"}
+    assert bind_outcome([_record(hearings=[convicted])]) == CHARGED
+
+
+def test_a_partial_conviction_labels_defendants_charged():
+    partial = {**DECIDED, "decision_type": "आंशिक ठहर"}
+    assert bind_outcome([_record(hearings=[partial])]) == CHARGED
+
+
+def test_an_undecided_case_labels_defendants_charged():
+    assert bind_outcome([_record(status="विचाराधीन")]) == CHARGED
+
+
+def test_the_plan_carries_both_dates_and_the_accused_binds():
+    api = _PlanApi(
+        detail={"registration_date_ad": "2023-06-22"},
+        hearings=[DECIDED],
+        parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव", "nes_id": YADAV},
+                 {"side": "plaintiff", "name": "नेपाल सरकार"}],
+    )
+    plan = _plan(api, _case())
+    assert dict(plan.fields) == {"case_start_date": "2023-06-22",
+                                 "case_end_date": "2024-06-04"}
+    assert plan.entities == [{"nes_id": YADAV, "relationship_type": "accused",
+                              "outcome": ACQUITTED,
+                              "notes": "प्रतिवादी — विशेष अदालत मुद्दा 079-cr-0151"}]
+    assert plan.status == "would-patch"
+
+
+def test_a_plaintiff_is_never_bound():
+    api = _PlanApi(detail={"registration_date_ad": "2023-06-22"},
+                   parties=[{"side": "plaintiff", "name": "नेपाल सरकार"}])
+    assert _plan(api, _case()).entities is None
+
+
+def test_an_existing_bind_survives_untouched():
+    existing = {"nes_id": YADAV, "relationship_type": "accused",
+                "outcome": "convicted", "notes": "hand-written by a caseworker"}
+    api = _PlanApi(detail={"registration_date_ad": "2023-06-22"},
+                   parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव",
+                             "nes_id": YADAV}])
+    plan = _plan(api, _case(entities=[existing]))
+    # Same (nes_id, relationship_type) -> already present -> nothing to write.
+    assert plan.entities is None
+
+
+def test_a_populated_date_is_never_overwritten():
+    api = _PlanApi(detail={"registration_date_ad": "2023-06-22"}, hearings=[DECIDED])
+    plan = _plan(api, _case(case_start_date="2020-01-01", case_end_date="2021-01-01"))
+    assert plan.fields == []
+
+
+def test_a_case_with_nothing_to_change_is_a_skip():
+    api = _PlanApi(detail={}, parties=[])
+    plan = _plan(api, _case())
+    assert plan.status == "nothing-to-do"
+    assert plan.fields == [] and plan.entities is None
+
+
+def test_a_case_with_no_court_reference_reports_why():
+    plan = _plan(_PlanApi(), _case(court_cases=[]))
+    assert plan.status == "no-court-reference"
+    assert "no court reference" in plan.skips[0]
+
+
+def test_a_non_draft_case_is_refused():
+    plan = _plan(_PlanApi(detail={"registration_date_ad": "2023-06-22"}),
+                 _case(state="PUBLISHED"))
+    assert plan.status == "skip-state"
