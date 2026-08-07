@@ -48,6 +48,9 @@ def test_build_query_is_bilingual_and_hits_translit():
     assert _recall_multi_match(body)["type"] == "most_fields"
     # Per-type facet aggregation present.
     assert "by_index" in body["aggs"]
+    # Count past OpenSearch's default 10,000-hit cap rather than a "gte" lower
+    # bound presented as an exact count.
+    assert body["track_total_hits"] is True
 
 
 def test_build_query_has_exact_phrase_title_boost():
