@@ -89,3 +89,130 @@ def test_end_date_takes_the_latest_when_every_reference_decided():
     ]
     value, _ = end_date(records)
     assert value == "2025-01-15"
+
+
+from casework.common.api import EntityAlreadyExists  # noqa: E402
+from casework.entity_identity import entity_slug  # noqa: E402
+from casework.enrich_court_record import (  # noqa: E402
+    PERSON_PREFIX,
+    exact_person_match,
+    resolve_defendant,
+)
+from jawafdehi_shared.entities.ids import build_entity_iri  # noqa: E402
+
+YADAV = "https://jawafdehi.org/entity/person/krishna-prasad-yadav"
+ORG = "https://jawafdehi.org/entity/organization/krishna-prasad-yadav"
+
+
+class _SearchApi:
+    def __init__(self, results=(), created=None):
+        self.results, self.created, self.posted = list(results), created, []
+
+    def search_entities(self, query, **kwargs):
+        return self.results
+
+    def create_entity(self, payload, timeout=60):
+        self.posted.append(payload)
+        if isinstance(self.created, Exception):
+            raise self.created
+        return self.created or {"@id": YADAV}
+
+
+def _hit(nes_id, ne):
+    return {"id": nes_id, "title": {"ne": ne}}
+
+
+def test_a_row_carrying_an_nes_id_is_a_pure_copy():
+    api = _SearchApi()
+    got = resolve_defendant(api, "कृष्ण प्रसाद यादव", YADAV, citation="",
+                            live_prefixes=["person"], run_entities={}, dry_run=True)
+    assert (got.nes_id, got.how) == (YADAV, "nes_id")
+    assert api.posted == []
+
+
+def test_one_exact_person_match_binds():
+    api = _SearchApi([_hit(YADAV, "कृष्ण प्रसाद यादव")])
+    got = resolve_defendant(api, "कृष्ण प्रसाद यादव", None, citation="",
+                            live_prefixes=["person"], run_entities={}, dry_run=True)
+    assert (got.nes_id, got.how) == (YADAV, "exact")
+
+
+def test_two_entities_with_the_same_exact_name_do_not_bind():
+    # The namesake case. NES holds 13 rows for "संजय प्रसाद यादव".
+    twin = "https://jawafdehi.org/entity/person/krishna-prasad-yadav-2"
+    api = _SearchApi([_hit(YADAV, "कृष्ण प्रसाद यादव"), _hit(twin, "कृष्ण प्रसाद यादव")])
+    nes_id, reason = exact_person_match(api, "कृष्ण प्रसाद यादव")
+    assert nes_id == ""
+    assert "2 person entities" in reason
+
+
+def test_a_non_person_entity_is_never_an_exact_match():
+    api = _SearchApi([_hit(ORG, "कृष्ण प्रसाद यादव")])
+    nes_id, reason = exact_person_match(api, "कृष्ण प्रसाद यादव")
+    assert nes_id == ""
+    assert "no person entity" in reason
+
+
+def test_a_near_match_is_not_a_match():
+    # कमला (feminine) must never satisfy कमल (masculine). The scored resolver
+    # gives this 0.96 through the English title; equality gives it nothing.
+    api = _SearchApi([_hit("https://jawafdehi.org/entity/person/kamala-thapa",
+                           "कमला थापा")])
+    nes_id, _ = exact_person_match(api, "कमल थापा")
+    assert nes_id == ""
+
+
+def test_no_match_creates_the_entity_and_binds_it():
+    api = _SearchApi(results=[], created={"@id": YADAV})
+    got = resolve_defendant(api, "कृष्ण प्रसाद यादव", None,
+                            citation="https://jawafdehi.org/material/court/special.079-cr-0151",
+                            live_prefixes=["person"], run_entities={}, dry_run=False)
+    assert (got.nes_id, got.how) == (YADAV, "created")
+    assert api.posted[0]["prefix"] == "person"
+    assert api.posted[0]["type"] == "Person"
+    assert api.posted[0]["name"] == "कृष्ण प्रसाद यादव"
+
+
+def test_a_dry_run_posts_nothing_but_reports_the_iri_it_would_use():
+    api = _SearchApi(results=[])
+    got = resolve_defendant(api, "कृष्ण प्रसाद यादव", None, citation="",
+                            live_prefixes=["person"], run_entities={}, dry_run=True)
+    assert got.how == "created"
+    assert got.nes_id.startswith("https://jawafdehi.org/entity/person/")
+    assert api.posted == []
+
+
+def test_the_same_person_across_two_cases_creates_one_entity():
+    api = _SearchApi(results=[], created={"@id": YADAV})
+    run_entities = {}
+    for _ in range(2):
+        resolve_defendant(api, "कृष्ण प्रसाद यादव", None, citation="",
+                          live_prefixes=["person"], run_entities=run_entities,
+                          dry_run=False)
+    assert len(api.posted) == 1
+
+
+def test_an_existing_iri_collision_binds_the_existing_entity():
+    # The stub raises before returning anything, so `resolve_defendant` never
+    # reads the exception's payload -- a real 409 body is an opaque error blob,
+    # not a clean IRI. What it keeps is the IRI it computed BEFORE the POST,
+    # which by construction of a same-slug collision IS the entity that was
+    # already there. `EntityAlreadyExists(YADAV)`'s argument is therefore
+    # unread by design; expressed here as the actual `entity_slug` output
+    # rather than `YADAV` itself, whose hand-picked spelling drops the schwas
+    # `entity_slug` keeps (`कृष्ण प्रसाद यादव` -> `krishna-prasada-yadava`, not
+    # `krishna-prasad-yadav`).
+    api = _SearchApi(results=[], created=EntityAlreadyExists(YADAV))
+    got = resolve_defendant(api, "कृष्ण प्रसाद यादव", None, citation="",
+                            live_prefixes=["person"], run_entities={}, dry_run=False)
+    assert got.how == "created"
+    assert got.nes_id == build_entity_iri(PERSON_PREFIX,
+                                          entity_slug("कृष्ण प्रसाद यादव"))
+
+
+def test_a_name_that_cannot_be_slugged_fails_without_raising():
+    api = _SearchApi(results=[])
+    got = resolve_defendant(api, "   ", None, citation="",
+                            live_prefixes=["person"], run_entities={}, dry_run=True)
+    assert (got.nes_id, got.how) == ("", "failed")
+    assert got.reason

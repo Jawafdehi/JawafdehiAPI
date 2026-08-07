@@ -42,8 +42,17 @@ Usage:
 """
 
 import logging
+from dataclasses import dataclass
 
+from casework.common.api import EntityAlreadyExists
+from casework.entity_identity import entity_slug, prefix_is_creatable
+from casework.entity_resolver import normalise_name
 from courts.case_status import parse_case_status
+from jawafdehi_shared.entities.ids import (
+    build_entity_iri,
+    is_valid_entity_iri,
+    parse_entity_iri,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,3 +138,109 @@ def end_date(records):
         return "", ("not every court reference has decided (still open: "
                     + ", ".join(undecided) + ")")
     return max(ends), ""
+
+
+@dataclass(frozen=True)
+class Resolution:
+    """One defendant name's outcome. `how` is the ladder rung it settled on."""
+    nes_id: str
+    how: str
+    reason: str = ""
+
+
+def _is_person(nes_id):
+    """Whether this IRI names a person entity.
+
+    `startswith`, not equality: NES nests person categories (`person/politician`),
+    and every one of them is still a person.
+    """
+    try:
+        return parse_entity_iri(nes_id).prefix.split("/")[0] == PERSON_PREFIX
+    except Exception:  # noqa: BLE001 - a malformed IRI is simply not a person
+        return False
+
+
+def exact_person_match(api, name):
+    """`(nes_id, reason)` -- the ONE person entity whose name is identical, or "".
+
+    Equality after `normalise_name` (NFC, punctuation and case folded), not a
+    similarity score. Two entities sharing that exact name is an ambiguity and
+    binds nothing: NES holds 13 rows for `संजय प्रसाद यादव`, and picking one by
+    score is how a corruption case names the wrong person.
+    """
+    wanted = normalise_name(name)
+    if not wanted:
+        return "", "empty name"
+    hits = {}
+    for result in api.search_entities(name) or ():
+        nes_id = (result.get("id") or "").strip()
+        if not is_valid_entity_iri(nes_id) or not _is_person(nes_id):
+            continue
+        titles = (result.get("title") or {})
+        if any(normalise_name(t) == wanted for t in (titles.get("ne"), titles.get("en")) if t):
+            hits[nes_id] = True
+    if len(hits) == 1:
+        return next(iter(hits)), ""
+    if len(hits) > 1:
+        return "", f"{len(hits)} person entities carry this exact name"
+    return "", "no person entity carries this exact name"
+
+
+def resolve_defendant(api, name, row_nes_id, *, citation, live_prefixes,
+                      run_entities, dry_run):
+    """Turn one court-record defendant name into an NES entity id.
+
+    The ladder, top to bottom:
+      1. the court row's own `nes_id`  -- a pure copy, no judgment
+      2. exactly one person entity with that identical name
+      3. create the entity from the court record
+
+    `run_entities` maps a normalised name to an IRI already created THIS RUN and
+    is shared across cases on purpose: without it, two cases naming the same
+    defendant create two entities. Nothing here raises -- a name that cannot
+    become an entity is reported and the case keeps its other defendants.
+    """
+    row_nes_id = (row_nes_id or "").strip()
+    if row_nes_id and is_valid_entity_iri(row_nes_id):
+        return Resolution(row_nes_id, "nes_id")
+
+    matched, why = exact_person_match(api, name)
+    if matched:
+        return Resolution(matched, "exact")
+
+    key = normalise_name(name)
+    if key in run_entities:
+        return Resolution(run_entities[key], "created", "reused from this run")
+
+    if not prefix_is_creatable(PERSON_PREFIX, live_prefixes):
+        return Resolution("", "failed", f"{why}; the person prefix is not creatable")
+    slug = entity_slug(name)
+    if not slug:
+        return Resolution("", "failed", f"{why}; the name cannot be slugged")
+
+    iri = build_entity_iri(PERSON_PREFIX, slug)
+    if dry_run:
+        # POST nothing, but report the IRI an --apply run would use, so the
+        # printed patch is the one that would be sent.
+        run_entities[key] = iri
+        return Resolution(iri, "created", "would create")
+
+    # `slug` is sent explicitly, not left for the server to derive: the create
+    # view's `normalize_authoring_payload` (entities/write_validation.py)
+    # raises "slug is required" on a payload missing it, since it has no `@id`
+    # to fall back on. Omitting it would 422 every single creation, which the
+    # brief's own stub-backed tests cannot catch because the stub never
+    # validates a payload shape.
+    payload = {"prefix": PERSON_PREFIX, "slug": slug, "type": PERSON_TYPE, "name": name}
+    if citation:
+        payload["citation"] = citation
+    try:
+        created = api.create_entity(payload)
+        iri = (created or {}).get("@id") or iri
+    except EntityAlreadyExists:
+        # The IRI is taken, which means the entity we wanted already exists.
+        pass
+    except Exception as exc:  # noqa: BLE001 - one failed POST costs this name, not the case
+        return Resolution("", "failed", f"could not create the entity ({type(exc).__name__})")
+    run_entities[key] = iri
+    return Resolution(iri, "created")
