@@ -91,10 +91,13 @@ def test_end_date_takes_the_latest_when_every_reference_decided():
     assert value == "2025-01-15"
 
 
+import urllib.error  # noqa: E402
+
 from casework.common.api import EntityAlreadyExists  # noqa: E402
 from casework.entity_identity import entity_slug  # noqa: E402
 from casework.enrich_court_record import (  # noqa: E402
     PERSON_PREFIX,
+    _is_person,
     exact_person_match,
     resolve_defendant,
 )
@@ -104,12 +107,23 @@ YADAV = "https://jawafdehi.org/entity/person/krishna-prasad-yadav"
 ORG = "https://jawafdehi.org/entity/organization/krishna-prasad-yadav"
 
 
+class _Results(list):
+    """A plain list plus `.complete`, standing in for `CandidateList`."""
+    complete = False
+
+
 class _SearchApi:
-    def __init__(self, results=(), created=None):
+    def __init__(self, results=(), created=None, complete=False):
         self.results, self.created, self.posted = list(results), created, []
+        # Cautious by default, matching `CandidateList`'s own default: a test
+        # that wants a bind on a single hit must say `complete=True` itself
+        # rather than get it for free from an unmarked plain list.
+        self.complete = complete
 
     def search_entities(self, query, **kwargs):
-        return self.results
+        results = _Results(self.results)
+        results.complete = self.complete
+        return results
 
     def create_entity(self, payload, timeout=60):
         self.posted.append(payload)
@@ -131,14 +145,30 @@ def test_a_row_carrying_an_nes_id_is_a_pure_copy():
 
 
 def test_one_exact_person_match_binds():
-    api = _SearchApi([_hit(YADAV, "कृष्ण प्रसाद यादव")])
+    # A COMPLETE window with one hit is the clean case: nothing else can be
+    # hiding, so the match is safe to bind.
+    api = _SearchApi([_hit(YADAV, "कृष्ण प्रसाद यादव")], complete=True)
     got = resolve_defendant(api, "कृष्ण प्रसाद यादव", None, citation="",
                             live_prefixes=["person"], run_entities={}, dry_run=True)
     assert (got.nes_id, got.how) == (YADAV, "exact")
 
 
+def test_a_single_hit_from_an_incomplete_window_does_not_bind():
+    # Same premise as the two-namesake test below, caught one page earlier.
+    # `संजय प्रसाद यादव` fills a full 50-row page and stops on relevance, so a
+    # lone hit inside an INCOMPLETE window can have a dozen unseen twins just
+    # past the edge -- exactly the failure this ladder exists to prevent.
+    # `_SearchApi` defaults to `complete=False`, so this is the plain case.
+    api = _SearchApi([_hit(YADAV, "कृष्ण प्रसाद यादव")])
+    nes_id, reason = exact_person_match(api, "कृष्ण प्रसाद यादव")
+    assert nes_id == ""
+    assert "incomplete" in reason
+
+
 def test_two_entities_with_the_same_exact_name_do_not_bind():
-    # The namesake case. NES holds 13 rows for "संजय प्रसाद यादव".
+    # The namesake case. NES holds 13 rows for "संजय प्रसाद यादव". Two CONFIRMED
+    # hits are ambiguous regardless of window completeness, so this is written
+    # against the (default) incomplete window on purpose.
     twin = "https://jawafdehi.org/entity/person/krishna-prasad-yadav-2"
     api = _SearchApi([_hit(YADAV, "कृष्ण प्रसाद यादव"), _hit(twin, "कृष्ण प्रसाद यादव")])
     nes_id, reason = exact_person_match(api, "कृष्ण प्रसाद यादव")
@@ -216,3 +246,42 @@ def test_a_name_that_cannot_be_slugged_fails_without_raising():
                             live_prefixes=["person"], run_entities={}, dry_run=True)
     assert (got.nes_id, got.how) == ("", "failed")
     assert got.reason
+
+
+def test_a_search_failure_fails_only_this_name():
+    # `search_entities` -> `CaseworkApi.get` -> `_request` can raise
+    # `urllib.error.HTTPError` on a transient 502; one bad row out of a case's
+    # several defendants must not kill the run that is processing the rest.
+    class _FlakyApi(_SearchApi):
+        def search_entities(self, query, **kwargs):
+            raise urllib.error.HTTPError("https://jawafdehi.org", 502,
+                                         "Bad Gateway", {}, None)
+
+    got = resolve_defendant(_FlakyApi(), "कृष्ण प्रसाद यादव", None, citation="",
+                            live_prefixes=["person"], run_entities={}, dry_run=True)
+    assert got.how == "failed"
+    assert got.reason
+
+
+def test_is_person_recognises_a_nested_person_category():
+    # `person/politician` is a category NES nests under `person`, and it must
+    # still count as a person -- the whole reason `_is_person` compares only
+    # the first slash-segment rather than the whole prefix.
+    assert _is_person(YADAV) is True
+    assert _is_person(build_entity_iri("person/politician", "some-slug")) is True
+
+
+def test_is_person_refuses_a_lookalike_prefix_and_other_types():
+    # `personnel` shares a spelling prefix with `person` but is not one -- the
+    # case a literal `startswith` would get wrong. A nested non-person prefix
+    # (`organization/government`) must be refused too.
+    assert _is_person(build_entity_iri("personnel", "someone")) is False
+    assert _is_person(
+        build_entity_iri("organization/government", "ministry-of-example")
+    ) is False
+
+
+def test_is_person_never_raises_on_a_malformed_iri():
+    assert _is_person("not-a-valid-iri") is False
+    assert _is_person("") is False
+    assert _is_person(None) is False

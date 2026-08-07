@@ -151,8 +151,12 @@ class Resolution:
 def _is_person(nes_id):
     """Whether this IRI names a person entity.
 
-    `startswith`, not equality: NES nests person categories (`person/politician`),
-    and every one of them is still a person.
+    Compares only the IRI's FIRST slash-segment, not the whole prefix and not
+    `startswith`: NES nests person categories (`person/politician`), and every
+    one of them is still a person, so plain equality against `PERSON_PREFIX`
+    would wrongly refuse them. A literal `startswith` check goes too far the
+    other way -- it would also match an unrelated `personnel/...` prefix --
+    which `.split("/")[0] ==` does not.
     """
     try:
         return parse_entity_iri(nes_id).prefix.split("/")[0] == PERSON_PREFIX
@@ -167,23 +171,47 @@ def exact_person_match(api, name):
     similarity score. Two entities sharing that exact name is an ambiguity and
     binds nothing: NES holds 13 rows for `संजय प्रसाद यादव`, and picking one by
     score is how a corruption case names the wrong person.
+
+    A SINGLE hit is refused too, when it came from an incomplete search
+    window. `CaseworkApi.search_entities` returns a `CandidateList` whose
+    `.complete` is False when paging stopped on relevance rather than running
+    out of rows -- `संजय प्रसाद यादव` fills a full 50-row page and stops there
+    on relevance, and same-title rows do not score identically (that name's
+    own duplicates sit at 130.981 and 130.564), so a block of namesakes can
+    straddle the page edge. One of them landing inside the fetched window then
+    looks "unique" while its twins sit unseen just past it -- the exact
+    failure this ladder exists to prevent. The asymmetry is why this fails
+    cautious rather than optimistic: a true match sitting outside the window
+    just becomes a duplicate entity (a merge), but a truncated window
+    promoting a namesake to "unique" binds the wrong person to a corruption
+    case (a defamation). `getattr(..., "complete", False)` so a plain list --
+    what a stub or a hand-built candidate list returns -- gets the cautious
+    answer by default.
     """
     wanted = normalise_name(name)
     if not wanted:
         return "", "empty name"
+    results = api.search_entities(name) or ()
+    complete = getattr(results, "complete", False)
     hits = {}
-    for result in api.search_entities(name) or ():
+    for result in results:
+        if not isinstance(result, dict):
+            continue
         nes_id = (result.get("id") or "").strip()
         if not is_valid_entity_iri(nes_id) or not _is_person(nes_id):
             continue
-        titles = (result.get("title") or {})
+        titles = result.get("title") or {}
         if any(normalise_name(t) == wanted for t in (titles.get("ne"), titles.get("en")) if t):
             hits[nes_id] = True
-    if len(hits) == 1:
-        return next(iter(hits)), ""
+    if not hits:
+        return "", "no person entity carries this exact name"
     if len(hits) > 1:
         return "", f"{len(hits)} person entities carry this exact name"
-    return "", "no person entity carries this exact name"
+    if not complete:
+        return "", ("exactly one exact match, but the search window is "
+                    "incomplete: a namesake could be sitting just past the "
+                    "edge where this check could not see it")
+    return next(iter(hits)), ""
 
 
 def resolve_defendant(api, name, row_nes_id, *, citation, live_prefixes,
@@ -198,13 +226,18 @@ def resolve_defendant(api, name, row_nes_id, *, citation, live_prefixes,
     `run_entities` maps a normalised name to an IRI already created THIS RUN and
     is shared across cases on purpose: without it, two cases naming the same
     defendant create two entities. Nothing here raises -- a name that cannot
-    become an entity is reported and the case keeps its other defendants.
+    become an entity is reported and the case keeps its other defendants. That
+    covers the search read too: one transient 502 on one of a case's several
+    defendant rows costs that row, not the run.
     """
     row_nes_id = (row_nes_id or "").strip()
     if row_nes_id and is_valid_entity_iri(row_nes_id):
         return Resolution(row_nes_id, "nes_id")
 
-    matched, why = exact_person_match(api, name)
+    try:
+        matched, why = exact_person_match(api, name)
+    except Exception as exc:  # noqa: BLE001 - one bad search costs this name, not the case
+        return Resolution("", "failed", f"could not search for a match ({type(exc).__name__})")
     if matched:
         return Resolution(matched, "exact")
 
@@ -225,12 +258,11 @@ def resolve_defendant(api, name, row_nes_id, *, citation, live_prefixes,
         run_entities[key] = iri
         return Resolution(iri, "created", "would create")
 
-    # `slug` is sent explicitly, not left for the server to derive: the create
-    # view's `normalize_authoring_payload` (entities/write_validation.py)
-    # raises "slug is required" on a payload missing it, since it has no `@id`
-    # to fall back on. Omitting it would 422 every single creation, which the
-    # brief's own stub-backed tests cannot catch because the stub never
-    # validates a payload shape.
+    # `slug` is sent explicitly, not left for the server to derive:
+    # `normalize_authoring_payload` raises "slug is required" on a payload
+    # missing it, since it has no `@id` to fall back on. Omitting it would 422
+    # every single creation, which the brief's own stub-backed tests cannot
+    # catch because the stub never validates a payload shape.
     payload = {"prefix": PERSON_PREFIX, "slug": slug, "type": PERSON_TYPE, "name": name}
     if citation:
         payload["citation"] = citation
