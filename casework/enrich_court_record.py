@@ -50,6 +50,7 @@ from casework.entity_identity import entity_slug, prefix_is_creatable
 from casework.entity_resolver import normalise_name
 from casework.enrich_related_entities import (
     bind_key,
+    current_entity_binds,
     merge_entity_binds,
     validate_bind_item,
 )
@@ -296,23 +297,56 @@ class CasePlan:
     skips: list = field(default_factory=list)
 
 
+def _reference_disposition(record):
+    """`(decided, is_plain_acquittal)` for one court reference.
+
+    `decided` reuses `_reference_end`'s own truth -- non-empty means decided --
+    so this function and `_reference_end` (and therefore `bind_outcome` and
+    `end_date`) can never disagree about whether a reference has concluded. A
+    reference decided only through the `case_status` paren-date fallback (29
+    cases in the census carry only that source, per `_reference_end`'s own
+    docstring) carries no outcome text at all, so it is `decided` but never
+    `is_plain_acquittal` -- conservative in the direction this function
+    already leans, since CHARGED is the default outcome throughout.
+
+    `is_plain_acquittal` is read off the deciding hearing's `decision_type`
+    ONLY, and only when that free-text cell says `सफाई` and nothing else
+    qualifies it. The hearings API returns raw portal text, and this corpus
+    contains compounds that qualify the word rather than standing alone (e.g.
+    `आदेश >> आंशिक कसुर ठहर सजाय निर्धारणको लागि पेश गर्ने`). `courts.case_status`'s
+    own hearing-decision map puts `आंशिक` first for exactly this reason -- a
+    bare substring test on `ठहर` once recorded 593 court_cases as a full
+    CONVICTED from a cell that actually said `आंशिक ...ठहर`. The same care
+    applies here: a cell naming `आंशिक` or `ठहर` alongside `सफाई` is not a plain
+    acquittal, so it is refused rather than guessed at.
+    """
+    decided = bool(_reference_end(record))
+    text = (deciding_hearing(record.get("hearings")) or {}).get("decision_type") or ""
+    plain_acquittal = bool(text) and ACQUITTAL in text and "आंशिक" not in text and "ठहर" not in text
+    return decided, plain_acquittal
+
+
 def bind_outcome(records):
     """The `outcome` every defendant on this case gets.
 
-    ACQUITTED only when every decided reference decided `सफाई` -- a whole-case
-    acquittal, which applies to each defendant and can only ever correct an
-    unfairly plain "Accused" label. Everything else is CHARGED, which is true by
-    construction: CIAA filed a charge sheet on every case in this corpus.
+    ACQUITTED only when EVERY court reference on the case has decided AND every
+    one of those decisions was a plain `सफाई` -- a whole-case acquittal, which
+    applies to each defendant and can only ever correct an unfairly plain
+    "Accused" label. Everything else is CHARGED, which is true by construction:
+    CIAA filed a charge sheet on every case in this corpus.
+
+    A single undecided reference must not acquit the rest: half-decided is not
+    decided here any more than it is in `end_date`, and stamping ACQUITTED on a
+    case that is still being heard is the opposite of true. `_reference_disposition`
+    is what keeps the two functions from disagreeing about what "decided" means.
 
     Never `convicted`. `ठहर` on a 19-defendant case does not say who, and
     `आंशिक ठहर` means some were convicted and some cleared.
     """
-    dispositions = [
-        (deciding_hearing(r.get("hearings")) or {}).get("decision_type") or ""
-        for r in records
-    ]
-    decided = [d for d in dispositions if d]
-    if decided and all(ACQUITTAL in d for d in decided):
+    dispositions = [_reference_disposition(r) for r in records]
+    if (dispositions
+            and all(decided for decided, _ in dispositions)
+            and all(acquitted for _, acquitted in dispositions)):
         return ACQUITTED
     return CHARGED
 
@@ -362,6 +396,20 @@ def plan_case(api, case, etag, *, live_prefixes, run_entities, dry_run):
                         skips=[f"state is {case.get('state')!r}, not "
                                f"{REQUIRED_WRITE_STATE}"])
 
+    if "entities" not in case:
+        # `case.get("entities") or []` cannot tell "this case has no binds"
+        # from "this payload does not carry binds at all" (a trimmed dict from
+        # a list endpoint, a projected read). Merging against a false-empty
+        # `current` would produce a fully-shaped, validly-formed `entities`
+        # list containing only the NEW binds -- which PATCHes clean and
+        # silently deletes every bind the case actually has. Refused outright,
+        # matching `enrich_related_entities.plan_case_entities`'s own guard for
+        # the identical hazard.
+        return CasePlan(slug, "no-entities-key",
+                        skips=["case payload has no 'entities' key -- absent "
+                               "is not empty; refusing to plan a write from "
+                               "an incomplete read"])
+
     records, skips = court_record_for_case(api, case)
     if not records:
         return CasePlan(slug, "no-court-reference", skips=skips)
@@ -381,7 +429,18 @@ def plan_case(api, case, etag, *, live_prefixes, run_entities, dry_run):
         api, case, records, live_prefixes=live_prefixes,
         run_entities=run_entities, dry_run=dry_run)
 
-    current = list(case.get("entities") or [])
+    # `current_entity_binds`, NOT the raw `case["entities"]` list: the read
+    # shape keys the relationship type under `type`, and `relationship_type`
+    # never appears on a read at all. Merging against the raw list means
+    # `bind_key` reads every existing bind as `(nes_id, "")`, so an
+    # already-present accused bind never matches the proposed one --
+    # `merge_entity_binds` then appends a SECOND bind for the same person, the
+    # merged rows carry no `relationship_type` at all (a 400 from
+    # `EntityPatchItemSerializer` on every case that already has any bind), and
+    # the existing `outcome` gets re-sent instead of staying dropped. The
+    # translator produces the PATCH shape and deliberately drops `outcome`, so
+    # an existing verdict is preserved rather than reset.
+    current = current_entity_binds(case)
     merged = merge_entity_binds(current, items)
     # `merge_entity_binds` appends only what is missing, so an unchanged length
     # means every proposed bind was already present -- send no list at all

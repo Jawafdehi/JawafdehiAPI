@@ -339,6 +339,39 @@ def test_an_undecided_case_labels_defendants_charged():
     assert bind_outcome([_record(status="विचाराधीन")]) == CHARGED
 
 
+def test_a_decided_reference_plus_an_undecided_one_is_charged():
+    # One reference decided सफाई, the other still open. Half-decided is not
+    # decided -- the same doctrine `end_date` already applies -- so this must
+    # not acquit a case that is still being heard.
+    records = [_record(hearings=[DECIDED]), _record(status="विचाराधीन")]
+    assert bind_outcome(records) == CHARGED
+
+
+def test_a_decided_acquittal_plus_a_conviction_is_charged():
+    convicted = {**DECIDED, "decision_type": "ठहर"}
+    records = [_record(hearings=[DECIDED]), _record(hearings=[convicted])]
+    assert bind_outcome(records) == CHARGED
+
+
+def test_a_reference_decided_only_via_case_status_cannot_acquit():
+    # This reference decided (the paren-date form parses to a date), but
+    # carries no hearing row and therefore no outcome text at all -- it can
+    # never be confirmed a plain acquittal, so mixed with a सफाई hearing on
+    # the other reference the case still reads CHARGED.
+    records = [_record(hearings=[DECIDED]),
+               _record(status="फैसला (मिती: २०८१/०२/२२)")]
+    assert bind_outcome(records) == CHARGED
+
+
+def test_a_qualified_acquittal_cell_is_not_a_plain_acquittal():
+    # The corpus contains compounds that qualify सफाई rather than standing
+    # alone. A bare substring test on सफाई would wrongly acquit here, the same
+    # class of bug `courts.case_status` fixed for ठहर (593 court_cases once
+    # recorded CONVICTED from a cell that actually said आंशिक ...ठहर).
+    qualified = {**DECIDED, "decision_type": "आंशिक सफाई"}
+    assert bind_outcome([_record(hearings=[qualified])]) == CHARGED
+
+
 def test_the_plan_carries_both_dates_and_the_accused_binds():
     api = _PlanApi(
         detail={"registration_date_ad": "2023-06-22"},
@@ -362,7 +395,12 @@ def test_a_plaintiff_is_never_bound():
 
 
 def test_an_existing_bind_survives_untouched():
-    existing = {"nes_id": YADAV, "relationship_type": "accused",
+    # The REAL read shape: the relationship type comes back under `type`, and
+    # `relationship_type` never appears on a read at all. A fixture written
+    # with `relationship_type` directly would pass even if `plan_case` merged
+    # against the raw read list instead of `current_entity_binds` -- which is
+    # exactly the bug this shape catches.
+    existing = {"nes_id": YADAV, "type": "accused",
                 "outcome": "convicted", "notes": "hand-written by a caseworker"}
     api = _PlanApi(detail={"registration_date_ad": "2023-06-22"},
                    parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव",
@@ -395,3 +433,20 @@ def test_a_non_draft_case_is_refused():
     plan = _plan(_PlanApi(detail={"registration_date_ad": "2023-06-22"}),
                  _case(state="PUBLISHED"))
     assert plan.status == "skip-state"
+
+
+def test_a_case_payload_missing_the_entities_key_is_refused():
+    # `case.get("entities") or []` cannot tell "no binds" from "this payload
+    # does not carry binds at all" -- a trimmed dict from a list endpoint, say.
+    # Merging against a false-empty `current` would PATCH a valid `entities`
+    # list holding only the new binds, silently deleting every one the case
+    # actually has. Must refuse outright rather than plan that write.
+    case = _case()
+    del case["entities"]
+    api = _PlanApi(detail={"registration_date_ad": "2023-06-22"},
+                   parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव",
+                             "nes_id": YADAV}])
+    plan = _plan(api, case)
+    assert plan.status == "no-entities-key"
+    assert plan.entities is None
+    assert "entities" in plan.skips[0]
