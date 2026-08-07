@@ -14,6 +14,7 @@ from casework.entity_resolver import (
     ELECTION_RECORD_MARKERS,
     MIN_BIND_SCORE,
     NO_MATCH,
+    _name_vetoes,
     PROVINCE_NAME_FORMS,
     REVIEW,
     apply_document_veto,
@@ -688,7 +689,15 @@ def test_resolve_still_binds_on_names_alone_and_takes_no_document():
     # is "nothing that implies I/O", asserted directly below rather than by an
     # exact list that any harmless addition breaks.
     params = list(inspect.signature(resolve).parameters)
-    assert params == ["extracted_name", "candidates", "candidates_complete"]
+    assert params[:2] == ["extracted_name", "candidates"]
+    # Everything after the first two must be a plain flag the caller already
+    # knows -- no api, no document, no fetcher, nothing that implies a read.
+    for extra in params[2:]:
+        # Annotations are strings in this module (postponed evaluation).
+        assert inspect.signature(resolve).parameters[extra].annotation in (
+            bool, "bool"), (
+            f"{extra!r} is not a plain bool -- I/O must stay out of resolve()")
+    assert not {"api", "document", "fetch", "session", "client"} & set(params)
     forbidden = ("document", "api", "client", "session", "fetch", "get", "url")
     assert not [p for p in params if any(word in p for word in forbidden)]
 
@@ -1066,3 +1075,159 @@ def test_the_devanagari_title_is_preferred_when_both_are_present():
         "अनिष श्रेष्ठ", "Anish Shrestha")
     # And it still binds that way -- this fix must not break Latin extractions.
     assert resolve("Anish Shrestha", [candidate]).verdict == BIND
+
+
+# --------------------------------------------------------------------------
+# A district name is one token, and that is not a weakness.
+#
+# The single-token veto exists because a lone token is a weak anchor in an open
+# name space -- one surname, one word of a firm's name. Districts are the
+# opposite: a closed gazetteer of 77, ingested with official codes
+# (location/district/jhapa-np0104), where the whole name IS one token. Vetoing
+# them means the location section can never bind anything, which is what the
+# 2026-08-06 extraction hardening found once the prompt stopped gluing an
+# activity onto the front of every place name.
+# --------------------------------------------------------------------------
+
+
+def test_a_single_token_district_name_binds_its_gazetteer_entry():
+    district = _candidate(
+        "https://jawafdehi.org/entity/location/district/kathmandu-np0261",
+        ne="काठमाडौं", en="Kathmandu")
+    decision = resolve("काठमाडौं", [district])
+    assert decision.verdict == BIND
+    assert decision.nes_id.endswith("/location/district/kathmandu-np0261")
+
+
+def test_a_single_token_province_name_binds_too():
+    province = _candidate(
+        "https://jawafdehi.org/entity/location/province/koshi-np01",
+        ne="कोशी", en="Koshi")
+    assert resolve("कोशी", [province]).verdict == BIND
+
+
+def test_the_exemption_does_not_reach_the_bare_location_prefix():
+    # `location/` holds countries and hand-added places with no gazetteer code.
+    # A lone token there is the weak anchor the veto was written for -- and
+    # `test_single_token_name_goes_to_review` pins the country case.
+    place = _candidate("https://jawafdehi.org/entity/location/kathamadaum-98646f",
+                       ne="काठमाडौं")
+    decision = resolve("काठमाडौं", [place])
+    assert decision.verdict == REVIEW
+    assert "single token" in decision.reason
+
+
+def test_the_exemption_does_not_reach_organisations():
+    org = _candidate("https://jawafdehi.org/entity/organization/kathamadaum",
+                     ne="काठमाडौं")
+    assert resolve("काठमाडौं", [org]).verdict == REVIEW
+
+
+def test_a_composite_name_is_still_vetoed_against_a_district():
+    # The exemption is for the single-token rule only. `घरजग्गा सम्पत्ति -
+    # काठमाडौं` describes seized property; matching it to Kathmandu district
+    # would assert the description IS the district.
+    district = _candidate(
+        "https://jawafdehi.org/entity/location/district/kathmandu-np0261",
+        ne="काठमाडौं", en="Kathmandu")
+    decision = resolve("घरजग्गा सम्पत्ति - काठमाडौं", [district])
+    assert decision.verdict != BIND
+    # Refused on score here, before the veto is consulted -- but the veto is
+    # still armed behind it, and it is the one the CREATE gate relies on.
+    assert "composite" in _name_vetoes("घरजग्गा सम्पत्ति - काठमाडौं",
+                                       district["id"])
+
+
+def test_name_vetoes_without_a_candidate_still_refuses_a_single_token():
+    # The create gate calls it with no candidate at all
+    # (`enrich_related_entities._cannot_create`). Nothing to exempt against,
+    # so every veto stays on.
+    assert "single token" in _name_vetoes("काठमाडौं")
+    assert _name_vetoes("काठमाडौं", None) == _name_vetoes("काठमाडौं")
+
+
+# --------------------------------------------------------------------------
+# Preferring the coded gazetteer entry when NES holds a place twice.
+#
+# Production run c92ad032 bound `झापा` to BOTH `location/district/jhapa-np0104`
+# and `location/jhapa`, each scoring 146.20, so one district reached the case as
+# two rows. Only the location section asks for this: elsewhere two entities
+# scoring alike is a real ambiguity, not a duplicate.
+#
+# The preference is score-aware. It picks among candidates that ALREADY qualify,
+# so a coded entry scoring below the threshold can never displace an un-coded
+# one that scored above it.
+# --------------------------------------------------------------------------
+
+
+_JHAPA_CODED = "https://jawafdehi.org/entity/location/district/jhapa-np0104"
+_JHAPA_BARE = "https://jawafdehi.org/entity/location/jhapa"
+
+
+def test_the_coded_district_wins_when_nes_holds_the_place_twice():
+    coded = _candidate(_JHAPA_CODED, ne="झापा")
+    bare = _candidate(_JHAPA_BARE, ne="झापा")
+    decision = resolve("झापा", [coded, bare], prefer_gazetteer=True)
+    assert decision.verdict == BIND
+    assert decision.nes_id == _JHAPA_CODED
+
+
+def test_without_the_preference_the_duplicate_is_still_an_ambiguity():
+    # The default is unchanged, so `related` and every other section keeps
+    # treating two qualifying entities as the ambiguity it usually is.
+    coded = _candidate(_JHAPA_CODED, ne="झापा")
+    bare = _candidate(_JHAPA_BARE, ne="झापा")
+    decision = resolve("झापा", [coded, bare])
+    assert decision.verdict == REVIEW
+    assert "ambiguous" in decision.reason
+
+
+def test_the_preference_leaves_an_uncoded_only_place_alone():
+    # NES has no `location/district/kathmandu-*`. Kathmandu exists only as
+    # `location/kathamadaum-98646f`, so there is nothing to prefer and the
+    # single-token veto still applies exactly as before.
+    bare = _candidate("https://jawafdehi.org/entity/location/kathamadaum-98646f",
+                      ne="काठमाडौं")
+    decision = resolve("काठमाडौं", [bare], prefer_gazetteer=True)
+    assert decision.verdict == REVIEW
+    assert "single token" in decision.reason
+
+
+def test_two_coded_districts_are_still_a_real_ambiguity():
+    # The preference narrows the field; it never invents a winner.
+    a = _candidate("https://jawafdehi.org/entity/location/district/jhapa-np0104",
+                   ne="झापा")
+    b = _candidate("https://jawafdehi.org/entity/location/district/jhapa-np0105",
+                   ne="झापा")
+    decision = resolve("झापा", [a, b], prefer_gazetteer=True)
+    assert decision.verdict == REVIEW
+    assert "ambiguous" in decision.reason
+
+
+def test_a_low_scoring_coded_entry_never_displaces_a_qualifying_one():
+    # THE TRAP THIS AVOIDS. Filtering candidates before scoring would hand the
+    # bind to a coded entry that matched badly, or drop to NO_MATCH entirely.
+    # The preference runs AFTER scoring, over the qualifying set only.
+    # Two tokens, so the single-token rule stays out of the way and this test
+    # pins the preference alone. Both IRIs are real: NES returns them for
+    # `कैलाली`.
+    coded_wrong = _candidate(
+        "https://jawafdehi.org/entity/location/district/sarlahi-np0219",
+        ne="सर्लाही")
+    bare_right = _candidate(
+        "https://jawafdehi.org/entity/location/dhanagadhi-kailali-f174bf",
+        ne="धनगढी, कैलाली")
+    decision = resolve("धनगढी, कैलाली", [coded_wrong, bare_right],
+                       prefer_gazetteer=True)
+    assert decision.verdict == BIND
+    assert decision.nes_id == (
+        "https://jawafdehi.org/entity/location/dhanagadhi-kailali-f174bf")
+
+
+def test_the_preference_reports_every_candidate_it_considered():
+    # The dropped duplicate still reaches the report, so a caseworker can see
+    # that NES holds the place twice.
+    coded = _candidate(_JHAPA_CODED, ne="झापा")
+    bare = _candidate(_JHAPA_BARE, ne="झापा")
+    decision = resolve("झापा", [coded, bare], prefer_gazetteer=True)
+    assert {row[1] for row in decision.candidates} == {_JHAPA_CODED, _JHAPA_BARE}

@@ -132,7 +132,7 @@ flowchart LR
 | tags | `enrich_tags` | `tags` | `patch_field` | yes ¹ | cheap |
 | timeline | `enrich_timeline` | `timeline` | `patch_field` | yes ¹ | premium |
 | allegations | `enrich_allegations` | `key_allegations` | `patch_field` | yes ¹ | premium |
-| entities | `enrich_related_entities` | `entities` | `patch_field` | yes ¹ | premium |
+| entities | `enrich_related_entities` | `entities` (+ NES entities with `--create-entities`) | `patch_field`, `POST /api/entities` | yes ¹ | premium |
 | ledger | `ledger` | ledger JSON (local file) | none (reads run logs) | local file | — |
 
 ¹ Remote write requires **`--apply` + `--allow-remote-writes` + `--api-token`** together.
@@ -154,6 +154,18 @@ Each run gets a `run_id` and writes two files under `work/enricher-runs/`
 
 - `…-<stage>-<run_id>.log` — human-readable, UTC-timestamped
 - `…-<stage>-<run_id>.events.jsonl` — one JSON event per case/step
+
+`enrich_related_entities` writes five more, sharing that stem. The first two are the
+answer to "what did the model actually find", which the counts in the log do not give
+you — they survive a run that binds nothing:
+
+| File | Holds |
+|------|-------|
+| `.extracted.jsonl` | Every extracted name with its section and notes, per case |
+| `.accused_notes.jsonl` | The `accused_notes` array |
+| `.binds.jsonl` | Each bind, with the candidates that lost |
+| `.created.jsonl` | Each entity created or refused, with the reason |
+| `.nomatch.md` | Names still unmatched, grouped, with a Role column |
 
 `ledger.py` folds all `*.events.jsonl` into a **current-state ledger** keyed by
 `(slug, stage)`, latest-by-timestamp, ignoring non-outcome statuses
@@ -382,10 +394,76 @@ uv run python -m casework.enrich_missing_bigo \
 | tags | `uv run python -m casework.enrich_tags --dry-run` | `… --apply` (add `--no-llm` for rules-only) |
 | timeline | `uv run python -m casework.enrich_timeline --dry-run` | `… --apply` |
 | allegations | `uv run python -m casework.enrich_allegations --dry-run` | `… --apply` |
-| entities | `uv run python -m casework.enrich_related_entities --dry-run` | `… --apply` |
+| entities | `uv run python -m casework.enrich_related_entities --dry-run` | `… --apply` (add `--create-entities` to create missing NES entities) |
 
 For every "Apply (loopback)" cell above, the **remote/production** form adds:
 `--api-base-url https://api.jawafdehi.org --api-token "$JAWAFDEHI_API_TOKEN" --allow-remote-writes`.
+
+#### Creating the NES entities a case needs — `--create-entities`
+
+`enrich_related_entities` binds extracted names to NES entities that already exist.
+Most do not: production run `645b1483` (case 078-CR-0038) extracted 13 names and
+matched **none**, because NES holds almost no institution a CIAA court order names.
+
+`--create-entities` creates them, then binds them. It is **off by default and
+never implied by `--apply`**, so upgrading the enricher cannot make an existing
+`--apply` run start writing to NES. It does not override the dry run either —
+without `--apply` the flag only reports what it would create.
+
+```bash
+# Dry run: reports every entity it would create, creates nothing
+uv run python -m casework.enrich_related_entities \
+    --slug case-078-cr-0038-ciaa-special-court-case-078-cr-9a \
+    --create-entities --dry-run
+
+# Write to production. --allow-remote-writes is only the guard; the write still
+# needs somewhere to go and something to authenticate with
+uv run python -m casework.enrich_related_entities --batch-csv batch.csv \
+    --create-entities --apply \
+    --api-base-url https://api.jawafdehi.org \
+    --api-token "$JAWAFDEHI_API_TOKEN" --allow-remote-writes
+```
+
+Read `*.created.jsonl` before an apply. Its `outcome` column is the whole story:
+
+| Outcome | Meaning |
+|---------|---------|
+| `created` | The POST succeeded and the entity is bound to the case |
+| `would-create` | Dry run: eligible to create, but nothing was POSTed and nothing bound. An `--apply` run would create it |
+| `already-exists` | Someone got there first (409); bound to theirs |
+| `reused` | A name created earlier in this run under the same prefix |
+| `skipped` | One of the four gates below refused it; the `reason` column says which |
+| `error` | The POST failed; the name stays unmatched, the case keeps its other binds |
+
+#### What is allowed to become an entity
+
+Four gates run in front of every POST, cheapest and most categorical first. A refused
+name still **binds** whatever it matched — these gate creation only.
+
+| Gate | Refuses |
+|------|---------|
+| Section | Anything from the `location` section. NES already holds all 77 districts under official codes (`location/district/jhapa-np0104`), so a location created here is always a duplicate or junk |
+| Name shape | `_name_vetoes`: a composite `Activity - Location`, a lone token, an all-generic institution name |
+| `is_named_entity` | Anything the extraction did not confirm names one specific thing. A **missing** field refuses too |
+| Identity | No prefix, a prefix whose parent branch does not exist, or no slug |
+
+`is_named_entity` fails closed on purpose. A prompt regression that drops the field shows
+up as `0 created` in the summary, which is visible and fixable; defaulting the other way
+fills NES with entries nobody can delete.
+
+Three things to know before you run it:
+
+- **Entities are created with no sources.** `POST /api/entities` validates `@id`,
+  `@type` and `name` and nothing else; the 2-distinct-publisher rule lives in
+  `manage.py bulk_ingest`. Each entity carries a `citation` naming the document it
+  came from, which is one source, not two.
+- **An already-enriched case creates nothing.** The idempotency gate skips any case
+  already holding a `related` bind, before the create step runs. Use `--force`.
+- **The slug comes from the English name when there is one.** Most firms in these court
+  orders are English names written in Devanagari, and transliterating them back gives
+  `phareshta-debhalapamenta-enda-indashtrija` for "Forest Development and Industries".
+  The IRI is permanent, so `created.jsonl` carries a `name_en` column worth reading
+  before an apply.
 
 ### 4. Consolidate run logs — `ledger`
 

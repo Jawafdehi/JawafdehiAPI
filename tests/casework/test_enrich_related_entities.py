@@ -31,13 +31,14 @@ import logging
 import subprocess
 import sys
 import types
+import urllib.error
 from pathlib import Path
 
 import pytest
 
 from casework import enrich_related_entities as ere
 from casework.common.api import CandidateList, ENTITY_SEARCH_MAX_PAGES, ENTITY_SEARCH_PAGE_SIZE
-from casework.court_record import CHARGED
+from casework.common.api import EntityAlreadyExists
 from casework.enrich_related_entities import (
     PROMOTED_PREFIX,
     RELATIONSHIP_TYPES,
@@ -143,19 +144,36 @@ class TestDonorFidelity:
         # silent edit to them is the failure this class exists to catch.
         for anchor in ("PART 1 — LOCATION ENTITIES",
                        "DO NOT extract accused home addresses",
-                       'The entity_name should include context in the format: '
-                       '"Organisation/Activity - Location"',
                        "PART 3 — ACCUSED NOTES",
                        "Only include primary accused persons. Keep notes under 80 chars."):
             assert anchor in donor["SYSTEM_PROMPT"], "anchor is not donor text"
             assert anchor in ere.SYSTEM_PROMPT
+
+    def test_the_composite_location_name_is_a_deliberate_divergence(self, donor):
+        # THE ONE DONOR RULE WE REFUSE. The donor tells the model to name a
+        # location "Organisation/Activity - Location", which is why the
+        # 2026-08-05 production run extracted `घरजग्गा सम्पत्ति - काठमाडौं` -- a
+        # description of seized property -- and was about to mint it as an NES
+        # entity. The composite also scores 0.00 against the canonical district
+        # it was meant to name, so it bound nothing either.
+        #
+        # Asserted against the donor as well as against us: if the donor text
+        # ever changes, this stops being a divergence and the test should be
+        # revisited rather than silently passing.
+        composite_rule = ('The entity_name should include context in the format: '
+                          '"Organisation/Activity - Location"')
+        assert composite_rule in donor["SYSTEM_PROMPT"]
+        assert composite_rule not in ere.SYSTEM_PROMPT
 
     def test_system_prompt_offers_every_section_the_binder_can_write(self):
         # Without this, widening `plan_case_entities` to all nine sections is dead
         # code: the LLM never emits anything but the two the donor asked for.
         # Asserted against the prompt's own output-format line so the two cannot
         # drift apart.
-        offered = {"location", "related", "accused", "alleged", "witness"}
+        # `accused` is deliberately absent: this module no longer writes it
+        # (2026-08-06). Defendants come from the NGM court record, which states
+        # them instead of guessing -- see `validate_new_bind`.
+        offered = {"location", "related", "alleged", "witness"}
         format_line = next(
             line for line in ere.SYSTEM_PROMPT.splitlines()
             if line.strip().startswith('"relationship_type"'))
@@ -217,11 +235,19 @@ class TestDonorFidelity:
         source = _donor_source()
         assert 'api.create_entity(display_name=name, nes_id="")' in source
 
-    def test_donor_has_no_create_entity_method_on_current_api(self):
-        # CaseworkApi (this branch) genuinely has no create_entity method --
-        # confirms the donor's write path is not just discouraged but
-        # structurally impossible to call as written.
-        assert not hasattr(ere.CaseworkApi, "create_entity")
+    def test_the_donor_create_entity_call_is_still_impossible_to_make(self):
+        # `CaseworkApi` DOES have `create_entity` now -- the --create-entities
+        # step needs it. The donor's CALL remains impossible, which is what this
+        # guard was always about: it minted an entity from a `display_name` and a
+        # blank `nes_id`, with no prefix, no type and therefore no IRI. Ours takes
+        # the API's authoring payload and the IRI comes from prefix+slug, so the
+        # donor's signature raises instead of quietly creating a nameless entity.
+        import inspect
+
+        params = inspect.signature(ere.CaseworkApi.create_entity).parameters
+        assert "display_name" not in params
+        assert "nes_id" not in params
+        assert "payload" in params
 
 
 # --------------------------------------------------------------------------
@@ -868,7 +894,7 @@ def test_summary_reports_the_three_counts_separately(
               argv=["--dry-run"])
     out = capsys.readouterr().out
     assert "TOTAL entities extracted across all cases: 2" in out
-    assert "TOTAL entities that WOULD bind to cases (dry run, nothing written): 0" in out
+    assert "TOTAL that WOULD bind to an EXISTING NES entity (dry run, nothing written): 0" in out
     assert "TOTAL reported for human review:" in out
     assert "TOTAL with no NES match:" in out
     assert "bound zero" in out.lower()
@@ -931,7 +957,7 @@ def test_summary_uses_plan_summary_so_already_bound_names_do_not_vanish(
 
     out = capsys.readouterr().out
     assert "TOTAL entities extracted across all cases: 2" in out
-    assert "TOTAL entities bound to cases: 1" in out
+    assert "TOTAL bound to an EXISTING NES entity: 1" in out
     assert "TOTAL already bound (nothing to write): 1" in out
     assert "TOTAL reported for human review: 0" in out
     assert "TOTAL with no NES match: 0" in out
@@ -1171,6 +1197,33 @@ class _SearchStubApi(_StubApi):
         self.etag = 'W/"abc123"'
         self.search_calls = []
         self.get_entity_calls = []
+        # Entity creation. `create_entity_calls` records the payload as sent;
+        # `create_conflicts` holds `<prefix>/<slug>` values that answer as though
+        # the entity already exists, and `create_errors` maps one to the
+        # exception the POST should raise instead.
+        self.create_entity_calls = []
+        self.create_conflicts = set()
+        self.create_errors = {}
+        self.live_prefixes = [
+            "person",
+            "location", "location/district",
+            "organization", "organization/contractor",
+            "organization/government", "organization/government/department",
+            "organization/government/district/dfo",
+        ]
+
+    def entity_prefixes(self, timeout=60):
+        return list(self.live_prefixes)
+
+    def create_entity(self, payload, timeout=60):
+        self.create_entity_calls.append(dict(payload))
+        ref = f"{payload['prefix']}/{payload['slug']}"
+        if ref in self.create_errors:
+            raise self.create_errors[ref]
+        if ref in self.create_conflicts:
+            raise EntityAlreadyExists(f"Entity {ref} already exists")
+        return {"@id": f"https://jawafdehi.org/entity/{ref}",
+                "@type": payload.get("type"), "name": payload.get("name")}
 
     def search_entities(self, query, **kw):
         self.search_calls.append(query)
@@ -1262,9 +1315,10 @@ def test_strict_buckets_review_and_nomatch_separately():
 
 def test_permissive_binds_the_ambiguity_and_still_cannot_bind_a_nomatch():
     # The default mode's whole point, and its limit. An ambiguity between two
-    # same-name entities resolves to the first by the `(-score, nes_id)` sort and
-    # binds; a name with NO candidate stays in nomatch, because there is nothing
-    # to promote and this module may never create an NES entity.
+    # same-name entities binds BOTH of them (2026-08-05: no review queue, the
+    # later filtering pass decides which is real); a name with NO candidate stays
+    # in nomatch, because there is nothing to bind. Creating one is the create
+    # step's job and requires `--create-entities`.
     anish_a = {"id": "https://jawafdehi.org/entity/person/anish-shrestha-219986",
                "title": {"ne": "अनिष श्रेष्‍ठ"}, "score": 182.17}
     anish_b = {"id": "https://jawafdehi.org/entity/person/anish-shrestha-285096",
@@ -1279,11 +1333,14 @@ def test_permissive_binds_the_ambiguity_and_still_cannot_bind_a_nomatch():
         {"entity_name": "खगेन्द्र पराजुली", "relationship_type": "related", "notes": "ख"}])
 
     assert plan.action == "WOULD_PATCH"
-    assert len(plan.bound) == 1
+    assert len(plan.bound) == 2
     assert plan.review == []
     assert len(plan.nomatch) == 1
+    # Both namesakes bound, in the deterministic `(-score, nes_id)` order so a
+    # re-run produces the same list rather than a reshuffled one.
+    assert [d.nes_id for _n, d, _notes, _s in plan.bound] == [
+        anish_a["id"], anish_b["id"]]
     _name, decision, _notes, _section = plan.bound[0]
-    assert decision.nes_id == anish_a["id"]      # first by the deterministic sort
     assert is_promoted(decision)
     assert "ambiguous" in decision.reason
 
@@ -1317,53 +1374,41 @@ KAMALA_IRI = "https://jawafdehi.org/entity/person/kamala-thapa-4f21ac"
 KAMALA_LATIN_ONLY = {"id": KAMALA_IRI, "title": {"en": "Kamala Thapa"}, "score": 190.0}
 
 
-def test_permissive_mode_refuses_to_promote_a_cross_script_only_match():
-    # THE ONE VETO PERMISSIVE MODE LEAVES STANDING. Every other promotion binds a
-    # name that matched, on grounds outside the name; this one would bind a name
-    # that did not match at all -- कमला थापा is a woman, कमल थापा is a man, and
-    # only romanisation makes them equal. The extracted name must stay in review
-    # even though its top candidate scores 0.96, well over MIN_BIND_SCORE.
+def test_permissive_mode_now_binds_a_cross_script_only_match():
+    # WAS THE ONE VETO PERMISSIVE MODE LEFT STANDING, and it is gone by decision
+    # (2026-08-05): this stage produces no review queue.
+    #
+    # Keeping the original reasoning on the record, because the test no longer
+    # states it: every other promotion binds a name that matched on grounds
+    # outside the name, while this one binds a name that did not match at all.
+    # कमला थापा is a woman, कमल थापा is a man, and only romanisation makes them
+    # equal -- 0.96 across scripts, 0.00 within Devanagari. So this bind can name
+    # a different person than the case charges, and the later filtering pass is
+    # what catches it.
     case = {"slug": "case-kamal", "state": "DRAFT", "entities": []}
     api = _SearchStubApi([case], {"कमल थापा": [KAMALA_LATIN_ONLY]})
     plan = plan_case_entities(api, case, 'W/"e"', [
-        {"entity_name": "कमल थापा", "relationship_type": "accused", "notes": "क"}])
+        {"entity_name": "कमल थापा", "relationship_type": "related", "notes": "क"}])
 
-    assert plan.action == "NOOP"
-    assert plan.patch_items == []
-    assert plan.bound == []
-    assert len(plan.review) == 1
-    _name, decision, section = plan.review[0]
-    assert decision.nes_id is None
-    assert section == "accused"
-    assert "across scripts" in decision.reason
-    assert "not promoted" in decision.reason
-    # The candidate is preserved so a caseworker can confirm or reject it by hand;
-    # only the automatic bind is refused.
-    assert decision.candidates[0][1] == KAMALA_IRI
-    # And the document was never fetched: a name this module will not bind must
-    # not cost an HTTP round trip either.
-    assert api.get_entity_calls == []
+    assert plan.action == "WOULD_PATCH"
+    assert plan.review == []
+    assert [item["nes_id"] for item in plan.patch_items] == [KAMALA_IRI]
 
 
-def test_a_cross_script_match_is_refused_even_when_another_veto_reports_first():
-    # The reason `_promote_top_candidate` checks the CANDIDATE and not
-    # `decision.reason`. `resolve` reports only the first veto that fires, and
-    # ambiguity is checked before the cross-script guard -- so a name that is both
-    # comes back reading "ambiguous", and a reason-text check would promote it,
-    # restoring the exact wrong bind. Two Latin-only namesakes, both above
-    # threshold: the reason says ambiguous, the refusal must still happen.
+def test_a_cross_script_match_is_bound_even_when_another_veto_reports_first():
+    # Two Latin-only namesakes, both above threshold. `resolve` reports only the
+    # first veto that fires and ambiguity is checked before the cross-script
+    # guard, so the reason reads "ambiguous". Both now bind.
     second = {"id": "https://jawafdehi.org/entity/person/kamala-thapa-9b7e10",
               "title": {"en": "Kamala Thapa"}, "score": 188.0}
     case = {"slug": "case-kamal-2", "state": "DRAFT", "entities": []}
     api = _SearchStubApi([case], {"कमल थापा": [KAMALA_LATIN_ONLY, second]})
     plan = plan_case_entities(api, case, 'W/"e"', [
-        {"entity_name": "कमल थापा", "relationship_type": "accused", "notes": "क"}])
+        {"entity_name": "कमल थापा", "relationship_type": "related", "notes": "क"}])
 
-    assert plan.bound == []
-    _name, decision, _section = plan.review[0]
-    assert "ambiguous" in decision.reason      # the veto that reported
-    assert "not promoted" in decision.reason   # the refusal that still applies
-    assert decision.nes_id is None
+    assert plan.review == []
+    assert sorted(item["nes_id"] for item in plan.patch_items) == sorted(
+        [KAMALA_IRI, second["id"]])
 
 
 def test_a_same_script_candidate_is_still_promoted_over_its_veto():
@@ -1377,7 +1422,7 @@ def test_a_same_script_candidate_is_still_promoted_over_its_veto():
     case = {"slug": "case-kamal-3", "state": "DRAFT", "entities": []}
     api = _SearchStubApi([case], {"कमल थापा": [thapa_a, thapa_b]})
     plan = plan_case_entities(api, case, 'W/"e"', [
-        {"entity_name": "कमल थापा", "relationship_type": "accused", "notes": "क"}])
+        {"entity_name": "कमल थापा", "relationship_type": "related", "notes": "क"}])
 
     assert plan.review == []
     _name, decision, _notes, _section = plan.bound[0]
@@ -1393,7 +1438,7 @@ def test_strict_mode_also_refuses_a_cross_script_only_match():
     case = {"slug": "case-kamal-strict", "state": "DRAFT", "entities": []}
     api = _SearchStubApi([case], {"कमल थापा": [KAMALA_LATIN_ONLY]})
     plan = plan_case_entities(api, case, 'W/"e"', [
-        {"entity_name": "कमल थापा", "relationship_type": "accused", "notes": "क"}],
+        {"entity_name": "कमल थापा", "relationship_type": "related", "notes": "क"}],
         strict=True)
 
     assert plan.bound == []
@@ -1434,11 +1479,12 @@ def test_the_same_entity_and_section_twice_is_planned_once():
     assert len(plan.bound) == 1
 
 
-def test_an_accused_bind_never_escalates_an_already_characterised_entity():
-    # The most consequential bind this module can write, and the one it will not
-    # write on its own: the case already binds this person as `related`, and an
-    # `accused` bind would assert they are the subject of the case AND set
-    # outcome=charged. A human decides that, so it goes to review.
+def test_an_accused_extraction_never_touches_an_existing_bind():
+    # This used to be the escalation guard: an `accused` bind on an entity the
+    # case already binds as `related` would assert they are the subject of the
+    # case AND set outcome=charged, so it went to review. The guard is now moot
+    # -- accused never reaches the binder at all (2026-08-06, confirmed with
+    # Gaurav's supervisor: defendants come from the NGM court record).
     case = {"slug": "case-escalate", "state": "DRAFT", "entities": [
         {"nes_id": ANKUR_IRI, "type": "related", "notes": "मानव-लिखित टिप्पणी"}]}
     api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
@@ -1447,10 +1493,8 @@ def test_an_accused_bind_never_escalates_an_already_characterised_entity():
 
     assert plan.action == "NOOP"
     assert plan.bound == []
-    _name, decision, section = plan.review[0]
-    assert section == "accused"
-    assert "would escalate to 'accused'" in decision.reason
-    assert "'related'" in decision.reason          # names what the case already says
+    assert plan.review == []          # no review either -- there is nothing to decide
+    assert plan.court_record_only == [("अंकुर खत्री", "accused")]
     # The existing bind and its human note are untouched.
     assert plan.patch_items == []
 
@@ -1469,17 +1513,18 @@ def test_a_non_accused_section_does_join_an_already_characterised_entity():
         (SURKHET_IRI, "related"), (SURKHET_IRI, "location")]
 
 
-def test_an_accused_bind_is_written_when_the_entity_is_new_to_the_case():
-    # The guard keys on an EXISTING characterisation, so a first-time accused
-    # bind is unaffected -- this is the ordinary path and must stay open.
+def test_a_first_time_accused_is_not_written_either():
+    # Not a narrowing of the old escalation guard -- a removal of the path. Even
+    # with a clean case, an unambiguous name and a perfect match, nothing is
+    # written, because the court record already states who the defendants are.
     case = {"slug": "case-first-accused", "state": "DRAFT", "entities": []}
     api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
     plan = plan_case_entities(api, case, 'W/"e"', [
         {"entity_name": "अंकुर खत्री", "relationship_type": "accused", "notes": "क"}])
 
-    assert plan.action == "WOULD_PATCH"
-    assert plan.patch_items == [{"nes_id": ANKUR_IRI, "relationship_type": "accused",
-                                 "notes": "क", "outcome": "charged"}]
+    assert plan.action == "NOOP"
+    assert plan.patch_items == []
+    assert plan.court_record_only == [("अंकुर खत्री", "accused")]
 
 
 def test_each_review_row_reports_its_own_section():
@@ -1498,19 +1543,22 @@ def test_each_review_row_reports_its_own_section():
     assert [section for _n, _d, section in plan.review] == ["alleged", "witness"]
 
 
-def test_an_unrecognised_section_is_reported_verbatim_on_its_review_row():
-    # The row exists to tell a caseworker what the model actually said, so the raw
-    # value is what goes on it -- not "" and not a guessed section.
+def test_an_unrecognised_section_is_recorded_verbatim_when_it_is_coerced():
+    # WAS a review row carrying the raw value. The row is gone, but the raw value
+    # still has to be recoverable: a relabelled section is a claim nobody made,
+    # so `plan.coerced` keeps what the model actually said, lowercased.
+    #
+    # The name is now searched, where before the bad section short-circuited it.
+    # That is a real added cost -- one search request per coerced name -- and it
+    # is the price of not failing the whole case's PATCH on one bad label.
     case = {"slug": "case-bad-section", "state": "DRAFT", "entities": []}
     api = _SearchStubApi([case], {})
     plan = plan_case_entities(api, case, 'W/"e"', [
         {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "Suspect", "notes": "क"}])
 
-    _name, decision, section = plan.review[0]
-    assert section == "suspect"
-    assert "is not one of the" in decision.reason
-    # Refused before a search request was spent.
-    assert api.search_calls == []
+    assert plan.review == []
+    assert plan.coerced == [("अनिष श्रेष्ठ", "suspect", "related")]
+    assert api.search_calls != []
 
 
 # --- Correction 1: the document veto (Task 5's `apply_document_veto`) -----
@@ -1681,7 +1729,7 @@ def test_a_location_and_a_related_item_each_bind_into_their_own_section():
     assert len(plan.bound) == 2
 
 
-def test_an_accused_extraction_binds_as_accused_and_carries_the_charged_outcome():
+def test_an_accused_extraction_writes_nothing():
     # `accused` is the one section with an extra requirement: the DB's
     # `outcome_only_on_accused` CHECK makes `outcome` legal here and nowhere
     # else, and every case in this corpus is a Special Court `-CR-` case, so
@@ -1692,9 +1740,11 @@ def test_an_accused_extraction_binds_as_accused_and_carries_the_charged_outcome(
     plan = plan_case_entities(api, case, 'W/"e"', [
         {"entity_name": "अंकुर खत्री", "relationship_type": "accused", "notes": "क"}])
 
-    assert plan.action == "WOULD_PATCH"
-    assert plan.patch_items == [{"nes_id": ANKUR_IRI, "relationship_type": "accused",
-                                 "outcome": CHARGED, "notes": "क"}]
+    # No bind, and therefore no `outcome` -- which is the point. `outcome` is
+    # legal only on an accused bind, so with the section gone this module can
+    # never send one.
+    assert plan.action == "NOOP"
+    assert plan.patch_items == []
 
 
 # --------------------------------------------------------------------------
@@ -1731,42 +1781,35 @@ def test_a_valid_section_binds_however_the_llm_cased_it(relationship_type, expec
 
 
 @pytest.mark.parametrize("relationship_type", ["", "organization", "Related party", None])
-def test_a_section_the_api_does_not_accept_reviews_without_searching(relationship_type):
-    # There is no section to bind these into, and guessing one would file the
-    # entity under a relationship nobody asserted. Refused BEFORE any search, so
-    # a malformed extraction costs no request.
+def test_a_section_the_api_does_not_accept_is_coerced_and_still_binds(relationship_type):
+    # WAS refused before any search, so a malformed extraction cost no request.
+    # Now coerced to `related` and bound: one unaccepted section fails the whole
+    # case's PATCH, so the name that would have been held is the cheap loss and
+    # every other bind on the case is the expensive one.
     case = {"slug": "case-scope", "state": "DRAFT", "entities": []}
     api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
     plan = plan_case_entities(api, case, 'W/"e"', [
         {"entity_name": "अंकुर खत्री", "relationship_type": relationship_type,
          "notes": "क"}])
 
-    assert plan.action == "NOOP"
-    assert plan.patch_items == []
-    assert plan.bound == []
-    assert len(plan.review) == 1
-    name, decision, _section = plan.review[0]
-    assert name == "अंकुर खत्री"
-    assert decision.nes_id is None
-    assert api.search_calls == []
-    assert api.get_entity_calls == []
+    assert plan.action == "WOULD_PATCH"
+    assert plan.review == []
+    assert [item["relationship_type"] for item in plan.patch_items] == ["related"]
+    assert [c[1] for c in plan.coerced] == [(relationship_type or "").strip().lower()]
 
 
-
-
-def test_plan_treats_a_missing_relationship_type_as_out_of_scope():
-    # The allow-list's other half: a missing key must fail the same way as an
-    # explicit "location" -- previously this was "safe" only because a filter
-    # in the unrelated `main()` function happened to drop such items first, a
-    # coupling this planner should not have to rely on.
+def test_plan_coerces_a_missing_relationship_type_rather_than_holding_it():
+    # The allow-list's other half: a missing key coerces the same way an
+    # unrecognised string does, so the planner never depends on `main()` having
+    # filtered such items out first.
     case = {"slug": "case-missing-type", "state": "DRAFT", "entities": []}
     api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
     plan = plan_case_entities(api, case, 'W/"e"', [
         {"entity_name": "अंकुर खत्री", "notes": "क"}])  # no relationship_type at all
 
-    assert plan.action == "NOOP"
-    assert len(plan.review) == 1
-    assert api.search_calls == []
+    assert plan.action == "WOULD_PATCH"
+    assert plan.review == []
+    assert plan.coerced == [("अंकुर खत्री", "", "related")]
 
 
 # --- Item 2 (important): a case payload with no "entities" key -----------
@@ -1999,9 +2042,9 @@ def test_nomatch_report_ranks_by_how_many_cases_a_name_appears_in(tmp_path):
     def d():
         return Decision(NM, None, 0.0, "", "no NES entity scored high enough", ())
 
-    rows = [("जिल्ला शिक्षा कार्यालय, दाङ", "case-a", d()),
-            ("जिल्ला शिक्षा कार्यालय, दाङ", "case-b", d()),
-            ("गुल्बा कोरी", "case-c", d())]
+    rows = [("जिल्ला शिक्षा कार्यालय, दाङ", "case-a", d(), "related"),
+            ("जिल्ला शिक्षा कार्यालय, दाङ", "case-b", d(), "related"),
+            ("गुल्बा कोरी", "case-c", d(), "accused")]
     out = tmp_path / "run.nomatch.md"
     write_nomatch_report(out, rows)
     text = out.read_text(encoding="utf-8")
@@ -2019,15 +2062,16 @@ def test_nomatch_report_escapes_table_breaking_characters(tmp_path):
     from casework.entity_resolver import Decision
 
     rows = [("मालपोत | कार्यालय", "case-a",
-             Decision(NM, None, 0.42, "जिल्ला\nकार्यालय", "no match", ()))]
+             Decision(NM, None, 0.42, "जिल्ला\nकार्यालय", "no match", ()),
+             "related")]
     out = tmp_path / "run.nomatch.md"
     write_nomatch_report(out, rows)
 
     row = next(line for line in out.read_text(encoding="utf-8").splitlines()
                if "मालपोत" in line)
-    # Four columns means four separators plus the two bounding ones; an unescaped
-    # pipe or newline would change that count.
-    assert row.count("|") - row.count(r"\|") == 5
+    # Five columns means five separators plus the bounding one; an unescaped pipe
+    # or newline would change that count.
+    assert row.count("|") - row.count(r"\|") == 6
     assert r"मालपोत \| कार्यालय" in row
     assert "जिल्ला कार्यालय" in row      # the newline became a space
     assert "\n" not in row
@@ -2104,8 +2148,8 @@ def test_nomatch_report_keeps_the_best_scoring_candidate_in_a_group(tmp_path):
     weak = Decision(NM, None, 0.40, "कमजोर मिल्दोजुल्दो", "no NES entity scored high enough", ())
     strong = Decision(NM, None, 0.83, "उत्तम मिल्दोजुल्दो", "no NES entity scored high enough", ())
     rows = [
-        ("जिल्ला शिक्षा कार्यालय, दाङ", "case-a", weak),
-        ("जिल्ला शिक्षा कार्यालय, दाङ", "case-b", strong),
+        ("जिल्ला शिक्षा कार्यालय, दाङ", "case-a", weak, "related"),
+        ("जिल्ला शिक्षा कार्यालय, दाङ", "case-b", strong, "related"),
     ]
     out = tmp_path / "run.nomatch.md"
     write_nomatch_report(out, rows)
@@ -2174,7 +2218,7 @@ def test_plan_summary_reconciles_on_the_ordinary_bind_review_nomatch_split():
     # `already_bound` subtraction and drive it negative, which is what the three
     # court-record keys that used to sit here existed to avoid.
     assert summary == {
-        "extracted": 3, "bound": 1, "review": 1, "nomatch": 1, "already_bound": 0,
+        "extracted": 3, "bound": 1, "review": 1, "nomatch": 1, "created": 0, "already_bound": 0,
     }
 
 
@@ -2200,8 +2244,12 @@ def test_plan_summary_reconciles_when_permissive_mode_promotes_the_ambiguity():
     ]
     plan = plan_case_entities(api, case, 'W/"e"', extracted_items)
 
+    # bound=3 from 3 names: अंकुर once, अनिष TWICE (both namesakes qualify). The
+    # buckets deliberately no longer sum to `extracted` -- `bound` counts rows,
+    # and `already_bound` is derived from names that produced no row at all, so
+    # the old subtraction's -1 cannot come back.
     assert plan_summary(plan, extracted_items) == {
-        "extracted": 3, "bound": 2, "review": 0, "nomatch": 1, "already_bound": 0,
+        "extracted": 3, "bound": 3, "review": 0, "nomatch": 1, "created": 0, "already_bound": 0,
     }
 
 
@@ -2297,7 +2345,7 @@ def test_a_failed_write_leaves_no_bound_row_and_no_bound_claim(
     out = capsys.readouterr().out
 
     assert "  BOUND " not in out
-    assert "TOTAL entities bound to cases: 0" in out
+    assert "TOTAL bound to an EXISTING NES entity: 0" in out
     assert api.replace_list_calls == []
     assert Path(_report_files()["binds"]).read_text(encoding="utf-8") == ""
     statuses = [r["status"] for r in report.rows if r["slug"] == "case-write-fails"]
@@ -2348,12 +2396,13 @@ def test_dry_run_bind_rows_are_marked_unwritten(
 
     binds = [json.loads(line) for line
              in Path(_report_files()["binds"]).read_text(encoding="utf-8").splitlines()]
-    # Two rows in the default mode: the clean match, plus the promoted ambiguity.
-    # Both must be marked unwritten -- a promoted bind is still only a prediction
-    # in a dry run.
-    assert [b["written"] for b in binds] == [False, False]
+    # THREE rows in the default mode: the clean match, plus BOTH namesakes of the
+    # ambiguity. Every one marked unwritten -- a promoted bind is still only a
+    # prediction in a dry run.
+    assert [b["written"] for b in binds] == [False, False, False]
     assert api.replace_list_calls == []
-    assert [b["reason"].startswith(PROMOTED_PREFIX) for b in binds] == [False, True]
+    assert [b["reason"].startswith(PROMOTED_PREFIX) for b in binds] == [
+        False, True, True]
 
 
 TWO_SECTION_RESPONSE = json.dumps({
@@ -2413,7 +2462,7 @@ def test_dry_run_refuses_what_apply_refuses_instead_of_promising_a_bind(
     assert "WOULD BIND" not in out
     assert "WOULD REFUSE" in out
     assert "no ETag" in out
-    assert "TOTAL entities that WOULD bind to cases (dry run, nothing written): 0" in out
+    assert "TOTAL that WOULD bind to an EXISTING NES entity (dry run, nothing written): 0" in out
     statuses = [r["status"] for r in report.rows if r["slug"] == "case-dry-no-etag"]
     assert statuses == ["would-refuse"]
     assert Path(_report_files()["binds"]).read_text(encoding="utf-8") == ""
@@ -2498,3 +2547,1270 @@ def test_apply_over_a_case_that_already_has_a_bind_writes_both_rows(
          "notes": "तत्कालीन अध्यक्ष"},
         {"nes_id": ANKUR_IRI, "relationship_type": "related", "notes": "क"},
     ]
+
+
+# --------------------------------------------------------------------------
+# Extraction visibility -- what the model said, for every extracted name.
+#
+# Motivated by production run 645b1483 (2026-08-05, case 078-CR-0038): 13
+# entities extracted, 0 bind, 0 review, 13 no-match. The run recorded COUNTS
+# only, so the one thing a caseworker needed -- what each of the 13 names was
+# said to BE -- reached no file. `bound` and `review` rows already carry their
+# section; `nomatch` dropped it, and nothing recorded the extraction itself.
+# --------------------------------------------------------------------------
+
+
+def _nomatch_decision(score=0.0, near=""):
+    from casework.entity_resolver import NO_MATCH as NM
+    from casework.entity_resolver import Decision
+
+    return Decision(NM, None, score, near, "no NES entity scored high enough", ())
+
+
+def test_nomatch_rows_carry_the_section_they_were_extracted_under():
+    # The section is the most useful triage field on an unresolved row: it says
+    # whether the missing NES entity is an accused person or a district office.
+    # `bound` and `review` carry it for a documented reason -- two extracted
+    # items can name the same person under different sections, so it cannot be
+    # recovered from the name afterwards. That reasoning applies here unchanged.
+    case = {"slug": "case-nomatch-sections", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [],
+                                  "वन निर्देशनालय, धनगढी": []})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "हेम राज बिष्ट", "relationship_type": "related",
+         "notes": "क"},
+        {"entity_name": "वन निर्देशनालय, धनगढी", "relationship_type": "location",
+         "notes": "ख"}], strict=True)
+
+    assert [(name, section) for name, _decision, section in plan.nomatch] == [
+        ("हेम राज बिष्ट", "related"),
+        ("वन निर्देशनालय, धनगढी", "location"),
+    ]
+
+
+def test_nomatch_report_shows_the_section_for_each_unmatched_name(tmp_path):
+    # The report IS the caseworker's queue for creating NES entities. Creating a
+    # person and creating a district office are different jobs, and the queue
+    # could not tell them apart.
+    rows = [("हेम राज बिष्ट", "case-a", _nomatch_decision(), "related"),
+            ("वन निर्देशनालय, धनगढी", "case-b", _nomatch_decision(), "location")]
+    out = tmp_path / "run.nomatch.md"
+    write_nomatch_report(out, rows)
+
+    lines = out.read_text(encoding="utf-8").splitlines()
+    assert "related" in next(line for line in lines if "हेम राज" in line)
+    assert "location" in next(line for line in lines if "निर्देशनालय" in line)
+
+
+def test_nomatch_report_lists_every_section_a_grouped_name_appeared_under(tmp_path):
+    # The report groups by normalised name across cases, so one group can hold
+    # rows extracted under different sections. Showing only the first would tell
+    # a caseworker the name is a location when another case called it accused.
+    rows = [("सुर्खेत जिल्ला", "case-a", _nomatch_decision(), "location"),
+            ("सुर्खेत जिल्ला", "case-b", _nomatch_decision(), "related")]
+    out = tmp_path / "run.nomatch.md"
+    write_nomatch_report(out, rows)
+
+    row = next(line for line in out.read_text(encoding="utf-8").splitlines()
+               if "सुर्खेत" in line)
+    assert "location" in row and "related" in row
+
+
+def test_report_paths_includes_the_new_sidecars():
+    paths = {"log": "/tmp/20260805T121433Z-entities-645b1483.log"}
+    out = report_paths(paths)
+    stem = "20260805T121433Z-entities-645b1483"
+    assert out["extracted"].endswith(f"{stem}.extracted.jsonl")
+    assert out["accused_notes"].endswith(f"{stem}.accused_notes.jsonl")
+    assert out["created"].endswith(f"{stem}.created.jsonl")
+
+
+NOTHING_RESOLVES_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "हेम राज बिष्ट", "relationship_type": "related",
+         "notes": "तत्कालीन प्रमुख"},
+        {"entity_name": "मानस नर्सरी, धनगढी", "relationship_type": "related",
+         "notes": "ठेक्का पाएको फर्म"},
+    ],
+    "accused_notes": [
+        {"name": "हेम राज बिष्ट", "notes": "वन अधिकृत, वन निर्देशनालय धनगढी"},
+    ],
+})
+
+
+def test_extraction_sidecar_records_every_name_when_nothing_resolves(
+    monkeypatch, patched_fetch_markdown
+):
+    # The run that motivated this: every extracted name failed to resolve, so
+    # binds.jsonl and review.jsonl were both empty and the $0.34 the extraction
+    # cost bought a report of counts. The sidecar is the only place the model's
+    # own answer survives a zero-bind run.
+    case = dict(PRESS_ONLY_CASE, slug="case-nothing-resolves", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [], "मानस नर्सरी, धनगढी": []})
+    _run_main(monkeypatch, api,
+              invoke_text_stub=lambda **kw: NOTHING_RESOLVES_RESPONSE,
+              argv=["--dry-run"])
+
+    rows = [json.loads(line) for line in Path(_report_files()["extracted"])
+            .read_text(encoding="utf-8").splitlines()]
+
+    assert [(r["extracted"], r["relationship_type"]) for r in rows] == [
+        ("हेम राज बिष्ट", "related"),
+        ("मानस नर्सरी, धनगढी", "related"),
+    ]
+    assert rows[0]["notes"] == "तत्कालीन प्रमुख"
+    assert rows[0]["slug"] == "case-nothing-resolves"
+
+
+def test_extraction_sidecar_records_accused_notes(
+    monkeypatch, patched_fetch_markdown
+):
+    # accused_notes is a whole second section of the extraction that reached no
+    # output file at all -- the run log counted them and nothing else.
+    case = dict(PRESS_ONLY_CASE, slug="case-accused-notes", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [], "मानस नर्सरी, धनगढी": []})
+    _run_main(monkeypatch, api,
+              invoke_text_stub=lambda **kw: NOTHING_RESOLVES_RESPONSE,
+              argv=["--dry-run"])
+
+    notes = [json.loads(line) for line in Path(_report_files()["accused_notes"])
+             .read_text(encoding="utf-8").splitlines()]
+    assert notes == [{"slug": "case-accused-notes",
+                      "name": "हेम राज बिष्ट",
+                      "notes": "वन अधिकृत, वन निर्देशनालय धनगढी"}]
+
+
+# --------------------------------------------------------------------------
+# Draft-case enrichment binds or creates -- it never reviews.
+#
+# Gaurav set this on 2026-08-05: deciding which entities deserve to exist is a
+# later pass, so this stage stops producing a review queue. Three behaviours
+# change, each pinned below.
+# --------------------------------------------------------------------------
+
+
+TWO_NAMESAKES_ABOVE_THRESHOLD = {
+    "अनिष श्रेष्ठ": [
+        {"id": "https://jawafdehi.org/entity/person/anish-shrestha-219986",
+         "title": {"ne": "अनिष श्रेष्‍ठ"}, "score": 182.17},
+        {"id": "https://jawafdehi.org/entity/person/anish-shrestha-285096",
+         "title": {"ne": "अनिष श्रेष्ठ"}, "score": 182.17},
+    ],
+}
+
+
+def test_ambiguity_binds_every_qualifying_candidate():
+    # Was: promote the top candidate, drop the runners-up. Now: bind all of them
+    # and let the later filtering pass decide. Two NES rows scoring identically
+    # are usually one person entered twice; when they are two different people
+    # sharing a name, both get bound and a human unpicks it later.
+    case = {"slug": "case-both-namesakes", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], TWO_NAMESAKES_ABOVE_THRESHOLD)
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related",
+         "notes": "क"}])
+
+    assert plan.action == "WOULD_PATCH"
+    assert plan.review == []
+    bound_ids = sorted(item["nes_id"] for item in plan.patch_items)
+    assert bound_ids == [
+        "https://jawafdehi.org/entity/person/anish-shrestha-219986",
+        "https://jawafdehi.org/entity/person/anish-shrestha-285096",
+    ]
+    # One extracted name, two bind rows -- both must be reported, or binds.jsonl
+    # under-reports what reached the case.
+    assert len(plan.bound) == 2
+
+
+def test_ambiguity_still_reviews_nothing_under_strict():
+    # `--strict` is untouched: it remains the conservative pipeline for anyone
+    # who wants an ambiguity held rather than bound.
+    case = {"slug": "case-strict-ambiguity", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], TWO_NAMESAKES_ABOVE_THRESHOLD)
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related",
+         "notes": "क"}], strict=True)
+
+    assert plan.bound == []
+    assert len(plan.review) == 1
+
+
+def test_a_candidate_below_the_threshold_is_not_bound_alongside_a_qualifying_one():
+    # "Bind every qualifying candidate" means every one at or above
+    # MIN_BIND_SCORE, not every one the search returned. A weak near-miss riding
+    # along on a strong match would bind an unrelated entity.
+    case = {"slug": "case-one-strong-one-weak", "state": "DRAFT", "entities": []}
+    strong = {"id": "https://jawafdehi.org/entity/person/anish-shrestha-219986",
+              "title": {"ne": "अनिष श्रेष्ठ"}, "score": 182.17}
+    weak = {"id": "https://jawafdehi.org/entity/person/anisha-shah-111111",
+            "title": {"ne": "अनिशा शाह"}, "score": 12.0}
+    api = _SearchStubApi([case], {"अनिष श्रेष्ठ": [strong, weak]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अनिष श्रेष्ठ", "relationship_type": "related",
+         "notes": "क"}])
+
+    assert [item["nes_id"] for item in plan.patch_items] == [
+        "https://jawafdehi.org/entity/person/anish-shrestha-219986"]
+
+
+def test_cross_script_only_match_is_bound_not_held():
+    # REVERSES `test_permissive_mode_refuses_to_promote_a_cross_script_only_match`.
+    # That veto was the one permissive mode left standing, because कमल (a man)
+    # and कमला (a woman) score 0.96 across scripts and 0.00 within Devanagari --
+    # so this bind names a different person than the case charges. Bound anyway
+    # per the 2026-08-05 decision: no review queue in this stage.
+    case = {"slug": "case-kamal-bound", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"कमल थापा": [KAMALA_LATIN_ONLY]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "कमल थापा", "relationship_type": "related", "notes": "क"}])
+
+    assert plan.action == "WOULD_PATCH"
+    assert plan.review == []
+    assert [item["nes_id"] for item in plan.patch_items] == [KAMALA_IRI]
+
+
+def test_an_unaccepted_relationship_type_is_coerced_to_related():
+    # Was: review, because there was no section to bind into. Now: coerced to
+    # `related`, the prompt's own default. This is not cosmetic -- PATCH
+    # /entities validates the whole list, so one unaccepted section fails every
+    # bind on the case, not just its own row.
+    case = {"slug": "case-bad-section", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "supervisor",
+         "notes": "क"}])
+
+    assert plan.review == []
+    assert [item["relationship_type"] for item in plan.patch_items] == ["related"]
+
+
+def test_a_missing_relationship_type_is_coerced_to_related():
+    case = {"slug": "case-no-section", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "notes": "क"}])
+
+    assert plan.review == []
+    assert [item["relationship_type"] for item in plan.patch_items] == ["related"]
+
+
+def test_the_coercion_is_recorded_so_a_reader_can_see_it_happened():
+    # A silently relabelled section is a section nobody asserted. The original
+    # value rides on the plan so the run log and the reports can name it.
+    case = {"slug": "case-coercion-recorded", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "supervisor",
+         "notes": "क"}])
+
+    assert plan.coerced == [("अंकुर खत्री", "supervisor", "related")]
+
+
+def test_coercion_does_not_fire_for_an_accepted_section():
+    case = {"slug": "case-good-section", "state": "DRAFT", "entities": []}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "witness",
+         "notes": "क"}])
+
+    assert plan.coerced == []
+    assert [item["relationship_type"] for item in plan.patch_items] == ["witness"]
+
+
+def test_an_accused_name_never_reaches_the_case_at_all():
+    # The one review this stage KEEPS. Escalating an already-characterised entity
+    # to `accused` sets outcome=charged and asserts the person is the subject of
+    # the case. Removing the review queue did not remove this guard, because the
+    # alternative is not "bind it later", it is "publish a charge on an LLM's
+    # say-so".
+    case = {"slug": "case-escalation", "state": "DRAFT",
+            "entities": [{"nes_id": ANKUR_IRI, "type": "related",
+                          "notes": "पहिले नै जोडिएको"}]}
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    plan = plan_case_entities(api, case, 'W/"e"', [
+        {"entity_name": "अंकुर खत्री", "relationship_type": "accused",
+         "notes": "क"}])
+
+    # Nothing to escalate and nothing to review: the section is refused before
+    # resolution runs, so the case keeps exactly what it had.
+    assert plan.review == []
+    assert plan.patch_items == []
+    assert plan.court_record_only == [("अंकुर खत्री", "accused")]
+
+
+# --------------------------------------------------------------------------
+# Creating the NES entity a name has no match for, then binding it.
+#
+# `--create-entities`, default OFF, on top of `--apply`. POST /api/entities has
+# no sourcing gate (`entities/validation.py:150` checks @id, @type and name and
+# nothing else) and the 2-distinct-publisher rule lives only in
+# `manage.py bulk_ingest`, so entities created here publish unsourced. Accepted
+# on 2026-08-05.
+# --------------------------------------------------------------------------
+
+
+CREATE_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "हेम राज बिष्ट", "relationship_type": "related",
+         "entity_prefix": "person", "entity_type": "Person",
+         "is_named_entity": True, "name_en": "",
+         "notes": "तत्कालीन प्रमुख"},
+        {"entity_name": "वन निर्देशनालय, धनगढी", "relationship_type": "related",
+         "entity_prefix": "organization/government/district/dfo",
+         "entity_type": "GovernmentOrganization",
+         "is_named_entity": True, "name_en": "",
+         "notes": "आरोपी कार्यरत रहेको निकाय"},
+    ],
+    "accused_notes": [],
+})
+
+
+def _created_rows():
+    return [json.loads(line) for line in Path(_report_files()["created"])
+            .read_text(encoding="utf-8").splitlines()]
+
+
+def test_no_entity_is_created_without_the_flag_even_under_apply(
+    monkeypatch, patched_fetch_markdown
+):
+    # THE SAFETY PROPERTY THAT MATTERS MOST. Creation opts in on TOP of --apply,
+    # never with it, so upgrading this enricher cannot make an existing --apply
+    # run start writing to NES.
+    case = dict(PRESS_ONLY_CASE, slug="case-no-flag", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [],
+                                  "वन निर्देशनालय, धनगढी": []})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
+              argv=["--apply"])
+
+    assert api.create_entity_calls == []
+    # Both names stay unmatched and reach the no-match report, exactly as before.
+    assert Path(_report_files()["created"]).read_text(encoding="utf-8") == ""
+
+
+def test_creates_an_entity_for_an_unmatched_name_and_binds_it(
+    monkeypatch, patched_fetch_markdown
+):
+    case = dict(PRESS_ONLY_CASE, slug="case-create-bind", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [],
+                                  "वन निर्देशनालय, धनगढी": []})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    # Both names were POSTed, under the prefix the extraction named.
+    posted = sorted((p["prefix"], p["slug"]) for p in api.create_entity_calls)
+    assert posted == [
+        ("organization/government/district/dfo", "vana-nirdeshanalaya-dhanagadhi"),
+        ("person", "hema-raja-bishta"),
+    ]
+    # ...and both reached the case, in the section the extraction gave them.
+    _slug, _path, items, _etag = api.replace_list_calls[0]
+    sections = {item["nes_id"].rsplit("/", 2)[-2]: item["relationship_type"]
+                for item in items}
+    assert sections["person"] == "related"
+    assert sections["dfo"] == "related"
+
+
+def test_a_dry_run_creates_nothing_but_reports_what_it_would_create(
+    monkeypatch, patched_fetch_markdown
+):
+    case = dict(PRESS_ONLY_CASE, slug="case-create-dry", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [],
+                                  "वन निर्देशनालय, धनगढी": []})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
+              argv=["--dry-run", "--create-entities"])
+
+    assert api.create_entity_calls == []
+    assert api.replace_list_calls == []
+    rows = _created_rows()
+    assert [r["outcome"] for r in rows] == ["would-create", "would-create"]
+    assert {r["extracted"] for r in rows} == {"हेम राज बिष्ट",
+                                             "वन निर्देशनालय, धनगढी"}
+
+
+def test_the_created_entity_cites_the_material_it_came_from(
+    monkeypatch, patched_fetch_markdown
+):
+    # An entity created here has no sources, which the 2-publisher rule would
+    # otherwise hold as staged. The citation is what keeps it traceable to the
+    # document that justified it.
+    case = dict(PRESS_ONLY_CASE, slug="case-create-citation", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [],
+                                  "वन निर्देशनालय, धनगढी": []})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    citations = {p["citation"] for p in api.create_entity_calls}
+    assert citations == {"https://jawafdehi.org/material/ciaa/press_releases/1"}
+
+
+TWO_SPELLINGS_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "वन निदेशनालय, धनगढी",
+         "relationship_type": "related",
+         "entity_prefix": "organization/government/district/dfo",
+         "entity_type": "GovernmentOrganization",
+         "is_named_entity": True, "name_en": "", "notes": "क"},
+        {"entity_name": "वन निदेशनालय, धनगढी ",
+         "relationship_type": "related",
+         "entity_prefix": "organization/government/district/dfo",
+         "entity_type": "GovernmentOrganization",
+         "is_named_entity": True, "name_en": "", "notes": "ख"},
+    ],
+    "accused_notes": [],
+})
+
+
+def test_one_office_named_twice_creates_one_entity(
+    monkeypatch, patched_fetch_markdown
+):
+    # Case 078-CR-0038 named the Dhangadhi forest directorate twice. Without the
+    # within-run dedup that case creates two entities on its first run.
+    case = dict(PRESS_ONLY_CASE, slug="case-two-spellings", entities=[])
+    api = _SearchStubApi([case], {})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: TWO_SPELLINGS_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    assert len(api.create_entity_calls) == 1
+    # Two spellings, one entity, and one bind row -- the case cannot carry the
+    # same entity twice in the same section, so the second bind merges away.
+    _slug, _path, items, _etag = api.replace_list_calls[0]
+    assert len(items) == 1
+    assert items[0]["nes_id"].endswith("/vana-nideshanalaya-dhanagadhi")
+    assert items[0]["relationship_type"] == "related"
+
+
+# The other half of the dedup: two names that are the same STRING but not the
+# same THING. A person and a school can carry one name -- the run cache is
+# keyed on the prefix as well for exactly this reason, because the two live at
+# different IRIs (`person/...` and `organization/...`) and the server would
+# never 409 one against the other. Keyed on the name alone, the second case
+# binds a PERSON entity as the organisation in a corruption case.
+HOMONYM_PERSON_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "श्रीकृष्ण श्रेष्ठ", "relationship_type": "related",
+         "entity_prefix": "person", "entity_type": "Person",
+         "is_named_entity": True, "name_en": "", "notes": "क"},
+    ],
+    "accused_notes": [],
+})
+
+HOMONYM_ORG_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "श्रीकृष्ण श्रेष्ठ", "relationship_type": "related",
+         "entity_prefix": "organization", "entity_type": "Organization",
+         "is_named_entity": True, "name_en": "", "notes": "ख"},
+    ],
+    "accused_notes": [],
+})
+
+
+def test_the_same_name_under_a_different_prefix_is_not_reused(
+    monkeypatch, patched_fetch_markdown
+):
+    person_case = dict(PRESS_ONLY_CASE, slug="case-homonym-person", entities=[])
+    org_case = dict(PRESS_ONLY_CASE, slug="case-homonym-org", entities=[])
+    api = _SearchStubApi([person_case, org_case], {"श्रीकृष्ण श्रेष्ठ": []})
+    replies = iter([HOMONYM_PERSON_RESPONSE, HOMONYM_ORG_RESPONSE])
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: next(replies),
+              argv=["--apply", "--create-entities"])
+
+    assert [p["prefix"] for p in api.create_entity_calls] == ["person", "organization"]
+    bound = [items[0]["nes_id"] for _s, _p, items, _e in api.replace_list_calls]
+    assert bound == [
+        "https://jawafdehi.org/entity/person/shrikrishna-shreshtha",
+        "https://jawafdehi.org/entity/organization/shrikrishna-shreshtha",
+    ]
+    # And the report agrees with itself: a row's prefix and its IRI can no
+    # longer disagree, which is what a name-keyed reuse used to write.
+    for row in _created_rows():
+        assert f"/entity/{row['prefix']}/" in row["nes_id"]
+
+
+# One name, two sections, contradictory metadata. `items_by_name` used to key on
+# the name alone, so BOTH `plan.nomatch` entries read whichever item the model
+# happened to emit last -- here the `person`/`is_named_entity: False` one, which
+# fails the creation gate and takes the legitimate contractor down with it.
+CROSSED_SECTIONS_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "गोरखा निर्माण सेवा", "relationship_type": "related",
+         "entity_prefix": "organization/contractor",
+         "entity_type": "Organization", "is_named_entity": True,
+         "name_en": "Gorkha Construction Services", "notes": "ठेक्का पाएको फर्म"},
+        {"entity_name": "गोरखा निर्माण सेवा", "relationship_type": "witness",
+         "entity_prefix": "person", "entity_type": "Person",
+         "is_named_entity": False, "name_en": "", "notes": "साक्षी"},
+    ],
+    "accused_notes": [],
+})
+
+
+def test_each_section_reads_its_own_extracted_item(
+    monkeypatch, patched_fetch_markdown
+):
+    case = dict(PRESS_ONLY_CASE, slug="case-crossed-sections", entities=[])
+    api = _SearchStubApi([case], {"गोरखा निर्माण सेवा": []})
+    _run_main(monkeypatch, api,
+              invoke_text_stub=lambda **kw: CROSSED_SECTIONS_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    # The contractor is created from its OWN item -- its prefix, its English
+    # name, its `is_named_entity`. The witness row is refused by its own.
+    assert [p["prefix"] for p in api.create_entity_calls] == ["organization/contractor"]
+    assert api.create_entity_calls[0]["slug"] == "gorkha-construction-services"
+
+    by_role = {row["role"]: row for row in _created_rows()}
+    assert by_role["related"]["outcome"] == "created"
+    assert by_role["witness"]["outcome"] == "skipped"
+    assert "is_named_entity" in by_role["witness"]["reason"]
+
+
+COERCED_SECTION_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "साझा भण्डार सहकारी", "relationship_type": "employer",
+         "entity_prefix": "organization", "entity_type": "Organization",
+         "is_named_entity": True, "name_en": "Sajha Bhandar Cooperative",
+         "notes": "क"},
+    ],
+    "accused_notes": [],
+})
+
+
+def test_a_coerced_section_still_finds_its_own_item(
+    monkeypatch, patched_fetch_markdown
+):
+    # The other half of keying on the section: `employer` is not a section the
+    # API accepts, so the planner coerces it to `related` and files the name
+    # under THAT. A lookup keyed on the raw `relationship_type` misses, the item
+    # comes back empty, and a perfectly good name is refused for having no
+    # prefix -- a silent loss, since "no prefix" reads like a model failure.
+    case = dict(PRESS_ONLY_CASE, slug="case-coerced-section", entities=[])
+    api = _SearchStubApi([case], {"साझा भण्डार सहकारी": []})
+    _run_main(monkeypatch, api,
+              invoke_text_stub=lambda **kw: COERCED_SECTION_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    assert [p["prefix"] for p in api.create_entity_calls] == ["organization"]
+    row = _created_rows()[0]
+    assert (row["role"], row["outcome"]) == ("related", "created")
+
+
+BAD_PREFIX_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "हेम राज बिष्ट", "relationship_type": "related",
+         "entity_prefix": "persen", "entity_type": "Person",
+         "is_named_entity": True, "name_en": "", "notes": "क"},
+    ],
+    "accused_notes": [],
+})
+
+
+def test_a_prefix_with_no_existing_parent_is_skipped_not_posted(
+    monkeypatch, patched_fetch_markdown
+):
+    # `persen` is a typo'd root: not in use and with no parent to vouch for it.
+    # Creating it would strand the entity where no search filter reaches, and the
+    # bad prefix would then report as live via /api/entity_prefixes.
+    case = dict(PRESS_ONLY_CASE, slug="case-bad-prefix", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": []})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: BAD_PREFIX_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    assert api.create_entity_calls == []
+    rows = _created_rows()
+    assert [r["outcome"] for r in rows] == ["skipped"]
+    assert "persen" in rows[0]["reason"]
+
+
+def test_an_already_exists_response_binds_the_existing_entity(
+    monkeypatch, patched_fetch_markdown
+):
+    # Someone got there first, which is the good case. `create_entity` raises on a
+    # duplicate @id (`publication/service.py:68`); the run must bind that IRI
+    # rather than record an error.
+    case = dict(PRESS_ONLY_CASE, slug="case-already-exists", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [],
+                                  "वन निर्देशनालय, धनगढी": []})
+    api.create_conflicts = {"person/hema-raja-bishta"}
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    _slug, _path, items, _etag = api.replace_list_calls[0]
+    assert "https://jawafdehi.org/entity/person/hema-raja-bishta" in {
+        item["nes_id"] for item in items}
+    outcomes = {r["extracted"]: r["outcome"] for r in _created_rows()}
+    assert outcomes["हेम राज बिष्ट"] == "already-exists"
+
+
+def test_a_failed_post_skips_that_name_and_keeps_the_rest_of_the_case(
+    monkeypatch, patched_fetch_markdown
+):
+    # One name's POST failing must not cost the case its other binds.
+    case = dict(PRESS_ONLY_CASE, slug="case-post-fails", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [],
+                                  "वन निर्देशनालय, धनगढी": []})
+    api.create_errors = {"person/hema-raja-bishta": RuntimeError("500 boom")}
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    _slug, _path, items, _etag = api.replace_list_calls[0]
+    bound_ids = {item["nes_id"] for item in items}
+    assert "https://jawafdehi.org/entity/person/hema-raja-bishta" not in bound_ids
+    assert any("dfo" in nes_id for nes_id in bound_ids)
+    outcomes = {r["extracted"]: r["outcome"] for r in _created_rows()}
+    assert outcomes["हेम राज बिष्ट"] == "error"
+
+
+def test_creation_preserves_binds_already_on_the_case(
+    monkeypatch, patched_fetch_markdown
+):
+    # PATCH /entities replaces the WHOLE list. A create step that sent only its
+    # new entities would delete the press release and court order binds someone
+    # attached last month.
+    # The existing bind is `accused`, NOT `related`, on purpose: the idempotency
+    # gate counts `related` binds only, so a case carrying one is skipped whole
+    # and never reaches the create step at all (see the test below).
+    existing = {"nes_id": ANKUR_IRI, "type": "accused", "outcome": "charged",
+                "notes": "पहिलेको टिप्पणी"}
+    case = dict(PRESS_ONLY_CASE, slug="case-preserve", entities=[existing])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [],
+                                  "वन निर्देशनालय, धनगढी": []})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    _slug, _path, items, _etag = api.replace_list_calls[0]
+    kept = [item for item in items if item["nes_id"] == ANKUR_IRI]
+    assert len(kept) == 1
+    assert kept[0]["notes"] == "पहिलेको टिप्पणी"
+    assert len(items) == 3       # the existing one plus the two created
+
+
+def test_a_case_with_a_related_bind_never_reaches_the_create_step(
+    monkeypatch, patched_fetch_markdown
+):
+    # A LIMITATION, PINNED RATHER THAN FIXED. The idempotency gate skips a case
+    # that already holds any `related` bind, and it runs before anything else --
+    # so on an already-enriched case, --create-entities creates nothing, however
+    # many unmatched names that case has. `--force` is the way past it.
+    #
+    # Left alone deliberately: widening the gate changes which cases every run of
+    # this enricher touches, which deserves its own measurement rather than
+    # riding along with entity creation.
+    existing = {"nes_id": ANKUR_IRI, "type": "related", "notes": "पहिलेको"}
+    case = dict(PRESS_ONLY_CASE, slug="case-gated", entities=[existing])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [],
+                                  "वन निर्देशनालय, धनगढी": []})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    assert api.create_entity_calls == []
+    assert api.replace_list_calls == []
+
+
+def test_force_gets_past_the_gate_and_creates(
+    monkeypatch, patched_fetch_markdown
+):
+    existing = {"nes_id": ANKUR_IRI, "type": "related", "notes": "पहिलेको"}
+    case = dict(PRESS_ONLY_CASE, slug="case-forced", entities=[existing])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [],
+                                  "वन निर्देशनालय, धनगढी": []})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
+              argv=["--apply", "--create-entities", "--force"])
+
+    assert len(api.create_entity_calls) == 2
+    _slug, _path, items, _etag = api.replace_list_calls[0]
+    assert ANKUR_IRI in {item["nes_id"] for item in items}
+
+
+def test_the_prefix_section_lists_every_live_category():
+    section = ere.prefix_prompt_section(
+        ["person", "organization/government/district/dfo", "location/district"])
+    assert "person" in section
+    assert "organization/government/district/dfo" in section
+    # Sorted, so two runs over the same prefix list build a byte-identical
+    # prompt. A reshuffled list is a different prompt for no reason.
+    assert section.index("location/district") < section.index("person")
+
+
+def test_the_prefix_section_is_empty_without_prefixes():
+    # An instruction to choose from an empty list makes the model invent values,
+    # and every invented value is then discarded -- an expensive way to create
+    # nothing.
+    assert ere.prefix_prompt_section([]) == ""
+    assert ere.prefix_prompt_section(None) == ""
+
+
+def test_the_system_prompt_asks_for_the_two_new_fields():
+    assert "entity_prefix" in ere.SYSTEM_PROMPT
+    assert "entity_type" in ere.SYSTEM_PROMPT
+
+
+def test_the_category_list_is_absent_from_the_prompt_without_the_flag(
+    monkeypatch, patched_fetch_markdown
+):
+    # Two fields nobody reads cost prompt budget on a stage where the budget is
+    # already the binding constraint, so the list only ships when it can be used.
+    case = dict(PRESS_ONLY_CASE, slug="case-no-prefix-prompt", entities=[])
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    seen = {}
+
+    def stub(**kw):
+        seen.update(kw)
+        return json.dumps({"entities": [], "accused_notes": []})
+
+    _run_main(monkeypatch, api, invoke_text_stub=stub, argv=["--dry-run"])
+    assert "ENTITY CATEGORY" not in seen["system"]
+
+
+def test_the_category_list_ships_with_the_flag(
+    monkeypatch, patched_fetch_markdown
+):
+    case = dict(PRESS_ONLY_CASE, slug="case-prefix-prompt", entities=[])
+    api = _SearchStubApi([case], {"अंकुर खत्री": [ANKUR_CANDIDATE]})
+    seen = {}
+
+    def stub(**kw):
+        seen.update(kw)
+        return json.dumps({"entities": [], "accused_notes": []})
+
+    _run_main(monkeypatch, api, invoke_text_stub=stub,
+              argv=["--dry-run", "--create-entities"])
+    assert "ENTITY CATEGORY" in seen["system"]
+    assert "organization/government/district/dfo" in seen["system"]
+
+
+def test_a_created_name_is_not_counted_as_already_bound():
+    # Found on the first production dry run (226fb34b, case 078-CR-0038): 13
+    # extracted, 1 bound, 12 would-create, 0 no-match -- reported as "already
+    # bound (nothing to write): 12". The create step removes a name from
+    # `plan.nomatch`, so it produced no row in bound/review/nomatch and the
+    # accounted-for check counted it as dropped-because-already-bound. Every
+    # created entity was reported as work that did not need doing.
+    plan = ere.EntityBindPlan(slug="case-count", action="NOOP", examined=True)
+    plan.bound = [("नागरिक लगानी कोष", None, "क", "related")]
+    plan.created = ["हेम राज विष्ट", "सविना आले"]
+    items = [{"entity_name": "नागरिक लगानी कोष"},
+             {"entity_name": "हेम राज विष्ट"},
+             {"entity_name": "सविना आले"}]
+
+    summary = ere.plan_summary(plan, items)
+    assert summary["created"] == 2
+    assert summary["already_bound"] == 0
+
+
+def test_a_genuinely_already_bound_name_is_still_counted():
+    # The counter must keep working: a name that resolved to an entity already on
+    # the case in that section produces no row anywhere, and that IS
+    # already-bound.
+    plan = ere.EntityBindPlan(slug="case-count-2", action="NOOP", examined=True)
+    plan.bound = [("नागरिक लगानी कोष", None, "क", "related")]
+    items = [{"entity_name": "नागरिक लगानी कोष"},
+             {"entity_name": "पहिले नै जोडिएको नाम"}]
+
+    summary = ere.plan_summary(plan, items)
+    assert summary["already_bound"] == 1
+    assert summary["created"] == 0
+
+
+# --------------------------------------------------------------------------
+# CaseworkApi.create_entity's error mapping.
+#
+# Found by the local harness run, not by a unit test: the first version keyed
+# already-exists off 422, which is what the view returns for a VALIDATION
+# failure. A duplicate IRI goes through `_map_service_value_error` instead and
+# comes back 409 ENTITY_EXISTS (`entities/views.py:420`), so every re-run
+# recorded `error` and rebound nothing.
+# --------------------------------------------------------------------------
+
+
+def _http_error(code, body):
+    import io
+    import urllib.error
+
+    return urllib.error.HTTPError(
+        "http://127.0.0.1:48010/api/entities", code, "err", {},
+        io.BytesIO(body.encode("utf-8")))
+
+
+def _api_raising(exc):
+    from casework.common.api import CaseworkApi
+
+    api = CaseworkApi("http://127.0.0.1:48010", basic=("u", "p"))
+
+    def boom(*a, **kw):
+        raise exc
+
+    api._request = boom
+    return api
+
+
+def test_a_409_conflict_becomes_entity_already_exists():
+    from casework.common.api import EntityAlreadyExists
+
+    api = _api_raising(_http_error(409, json.dumps({"error": {
+        "code": "ENTITY_EXISTS",
+        "message": "Entity https://jawafdehi.org/entity/person/hema-raja-vishta "
+                   "already exists"}})))
+    with pytest.raises(EntityAlreadyExists):
+        api.create_entity({"prefix": "person", "slug": "hema-raja-vishta",
+                           "type": "Person", "name": {"ne": "हेम राज विष्ट"}})
+
+
+def test_a_422_validation_failure_is_not_mistaken_for_a_conflict():
+    # 422 is the view's VALIDATION status. Treating it as already-exists would
+    # bind a nonexistent IRI on every malformed payload.
+    from casework.common.api import EntityAlreadyExists
+
+    api = _api_raising(_http_error(422, json.dumps({"error": {
+        "code": "VALIDATION_ERROR",
+        "message": "@type must be a known schema.org/jawafdehi type"}})))
+    with pytest.raises(ValueError) as caught:
+        api.create_entity({"prefix": "person", "slug": "x", "type": "Nonsense",
+                           "name": {"ne": "क"}})
+    assert not isinstance(caught.value, EntityAlreadyExists)
+
+
+def test_a_500_propagates_untouched():
+    api = _api_raising(_http_error(500, "boom"))
+    with pytest.raises(Exception) as caught:
+        api.create_entity({"prefix": "person", "slug": "x", "type": "Person",
+                           "name": {"ne": "क"}})
+    assert "500" in str(caught.value)
+
+
+# --------------------------------------------------------------------------
+# Four gates in front of the POST.
+#
+# Creating an entity is permanent and public, so each gate refuses on a
+# different ground: the section it came from, the shape of the string, the
+# model's own verdict on whether the string names a thing, and identity.
+# A refused name still BINDS whatever it matched -- these gate creation only.
+# The order is fixed in `_cannot_create`, which carries the reasoning for each.
+# --------------------------------------------------------------------------
+
+
+LOCATION_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "काठमाडौं", "relationship_type": "location",
+         "entity_prefix": "location/district", "entity_type": "Place",
+         "is_named_entity": True, "name_en": "Kathmandu",
+         "notes": "जग्गा तथा शेयर लगानी रहेको जिल्ला"},
+    ],
+    "accused_notes": [],
+})
+
+
+def test_a_location_is_never_created_even_when_everything_else_is_valid(
+    monkeypatch, patched_fetch_markdown
+):
+    # NES already holds all 77 districts under official codes
+    # (location/district/kailali-np0771). A location this pipeline creates is
+    # therefore always a duplicate of a canonical district or junk -- there is
+    # no third case.
+    case = dict(PRESS_ONLY_CASE, slug="case-location-nocreate", entities=[])
+    api = _SearchStubApi([case], {"काठमाडौं": []})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: LOCATION_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    assert api.create_entity_calls == []
+    row, = _created_rows()
+    assert row["outcome"] == "skipped"
+    assert "location" in row["reason"]
+
+
+COMPOSITE_RELATED_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "घरजग्गा सम्पत्ति - काठमाडौं", "relationship_type": "related",
+         "entity_prefix": "organization", "entity_type": "Organization",
+         "is_named_entity": True, "name_en": "Real estate property - Kathmandu",
+         "notes": "जफत गरिएको सम्पत्ति"},
+    ],
+    "accused_notes": [],
+})
+
+
+def test_a_composite_name_in_the_related_section_is_never_created(
+    monkeypatch, patched_fetch_markdown
+):
+    # The backstop. `_name_vetoes` catches nothing in the current production
+    # sample that the location gate does not already catch, but a composite
+    # reaching the RELATED section would otherwise create junk for free -- and
+    # the model claiming is_named_entity=True does not make it a thing.
+    case = dict(PRESS_ONLY_CASE, slug="case-composite-related", entities=[])
+    api = _SearchStubApi([case], {"घरजग्गा सम्पत्ति - काठमाडौं": []})
+    _run_main(monkeypatch, api,
+              invoke_text_stub=lambda **kw: COMPOSITE_RELATED_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    assert api.create_entity_calls == []
+    row, = _created_rows()
+    assert row["outcome"] == "skipped"
+    assert "composite" in row["reason"]
+
+
+def _named_entity_response(flag):
+    """One related company, with `is_named_entity` set to whatever `flag` is.
+
+    `flag is None` omits the key entirely -- the prompt-regression shape.
+    """
+    entity = {"entity_name": "सामुदायिक वन उपभोक्ता समूह",
+              "relationship_type": "related",
+              "entity_prefix": "organization", "entity_type": "Organization",
+              "name_en": "Community Forest User Group",
+              "notes": "रुख कटान गरिएको भनिएको समूह"}
+    if flag is not None:
+        entity["is_named_entity"] = flag
+    return json.dumps({"entities": [entity], "accused_notes": []})
+
+
+def test_is_named_entity_false_blocks_creation(monkeypatch, patched_fetch_markdown):
+    # "Community Forest User Group" is a category of body, not a named one.
+    # `_name_vetoes` misses it: the generic rule needs EVERY word in its
+    # 53-word list, and सामुदायिक and समूह are not in it. Only the model,
+    # which read the passage, can tell.
+    case = dict(PRESS_ONLY_CASE, slug="case-not-named", entities=[])
+    api = _SearchStubApi([case], {"सामुदायिक वन उपभोक्ता समूह": []})
+    _run_main(monkeypatch, api,
+              invoke_text_stub=lambda **kw: _named_entity_response(False),
+              argv=["--apply", "--create-entities"])
+
+    assert api.create_entity_calls == []
+    row, = _created_rows()
+    assert row["outcome"] == "skipped"
+    assert "named entity" in row["reason"]
+
+
+def test_a_missing_is_named_entity_blocks_creation(
+    monkeypatch, patched_fetch_markdown
+):
+    # FAIL CLOSED. A prompt regression that drops the field shows up as
+    # `0 created` in the summary, which is visible and fixable. Defaulting the
+    # other way fills NES with junk that cannot be deleted.
+    case = dict(PRESS_ONLY_CASE, slug="case-flag-absent", entities=[])
+    api = _SearchStubApi([case], {"सामुदायिक वन उपभोक्ता समूह": []})
+    _run_main(monkeypatch, api,
+              invoke_text_stub=lambda **kw: _named_entity_response(None),
+              argv=["--apply", "--create-entities"])
+
+    assert api.create_entity_calls == []
+    row, = _created_rows()
+    assert row["outcome"] == "skipped"
+
+
+def test_is_named_entity_true_still_creates(monkeypatch, patched_fetch_markdown):
+    case = dict(PRESS_ONLY_CASE, slug="case-named-true", entities=[])
+    api = _SearchStubApi([case], {"सामुदायिक वन उपभोक्ता समूह": []})
+    _run_main(monkeypatch, api,
+              invoke_text_stub=lambda **kw: _named_entity_response(True),
+              argv=["--apply", "--create-entities"])
+
+    payload, = api.create_entity_calls
+    assert payload["slug"] == "community-forest-user-group"
+
+
+def test_a_gated_name_still_binds_when_the_resolver_matched_it(
+    monkeypatch, patched_fetch_markdown
+):
+    # The gates stop CREATION, never binding. A location that matches its
+    # canonical district must still reach the case.
+    case = dict(PRESS_ONLY_CASE, slug="case-gate-still-binds", entities=[])
+    api = _SearchStubApi([case], {"काठमाडौं": [
+        {"id": "https://jawafdehi.org/entity/location/district/kathmandu-np0261",
+         "title": {"ne": "काठमाडौं", "en": "Kathmandu"}, "score": 112.6},
+    ]})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: LOCATION_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    assert api.create_entity_calls == []
+    _slug, _path, items, _etag = api.replace_list_calls[0]
+    assert [i["nes_id"] for i in items] == [
+        "https://jawafdehi.org/entity/location/district/kathmandu-np0261"]
+
+
+# --------------------------------------------------------------------------
+# The English name reaches the payload, not just the slug.
+# --------------------------------------------------------------------------
+
+
+def test_the_payload_carries_both_names_when_english_is_supplied(
+    monkeypatch, patched_fetch_markdown
+):
+    # Canonical NES entities carry both ({"ne": "काठमाडौं", "en": "Kathmandu"}).
+    # Ours carried `ne` only, so every entity we created was missing its
+    # English name for the English UI and for search.
+    case = dict(PRESS_ONLY_CASE, slug="case-payload-en", entities=[])
+    api = _SearchStubApi([case], {"सामुदायिक वन उपभोक्ता समूह": []})
+    _run_main(monkeypatch, api,
+              invoke_text_stub=lambda **kw: _named_entity_response(True),
+              argv=["--apply", "--create-entities"])
+
+    payload, = api.create_entity_calls
+    assert payload["name"] == {"ne": "सामुदायिक वन उपभोक्ता समूह",
+                               "en": "Community Forest User Group"}
+
+
+NO_ENGLISH_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "हेम राज बिष्ट", "relationship_type": "related",
+         "entity_prefix": "person", "entity_type": "Person",
+         "is_named_entity": True, "name_en": "",
+         "notes": "तत्कालीन प्रमुख"},
+    ],
+    "accused_notes": [],
+})
+
+
+def test_the_payload_omits_the_english_name_rather_than_sending_it_blank(
+    monkeypatch, patched_fetch_markdown
+):
+    case = dict(PRESS_ONLY_CASE, slug="case-payload-no-en", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": []})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: NO_ENGLISH_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    payload, = api.create_entity_calls
+    assert payload["name"] == {"ne": "हेम राज बिष्ट"}
+    assert payload["slug"] == "hema-raja-bishta"
+
+
+# --------------------------------------------------------------------------
+# The prompt itself.
+# --------------------------------------------------------------------------
+
+
+def test_the_prompt_asks_for_both_new_fields():
+    assert "is_named_entity" in ere.SYSTEM_PROMPT
+    assert "name_en" in ere.SYSTEM_PROMPT
+
+
+def test_the_prompt_no_longer_teaches_the_composite_location_name():
+    # Line 204 used to mandate "Organisation/Activity - Location", which is why
+    # `घरजग्गा सम्पत्ति - काठमाडौं` was extracted at all. Both dry-run cases
+    # produced one, and the composite also scores 0.00 against the canonical
+    # district it was supposed to name.
+    assert "Activity - Location" not in ere.SYSTEM_PROMPT
+    # The composite survives only as a labelled counter-example. Showing the
+    # model the exact string it used to emit, marked WRONG, beats deleting it.
+    correct, _sep, wrong = ere.SYSTEM_PROMPT.partition(
+        "Examples of WRONG location names:")
+    assert "स्वास्थ्य उपकरण खरिद - जनकपुरधाम" not in correct
+    assert "स्वास्थ्य उपकरण खरिद - जनकपुरधाम" in wrong
+
+
+def test_the_prompt_no_longer_demands_blank_location_notes():
+    # The activity context moves out of the name and into notes, so the old
+    # "leave notes BLANK" rule would now throw it away.
+    assert 'Leave notes BLANK ("") for all location entities' not in ere.SYSTEM_PROMPT
+
+
+def test_the_prompt_rules_out_media_that_only_reported_the_case():
+    # `नयाँ पत्रिका` was extracted as `related` for publishing the story. A
+    # newspaper that reported a case is a source, not a participant.
+    assert "नयाँ पत्रिका" in ere.SYSTEM_PROMPT
+
+
+def test_the_creation_block_explains_both_new_fields():
+    section = ere.prefix_prompt_section(["person", "organization"])
+    assert "is_named_entity" in section
+    assert "name_en" in section
+
+
+# --------------------------------------------------------------------------
+# The LLM does not supply accused. The court record does.
+#
+# `GET /courtcases/<court>/<number>/entities` returns the defendants CIAA
+# actually charged -- for 078-CR-0038, हेम राज विष्ट and रुबी जि.सी. विष्ट, the
+# same two the extraction guessed at. `casework/court_record.py` already reads
+# it and is deliberately unwired here (see the import comment at line 127).
+#
+# THE HARM THIS REMOVES: an accused bind carries `outcome = CHARGED`, and since
+# 2026-08-05 one extracted name binds EVERY candidate above the threshold. An
+# ambiguous accused name therefore recorded every namesake as charged in a
+# corruption case -- `resolve`'s own docstring names 13 same-name entities for
+# `संजय प्रसाद यादव`. Dropping the section removes the path entirely rather than
+# narrowing it.
+# --------------------------------------------------------------------------
+
+
+ACCUSED_RESPONSE = json.dumps({
+    "entities": [
+        {"entity_name": "हेम राज बिष्ट", "relationship_type": "accused",
+         "entity_prefix": "person", "entity_type": "Person",
+         "is_named_entity": True, "name_en": "Hem Raj Bista",
+         "notes": "प्रतिवादी"},
+        {"entity_name": "नानी काजी थापा", "relationship_type": "alleged",
+         "entity_prefix": "person", "entity_type": "Person",
+         "is_named_entity": True, "name_en": "Nani Kaji Thapa",
+         "notes": "घुस लेनदेनमा संलग्न भनी उल्लेख"},
+    ],
+    "accused_notes": [],
+})
+
+
+def test_an_extracted_accused_is_never_bound(monkeypatch, patched_fetch_markdown):
+    case = dict(PRESS_ONLY_CASE, slug="case-accused-dropped", entities=[])
+    api = _SearchStubApi([case], {
+        "हेम राज बिष्ट": [{"id": "https://jawafdehi.org/entity/person/hem-raj-bista",
+                            "title": {"ne": "हेम राज बिष्ट"}, "score": 180.0}],
+        "नानी काजी थापा": [{"id": "https://jawafdehi.org/entity/person/nani-kaji-thapa",
+                             "title": {"ne": "नानी काजी थापा"}, "score": 180.0}],
+    })
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: ACCUSED_RESPONSE,
+              argv=["--apply"])
+
+    _slug, _path, items, _etag = api.replace_list_calls[0]
+    sections = {item["relationship_type"] for item in items}
+    assert "accused" not in sections
+    # The alleged name is untouched -- it is not in the court record, so the
+    # extraction is the only source for it.
+    assert sections == {"alleged"}
+
+
+def test_an_extracted_accused_is_never_created(monkeypatch, patched_fetch_markdown):
+    # Creation must not sneak an accused in through the other door.
+    case = dict(PRESS_ONLY_CASE, slug="case-accused-nocreate", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [], "नानी काजी थापा": []})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: ACCUSED_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    posted = [p["slug"] for p in api.create_entity_calls]
+    assert "hem-raj-bista" not in posted
+    assert posted == ["nani-kaji-thapa"]
+
+
+def test_a_dropped_accused_is_reported_not_silently_discarded(
+    monkeypatch, patched_fetch_markdown
+):
+    case = dict(PRESS_ONLY_CASE, slug="case-accused-reported", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [], "नानी काजी थापा": []})
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: ACCUSED_RESPONSE,
+              argv=["--dry-run"])
+
+    rows = [json.loads(line) for line in
+            Path(_report_files()["extracted"]).read_text(encoding="utf-8").splitlines()]
+    dropped = [r for r in rows if r["extracted"] == "हेम राज बिष्ट"]
+    assert dropped, "the accused name must still reach extracted.jsonl"
+    assert dropped[0]["relationship_type"] == "accused"
+
+
+def test_no_bind_this_module_writes_can_carry_a_charged_outcome(
+    monkeypatch, patched_fetch_markdown
+):
+    # `outcome` is legal only on an accused bind (the `outcome_only_on_accused`
+    # CHECK constraint). With accused gone, this module can never send one.
+    case = dict(PRESS_ONLY_CASE, slug="case-no-outcome", entities=[])
+    api = _SearchStubApi([case], {
+        "हेम राज बिष्ट": [{"id": "https://jawafdehi.org/entity/person/hem-raj-bista",
+                            "title": {"ne": "हेम राज बिष्ट"}, "score": 180.0}],
+        "नानी काजी थापा": [{"id": "https://jawafdehi.org/entity/person/nani-kaji-thapa",
+                             "title": {"ne": "नानी काजी थापा"}, "score": 180.0}],
+    })
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: ACCUSED_RESPONSE,
+              argv=["--apply"])
+
+    _slug, _path, items, _etag = api.replace_list_calls[0]
+    assert all(not item.get("outcome") for item in items)
+
+
+def test_the_prompt_no_longer_offers_accused_as_a_relationship_type():
+    assert '"accused"' not in ere.SYSTEM_PROMPT
+    assert "relationship_type" in ere.SYSTEM_PROMPT      # the others survive
+    assert '"alleged"' in ere.SYSTEM_PROMPT
+    assert '"witness"' in ere.SYSTEM_PROMPT
+
+
+def test_the_prompt_says_where_defendants_actually_come_from():
+    assert "court record" in ere.SYSTEM_PROMPT
+
+
+def test_the_carry_through_validator_still_accepts_an_existing_accused_bind():
+    # THE TRAP THE SPLIT AVOIDS. `apply_entity_plan` validates every row of the
+    # whole-list PATCH, including binds the case already had. A human's accused
+    # bind -- or one the court-record path wrote -- must survive that, or the
+    # case becomes unpatchable and we destroy the authoritative record.
+    existing = {"nes_id": ANKUR_IRI, "relationship_type": "accused",
+                "outcome": "charged", "notes": "मानव-लिखित"}
+    assert ere.validate_bind_item(existing) == existing
+
+
+def test_this_module_may_not_propose_an_accused_bind_of_its_own():
+    proposed = {"nes_id": ANKUR_IRI, "relationship_type": "accused",
+                "notes": "क"}
+    with pytest.raises(ValueError, match="court record"):
+        ere.validate_new_bind(proposed)
+
+
+def test_the_new_bind_validator_still_applies_the_generic_rules():
+    with pytest.raises(ValueError, match="canonical NES entity IRI"):
+        ere.validate_new_bind({"nes_id": "not-an-iri",
+                               "relationship_type": "related", "notes": ""})
+
+
+def test_a_failed_prefix_read_costs_one_case_not_the_whole_run(
+    monkeypatch, patched_fetch_markdown
+):
+    # Every other API call in the per-case loop is wrapped so one case's failure
+    # does not cost the run. `entity_prefixes` was not, so a single 502 aborted
+    # a 3,000-case batch -- and at the second call site, after entities had
+    # already been created and cases already PATCHed.
+    case = dict(PRESS_ONLY_CASE, slug="case-prefix-502", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [], "वन निर्देशनालय, धनगढी": []})
+
+    def boom(timeout=60):
+        raise urllib.error.HTTPError("u", 502, "Bad Gateway", {}, None)
+    api.entity_prefixes = boom
+
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    # The run survived and created nothing, rather than raising out of main().
+    assert api.create_entity_calls == []
+
+
+def test_an_unreadable_prefix_list_does_not_blame_the_prefix(
+    monkeypatch, patched_fetch_markdown
+):
+    # `read_live_prefixes` returns None rather than [] so a failed read cannot
+    # be mistaken for "no prefix is in use" -- but `prefix_is_creatable` folds
+    # both to an empty set, so every name came back refused for a reason that
+    # was never checked. `person` is in use in production; telling a caseworker
+    # its parent branch does not exist sends them to fix nothing.
+    case = dict(PRESS_ONLY_CASE, slug="case-prefix-502-reason", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [], "वन निर्देशनालय, धनगढी": []})
+
+    def boom(timeout=60):
+        raise urllib.error.HTTPError("u", 502, "Bad Gateway", {}, None)
+    api.entity_prefixes = boom
+
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    rows = _created_rows()
+    assert rows, "the refused names must still reach created.jsonl"
+    for row in rows:
+        assert row["outcome"] == "skipped"
+        assert "could not be read" in row["reason"]
+        assert "parent branch does not exist" not in row["reason"]
+
+
+def test_an_uncanonical_created_iri_costs_one_name_not_the_run(
+    monkeypatch, patched_fetch_markdown
+):
+    # `_created_bind` validates, and validation RAISES. The per-name handler
+    # only wrapped the POST, so a server answering with an off-authority `@id`
+    # escaped both it and the call site, killing the run after entities had
+    # already been created.
+    case = dict(PRESS_ONLY_CASE, slug="case-bad-iri", entities=[])
+    api = _SearchStubApi([case], {"हेम राज बिष्ट": [], "वन निर्देशनालय, धनगढी": []})
+    real_create = api.create_entity
+
+    def odd_iri(payload, timeout=60):
+        real_create(payload, timeout)
+        return {"@id": "https://elsewhere.example/entity/person/x"}
+    api.create_entity = odd_iri
+
+    _run_main(monkeypatch, api, invoke_text_stub=lambda **kw: CREATE_RESPONSE,
+              argv=["--apply", "--create-entities"])
+
+    rows = _created_rows()
+    assert [r["outcome"] for r in rows] == ["error", "error"]
+    assert all("canonical NES entity IRI" in r["reason"] for r in rows)

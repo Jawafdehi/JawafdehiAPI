@@ -697,17 +697,43 @@ def _province_veto(extracted: str, nes_id: str) -> str:
     )
 
 
-def _name_vetoes(extracted: str) -> str:
+#: Prefixes whose name space is a CLOSED, officially-coded gazetteer: 77
+#: districts and 7 provinces, ingested with their government codes
+#: (`location/district/jhapa-np0104`). The bare `location/` prefix is
+#: deliberately absent -- it holds countries and hand-added places with no code,
+#: which is the open name space the single-token veto was written for.
+GAZETTEER_PREFIXES = (
+    "/entity/location/district/",
+    "/entity/location/province/",
+)
+
+
+def names_a_gazetteer_place(nes_id) -> bool:
+    """True when `nes_id` is a district or province from the coded gazetteer."""
+    if not nes_id or not isinstance(nes_id, str):
+        return False
+    return any(marker in nes_id for marker in GAZETTEER_PREFIXES)
+
+
+def _name_vetoes(extracted: str, nes_id=None) -> str:
     """The reason this name can never be auto-bound, or "" if none applies.
 
-    These are properties of the extracted string alone, independent of what NES
-    holds.
+    Every veto here is a property of the extracted string alone. `nes_id` is the
+    winning candidate and buys exactly one exemption, described below; callers
+    with no candidate -- `enrich_related_entities._cannot_create`, deciding
+    whether to CREATE -- pass nothing and get every veto.
     """
     normalised = normalise_name(extracted)
     if _COMPOSITE_SEPARATOR in normalised:
         return "composite 'Activity - Location' name, never split"
     tokens = name_tokens(extracted)
-    if len(tokens) < 2:
+    # THE ONE EXEMPTION. A lone token is a weak anchor in an OPEN name space --
+    # one surname, one word of a firm. A district is the opposite: `काठमाडौं` is
+    # the entire name, the register holds 77 of them, and each carries a
+    # government code. Vetoing those left the location section unable to bind
+    # anything at all, which is what the 2026-08-06 hardening found once the
+    # prompt stopped gluing an activity onto the front of every place name.
+    if len(tokens) < 2 and not (tokens and names_a_gazetteer_place(nes_id)):
         return "single token is too weak an anchor"
     if all(token[1] & GENERIC_TOKENS for token in tokens):
         return "generic institutional name identifies no specific entity"
@@ -894,7 +920,8 @@ def _truncation_veto(candidates, winner_id, candidates_complete) -> str:
 
 
 def resolve(extracted_name: str, candidates: list[dict],
-            candidates_complete: bool = True) -> Decision:
+            candidates_complete: bool = True,
+            prefer_gazetteer: bool = False) -> Decision:
     """Decide what to do with one LLM-extracted name.
 
     BIND only when exactly ONE NES entity scores at or above MIN_BIND_SCORE and
@@ -940,6 +967,29 @@ def resolve(extracted_name: str, candidates: list[dict],
                         "no NES entity scored at or above the bind threshold",
                         frozen)
 
+    # NES holds some places twice: `झापा` is both `location/district/jhapa-np0104`
+    # and `location/jhapa`, scoring 146.20 each, so run c92ad032 bound one
+    # district onto the case as two rows. Where the coded gazetteer entry is
+    # among the qualifiers, it is the one to keep -- it carries the government
+    # district code, and the un-coded twin is a hand-added duplicate.
+    #
+    # AFTER qualification, never before. Filtering the candidate list up front
+    # would let a coded entry that matched badly take the bind from an un-coded
+    # one that matched well, or drop the name to NO_MATCH outright. Narrowing
+    # the qualifying set can only ever pick between entities already good enough
+    # to bind.
+    #
+    # `frozen` keeps every candidate, so the dropped twin still reaches the
+    # report and the duplicate stays visible.
+    #
+    # Only the location section asks for this. Anywhere else, two entities
+    # scoring alike is the ambiguity it looks like.
+    if prefer_gazetteer and len(qualifying) > 1:
+        coded = {nes_id for nes_id in qualifying if names_a_gazetteer_place(nes_id)}
+        if coded:
+            qualifying = coded
+            scored = [row for row in scored if row[1] in coded]
+
     # Every veto below refuses the SAME way -- downgrade the winning candidate
     # to REVIEW with a reason -- so the construction lives in one place. A new
     # veto is then one line, with no chance of transposing an argument.
@@ -952,7 +1002,7 @@ def resolve(extracted_name: str, candidates: list[dict],
     truncation = _truncation_veto(candidates, scored[0][1], candidates_complete)
     if truncation:
         return review(truncation)
-    veto = _name_vetoes(extracted_name)
+    veto = _name_vetoes(extracted_name, scored[0][1])
     if veto:
         return review(veto)
     if is_cross_script_only(extracted_name, scored[0][2]):
