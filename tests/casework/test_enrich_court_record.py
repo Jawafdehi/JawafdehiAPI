@@ -287,7 +287,13 @@ def test_is_person_never_raises_on_a_malformed_iri():
     assert _is_person(None) is False
 
 
-from casework.enrich_court_record import ACQUITTED, CHARGED, bind_outcome, plan_case  # noqa: E402
+from casework.enrich_court_record import (  # noqa: E402
+    ACQUITTED,
+    CHARGED,
+    CasePlan,
+    bind_outcome,
+    plan_case,
+)
 
 CASE_IRI = "https://jawafdehi.org/courtcase/special/079-cr-0151"
 
@@ -479,3 +485,120 @@ def test_a_case_payload_missing_the_entities_key_is_refused():
     assert plan.status == "no-entities-key"
     assert plan.entities is None
     assert "entities" in plan.skips[0]
+
+
+import json  # noqa: E402
+
+import pytest  # noqa: E402
+
+from casework.enrich_court_record import apply_plan, main  # noqa: E402
+
+
+def test_apply_plan_refuses_to_write_without_an_etag():
+    plan = CasePlan("case-079-cr-0151", "would-patch",
+                    fields=[("case_start_date", "2023-06-22")], if_match="")
+    with pytest.raises(ValueError, match="ETag"):
+        apply_plan(_PlanApi(), plan)
+
+
+def test_apply_plan_sends_one_conditional_request():
+    seen = {}
+
+    class _Api:
+        def patch_case(self, slug, *, fields=(), lists=(), if_match=None):
+            seen.update(slug=slug, fields=list(fields), lists=list(lists),
+                        if_match=if_match)
+            return {}
+
+    plan = CasePlan("case-079-cr-0151", "would-patch",
+                    fields=[("case_start_date", "2023-06-22")],
+                    entities=[{"nes_id": YADAV, "relationship_type": "accused"}],
+                    if_match='W/"7"')
+    apply_plan(_Api(), plan)
+    assert seen["if_match"] == 'W/"7"'
+    assert seen["fields"] == [("case_start_date", "2023-06-22")]
+    assert seen["lists"][0][0] == "entities"
+
+
+class _CliApi(_PlanApi):
+    """`_PlanApi` plus the list/detail entry points `main()` calls before it
+    ever reaches `plan_case` -- one case in, its own ETag on the read."""
+
+    def __init__(self, case, **kw):
+        super().__init__(**kw)
+        self._case = case
+
+    def iter_cases(self, params=None, timeout=60, progress=None):
+        yield self._case
+
+    def get_case_with_etag(self, slug, timeout=60):
+        return self._case, 'W/"7"'
+
+    def entity_prefixes(self, timeout=60):
+        return ["person"]
+
+
+def _events(tmp_path):
+    """Every JSON line from the one `*.events.jsonl` a run leaves in `tmp_path`."""
+    paths = list(tmp_path.glob("*.events.jsonl"))
+    assert paths, "the run must leave an events file"
+    return [json.loads(line) for line in paths[0].read_text().splitlines() if line]
+
+
+def test_a_dry_run_writes_the_events_file_and_no_patch(tmp_path, monkeypatch):
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("CASEWORK_API_USER", "dev")
+    monkeypatch.setenv("CASEWORK_API_PASSWORD", "dev")
+    # Stub the corpus read and the court reads; assert nothing PATCHes.
+    api = _CliApi(
+        _case(),
+        detail={"registration_date_ad": "2023-06-22"},
+        hearings=[DECIDED],
+        parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव", "nes_id": YADAV}],
+    )
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+               "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+    events = _events(tmp_path)
+    steps = {e["step"] for e in events}
+    assert {"select", "court_read", "patch"} <= steps
+    # No real PATCH: every `patch` event this run emits is the dry-run kind.
+    assert all(e["status"] == "dry_run" for e in events if e["step"] == "patch")
+
+
+def test_a_case_missing_the_entities_key_is_skipped_and_logged(tmp_path, monkeypatch):
+    # `plan_case` refuses to plan a write off a payload with no `entities` key
+    # at all -- merging would fabricate a false-empty current list and PATCH a
+    # replace that deletes every bind the case actually has (see `plan_case`).
+    # The CLI's job is to treat that refusal as a SKIP: no court_read, no
+    # bind_plan, no patch -- and log why, the same as `skip-state` and
+    # `no-court-reference` already do.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    case = _case()
+    del case["entities"]
+    api = _CliApi(case, detail={"registration_date_ad": "2023-06-22"})
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+               "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+    events = _events(tmp_path)
+    assert [e["step"] for e in events] == ["select"]
+    assert events[0]["status"] == "skip_no_entities_key"
+
+
+def test_the_module_imports_without_django(tmp_path):
+    """The standalone constraint, pinned. One convenience import re-adds Django."""
+    import os
+    import subprocess
+    import sys
+
+    env = {k: v for k, v in os.environ.items() if k != "DJANGO_SETTINGS_MODULE"}
+    proc = subprocess.run(
+        [sys.executable, "-c", "import casework.enrich_court_record"],
+        env=env, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr

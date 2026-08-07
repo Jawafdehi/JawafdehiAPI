@@ -41,10 +41,25 @@ Usage:
     uv run python -m casework.enrich_court_record --dry-run --verbose
 """
 
+import argparse
 import logging
+import sys
+import time
 from dataclasses import dataclass, field
 
-from casework.common.api import EntityAlreadyExists
+from casework.common.api import CaseworkApi, EntityAlreadyExists
+from casework.common.cli import (
+    add_common_args,
+    basic_auth_from_env,
+    configure_run_logging,
+    log_event,
+    log_run_footer,
+    log_run_header,
+    print_summary,
+    setup_logging,
+)
+from casework.common.review import ReviewRow, build_review_file
+from casework.common.select import select_for_run
 from casework.court_record import court_record_for_case
 from casework.entity_identity import entity_slug, prefix_is_creatable
 from casework.entity_resolver import normalise_name
@@ -52,6 +67,7 @@ from casework.enrich_related_entities import (
     bind_key,
     current_entity_binds,
     merge_entity_binds,
+    read_live_prefixes,
     validate_bind_item,
 )
 from courts.case_status import _order_key, parse_case_status
@@ -462,3 +478,173 @@ def plan_case(api, case, etag, *, live_prefixes, run_entities, dry_run):
     status = "would-patch" if (fields or entities is not None) else "nothing-to-do"
     return CasePlan(slug, status, fields=fields, entities=entities,
                     if_match=etag or "", rows=rows, skips=skips)
+
+
+STAGE = "court_record"
+
+
+def build_api(args):
+    """`CaseworkApi` from parsed args -- Bearer when a token is set, else Basic."""
+    if args.api_token:
+        return CaseworkApi(args.api_base_url, token=args.api_token,
+                           allow_remote_writes=args.allow_remote_writes)
+    return CaseworkApi(args.api_base_url, basic=basic_auth_from_env(),
+                       allow_remote_writes=args.allow_remote_writes)
+
+
+def apply_plan(api, plan):
+    """Execute a would-patch plan as ONE conditional request.
+
+    Fails closed with no ETag: without If-Match the whole-list replace is
+    unconditional and a concurrent edit would be silently clobbered.
+
+    NEITHER RETRIES NOR FORCES. A 412 means the case changed between the read
+    and this write, so the merged list is stale and writing it would drop
+    someone else's edit. It propagates; `main` records the case as an error and
+    emits no bind row, so nothing claims a bind that never landed.
+    """
+    if not plan.if_match:
+        raise ValueError(
+            f"refusing to write {plan.slug} with no ETag: the whole-list "
+            "replace would be unconditional")
+    lists = [] if plan.entities is None else [("entities", plan.entities)]
+    return api.patch_case(plan.slug, fields=plan.fields, lists=lists,
+                          if_match=plan.if_match)
+
+
+#: `plan_case` statuses that end a case before any court-record work happens:
+#: no `court_read`, `dates`, `defendant_resolve`, `bind_plan` or `patch` event
+#: follows one of these, only the `select` event below carrying the mapped
+#: status. Anything else falls through to `"selected"`.
+#:
+#: `"no-entities-key"` reached `plan_case` after this CLI's event vocabulary
+#: was first drafted: a case payload with no `entities` key at all cannot be
+#: told apart from one that genuinely carries zero binds, so `plan_case`
+#: refuses to plan a write rather than merge against a false-empty current
+#: list and PATCH a replace that would delete every bind the case actually
+#: has (see `plan_case`'s own guard). That refusal is a SKIP exactly like
+#: `skip-state` and `no-court-reference` -- nothing downstream was read or
+#: planned -- so it is counted and logged the same way, under its own
+#: `skip_no_entities_key` status so the events file still records which of
+#: the three reasons applied.
+_SKIP_SELECT_STATUS = {
+    "skip-state": "skip_state",
+    "no-court-reference": "skip_no_court_ref",
+    "no-entities-key": "skip_no_entities_key",
+}
+
+
+def _log_plan(logger, events, run_id, plan, case):
+    """Emit the per-step events for one planned case.
+
+    `run_id`/`stage`/`slug` are passed as explicit keywords on every call
+    rather than once via a `**common` dict: `ty` cannot verify that a plain
+    `dict[str, str]` splatted into `log_event`'s keyword-only signature never
+    lands in `elapsed_ms: int | None` or `level: int`, and flags every call
+    site as a type error even though no such collision is possible here.
+    `enrich_related_entities.py`'s own `log_event` calls use the same
+    explicit-keyword style for the identical reason.
+    """
+    for row in plan.rows:
+        status = {"nes_id": "nes_id_copied", "exact": "exact_match",
+                  "created": "created", "failed": "failed"}[row["how"]]
+        log_event(logger, events, run_id=run_id, stage=STAGE, slug=plan.slug,
+                  step="defendant_resolve", status=status,
+                  detail=f"{row['name']} -> {row['nes_id'] or row['reason']}")
+    if plan.fields:
+        log_event(logger, events, run_id=run_id, stage=STAGE, slug=plan.slug,
+                  step="dates", status="proposed",
+                  detail=", ".join(f"{k}={v}" for k, v in plan.fields))
+    for skip in plan.skips:
+        status = "skip_open_case" if "not every court reference" in skip else "no_source"
+        log_event(logger, events, run_id=run_id, stage=STAGE, slug=plan.slug,
+                  step="dates", status=status, detail=skip)
+    log_event(logger, events, run_id=run_id, stage=STAGE, slug=plan.slug,
+              step="bind_plan",
+              status="merged" if plan.entities is not None else "no_additions",
+              detail=f"{len(plan.rows)} defendant(s) on the court record")
+
+
+def main(argv=None):
+    parser = add_common_args(argparse.ArgumentParser(
+        description="Bind court-record defendants and fill the case date fields."))
+    args = parser.parse_args(argv)
+    setup_logging(args.verbose)
+    logger, run_id, paths = configure_run_logging(STAGE, verbose=args.verbose)
+    events = paths["events"]
+    started = time.time()
+
+    api = build_api(args)
+    cases = select_for_run(list(api.iter_cases()), args)
+    log_run_header(logger, stage=STAGE, base_url=args.api_base_url,
+                   dry_run=args.dry_run, provider=args.provider, model=args.model,
+                   n_selected=len(cases), run_id=run_id, paths=paths)
+
+    review = build_review_file(args, stage=STAGE, field_name="accused + case dates",
+                               run_id=run_id)
+    live_prefixes = read_live_prefixes(api)
+    run_entities, stats = {}, {}
+
+    for case in cases:
+        slug = case.get("slug") or ""
+        try:
+            detail, etag = api.get_case_with_etag(slug)
+        except Exception as exc:  # noqa: BLE001 - one case's read failure is not the run's
+            log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
+                      step="court_read", status="unreadable",
+                      detail=f"{type(exc).__name__}")
+            stats["error"] = stats.get("error", 0) + 1
+            continue
+
+        plan = plan_case(api, detail, etag, live_prefixes=live_prefixes,
+                         run_entities=run_entities, dry_run=args.dry_run)
+        log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
+                  step="select", status=_SKIP_SELECT_STATUS.get(plan.status, "selected"))
+        if plan.status in _SKIP_SELECT_STATUS:
+            stats[plan.status] = stats.get(plan.status, 0) + 1
+            continue
+        log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
+                  step="court_read", status="ok")
+        _log_plan(logger, events, run_id, plan, detail)
+
+        generated = "; ".join(
+            [f"{k}={v}" for k, v in plan.fields]
+            + [f"accused+{len(plan.rows)}" if plan.entities is not None else ""]).strip("; ")
+        review.add(ReviewRow(
+            slug=slug, status=plan.status,
+            before=(f"case_start_date={detail.get('case_start_date')}, "
+                    f"case_end_date={detail.get('case_end_date')}, "
+                    f"{len(detail.get('entities') or [])} bind(s)"),
+            generated=generated,
+            note="; ".join(plan.skips)))
+
+        if plan.status == "nothing-to-do":
+            stats["nothing-to-do"] = stats.get("nothing-to-do", 0) + 1
+            continue
+        if args.dry_run:
+            log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
+                      step="patch", status="dry_run", detail=generated)
+            stats["would-patch"] = stats.get("would-patch", 0) + 1
+            continue
+        try:
+            apply_plan(api, plan)
+        except Exception as exc:  # noqa: BLE001 - a 412 or a 400 costs this case only
+            status = "etag_conflict" if "412" in str(exc) else "rejected"
+            log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
+                      step="patch", status=status,
+                      detail=f"{type(exc).__name__}: {exc}")
+            stats["error"] = stats.get("error", 0) + 1
+            continue
+        log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
+                  step="patch", status="applied", detail=generated)
+        stats["patched"] = stats.get("patched", 0) + 1
+
+    review.write()
+    log_run_footer(logger, stage=STAGE, stats=stats, duration_s=time.time() - started)
+    print_summary(stats, args.dry_run, "court-record binder")
+    print(f"review file: {review.path}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
