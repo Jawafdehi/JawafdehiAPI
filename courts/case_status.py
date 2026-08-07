@@ -56,6 +56,25 @@ AFFIRMED = "AFFIRMED"
 REVERSED = "REVERSED"
 PARTIALLY_REVERSED = "PARTIALLY_REVERSED"
 
+# The closed set of values ``CourtCase.verdict_type`` is *supposed* to hold. The
+# column is a plain CharField with no DB constraint, and historic enrichment
+# wrote raw portal text straight into it — measured 2026-08-06 on prod, 1,323
+# Supreme rows (1.27% of the populated ones, 37 distinct values) hold Nepali
+# strings rather than a member here, including bench referrals
+# (``पूर्ण इजलासमा पेस हुने``), interlocutory orders (``कैफियत प्रतिवेदन माग्ने``)
+# and pure punctuation (``।।।।।।।``). Every such row has a NULL verdict date, so
+# they are enrichment noise rather than asserted verdicts — but a referral
+# rendered as an outcome would tell a reader a live case was decided. Anything
+# crossing a public boundary must therefore be filtered through this set; see
+# ``courts.serializers.CourtCaseSerializer.get_verdict_type``.
+VERDICT_TYPES = frozenset({
+    CONVICTED, ACQUITTED, PARTIALLY_CONVICTED,
+    CLAIM_UPHELD, CLAIM_DENIED, PARTIALLY_UPHELD,
+    SETTLED, WITHDRAWN, DISMISSED, QUASHED,
+    PROCEDURAL, ABEYANCE, STRUCK_OFF, AMENDED, OTHER,
+    AFFIRMED, REVERSED, PARTIALLY_REVERSED,
+})
+
 
 # --- vocabulary --------------------------------------------------------------
 

@@ -22,6 +22,7 @@ from django.test import SimpleTestCase
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from courts import case_status as cs
 from courts.models import (
     BlacklistedFirm,
     CaseEntity,
@@ -145,6 +146,84 @@ class ReadPlaneTests(_DbAPITestCase):
         resp = self.client.get("/api/courtcase-entities/", {"nes_id": "https://jawafdehi.org/entity/person/ram-bahadur"})
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data["results"]), 1)
+
+
+class VerdictExposureTests(_DbAPITestCase):
+    """``verdict_type`` crosses the public boundary through a whitelist.
+
+    The column has no DB constraint and historic Supreme enrichment wrote raw
+    portal text into it (measured 2026-08-06: 1,323 prod rows, 37 distinct
+    values). The dangerous class is not the punctuation garbage but the bench
+    referrals and interlocutory orders, which read as dispositions while the
+    case is still live — so the serializer must publish only real enum members.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.court = Court.objects.create(
+            identifier="supreme",
+            court_type="supreme",
+            full_name_nepali="सर्वोच्च अदालत",
+            full_name_english="Supreme Court",
+        )
+        # A promoted appellate outcome — the shape the case stepper reads.
+        CourtCase.objects.create(
+            case_number="081-CR-1038",
+            court=cls.court,
+            verdict_type="AFFIRMED",
+            verdict_date_bs="2082-03-20",
+            verdict_date_ad=date(2025, 7, 4),
+        )
+        # A bench referral stored raw in verdict_type. Reads like a decision
+        # ("to be presented to the full bench"); the case is still live, and
+        # every such prod row carries a NULL verdict date exactly as here.
+        CourtCase.objects.create(
+            case_number="076-RB-0582",
+            court=cls.court,
+            verdict_type="पूर्ण इजलासमा पेस हुने",
+        )
+        # Scrape garbage, likewise seen in prod.
+        CourtCase.objects.create(
+            case_number="067-WO-0527", court=cls.court, verdict_type="।।।।।।।",
+        )
+        # Never enriched at all.
+        CourtCase.objects.create(case_number="081-CR-1318", court=cls.court)
+
+    def _get(self, case_number):
+        resp = self.client.get(f"/api/courtcases/supreme/{case_number}")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        return resp.data
+
+    def test_enum_member_is_published_with_its_dates(self):
+        data = self._get("081-CR-1038")
+        self.assertEqual(data["verdict_type"], "AFFIRMED")
+        self.assertEqual(data["verdict_date_bs"], "2082-03-20")
+        self.assertEqual(str(data["verdict_date_ad"]), "2025-07-04")
+
+    def test_bench_referral_is_not_published_as_a_verdict(self):
+        data = self._get("076-RB-0582")
+        self.assertIsNone(data["verdict_type"])
+        self.assertIsNone(data["verdict_date_bs"])
+
+    def test_scrape_garbage_is_not_published(self):
+        self.assertIsNone(self._get("067-WO-0527")["verdict_type"])
+
+    def test_unenriched_docket_reports_null(self):
+        self.assertIsNone(self._get("081-CR-1318")["verdict_type"])
+
+    def test_whitelist_covers_every_declared_constant(self):
+        """Guards against a new verdict constant being added and silently
+        dropped on the wire because nobody updated ``VERDICT_TYPES``."""
+        declared = {
+            value
+            for name, value in vars(cs).items()
+            if name.isupper()
+            and not name.startswith("_")
+            and isinstance(value, str)
+            and value == name
+            and name not in {"PENDING", "DECIDED", "UNKNOWN"}  # lifecycle, not verdict
+        }
+        self.assertEqual(declared, set(cs.VERDICT_TYPES))
 
 
 class SearchRetiredTests(_DbAPITestCase):
