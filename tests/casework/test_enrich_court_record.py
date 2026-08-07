@@ -222,22 +222,130 @@ def test_the_same_person_across_two_cases_creates_one_entity():
     assert len(api.posted) == 1
 
 
-def test_an_existing_iri_collision_binds_the_existing_entity():
-    # The stub raises before returning anything, so `resolve_defendant` never
-    # reads the exception's payload -- a real 409 body is an opaque error blob,
-    # not a clean IRI. What it keeps is the IRI it computed BEFORE the POST,
-    # which by construction of a same-slug collision IS the entity that was
-    # already there. `EntityAlreadyExists(YADAV)`'s argument is therefore
-    # unread by design; expressed here as the actual `entity_slug` output
-    # rather than `YADAV` itself, whose hand-picked spelling drops the schwas
-    # `entity_slug` keeps (`कृष्ण प्रसाद यादव` -> `krishna-prasada-yadava`, not
-    # `krishna-prasad-yadav`).
+def test_an_existing_iri_collision_refuses_to_bind():
+    # A 409 means the slug is TAKEN -- by an entity the ladder just declined to
+    # identify, since a unique exact match would have bound at rung 2 and never
+    # reached the POST. Keeping the pre-POST IRI and binding it (what this did
+    # until 2026-08-07) hands the case to whoever already owns that slug: after
+    # "13 person entities carry this exact name", or after the truncation veto
+    # declined candidate X, the create collides with X and X gets bound anyway
+    # with no ambiguity check. Nothing may be bound here.
     api = _SearchApi(results=[], created=EntityAlreadyExists(YADAV))
     got = resolve_defendant(api, "कृष्ण प्रसाद यादव", None, citation="",
                             live_prefixes=["person"], run_entities={}, dry_run=False)
-    assert got.how == "created"
-    assert got.nes_id == build_entity_iri(PERSON_PREFIX,
-                                          entity_slug("कृष्ण प्रसाद यादव"))
+    assert (got.nes_id, got.how) == ("", "failed")
+    # The report must name the IRI that was taken, so a human can look at it.
+    # Spelled through `entity_slug` rather than as `YADAV`, whose hand-picked
+    # spelling drops the schwas `entity_slug` keeps (`कृष्ण प्रसाद यादव` ->
+    # `krishna-prasada-yadava`, not `krishna-prasad-yadav`).
+    taken = build_entity_iri(PERSON_PREFIX, entity_slug("कृष्ण प्रसाद यादव"))
+    assert taken in got.reason
+    assert "collided" in got.reason
+
+
+def test_a_collision_is_not_remembered_for_the_rest_of_the_run():
+    # The refusal must not poison `run_entities` either: caching the taken IRI
+    # would make every LATER case naming this defendant bind it at the "reused
+    # from this run" rung, turning one refused bind into a run-wide one.
+    api = _SearchApi(results=[], created=EntityAlreadyExists(YADAV))
+    run_entities = {}
+    resolve_defendant(api, "कृष्ण प्रसाद यादव", None, citation="",
+                      live_prefixes=["person"], run_entities=run_entities,
+                      dry_run=False)
+    assert run_entities == {}
+
+
+def test_two_same_named_defendants_on_different_cases_do_not_collapse():
+    # `run_entities` is shared across cases so ONE person named on two cases
+    # becomes one entity. Keyed on the bare name that reuse is indiscriminate:
+    # two DIFFERENT people who merely share a name -- a defendant on case A and
+    # a defendant on case B -- collapse into a single entity, and case A's
+    # person then carries case B's accusation. The court party row's `address`
+    # is what the charge sheet uses to tell them apart, so it is part of the key.
+    #
+    # Written against a stub that behaves like the server (one slug, one
+    # entity), because both halves of the fix have to hold for this to pass:
+    # keying on the bare name reuses A's entity for B outright, and keeping the
+    # old 409 handling binds A's entity to B after the create collides.
+    class _SlugAwareApi(_SearchApi):
+        def create_entity(self, payload, timeout=60):
+            taken = {p["slug"] for p in self.posted}
+            self.posted.append(payload)
+            iri = build_entity_iri(PERSON_PREFIX, payload["slug"])
+            if payload["slug"] in taken:
+                raise EntityAlreadyExists(iri)
+            return {"@id": iri}
+
+    api = _SlugAwareApi(results=[])
+    run_entities = {}
+    common = {"citation": "", "live_prefixes": ["person"],
+              "run_entities": run_entities, "dry_run": False}
+    first = resolve_defendant(api, "कृष्ण प्रसाद यादव", None,
+                              address="सर्लाही, हरिपुर-४", **common)
+    second = resolve_defendant(api, "कृष्ण प्रसाद यादव", None,
+                               address="मोरङ, विराटनगर-१२", **common)
+    assert (first.how, bool(first.nes_id)) == ("created", True)
+    # A different person must not inherit the first one's entity, by either
+    # route -- not from the run cache, and not from the collision.
+    assert second.nes_id != first.nes_id
+    assert (second.nes_id, second.how) == ("", "failed")
+
+
+def test_the_same_person_on_two_cases_still_creates_one_entity():
+    # The other half of the same key: same name AND same address is one person,
+    # and must still be created once no matter how many cases name them --
+    # otherwise the address in the key would have cost the cross-case reuse
+    # `run_entities` exists for.
+    api = _SearchApi(results=[], created={"@id": YADAV})
+    run_entities = {}
+    for _ in range(2):
+        resolve_defendant(api, "कृष्ण प्रसाद यादव", None, citation="",
+                          live_prefixes=["person"], run_entities=run_entities,
+                          dry_run=False, address="सर्लाही, हरिपुर-४")
+    assert len(api.posted) == 1
+    assert len(run_entities) == 1
+
+
+def test_an_address_is_normalised_before_it_keys_the_run():
+    # Spacing/punctuation drift in the portal's transcription of one address
+    # must not split one person into two entities -- the same `normalise_name`
+    # the name half of the key already goes through.
+    api = _SearchApi(results=[], created={"@id": YADAV})
+    run_entities = {}
+    for address in ("सर्लाही, हरिपुर-४", " सर्लाही,  हरिपुर-४ "):
+        resolve_defendant(api, "कृष्ण प्रसाद यादव", None, citation="",
+                          live_prefixes=["person"], run_entities=run_entities,
+                          dry_run=False, address=address)
+    assert len(api.posted) == 1
+
+
+def test_an_unreadable_prefix_list_is_not_a_verdict_on_the_prefix():
+    # `read_live_prefixes` returns None on any error (a transient 502 at run
+    # start), and `prefix_is_creatable` folds None to the empty set -- so
+    # without a dedicated branch every defendant needing creation across all
+    # 307 cases is reported "the person prefix is not creatable", a false
+    # statement about a prefix as ordinary as `person`. The dates still PATCH,
+    # so a re-run finds them populated and the missing binds look deliberate.
+    api = _SearchApi(results=[])
+    got = resolve_defendant(api, "कृष्ण प्रसाद यादव", None, citation="",
+                            live_prefixes=None, run_entities={}, dry_run=True)
+    assert (got.nes_id, got.how) == ("", "failed")
+    assert "could not be read" in got.reason and "retry this case" in got.reason
+    # The distinction is the whole point: this must NOT read as a judgement on
+    # the prefix the way a genuinely refused prefix does.
+    assert "not creatable" not in got.reason
+    assert api.posted == []
+
+
+def test_a_genuinely_unusable_prefix_still_says_so():
+    # The companion: an EMPTY (successfully read) prefix list is a real verdict
+    # -- `person` is in use nowhere -- and must keep saying "not creatable",
+    # or the None branch above would have swallowed both cases into one reason.
+    api = _SearchApi(results=[])
+    got = resolve_defendant(api, "कृष्ण प्रसाद यादव", None, citation="",
+                            live_prefixes=[], run_entities={}, dry_run=True)
+    assert (got.nes_id, got.how) == ("", "failed")
+    assert "not creatable" in got.reason
 
 
 def test_a_name_that_cannot_be_slugged_fails_without_raising():
@@ -443,6 +551,22 @@ def test_an_existing_bind_survives_untouched():
     plan = _plan(api, _case(entities=[existing]))
     # Same (nes_id, relationship_type) -> already present -> nothing to write.
     assert plan.entities is None
+
+
+def test_the_party_row_address_reaches_the_run_entity_key():
+    # Wiring: `_accused_binds` must pass the court party row's `address`
+    # through to `resolve_defendant`, or the name-plus-address key is dead code
+    # at the only call site that matters and two same-named defendants on two
+    # cases still collapse into one entity. Two cases, one name, two addresses,
+    # one shared `run_entities` -- two keys.
+    run_entities = {}
+    for slug, address in (("case-a", "सर्लाही, हरिपुर-४"),
+                          ("case-b", "मोरङ, विराटनगर-१२")):
+        api = _PlanApi(detail={"registration_date_ad": "2023-06-22"},
+                       parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव",
+                                 "address": address}])
+        _plan(api, _case(slug=slug), run_entities=run_entities)
+    assert len(run_entities) == 2
 
 
 def test_a_populated_date_is_never_overwritten():
@@ -672,14 +796,92 @@ def test_a_partially_unreadable_court_record_is_logged_as_court_read_not_dates(
     events = _events(tmp_path)
 
     court_read = [e for e in events if e["step"] == "court_read"]
-    assert any(e["status"] == "ok" for e in court_read)
-    assert any(e["status"] == "unreadable" and "079-cr-0999" in e["detail"]
+    assert any(e["detail"] == "" for e in court_read), "the successful read"
+    assert any("unreadable: " in e["detail"] and "079-cr-0999" in e["detail"]
                for e in court_read)
     # The 404 must not also (or instead) show up as a `dates` event -- only
     # the genuine date-source skip belongs there.
     dates = [e for e in events if e["step"] == "dates"]
     assert not any("079-cr-0999" in e.get("detail", "") for e in dates)
-    assert any(e["status"] == "no_source" for e in dates)
+    assert any(e["detail"].startswith("no_source: ") for e in dates)
+    # Both are INTERMEDIATE steps, so both report `ok` and carry the
+    # classification in the detail; see `_RUNG_WORDS`. A distinctive status
+    # here would be recorded by `casework.ledger` as this case's outcome.
+    assert {e["status"] for e in court_read + dates} == {"ok"}
+
+
+def test_a_dry_run_leaves_the_case_out_of_the_ledger_entirely(tmp_path, monkeypatch):
+    # Fix 3, proved against a REAL run rather than a hand-written fixture: the
+    # events this CLI actually emits, folded by the real
+    # `casework.ledger.build_ledger`, must leave nothing behind for a dry run.
+    # A dry run changed nothing, so the "what did we change, when" audit must
+    # not carry a row for it -- and excluding the terminal `patch`/`dry_run`
+    # status alone does not achieve that: whatever distinctive status the
+    # LATEST surviving event carries becomes the outcome instead, which is how
+    # `bind_plan`/`merged` was landing in the ledger for every dry-run case.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    api = _CliApi(
+        _case(),
+        detail={"registration_date_ad": "2023-06-22"},
+        hearings=[DECIDED],
+        parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव"}],
+    )
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    assert main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+                 "--review-file", str(tmp_path / "review.md")]) == 0
+
+    # The run really did emit the full sequence -- otherwise "the ledger is
+    # empty" would be true for the boring reason that nothing was logged.
+    steps = [e["step"] for e in _events(tmp_path)]
+    assert {"select", "court_read", "defendant_resolve", "bind_plan",
+            "patch"} <= set(steps)
+
+    from casework.ledger import build_ledger
+    assert build_ledger(tmp_path) == {}
+
+
+def test_an_apply_run_is_recorded_in_the_ledger(tmp_path, monkeypatch):
+    # The companion: "the ledger is empty" must not be achieved by excluding
+    # every status this stage emits. The same sequence ending in a real PATCH
+    # records `applied` against the case.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    api = _CliApi(
+        _case(),
+        detail={"registration_date_ad": "2023-06-22"}, hearings=[DECIDED],
+        parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव", "nes_id": YADAV}],
+    )
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    assert main(["--api-base-url", "http://127.0.0.1:48010", "--apply",
+                 "--review-file", str(tmp_path / "review.md")]) == 0
+
+    from casework.ledger import build_ledger
+    ledger = build_ledger(tmp_path)
+    assert ledger[("case-079-cr-0151", "court_record")]["status"] == "applied"
+
+
+def test_a_case_with_nothing_to_change_records_already_not_nothing(tmp_path, monkeypatch):
+    # A case that needed no write ends on `ok`-statused intermediates only, so
+    # without a terminal event of its own it would vanish from the ledger --
+    # indistinguishable from a run that crashed before reaching it. The ledger's
+    # stated value is telling "we enriched it" from "it was already populated",
+    # so this path emits the sibling vocabulary for the latter.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    api = _CliApi(_case(case_start_date="2020-01-01", case_end_date="2021-01-01"),
+                  detail={"registration_date_ad": "2023-06-22"}, hearings=[DECIDED],
+                  parties=[])
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    assert main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+                 "--review-file", str(tmp_path / "review.md")]) == 0
+    assert api.patch_calls == []
+
+    from casework.ledger import build_ledger
+    assert build_ledger(tmp_path)[("case-079-cr-0151", "court_record")]["status"] == "already"
 
 
 def test_apply_run_records_a_412_as_etag_conflict_with_no_applied_event(

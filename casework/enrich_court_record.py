@@ -26,9 +26,21 @@ WHY NOT THE SCORED RESOLVER. `casework.entity_resolver` binds the best candidate
 above a threshold. NES holds 162,650 person entities dominated by Election
 Commission candidate records, so a scored match can name a namesake as the
 accused in a corruption case -- the worst error this platform can make. This
-module matches on exact name equality within the `person` prefix, and creates
-the entity when there is no unique exact match. The failure mode becomes a
-duplicate entity, which is a merge, not a defamation.
+module matches on exact name equality within the `person` prefix, and creates a
+NEW entity when there is no unique exact match. Where that works the failure
+mode is a duplicate entity, which is a merge, not a defamation.
+
+WHERE THE CREATION COLLIDES, NOTHING IS BOUND. A 409 on the create says the slug
+this name yields is already TAKEN -- and by an entity the ladder just declined to
+identify, because a unique exact match would have bound at rung 2 and never
+reached the POST at all. The collision is therefore rung 2's own refusal
+condition restated: this name is not unique to this person. So the 409 path binds
+nothing. It reports `failed`, names the IRI that was taken, and leaves the case
+for a human. Keeping the pre-POST IRI and binding it -- what this module did
+until 2026-08-07 -- silently converts "I could not identify this person" into "I
+identified this person", on exactly the common names the truncation veto was
+written for. The cost is a bind this run does not make; the alternative is the
+one error this platform must never make.
 
 WHY IT NEVER WRITES `convicted`. `decision_type` sits on the CASE, not on each
 defendant. `ठहर` on a 19-defendant case does not say who, and `आंशिक ठहर` means
@@ -61,7 +73,7 @@ from casework.common.cli import (
 )
 from casework.common.review import ReviewRow, build_review_file
 from casework.common.select import select_for_run
-from casework.court_record import court_record_for_case
+from casework.court_record import court_record_for_case, is_defendant, party_name
 from casework.entity_identity import entity_slug, prefix_is_creatable
 from casework.entity_resolver import normalise_name
 from casework.enrich_related_entities import (
@@ -238,8 +250,35 @@ def exact_person_match(api, name):
     return next(iter(hits)), ""
 
 
+def run_entity_key(name, address):
+    """The `run_entities` key for one court-record party row.
+
+    NAME PLUS ADDRESS, never the bare name. `run_entities` is shared across
+    every case in the run so that one person named on two cases becomes ONE
+    entity rather than two. Keyed on the name alone that reuse is
+    indiscriminate: two DIFFERENT people who merely share a name, each a
+    defendant on a different case, collapse into a single entity, and case A's
+    person then carries case B's accusation -- the same wrong-person bind the
+    match rungs refuse, arriving through the create rung instead.
+
+    `address` is the only other identifying column NGM stores on a party
+    (`courts.serializers`'s `CaseEntitySerializer` exposes `side`, `name`,
+    `address`, `nes_id` and nothing else), and it is what the charge sheet uses
+    to tell namesakes apart, so it is what separates them here.
+
+    EMPTY-TOLERANT, and the residual hole is deliberate: a row with no address
+    keys on `(name, "")` and still reuses across cases, so two same-named,
+    address-less defendants on two cases can still collapse. Closing that would
+    mean keying on the case, which defeats the cross-case reuse this map exists
+    for and mints a duplicate entity for every case a person appears on. Both
+    halves go through `normalise_name` so a spacing or punctuation difference in
+    the portal's transcription does not split one person into two entities.
+    """
+    return normalise_name(name), normalise_name(address or "")
+
+
 def resolve_defendant(api, name, row_nes_id, *, citation, live_prefixes,
-                      run_entities, dry_run):
+                      run_entities, dry_run, address=""):
     """Turn one court-record defendant name into an NES entity id.
 
     The ladder, top to bottom:
@@ -247,12 +286,12 @@ def resolve_defendant(api, name, row_nes_id, *, citation, live_prefixes,
       2. exactly one person entity with that identical name
       3. create the entity from the court record
 
-    `run_entities` maps a normalised name to an IRI already created THIS RUN and
-    is shared across cases on purpose: without it, two cases naming the same
-    defendant create two entities. Nothing here raises -- a name that cannot
-    become an entity is reported and the case keeps its other defendants. That
-    covers the search read too: one transient 502 on one of a case's several
-    defendant rows costs that row, not the run.
+    `run_entities` maps a `run_entity_key` (name AND address) to an IRI already
+    created THIS RUN, and is shared across cases on purpose: without it, two
+    cases naming the same defendant create two entities. Nothing here raises --
+    a name that cannot become an entity is reported and the case keeps its other
+    defendants. That covers the search read too: one transient 502 on one of a
+    case's several defendant rows costs that row, not the run.
     """
     row_nes_id = (row_nes_id or "").strip()
     if row_nes_id and is_valid_entity_iri(row_nes_id):
@@ -265,10 +304,23 @@ def resolve_defendant(api, name, row_nes_id, *, citation, live_prefixes,
     if matched:
         return Resolution(matched, "exact")
 
-    key = normalise_name(name)
+    key = run_entity_key(name, address)
     if key in run_entities:
         return Resolution(run_entities[key], "created", "reused from this run")
 
+    if live_prefixes is None:
+        # NOT a judgement on `person` -- nothing was checked. `read_live_prefixes`
+        # returns None for exactly this case, but `prefix_is_creatable` folds
+        # None and [] to the same empty set, so without this branch one transient
+        # 502 at run start reports every defendant on all 307 cases as needing a
+        # prefix that is not creatable. That sentence is false for a prefix as
+        # ordinary as `person`, and the dates still PATCH, so a re-run finds them
+        # populated and the missing binds look deliberate.
+        # `enrich_related_entities._cannot_create` draws the same distinction.
+        return Resolution("", "failed",
+                          f"{why}; the live entity prefix list could not be "
+                          f"read, so {PERSON_PREFIX!r} was never checked -- "
+                          "retry this case")
     if not prefix_is_creatable(PERSON_PREFIX, live_prefixes):
         return Resolution("", "failed", f"{why}; the person prefix is not creatable")
     slug = entity_slug(name)
@@ -294,8 +346,23 @@ def resolve_defendant(api, name, row_nes_id, *, citation, live_prefixes,
         created = api.create_entity(payload)
         iri = (created or {}).get("@id") or iri
     except EntityAlreadyExists:
-        # The IRI is taken, which means the entity we wanted already exists.
-        pass
+        # BINDS NOTHING. A 409 says the slug is taken -- by an entity this
+        # ladder just declined to identify, since a unique exact match would
+        # have bound at rung 2 and never reached this POST. The collision is
+        # therefore rung 2's own refusal restated (this name is not unique to
+        # this person), and the pre-POST IRI names whoever already owns the
+        # slug, not necessarily this defendant. `search_entities` marks
+        # `complete=False` for any name whose results fill a page on relevance,
+        # so this is the COMMON path for exactly the common names the
+        # truncation veto was written for -- 13 rows carry `संजय प्रसाद यादव`,
+        # and one of them owns the slug. Binding it turns "I could not identify
+        # this person" into "I identified this person"; report it instead and
+        # let a human decide.
+        return Resolution("", "failed",
+                          f"{why}; creating it collided with the existing "
+                          f"{iri}, so this name is not unique to this person "
+                          "-- refusing to bind an entity this run did not "
+                          "identify")
     except Exception as exc:  # noqa: BLE001 - one failed POST costs this name, not the case
         return Resolution("", "failed", f"could not create the entity ({type(exc).__name__})")
     run_entities[key] = iri
@@ -383,23 +450,28 @@ def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run):
     """`(items, rows)` -- one bind per named defendant, plus a report row each.
 
     De-duplicated by name across every court reference on the case, order
-    preserved, exactly like `defendant_names` does.
+    preserved, exactly like `defendant_names` does -- through the SAME
+    `is_defendant`/`party_name` pair that module exposes, so the two paths
+    cannot drift on who counts as a defendant. The whole party row is needed
+    here (its `nes_id` for ladder rung 1, its `address` for the run-entity key),
+    which is why this reads the parties itself rather than calling
+    `defendant_names`.
     """
     outcome = bind_outcome(records)
     citation = (records[0].get("detail") or {}).get("material_id", "") if records else ""
     items, rows, seen = [], [], set()
     for record in records:
         for party in record.get("parties") or ():
-            if (party.get("side") or "").strip().lower() != "defendant":
+            if not is_defendant(party):
                 continue
-            name = (party.get("name") or "").strip()
+            name = party_name(party)
             if not name or name in seen:
                 continue
             seen.add(name)
             got = resolve_defendant(
                 api, name, party.get("nes_id"), citation=citation,
                 live_prefixes=live_prefixes, run_entities=run_entities,
-                dry_run=dry_run)
+                dry_run=dry_run, address=party.get("address"))
             row = {"slug": case.get("slug"), "name": name, "how": got.how,
                    "nes_id": got.nes_id, "outcome": outcome, "reason": got.reason,
                    "court_case": f"{record['court']}/{record['number']}"}
@@ -516,7 +588,8 @@ def apply_plan(api, plan):
 #: `plan_case` statuses that end a case before any court-record work happens:
 #: no `court_read`, `dates`, `defendant_resolve`, `bind_plan` or `patch` event
 #: follows one of these, only the `select` event below carrying the mapped
-#: status. Anything else falls through to `"selected"`.
+#: status -- which makes these three TERMINAL, and so the only `select`
+#: statuses that may be distinctive. Anything else falls through to `"ok"`.
 #:
 #: `"no-entities-key"` reached `plan_case` after this CLI's event vocabulary
 #: was first drafted: a case payload with no `entities` key at all cannot be
@@ -547,8 +620,27 @@ _SKIP_SELECT_STATUS = {
 _COURT_READ_FAILURE_PREFIX = "court reference "
 
 
+#: The ladder rung each `plan.rows` entry settled on, spelled for the events
+#: file. It rides in the event's DETAIL, not its status: every event this
+#: function emits is an INTERMEDIATE step, and `casework.ledger.build_ledger`
+#: treats any status outside `NON_OUTCOME_STATUSES` as the case's outcome for
+#: the stage. A per-defendant `failed` or a per-case `merged` would therefore be
+#: recorded as what this stage DID to the case, which on a dry run is nothing at
+#: all -- and `failed` is a real terminal status for `casework.convert`, so it
+#: cannot simply be added to that shared frozenset. Every sibling enricher
+#: resolves this the same way: intermediate steps report `ok` and put the
+#: specifics in `detail` (`step="source", status="ok"`,
+#: `step="resolve", status="ok"`), leaving distinctive statuses to the one
+#: terminal event per case.
+_RUNG_WORDS = {"nes_id": "nes_id_copied", "exact": "exact_match",
+               "created": "created", "failed": "failed"}
+
+
 def _log_plan(logger, events, run_id, plan):
     """Emit the per-step events for one planned case.
+
+    Every event here is intermediate and therefore `ok`-statused; see
+    `_RUNG_WORDS` for why, and `main` for the terminal events that follow.
 
     `run_id`/`stage`/`slug` are passed as explicit keywords on every call
     rather than once via a `**common` dict: `ty` cannot verify that a plain
@@ -559,15 +651,14 @@ def _log_plan(logger, events, run_id, plan):
     explicit-keyword style for the identical reason.
     """
     for row in plan.rows:
-        status = {"nes_id": "nes_id_copied", "exact": "exact_match",
-                  "created": "created", "failed": "failed"}[row["how"]]
         log_event(logger, events, run_id=run_id, stage=STAGE, slug=plan.slug,
-                  step="defendant_resolve", status=status,
-                  detail=f"{row['name']} -> {row['nes_id'] or row['reason']}")
+                  step="defendant_resolve", status="ok",
+                  detail=f"{_RUNG_WORDS[row['how']]}: {row['name']} -> "
+                         f"{row['nes_id'] or row['reason']}")
     if plan.fields:
         log_event(logger, events, run_id=run_id, stage=STAGE, slug=plan.slug,
-                  step="dates", status="proposed",
-                  detail=", ".join(f"{k}={v}" for k, v in plan.fields))
+                  step="dates", status="ok",
+                  detail="proposed " + ", ".join(f"{k}={v}" for k, v in plan.fields))
     for skip in plan.skips:
         if skip.startswith(_COURT_READ_FAILURE_PREFIX):
             # A per-reference read failure, not a date fact: `plan.status` is
@@ -575,17 +666,19 @@ def _log_plan(logger, events, run_id, plan):
             # readable reference, or `plan_case` would have returned
             # "no-court-reference" and `_log_plan` would never run), so the
             # earlier `court_read`/`ok` event already logged for this case
-            # stands -- this event says the SAME court read was only partial.
+            # stands -- this event says the SAME court read was only partial,
+            # which is an annotation on that read rather than this case's
+            # outcome.
             log_event(logger, events, run_id=run_id, stage=STAGE, slug=plan.slug,
-                      step="court_read", status="unreadable", detail=skip)
+                      step="court_read", status="ok", detail=f"unreadable: {skip}")
             continue
-        status = "skip_open_case" if "not every court reference" in skip else "no_source"
+        kind = "skip_open_case" if "not every court reference" in skip else "no_source"
         log_event(logger, events, run_id=run_id, stage=STAGE, slug=plan.slug,
-                  step="dates", status=status, detail=skip)
+                  step="dates", status="ok", detail=f"{kind}: {skip}")
     log_event(logger, events, run_id=run_id, stage=STAGE, slug=plan.slug,
-              step="bind_plan",
-              status="merged" if plan.entities is not None else "no_additions",
-              detail=f"{len(plan.rows)} defendant(s) on the court record")
+              step="bind_plan", status="ok",
+              detail=f"{'merged' if plan.entities is not None else 'no_additions'}: "
+                     f"{len(plan.rows)} defendant(s) on the court record")
 
 
 def main(argv=None):
@@ -629,8 +722,13 @@ def main(argv=None):
         # WHICH missing/unreadable reference. Without this, "no-court-reference"
         # (a case naming none at all) and "every reference on this case
         # 404'd" produced an identical events-file line.
+        # `"ok"` -- not `"selected"` -- for a case that proceeds: selection is
+        # an intermediate step, and any status outside
+        # `casework.ledger.NON_OUTCOME_STATUSES` is recorded as the case's
+        # outcome for this stage. The three SKIP statuses keep their own
+        # spellings because they ARE the outcome: nothing follows them.
         log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
-                  step="select", status=_SKIP_SELECT_STATUS.get(plan.status, "selected"),
+                  step="select", status=_SKIP_SELECT_STATUS.get(plan.status, "ok"),
                   detail="; ".join(plan.skips))
         if plan.status in _SKIP_SELECT_STATUS:
             stats[plan.status] = stats.get(plan.status, 0) + 1
@@ -651,6 +749,19 @@ def main(argv=None):
             note="; ".join(plan.skips)))
 
         if plan.status == "nothing-to-do":
+            # The one TERMINAL event this path gets. Without it the case ends on
+            # `ok`-statused intermediates only and vanishes from the ledger
+            # entirely, which cannot be told apart from a run that crashed
+            # before reaching it. `already` is the vocabulary every sibling uses
+            # for "the fields were populated before we got here"
+            # (`step="idempotency", status="already"`), and it is what this is:
+            # no date field was empty and needed filling, and every bind the
+            # court record names is already on the case.
+            log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
+                      step="idempotency", status="already",
+                      detail="nothing to add: no empty date this run could "
+                             f"fill, and all {len(plan.rows)} court-record "
+                             "defendant(s) are already bound")
             stats["nothing-to-do"] = stats.get("nothing-to-do", 0) + 1
             continue
         if args.dry_run:

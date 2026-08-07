@@ -1,16 +1,21 @@
 """Accused names, read from the case's own NGM court record.
 
-CURRENTLY UNWIRED -- NOTHING IMPORTS `defendant_names`. This module is complete and
-tested; it just has no caller yet. `enrich_related_entities` used to call it, and
-that was removed: reading accused needs neither a document nor an LLM, so sitting
-inside a document-and-LLM enricher put it behind five gates it has no use for (the
-already-enriched skip, the MARKDOWN-role prerequisite, the no-source gate, the
-empty-prompt gate, and any LLM failure). A case with a complete court record bound
-zero defendants whenever its press-release PDF lacked a MARKDOWN role.
+WHO CALLS WHAT. `casework.enrich_court_record` is this module's CLI -- pure HTTP,
+no model, no token spend -- and it calls `court_record_for_case`, the full read
+(detail + hearings + parties), because it needs the dates and the party rows'
+`nes_id`/`address`, not just the names. `defendant_names` is the narrow read for
+callers that want ONLY the names; it is kept for them and is not on the enricher's
+path. Neither is authoritative over the other on WHO COUNTS AS A DEFENDANT: both
+route that judgement through `is_defendant`/`party_name` below, so the filter, the
+strip and the de-dup cannot drift apart.
 
-The intended home is its own CLI -- pure HTTP, no model, no token spend, minutes
-across the corpus instead of hours. That is pending a decision; do not delete this
-in the meantime, and do not wire it back into an LLM enricher.
+Do not wire either of them back into an LLM enricher. `enrich_related_entities`
+used to call this module, and that was removed: reading accused needs neither a
+document nor an LLM, so sitting inside a document-and-LLM enricher put it behind
+five gates it has no use for (the already-enriched skip, the MARKDOWN-role
+prerequisite, the no-source gate, the empty-prompt gate, and any LLM failure). A
+case with a complete court record bound zero defendants whenever its
+press-release PDF lacked a MARKDOWN role.
 
 WHY THIS EXISTS. Accused binds used to have no source at all: the LLM prompt's
 PART 3 extracted accused names, counted them, and threw them away. The obvious
@@ -40,15 +45,33 @@ import urllib.error
 
 logger = logging.getLogger(__name__)
 
-# A verdict is legal only on an accused bind (the `outcome_only_on_accused` CHECK
-# constraint). Every case in this corpus is a Special Court `-CR-` case, which
-# means CIAA filed a charge sheet, so 'charged' is true by construction rather
-# than inferred. Sent explicitly so the claim is visible in the request body
-# instead of implied by the API's omitted-outcome fallback
-# (`cases/api_views.py`).
-CHARGED = "charged"
-
 _COURTCASE_MARKER = "/courtcase/"
+
+#: The one spelling of "defendant" NGM's party rows use (`courts.models`'s
+#: `CaseEntity.side` is free text, documented `plaintiff | defendant`).
+_DEFENDANT_SIDE = "defendant"
+
+
+def is_defendant(party):
+    """Whether this party row names a defendant rather than a plaintiff.
+
+    The ONE place that test lives. `enrich_court_record._accused_binds` needs
+    the whole party row (its `nes_id` and `address`) and so cannot call
+    `defendant_names`, but it must not re-spell the filter either: a side test
+    that drifts between the two would bind plaintiffs on one path and not the
+    other, and `नेपाल सरकार` is the plaintiff on every case in this corpus.
+    """
+    return (party.get("side") or "").strip().lower() == _DEFENDANT_SIDE
+
+
+def party_name(party):
+    """The party's name, stripped, or "" when the row carries none.
+
+    Shared with `is_defendant` for the same reason: the de-dup on both paths
+    keys on this exact string, so one path stripping and the other not would
+    make the same person two entities.
+    """
+    return (party.get("name") or "").strip()
 
 
 def court_ref(iri):
@@ -105,9 +128,9 @@ def defendant_names(api, case):
             continue
 
         for party in parties:
-            if (party.get("side") or "").strip().lower() != "defendant":
+            if not is_defendant(party):
                 continue
-            name = (party.get("name") or "").strip()
+            name = party_name(party)
             if not name or name in seen:
                 continue
             seen.add(name)

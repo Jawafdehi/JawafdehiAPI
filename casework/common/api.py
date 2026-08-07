@@ -13,9 +13,13 @@ LOOPBACK_HOSTS = ("127.0.0.1", "localhost")
 class EntityAlreadyExists(Exception):
     """A create POST hit an entity that is already there.
 
-    Its own type because the caller's response is to BIND the existing entity,
-    not to record an error: someone -- a caseworker, or an earlier run over the
-    same case -- got there first, which is the outcome we wanted. The server
+    Its own type because the caller's response is usually to BIND the existing
+    entity, not to record an error: someone -- a caseworker, or an earlier run
+    over the same case -- got there first, which is the outcome we wanted. NOT
+    universally, though: a caller that reached the create BECAUSE it could not
+    identify the entity by name must refuse instead, since the collision says
+    only that the slug is taken, not that it is taken by this person. See
+    `casework.enrich_court_record.resolve_defendant`. The server
     answers 409 `ENTITY_EXISTS`: `_map_service_value_error` maps the duplicate
     `@id` check (`entities/services/publication/service.py:68`) to 409, and
     reserves 422 for `validate_create_payload` failures (`entities/views.py:220,

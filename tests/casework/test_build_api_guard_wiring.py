@@ -1,11 +1,17 @@
-"""Guard-wiring unit tests for every ported enricher's `build_api(args)`.
+"""Guard-wiring unit tests for every enricher CLI's `build_api(args)`.
 
 Task PP2 wires `args.allow_remote_writes` into BOTH branches of `build_api`
-(the `token=` branch and the `basic=` branch) across all six enricher CLIs, so
+(the `token=` branch and the `basic=` branch) across the enricher CLIs, so
 that `--allow-remote-writes` actually reaches `CaseworkApi` and its
 `_patch` write-guard. This is the mutation-sensitive test the task calls out
 explicitly: dropping `allow_remote_writes=` from a `build_api` call must make
-one of these fail (pinned by `TestMutationDropsAllowRemoteWrites` below).
+one of these fail.
+
+`MODULES` must list EVERY module that defines a `build_api`. It carried the six
+PP2 enrichers only, so `enrich_card`, `enrich_description` and
+`enrich_court_record` -- each with the identical two-branch `build_api` -- were
+unpinned: dropping `allow_remote_writes=` from either of their branches was
+caught for six files and silently allowed in three. All nine are listed now.
 
 No network -- `build_api` only constructs a `CaseworkApi` object, it never
 makes a request.
@@ -16,12 +22,16 @@ import pytest
 
 from casework import convert as c_convert
 from casework import enrich_allegations as c_allegations
+from casework import enrich_card as c_card
+from casework import enrich_court_record as c_court_record
+from casework import enrich_description as c_description
 from casework import enrich_missing_bigo as c_bigo
 from casework import enrich_related_entities as c_entities
 from casework import enrich_tags as c_tags
 from casework import enrich_timeline as c_timeline
 
-MODULES = [c_bigo, c_tags, c_timeline, c_allegations, c_entities, c_convert]
+MODULES = [c_bigo, c_tags, c_timeline, c_allegations, c_entities, c_convert,
+           c_card, c_description, c_court_record]
 
 
 def _args(*, api_base_url, **overrides):
@@ -37,7 +47,7 @@ def _args(*, api_base_url, **overrides):
 
 @pytest.mark.parametrize("module", MODULES, ids=lambda m: m.__name__.rsplit(".", 1)[-1])
 class TestBuildApiGuardWiring:
-    """Both auth branches of `build_api`, both flag values, all six files.
+    """Both auth branches of `build_api`, both flag values, every file.
 
     The `basic=` branch requires a loopback `api_base_url` (`CaseworkApi`
     itself rejects `basic=` against a non-loopback host -- see

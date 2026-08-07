@@ -114,15 +114,45 @@ class TestBuildLedger:
         ])
         assert ("case-8", "bind") not in build_ledger(tmp_path)
 
-    def test_court_record_dry_run_patch_is_not_an_outcome(self, tmp_path):
+    def test_court_record_dry_run_leaves_no_outcome_for_the_whole_case(self, tmp_path):
         # enrich_court_record's `patch`/`dry_run` status is the same kind of
-        # "changed nothing" preview as bind_materials' `planned` -- it must
-        # not pollute the "what did we change, when" audit either.
+        # "changed nothing" preview as bind_materials' `planned` -- it must not
+        # pollute the "what did we change, when" audit either.
+        #
+        # Written against the case's WHOLE event sequence, not the `patch` line
+        # alone: excluding the terminal status achieves nothing if an earlier
+        # intermediate carries a distinctive one, because the fold then records
+        # THAT as the outcome. A lone-`patch` fixture passed while
+        # `bind_plan`/`merged` was still landing `merged` in the ledger for
+        # every dry-run case.
         _write_events(tmp_path / "court_record.events.jsonl", [
-            _ev("2026-08-07T10:00:00Z", "court_record", "case-10", "patch", "dry_run",
+            _ev("2026-08-07T10:00:00Z", "court_record", "case-10", "select", "ok"),
+            _ev("2026-08-07T10:00:01Z", "court_record", "case-10", "court_read", "ok"),
+            _ev("2026-08-07T10:00:02Z", "court_record", "case-10",
+                "defendant_resolve", "ok", "created: कृष्ण प्रसाद यादव -> person/..."),
+            _ev("2026-08-07T10:00:03Z", "court_record", "case-10", "dates", "ok",
+                "proposed case_start_date=2023-06-22"),
+            _ev("2026-08-07T10:00:04Z", "court_record", "case-10", "bind_plan", "ok",
+                "merged: 1 defendant(s) on the court record"),
+            _ev("2026-08-07T10:00:05Z", "court_record", "case-10", "patch", "dry_run",
                 "case_start_date=2023-06-22"),
         ])
         assert ("case-10", "court_record") not in build_ledger(tmp_path)
+
+    def test_a_court_record_apply_is_still_recorded(self, tmp_path):
+        # The companion, so "nothing lands" is not achieved by excluding
+        # everything: the same sequence ending in a REAL patch must record it.
+        _write_events(tmp_path / "court_record.events.jsonl", [
+            _ev("2026-08-07T11:00:00Z", "court_record", "case-11", "select", "ok"),
+            _ev("2026-08-07T11:00:01Z", "court_record", "case-11", "court_read", "ok"),
+            _ev("2026-08-07T11:00:02Z", "court_record", "case-11",
+                "defendant_resolve", "ok", "exact_match: कृष्ण प्रसाद यादव -> person/..."),
+            _ev("2026-08-07T11:00:03Z", "court_record", "case-11", "bind_plan", "ok",
+                "merged: 1 defendant(s) on the court record"),
+            _ev("2026-08-07T11:00:04Z", "court_record", "case-11", "patch", "applied",
+                "case_start_date=2023-06-22; accused+1"),
+        ])
+        assert build_ledger(tmp_path)[("case-11", "court_record")]["status"] == "applied"
 
     def test_applied_bind_supersedes_earlier_planned(self, tmp_path):
         # A later real APPLY must be recorded; the earlier dry-run 'planned' was
