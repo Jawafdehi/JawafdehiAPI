@@ -298,7 +298,10 @@ def _if_match_matches(request, case) -> bool:
                     "https://jawafdehi.org/courtcase/kathmandudc/081-fn-12327). "
                     "Reverse-chronological. Unlike the other filters this one "
                     "is PUBLISHED-only for EVERY caller, including casework "
-                    "roles — it powers a public court-record page."
+                    "roles — it powers a public court-record page. Fails "
+                    "closed: a malformed or empty value returns an empty page, "
+                    "never an unfiltered one. Composes with `entity` (both "
+                    "narrow, and PUBLISHED-only still wins)."
                 ),
                 required=False,
             ),
@@ -497,6 +500,55 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             "material_references",
         )
 
+        # Reverse lookup: cases citing a specific NGM court case by its canonical
+        # ``@id`` IRI (``CaseCourtCaseReference.courtcase_iri``), powering the
+        # "Related Jawafdehi cases" section on a court case's own page. Flat and
+        # reverse-chronological — ``CaseCourtCaseReference`` has no
+        # ``relationship_type``, so there is no accused/alleged tier to float
+        # here the way the ``entity`` branch below does.
+        #
+        # PUBLISHED-only for EVERY caller, deliberately NOT inheriting the
+        # role-scoped queryset the ``entity`` branch uses: a court-case page is a
+        # public archive record, not a casework surface. Caseworkers work on the
+        # Jawafdehi case itself, so there is no reason for a DRAFT/IN_REVIEW case
+        # to ever be named on one.
+        #
+        # This NARROWS ``queryset`` rather than returning, so it composes with
+        # the ``entity`` branch below instead of being silently dropped when both
+        # params are present. Applying it first also means its PUBLISHED-only
+        # rule — the stricter of the two — survives the combination: a request
+        # carrying ``courtcase`` can never widen past PUBLISHED via ``entity``.
+        #
+        # Presence, not truthiness: ``?courtcase=`` is malformed input, not an
+        # absent filter, and must fail CLOSED to an empty page. A falsey check
+        # would skip this branch and hand back the whole unfiltered case list —
+        # exactly the failure mode this filter exists to prevent.
+        courtcase_param = self.request.query_params.get("courtcase")
+        if self.action == "list" and courtcase_param is not None:
+            # Stored IRIs are canonical (``build_courtcase_iri`` lowercases court
+            # + case number), so normalize the param first — otherwise a caller
+            # echoing the court's own casing ("/KathmanduDC/081-FN-12327")
+            # silently matches nothing. ``canonicalize_courtcase_iri`` alone is
+            # not enough: its regex is lowercase-only, so it REJECTS mixed case
+            # rather than folding it. Lowercasing the whole IRI first is safe
+            # here — canonicalization discards the host and re-emits on the
+            # canonical authority regardless.
+            try:
+                courtcase_iri = canonicalize_courtcase_iri(courtcase_param.lower())
+            except ValueError:
+                # Not a court-case IRI at all (including "") — nothing cites it.
+                return queryset.none()
+            # No ``.distinct()``: the ``unique_case_courtcase_reference``
+            # constraint is on (case, courtcase_iri), so this join matches at
+            # most one reference row per case and cannot duplicate a ``Case``.
+            # The ``entity`` branch below DOES need it — its constraint includes
+            # ``relationship_type``, so one case can hold several rows for the
+            # same ``nes_id``.
+            queryset = queryset.filter(
+                state=CaseState.PUBLISHED,
+                courtcase_references__courtcase_iri=courtcase_iri,
+            )
+
         # Reverse lookup: cases citing a specific NES entity by its canonical
         # ``@id`` IRI (``CaseEntityRelationship.nes_id``), powering the "Related
         # cases" section on an entity's record page. List action only — retrieve
@@ -522,38 +574,6 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
                 .annotate(_accused_first=accused_first)
                 .order_by("-_accused_first", "-created_at")
             )
-
-        # Reverse lookup: cases citing a specific NGM court case by its canonical
-        # ``@id`` IRI (``CaseCourtCaseReference.courtcase_iri``), powering the
-        # "Related Jawafdehi cases" section on a court case's own page. Flat and
-        # reverse-chronological — ``CaseCourtCaseReference`` has no
-        # ``relationship_type``, so there is no accused/alleged tier to float
-        # here the way the ``entity`` branch above does.
-        #
-        # PUBLISHED-only for EVERY caller, deliberately NOT inheriting the
-        # role-scoped queryset the ``entity`` branch uses: a court-case page is a
-        # public archive record, not a casework surface. Caseworkers work on the
-        # Jawafdehi case itself, so there is no reason for a DRAFT/IN_REVIEW case
-        # to ever be named on one.
-        courtcase_param = self.request.query_params.get("courtcase")
-        if self.action == "list" and courtcase_param:
-            # Stored IRIs are canonical (``build_courtcase_iri`` lowercases court
-            # + case number), so normalize the param first — otherwise a caller
-            # echoing the court's own casing ("/KathmanduDC/081-FN-12327")
-            # silently matches nothing. ``canonicalize_courtcase_iri`` alone is
-            # not enough: its regex is lowercase-only, so it REJECTS mixed case
-            # rather than folding it. Lowercasing the whole IRI first is safe
-            # here — canonicalization discards the host and re-emits on the
-            # canonical authority regardless.
-            try:
-                courtcase_iri = canonicalize_courtcase_iri(courtcase_param.lower())
-            except ValueError:
-                # Not a court-case IRI at all — no case can cite it.
-                return queryset.none()
-            return queryset.filter(
-                state=CaseState.PUBLISHED,
-                courtcase_references__courtcase_iri=courtcase_iri,
-            ).order_by("-created_at")
 
         return queryset.order_by("-created_at")
 

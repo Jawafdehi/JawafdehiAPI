@@ -16,7 +16,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from cases.models import Case, CaseState, CaseType
-from tests.conftest import create_user_with_role
+from tests.conftest import create_case_with_entities, create_user_with_role
 
 CC = "https://jawafdehi.org/courtcase/kathmandudc/081-fn-12327"
 OTHER_CC = "https://jawafdehi.org/courtcase/special/081-cr-0079"
@@ -76,9 +76,27 @@ class TestCaseCourtCaseFilter:
         _make("cf-safe", "Safe", CaseState.PUBLISHED, [CC])
 
         # A bare case number, a stray URL, junk — none can be cited by a case.
-        for junk in ("081-FN-12327", "https://example.com/nope", "../../etc/passwd"):
+        # "" is malformed input too, NOT an absent filter: ``?courtcase=`` must
+        # fail closed to an empty page rather than fall through to the full
+        # unfiltered case list (a falsey presence check used to do exactly that).
+        for junk in (
+            "081-FN-12327",
+            "https://example.com/nope",
+            "../../etc/passwd",
+            "",
+        ):
             data = _get(junk)
-            assert data["count"] == 0, junk
+            assert data["count"] == 0, repr(junk)
+
+    def test_empty_param_does_not_fall_through_to_unfiltered_list(self):
+        # Pins the regression directly: the empty-value response must not be the
+        # unfiltered list. Cases here cite NO court case, so a fall-through would
+        # return them while a correctly-failing-closed filter returns nothing.
+        _make("cf-unrelated-1", "Unrelated", CaseState.PUBLISHED, [])
+        _make("cf-unrelated-2", "Also unrelated", CaseState.PUBLISHED, [])
+
+        assert APIClient().get("/api/cases/").data["count"] == 2
+        assert _get("")["count"] == 0
 
     def test_reverse_chronological(self):
         now = timezone.now()
@@ -120,3 +138,95 @@ class TestCaseCourtCaseFilter:
 
         assert resp.status_code == 200
         assert resp.data["count"] == 0
+
+
+ENTITY = "https://jawafdehi.org/entity/person/cf-test-person"
+
+
+@pytest.mark.django_db
+class TestCourtCaseFilterComposesWithEntity:
+    """``?courtcase=`` must NARROW alongside ``?entity=``, not be dropped by it.
+
+    Both are reverse lookups and the ``entity`` branch returns early, so before
+    this was fixed ``?entity=X&courtcase=Y`` silently ignored ``courtcase`` and
+    answered as though only ``entity`` had been passed — a filter failing OPEN.
+    """
+
+    def test_both_params_intersect(self):
+        # Cites the entity AND the court case -> the only match.
+        create_case_with_entities(
+            slug="cf-both",
+            title="Both",
+            state=CaseState.PUBLISHED,
+            case_type=CaseType.CORRUPTION,
+            alleged_entities=[ENTITY],
+            court_cases=[CC],
+        )
+        # Cites the entity but a DIFFERENT court case -> must be excluded.
+        create_case_with_entities(
+            slug="cf-entity-only",
+            title="Entity only",
+            state=CaseState.PUBLISHED,
+            case_type=CaseType.CORRUPTION,
+            alleged_entities=[ENTITY],
+            court_cases=[OTHER_CC],
+        )
+
+        resp = APIClient().get("/api/cases/", {"entity": ENTITY, "courtcase": CC})
+
+        assert resp.status_code == 200
+        assert [c["slug"] for c in resp.data["results"]] == ["cf-both"]
+
+    def test_entity_param_cannot_widen_courtcase_past_published(self):
+        # The PUBLISHED-only rule is the stricter of the two and must survive the
+        # combination: a caseworker sees DRAFT/IN_REVIEW through ``?entity=``
+        # alone, but adding ``courtcase`` scopes the answer to a public
+        # court-record page, where an unpublished case must never be named.
+        create_case_with_entities(
+            slug="cf-combo-pub",
+            title="Published",
+            state=CaseState.PUBLISHED,
+            case_type=CaseType.CORRUPTION,
+            alleged_entities=[ENTITY],
+            court_cases=[CC],
+        )
+        create_case_with_entities(
+            slug="cf-combo-inreview",
+            title="In review",
+            state=CaseState.IN_REVIEW,
+            case_type=CaseType.CORRUPTION,
+            alleged_entities=[ENTITY],
+            court_cases=[CC],
+        )
+
+        client = APIClient()
+        client.force_authenticate(
+            user=create_user_with_role("cw2", "cw2@example.com", "Caseworker")
+        )
+
+        # Sanity: ?entity= alone DOES show the caseworker the in-review case.
+        entity_only = client.get("/api/cases/", {"entity": ENTITY})
+        assert {c["slug"] for c in entity_only.data["results"]} == {
+            "cf-combo-pub",
+            "cf-combo-inreview",
+        }
+
+        # Adding ?courtcase= narrows it back to PUBLISHED-only.
+        combined = client.get("/api/cases/", {"entity": ENTITY, "courtcase": CC})
+        assert combined.status_code == 200
+        assert [c["slug"] for c in combined.data["results"]] == ["cf-combo-pub"]
+
+    def test_malformed_courtcase_still_fails_closed_alongside_entity(self):
+        create_case_with_entities(
+            slug="cf-junk-combo",
+            title="Cites entity",
+            state=CaseState.PUBLISHED,
+            case_type=CaseType.CORRUPTION,
+            alleged_entities=[ENTITY],
+            court_cases=[CC],
+        )
+
+        for junk in ("not-an-iri", ""):
+            resp = APIClient().get("/api/cases/", {"entity": ENTITY, "courtcase": junk})
+            assert resp.status_code == 200
+            assert resp.data["count"] == 0, repr(junk)
