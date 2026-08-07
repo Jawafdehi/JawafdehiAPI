@@ -54,7 +54,7 @@ from casework.enrich_related_entities import (
     merge_entity_binds,
     validate_bind_item,
 )
-from courts.case_status import parse_case_status
+from courts.case_status import _order_key, parse_case_status
 from jawafdehi_shared.entities.ids import (
     build_entity_iri,
     is_valid_entity_iri,
@@ -319,10 +319,21 @@ def _reference_disposition(record):
     CONVICTED from a cell that actually said `आंशिक ...ठहर`. The same care
     applies here: a cell naming `आंशिक` or `ठहर` alongside `सफाई` is not a plain
     acquittal, so it is refused rather than guessed at.
+
+    The cell is normalised through `courts.case_status._order_key` before any
+    of that testing, not compared raw. The portal spells `आंशिक` two more ways
+    in this corpus (`आंशीक`, `आशिंक` -- `_order_key`'s own `_ORDER_SPELLING`
+    table says so), and a misspelled qualifier must block ACQUITTED exactly as
+    well as the canonical spelling does. `_order_key` is already how this same
+    `decision_type`/`order_type` text is normalised elsewhere in that module
+    (`outcome_from_hearings`'s own fallback branch), so this reuses the one
+    normalisation the corpus's hearing text already goes through, rather than
+    hand-copying its variant table and drifting from it later.
     """
     decided = bool(_reference_end(record))
     text = (deciding_hearing(record.get("hearings")) or {}).get("decision_type") or ""
-    plain_acquittal = bool(text) and ACQUITTAL in text and "आंशिक" not in text and "ठहर" not in text
+    key = _order_key(text) if text else ""
+    plain_acquittal = bool(key) and ACQUITTAL in key and "आंशिक" not in key and "ठहर" not in key
     return decided, plain_acquittal
 
 

@@ -372,6 +372,35 @@ def test_a_qualified_acquittal_cell_is_not_a_plain_acquittal():
     assert bind_outcome([_record(hearings=[qualified])]) == CHARGED
 
 
+def test_a_misspelled_qualifier_still_blocks_the_acquittal():
+    # `आंशीक` (दीर्घ ई) is a real portal misspelling of `आंशिक`, documented in
+    # `courts.case_status._ORDER_SPELLING`. An exact-string qualifier check
+    # would miss it and read this cell as a plain acquittal -- every defendant
+    # on a partially-convicted case would then be labelled acquitted. Proves
+    # the cell is normalised (via `_order_key`) before the qualifier test.
+    misspelled = {**DECIDED, "decision_type": "आंशीक सफाई"}
+    assert bind_outcome([_record(hearings=[misspelled])]) == CHARGED
+
+
+def test_every_reference_deciding_a_plain_acquittal_is_acquitted():
+    # Both references decided सफाई, but through the two DIFFERENT sources
+    # `_reference_end` itself draws on. Reference 1's decided-ness (and its
+    # outcome text) come straight off its own hearing row, which carries a
+    # usable `hearing_date_ad`. Reference 2's hearing carries the outcome text
+    # but NO usable `hearing_date_ad`, so its decided-ness falls through to
+    # the `case_status` paren-date fallback -- the same two-source path
+    # `_reference_end` uses for `end_date`, now exercised on the ACQUITTED
+    # branch rather than only the CHARGED one. Nothing before this test
+    # proved the positive path survives the `all(decided) and all(acquitted)`
+    # rewrite -- every earlier multi-reference test asserted CHARGED.
+    acquittal_no_hearing_date = {"case_status": "फैसला", "decision_type": "सफाई"}
+    records = [
+        _record(hearings=[DECIDED]),
+        _record(status="फैसला (मिती: २०८१/०२/२२)", hearings=[acquittal_no_hearing_date]),
+    ]
+    assert bind_outcome(records) == ACQUITTED
+
+
 def test_the_plan_carries_both_dates_and_the_accused_binds():
     api = _PlanApi(
         detail={"registration_date_ad": "2023-06-22"},
