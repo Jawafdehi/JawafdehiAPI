@@ -16,13 +16,13 @@ import os
 # These values are NOT judgements about how expensive/cheap a stage "feels" --
 # they mirror the donor's actual `tier=` arguments to `invoke_text`/
 # `invoke_with_tools`, verified at donor commit 0321a85:
-#   enrich_missing_bigo.py:446      tier="premium"
-#   enrich_tags.py:1088             tier="cheap"
-#   enrich_timeline.py:518          tier="premium"
-#   enrich_allegations.py:350       tier="premium"
-#   enrich_related_entities.py:421  tier="premium"
-#   enrich_description.py:576       tier="premium"
-#   enrich_card.py:337              tier="cheap"
+#   enrich_missing_bigo.py       tier="premium"
+#   enrich_tags.py               tier="cheap"
+#   enrich_timeline.py           tier="premium"
+#   enrich_allegations.py        tier="premium"
+#   enrich_related_entities.py   tier="premium"
+#   enrich_description.py        tier="premium"
+#   enrich_card.py               tier="cheap"
 TIERS = {
     "bigo": "premium",
     "tags": "cheap",
@@ -30,22 +30,36 @@ TIERS = {
     "allegations": "premium",
     "entities": "premium",
     "description": "premium",
-    # `card` is cheap on the donor's own authority (enrich_card.py:337) and on
+    # `card` is cheap on the donor's own authority (`enrich_card.py`) and on
     # the merits: it fetches no source document, only summarising a
     # `description` already on the case. NOTE the donor's OTHER title writer,
-    # the standalone `enrich_title.py`, used tier="premium" (line 275) for the
+    # the standalone `enrich_title.py`, used tier="premium" for the
     # same no-fetch inputs -- the two donors disagreed. `enrich_title.py` folds
     # into this stage as `--only title`, and the brief resolves the conflict in
     # favour of cheap. See `casework/enrich_card.py`'s deviation 2.
     "card": "cheap",
-    # `news` is premium on the brief's authority and the donor's: the donor ran
-    # its authoritative verifier at tier="premium" (donor
-    # `enrich_news_articles.py:1073`) behind a cheap recall gate, and this port
-    # keeps both. The gate's cheap call is made explicitly with tier="cheap" in
-    # `news_search.verify_batch`, so this entry is the tier of the DECISION.
-    # Not a place to economise -- the decision is whether to publicly link named
-    # people to a corruption case.
-    "news": "premium",
+    # `news` is CHEAP, and this is the one entry here that departs from the
+    # donor -- it ran its authoritative verifier at tier="premium". Changed on
+    # the operator's decision (2026-08-07), on cost: `verify_batch` carries the
+    # largest answer budget in the pipeline (see `verify_max_tokens`), because
+    # every verdict returns an English reason plus a 350-500 character Devanagari
+    # note.
+    #
+    # What this entry does and does not move. Three of the stage's four LLM
+    # calls were ALREADY cheap -- query generation, Devanagari names, and the
+    # gate that sees EVERY candidate. This is the tier of the fourth: the
+    # DECISION call, which returns the relevance verdict and the confidence that
+    # `Verdict.is_bindable` gates on. So the saving is real but the exposure is
+    # concentrated: it is the call deciding whether to publicly link a named
+    # person to a corruption case, and production already carries two
+    # wrong-case binds made on a weaker judgement.
+    #
+    # UNMEASURED. Both tiers resolve to the same model under `bootstrap`, so no
+    # local run distinguishes them; the labelled set in
+    # `tests/casework/news_labelled_set.py` is the harness for measuring it
+    # against a real cheap model, and that has not been done. If false positives
+    # appear in review, this is the first line to revert.
+    "news": "cheap",
 }
 DEFAULT_TIER = "cheap"
 

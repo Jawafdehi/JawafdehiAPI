@@ -283,8 +283,8 @@ class Verdict:
         docstring). `event_type` must be a real lifecycle value because the
         per-event cap and the bind ordering both key on it. `summary` must be
         SUBSTANTIAL because it IS the evidence note -- binding without one is the
-        `bind_materials.py:143` blank-note behaviour this port exists to avoid,
-        and a one-line note is that behaviour with extra steps.
+        blank-note behaviour in `bind_materials.merge_evidence` that this port
+        exists to avoid, and a one-line note is that behaviour with extra steps.
 
         The length floor is not cosmetic. `salvage_json` repairs a reply truncated
         at `max_tokens` by closing the open string, so an overflowing verify call
@@ -598,82 +598,6 @@ def parse_ddg_html(html):
     return results[:SEARCH_RESULTS_PER_QUERY]
 
 
-#: `host:port` of a SOCKS5 proxy for THIS module's traffic only. Set when the run
-#: happens on a host search engines refuse (see `search_duckduckgo`) and an SSH
-#: reverse tunnel from an unblocked connection is carrying the queries:
-#:
-#:     ssh -R 1080 you@sandbox                    # laptop, keeps the tunnel up
-#:     export CASEWORK_SOCKS_PROXY=127.0.0.1:1080 # sandbox
-SOCKS_PROXY_ENV = "CASEWORK_SOCKS_PROXY"
-
-
-def _parse_proxy(spec):
-    host, sep, port = spec.strip().rpartition(":")
-    if not sep or not port.isdigit():
-        raise SearchUnavailable(
-            f"${SOCKS_PROXY_ENV}={spec!r} is not host:port "
-            f"(e.g. 127.0.0.1:1080).")
-    return host or "127.0.0.1", int(port)
-
-
-def build_socks_opener(spec):
-    """A urllib opener whose sockets dial out through a SOCKS5 proxy.
-
-    SCOPED TO THIS MODULE'S CLIENT ON PURPOSE. The usual PySocks recipe --
-    `socks.set_default_proxy()` then `socket.socket = socks.socksocket` -- is
-    process-global, so it would push the case API and the LLM provider through
-    the tunnel as well. Those must stay on the local interface: the API is
-    reached over loopback during a smoke run, and routing an operator's personal
-    connection into the write path is not something a search workaround should
-    do silently.
-
-    `rdns=True` resolves hostnames at the proxy. Resolving locally would leak
-    every news host into this machine's DNS and, worse, could resolve to an
-    address the tunnel's exit cannot reach.
-    """
-    import http.client
-
-    # Validate the SPEC before importing, so a typo is reported as a typo. The
-    # other order told an operator who wrote `CASEWORK_SOCKS_PROXY=1080` to go
-    # install PySocks, which would not have helped.
-    proxy_host, proxy_port = _parse_proxy(spec)
-
-    try:
-        import socks
-    except ImportError as exc:
-        raise SearchUnavailable(
-            f"${SOCKS_PROXY_ENV} is set but PySocks is not installed. "
-            f"Install it with `uv pip install PySocks`, or `uv sync --extra "
-            f"casework-proxy`.") from exc
-
-    def _dial(address, timeout):
-        sock = socks.socksocket()
-        sock.set_proxy(socks.SOCKS5, proxy_host, proxy_port, rdns=True)
-        if isinstance(timeout, (int, float)):
-            sock.settimeout(timeout)
-        sock.connect(address)
-        return sock
-
-    class _TunnelledHTTPS(http.client.HTTPSConnection):
-        def connect(self):
-            sock = _dial((self.host, self.port), self.timeout)
-            self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
-
-    class _TunnelledHTTP(http.client.HTTPConnection):
-        def connect(self):
-            self.sock = _dial((self.host, self.port), self.timeout)
-
-    class _HTTPSHandler(urllib.request.HTTPSHandler):
-        def https_open(self, req):
-            return self.do_open(_TunnelledHTTPS, req, context=self._context)
-
-    class _HTTPHandler(urllib.request.HTTPHandler):
-        def http_open(self, req):
-            return self.do_open(_TunnelledHTTP, req)
-
-    return urllib.request.build_opener(_HTTPHandler, _HTTPSHandler)
-
-
 #: Query parameters that carry a credential. Google's Custom Search API is the
 #: reason this exists: it takes the key in the QUERY STRING with no header
 #: alternative, unlike Brave/Serper/Tavily, so the URL itself is a secret.
@@ -725,7 +649,7 @@ class WebClient:
     """
 
     def __init__(self, search_delay=1.5, fetch_delay=0.5, save_delay=6.0, timeout=20,
-                 proxy=None, budget=None):
+                 budget=None):
         self.delays = {"search": search_delay, "fetch": fetch_delay,
                        "archive": 0.0, "save": save_delay}
         self.timeout = timeout
@@ -736,15 +660,18 @@ class WebClient:
         #: so a new provider cannot forget it -- every one of them reaches the
         #: network through `get` or `post_json` and nowhere else.
         self.budget = budget
-        # An explicit `proxy=""` disables the tunnel even when the env var is
-        # set, which is how the tests keep themselves off any real socket.
-        spec = os.environ.get(SOCKS_PROXY_ENV, "") if proxy is None else proxy
-        self.proxy = spec.strip()
         #: `build_opener()` with no handlers still installs a ProxyHandler that
-        #: reads `https_proxy`, so an ordinary HTTP proxy keeps working here with
-        #: no SOCKS involvement and no extra dependency.
-        self._opener = (build_socks_opener(self.proxy) if self.proxy
-                        else urllib.request.build_opener())
+        #: reads `$https_proxy`, so an ordinary HTTP proxy still works here --
+        #: with no dependency and nothing this module has to implement.
+        #:
+        #: There was a SOCKS5 tunnel here, for running DuckDuckGo from a host
+        #: search engines refuse. It is gone: every provider we actually search
+        #: with is a keyed API that serves a datacentre address happily, so the
+        #: tunnel was ~100 lines of security-sensitive networking (DNS leaks, a
+        #: deliberately scoped opener) carried for a path nobody ran. If the
+        #: keyed providers ever lapse, "no search provider configured" is the
+        #: better failure -- see `SearchBudget` for seeing that coming.
+        self._opener = urllib.request.build_opener()
 
     def invalidate(self, url, kind):
         """Forget one cached response so the next `get` is a real request.
@@ -2430,14 +2357,22 @@ def verify_max_tokens(n_survivors):
 
 def verify_batch(articles, case, invoke_json, usage, press_release_text=None,
                  tier="premium"):
-    """Two-tier verification of one batch. Returns `[(Article, Verdict)]`.
+    """Two-pass verification of one batch. Returns `[(Article, Verdict)]`.
 
-    Cheap gate drops clearly-irrelevant candidates in ONE call; the premium tier
-    re-checks the survivors in ONE call and returns the authoritative verdict
-    plus the Nepali note. A gate call that fails or fails to parse escalates the
-    WHOLE batch to premium rather than dropping everything on a transient cheap
-    -model error (donor:1064) -- fail-open is correct at the gate precisely
-    because the premium tier is the decision.
+    A cheap gate drops clearly-irrelevant candidates in ONE call; the DECISION
+    pass re-checks the survivors in ONE call and returns the authoritative
+    verdict plus the Nepali note. A gate call that fails or fails to parse
+    escalates the WHOLE batch to the decision pass rather than dropping
+    everything on a transient cheap-model error (donor:1064) -- fail-open is
+    correct at the gate precisely because the second pass is the decision.
+
+    `tier` is the DECISION pass's tier and the caller supplies it; the enricher
+    passes `tier_for("news")`, which is currently "cheap" on a cost decision
+    (see `casework.common.llm.TIERS`). The default here stays "premium" because
+    a direct caller with no pipeline config should get the safer one. Note the
+    gate keeps earning its place either way: it filters before the pass that
+    sends 900-character excerpts and carries the big answer budget, so it saves
+    tokens even when both passes run the same model.
 
     Every returned pair is (article, verdict) in input order; a candidate the
     gate dropped comes back with `Verdict(relevant=False)` so the caller can

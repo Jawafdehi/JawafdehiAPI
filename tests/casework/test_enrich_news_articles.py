@@ -24,7 +24,6 @@ reported in this task's `findings.md`; it is a prompt property, not a code one.
 """
 
 import collections
-import importlib.util
 import json
 import logging
 import pathlib
@@ -105,7 +104,6 @@ class FakeWeb:
         #: Nothing here ever tunnels -- a fake that reaches the network is a bug
         #: -- but the ATTRIBUTE has to exist or the fake stops standing in for
         #: the real thing, which is how the preflight broke nine tests at once.
-        self.proxy = ""
         #: Same reason. The real client charges a budget per search; these tests
         #: are uncapped, but the attribute must exist for the fake to stand in.
         self.budget = None
@@ -743,7 +741,7 @@ def test_the_merge_never_overwrites_a_note_on_an_iri_already_present():
 
 
 def test_a_bound_entry_carries_its_note_rather_than_binding_blank():
-    """Deviation 2 -- `bind_materials.py:143` appends `""`; this must not."""
+    """Deviation 2 -- `bind_materials.merge_evidence` appends `""`; not here."""
     pair = MATCHES[0]
     plan = _plan_for_pair(pair, dict(SLOPPY_MEDIUM, confidence="high"))
     appended = plan.patch_items[-1]
@@ -936,11 +934,15 @@ def test_max_articles_must_be_non_negative():
         en.main(BASE_ARGV + ["--max-articles", "-1"])
 
 
-def test_the_stage_is_registered_with_the_premium_tier():
+def test_the_stage_is_registered_with_the_cheap_tier():
+    """Cheap on the operator's cost decision (2026-08-07), departing from the
+    donor's premium verifier. Pinned because it is a deliberate trade, not a
+    default: it moves the BIND DECISION onto the cheap model, and if false
+    positives show up in review this assertion is the marker for the revert."""
     from casework.common.llm import tier_for
     from casework.common.pipeline import STAGES
 
-    assert tier_for("news") == "premium"
+    assert tier_for("news") == "cheap"
     assert STAGES["news"].requires_stages == ("card", "entities")
     assert STAGES["news"].provides == ("evidence",)
 
@@ -1326,7 +1328,7 @@ def test_an_unknown_provider_name_is_refused_not_ignored(monkeypatch):
 def test_post_cache_keys_on_the_body_not_just_the_url(monkeypatch):
     """Every Serper/Tavily query POSTs to ONE url. Keying the cache on the url
     alone would serve query 1's articles as the answer to all twelve."""
-    client = ns.WebClient(search_delay=0, proxy="")
+    client = ns.WebClient(search_delay=0)
     served = iter([(200, json.dumps({"organic": [
         {"title": "a", "link": "https://a.test/1", "snippet": "s"}]})),
         (200, json.dumps({"organic": [
@@ -1370,61 +1372,9 @@ class _FakeResponse:
         return False
 
 
-# ---------------------------------------------------------------------------
-# SOCKS tunnel. A search API key needs a payment card, so the fallback for a
-# blocked host is an SSH reverse tunnel (`ssh -R 1080`) from an unblocked
-# connection. urllib cannot speak SOCKS unaided; these cover the seam.
-# ---------------------------------------------------------------------------
-
-
-def test_no_proxy_configured_leaves_the_client_on_the_plain_opener():
-    client = ns.WebClient(proxy="")
-    assert client.proxy == ""
-    assert not any(type(h).__name__.startswith("_Tunnelled")
-                   for h in client._opener.handlers)
-
-
-@pytest.mark.skipif(importlib.util.find_spec("socks") is None,
-                    reason="needs PySocks to build the opener; CI installs the "
-                           "casework-proxy extra so this runs there")
-def test_the_proxy_is_read_from_the_environment(monkeypatch):
-    monkeypatch.setenv(ns.SOCKS_PROXY_ENV, "127.0.0.1:1080")
-    assert ns.WebClient().proxy == "127.0.0.1:1080"
-
-
-def test_an_explicit_empty_proxy_overrides_the_environment(monkeypatch):
-    """Tests and loopback smokes must be able to stay off the tunnel."""
-    monkeypatch.setenv(ns.SOCKS_PROXY_ENV, "127.0.0.1:1080")
-    assert ns.WebClient(proxy="").proxy == ""
-
-
-@pytest.mark.parametrize("spec", ["1080", "not-a-port", "127.0.0.1:", ""])
-def test_a_malformed_proxy_spec_is_refused_with_the_expected_form(spec):
-    with pytest.raises(ns.SearchUnavailable) as exc:
-        ns._parse_proxy(spec)
-    assert "127.0.0.1:1080" in str(exc.value), "the message must show the form"
-
-
-@pytest.mark.skipif(importlib.util.find_spec("socks") is None,
-                    reason="PySocks absent: uv sync --extra casework-proxy. CI "
-                           "installs it so this DOES run there -- the skip is "
-                           "for a local venv without the optional extra.")
-def test_the_tunnel_does_not_capture_the_whole_process(monkeypatch):
-    """THE POINT OF THE SCOPED OPENER. The common PySocks recipe replaces
-    `socket.socket` globally, which would route the case API and the LLM
-    provider through the operator's personal connection as a side effect of a
-    search workaround. Only this client's sockets may move."""
-    import socket as socket_module
-    original = socket_module.socket
-    client = ns.WebClient(proxy="127.0.0.1:1080")
-    assert socket_module.socket is original, "global socket was monkeypatched"
-    assert any(type(h).__name__ == "_TunnelledHTTPSHandler" or
-               type(h).__name__.startswith("_HTTPS")
-               for h in client._opener.handlers), "no tunnelled handler installed"
-
-
-def test_a_tunnelled_client_still_throttles_and_caches(monkeypatch):
-    """A proxy swap must not bypass the pacing -- the reason WebClient exists."""
+def test_the_client_throttles_and_caches(monkeypatch):
+    """Pacing and caching are the reason WebClient exists; every provider
+    reaches the network through it, so neither may be bypassed."""
     opened = []
 
     class _Op:
@@ -1432,7 +1382,7 @@ def test_a_tunnelled_client_still_throttles_and_caches(monkeypatch):
             opened.append(request.full_url)
             return _FakeResponse(200, "{}")
 
-    client = ns.WebClient(proxy="", search_delay=0)
+    client = ns.WebClient(search_delay=0)
     monkeypatch.setattr(client, "_opener", _Op())
     client.get("https://x.test/a", "search")
     client.get("https://x.test/a", "search")
@@ -1643,17 +1593,6 @@ def test_a_datetime_publication_date_does_not_put_a_clock_time_in_the_note():
     assert rendered == ns.format_publication_date(date(2024, 6, 16))
 
 
-def test_a_broken_proxy_is_reported_at_startup_not_as_a_traceback(monkeypatch,
-                                                                  capsys):
-    """`WebClient` is built OUTSIDE the per-case try, so a malformed
-    $CASEWORK_SOCKS_PROXY escaped as a bare traceback. The preflight catches it
-    before any case is touched."""
-    monkeypatch.setenv(ns.SOCKS_PROXY_ENV, "not-a-host-port")
-    with pytest.raises(ns.SearchUnavailable) as exc:
-        ns.WebClient()
-    assert "127.0.0.1:1080" in str(exc.value), "the message shows the form"
-
-
 def test_the_enricher_preflights_search_config_before_touching_a_case():
     """The check must sit ahead of the case loop, not inside it."""
     src = pathlib.Path(en.__file__).read_text(encoding="utf-8")
@@ -1685,7 +1624,7 @@ def test_the_real_client_hands_a_4xx_body_to_a_provider_that_asks(monkeypatch):
 
     monkeypatch.setenv("GOOGLE_CSE_API_KEY", "k")
     monkeypatch.setenv("GOOGLE_CSE_CX", "cx")
-    client = ns.WebClient(search_delay=0, proxy="")
+    client = ns.WebClient(search_delay=0)
     monkeypatch.setattr(client, "_opener",
                         types.SimpleNamespace(open=raise_403))
     with pytest.raises(ns.SearchUnavailable) as exc:
@@ -1707,7 +1646,7 @@ def test_an_html_error_page_is_still_never_parsed_as_search_results(monkeypatch)
         raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", {},
                                      io.BytesIO(page))
 
-    client = ns.WebClient(search_delay=0, proxy="")
+    client = ns.WebClient(search_delay=0)
     monkeypatch.setattr(client, "_opener",
                         types.SimpleNamespace(open=raise_403))
     status, body = client.get("https://x.test/", "search")
@@ -1898,7 +1837,7 @@ def test_only_search_is_charged_not_fetching_or_archiving(tmp_path, monkeypatch)
     requests nobody invoices us for."""
     budget = _budget(tmp_path, limit=100)
     client = ns.WebClient(search_delay=0, fetch_delay=0, save_delay=0,
-                          proxy="", budget=budget)
+                          budget=budget)
     monkeypatch.setattr(client, "_opener", _OpenerReturning("<html></html>"))
     for kind in ("fetch", "archive", "save"):
         client.get(f"https://example.test/{kind}", kind)
@@ -1911,7 +1850,7 @@ def test_a_cached_search_is_not_charged_twice(tmp_path, monkeypatch):
     """A cache hit sends nothing, so charging it would bill us for a request that
     never left the process and make the ledger disagree with the provider."""
     budget = _budget(tmp_path, limit=100)
-    client = ns.WebClient(search_delay=0, fetch_delay=0, proxy="", budget=budget)
+    client = ns.WebClient(search_delay=0, fetch_delay=0, budget=budget)
     monkeypatch.setattr(client, "_opener", _OpenerReturning("<html></html>"))
     client.get("https://example.test/same", "search")
     client.get("https://example.test/same", "search")
@@ -1922,7 +1861,7 @@ def test_the_post_providers_cannot_bypass_the_budget(tmp_path, monkeypatch):
     """Serper and Tavily are POST-only. A cap enforced on `get` alone would be
     silently absent for two of the five providers."""
     budget = _budget(tmp_path, limit=100)
-    client = ns.WebClient(search_delay=0, proxy="", budget=budget)
+    client = ns.WebClient(search_delay=0, budget=budget)
     monkeypatch.setattr(client, "_opener", _OpenerReturning('{"organic": []}'))
     client.post_json("https://example.test/s", "search", {"q": "क"})
     assert budget.spent == 1
@@ -1930,7 +1869,7 @@ def test_the_post_providers_cannot_bypass_the_budget(tmp_path, monkeypatch):
 
 def test_an_exhausted_budget_stops_the_request_reaching_the_network(tmp_path):
     budget = _budget(tmp_path, limit=1, spent=1)
-    client = ns.WebClient(search_delay=0, proxy="", budget=budget)
+    client = ns.WebClient(search_delay=0, budget=budget)
 
     class _Explode:
         def open(self, *a, **k):

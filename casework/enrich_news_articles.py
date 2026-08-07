@@ -782,16 +782,14 @@ def main(argv=None):
     report = RunReport()
     review = build_review_file(args, stage=STAGE_NAME, field_name="evidence (news)",
                               run_id=run_id)
-    # PREFLIGHT, before any case is touched. Both of these read configuration and
-    # raise `SearchUnavailable` -- an unknown $CASEWORK_SEARCH_PROVIDER, a keyed
-    # provider with no key, a malformed $CASEWORK_SOCKS_PROXY, PySocks not
-    # installed. The client is built OUTSIDE the per-case try below, so without
-    # this the proxy cases surfaced as a bare traceback; the provider cases
-    # surfaced correctly but only after the case list had been fetched and the
-    # run header printed, which reads like the run started and then broke.
+    # PREFLIGHT, before any case is touched. `resolve_search_provider` raises
+    # `SearchUnavailable` for an unknown $CASEWORK_SEARCH_PROVIDER or a keyed
+    # provider missing its credential, and it does so here rather than after the
+    # case list has been fetched and the run header printed -- which reads like
+    # the run started and then broke.
     #
     # The missing-key half of that only became true when `resolve_search_provider`
-    # started checking `PROVIDER_KEY_ENV`; before it, this comment described a
+    # started checking `PROVIDER_PREFLIGHT`; before it, this comment described a
     # guarantee the code did not give. A backend that fails LATER -- rate limits,
     # the anti-bot interstitial, a revoked key -- still surfaces mid-run, which is
     # what the abort-and-exit-non-zero path at the end of the case loop is for.
@@ -804,13 +802,10 @@ def main(argv=None):
                            budget=budget)
     except SearchUnavailable as exc:
         # SystemExit, not `return report`. `main()` is invoked bare at the bottom
-        # of this file, so returning exits 0 and a misconfigured provider, a
-        # missing key or a malformed proxy would report SUCCESS to a scheduler.
-        # Matches how --max-articles validation already fails above.
+        # of this file, so returning exits 0 and a misconfigured provider or a
+        # missing key would report SUCCESS to a scheduler. Matches how
+        # --max-articles validation already fails above.
         raise SystemExit(f"search is not configured: {exc}") from exc
-    if client.proxy:
-        print(f"  search + fetch via SOCKS proxy {client.proxy} "
-              f"(the case API and the LLM stay on the local interface)")
     if provider_name != DEFAULT_SEARCH_PROVIDER:
         print(f"  search provider: {provider_name}")
     if budget is not None:

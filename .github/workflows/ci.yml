@@ -34,13 +34,8 @@ jobs:
         with:
           enable-cache: true
 
-      # `--extra casework-proxy` pulls PySocks, which the casework news search
-      # imports lazily for its SOCKS5 tunnel. Without it the test asserting the
-      # tunnel does NOT capture process-wide networking cannot run, and that is
-      # the property keeping the case API and the LLM provider off an operator's
-      # personal connection. It is one small pure-Python wheel.
       - name: Install dependencies (incl. dev group)
-        run: uv sync --frozen --extra casework-proxy
+        run: uv sync --frozen
 
       - name: Lint (ruff check)
         run: uv run ruff check .

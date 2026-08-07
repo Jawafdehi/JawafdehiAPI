@@ -118,13 +118,6 @@ bigo-enrichment = [
     "markitdown[docx,pdf,pptx,xlsx]>=0.1.5",
     "likhit",
 ]
-# SOCKS5 support for the casework news search, used when the run happens on a
-# host search engines refuse (datacentre address) and the queries are carried
-# over an SSH reverse tunnel. Imported lazily and only when CASEWORK_SOCKS_PROXY
-# is set, so the base image and every other code path are unaffected.
-casework-proxy = [
-    "PySocks>=1.7.1",
-]
 
 [tool.uv.sources]
 # Shared by material enrichment and the embedded MCP document converter.
