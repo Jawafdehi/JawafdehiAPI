@@ -2388,9 +2388,12 @@ def verify_batch(articles, case, invoke_json, usage, press_release_text=None,
         min(4000, 200 + 200 * len(articles)), "cheap", usage)
     gate = _verdicts_from_response(gate_result, len(articles))
     # Fail OPEN at the gate -- a cheap-tier error or an unparseable reply
-    # escalates to premium rather than dropping the candidate (donor:1064). The
-    # gate is a cost optimisation; the premium tier is the decision, so a broken
-    # gate must not become a silent rejection.
+    # escalates to the decision pass rather than dropping the candidate
+    # (donor:1064). The gate is a cost optimisation; the decision pass is the
+    # decision, so a broken gate must not become a silent rejection. Note the
+    # decision pass may now run at the SAME tier as the gate (see `tier`), which
+    # changes what escalation buys but not that it must happen: the gate's
+    # answer is missing, not negative.
     #
     # PER INDEX, not per batch. `if gate:` was truthy as soon as ONE row parsed,
     # so a reply truncated at max_tokens -- which `llm.invoke.salvage_json`
@@ -2403,9 +2406,13 @@ def verify_batch(articles, case, invoke_json, usage, press_release_text=None,
     survivor_indexes = [i for i in range(len(articles))
                         if i not in gate or (gate.get(i) or {}).get("relevant")]
     if len(gate) < len(articles):
+        # Names the ACTUAL tier. It said "premium" unconditionally, so once the
+        # decision pass became configurable an operator reading this line would
+        # conclude a premium model had judged those candidates when it had not.
         log.warning("  cheap gate answered %d/%d candidates; escalating the "
-                    "%d unanswered to premium rather than dropping them",
-                    len(gate), len(articles), len(articles) - len(gate))
+                    "%d unanswered to the %s decision pass rather than "
+                    "dropping them",
+                    len(gate), len(articles), len(articles) - len(gate), tier)
 
     out = [(article, Verdict(relevant=False, reason=str(SkipReason.GATE_REJECTED)))
            for article in articles]
