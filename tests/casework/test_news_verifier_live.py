@@ -15,17 +15,33 @@ WHY THIS IS OPT-IN RATHER THAN A CI GATE. It calls a real model, so it is
 non-deterministic, costs tokens and needs provider credentials. Making it a
 gate would make CI flaky and expensive. Making it *absent* is worse -- the
 tier is a configuration choice, and a configuration choice with no way to check
-it is a guess. So it is a marked test an operator runs deliberately:
+it is a guess. So it is skipped unless asked for, by name:
 
-    CASEWORK_LIVE_MODEL_EVAL=1 uv run pytest -m live_model -s
+    CASEWORK_LIVE_MODEL_EVAL=1 \
+        uv run pytest tests/casework/test_news_verifier_live.py -s
+
     CASEWORK_LIVE_MODEL_EVAL=1 CASEWORK_EVAL_MODEL=sonnet \
-        uv run pytest -m live_model -s
+        uv run pytest tests/casework/test_news_verifier_live.py -s
 
 RUN IT WHEN: changing a stage's tier, changing a model, or before a batch large
-enough that a wrong bind would be expensive to unpick. Measured 2026-08-07 on
-`haiku` at the cheap tier: 1 of 10 -- pair 12, case 080-CR-0174 against an
-article about the same accused's OTHER case, returned `high` confidence. That
-is the precise failure `confidence == "high"` exists to refuse.
+enough that a wrong bind would be expensive to unpick.
+
+MEASURED 2026-08-07, same 20 pairs, same code path, one run each:
+
+    haiku  (cheap)    1 false positive of 10    3 missed of 10
+    sonnet (premium)  0 false positives of 10   2 missed of 10
+
+The false positive is pair 12 -- case 080-CR-0174 against an article about the
+same accused's OTHER corruption case. haiku answered `high` confidence on
+defendant + institution + corruption, which `VERIFY_SYSTEM_PROMPT`'s own rubric
+grades MEDIUM; sonnet rejects it. It reproduces one of the two live production
+mis-binds this fixture was built from, so the failure is attributable to the
+model, not to the prompt.
+
+Read the missed-match counts with care: one run each, no repeats, and a model
+that binds nothing would score zero false positives. The assertion below is the
+safety half; the printed false negatives are the coverage half, and neither
+number is a substitute for the other.
 """
 import os
 from datetime import date
@@ -36,12 +52,12 @@ from django.test import override_settings
 from casework.news_search import Article, verify_batch
 from tests.casework.news_labelled_set import LABELLED_PAIRS
 
-pytestmark = [
-    pytest.mark.live_model,
-    pytest.mark.skipif(
-        not os.environ.get("CASEWORK_LIVE_MODEL_EVAL"),
-        reason="calls a real LLM; set CASEWORK_LIVE_MODEL_EVAL=1 to run"),
-]
+#: Skipped unless asked for. No custom pytest MARKER on purpose -- registering
+#: one means editing `pyproject.toml`, and selecting this file by path is just
+#: as good for the one operator who runs it.
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("CASEWORK_LIVE_MODEL_EVAL"),
+    reason="calls a real LLM; set CASEWORK_LIVE_MODEL_EVAL=1 to run")
 
 
 def _case_from(pair):

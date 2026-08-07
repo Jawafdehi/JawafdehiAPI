@@ -54,11 +54,26 @@ TIERS = {
     # person to a corruption case, and production already carries two
     # wrong-case binds made on a weaker judgement.
     #
-    # UNMEASURED. Both tiers resolve to the same model under `bootstrap`, so no
-    # local run distinguishes them; the labelled set in
-    # `tests/casework/news_labelled_set.py` is the harness for measuring it
-    # against a real cheap model, and that has not been done. If false positives
-    # appear in review, this is the first line to revert.
+    # NOW MEASURED, and the result is not comfortable. Same 20 labelled pairs,
+    # same code path, 2026-08-07, via `tests/casework/test_news_verifier_live.py`:
+    #
+    #     haiku  (cheap)    1 false positive of 10     3 missed of 10
+    #     sonnet (premium)  0 false positives of 10    2 missed of 10
+    #
+    # The one false positive is pair 12: case 080-CR-0174 against an article
+    # about the same accused's OTHER corruption case. haiku returned `high`
+    # confidence on defendant + institution + corruption, which this stage's own
+    # rubric grades MEDIUM -- exactly what the `confidence == "high"` bar exists
+    # to refuse, and a reproduction of one of the two live production mis-binds
+    # the labelled set was built from. sonnet rejects it.
+    #
+    # So the failure IS attributable to the tier, not to the prompt. Kept cheap
+    # on the operator's explicit decision, with `--model` as the override.
+    #
+    # NOTE FOR WHOEVER ACTS ON THIS: `--model sonnet` is MORE expensive than
+    # reverting this line. It sets both tiers, so the gate moves to sonnet too;
+    # flipping this entry back to "premium" keeps the gate cheap and lifts only
+    # the decision. If the goal is a safe bind at the lowest cost, revert here.
     "news": "cheap",
 }
 DEFAULT_TIER = "cheap"
