@@ -7,6 +7,7 @@ even try.
 """
 
 import asyncio
+import inspect
 import json
 import threading
 import time
@@ -336,6 +337,42 @@ class TestPublishMechanics:
         with mock.patch.object(bus.logger, "warning") as warn:
             bus._log_result(ok, "s")
         warn.assert_not_called()
+
+    @override_settings(NATS_URL="nats://localhost:4222")
+    def test_a_loop_that_died_under_us_does_not_orphan_the_coroutine(self):
+        """A failed schedule must close the coroutine it already built.
+
+        ``js.publish(...)`` is eager, but ``run_coroutine_threadsafe`` raises on a
+        closed loop *before* wrapping it in a task, so nothing will ever await it and
+        it emits "coroutine was never awaited" when collected. That would be a SECOND
+        suite warning, which AGENTS.md treats as a real signal.
+
+        Asserted on the coroutine's own state rather than by catching the warning,
+        because the warning only fires at GC time and would make this flaky.
+        """
+        built = {}
+
+        async def real_publish(*_args, **_kwargs):  # a genuine coroutine, not a Mock
+            return None
+
+        def capture(*args, **kwargs):
+            built["coro"] = real_publish(*args, **kwargs)
+            return built["coro"]
+
+        with mock.patch.object(bus._bus, "_ensure_started", return_value=True), \
+             mock.patch.object(bus._bus, "_js") as js, \
+             mock.patch.object(bus._bus, "_loop", mock.Mock()), \
+             mock.patch(
+                 "case_events.bus.asyncio.run_coroutine_threadsafe",
+                 side_effect=RuntimeError("Event loop is closed"),
+             ), \
+             mock.patch.object(bus.logger, "warning") as warn:
+            js.publish.side_effect = capture
+            result = bus._bus.publish("jaw.case.update.approved", {"payload": {}})
+
+        assert result is False
+        assert warn.call_args.kwargs["error"] == "Event loop is closed"
+        assert inspect.getcoroutinestate(built["coro"]) == inspect.CORO_CLOSED
 
 
 class TestOnlyOneThreadPaysTheConnectCost:

@@ -461,6 +461,7 @@ class TestParseTimelineResponse:
             {"date": "2020-01-01", "title": "पहिलो"},
         ])
         result = _parse_timeline_response(body)
+        assert result is not None
         assert [e["date"] for e in result] == ["2020-01-01", "2024-06-01"]
 
     def test_drops_invalid_entries_keeps_valid_ones(self):

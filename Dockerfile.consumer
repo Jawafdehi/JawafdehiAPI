@@ -5,10 +5,16 @@
 # judge shells out to the `claude` binary authenticated by the operator's
 # subscription (CLAUDE_CODE_OAUTH_TOKEN) — so the CLI must ship in the image.
 #
-# Built amd64-only: likhit's legacy-.doc fallback (antiword) bundles an
-# x86_64-only binary (on arm64 those sources convert to 0 chars and reviews
-# grade on partial material), and npm-installing the CLI under arm64 QEMU
-# emulation is unreliable. Schedule on an amd64 node.
+# Built for amd64 AND arm64. This image used to be amd64-only because likhit's
+# legacy-.doc path relies on pyantiword, which bundles an x86-64 binary that
+# cannot execute anywhere else. LibreOffice (installed below) is packaged for
+# every architecture we deploy to and now anchors likhit's fallback chain, so
+# that constraint is gone. Verified on arm64 against a real CIAA press release:
+# LibreOffice's extraction is identical to amd64 antiword's, 0 replacement chars.
+#
+# The other former blocker was npm-installing the claude CLI under arm64 QEMU.
+# The workflow now builds each architecture on its own native runner and merges
+# the two into one manifest list, so nothing is emulated.
 ARG BASE_IMAGE=jawafdehi/jawafdehi-platform:main
 FROM ${BASE_IMAGE}
 
@@ -18,12 +24,27 @@ USER root
 
 # Node.js 22 LTS via NodeSource (claude-code needs a recent Node). The slim base
 # lacks curl/gnupg needed to add the apt repo.
+#
+# libreoffice-writer converts legacy .doc for the material_convert handler. In
+# this RUN to share the apt lists; --no-install-recommends keeps Java and the
+# rest of the suite out (~214 MB installed). `command -v soffice` is a build-time
+# guard: likhit locates it with shutil.which(), so the build must fail loudly if
+# the binary ever stops landing on PATH.
+#
+# ⚠️ Deliberately NOT installing `antiword`, even though it is 1 MB, is built for
+# arm64, and likhit would try it before LibreOffice. antiword selects its output
+# charmap from the locale, and this image inherits python:3.12-slim's unset LANG,
+# so a bare `antiword` call renders every Devanagari character as `?` — exit 0,
+# empty stderr, valid UTF-8, silently wrong. Measured on the CIAA fixture:
+# 1853 Devanagari codepoints via LibreOffice, 0 via locale-less antiword. It is
+# safe to add here only once likhit passes `-m UTF-8.txt` in a released version.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     gnupg \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
+    && apt-get install -y --no-install-recommends nodejs libreoffice-writer \
+    && command -v soffice \
     && rm -rf /var/lib/apt/lists/*
 
 # The claude_cli judge provider invokes this binary (settings.CLAUDE_CLI_BIN).

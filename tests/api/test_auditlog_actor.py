@@ -10,6 +10,8 @@ Regression tests for two defects on ``CaseViewSet.partial_update``:
    API-driven ``LogEntry`` was written with ``actor=NULL``. See ``AuditlogActorMixin``.
 """
 
+from typing import TYPE_CHECKING
+
 import pytest
 from auditlog.models import LogEntry
 from django.contrib.auth import get_user_model
@@ -24,7 +26,14 @@ from cases.models import (
 )
 from tests.conftest import create_user_with_role
 
-User = get_user_model()
+if TYPE_CHECKING:
+    # `get_user_model()` is typed `type[AbstractBaseUser]`, which cannot be used
+    # as an annotation. AUTH_USER_MODEL is not overridden in this project, so the
+    # concrete class below IS what `get_user_model()` returns at runtime — the
+    # runtime path keeps the indirection, the checker gets the real class.
+    from django.contrib.auth.models import User
+else:
+    User = get_user_model()
 
 URL = "/api/cases/{}/"
 

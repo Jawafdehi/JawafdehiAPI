@@ -114,7 +114,11 @@ def test_regrade_all_targets_only_the_latest_review_per_slug():
     with mock.patch.object(
         views.HasContributorRole, "has_permission", return_value=True
     ):
-        response = views.regrade_all(request)
+        # drf-stubs types an `@api_view`-decorated function as a zero-parameter
+        # view callable, so calling it directly with a request — which is exactly
+        # how APIRequestFactory tests invoke function views — reads as an arity
+        # error. The call is correct DRF usage.
+        response = views.regrade_all(request)  # ty: ignore[too-many-positional-arguments]
 
     assert response.data["review_ids"] == [latest.pk]
     old.refresh_from_db()

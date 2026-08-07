@@ -2,6 +2,7 @@
 Tests for PATCH /api/cases/{id}/ (RFC 6902 JSON Patch endpoint).
 """
 
+from typing import TYPE_CHECKING
 from unittest import mock
 
 import pytest
@@ -18,7 +19,13 @@ from cases.models import (
 )
 from tests.conftest import create_user_with_role
 
-User = get_user_model()
+if TYPE_CHECKING:
+    # See the note in tests/api/test_auditlog_actor.py: `get_user_model()` is
+    # typed `type[AbstractBaseUser]` and so is not usable as an annotation, while
+    # AUTH_USER_MODEL here is the default `User`.
+    from django.contrib.auth.models import User
+else:
+    User = get_user_model()
 
 URL = "/api/cases/{}/"
 

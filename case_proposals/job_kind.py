@@ -248,7 +248,11 @@ def on_result(job, result: dict) -> None:
         return _validation_failure(job, "intent type not draftable by a model", intent_type=str(itype)[:60])
 
     try:
-        confidence = float(result.get("confidence"))
+        # Passing a missing key's None into float() is the INTENT here: the
+        # `except (TypeError, ValueError)` immediately below is what handles both
+        # "absent" and "not a number", in one place. Narrowing first would just
+        # duplicate that branch.
+        confidence = float(result.get("confidence"))  # ty: ignore[invalid-argument-type]
     except (TypeError, ValueError):
         return _validation_failure(job, "confidence is missing or not a number")
     if not 0.0 <= confidence <= 1.0:

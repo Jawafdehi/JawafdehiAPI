@@ -530,6 +530,21 @@ wheels = [
 ]
 
 [[package]]
+name = "django-stubs"
+version = "6.0.7"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "django" },
+    { name = "django-stubs-ext" },
+    { name = "types-pyyaml" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8a/90/087c6e424e705e05182e543ef6b366a59eb5c92ab008b0dbbba55f357a40/django_stubs-6.0.7.tar.gz", hash = "sha256:bc55431c0af745a64e39cf33a8d36c87dccbedeae2fe26fab47dd355270e8538", size = 282293, upload-time = "2026-07-14T10:08:27.122Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/02/86/230ae6056221b543d63f7710d73967fe1c6840693540e99ea3c54f45859c/django_stubs-6.0.7-py3-none-any.whl", hash = "sha256:7ed9a14c438e589272ca04e966dee82a4d1ff7ca5c2171bc986c50a0d03ec35b", size = 547460, upload-time = "2026-07-14T10:08:25.626Z" },
+]
+
+[[package]]
 name = "django-stubs-ext"
 version = "6.0.6"
 source = { registry = "https://pypi.org/simple" }
@@ -602,6 +617,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/ca/d7/c016e69fac19ff8afdc89db9d31d9ae43ae031e4d1993b20aca179b8301a/djangorestframework-3.17.1.tar.gz", hash = "sha256:a6def5f447fe78ff853bff1d47a3c59bf38f5434b031780b351b0c73a62db1a5", size = 905742, upload-time = "2026-03-24T16:58:33.705Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/5a/e1/2c516bdc83652b1a60c6119366ac2c0607b479ed05cd6093f916ca8928f8/djangorestframework-3.17.1-py3-none-any.whl", hash = "sha256:c3c74dd3e83a5a3efc37b3c18d92bd6f86a6791c7b7d4dff62bb068500e76457", size = 898844, upload-time = "2026-03-24T16:58:31.845Z" },
+]
+
+[[package]]
+name = "djangorestframework-stubs"
+version = "3.17.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "django-stubs" },
+    { name = "types-pyyaml" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8a/4b/1bee065c6c87ee04b905732deb53acdfc43d0e5673f43a5f75ec4deb7f6f/djangorestframework_stubs-3.17.1.tar.gz", hash = "sha256:5b67655090e2976b778bad572840b732a87ab2911402530d0dca2fbf72f891c5", size = 33470, upload-time = "2026-07-28T21:27:52.071Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/86/38/6a04ffca56e24220bf37494fe9f75ce9abe8115776a90c924732bb37823a/djangorestframework_stubs-3.17.1-py3-none-any.whl", hash = "sha256:40f1f22ec1965d1caff17c66794b87799eb8f42e0628ea46b501dcd565d8a803", size = 57562, upload-time = "2026-07-28T21:27:50.58Z" },
 ]
 
 [[package]]
@@ -1199,6 +1228,8 @@ casework-proxy = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "django-stubs" },
+    { name = "djangorestframework-stubs" },
     { name = "hypothesis" },
     { name = "pre-commit" },
     { name = "pytest" },
@@ -1231,8 +1262,8 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28" },
     { name = "indic-transliteration", specifier = ">=2.3.82" },
     { name = "jsonpatch", specifier = ">=1.33" },
-    { name = "likhit", git = "https://github.com/Jawafdehi/likhit.git?rev=e98eb446437f8a086e1e8da409d413ca81106532" },
-    { name = "likhit", marker = "extra == 'bigo-enrichment'", git = "https://github.com/Jawafdehi/likhit.git?rev=e98eb446437f8a086e1e8da409d413ca81106532" },
+    { name = "likhit", git = "https://github.com/Jawafdehi/likhit.git?rev=5ae527711c8542e04b919b930cb2b19fdfaffc65" },
+    { name = "likhit", marker = "extra == 'bigo-enrichment'", git = "https://github.com/Jawafdehi/likhit.git?rev=5ae527711c8542e04b919b930cb2b19fdfaffc65" },
     { name = "lxml", specifier = ">=5.0" },
     { name = "markdown", specifier = ">=3.5" },
     { name = "markitdown", extras = ["docx", "pdf", "pptx", "xlsx"], specifier = ">=0.1.5" },
@@ -1267,6 +1298,8 @@ provides-extras = ["bigo-enrichment", "casework-proxy"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "django-stubs", specifier = "==6.0.7" },
+    { name = "djangorestframework-stubs", specifier = "==3.17.1" },
     { name = "hypothesis", specifier = ">=6.0" },
     { name = "pre-commit", specifier = ">=4.6.0" },
     { name = "pytest", specifier = ">=8.0" },
@@ -1419,8 +1452,8 @@ wheels = [
 
 [[package]]
 name = "likhit"
-version = "0.1.7"
-source = { git = "https://github.com/Jawafdehi/likhit.git?rev=e98eb446437f8a086e1e8da409d413ca81106532#e98eb446437f8a086e1e8da409d413ca81106532" }
+version = "0.1.8"
+source = { git = "https://github.com/Jawafdehi/likhit.git?rev=5ae527711c8542e04b919b930cb2b19fdfaffc65#5ae527711c8542e04b919b930cb2b19fdfaffc65" }
 dependencies = [
     { name = "fonttools" },
     { name = "markitdown", extra = ["docx", "pdf"] },
@@ -3172,6 +3205,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/7c/f7/68adc395201b20b872d68e975386832e8005ffeacedd43a1d837a32815be/typer-0.26.8.tar.gz", hash = "sha256:c244a6bd558886fe3f8780efb6bdd28bb9aff005a94eedebaa5cb32926fe2f7e", size = 202097, upload-time = "2026-06-26T09:22:45.705Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/80/87/b9fd69c92c6102a066e1b86a35243f53e70bd4c709f2a26d9f4fee4f4dc0/typer-0.26.8-py3-none-any.whl", hash = "sha256:3512ca79ac5c11113414b36e80281b872884477722440691c89d1112e321a49c", size = 122564, upload-time = "2026-06-26T09:22:44.72Z" },
+]
+
+[[package]]
+name = "types-pyyaml"
+version = "6.0.12.20260724"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/3f/6f/a28f44bcd56bebed42b028a2894c79853e2f5e6b5279e633cb3f287a05e7/types_pyyaml-6.0.12.20260724.tar.gz", hash = "sha256:3c1ce1bb73cd5ec02e90390c2b1f00e810d241d8825fd73ff359696839271b6b", size = 17893, upload-time = "2026-07-24T04:58:43.453Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8b/42/0337fefc615e20ee55d1c8f71b774a9b2b734a04669139c20753b27a2a3a/types_pyyaml-6.0.12.20260724-py3-none-any.whl", hash = "sha256:d57db930a4b2efbc57cf430ec8882765d246929432fa253092f383902329a453", size = 20312, upload-time = "2026-07-24T04:58:42.486Z" },
 ]
 
 [[package]]

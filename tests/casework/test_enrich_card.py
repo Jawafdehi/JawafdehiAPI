@@ -1158,7 +1158,10 @@ def test_a_failed_detail_fetch_skips_the_case_and_never_writes(monkeypatch):
     `if_match=None`, because the failed fetch is what left the ETag unset.
     """
     class _FetchFails(_StubApi):
-        def get_case_with_etag(self, slug):
+        # `timeout` is carried even though this override ignores it: dropping a
+        # parameter the base accepts makes the double break on any caller that
+        # passes it, which is a bug the double would hide rather than expose.
+        def get_case_with_etag(self, slug, timeout=60):
             raise RuntimeError("HTTP Error 502: Bad Gateway")
 
     api = _FetchFails([CASE_STUB_BOTH])

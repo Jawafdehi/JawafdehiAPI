@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Any
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
@@ -34,7 +35,13 @@ from materials.sourcing.nkp.normalizer import (
 #: class matching is membership (``col-sm-8`` among the element's classes), which
 #: is slightly more lenient than the legacy ``@class="col-sm-8"`` xpath and so
 #: strictly more robust to an added utility class.
-_CONTAINER_ATTRS = {"class": "col-sm-8"}
+# Annotated `Any`-valued rather than left to infer `dict[str, str]`: bs4 types
+# `find(attrs=...)` as a dict over its own wide "strainable" union, and `dict` is
+# INVARIANT in its value type, so `dict[str, str]` is not assignable to it even
+# though `str` is a member of that union. `Any` on a handle to an untyped
+# third-party shape is the documented house style (see the ANN401 note in
+# pyproject.toml, which names BeautifulSoup explicitly).
+_CONTAINER_ATTRS: dict[str, Any] = {"class": "col-sm-8"}
 
 #: Link/UI label text that is page chrome, never body text (the download badge and
 #: the social buttons), dropped from the extracted full text.

@@ -29,6 +29,9 @@ jobs:
   build-and-push:
     needs: [unit-and-security-gate, live-integration-gate]
     runs-on: ubuntu-latest
+    outputs:
+      # The consumer jobs layer on this exact commit's platform image.
+      short_sha: ${{ steps.shortsha.outputs.value }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
       - uses: docker/setup-qemu-action@eaefd20f597840d8870070b5b0e1bd33d2fff867
@@ -62,16 +65,85 @@ jobs:
           cache-from: type=gha,scope=platform
           cache-to: type=gha,mode=max,scope=platform
 
-      # Jobs-consumer image (platform + Node + claude CLI, Dockerfile.consumer).
-      # Layers on the platform image pushed above, referenced by its immutable
-      # short-sha tag so the pair is always built from the same commit. Skipped on
-      # PRs (the base tag is only pushed on branch builds). amd64-only — see
-      # Dockerfile.consumer.
       - name: Short SHA for the consumer base tag
-        if: github.event_name != 'pull_request'
-        run: echo "SHORT_SHA=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+        id: shortsha
+        run: echo "value=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+  # Jobs-consumer image (platform + Node + claude CLI + LibreOffice,
+  # Dockerfile.consumer). Layers on the platform image built above, referenced by
+  # its immutable short-sha tag so the pair always comes from the same commit.
+  #
+  # Built on native runners per architecture rather than one job with QEMU: the
+  # image npm-installs the claude CLI, which is unreliable under emulation. Each
+  # job pushes an untagged manifest by digest; consumer-manifest then assembles
+  # the two digests into the tag list, so no per-arch tags litter the registry.
+  # GitHub's arm64 runners are free for public repositories.
+  consumer-amd64:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5
+      - name: Log into DockerHub
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf
+        id: build
+        with:
+          context: .
+          file: Dockerfile.consumer
+          platforms: linux/amd64
+          build-args: |
+            BASE_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-push.outputs.short_sha }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-consumer,push-by-digest=true,name-canonical=true,push=true
+          # Scope per architecture: the two arch jobs would otherwise share one
+          # gha scope and each overwrite the other's export every run.
+          cache-from: type=gha,scope=consumer-amd64
+          cache-to: type=gha,mode=max,scope=consumer-amd64
+
+  consumer-arm64:
+    needs: build-and-push
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5
+      - name: Log into DockerHub
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf
+        id: build
+        with:
+          context: .
+          file: Dockerfile.consumer
+          platforms: linux/arm64
+          build-args: |
+            BASE_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-push.outputs.short_sha }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-consumer,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=consumer-arm64
+          cache-to: type=gha,mode=max,scope=consumer-arm64
+
+  # Assemble the two per-arch digests into the real tags (:main, :<short-sha>,
+  # semver). Until this job runs the digests are unreferenced, so a failure here
+  # leaves the previous manifest list serving rather than a half-published tag.
+  consumer-manifest:
+    needs: [consumer-amd64, consumer-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5
+      - name: Log into DockerHub
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9
-        if: github.event_name != 'pull_request'
         id: meta-consumer
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-consumer
@@ -80,16 +152,29 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=,format=short
-      - uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf
-        if: github.event_name != 'pull_request'
-        with:
-          context: .
-          file: Dockerfile.consumer
-          platforms: linux/amd64
-          push: true
-          build-args: |
-            BASE_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.SHORT_SHA }}
-          tags: ${{ steps.meta-consumer.outputs.tags }}
-          labels: ${{ steps.meta-consumer.outputs.labels }}
-          cache-from: type=gha,scope=consumer
-          cache-to: type=gha,mode=max,scope=consumer
+      - name: Create the multi-arch manifest list
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-consumer
+          AMD64_DIGEST: ${{ needs.consumer-amd64.outputs.digest }}
+          ARM64_DIGEST: ${{ needs.consumer-arm64.outputs.digest }}
+          META_JSON: ${{ steps.meta-consumer.outputs.json }}
+        run: |
+          set -euo pipefail
+          mapfile -t TAG_ARGS < <(jq -r '.tags[] | "-t\n" + .' <<<"$META_JSON")
+          docker buildx imagetools create "${TAG_ARGS[@]}" \
+            "${IMAGE}@${AMD64_DIGEST}" \
+            "${IMAGE}@${ARM64_DIGEST}"
+      - name: Verify both architectures are present
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-consumer
+        run: |
+          set -euo pipefail
+          # A manifest list that silently lost an arch is the failure this whole
+          # change exists to prevent, so assert on it rather than trusting it.
+          # buildx attaches provenance as extra manifests with platform
+          # unknown/unknown; those must be filtered or this never matches.
+          ARCHES=$(docker buildx imagetools inspect --raw "${IMAGE}:${GITHUB_SHA::7}" \
+            | jq -r '[.manifests[].platform.architecture]
+                     | map(select(. != "unknown")) | unique | sort | join(",")')
+          echo "architectures: $ARCHES"
+          test "$ARCHES" = "amd64,arm64"

@@ -1,5 +1,7 @@
 """OpenAI-compatible llm-proxy provider."""
 
+from typing import Any
+
 from django.conf import settings
 
 from llm.providers.base import Provider, strip_code_fence
@@ -23,7 +25,11 @@ class ProxyProvider(Provider):
         if _proxy is None:
             from openai import OpenAI
 
-            kwargs = dict(
+            # `dict[str, Any]`: a heterogeneous kwargs carrier infers its value type
+            # as the union of every entry, so `OpenAI(**kwargs)` below would see
+            # EVERY one of its parameters as `str | int | ...` — 16 diagnostics from
+            # this one splat. The values are deliberately of differing types.
+            kwargs: dict[str, Any] = dict(
                 base_url=settings.LLM_PROXY_BASE_URL,
                 api_key=settings.LLM_PROXY_API_KEY or "unused",
                 timeout=120,

@@ -15,7 +15,7 @@ that look like bugs but are load-bearing.
 ```bash
 uv sync                                    # install app + dev tools
 uv run ruff check .                        # the lint gate (exactly what CI runs)
-uv run ty check                            # type check — ADVISORY, not a gate
+uv run ty check                            # type check — a GATE, must be clean
 uv run python manage.py check
 DJANGO_SETTINGS_MODULE=config.settings_test TESTING=true \
   uv run pytest -q --ignore=integration-tests    # full suite, ~2.3 min, no services
@@ -26,12 +26,17 @@ databases, one per router alias. Do not stand up Postgres/OpenSearch/MinIO to ru
 it. `--ignore=integration-tests` matters: `integration-tests/` is a separate live-stack
 suite that *errors* rather than skips when the stack is down.
 
-Expect **3297 passed · 4 skipped · 1 warning** (measured 2026-08-04). The 4 skips
-are `materials/tests/test_patch_concurrency_postgres.py`, which needs a real
-Postgres `ngm` alias AND `DJANGO_SETTINGS_MODULE=config.settings` — see that
+**Baseline the suite on your untouched branch and compare against that**, rather
+than against a number written down here — the totals move whenever upstream lands
+tests, and a stale figure here would just make a green run look wrong. What is
+stable is the shape: green, a handful of skips, exactly one warning.
+
+The skips are `materials/tests/test_patch_concurrency_postgres.py`, which needs a
+real Postgres `ngm` alias AND `DJANGO_SETTINGS_MODULE=config.settings` — see that
 module's docstring; `settings_test` hardcodes sqlite, so they can never run on the
-default gate. The 1 warning is upstream's own un-awaited `_drain_tasks` coroutine
-in `case_events`, not something this tree introduced.
+default gate. The one warning is upstream's own un-awaited `_drain_tasks`
+coroutine in `case_events`, not something this tree introduced. **A second
+warning is a real signal** — see the note under Conventions.
 
 Run one test: `uv run pytest tests/api/test_public_api.py -k name`. Security suite
 only: `uv run pytest -m security`.
@@ -47,12 +52,42 @@ primitive — so a directory opts *in* by deleting its line there, and only once
 its `ruff check <dir> --select ANN` count is already 0. Tests are exempt
 permanently.
 
-**`ty` is advisory, not a gate** — `uv run ty check`, and CI runs it with
-`|| true`. It is pre-1.0 with no Django plugin, so it cannot see through the
-model metaclass: at adoption it reported 1304 diagnostics of which ~800 were
-`Model.objects` / DRF `force_authenticate` false positives.
-`[tool.ty.rules]` silences those families, leaving **30 real ones** — worth
-reading, and the list to drive to zero before making it a gate.
+**`ty` IS a gate now** — `uv run ty check`, no `|| true` in CI, and a
+`local` pre-commit hook (local because ty needs the project venv to resolve
+django-stubs et al; a hermetic mirror env would report the tree as unresolved
+imports).
+
+It is still pre-1.0 with no Django plugin, but that stopped mattering:
+`django-stubs` + `djangorestframework-stubs` (dev group, exact-pinned, type-only)
+close the metaclass blind spot from stub data, which needs no plugin. Enforced
+now, beyond ty's defaults: `invalid-argument-type`, `not-subscriptable`,
+`unsupported-operator`, `invalid-assignment` (all four were silenced before),
+plus `possibly-unresolved-reference` and `possibly-missing-import`, which ty
+ships OFF and which found real bugs.
+
+Two families remain exempt: `unresolved-attribute` (the one genuine plugin gap —
+implicit FK `_id`, reverse accessors, `get_user_model()`) and `unresolved-import`
+(optional lazily-imported deps; permanent). Tests and a list of named source
+files are scoped out of the four new families via `[[tool.ty.overrides]]` —
+**deleting an entry from that list is how a file opts in**, and only once
+`ty check <file>` is already 0.
+
+**The measured cost of every exemption lives in `pyproject.toml`, next to the
+config it justifies — not here.** That is deliberate: a number is only useful
+where you can act on it, and a count in this file rots silently while a count
+beside the `include =` list is read by whoever is about to delete an entry. Each
+block records how it was measured, so re-derive rather than trust.
+
+**The gate's diagnostic set is a function of the resolved DEPENDENCY set.** This
+is the trap most likely to waste your afternoon. Families like
+`unresolved-import` are exempt, so before a package resolves, everything
+downstream of it infers as `Unknown` and no rule can fire on it. Promote that
+package into the main dependency set and its consumers become checked code
+overnight — so `ty check` can go red in files nobody edited. It happened here:
+PR #427 moved `markitdown`, `httpcore` and `likhit` out of extras, which
+surfaced findings in `review/converter.py` and `materials/sourcing/ppmo/ocr.py`,
+both untouched for weeks. **Re-measure after a dependency change; do not assume
+a merge broke something.**
 
 ## Traps — things that look wrong and are not
 
@@ -185,12 +220,36 @@ do not push to it.
   `tests/e2e/test_public_api_e2e.py:101` E/34 (a test, low value to split), and
   `casework/enrich_related_entities.py:364` `main` E/33.
   `cases/api_views.py` is still a 1989-line module even after the split.
-- **`ty`'s 30 real diagnostics** (`uv run ty check`). Mostly Django-shaped and
-  low-value (`__str__` returning `CharField` not `str`, `QuerySet.as_manager`),
-  but read them before dismissing: two genuine bugs came out of the first pass —
-  `case_scraper.py` called `len()` on an Optional `response.text` (TypeError on a
-  blocked Gemini candidate), and `ciaa_draft_case_service.convert_bs_to_ad` was
-  annotated `Optional[datetime]` while `bs_to_ad` returns `date`.
+- **`ty` is clean and gated** — the debt this bullet used to list is gone. The
+  `__str__`-returning-`CharField` family evaporated with django-stubs; the rest
+  were fixed. Keep reading its output rather than dismissing it, because that pass
+  found more real bugs: a SECOND Optional-`response.text` in `case_scraper.py` (the
+  phase-2 structuring call, one function below the phase-1 one already fixed);
+  `build_convert_payload` annotated `Optional[dict]` while all three of its failure
+  paths `raise`; `_die()` missing `-> NoReturn`, which made six reads genuinely
+  possibly-unbound; a `get_form` override silently dropping Django's `change`; and
+  `case_events.bus` passing a possibly-None loop *after* building the coroutine,
+  orphaning it.
+- **Two real defects sit behind the MCP type debt** (found 2026-08-05 while
+  gating ty over PR #427; each wants its own PR, neither is a typing fix):
+  `jawafdehi_mcp/tools/ngm_extract.py` `_validate_environment` is annotated
+  `-> tuple[str, str]` but returns `get_jawafdehi_api_config()`, whose token can
+  be `None` — and that token goes straight into an `Authorization` header. And
+  `sql_quote` is `value.replace("'", "''")`, applied to `arguments.get(...)`
+  straight off the MCP wire, then f-string-interpolated into `SELECT`s. The
+  `''`-doubling is correct for Postgres with `standard_conforming_strings` on, so
+  this is not trivially injectable, but a non-`str` argument (JSON number, list)
+  reaches `.replace` and raises. The `if not all([a, b, c])` guard above it is
+  also why ty reports most of that file — `all()` does not narrow.
+- **The remaining type debt is enumerated, not vague** — read the
+  `[[tool.ty.overrides]]` blocks in `pyproject.toml`, which name every file and
+  carry the per-block measurement and reasoning. The THIRD block is source files
+  predating the gate (the first is `urls.py`, the second tests); the FOURTH is
+  everything PR #427 brought in. Nearly all of it is two shapes: bs4 attribute
+  values (`str | AttributeValueList | None`) used as plain `str`, and unnarrowed
+  Optionals. The `dict(...)`-splat lever — annotating a heterogeneous carrier dict
+  `dict[str, Any]` so a typed constructor stops unioning every field — is the
+  biggest single win available and is mostly spent.
 - **`ANN` is enforced in `lakehouse/` only.** Per-directory source-only counts,
   cheapest first (re-measured after the 2026-08-04 upstream rebase): `newsletter`
   5, `discovery` 31, `jobs` 34, `content` 57, `case_proposals` 78, `case_events`

@@ -61,7 +61,11 @@ class ArticleIndexPage(Page):
     api_fields = [APIField("intro")]
 
 
-class ArticlePage(HeadlessPreviewMixin, Page):
+# The `serve_preview` signatures of `HeadlessPreviewMixin` (wagtail-headless-preview)
+# and Wagtail's own `PreviewableMixin` genuinely disagree upstream. Overriding it is
+# the entire reason the mixin is here and it must come FIRST in the MRO — see the
+# docstring below. Nothing in this repo can reconcile the two declarations.
+class ArticlePage(HeadlessPreviewMixin, Page):  # ty: ignore[invalid-method-override]
     """An update or news article, delivered headless via the API v2.
 
     ``HeadlessPreviewMixin`` overrides ``serve_preview`` so the edit-screen
