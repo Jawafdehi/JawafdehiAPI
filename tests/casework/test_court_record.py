@@ -12,7 +12,7 @@ import urllib.error
 
 import pytest
 
-from casework.court_record import court_ref, defendant_names
+from casework.court_record import court_record_for_case, court_ref, defendant_names
 
 
 class _Api:
@@ -130,3 +130,74 @@ def test_blank_and_missing_names_are_dropped():
     ]})
     names, _ = defendant_names(api, CASE)
     assert names == ["सिताराम यादव"]
+
+
+class _FullApi:
+    """Stub covering all three court reads. Values that are Exceptions raise."""
+
+    def __init__(self, detail=None, hearings=None, parties=None):
+        self.detail, self.hearings, self.parties = detail or {}, hearings or {}, parties or {}
+
+    def _pick(self, store, court, number):
+        value = store.get(f"{court}/{number}")
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    def get_courtcase(self, court, number, timeout=60):
+        return self._pick(self.detail, court, number) or {}
+
+    def list_hearings(self, court, number, timeout=60):
+        return self._pick(self.hearings, court, number) or []
+
+    def get_court_case_entities(self, court, number, timeout=60):
+        return self._pick(self.parties, court, number) or []
+
+
+CASE_0151 = {"court_cases": ["https://jawafdehi.org/courtcase/special/079-cr-0151"]}
+
+
+def test_reads_detail_hearings_and_parties_for_every_reference():
+    api = _FullApi(
+        detail={"special/079-cr-0151": {"registration_date_ad": "2023-06-22"}},
+        hearings={"special/079-cr-0151": [{"case_status": "फैसला",
+                                           "hearing_date_ad": "2024-06-04"}]},
+        parties={"special/079-cr-0151": [{"side": "defendant", "name": "कृष्ण प्रसाद यादव"}]},
+    )
+    records, skips = court_record_for_case(api, CASE_0151)
+    assert skips == []
+    assert len(records) == 1
+    assert records[0]["court"] == "special"
+    assert records[0]["detail"]["registration_date_ad"] == "2023-06-22"
+    assert records[0]["hearings"][0]["hearing_date_ad"] == "2024-06-04"
+    assert records[0]["parties"][0]["name"] == "कृष्ण प्रसाद यादव"
+
+
+def test_an_unreadable_reference_is_a_skip_not_a_raise():
+    api = _FullApi(detail={"special/079-cr-0151": urllib.error.HTTPError(
+        "u", 404, "Not Found", None, None)})
+    records, skips = court_record_for_case(api, CASE_0151)
+    assert records == []
+    assert "404" in skips[0]
+
+
+def test_one_bad_reference_does_not_cost_the_others():
+    case = {"court_cases": [
+        "https://jawafdehi.org/courtcase/special/079-cr-0151",
+        "https://jawafdehi.org/courtcase/special/080-cr-0111",
+    ]}
+    api = _FullApi(
+        detail={
+            "special/079-cr-0151": urllib.error.HTTPError("u", 404, "gone", None, None),
+            "special/080-cr-0111": {"registration_date_ad": "2024-01-01"},
+        },
+    )
+    records, skips = court_record_for_case(api, case)
+    assert [r["number"] for r in records] == ["080-cr-0111"]
+    assert len(skips) == 1
+
+
+def test_no_court_reference_reports_why():
+    records, skips = court_record_for_case(_FullApi(), {"court_cases": []})
+    assert records == []
+    assert "no court reference" in skips[0]

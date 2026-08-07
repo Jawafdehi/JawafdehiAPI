@@ -113,3 +113,47 @@ def defendant_names(api, case):
             seen.add(name)
             names.append(name)
     return names, skips
+
+
+def court_record_for_case(api, case):
+    """`(records, skips)` -- the full court record behind every reference on `case`.
+
+    Each record is `{"court", "number", "detail", "hearings", "parties"}`. The
+    three reads are made per reference; any one of them failing drops that
+    reference into `skips` with a human-readable reason and moves on, because 9
+    of the 49 published court references 404 and one stale number must not cost
+    a case its other references.
+
+    Deliberately separate from `defendant_names`, which answers the narrower
+    "who are the defendants" question and stays the entry point for callers that
+    need only names.
+    """
+    refs = [ref for ref in (court_ref(raw) for raw in (case.get("court_cases") or []))
+            if ref]
+    if not refs:
+        return [], ["no court reference on the case: neither dates nor accused "
+                    "can be read from the court record"]
+
+    records, skips = [], []
+    for court, number in refs:
+        try:
+            record = {
+                "court": court,
+                "number": number,
+                "detail": api.get_courtcase(court, number) or {},
+                "hearings": api.list_hearings(court, number) or [],
+                "parties": api.get_court_case_entities(court, number) or [],
+            }
+        except urllib.error.HTTPError as exc:
+            skips.append(f"court reference {court}/{number} could not be read "
+                         f"(HTTP {exc.code})")
+            logger.warning("court record %s/%s unreadable: HTTP %s",
+                           court, number, exc.code)
+            continue
+        except Exception as exc:  # noqa: BLE001 - network, decode, anything else: a read failure is a skip
+            skips.append(f"court reference {court}/{number} could not be read "
+                         f"({type(exc).__name__})")
+            logger.warning("court record %s/%s unreadable: %s", court, number, exc)
+            continue
+        records.append(record)
+    return records, skips
