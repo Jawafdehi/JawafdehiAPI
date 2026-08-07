@@ -155,11 +155,15 @@ class FakeApi:
         self.base_url = base_url
         self.materials = []
         self.replaced = []
+        #: Counts detail fetches, so a test can pin that the preflight failed
+        #: BEFORE any case was touched rather than after the list was walked.
+        self.fetched = 0
 
     def iter_cases(self, params=None, timeout=60, progress=None):
         return iter([{"slug": self.case["slug"], "state": self.case.get("state")}])
 
     def get_case_with_etag(self, slug, timeout=60):
+        self.fetched += 1
         return self.case, self.etag
 
     def create_material(self, doc, material_type, timeout=60):
@@ -648,9 +652,12 @@ def test_the_run_aborts_on_the_first_dead_search_instead_of_per_case(monkeypatch
     web = AnomalyWeb()
     api = FakeApi(case_payload())
     review = tmp_path / "review.md"
-    report = run_main(monkeypatch, api, web, stub_invoke_json(),
-                      ["--review-file", str(review)])
-    assert report.summary() == {"error": 1}
+    # SystemExit, not a returned report: an aborted run must not exit 0. The
+    # review file and the summary are still written before it.
+    with pytest.raises(SystemExit) as exc:
+        run_main(monkeypatch, api, web, stub_invoke_json(),
+                 ["--review-file", str(review)])
+    assert exc.value.code not in (0, None)
     text = review.read_text(encoding="utf-8")
     assert "SEARCH BACKEND DOWN" in text
     assert api.materials == [] and api.replaced == []
@@ -1148,7 +1155,7 @@ def test_no_permalink_actually_suppresses_the_archive_lookup():
     assert parser.parse_args([]).permalink is True
     assert parser.parse_args(["--no-permalink"]).permalink is False
     assert "args.permalink" in pathlib.Path(
-        en.__file__).read_text(), (
+        en.__file__).read_text(encoding="utf-8"), (
         "the flag must be READ, not merely registered")
 
 
@@ -1648,7 +1655,7 @@ def test_a_broken_proxy_is_reported_at_startup_not_as_a_traceback(monkeypatch,
 
 def test_the_enricher_preflights_search_config_before_touching_a_case():
     """The check must sit ahead of the case loop, not inside it."""
-    src = pathlib.Path(en.__file__).read_text()
+    src = pathlib.Path(en.__file__).read_text(encoding="utf-8")
     preflight = src.index("resolve_search_provider()")
     loop = src.index("for index, summary in enumerate(cases, 1):")
     assert preflight < loop, "config is validated after work has begun"
@@ -1746,18 +1753,61 @@ def test_a_review_row_survives_an_article_with_no_title():
 
 
 def test_a_failed_preflight_exits_non_zero(monkeypatch):
-    """`main()` is invoked bare, so `return report` exits 0 and a misconfigured
-    provider reports SUCCESS to a scheduler."""
-    src = pathlib.Path(en.__file__).read_text()
-    handler = src.index("search is not configured")
-    assert "raise SystemExit" in src[handler - 300:handler + 120], (
-        "the preflight must exit non-zero, like --max-articles validation")
+    """`main()` is invoked bare at the bottom of the module, so `return report`
+    exits 0 and a misconfigured provider reports SUCCESS to a scheduler.
+
+    Driven through `main()` rather than grepped out of the source, so a
+    refactor that reintroduces the bug fails here instead of passing on a
+    string that happens to still be present."""
+    monkeypatch.setenv("CASEWORK_SEARCH_PROVIDER", "brave")
+    monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
+    with pytest.raises(SystemExit) as exc:
+        run_main(monkeypatch, FakeApi(case_payload()), FakeWeb(),
+                 stub_invoke_json())
+    assert exc.value.code not in (0, None), (
+        "a keyed provider with no key must exit non-zero")
+    assert "brave" in str(exc.value).lower(), exc.value
+
+
+def test_a_missing_key_is_caught_before_the_case_list_is_fetched(monkeypatch):
+    """`resolve_search_provider` used to validate only the provider NAME, so a
+    missing key sailed through the preflight, fetched the case list, printed the
+    run header and then aborted on the first query of case 1 -- which reads like
+    the backend went down mid-run rather than like it was never configured."""
+    monkeypatch.setenv("CASEWORK_SEARCH_PROVIDER", "brave")
+    monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
+    api = FakeApi(case_payload())
+    with pytest.raises(SystemExit):
+        run_main(monkeypatch, api, FakeWeb(), stub_invoke_json())
+    assert api.fetched == 0, (
+        "the preflight must fail before a single case is fetched")
+
+
+def test_an_aborted_run_exits_non_zero_but_still_ships_what_it_had(monkeypatch,
+                                                                  capsys):
+    """A backend that dies MID-run -- rate limits, the anti-bot page, a revoked
+    key -- aborts the loop. Returning `report` there exits 0 and tells a
+    scheduler that a batch which stopped at case 1 of N succeeded. The summary
+    and the review file must still be written before the non-zero exit."""
+    class _DeadSearch(FakeWeb):
+        def get(self, url, kind, **kwargs):
+            if kind == "search":
+                raise ns.SearchUnavailable("429 from the provider")
+            return super().get(url, kind, **kwargs)
+
+    with pytest.raises(SystemExit) as exc:
+        run_main(monkeypatch, FakeApi(case_payload()), _DeadSearch(),
+                 stub_invoke_json())
+    assert exc.value.code not in (0, None)
+    out = capsys.readouterr()
+    assert "review file:" in out.out, "the review file must still be written"
+    assert "ABORTED at case 1/1" in out.err
 
 
 def test_bind_materials_records_the_reciprocal_duplicate_contract():
     """Both stages PATCH the same destructive whole-list /evidence, so both
     normalisers must stay identical. Only one side said so."""
-    src = pathlib.Path(en.__file__).parent.joinpath("bind_materials.py").read_text()
+    src = pathlib.Path(en.__file__).parent.joinpath("bind_materials.py").read_text(encoding="utf-8")
     assert src.count("DELIBERATELY DUPLICATED") == 2
     assert "enrich_news_articles" in src
 
@@ -1951,9 +2001,11 @@ def test_an_exhausted_budget_aborts_the_run_and_writes_nothing(monkeypatch,
     prevent."""
     api = FakeApi(case_payload())
     review = tmp_path / "review.md"
-    report = run_main(monkeypatch, api, ExhaustedWeb(), stub_invoke_json(),
-                      ["--review-file", str(review)])
-    assert report.summary() == {"error": 1}
+    with pytest.raises(SystemExit) as exc:
+        run_main(monkeypatch, api, ExhaustedWeb(), stub_invoke_json(),
+                 ["--review-file", str(review)])
+    assert exc.value.code not in (0, None), (
+        "a batch stopped by the cap did not complete, and must say so")
     assert "budget exhausted" in review.read_text(encoding="utf-8")
     assert api.materials == [] and api.replaced == [], (
         "an aborted run must not have written anything")
@@ -2001,7 +2053,11 @@ def test_the_preflight_warns_when_the_batch_cannot_fit(tmp_path, capsys):
     budget = ns.SearchBudget(100, "brave", path=tmp_path / "b.json")
     en._check_budget_fits(budget, n_cases=25)
     out = capsys.readouterr().out
-    assert "WARNING" in out and "--limit 8" in out, out
+    # Derived, not hard-coded: `affordable = remaining // QUERY_LIMIT`, so a
+    # change to QUERY_LIMIT should fail on the constant that moved rather than
+    # on a warning string.
+    affordable = 100 // ns.QUERY_LIMIT
+    assert "WARNING" in out and f"--limit {affordable}" in out, out
     en._check_budget_fits(ns.SearchBudget(1000, "brave", path=tmp_path / "c.json"),
                           25)
     assert "WARNING" not in capsys.readouterr().out
@@ -2049,6 +2105,26 @@ def test_a_daily_allowance_resets_daily(tmp_path):
                            now=lambda: ns.datetime(2026, 8, 7,
                                                    tzinfo=ns.timezone.utc))
     assert day2.spent == 0
+
+
+def test_the_ledger_survives_two_providers_writing_alternately(tmp_path):
+    """Running a Brave batch and a Serper batch at once is a thing an operator
+    would reasonably do, and it is exactly when an unlocked read-modify-write
+    drops one of the two rows. Committed with `os.replace`, so a crash
+    mid-write also cannot leave a truncated file that `_read_all` would read as
+    zero spent -- handing back an allowance that is gone."""
+    ledger = tmp_path / "b.json"
+    brave = ns.SearchBudget(900, "brave", path=ledger)
+    serper = ns.SearchBudget(2200, "serper", path=ledger)
+    for _ in range(2):
+        brave.spend()
+    for _ in range(3):
+        serper.spend()
+
+    assert ns.SearchBudget(900, "brave", path=ledger).spent == 2
+    assert ns.SearchBudget(2200, "serper", path=ledger).spent == 3
+    assert not list(tmp_path.glob("*.tmp")), (
+        "the atomic write must not leave a temp file behind")
 
 
 def test_the_quota_table_matches_each_vendors_real_allowance():
@@ -2472,9 +2548,14 @@ def test_a_devanagari_nes_name_keeps_the_lossy_table_out_of_the_front_slots():
 
 
 def test_the_enricher_asks_for_the_devanagari_name():
-    src = pathlib.Path(en.__file__).read_text()
-    assert "generate_devanagari_names(case, invoke_json, usage)" in src
-    assert "devanagari_names=devanagari" in src
+    """Driven through `collect_for_case`, so it pins that the call HAPPENS on
+    the production path -- a source grep would keep passing if the result were
+    computed and then never passed to `build_queries`."""
+    invoke_json = stub_invoke_json()
+    en.collect_for_case(case_payload(), FakeWeb(search_results=[]), invoke_json,
+                        FakeUsage(), max_articles=3)
+    assert ns.DEVANAGARI_NAME_SYSTEM_PROMPT[:40] in invoke_json.seen["systems"], (
+        invoke_json.seen["systems"])
 
 
 def test_the_short_name_queries_survive_the_models_queries():

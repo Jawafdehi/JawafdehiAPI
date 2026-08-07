@@ -42,6 +42,7 @@ case. Production already carries two such binds on
 A relevant-but-not-high verdict becomes a `NearMiss`, which the review file
 prints for a human and the writer never touches.
 """
+import contextlib
 import hashlib
 import json
 import logging
@@ -56,6 +57,11 @@ from datetime import date, datetime, timezone
 from enum import Enum
 from html.parser import HTMLParser
 from pathlib import Path
+
+try:                      # POSIX only; the ledger lock degrades to a no-op.
+    import fcntl
+except ImportError:       # pragma: no cover - this stage is run from Linux
+    fcntl = None
 
 log = logging.getLogger("casework.news_search")
 
@@ -771,8 +777,14 @@ class WebClient:
     def get(self, url, kind, headers=None, expect_html=False, error_body=False):
         """`(status, text)` for a GET, or `(None, None)` on a transport error.
 
-        Never raises: a dead news host is an ordinary outcome of searching the
-        open web, and one of them must not end the case.
+        Swallows transport errors: a dead news host is an ordinary outcome of
+        searching the open web, and one of them must not end the case.
+
+        It does raise `SearchBudgetExceeded`, from `_charge`, and that is meant
+        to travel -- the request has not been sent, the cap is a hard stop, and
+        the enricher's abort handler is what should catch it. Do not wrap this
+        call in a bare `except Exception` that would swallow it back into a
+        "found nothing" row.
 
         `error_body=True` returns the 4xx/5xx BODY instead of discarding it.
         Off by default and opt-in per call on purpose: a keyed JSON provider puts
@@ -818,7 +830,8 @@ class WebClient:
         return result
 
     def post_json(self, url, kind, payload, headers=None):
-        """`(status, text)` for a JSON POST. Same never-raises contract as `get`.
+        """`(status, text)` for a JSON POST. Same contract as `get`: transport
+        errors are swallowed, `SearchBudgetExceeded` propagates.
 
         Exists because two of the keyed search providers (Serper, Tavily) are
         POST-only. Routed through the same throttle, cache and call counter as
@@ -986,7 +999,7 @@ class SearchBudget:
     def _read_all(self):
         """Every provider's row, or `{}` if the file is absent or unreadable."""
         try:
-            data = json.loads(self.path.read_text())
+            data = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
         rows = data.get("spent") if isinstance(data, dict) else None
@@ -1003,6 +1016,25 @@ class SearchBudget:
                         "batch.", self.path)
         return {}
 
+    @contextlib.contextmanager
+    def _locked(self):
+        """Hold an exclusive advisory lock on the ledger's sidecar lock file.
+
+        A no-op where `fcntl` is missing (Windows). The atomic `os.replace` in
+        `_save` still holds there; only the cross-process ordering is lost, and
+        this stage is run from Linux.
+        """
+        if fcntl is None:
+            yield
+            return
+        lock_path = self.path.with_name(f"{self.path.name}.lock")
+        with open(lock_path, "w", encoding="utf-8") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
     def _load(self):
         row = self._read_all().get(self.provider)
         if not isinstance(row, dict) or row.get("bucket") != self.bucket:
@@ -1015,11 +1047,32 @@ class SearchBudget:
     def _save(self):
         # Read-modify-write rather than overwrite: two providers share this file
         # and a plain dump would erase whichever one is not running.
-        rows = self._read_all()
-        rows[self.provider] = {"bucket": self.bucket, "spent": self.spent}
+        #
+        # The sequence runs under an exclusive advisory lock and commits with
+        # `os.replace`, because running two providers AT ONCE is a thing an
+        # operator would reasonably do -- a Brave batch and a Serper batch in
+        # two terminals -- and that is exactly when an unlocked
+        # read-modify-write drops one of the two rows. `os.replace` is atomic
+        # on POSIX, so a crash mid-write also cannot leave a truncated file,
+        # which `_read_all` would read as zero spent and hand back an allowance
+        # that is gone.
+        #
+        # The lock is on a SEPARATE file: locking the ledger itself would leave
+        # the lock attached to the old inode the moment `os.replace` swaps it.
+        #
+        # What this does NOT make safe is two runs of the SAME provider at
+        # once. Each holds its own `self.spent` and the last writer wins, so
+        # the count can lag. That is an operator error -- two runs drawing on
+        # one paid quota -- and each process still enforces the cap on itself.
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps({"spent": rows}, indent=2))
+            with self._locked():
+                rows = self._read_all()
+                rows[self.provider] = {"bucket": self.bucket, "spent": self.spent}
+                tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.tmp")
+                tmp.write_text(json.dumps({"spent": rows}, indent=2),
+                               encoding="utf-8")
+                os.replace(tmp, self.path)
         except OSError as exc:
             # An unwritable ledger must not kill a run that is otherwise fine,
             # but it silently removes the protection -- so say so, loudly, once
@@ -1057,6 +1110,26 @@ _ANOMALY_MARKERS = ("anomaly", "detected unusual activity", "verify you are")
 #: Env var naming the backend. Default keeps the donor's behaviour exactly.
 SEARCH_PROVIDER_ENV = "CASEWORK_SEARCH_PROVIDER"
 DEFAULT_SEARCH_PROVIDER = "duckduckgo"
+
+
+def _google_cse_credentials():
+    """`(key, cx)` for Google CSE, or a `SearchUnavailable` naming what is absent.
+
+    Two credentials, unlike every other provider, and the missing-CX case needs
+    its own message: a key with no engine id returns a bare 400 from Google,
+    which reads as a mystery rather than as "you never created a search
+    engine". Split out so `resolve_search_provider` can preflight BOTH without
+    reimplementing the check and losing that message.
+    """
+    key = _keyed("GOOGLE_CSE_API_KEY", "google_cse")
+    cx = (os.environ.get("GOOGLE_CSE_CX") or "").strip()
+    if not cx:
+        raise SearchUnavailable(
+            "GOOGLE_CSE_API_KEY is set but $GOOGLE_CSE_CX is not. Google needs "
+            "both: the API key, and the id of the Programmable Search Engine to "
+            "query (create one at programmablesearchengine.google.com and set it "
+            "to search the entire web).")
+    return key, cx
 
 
 def _keyed(env_name, provider):
@@ -1225,14 +1298,7 @@ def search_google_cse(client, query):
 
     Shape is from the vendor schema and is UNVERIFIED against a live key.
     """
-    key = _keyed("GOOGLE_CSE_API_KEY", "google_cse")
-    cx = (os.environ.get("GOOGLE_CSE_CX") or "").strip()
-    if not cx:
-        raise SearchUnavailable(
-            "GOOGLE_CSE_API_KEY is set but $GOOGLE_CSE_CX is not. Google needs "
-            "both: the API key, and the id of the Programmable Search Engine to "
-            "query (create one at programmablesearchengine.google.com and set it "
-            "to search the entire web).")
+    key, cx = _google_cse_credentials()
     url = ("https://www.googleapis.com/customsearch/v1?"
            + urllib.parse.urlencode({
                "key": key, "cx": cx, "q": query,
@@ -1268,14 +1334,35 @@ SEARCH_PROVIDERS = {
 }
 
 
+#: What each keyed provider cannot run without, as the SAME reader the provider
+#: itself calls -- so the preflight can never drift from the real requirement,
+#: and each keeps its own message (Google's names the engine id, not just "a
+#: key"). Checked at RESOLVE time: `resolve_search_provider` used to validate
+#: only the NAME, so `CASEWORK_SEARCH_PROVIDER=brave` with no key sailed through
+#: the enricher's preflight, fetched the case list, printed the run header, and
+#: then aborted on the first query of case 1 -- which reads to an operator like
+#: the backend went down mid-run rather than like it was never configured.
+PROVIDER_PREFLIGHT = {
+    "brave": lambda: _keyed("BRAVE_SEARCH_API_KEY", "brave"),
+    "serper": lambda: _keyed("SERPER_API_KEY", "serper"),
+    "tavily": lambda: _keyed("TAVILY_API_KEY", "tavily"),
+    "google_cse": _google_cse_credentials,
+}
+
+
 def resolve_search_provider(name=None):
-    """`(name, callable)` for the configured backend. Raises on an unknown name."""
+    """`(name, callable)` for the configured backend.
+
+    Raises `SearchUnavailable` on an unknown name OR a missing credential, so
+    both are caught by the enricher's preflight rather than mid-run.
+    """
     chosen = (name or os.environ.get(SEARCH_PROVIDER_ENV)
               or DEFAULT_SEARCH_PROVIDER).strip().lower()
     if chosen not in SEARCH_PROVIDERS:
         raise SearchUnavailable(
             f"unknown search provider {chosen!r}. Set ${SEARCH_PROVIDER_ENV} to "
             f"one of: {', '.join(sorted(SEARCH_PROVIDERS))}.")
+    PROVIDER_PREFLIGHT.get(chosen, lambda: None)()
     return chosen, SEARCH_PROVIDERS[chosen]
 
 

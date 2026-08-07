@@ -789,6 +789,12 @@ def main(argv=None):
     # this the proxy cases surfaced as a bare traceback; the provider cases
     # surfaced correctly but only after the case list had been fetched and the
     # run header printed, which reads like the run started and then broke.
+    #
+    # The missing-key half of that only became true when `resolve_search_provider`
+    # started checking `PROVIDER_KEY_ENV`; before it, this comment described a
+    # guarantee the code did not give. A backend that fails LATER -- rate limits,
+    # the anti-bot interstitial, a revoked key -- still surfaces mid-run, which is
+    # what the abort-and-exit-non-zero path at the end of the case loop is for.
     try:
         provider_name, _ = resolve_search_provider()
         budget = _build_budget(args, provider_name)
@@ -836,6 +842,7 @@ def main(argv=None):
     if args.dry_run:
         print("  [DRY RUN] No materials created, no evidence bound.")
 
+    aborted = None
     for index, summary in enumerate(cases, 1):
         slug = summary.get("slug") or "?"
         # The web cache earns its hit rate WITHIN a case (the same URL surfaces
@@ -859,6 +866,7 @@ def main(argv=None):
                       slug=slug, step="search", status="aborted", detail=str(exc)[:300],
                       level=logging.ERROR)
             print(f"\nABORTED at case {index}/{total}: {exc}", file=sys.stderr)
+            aborted = exc
             break
 
     stats = report.summary()
@@ -879,6 +887,14 @@ def main(argv=None):
     print(f"review file: {review.write()}")
     log_run_footer(logger, stage=STAGE_NAME, stats=stats,
                    duration_s=time.monotonic() - started, usage_summary=usage_summary)
+    if aborted is not None:
+        # Exit NON-ZERO on an aborted run, for the same reason the preflight
+        # does: `main()` is invoked bare at the bottom of this module, so
+        # returning exits 0 and tells a scheduler that a batch which stopped at
+        # case 1 of 25 succeeded. The summary, the review file and the footer
+        # are all written above first -- whatever did ship still ships and is
+        # still reported; only the exit status changes.
+        raise SystemExit(f"search backend down, run aborted: {aborted}")
     return report
 
 
