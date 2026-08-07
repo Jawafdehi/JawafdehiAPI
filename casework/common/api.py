@@ -384,6 +384,73 @@ class CaseworkApi:
                 return rows
             page += 1
 
+    def get_courtcase(self, court, number, timeout=60):
+        """One NGM court case: registration date, case_status, parties summary.
+
+        The composite-key detail route, keyed on (court, case_number). Public on
+        the read plane, so this works with no credentials at all.
+        """
+        path = (f"/courtcases/{urllib.parse.quote(str(court), safe='')}"
+                f"/{urllib.parse.quote(str(number), safe='')}/")
+        return self.get(path, timeout=timeout)
+
+    def list_hearings(self, court, number, timeout=60):
+        """Every hearing row on one court case, following pagination.
+
+        Rows are NOT returned in date order -- the deciding hearing can sort
+        before an earlier one. Callers pick by max `hearing_date_ad`, never by
+        list position.
+
+        Pages by page NUMBER and ignores the response's `next` URL, for the same
+        reason `get_court_case_entities` does: `get()` concatenates path onto
+        base_url, so an absolute `next` would produce a doubled prefix.
+        """
+        path = (f"/courtcases/{urllib.parse.quote(str(court), safe='')}"
+                f"/{urllib.parse.quote(str(number), safe='')}/hearings")
+        rows, page = [], 1
+        while True:
+            data = self.get(path, {"page": page, "page_size": 100}, timeout=timeout)
+            batch = data.get("results") or []
+            rows.extend(batch)
+            if len(batch) < 100:
+                return rows
+            page += 1
+
+    def patch_case(self, slug, *, fields=(), lists=(), timeout=60, if_match=None):
+        """Write scalar fields AND whole-list paths in ONE conditional request.
+
+        `fields` is `[(name, value)]` of scalars; `lists` is `[(path, items)]`
+        of whole-list paths (`WHOLE_LIST_PATHS`).
+
+        WHY THIS EXISTS. `patch_fields` refuses whole-list paths and
+        `replace_list` takes one path at a time, so a caller writing
+        `case_start_date` and `entities` had to send two requests -- and the
+        first changes the ETag, so the second 412s under the ETag read at the
+        top. `build_replace_ops` records the same failure from `enrich_card`.
+
+        THE MERGE-FIRST CONTRACT OF `replace_list` APPLIES IN FULL to every
+        entry in `lists`: the server deletes every existing join row for that
+        path and recreates from exactly the items given. Pass the FULL merged
+        list, never a delta. Omitting a row deletes it, with no warning and no
+        recovery.
+
+        Empty in -> no request and `{}` out, so a case with nothing to change
+        costs no write.
+        """
+        fields, lists = list(fields), list(lists)
+        for name, _ in fields:
+            if name in WHOLE_LIST_PATHS:
+                raise ValueError(
+                    f"{name} is a whole-list path -- pass it in `lists`, which "
+                    "carries the merge-first contract")
+        for path, _ in lists:
+            if path not in WHOLE_LIST_PATHS:
+                raise ValueError(f"{path} is not a whole-list path")
+        ops = build_replace_ops(fields) + build_replace_ops(lists)
+        if not ops:
+            return {}
+        return self._patch(slug, ops, timeout, if_match=if_match)
+
     def search_entities(self, query, *, page_size=ENTITY_SEARCH_PAGE_SIZE,
                         pages=ENTITY_SEARCH_MAX_PAGES, timeout=60):
         """Candidate NES entities for `query`, from the unified search endpoint.

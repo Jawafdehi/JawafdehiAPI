@@ -1040,3 +1040,69 @@ def test_get_court_case_entities_stops_when_next_is_null(monkeypatch):
     api.get_court_case_entities("special", "080-cr-0111")
 
     assert len(seen) == 1
+
+
+# ---------------------------------------------------------------------------
+# get_courtcase / list_hearings / patch_case -- the three methods the court-
+# record binder depends on. get_courtcase reads the one composite-key detail
+# route; list_hearings pages the hearings sub-resource by page NUMBER, same as
+# get_court_case_entities; patch_case sends scalar fields and a whole-list path
+# in ONE conditional request, because patch_fields refuses whole-list paths and
+# replace_list takes one path at a time -- and two requests cannot share one
+# ETag, which is the exact failure build_replace_ops documents.
+# ---------------------------------------------------------------------------
+
+
+def test_get_courtcase_hits_the_composite_path(monkeypatch):
+    api = CaseworkApi("http://127.0.0.1:48010", token="t")
+    seen = {}
+
+    def fake_get(path, params=None, timeout=60):
+        seen["path"] = path
+        return {"case_number": "079-CR-0151", "registration_date_ad": "2023-06-22"}
+
+    monkeypatch.setattr(api, "get", fake_get)
+    assert api.get_courtcase("special", "079-CR-0151")["registration_date_ad"] == "2023-06-22"
+    assert seen["path"] == "/courtcases/special/079-CR-0151/"
+
+
+def test_list_hearings_follows_pages_by_number(monkeypatch):
+    api = CaseworkApi("http://127.0.0.1:48010", token="t")
+    pages = {
+        1: {"results": [{"hearing_date_ad": "2024-06-04"}] * 100},
+        2: {"results": [{"hearing_date_ad": "2024-06-03"}]},
+    }
+    monkeypatch.setattr(api, "get", lambda path, params=None, timeout=60: pages[params["page"]])
+    rows = api.list_hearings("special", "079-CR-0151")
+    assert len(rows) == 101
+
+
+def test_patch_case_sends_scalars_and_a_whole_list_in_one_request(monkeypatch):
+    api = CaseworkApi("http://127.0.0.1:48010", token="t")
+    seen = {}
+
+    def fake_patch(slug, ops, timeout=60, if_match=None):
+        seen.update(slug=slug, ops=ops, if_match=if_match)
+        return {}
+
+    monkeypatch.setattr(api, "_patch", fake_patch)
+    api.patch_case(
+        "case-079-cr-0151",
+        fields=[("case_start_date", "2023-06-22")],
+        lists=[("entities", [{"nes_id": "x", "relationship_type": "accused"}])],
+        if_match='W/"7"',
+    )
+    assert seen["if_match"] == 'W/"7"'
+    assert [op["path"] for op in seen["ops"]] == ["/case_start_date", "/entities"]
+
+
+def test_patch_case_refuses_a_whole_list_path_passed_as_a_scalar():
+    api = CaseworkApi("http://127.0.0.1:48010", token="t")
+    with pytest.raises(ValueError, match="whole-list path"):
+        api.patch_case("case-079-cr-0151", fields=[("entities", [])])
+
+
+def test_patch_case_makes_no_request_when_nothing_changed(monkeypatch):
+    api = CaseworkApi("http://127.0.0.1:48010", token="t")
+    monkeypatch.setattr(api, "_patch", lambda *a, **k: pytest.fail("should not PATCH"))
+    assert api.patch_case("case-079-cr-0151") == {}
