@@ -29,6 +29,8 @@ from jawafdehi_shared.search.opensearch import (
     make_client,
 )
 
+from .analytics import normalize_query
+
 logger = logging.getLogger("jawafdehi.search")
 
 # Result ``type`` token  ->  the index that holds it + the owning source_app.
@@ -622,6 +624,7 @@ class SearchService:
 
         return {
             "query": q,
+            "normalized_query": normalize_query(q),
             "lang": lang,
             "sort": sort,
             "page": page,
