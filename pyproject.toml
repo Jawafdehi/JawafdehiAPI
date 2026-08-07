@@ -546,6 +546,12 @@ asyncio_mode = "auto"
 # own: ``uv run pytest -m security``. These run in the normal sqlite unit gate.
 markers = [
     "security: adversarial / penetration-oriented tests (run with -m security)",
+    # `live_model` calls a REAL LLM, so it is non-deterministic, costs tokens and
+    # needs provider credentials. It cannot be a CI gate and is skipped unless
+    # $CASEWORK_LIVE_MODEL_EVAL is set. Run it by hand before a batch, or after
+    # changing a tier or a model:
+    #   CASEWORK_LIVE_MODEL_EVAL=1 uv run pytest -m live_model -s
+    "live_model: calls a real LLM; opt-in via $CASEWORK_LIVE_MODEL_EVAL",
 ]
 # Each app owns its own ``tests`` package (entities/tests, courts/tests,
 # materials/tests, cases/tests, …) so test module names are unique — no collision,
