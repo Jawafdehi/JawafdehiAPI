@@ -619,13 +619,14 @@ class AnomalyWeb(FakeWeb):
     2026-08-05, under both the donor UA and a browser UA.
     """
 
-    def get(self, url, kind, headers=None, expect_html=False):
+    def get(self, url, kind, headers=None, expect_html=False, error_body=False):
         self.calls[kind] = self.calls.get(kind, 0) + 1
         if kind == "search":
             return 202, ("<html><head><title>DuckDuckGo</title></head><body>"
                          "<div class='anomaly-modal__title'>Unfortunately, bots "
                          "use DuckDuckGo too.</div></body></html>")
-        return super().get(url, kind, headers=headers, expect_html=expect_html)
+        return super().get(url, kind, headers=headers, expect_html=expect_html,
+                           error_body=error_body)
 
 
 def test_an_anti_bot_page_raises_rather_than_reporting_zero_results():
@@ -1790,10 +1791,12 @@ def test_an_aborted_run_exits_non_zero_but_still_ships_what_it_had(monkeypatch,
     scheduler that a batch which stopped at case 1 of N succeeded. The summary
     and the review file must still be written before the non-zero exit."""
     class _DeadSearch(FakeWeb):
-        def get(self, url, kind, **kwargs):
+        def get(self, url, kind, headers=None, expect_html=False,
+                error_body=False):
             if kind == "search":
                 raise ns.SearchUnavailable("429 from the provider")
-            return super().get(url, kind, **kwargs)
+            return super().get(url, kind, headers=headers,
+                               expect_html=expect_html, error_body=error_body)
 
     with pytest.raises(SystemExit) as exc:
         run_main(monkeypatch, FakeApi(case_payload()), _DeadSearch(),

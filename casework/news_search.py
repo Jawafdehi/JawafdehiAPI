@@ -58,10 +58,23 @@ from enum import Enum
 from html.parser import HTMLParser
 from pathlib import Path
 
-try:                      # POSIX only; the ledger lock degrades to a no-op.
-    import fcntl
-except ImportError:       # pragma: no cover - this stage is run from Linux
-    fcntl = None
+def _load_fcntl():
+    """The `fcntl` module, or None where it does not exist (Windows).
+
+    Wrapped in a function rather than written as a bare `try: import fcntl /
+    except ImportError: fcntl = None`, because that form declares the name with
+    the MODULE type and `None` is then not assignable to it -- which `ty` fails
+    the build on. Returning from two branches gives the binding the union type
+    it actually has.
+    """
+    try:
+        import fcntl
+    except ImportError:   # pragma: no cover - this stage is run from Linux
+        return None
+    return fcntl
+
+
+fcntl = _load_fcntl()
 
 log = logging.getLogger("casework.news_search")
 
