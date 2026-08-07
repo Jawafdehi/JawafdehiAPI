@@ -1259,8 +1259,8 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28" },
     { name = "indic-transliteration", specifier = ">=2.3.82" },
     { name = "jsonpatch", specifier = ">=1.33" },
-    { name = "likhit", git = "https://github.com/Jawafdehi/likhit.git?rev=e98eb446437f8a086e1e8da409d413ca81106532" },
-    { name = "likhit", marker = "extra == 'bigo-enrichment'", git = "https://github.com/Jawafdehi/likhit.git?rev=e98eb446437f8a086e1e8da409d413ca81106532" },
+    { name = "likhit", git = "https://github.com/Jawafdehi/likhit.git?rev=5ae527711c8542e04b919b930cb2b19fdfaffc65" },
+    { name = "likhit", marker = "extra == 'bigo-enrichment'", git = "https://github.com/Jawafdehi/likhit.git?rev=5ae527711c8542e04b919b930cb2b19fdfaffc65" },
     { name = "lxml", specifier = ">=5.0" },
     { name = "markdown", specifier = ">=3.5" },
     { name = "markitdown", extras = ["docx", "pdf", "pptx", "xlsx"], specifier = ">=0.1.5" },
@@ -1448,8 +1448,8 @@ wheels = [
 
 [[package]]
 name = "likhit"
-version = "0.1.7"
-source = { git = "https://github.com/Jawafdehi/likhit.git?rev=e98eb446437f8a086e1e8da409d413ca81106532#e98eb446437f8a086e1e8da409d413ca81106532" }
+version = "0.1.8"
+source = { git = "https://github.com/Jawafdehi/likhit.git?rev=5ae527711c8542e04b919b930cb2b19fdfaffc65#5ae527711c8542e04b919b930cb2b19fdfaffc65" }
 dependencies = [
     { name = "fonttools" },
     { name = "markitdown", extra = ["docx", "pdf"] },
