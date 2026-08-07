@@ -2367,12 +2367,12 @@ def verify_batch(articles, case, invoke_json, usage, press_release_text=None,
     correct at the gate precisely because the second pass is the decision.
 
     `tier` is the DECISION pass's tier and the caller supplies it; the enricher
-    passes `tier_for("news")`, which is currently "cheap" on a cost decision
-    (see `casework.common.llm.TIERS`). The default here stays "premium" because
-    a direct caller with no pipeline config should get the safer one. Note the
-    gate keeps earning its place either way: it filters before the pass that
-    sends 900-character excerpts and carries the big answer budget, so it saves
-    tokens even when both passes run the same model.
+    passes `tier_for("news")`, which is "premium" on measurement -- the cheap
+    model bound an article about the accused's OTHER case at `high` confidence
+    (see `casework.common.llm.TIERS`). The default here matches, so a direct
+    caller with no pipeline config gets the safe one. The gate earns its place
+    regardless of what the two tiers resolve to: it filters before the pass that
+    sends 900-character excerpts and carries the big answer budget.
 
     Every returned pair is (article, verdict) in input order; a candidate the
     gate dropped comes back with `Verdict(relevant=False)` so the caller can
@@ -2390,10 +2390,9 @@ def verify_batch(articles, case, invoke_json, usage, press_release_text=None,
     # Fail OPEN at the gate -- a cheap-tier error or an unparseable reply
     # escalates to the decision pass rather than dropping the candidate
     # (donor:1064). The gate is a cost optimisation; the decision pass is the
-    # decision, so a broken gate must not become a silent rejection. Note the
-    # decision pass may now run at the SAME tier as the gate (see `tier`), which
-    # changes what escalation buys but not that it must happen: the gate's
-    # answer is missing, not negative.
+    # decision, so a broken gate must not become a silent rejection. This holds
+    # even if the two passes are configured onto the same tier: a gate that did
+    # not answer has given no answer, not a negative one.
     #
     # PER INDEX, not per batch. `if gate:` was truthy as soon as ONE row parsed,
     # so a reply truncated at max_tokens -- which `llm.invoke.salvage_json`

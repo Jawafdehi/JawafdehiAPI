@@ -934,15 +934,16 @@ def test_max_articles_must_be_non_negative():
         en.main(BASE_ARGV + ["--max-articles", "-1"])
 
 
-def test_the_stage_is_registered_with_the_cheap_tier():
-    """Cheap on the operator's cost decision (2026-08-07), departing from the
-    donor's premium verifier. Pinned because it is a deliberate trade, not a
-    default: it moves the BIND DECISION onto the cheap model, and if false
-    positives show up in review this assertion is the marker for the revert."""
+def test_the_stage_is_registered_with_the_premium_tier():
+    """Premium on measurement, not on inheritance. The cheap model bound 1 of
+    10 no_match pairs on the labelled set -- at `high` confidence, on an article
+    about the same accused's OTHER case -- and the premium model bound none.
+    See `tests/casework/test_news_verifier_live.py`, which is how to re-check it
+    rather than re-argue it."""
     from casework.common.llm import tier_for
     from casework.common.pipeline import STAGES
 
-    assert tier_for("news") == "cheap"
+    assert tier_for("news") == "premium"
     assert STAGES["news"].requires_stages == ("card", "entities")
     assert STAGES["news"].provides == ("evidence",)
 

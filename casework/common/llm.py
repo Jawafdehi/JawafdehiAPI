@@ -38,43 +38,37 @@ TIERS = {
     # into this stage as `--only title`, and the brief resolves the conflict in
     # favour of cheap. See `casework/enrich_card.py`'s deviation 2.
     "card": "cheap",
-    # `news` is CHEAP, and this is the one entry here that departs from the
-    # donor -- it ran its authoritative verifier at tier="premium". Changed on
-    # the operator's decision (2026-08-07), on cost: `verify_batch` carries the
-    # largest answer budget in the pipeline (see `verify_max_tokens`), because
-    # every verdict returns an English reason plus a 350-500 character Devanagari
-    # note.
+    # `news` is premium, and unlike every other entry here that is a MEASURED
+    # choice rather than an inherited one. It was moved to cheap on cost and
+    # moved back when the measurement came in.
     #
-    # What this entry does and does not move. Three of the stage's four LLM
-    # calls were ALREADY cheap -- query generation, Devanagari names, and the
-    # gate that sees EVERY candidate. This is the tier of the fourth: the
-    # DECISION call, which returns the relevance verdict and the confidence that
-    # `Verdict.is_bindable` gates on. So the saving is real but the exposure is
-    # concentrated: it is the call deciding whether to publicly link a named
-    # person to a corruption case, and production already carries two
-    # wrong-case binds made on a weaker judgement.
+    # This is the tier of ONE call. Three of the stage's four are already cheap
+    # -- query generation, Devanagari names, and the gate that sees EVERY
+    # candidate. The fourth is the DECISION: it returns the relevance verdict
+    # and the confidence `Verdict.is_bindable` gates on, i.e. whether to
+    # publicly link a named person to a corruption case.
     #
-    # NOW MEASURED, and the result is not comfortable. Same 20 labelled pairs,
-    # same code path, 2026-08-07, via `tests/casework/test_news_verifier_live.py`:
+    # Same 20 labelled pairs, same code path, one run each, 2026-08-07, via
+    # `tests/casework/test_news_verifier_live.py`:
     #
     #     haiku  (cheap)    1 false positive of 10     3 missed of 10
     #     sonnet (premium)  0 false positives of 10    2 missed of 10
     #
-    # The one false positive is pair 12: case 080-CR-0174 against an article
-    # about the same accused's OTHER corruption case. haiku returned `high`
-    # confidence on defendant + institution + corruption, which this stage's own
-    # rubric grades MEDIUM -- exactly what the `confidence == "high"` bar exists
-    # to refuse, and a reproduction of one of the two live production mis-binds
-    # the labelled set was built from. sonnet rejects it.
+    # The false positive is pair 12: case 080-CR-0174 against an article about
+    # the same accused's OTHER corruption case. haiku answered `high` on
+    # defendant + institution + corruption, which this stage's own rubric grades
+    # MEDIUM -- precisely what the `confidence == "high"` bar exists to refuse,
+    # and a reproduction of one of the two live production mis-binds the
+    # labelled set was built from. sonnet rejects it. So the failure is the
+    # MODEL's, not the prompt's, which is the one thing a single-model run could
+    # not have told us.
     #
-    # So the failure IS attributable to the tier, not to the prompt. Kept cheap
-    # on the operator's explicit decision, with `--model` as the override.
-    #
-    # NOTE FOR WHOEVER ACTS ON THIS: `--model sonnet` is MORE expensive than
-    # reverting this line. It sets both tiers, so the gate moves to sonnet too;
-    # flipping this entry back to "premium" keeps the gate cheap and lifts only
-    # the decision. If the goal is a safe bind at the lowest cost, revert here.
-    "news": "cheap",
+    # Cost, since that was the reason to move it: premium here is CHEAPER than
+    # the alternative that was on the table. Forcing quality with `--model
+    # sonnet` sets both tiers, dragging the gate up too; this entry lifts only
+    # the decision and leaves the gate cheap. Re-measure with the live test
+    # before changing it again -- do not re-argue it from first principles.
+    "news": "premium",
 }
 DEFAULT_TIER = "cheap"
 
