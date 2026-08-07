@@ -45,6 +45,7 @@ import argparse
 import logging
 import sys
 import time
+import urllib.error
 from dataclasses import dataclass, field
 
 from casework.common.api import CaseworkApi, EntityAlreadyExists
@@ -534,7 +535,19 @@ _SKIP_SELECT_STATUS = {
 }
 
 
-def _log_plan(logger, events, run_id, plan, case):
+#: Prefix `court_record_for_case` puts on every per-reference read failure it
+#: reports (`f"court reference {court}/{number} could not be read (...)"`).
+#: `_log_plan` matches on this exact prefix to route those skips to
+#: `court_read`/`unreadable` rather than `dates` -- a reference that 404s cost
+#: this case its defendants and/or its dates from THAT reference, and it is
+#: not a fact about date-derivation the way "case_end_date left empty: ..."
+#: is. Checked as a prefix, not a substring: the OTHER skip this function
+#: sees, "case_end_date left empty: not every court reference has decided
+#: ...", contains the words "court reference" too, just never at position 0.
+_COURT_READ_FAILURE_PREFIX = "court reference "
+
+
+def _log_plan(logger, events, run_id, plan):
     """Emit the per-step events for one planned case.
 
     `run_id`/`stage`/`slug` are passed as explicit keywords on every call
@@ -556,6 +569,16 @@ def _log_plan(logger, events, run_id, plan, case):
                   step="dates", status="proposed",
                   detail=", ".join(f"{k}={v}" for k, v in plan.fields))
     for skip in plan.skips:
+        if skip.startswith(_COURT_READ_FAILURE_PREFIX):
+            # A per-reference read failure, not a date fact: `plan.status` is
+            # not one of the SKIP statuses here (this case had at least one
+            # readable reference, or `plan_case` would have returned
+            # "no-court-reference" and `_log_plan` would never run), so the
+            # earlier `court_read`/`ok` event already logged for this case
+            # stands -- this event says the SAME court read was only partial.
+            log_event(logger, events, run_id=run_id, stage=STAGE, slug=plan.slug,
+                      step="court_read", status="unreadable", detail=skip)
+            continue
         status = "skip_open_case" if "not every court reference" in skip else "no_source"
         log_event(logger, events, run_id=run_id, stage=STAGE, slug=plan.slug,
                   step="dates", status=status, detail=skip)
@@ -598,14 +621,23 @@ def main(argv=None):
 
         plan = plan_case(api, detail, etag, live_prefixes=live_prefixes,
                          run_entities=run_entities, dry_run=args.dry_run)
+        # `detail=` carries `plan.skips` even on a clean "selected": a case
+        # can reach "would-patch"/"nothing-to-do" with a partially-unreadable
+        # court record (some references 404, at least one did not), and the
+        # SAME line then tells an operator replaying the ledger what a bare
+        # "skip_state"/"skip_no_court_ref" status alone cannot -- WHICH state,
+        # WHICH missing/unreadable reference. Without this, "no-court-reference"
+        # (a case naming none at all) and "every reference on this case
+        # 404'd" produced an identical events-file line.
         log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
-                  step="select", status=_SKIP_SELECT_STATUS.get(plan.status, "selected"))
+                  step="select", status=_SKIP_SELECT_STATUS.get(plan.status, "selected"),
+                  detail="; ".join(plan.skips))
         if plan.status in _SKIP_SELECT_STATUS:
             stats[plan.status] = stats.get(plan.status, 0) + 1
             continue
         log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
                   step="court_read", status="ok")
-        _log_plan(logger, events, run_id, plan, detail)
+        _log_plan(logger, events, run_id, plan)
 
         generated = "; ".join(
             [f"{k}={v}" for k, v in plan.fields]
@@ -629,7 +661,15 @@ def main(argv=None):
         try:
             apply_plan(api, plan)
         except Exception as exc:  # noqa: BLE001 - a 412 or a 400 costs this case only
-            status = "etag_conflict" if "412" in str(exc) else "rejected"
+            # `isinstance(exc, HTTPError) and exc.code == 412`, never a
+            # substring test on the message: `apply_plan`'s own no-ETag
+            # `ValueError` interpolates `plan.slug`, so a case slugged
+            # `...-cr-0412` hitting that (permanent) refusal would otherwise
+            # be logged `etag_conflict` -- telling an operator to re-read and
+            # retry a write that will refuse again every time.
+            status = ("etag_conflict"
+                     if isinstance(exc, urllib.error.HTTPError) and exc.code == 412
+                     else "rejected")
             log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
                       step="patch", status=status,
                       detail=f"{type(exc).__name__}: {exc}")

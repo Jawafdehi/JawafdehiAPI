@@ -521,21 +521,33 @@ def test_apply_plan_sends_one_conditional_request():
 
 
 class _CliApi(_PlanApi):
-    """`_PlanApi` plus the list/detail entry points `main()` calls before it
-    ever reaches `plan_case` -- one case in, its own ETag on the read."""
+    """`_PlanApi` plus the list/detail/write entry points `main()` calls
+    before and beyond `plan_case` -- one case in, its own ETag on the read,
+    and an optional canned `patch_case` outcome for the `--apply` path.
+    """
 
-    def __init__(self, case, **kw):
+    def __init__(self, case, *, etag='W/"7"', patch_error=None, **kw):
         super().__init__(**kw)
         self._case = case
+        self._etag = etag
+        self._patch_error = patch_error
+        self.patch_calls = []
 
     def iter_cases(self, params=None, timeout=60, progress=None):
         yield self._case
 
     def get_case_with_etag(self, slug, timeout=60):
-        return self._case, 'W/"7"'
+        return self._case, self._etag
 
     def entity_prefixes(self, timeout=60):
         return ["person"]
+
+    def patch_case(self, slug, *, fields=(), lists=(), timeout=60, if_match=None):
+        self.patch_calls.append({"slug": slug, "fields": list(fields),
+                                  "lists": list(lists), "if_match": if_match})
+        if self._patch_error is not None:
+            raise self._patch_error
+        return {}
 
 
 def _events(tmp_path):
@@ -550,11 +562,18 @@ def test_a_dry_run_writes_the_events_file_and_no_patch(tmp_path, monkeypatch):
     monkeypatch.setenv("CASEWORK_API_USER", "dev")
     monkeypatch.setenv("CASEWORK_API_PASSWORD", "dev")
     # Stub the corpus read and the court reads; assert nothing PATCHes.
+    # The defendant carries NO `nes_id` on purpose: with one, `resolve_defendant`
+    # returns at ladder rung 1 and never reaches the creation rung, so the
+    # `args.dry_run -> plan_case -> _accused_binds -> resolve_defendant(dry_run=...)`
+    # wiring would be untested at the CLI level -- a bug that hardcoded
+    # `dry_run=False` somewhere in that chain would still pass this test.
+    # Dropping the nes_id forces the creation rung and lets `api.posted == []`
+    # prove the CLI's `--dry-run` really reaches it and suppresses the POST.
     api = _CliApi(
         _case(),
         detail={"registration_date_ad": "2023-06-22"},
         hearings=[DECIDED],
-        parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव", "nes_id": YADAV}],
+        parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव"}],
     )
     import casework.enrich_court_record as ecr
     monkeypatch.setattr(ecr, "build_api", lambda args: api)
@@ -567,6 +586,10 @@ def test_a_dry_run_writes_the_events_file_and_no_patch(tmp_path, monkeypatch):
     assert {"select", "court_read", "patch"} <= steps
     # No real PATCH: every `patch` event this run emits is the dry-run kind.
     assert all(e["status"] == "dry_run" for e in events if e["step"] == "patch")
+    # No real POST either, even though this defendant would need a new entity
+    # under `--apply`.
+    assert api.posted == []
+    assert api.patch_calls == []
 
 
 def test_a_case_missing_the_entities_key_is_skipped_and_logged(tmp_path, monkeypatch):
@@ -589,16 +612,175 @@ def test_a_case_missing_the_entities_key_is_skipped_and_logged(tmp_path, monkeyp
     events = _events(tmp_path)
     assert [e["step"] for e in events] == ["select"]
     assert events[0]["status"] == "skip_no_entities_key"
+    # The ONE line this case leaves must say WHY, not just THAT -- an operator
+    # replaying the ledger can't otherwise tell this apart from any other
+    # select-skip on the same case.
+    assert "entities" in events[0]["detail"]
+
+
+def test_a_non_draft_case_is_skipped_with_the_state_in_the_detail(tmp_path, monkeypatch):
+    # `plan_case` already puts the actual state into `skips` for this path
+    # ("state is 'PUBLISHED', not 'DRAFT'"); this pins that the CLI actually
+    # surfaces it, so a `skip_state` line in the events file says WHICH state
+    # rather than just that one applied.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    api = _CliApi(_case(state="PUBLISHED"))
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    # `--slug` bypasses `select_for_run`'s DRAFT/IN_REVIEW gate (see
+    # `casework.common.select.select_cases`) -- needed here only to get a
+    # PUBLISHED case through selection so `plan_case`'s OWN state check (the
+    # thing under test) is what produces the skip, not the selector dropping
+    # it before `main` ever sees it.
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+               "--slug", "case-079-cr-0151",
+               "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+    events = _events(tmp_path)
+    assert [e["step"] for e in events] == ["select"]
+    assert events[0]["status"] == "skip_state"
+    assert "PUBLISHED" in events[0]["detail"]
+
+
+def test_a_partially_unreadable_court_record_is_logged_as_court_read_not_dates(
+    tmp_path, monkeypatch,
+):
+    # Two court references on one case; the second 404s. `court_record_for_case`
+    # still returns the one successfully-read record, so the case proceeds --
+    # but the skip describing the 404 must land under `court_read`/`unreadable`,
+    # not `dates`: it is a fact about a broken read, not about date derivation,
+    # and the case's own `court_read`/`ok` event (logged because at least one
+    # reference succeeded) must not be the only word on the subject.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    second_ref = "https://jawafdehi.org/courtcase/special/079-cr-0999"
+
+    class _TwoRefApi(_CliApi):
+        def get_courtcase(self, court, number, timeout=60):
+            if number == "079-cr-0999":
+                raise urllib.error.HTTPError(second_ref, 404, "Not Found", {}, None)
+            return super().get_courtcase(court, number, timeout=timeout)
+
+    case = _case(court_cases=[CASE_IRI, second_ref])
+    api = _TwoRefApi(case, detail={"registration_date_ad": "2023-06-22"})
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+               "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+    events = _events(tmp_path)
+
+    court_read = [e for e in events if e["step"] == "court_read"]
+    assert any(e["status"] == "ok" for e in court_read)
+    assert any(e["status"] == "unreadable" and "079-cr-0999" in e["detail"]
+               for e in court_read)
+    # The 404 must not also (or instead) show up as a `dates` event -- only
+    # the genuine date-source skip belongs there.
+    dates = [e for e in events if e["step"] == "dates"]
+    assert not any("079-cr-0999" in e.get("detail", "") for e in dates)
+    assert any(e["status"] == "no_source" for e in dates)
+
+
+def test_apply_run_records_a_412_as_etag_conflict_with_no_applied_event(
+    tmp_path, monkeypatch, capsys,
+):
+    # The load-bearing chain under `--apply`: a stale read (412 on the write)
+    # must record `etag_conflict`, count as an error, and emit NO `applied`
+    # event -- nothing here claims a bind that never landed.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    conflict = urllib.error.HTTPError(
+        "https://jawafdehi.org/api/cases/case-079-cr-0151/", 412,
+        "Precondition Failed", {}, None)
+    api = _CliApi(
+        _case(), patch_error=conflict,
+        detail={"registration_date_ad": "2023-06-22"}, hearings=[DECIDED],
+        parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव", "nes_id": YADAV}],
+    )
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--apply",
+               "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+    assert api.patch_calls, "apply_plan must have actually called patch_case"
+    events = _events(tmp_path)
+    patch_events = [e for e in events if e["step"] == "patch"]
+    assert len(patch_events) == 1
+    assert patch_events[0]["status"] == "etag_conflict"
+    assert not any(e["status"] == "applied" for e in patch_events)
+    assert "error: 1" in capsys.readouterr().out
+
+
+def test_apply_run_records_a_successful_write(tmp_path, monkeypatch):
+    # The companion success path: a clean `--apply` PATCH logs `applied`,
+    # carrying the merged `if_match` through to the one real write.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    api = _CliApi(
+        _case(),
+        detail={"registration_date_ad": "2023-06-22"}, hearings=[DECIDED],
+        parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव", "nes_id": YADAV}],
+    )
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--apply",
+               "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+    events = _events(tmp_path)
+    patch_events = [e for e in events if e["step"] == "patch"]
+    assert len(patch_events) == 1
+    assert patch_events[0]["status"] == "applied"
+    assert len(api.patch_calls) == 1
+    assert api.patch_calls[0]["if_match"] == 'W/"7"'
+
+
+def test_a_slug_containing_412_does_not_mislabel_a_missing_etag_as_a_conflict(
+    tmp_path, monkeypatch,
+):
+    # `apply_plan`'s own no-ETag `ValueError` interpolates `plan.slug` into its
+    # message. A slug that happens to contain "412" must not make a plain
+    # string-search read that as an HTTP 412 -- this refusal is PERMANENT
+    # (there will never be an ETag to retry with), not a transient conflict.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    case = _case(slug="case-079-cr-0412")
+    api = _CliApi(case, etag="",  # no ETag at all: apply_plan refuses before any HTTP call
+                  detail={"registration_date_ad": "2023-06-22"})
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--apply",
+               "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+    assert api.patch_calls == [], "refused before ever reaching patch_case"
+    events = _events(tmp_path)
+    patch_events = [e for e in events if e["step"] == "patch"]
+    assert len(patch_events) == 1
+    assert patch_events[0]["status"] == "rejected"
 
 
 def test_the_module_imports_without_django(tmp_path):
-    """The standalone constraint, pinned. One convenience import re-adds Django."""
+    """The standalone constraint, pinned deterministically.
+
+    Checking only `returncode == 0` proves little on its own:
+    `casework.common.llm.bootstrap` (never called by this module, but the
+    thing this test guards against a future edit calling) sets
+    `DJANGO_SETTINGS_MODULE` itself via `os.environ.setdefault` and would
+    fail closed here only because this shell has no `SECRET_KEY` -- a shell
+    that exports a complete `.env` would let Django configure successfully,
+    and the subprocess would exit 0 with Django fully loaded. Asserting
+    `"django" not in sys.modules` INSIDE the subprocess is true regardless of
+    what the environment happens to provide.
+    """
     import os
     import subprocess
     import sys
 
     env = {k: v for k, v in os.environ.items() if k != "DJANGO_SETTINGS_MODULE"}
     proc = subprocess.run(
-        [sys.executable, "-c", "import casework.enrich_court_record"],
+        [sys.executable, "-c",
+         "import casework.enrich_court_record, sys\n"
+         "loaded = sorted(m for m in sys.modules if m == 'django' or m.startswith('django.'))\n"
+         "assert not loaded, loaded"],
         env=env, capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr

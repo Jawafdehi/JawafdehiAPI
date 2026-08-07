@@ -99,10 +99,11 @@ class TestBuildLedger:
         assert led[("c5", "allegations")]["status"] == "llm-error"
 
     def test_non_outcome_statuses_are_the_step_signals(self):
-        # 'planned' joins the step signals: it is bind_materials' dry-run status,
-        # deliberately folded into no outcome (a dry run changed nothing).
+        # 'planned' (bind_materials) and 'dry_run' (enrich_court_record) join
+        # the step signals: both are dry-run statuses for a write-to-existing-
+        # fields preview, deliberately folded into no outcome (nothing changed).
         assert set(NON_OUTCOME_STATUSES) == {
-            "ok", "start", "fallback", "none", "planned"}
+            "ok", "start", "fallback", "none", "planned", "dry_run"}
 
     def test_planned_bind_dryrun_is_not_an_outcome(self, tmp_path):
         # bind_materials maps a dry-run WOULD_PATCH to 'planned' precisely so it
@@ -112,6 +113,16 @@ class TestBuildLedger:
             _ev("2026-07-21T10:00:00Z", "bind", "case-8", "plan", "planned", "WOULD_PATCH"),
         ])
         assert ("case-8", "bind") not in build_ledger(tmp_path)
+
+    def test_court_record_dry_run_patch_is_not_an_outcome(self, tmp_path):
+        # enrich_court_record's `patch`/`dry_run` status is the same kind of
+        # "changed nothing" preview as bind_materials' `planned` -- it must
+        # not pollute the "what did we change, when" audit either.
+        _write_events(tmp_path / "court_record.events.jsonl", [
+            _ev("2026-08-07T10:00:00Z", "court_record", "case-10", "patch", "dry_run",
+                "case_start_date=2023-06-22"),
+        ])
+        assert ("case-10", "court_record") not in build_ledger(tmp_path)
 
     def test_applied_bind_supersedes_earlier_planned(self, tmp_path):
         # A later real APPLY must be recorded; the earlier dry-run 'planned' was
