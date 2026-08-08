@@ -97,6 +97,15 @@ def test_merge_evidence_is_idempotent_on_existing():
     assert merge_evidence(current, [(PR, "")]) == current
 
 
+def test_merge_evidence_refuses_bare_iris():
+    """A bare IRI is the natural mistake, and a 2-char one would unpack into
+    iri="a", note="b" and bind garbage without complaint."""
+    with pytest.raises(TypeError, match="material_iri"):
+        merge_evidence([], [PR])
+    with pytest.raises(TypeError, match="material_iri"):
+        merge_evidence([], ["ab"])
+
+
 # ---------------------------------------------------------------------------
 # missing_candidates -- the shared "still needs binding" predicate the ledger
 # and binder both use, so they cannot drift on what "bound" means.
