@@ -95,11 +95,14 @@ import urllib.error  # noqa: E402
 
 from casework.common.api import EntityAlreadyExists  # noqa: E402
 from casework.entity_identity import entity_slug  # noqa: E402
+from casework.entity_resolver import normalise_name  # noqa: E402
 from casework.enrich_court_record import (  # noqa: E402
     PERSON_PREFIX,
     _accused_binds,
     _is_person,
+    defendant_name_index,
     exact_person_match,
+    held_names,
     resolve_defendant,
 )
 from jawafdehi_shared.entities.ids import build_entity_iri  # noqa: E402
@@ -602,6 +605,106 @@ def test_accused_binds_binds_a_person_named_through_their_firm():
     assert skips == []
 
 
+def test_defendant_name_index_groups_by_normalised_name_across_cases():
+    # Extra spacing and a trailing danda on case-b's spelling: a wrong
+    # implementation keyed on raw string equality would put these in two
+    # separate buckets instead of one, and never hold either.
+    records_by_slug = {
+        "case-a": [_record(parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव"}])],
+        "case-b": [_record(number="080-cr-0002",
+                           parties=[{"side": "defendant", "name": "कृष्ण  प्रसाद यादव।"}])],
+    }
+    index = defendant_name_index(records_by_slug)
+    assert index[normalise_name("कृष्ण प्रसाद यादव")] == frozenset({"case-a", "case-b"})
+
+
+def test_defendant_name_index_excludes_non_prosecution_records():
+    # A ministry named "defendant" on two OA references must not consume a
+    # review slot: it was never a bind candidate, so it must never surface as
+    # held either. A wrong implementation that indexes every party regardless
+    # of case-type code would put this name in the index with two slugs, and
+    # `held_names` would then flag it.
+    records_by_slug = {
+        "case-a": [_record(number="079-oa-0014",
+                           parties=[{"side": "defendant", "name": "कुनै व्यक्ति"}])],
+        "case-b": [_record(number="080-oa-0002",
+                           parties=[{"side": "defendant", "name": "कुनै व्यक्ति"}])],
+    }
+    assert defendant_name_index(records_by_slug) == {}
+
+
+def test_held_names_is_empty_when_every_name_is_on_one_case_only():
+    records_by_slug = {
+        "case-a": [_record(parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव"}])],
+        "case-b": [_record(number="080-cr-0002",
+                           parties=[{"side": "defendant", "name": "सिताराम यादव"}])],
+    }
+    assert held_names(defendant_name_index(records_by_slug)) == {}
+
+
+def test_held_names_names_the_cases_a_shared_defendant_appears_on():
+    records_by_slug = {
+        "case-a": [_record(parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव"}])],
+        "case-b": [_record(number="080-cr-0002",
+                           parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव"}])],
+    }
+    held = held_names(defendant_name_index(records_by_slug))
+    assert held == {normalise_name("कृष्ण प्रसाद यादव"): frozenset({"case-a", "case-b"})}
+
+
+def test_a_shared_defendant_is_held_on_both_cases_naming_the_other():
+    # Both cases must be held, and each one's reason must name the OTHER case,
+    # not itself -- a wrong implementation that reports the full `held[key]`
+    # set unfiltered would pass "both held" but also claim case-a appears on
+    # case-a, which the second half of each assertion below catches.
+    key = normalise_name("कृष्ण प्रसाद यादव")
+    held = {key: frozenset({"case-a", "case-b"})}
+    record = _record(parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव"}])
+    items_a, rows_a, _ = _accused_binds(
+        _SearchApi(), _case(slug="case-a"), [record],
+        live_prefixes=["person"], run_entities={}, dry_run=True, held=held)
+    items_b, rows_b, _ = _accused_binds(
+        _SearchApi(), _case(slug="case-b"), [record],
+        live_prefixes=["person"], run_entities={}, dry_run=True, held=held)
+    assert items_a == [] and items_b == []
+    assert rows_a[0]["how"] == "held" and rows_b[0]["how"] == "held"
+    assert "case-b" in rows_a[0]["reason"] and "case-a" not in rows_a[0]["reason"]
+    assert "case-a" in rows_b[0]["reason"] and "case-b" not in rows_b[0]["reason"]
+
+
+def test_a_name_held_for_another_name_does_not_hold_this_one():
+    # `held` is non-empty, but carries no entry for THIS defendant's name -- a
+    # wrong implementation that treats "held is non-empty" as "hold everyone
+    # on this case" would still fail this, since the bound defendant carries a
+    # real `nes_id` and a bind item only appears when the ladder actually ran.
+    held = {normalise_name("अर्को व्यक्ति"): frozenset({"case-x", "case-y"})}
+    record = _record(parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव",
+                               "nes_id": YADAV}])
+    items, rows, _ = _accused_binds(
+        _SearchApi(), _case(slug="case-a"), [record],
+        live_prefixes=["person"], run_entities={}, dry_run=True, held=held)
+    assert [i["nes_id"] for i in items] == [YADAV]
+    assert rows[0]["how"] == "nes_id"
+
+
+def test_a_name_spelled_with_different_punctuation_across_cases_still_holds():
+    # End to end from raw records through `defendant_name_index`/`held_names`
+    # into `_accused_binds`: keying on `normalise_name` (the same function
+    # `exact_person_match` uses) means a spacing/punctuation variant cannot
+    # slip past the held check the way raw string equality would.
+    records_by_slug = {
+        "case-a": [_record(parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव"}])],
+        "case-b": [_record(number="080-cr-0002",
+                           parties=[{"side": "defendant", "name": "कृष्ण  प्रसाद यादव।"}])],
+    }
+    held = held_names(defendant_name_index(records_by_slug))
+    items, rows, _ = _accused_binds(
+        _SearchApi(), _case(slug="case-a"), records_by_slug["case-a"],
+        live_prefixes=["person"], run_entities={}, dry_run=True, held=held)
+    assert items == []
+    assert rows[0]["how"] == "held"
+
+
 def test_a_case_with_only_a_non_prosecution_reference_still_gets_both_dates():
     # Guards "dates are not filtered": `plan_case` reads `start_date`/`end_date`
     # off `records` directly, so the accused-bind filter must live inside
@@ -632,6 +735,31 @@ def test_an_existing_bind_survives_untouched():
     plan = _plan(api, _case(entities=[existing]))
     # Same (nes_id, relationship_type) -> already present -> nothing to write.
     assert plan.entities is None
+
+
+def test_a_held_defendant_does_not_block_the_case_s_other_defendants_or_dates():
+    # `held` must cost only the name it names: the case's other defendant
+    # still binds through the ordinary ladder, and the date fields -- which
+    # `plan_case` derives from `records`, never from `rows` -- still fill. A
+    # wrong implementation that let a hold short-circuit the whole case (or
+    # that dropped the held name from `plan.rows` instead of reporting it)
+    # would fail one of the three assertions below.
+    key = normalise_name("कृष्ण प्रसाद यादव")
+    held = {key: frozenset({"case-a", "case-b"})}
+    api = _PlanApi(
+        detail={"registration_date_ad": "2023-06-22"}, hearings=[DECIDED],
+        parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव"},
+                 {"side": "defendant", "name": "सिताराम यादव", "nes_id": YADAV}],
+    )
+    plan = _plan(api, _case(slug="case-a"), held=held)
+    assert dict(plan.fields) == {"case_start_date": "2023-06-22",
+                                 "case_end_date": "2024-06-04"}
+    assert plan.entities == [{"nes_id": YADAV, "relationship_type": "accused",
+                              "outcome": ACQUITTED,
+                              "notes": "प्रतिवादी — विशेष अदालत मुद्दा 079-cr-0151"}]
+    hows = {r["name"]: r["how"] for r in plan.rows}
+    assert hows["कृष्ण प्रसाद यादव"] == "held"
+    assert hows["सिताराम यादव"] == "nes_id"
 
 
 def test_the_party_row_address_reaches_the_run_entity_key():
@@ -889,6 +1017,75 @@ def test_a_partially_unreadable_court_record_is_logged_as_court_read_not_dates(
     # classification in the detail; see `_RUNG_WORDS`. A distinctive status
     # here would be recorded by `casework.ledger` as this case's outcome.
     assert {e["status"] for e in court_read + dates} == {"ok"}
+
+
+def test_a_non_prosecution_court_reference_is_logged_as_bind_plan_not_dates(
+    tmp_path, monkeypatch,
+):
+    # `_accused_binds` skips a whole non-prosecution record without reading a
+    # single party, and `_log_plan` routes that skip line under
+    # `step="bind_plan"` (see `_NON_PROSECUTION_SKIP_PREFIX`), never into the
+    # `dates`/`no_source` catch-all a genuine date-derivation skip uses. Task 1
+    # shipped that routing branch with only a hand-run repro in its report --
+    # this is the automated pin the follow-up review asked for, in the same
+    # style as the court-read-failure test above.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    oa_ref = "https://jawafdehi.org/courtcase/special/079-oa-0014"
+    case = _case(court_cases=[oa_ref])
+    api = _CliApi(case, detail={"registration_date_ad": "2023-06-22"},
+                  parties=[{"side": "defendant", "name": "कुनै व्यक्ति"}])
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+               "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+    events = _events(tmp_path)
+
+    bind_plan = [e for e in events if e["step"] == "bind_plan"]
+    assert any("079-oa-0014" in e["detail"] and "not a prosecution" in e["detail"]
+               for e in bind_plan)
+    assert any("skipped as non-prosecution" in e["detail"] for e in bind_plan)
+    # The skip must not ALSO (or instead) land under `dates`.
+    dates = [e for e in events if e["step"] == "dates"]
+    assert not any("079-oa-0014" in e.get("detail", "") for e in dates)
+    assert {e["status"] for e in bind_plan} == {"ok"}
+
+
+def test_a_held_defendant_is_logged_under_defendant_resolve_not_silently_dropped(
+    tmp_path, monkeypatch,
+):
+    # `main()` does not build a held set yet -- a later task wires the
+    # two-pass index (`defendant_name_index`/`held_names`) into it. Until
+    # then this pins the `_log_plan` routing for a `how="held"` row end to
+    # end by monkeypatching `plan_case` to inject a held set the same way
+    # that later task will, rather than only unit-testing `_log_plan`
+    # directly. Guards `_RUNG_WORDS` carrying a `"held"` entry (its absence
+    # would raise `KeyError` here, not silently drop the row) and that the
+    # held defendant never reaches a bind.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    case = _case()
+    api = _CliApi(case, detail={"registration_date_ad": "2023-06-22"}, hearings=[DECIDED],
+                  parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव"}])
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+    held = {normalise_name("कृष्ण प्रसाद यादव"): frozenset({"case-079-cr-0151", "case-b"})}
+    real_plan_case = ecr.plan_case
+    monkeypatch.setattr(
+        ecr, "plan_case",
+        lambda *a, **kw: real_plan_case(*a, **{**kw, "held": held}))
+
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+               "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+    events = _events(tmp_path)
+    resolve_events = [e for e in events if e["step"] == "defendant_resolve"]
+    assert len(resolve_events) == 1
+    assert resolve_events[0]["detail"].startswith("held: कृष्ण प्रसाद यादव -> ")
+    assert "case-b" in resolve_events[0]["detail"]
+    assert resolve_events[0]["status"] == "ok"
+    assert api.posted == []
+    assert api.patch_calls == []
 
 
 def test_a_dry_run_leaves_the_case_out_of_the_ledger_entirely(tmp_path, monkeypatch):

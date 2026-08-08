@@ -452,7 +452,35 @@ def bind_outcome(records):
     return CHARGED
 
 
-def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run):
+def defendant_name_index(records_by_slug):
+    """`{normalised name: {slug, ...}}` over every case selected for the run.
+
+    Only records passing `BINDABLE_CODES` feed this index, matching
+    `_accused_binds`'s own filter -- a ministry named on two `OA` cases must
+    not consume a review slot for a name that was never a bind candidate.
+    """
+    index = {}
+    for slug, records in records_by_slug.items():
+        for record in records:
+            if case_number_code(record["number"]) not in BINDABLE_CODES:
+                continue
+            for party in record.get("parties") or ():
+                if not is_defendant(party):
+                    continue
+                name = party_name(party)
+                if not name:
+                    continue
+                index.setdefault(normalise_name(name), set()).add(slug)
+    return {name: frozenset(slugs) for name, slugs in index.items()}
+
+
+def held_names(index):
+    """Normalised names appearing on more than one case -- never auto-bound."""
+    return {name: slugs for name, slugs in index.items() if len(slugs) > 1}
+
+
+def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run,
+                   held=None):
     """`(items, rows, skips)` -- binds, a report row each, and non-prosecution skips.
 
     De-duplicated by name across every court reference on the case, order
@@ -462,7 +490,13 @@ def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run):
     here (its `nes_id` for ladder rung 1, its `address` for the run-entity key),
     which is why this reads the parties itself rather than calling
     `defendant_names`.
+
+    A name in `held` (see `held_names`) never reaches `resolve_defendant` at
+    all -- it gets a `how="held"` row and no bind item, because the same-name
+    collapse `held_names` exists to catch cannot be told apart from a genuine
+    match by anything this function can see on its own.
     """
+    held = held or {}
     outcome = bind_outcome(records)
     citation = (records[0].get("detail") or {}).get("material_id", "") if records else ""
     items, rows, skips, seen = [], [], [], set()
@@ -481,6 +515,17 @@ def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run):
             if not name or name in seen:
                 continue
             seen.add(name)
+            other_slugs = held.get(normalise_name(name))
+            if other_slugs:
+                others = sorted(s for s in other_slugs if s != case.get("slug"))
+                rows.append({
+                    "slug": case.get("slug"), "name": name, "how": "held",
+                    "nes_id": "", "outcome": outcome,
+                    "reason": ("also names a defendant on "
+                              + (", ".join(others) or "another case")
+                              + " -- held for a human to rule on"),
+                    "court_case": f"{record['court']}/{record['number']}"})
+                continue
             got = resolve_defendant(
                 api, name, party.get("nes_id"), citation=citation,
                 live_prefixes=live_prefixes, run_entities=run_entities,
@@ -501,7 +546,7 @@ def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run):
     return items, rows, skips
 
 
-def plan_case(api, case, etag, *, live_prefixes, run_entities, dry_run):
+def plan_case(api, case, etag, *, live_prefixes, run_entities, dry_run, held=None):
     """Build the write for one case. Reads the court record; writes nothing."""
     slug = case.get("slug") or ""
     if (case.get("state") or "").upper() != REQUIRED_WRITE_STATE:
@@ -540,7 +585,7 @@ def plan_case(api, case, etag, *, live_prefixes, run_entities, dry_run):
 
     items, rows, accused_skips = _accused_binds(
         api, case, records, live_prefixes=live_prefixes,
-        run_entities=run_entities, dry_run=dry_run)
+        run_entities=run_entities, dry_run=dry_run, held=held)
     skips.extend(accused_skips)
 
     # `current_entity_binds`, NOT the raw `case["entities"]` list: the read
@@ -641,20 +686,20 @@ _COURT_READ_FAILURE_PREFIX = "court reference "
 _NON_PROSECUTION_SKIP_PREFIX = "skipping accused bind for "
 
 
-#: The ladder rung each `plan.rows` entry settled on, spelled for the events
-#: file. It rides in the event's DETAIL, not its status: every event this
-#: function emits is an INTERMEDIATE step, and `casework.ledger.build_ledger`
-#: treats any status outside `NON_OUTCOME_STATUSES` as the case's outcome for
-#: the stage. A per-defendant `failed` or a per-case `merged` would therefore be
-#: recorded as what this stage DID to the case, which on a dry run is nothing at
-#: all -- and `failed` is a real terminal status for `casework.convert`, so it
-#: cannot simply be added to that shared frozenset. Every sibling enricher
-#: resolves this the same way: intermediate steps report `ok` and put the
-#: specifics in `detail` (`step="source", status="ok"`,
-#: `step="resolve", status="ok"`), leaving distinctive statuses to the one
-#: terminal event per case.
+#: The ladder rung -- or hold decision -- each `plan.rows` entry settled on,
+#: spelled for the events file. It rides in the event's DETAIL, not its
+#: status: every event this function emits is an INTERMEDIATE step, and
+#: `casework.ledger.build_ledger` treats any status outside
+#: `NON_OUTCOME_STATUSES` as the case's outcome for the stage. A per-defendant
+#: `failed` or a per-case `merged` would therefore be recorded as what this
+#: stage DID to the case, which on a dry run is nothing at all -- and `failed`
+#: is a real terminal status for `casework.convert`, so it cannot simply be
+#: added to that shared frozenset. Every sibling enricher resolves this the
+#: same way: intermediate steps report `ok` and put the specifics in `detail`
+#: (`step="source", status="ok"`, `step="resolve", status="ok"`), leaving
+#: distinctive statuses to the one terminal event per case.
 _RUNG_WORDS = {"nes_id": "nes_id_copied", "exact": "exact_match",
-               "created": "created", "failed": "failed"}
+               "created": "created", "failed": "failed", "held": "held"}
 
 
 def _log_plan(logger, events, run_id, plan):
