@@ -123,7 +123,14 @@ class BindPlan:
 
 def current_evidence(case):
     """Normalize the case's evidence into the {material_iri, additional_details}
-    shape the PATCH expects, preserving order."""
+    shape the PATCH expects, preserving order.
+
+    DELIBERATELY DUPLICATED in `casework/enrich_news_articles.py`. Both stages
+    write the same destructive whole-list `PATCH /evidence`, so both must
+    normalise it identically; the copy is kept rather than shared because these
+    are standalone scripts with no shared sequencing. Change one, change the
+    other -- a divergence here silently drops evidence rows.
+    """
     return [
         {"material_iri": e.get("material_iri"),
          "additional_details": e.get("additional_details") or ""}
@@ -135,7 +142,14 @@ def current_evidence(case):
 def merge_evidence(current, add_iris):
     """Append each new IRI not already present, preserving existing order and
     de-duplicating. Never reorders or drops an existing entry -- the whole-list
-    replace makes any omission destructive."""
+    replace makes any omission destructive.
+
+    DELIBERATELY DUPLICATED as `merge_news_evidence` in
+    `casework/enrich_news_articles.py`, which differs in ONE respect: it binds
+    the Nepali evidence note at the same time instead of `additional_details:
+    ""` (its deviation 2). The append-only contract is identical and must stay
+    that way in both.
+    """
     have = {e["material_iri"] for e in current}
     merged = list(current)
     for iri in add_iris:
