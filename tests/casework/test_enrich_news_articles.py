@@ -34,6 +34,7 @@ from datetime import date
 
 import pytest
 
+from casework import bind_materials
 from casework import enrich_news_articles as en
 from casework import news_search as ns
 from tests.casework.fakes import FakeUsage
@@ -725,7 +726,7 @@ def test_the_merge_appends_and_never_disturbs_an_existing_entry():
                 "additional_details": "a human wrote this"},
                {"material_iri": "https://jawafdehi.org/material/court_order/2",
                 "additional_details": ""}]
-    merged = en.merge_news_evidence(
+    merged = en.merge_evidence(
         current, [("https://jawafdehi.org/material/news/20240101.aaaaaaaa", "नयाँ नोट")])
     assert merged[:2] == current
     assert merged[2] == {
@@ -736,12 +737,12 @@ def test_the_merge_appends_and_never_disturbs_an_existing_entry():
 def test_the_merge_never_overwrites_a_note_on_an_iri_already_present():
     iri = "https://jawafdehi.org/material/news/20240101.aaaaaaaa"
     current = [{"material_iri": iri, "additional_details": "a human edited this"}]
-    merged = en.merge_news_evidence(current, [(iri, "the model would say this")])
+    merged = en.merge_evidence(current, [(iri, "the model would say this")])
     assert merged == current
 
 
 def test_a_bound_entry_carries_its_note_rather_than_binding_blank():
-    """Deviation 2 -- `bind_materials.merge_evidence` appends `""`; not here."""
+    """The news stage passes a real note where the binder passes `""`."""
     pair = MATCHES[0]
     plan = _plan_for_pair(pair, dict(SLOPPY_MEDIUM, confidence="high"))
     appended = plan.patch_items[-1]
@@ -810,7 +811,7 @@ def test_the_write_sends_the_whole_merged_list_not_a_delta():
                                    "https://jawafdehi.org/material/news/20230101.aaaa")
     api = FakeApi(case_payload(evidence=[existing]))
     plan = _bindable_plan()
-    plan.patch_items = en.merge_news_evidence(
+    plan.patch_items = en.merge_evidence(
         en.current_evidence(api.case), [(plan.bound_iris[0], "नोट")])
     en.apply_plan(api, plan)
     items = api.replaced[0]["items"]
@@ -1747,12 +1748,15 @@ def test_an_aborted_run_exits_non_zero_but_still_ships_what_it_had(monkeypatch,
     assert "ABORTED at case 1/1" in out.err
 
 
-def test_bind_materials_records_the_reciprocal_duplicate_contract():
-    """Both stages PATCH the same destructive whole-list /evidence, so both
-    normalisers must stay identical. Only one side said so."""
-    src = pathlib.Path(en.__file__).parent.joinpath("bind_materials.py").read_text(encoding="utf-8")
-    assert src.count("DELIBERATELY DUPLICATED") == 2
-    assert "enrich_news_articles" in src
+def test_both_evidence_writers_share_one_normaliser():
+    """Two copies of a whole-list-replace normaliser can diverge and silently drop
+    evidence rows. Identity, not similarity, is what makes that impossible."""
+    from casework.common import evidence as shared
+
+    assert en.current_evidence is shared.current_evidence
+    assert en.merge_evidence is shared.merge_evidence
+    assert bind_materials.current_evidence is shared.current_evidence
+    assert bind_materials.merge_evidence is shared.merge_evidence
 
 
 # ---------------------------------------------------------------------------

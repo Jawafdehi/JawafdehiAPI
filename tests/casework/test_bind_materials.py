@@ -7,9 +7,10 @@ import urllib.error
 
 import pytest
 
+from casework.common.evidence import merge_evidence
 from casework.bind_materials import (
     BindPlan, _build_api, _ledger_status, apply_plan, candidates_from_row,
-    merge_evidence, missing_candidates, parse_source_ident, plan_case, run,
+    missing_candidates, parse_source_ident, plan_case, run,
 )
 
 HOST = "https://jawafdehi.org/material"
@@ -87,13 +88,13 @@ def test_candidates_from_row_strips_status_dedupes_and_orders():
 
 def test_merge_evidence_appends_new_preserving_order():
     current = [{"material_iri": PR, "additional_details": ""}]
-    merged = merge_evidence(current, [CO])
+    merged = merge_evidence(current, [(CO, "")])
     assert [e["material_iri"] for e in merged] == [PR, CO]
 
 
 def test_merge_evidence_is_idempotent_on_existing():
     current = [{"material_iri": PR, "additional_details": "note"}]
-    assert merge_evidence(current, [PR]) == current
+    assert merge_evidence(current, [(PR, "")]) == current
 
 
 # ---------------------------------------------------------------------------
