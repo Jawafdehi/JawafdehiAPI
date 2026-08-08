@@ -415,9 +415,11 @@ def test_is_person_never_raises_on_a_malformed_iri():
     assert _is_person(None) is False
 
 
+from casework.common.select import ENRICHABLE_STATES  # noqa: E402
 from casework.enrich_court_record import (  # noqa: E402
     ACQUITTED,
     CHARGED,
+    REQUIRED_WRITE_STATE,
     CasePlan,
     bind_outcome,
     plan_case,
@@ -873,6 +875,21 @@ def test_a_non_draft_case_is_refused():
     plan = _plan(_PlanApi(detail={"registration_date_ad": "2023-06-22"}),
                  _case(state="PUBLISHED"))
     assert plan.status == "skip-state"
+
+
+def test_an_in_review_case_is_selected_for_the_index_but_never_written():
+    # `select_cases`'s ENRICHABLE_STATES admits IN_REVIEW, which is what the
+    # held index wants -- an IN_REVIEW case's defendants are real occurrences
+    # and must count toward a cross-case collision. The WRITE gate is separate
+    # and narrower: `REQUIRED_WRITE_STATE` is DRAFT alone. Pinned because the
+    # two are easy to conflate, and widening this one to match the selection
+    # gate would start writing to cases already under human review.
+    assert "IN_REVIEW" in ENRICHABLE_STATES
+    assert REQUIRED_WRITE_STATE == "DRAFT"
+    plan = _plan(_PlanApi(detail={"registration_date_ad": "2023-06-22"}),
+                 _case(state="IN_REVIEW"))
+    assert plan.status == "skip-state"
+    assert "IN_REVIEW" in plan.skips[0]
 
 
 def test_a_case_payload_missing_the_entities_key_is_refused():
