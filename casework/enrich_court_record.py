@@ -54,6 +54,7 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 import sys
 import time
@@ -542,8 +543,14 @@ def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run, 
     return items, rows, skips
 
 
-def plan_case(api, case, etag, *, live_prefixes, run_entities, dry_run, held):
-    """Build the write for one case. Reads the court record; writes nothing."""
+def plan_case(api, case, etag, *, live_prefixes, run_entities, dry_run, held,
+              court_record=None):
+    """Build the write for one case; writes nothing.
+
+    Reads the court record itself unless `court_record` -- a pass-1
+    `(records, skips)` pair -- is supplied, so a run planning many cases can
+    read every court reference once and reuse it here.
+    """
     slug = case.get("slug") or ""
     if (case.get("state") or "").upper() != REQUIRED_WRITE_STATE:
         return CasePlan(slug, "skip-state",
@@ -564,7 +571,10 @@ def plan_case(api, case, etag, *, live_prefixes, run_entities, dry_run, held):
                                "is not empty; refusing to plan a write from "
                                "an incomplete read"])
 
-    records, skips = court_record_for_case(api, case)
+    if court_record is not None:
+        records, skips = court_record
+    else:
+        records, skips = court_record_for_case(api, case)
     if not records:
         return CasePlan(slug, "no-court-reference", skips=skips)
 
@@ -765,6 +775,47 @@ def _log_plan(logger, events, run_id, plan):
     return held_count
 
 
+def _held_report(held, court_records):
+    """One entry per held name: the cases it appears on and the defendant
+    rows behind it, so a human can rule on all of them without re-reading
+    the court record themselves.
+
+    Recomputed from `court_records` (the pass-1 cache) rather than collected
+    from `plan.rows` during pass 2, so a case that never reaches
+    `_accused_binds` -- wrong state, no `entities` key -- still shows up
+    here. The same `BINDABLE_CODES`/`is_defendant`/`party_name` filter as
+    `defendant_name_index` applies, so this cannot list a row that index
+    itself would have excluded.
+    """
+    report = []
+    for name, slugs in sorted(held.items()):
+        rows = []
+        for slug in sorted(slugs):
+            records, _ = court_records.get(slug, ([], []))
+            for record in records:
+                if case_number_code(record["number"]) not in BINDABLE_CODES:
+                    continue
+                for party in record.get("parties") or ():
+                    if not is_defendant(party):
+                        continue
+                    if normalise_name(party_name(party)) != name:
+                        continue
+                    rows.append({"slug": slug,
+                                "court_case": f"{record['court']}/{record['number']}",
+                                "name": party_name(party)})
+        report.append({"name": name, "cases": sorted(slugs), "rows": rows})
+    return report
+
+
+def write_held_file(path, held, court_records, *, run_id):
+    """Write the held-names file: every cross-case name a human must rule
+    on before it can be bound. Devanagari unescaped, matching every other
+    casework output file."""
+    payload = {"run_id": run_id, "held": _held_report(held, court_records)}
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
 def main(argv=None):
     parser = add_common_args(argparse.ArgumentParser(
         description="Bind court-record defendants and fill the case date fields."))
@@ -785,10 +836,39 @@ def main(argv=None):
     live_prefixes = read_live_prefixes(api)
     run_entities, stats = {}, {}
 
+    # Pass 1: read every selected case's court record before planning any of
+    # them, so the held index sees every defendant in the run. A per-case
+    # index would hold a name on case A and bind it on case B -- the exact
+    # collapse this two-pass split exists to close (see the module
+    # docstring). A read failure here costs only that case: it is dropped
+    # from `readable_cases` and never reaches pass 2, the same way a pass-2
+    # read failure below drops a case from the write loop.
+    court_records, readable_cases = {}, []
     for case in cases:
         slug = case.get("slug") or ""
         try:
-            detail, etag = api.get_case_with_etag(slug)
+            case_detail, _ = api.get_case_with_etag(slug)
+        except Exception as exc:  # noqa: BLE001 - one case's read failure is not the run's
+            log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
+                      step="court_read", status="unreadable",
+                      detail=f"pass 1: {type(exc).__name__}")
+            stats["error"] = stats.get("error", 0) + 1
+            continue
+        readable_cases.append(case)
+        court_records[slug] = court_record_for_case(api, case_detail)
+
+    held = held_names(defendant_name_index(
+        {slug: records for slug, (records, _) in court_records.items()}))
+
+    # Pass 2: plan (and maybe write) every case against that SAME `held`
+    # mapping. `get_case_with_etag` is re-read here for a FRESH ETag --
+    # pass 1's is stale by the time this write would land, and a stale
+    # If-Match raises 412. The court record itself does not need a second
+    # read: it is cached from pass 1 and passed straight into `plan_case`.
+    for case in readable_cases:
+        slug = case.get("slug") or ""
+        try:
+            case_detail, etag = api.get_case_with_etag(slug)
         except Exception as exc:  # noqa: BLE001 - one case's read failure is not the run's
             log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
                       step="court_read", status="unreadable",
@@ -796,12 +876,9 @@ def main(argv=None):
             stats["error"] = stats.get("error", 0) + 1
             continue
 
-        plan = plan_case(api, detail, etag, live_prefixes=live_prefixes,
+        plan = plan_case(api, case_detail, etag, live_prefixes=live_prefixes,
                          run_entities=run_entities, dry_run=args.dry_run,
-                         # Single-pass `main()`: no cross-case index yet, so
-                         # nothing is held. Task 3 builds the real index over
-                         # every selected case and passes it here instead.
-                         held={})
+                         held=held, court_record=court_records.get(slug))
         # `detail=` carries `plan.skips` even on a clean "selected": a case
         # can reach "would-patch"/"nothing-to-do" with a partially-unreadable
         # court record (some references 404, at least one did not), and the
@@ -832,14 +909,16 @@ def main(argv=None):
         if held_count:
             generated_parts.append(f"{held_count} name(s) held for review")
         generated = "; ".join(generated_parts)
-        review.add(ReviewRow(
-            slug=slug, status=plan.status,
-            before=(f"case_start_date={detail.get('case_start_date')}, "
-                    f"case_end_date={detail.get('case_end_date')}, "
-                    f"{len(detail.get('entities') or [])} bind(s)"),
-            generated=generated,
-            note="; ".join(plan.skips)))
+        before = (f"case_start_date={case_detail.get('case_start_date')}, "
+                 f"case_end_date={case_detail.get('case_end_date')}, "
+                 f"{len(case_detail.get('entities') or [])} bind(s)")
+        note = "; ".join(plan.skips)
 
+        # The review row is added in EACH terminal branch below, carrying the
+        # status the case actually reached -- never `plan.status` (always
+        # "would-patch" here) written before the write was attempted. That
+        # was the bug: every row read `would-patch` even under `Mode:
+        # APPLIED`, because `review.add` used to run before `apply_plan`.
         if plan.status == "nothing-to-do":
             # The one TERMINAL event this path gets. Without it the case ends on
             # `ok`-statused intermediates only and vanishes from the ledger
@@ -853,20 +932,25 @@ def main(argv=None):
             # would record as this stage's completed outcome) without the
             # audit trail claiming the stage is finished when it isn't.
             # `held_for_review` is the honest, distinct status for that case.
-            detail = ("nothing to add: no empty date this run could fill, "
-                     f"and {resolved_count} court-record defendant(s) are "
-                     "already bound")
+            nothing_to_do_note = (
+                "nothing to add: no empty date this run could fill, "
+                f"and {resolved_count} court-record defendant(s) are "
+                "already bound")
             if held_count:
-                detail += f"; {held_count} name(s) held for review"
+                nothing_to_do_note += f"; {held_count} name(s) held for review"
             log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
                       step="idempotency",
                       status="held_for_review" if held_count else "already",
-                      detail=detail)
+                      detail=nothing_to_do_note)
+            review.add(ReviewRow(slug=slug, status="nothing-to-do", before=before,
+                                 generated=generated, note=note))
             stats["nothing-to-do"] = stats.get("nothing-to-do", 0) + 1
             continue
         if args.dry_run:
             log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
                       step="patch", status="dry_run", detail=generated)
+            review.add(ReviewRow(slug=slug, status="would-patch", before=before,
+                                 generated=generated, note=note))
             stats["would-patch"] = stats.get("would-patch", 0) + 1
             continue
         try:
@@ -884,16 +968,24 @@ def main(argv=None):
             log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
                       step="patch", status=status,
                       detail=f"{type(exc).__name__}: {exc}")
+            review.add(ReviewRow(slug=slug, status=status, before=before,
+                                 generated=generated, note=note))
             stats["error"] = stats.get("error", 0) + 1
             continue
         log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
                   step="patch", status="applied", detail=generated)
+        review.add(ReviewRow(slug=slug, status="patched", before=before,
+                             generated=generated, note=note))
         stats["patched"] = stats.get("patched", 0) + 1
+
+    held_path = review.path.parent / (review.path.stem + ".held.json")
+    write_held_file(held_path, held, court_records, run_id=run_id)
 
     review.write()
     log_run_footer(logger, stage=STAGE, stats=stats, duration_s=time.time() - started)
     print_summary(stats, args.dry_run, "court-record binder")
     print(f"review file: {review.path}")
+    print(f"held-names file: {held_path}")
     return 0
 
 
