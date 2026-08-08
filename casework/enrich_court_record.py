@@ -752,6 +752,19 @@ def _rung_counts(rows):
     return resolved, held
 
 
+def _resolve_detail(row):
+    """What one defendant resolved to -- the IRI, its caveat, or why it failed.
+
+    `nes_id or reason` alone discards the reason on every row that has both,
+    which is exactly the two rows whose reason carries a warning: a dry run's
+    "would create" (`--apply` refuses it if the slug is taken) and a
+    "reused from this run". Both then read as a plain settled bind.
+    """
+    if row["nes_id"] and row["reason"]:
+        return f"{row['nes_id']} ({row['reason']})"
+    return row["nes_id"] or row["reason"]
+
+
 def _log_plan(logger, events, run_id, plan):
     """Emit the per-step events for one planned case. Returns `(held, resolved)`.
 
@@ -774,7 +787,7 @@ def _log_plan(logger, events, run_id, plan):
         log_event(logger, events, run_id=run_id, stage=STAGE, slug=plan.slug,
                   step="defendant_resolve", status="ok",
                   detail=f"{_RUNG_WORDS[row['how']]}: {row['name']} -> "
-                         f"{row['nes_id'] or row['reason']}")
+                         f"{_resolve_detail(row)}")
     if plan.fields:
         log_event(logger, events, run_id=run_id, stage=STAGE, slug=plan.slug,
                   step="dates", status="ok",

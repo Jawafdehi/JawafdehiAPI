@@ -1208,6 +1208,36 @@ def test_a_held_defendant_is_logged_under_defendant_resolve_not_silently_dropped
     assert api.patch_calls == []
 
 
+def test_a_dry_run_created_row_keeps_the_caveat_its_iri_would_have_hidden(
+    tmp_path, monkeypatch,
+):
+    # `nes_id or reason` dropped the reason on every row carrying both, and
+    # a dry-run "created" row is exactly that: the IRI is truthy, so the
+    # warning that `--apply` refuses this bind when the slug is already taken
+    # was discarded. The review file is approved BEFORE the apply, so a row
+    # reading `created: <name> -> <iri>` promised a bind the run might refuse.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    api = _MultiCaseApi(
+        [_case()],
+        {"079-cr-0151": {"detail": {"registration_date_ad": "2023-06-22"},
+                         "hearings": [DECIDED],
+                         "parties": [{"side": "defendant",
+                                      "name": "कृष्ण प्रसाद यादव"}]}})
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+               "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+    created = [e for e in _events(tmp_path)
+               if e["step"] == "defendant_resolve" and e["detail"].startswith("created: ")]
+    assert len(created) == 1
+    # Both halves: the IRI an --apply would use, AND the caveat on it.
+    assert "/entity/person/" in created[0]["detail"]
+    assert "--apply refuses the bind" in created[0]["detail"]
+    assert api.posted == []
+
+
 def test_a_held_defendant_is_excluded_from_resolved_and_accused_counts(tmp_path, monkeypatch):
     # Reviewer repro: one held name plus one `nes_id`-bound defendant, dates
     # already populated. Before this fix `len(plan.rows)` counted the held
