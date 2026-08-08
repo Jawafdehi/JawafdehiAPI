@@ -642,15 +642,10 @@ class Case(models.Model):
     )
     # Date fields
     case_start_date = models.DateField(
-        null=True, blank=True,
-        help_text="When the case began — the court registration date for a "
-                  "case with a court record",
+        null=True, blank=True, help_text="When the alleged incident began"
     )
     case_end_date = models.DateField(
-        null=True, blank=True,
-        help_text="When the case concluded — the deciding hearing date. Leave "
-                  "empty for a case still being heard: a value here renders the "
-                  "case as concluded on the public site",
+        null=True, blank=True, help_text="When the alleged incident ended"
     )
 
     # Entity relationships live on the CaseEntityRelationship bind (the
