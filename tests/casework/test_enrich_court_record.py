@@ -436,6 +436,7 @@ def _plan(api, case, **kw):
     kw.setdefault("live_prefixes", ["person"])
     kw.setdefault("run_entities", {})
     kw.setdefault("dry_run", True)
+    kw.setdefault("held", {})
     return plan_case(api, case, 'W/"7"', **kw)
 
 
@@ -554,7 +555,7 @@ def test_accused_binds_skips_a_non_prosecution_record_but_binds_a_prosecution_on
                         parties=[{"side": "defendant", "name": "कुनै व्यक्ति"}])
     items, rows, skips = _accused_binds(
         _SearchApi(), _case(), [cr_record, oa_record],
-        live_prefixes=["person"], run_entities={}, dry_run=True)
+        live_prefixes=["person"], run_entities={}, dry_run=True, held={})
     assert [i["nes_id"] for i in items] == [YADAV]
     assert [r["name"] for r in rows] == ["कृष्ण प्रसाद यादव"]
     assert len(skips) == 1
@@ -571,7 +572,7 @@ def test_accused_binds_binds_the_pre_fy073_no_code_format():
                                "nes_id": YADAV}])
     items, rows, skips = _accused_binds(
         _SearchApi(), _case(), [record],
-        live_prefixes=["person"], run_entities={}, dry_run=True)
+        live_prefixes=["person"], run_entities={}, dry_run=True, held={})
     assert [i["nes_id"] for i in items] == [YADAV]
     assert skips == []
 
@@ -585,7 +586,7 @@ def test_accused_binds_skips_an_unrecognised_code_not_on_any_documented_skip_lis
                      parties=[{"side": "defendant", "name": "कुनै व्यक्ति", "nes_id": YADAV}])
     items, rows, skips = _accused_binds(
         _SearchApi(), _case(), [record],
-        live_prefixes=["person"], run_entities={}, dry_run=True)
+        live_prefixes=["person"], run_entities={}, dry_run=True, held={})
     assert items == []
     assert len(skips) == 1 and "ZZ" in skips[0]
 
@@ -600,7 +601,7 @@ def test_accused_binds_binds_a_person_named_through_their_firm():
                      parties=[{"side": "defendant", "name": firm_name, "nes_id": YADAV}])
     items, rows, skips = _accused_binds(
         _SearchApi(), _case(), [record],
-        live_prefixes=["person"], run_entities={}, dry_run=True)
+        live_prefixes=["person"], run_entities={}, dry_run=True, held={})
     assert [i["nes_id"] for i in items] == [YADAV]
     assert skips == []
 
@@ -700,6 +701,40 @@ def test_a_name_spelled_with_different_punctuation_across_cases_still_holds():
     held = held_names(defendant_name_index(records_by_slug))
     items, rows, _ = _accused_binds(
         _SearchApi(), _case(slug="case-a"), records_by_slug["case-a"],
+        live_prefixes=["person"], run_entities={}, dry_run=True, held=held)
+    assert items == []
+    assert rows[0]["how"] == "held"
+
+
+def test_two_punctuation_variants_of_one_name_on_the_same_case_collapse_to_one_row():
+    # `seen` used to key on the raw name, so two spellings of the SAME
+    # defendant on one case's parties produced two `defendant_resolve` rows
+    # (and could double-bind the same person under two different IRIs) for
+    # one person. `defendant_name_index` already collapses spelling variants
+    # via `normalise_name`; the per-case dedup inside `_accused_binds` must
+    # agree, or a case can hold one spelling while binding the other.
+    record = _record(parties=[
+        {"side": "defendant", "name": "कृष्ण प्रसाद यादव", "nes_id": YADAV},
+        {"side": "defendant", "name": "कृष्ण  प्रसाद यादव।"},
+    ])
+    items, rows, _ = _accused_binds(
+        _SearchApi(), _case(), [record],
+        live_prefixes=["person"], run_entities={}, dry_run=True, held={})
+    assert len(rows) == 1
+    assert [i["nes_id"] for i in items] == [YADAV]
+
+
+def test_a_held_entry_mapping_to_an_empty_set_still_holds():
+    # `held_names` only ever returns entries with 2+ slugs, so an empty set
+    # should not occur in practice -- but the membership check must be
+    # `is not None`, not truthiness. A truthy check on an empty frozenset
+    # falls through and binds, which is the fail-OPEN direction on exactly
+    # the defamation path this task exists to close.
+    held = {normalise_name("कृष्ण प्रसाद यादव"): frozenset()}
+    record = _record(parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव",
+                               "nes_id": YADAV}])
+    items, rows, _ = _accused_binds(
+        _SearchApi(), _case(), [record],
         live_prefixes=["person"], run_entities={}, dry_run=True, held=held)
     assert items == []
     assert rows[0]["how"] == "held"
@@ -832,6 +867,25 @@ def test_apply_plan_refuses_to_write_without_an_etag():
                     fields=[("case_start_date", "2023-06-22")], if_match="")
     with pytest.raises(ValueError, match="ETag"):
         apply_plan(_PlanApi(), plan)
+
+
+def test_accused_binds_requires_held_explicitly():
+    # No default: a caller that forgets `held` must get a loud `TypeError`,
+    # not a silent "nothing is held" that reintroduces the same-name collapse
+    # this task exists to stop -- the failure mode on this path is naming the
+    # wrong person as accused, so a forgotten argument must fail LOUD, not open.
+    with pytest.raises(TypeError):
+        _accused_binds(  # ty: ignore[missing-argument] -- the point of this test
+            _SearchApi(), _case(), [],
+            live_prefixes=["person"], run_entities={}, dry_run=True)
+
+
+def test_plan_case_requires_held_explicitly():
+    with pytest.raises(TypeError):
+        plan_case(  # ty: ignore[missing-argument] -- the point of this test
+            _PlanApi(detail={"registration_date_ad": "2023-06-22"}),
+            _case(), 'W/"7"',
+            live_prefixes=["person"], run_entities={}, dry_run=True)
 
 
 def test_apply_plan_sends_one_conditional_request():
@@ -1086,6 +1140,77 @@ def test_a_held_defendant_is_logged_under_defendant_resolve_not_silently_dropped
     assert resolve_events[0]["status"] == "ok"
     assert api.posted == []
     assert api.patch_calls == []
+
+
+def test_a_held_defendant_is_excluded_from_resolved_and_accused_counts(tmp_path, monkeypatch):
+    # Reviewer repro: one held name plus one `nes_id`-bound defendant, dates
+    # already populated. Before this fix `len(plan.rows)` counted the held
+    # row as "resolved" and as part of "accused+N" too -- the bind_plan
+    # summary read "2 defendant(s) resolved" and the review file's Generated
+    # field read "accused+2" for a plan that only ever bound one person.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    case = _case(case_start_date="2020-01-01", case_end_date="2021-01-01")
+    api = _CliApi(
+        case, detail={"registration_date_ad": "2023-06-22"}, hearings=[DECIDED],
+        parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव"},
+                 {"side": "defendant", "name": "सिताराम यादव", "nes_id": YADAV}])
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+    held = {normalise_name("कृष्ण प्रसाद यादव"): frozenset({"case-079-cr-0151", "case-b"})}
+    real_plan_case = ecr.plan_case
+    monkeypatch.setattr(
+        ecr, "plan_case",
+        lambda *a, **kw: real_plan_case(*a, **{**kw, "held": held}))
+
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+               "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+
+    bind_plan = [e for e in _events(tmp_path) if e["step"] == "bind_plan"]
+    assert any("1 defendant(s) resolved" in e["detail"] for e in bind_plan)
+    assert not any("2 defendant(s) resolved" in e["detail"] for e in bind_plan)
+    assert any("1 name(s) held for review" in e["detail"] for e in bind_plan)
+
+    review_text = (tmp_path / "review.md").read_text(encoding="utf-8")
+    assert "accused+1" in review_text
+    assert "accused+2" not in review_text
+    assert "1 name(s) held for review" in review_text
+
+
+def test_a_held_only_nothing_to_do_case_is_not_recorded_as_already(tmp_path, monkeypatch):
+    # The companion to `test_a_case_with_nothing_to_change_records_already_not_nothing`:
+    # when the ONLY reason a case reaches "nothing-to-do" is a held name, the
+    # stage's own work is not finished -- a human still has to rule on it.
+    # `already` is excluded from nothing here: `casework.ledger.NON_OUTCOME_STATUSES`
+    # does not contain it, so `build_ledger` would otherwise record this
+    # stage as a COMPLETED outcome for a case whose whole point is that it
+    # isn't.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    case = _case(case_start_date="2020-01-01", case_end_date="2021-01-01")
+    api = _CliApi(case, detail={"registration_date_ad": "2023-06-22"}, hearings=[DECIDED],
+                  parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव"}])
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+    held = {normalise_name("कृष्ण प्रसाद यादव"): frozenset({"case-079-cr-0151", "case-b"})}
+    real_plan_case = ecr.plan_case
+    monkeypatch.setattr(
+        ecr, "plan_case",
+        lambda *a, **kw: real_plan_case(*a, **{**kw, "held": held}))
+
+    assert main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+                 "--review-file", str(tmp_path / "review.md")]) == 0
+    assert api.patch_calls == []
+
+    idempotency = [e for e in _events(tmp_path) if e["step"] == "idempotency"]
+    assert len(idempotency) == 1
+    assert idempotency[0]["status"] == "held_for_review"
+    assert "1 name(s) held for review" in idempotency[0]["detail"]
+    assert "0 court-record defendant(s) are already bound" in idempotency[0]["detail"]
+
+    from casework.ledger import build_ledger
+    status = build_ledger(tmp_path)[("case-079-cr-0151", "court_record")]["status"]
+    assert status == "held_for_review"
+    assert status != "already"
 
 
 def test_a_dry_run_leaves_the_case_out_of_the_ledger_entirely(tmp_path, monkeypatch):

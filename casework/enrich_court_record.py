@@ -475,12 +475,11 @@ def defendant_name_index(records_by_slug):
 
 
 def held_names(index):
-    """Normalised names appearing on more than one case -- never auto-bound."""
+    """`{normalised name: frozenset(slugs)}` for names on more than one case -- never auto-bound."""
     return {name: slugs for name, slugs in index.items() if len(slugs) > 1}
 
 
-def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run,
-                   held=None):
+def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run, held):
     """`(items, rows, skips)` -- binds, a report row each, and non-prosecution skips.
 
     De-duplicated by name across every court reference on the case, order
@@ -491,12 +490,9 @@ def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run,
     which is why this reads the parties itself rather than calling
     `defendant_names`.
 
-    A name in `held` (see `held_names`) never reaches `resolve_defendant` at
-    all -- it gets a `how="held"` row and no bind item, because the same-name
-    collapse `held_names` exists to catch cannot be told apart from a genuine
-    match by anything this function can see on its own.
+    A held name (see `held_names`) is never told apart from a genuine match
+    by anything this function alone can see.
     """
-    held = held or {}
     outcome = bind_outcome(records)
     citation = (records[0].get("detail") or {}).get("material_id", "") if records else ""
     items, rows, skips, seen = [], [], [], set()
@@ -512,17 +508,17 @@ def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run,
             if not is_defendant(party):
                 continue
             name = party_name(party)
-            if not name or name in seen:
+            key = normalise_name(name)
+            if not name or key in seen:
                 continue
-            seen.add(name)
-            other_slugs = held.get(normalise_name(name))
-            if other_slugs:
+            seen.add(key)
+            other_slugs = held.get(key)
+            if other_slugs is not None:
                 others = sorted(s for s in other_slugs if s != case.get("slug"))
                 rows.append({
                     "slug": case.get("slug"), "name": name, "how": "held",
                     "nes_id": "", "outcome": outcome,
-                    "reason": ("also names a defendant on "
-                              + (", ".join(others) or "another case")
+                    "reason": ("also names a defendant on " + ", ".join(others)
                               + " -- held for a human to rule on"),
                     "court_case": f"{record['court']}/{record['number']}"})
                 continue
@@ -546,7 +542,7 @@ def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run,
     return items, rows, skips
 
 
-def plan_case(api, case, etag, *, live_prefixes, run_entities, dry_run, held=None):
+def plan_case(api, case, etag, *, live_prefixes, run_entities, dry_run, held):
     """Build the write for one case. Reads the court record; writes nothing."""
     slug = case.get("slug") or ""
     if (case.get("state") or "").upper() != REQUIRED_WRITE_STATE:
@@ -703,10 +699,12 @@ _RUNG_WORDS = {"nes_id": "nes_id_copied", "exact": "exact_match",
 
 
 def _log_plan(logger, events, run_id, plan):
-    """Emit the per-step events for one planned case.
+    """Emit the per-step events for one planned case. Returns the held count.
 
     Every event here is intermediate and therefore `ok`-statused; see
     `_RUNG_WORDS` for why, and `main` for the terminal events that follow.
+    The held count is returned so `main` can subtract it from its own
+    "accused+N" and already-bound counts without recomputing `plan.rows`.
 
     `run_id`/`stage`/`slug` are passed as explicit keywords on every call
     rather than once via a `**common` dict: `ty` cannot verify that a plain
@@ -716,7 +714,9 @@ def _log_plan(logger, events, run_id, plan):
     `enrich_related_entities.py`'s own `log_event` calls use the same
     explicit-keyword style for the identical reason.
     """
+    held_count = 0
     for row in plan.rows:
+        held_count += row["how"] == "held"
         log_event(logger, events, run_id=run_id, stage=STAGE, slug=plan.slug,
                   step="defendant_resolve", status="ok",
                   detail=f"{_RUNG_WORDS[row['how']]}: {row['name']} -> "
@@ -751,13 +751,18 @@ def _log_plan(logger, events, run_id, plan):
                   step="dates", status="ok", detail=f"{kind}: {skip}")
     # "resolved", not "on the court record": when `code_skips` is non-zero the
     # court record named at least one defendant this run declined to look at,
-    # and the earlier count must not be read as "the record named none".
+    # and the earlier count must not be read as "the record named none". A
+    # held row sits in `plan.rows` too but was never resolved, so it is
+    # subtracted out here as well.
     summary = (f"{'merged' if plan.entities is not None else 'no_additions'}: "
-               f"{len(plan.rows)} defendant(s) resolved")
+               f"{len(plan.rows) - held_count} defendant(s) resolved")
     if code_skips:
         summary += f"; {code_skips} court reference(s) skipped as non-prosecution"
+    if held_count:
+        summary += f"; {held_count} name(s) held for review"
     log_event(logger, events, run_id=run_id, stage=STAGE, slug=plan.slug,
               step="bind_plan", status="ok", detail=summary)
+    return held_count
 
 
 def main(argv=None):
@@ -792,7 +797,11 @@ def main(argv=None):
             continue
 
         plan = plan_case(api, detail, etag, live_prefixes=live_prefixes,
-                         run_entities=run_entities, dry_run=args.dry_run)
+                         run_entities=run_entities, dry_run=args.dry_run,
+                         # Single-pass `main()`: no cross-case index yet, so
+                         # nothing is held. Task 3 builds the real index over
+                         # every selected case and passes it here instead.
+                         held={})
         # `detail=` carries `plan.skips` even on a clean "selected": a case
         # can reach "would-patch"/"nothing-to-do" with a partially-unreadable
         # court record (some references 404, at least one did not), and the
@@ -814,11 +823,15 @@ def main(argv=None):
             continue
         log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
                   step="court_read", status="ok")
-        _log_plan(logger, events, run_id, plan)
+        held_count = _log_plan(logger, events, run_id, plan)
+        resolved_count = len(plan.rows) - held_count
 
-        generated = "; ".join(
-            [f"{k}={v}" for k, v in plan.fields]
-            + [f"accused+{len(plan.rows)}" if plan.entities is not None else ""]).strip("; ")
+        generated_parts = [f"{k}={v}" for k, v in plan.fields]
+        if plan.entities is not None:
+            generated_parts.append(f"accused+{resolved_count}")
+        if held_count:
+            generated_parts.append(f"{held_count} name(s) held for review")
+        generated = "; ".join(generated_parts)
         review.add(ReviewRow(
             slug=slug, status=plan.status,
             before=(f"case_start_date={detail.get('case_start_date')}, "
@@ -833,14 +846,22 @@ def main(argv=None):
             # entirely, which cannot be told apart from a run that crashed
             # before reaching it. `already` is the vocabulary every sibling uses
             # for "the fields were populated before we got here"
-            # (`step="idempotency", status="already"`), and it is what this is:
-            # no date field was empty and needed filling, and every bind the
-            # court record names is already on the case.
+            # (`step="idempotency", status="already"`), and it is what this is
+            # -- UNLESS a held name is the reason nothing else happened: that
+            # case still has a human decision outstanding, so it cannot read
+            # `already` (a status `casework.ledger.NON_OUTCOME_STATUSES`
+            # would record as this stage's completed outcome) without the
+            # audit trail claiming the stage is finished when it isn't.
+            # `held_for_review` is the honest, distinct status for that case.
+            detail = ("nothing to add: no empty date this run could fill, "
+                     f"and {resolved_count} court-record defendant(s) are "
+                     "already bound")
+            if held_count:
+                detail += f"; {held_count} name(s) held for review"
             log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
-                      step="idempotency", status="already",
-                      detail="nothing to add: no empty date this run could "
-                             f"fill, and all {len(plan.rows)} court-record "
-                             "defendant(s) are already bound")
+                      step="idempotency",
+                      status="held_for_review" if held_count else "already",
+                      detail=detail)
             stats["nothing-to-do"] = stats.get("nothing-to-do", 0) + 1
             continue
         if args.dry_run:
