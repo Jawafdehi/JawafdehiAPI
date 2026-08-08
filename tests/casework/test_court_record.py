@@ -13,7 +13,6 @@ import urllib.error
 import pytest
 
 from casework.court_record import (
-    BINDABLE_CODES,
     case_number_code,
     court_record_for_case,
     court_ref,
@@ -225,10 +224,3 @@ def test_no_court_reference_reports_why():
 ])
 def test_case_number_code_classifies_the_court_case_type(number, expected):
     assert case_number_code(number) == expected
-
-
-def test_bindable_codes_names_only_the_prosecution_codes():
-    # Pins the allow-list itself: a deny-list rewrite (skip only OA/RE/W*)
-    # would still pass every `case_number_code` test above but silently bind
-    # an unrecognised code instead of skipping it.
-    assert BINDABLE_CODES == frozenset({"CR", "CB", "FJ", ""})

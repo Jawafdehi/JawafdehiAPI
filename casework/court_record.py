@@ -64,11 +64,7 @@ _CODE_SEGMENT = re.compile(r"-([A-Za-z]+)-")
 
 
 def case_number_code(number):
-    """The court's case-type letters from `079-CR-0151`, upper-cased, or "".
-
-    Matches the first `-<letters>-` segment; a number with none (the old
-    pre-FY073 format, or anything malformed) yields "".
-    """
+    """The court's case-type letters from `079-CR-0151`, upper-cased, or "" if none."""
     match = _CODE_SEGMENT.search(str(number or ""))
     return match.group(1).upper() if match else ""
 

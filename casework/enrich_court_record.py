@@ -453,8 +453,7 @@ def bind_outcome(records):
 
 
 def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run):
-    """`(items, rows, skips)` -- one bind per named defendant, a report row each,
-    and a line per record whose case type is not a prosecution.
+    """`(items, rows, skips)` -- binds, a report row each, and non-prosecution skips.
 
     De-duplicated by name across every court reference on the case, order
     preserved, exactly like `defendant_names` does -- through the SAME
@@ -463,11 +462,6 @@ def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run):
     here (its `nes_id` for ladder rung 1, its `address` for the run-entity key),
     which is why this reads the parties itself rather than calling
     `defendant_names`.
-
-    A record whose `case_number_code` is not in `BINDABLE_CODES` (`OA`, `RE`,
-    the `W*` writ codes, ...) is skipped whole: on those the defendant column
-    names a government office, not a person. This is the only filter on this
-    path -- `start_date`/`end_date` still read every record.
     """
     outcome = bind_outcome(records)
     citation = (records[0].get("detail") or {}).get("material_id", "") if records else ""
@@ -476,7 +470,7 @@ def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run):
         code = case_number_code(record["number"])
         if code not in BINDABLE_CODES:
             skips.append(
-                f"skipping accused bind for court reference "
+                "skipping accused bind for court reference "
                 f"{record['court']}/{record['number']}: case type {code!r} "
                 "is not a prosecution")
             continue
@@ -640,6 +634,13 @@ _SKIP_SELECT_STATUS = {
 _COURT_READ_FAILURE_PREFIX = "court reference "
 
 
+#: Prefix `_accused_binds` puts on every record it skips for a non-prosecution
+#: case type. Mirrors `_COURT_READ_FAILURE_PREFIX`'s role: the reference read
+#: fine and was refused by policy, which is neither an unreadable reference
+#: nor a fact about date derivation, so `_log_plan` routes it to `bind_plan`.
+_NON_PROSECUTION_SKIP_PREFIX = "skipping accused bind for "
+
+
 #: The ladder rung each `plan.rows` entry settled on, spelled for the events
 #: file. It rides in the event's DETAIL, not its status: every event this
 #: function emits is an INTERMEDIATE step, and `casework.ledger.build_ledger`
@@ -679,6 +680,7 @@ def _log_plan(logger, events, run_id, plan):
         log_event(logger, events, run_id=run_id, stage=STAGE, slug=plan.slug,
                   step="dates", status="ok",
                   detail="proposed " + ", ".join(f"{k}={v}" for k, v in plan.fields))
+    code_skips = 0
     for skip in plan.skips:
         if skip.startswith(_COURT_READ_FAILURE_PREFIX):
             # A per-reference read failure, not a date fact: `plan.status` is
@@ -692,13 +694,25 @@ def _log_plan(logger, events, run_id, plan):
             log_event(logger, events, run_id=run_id, stage=STAGE, slug=plan.slug,
                       step="court_read", status="ok", detail=f"unreadable: {skip}")
             continue
+        if skip.startswith(_NON_PROSECUTION_SKIP_PREFIX):
+            # Read fine, refused by policy -- not a date fact either, so this
+            # rides under `bind_plan` (see `_NON_PROSECUTION_SKIP_PREFIX`).
+            code_skips += 1
+            log_event(logger, events, run_id=run_id, stage=STAGE, slug=plan.slug,
+                      step="bind_plan", status="ok", detail=skip)
+            continue
         kind = "skip_open_case" if "not every court reference" in skip else "no_source"
         log_event(logger, events, run_id=run_id, stage=STAGE, slug=plan.slug,
                   step="dates", status="ok", detail=f"{kind}: {skip}")
+    # "resolved", not "on the court record": when `code_skips` is non-zero the
+    # court record named at least one defendant this run declined to look at,
+    # and the earlier count must not be read as "the record named none".
+    summary = (f"{'merged' if plan.entities is not None else 'no_additions'}: "
+               f"{len(plan.rows)} defendant(s) resolved")
+    if code_skips:
+        summary += f"; {code_skips} court reference(s) skipped as non-prosecution"
     log_event(logger, events, run_id=run_id, stage=STAGE, slug=plan.slug,
-              step="bind_plan", status="ok",
-              detail=f"{'merged' if plan.entities is not None else 'no_additions'}: "
-                     f"{len(plan.rows)} defendant(s) on the court record")
+              step="bind_plan", status="ok", detail=summary)
 
 
 def main(argv=None):

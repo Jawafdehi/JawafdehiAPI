@@ -9,8 +9,8 @@ BOTH a deciding hearing and the case_status string, agreeing 277/277), and all
 from casework.enrich_court_record import deciding_hearing, end_date, start_date
 
 
-def _record(reg=None, hearings=(), status=None, parties=()):
-    return {"court": "special", "number": "079-cr-0151",
+def _record(reg=None, hearings=(), status=None, parties=(), number="079-cr-0151"):
+    return {"court": "special", "number": number,
             "detail": {"registration_date_ad": reg, "case_status": status},
             "hearings": list(hearings), "parties": list(parties)}
 
@@ -436,14 +436,6 @@ def _plan(api, case, **kw):
     return plan_case(api, case, 'W/"7"', **kw)
 
 
-def _court_record(number, name, *, nes_id=None, court="special"):
-    """One court reference, one defendant party, for `_accused_binds` tests."""
-    party = {"side": "defendant", "name": name}
-    if nes_id:
-        party["nes_id"] = nes_id
-    return {"court": court, "number": number, "detail": {}, "hearings": [], "parties": [party]}
-
-
 def test_a_whole_case_acquittal_labels_every_defendant_acquitted():
     assert bind_outcome([_record(hearings=[DECIDED])]) == ACQUITTED
 
@@ -552,8 +544,11 @@ def test_accused_binds_skips_a_non_prosecution_record_but_binds_a_prosecution_on
     # on THAT literal name string would still pass a fixture using it, for the
     # wrong reason. Naming it "कुनै व्यक्ति" (an ordinary person's placeholder)
     # means only a code-based filter can make this record skip.
-    cr_record = _court_record("079-cr-0151", "कृष्ण प्रसाद यादव", nes_id=YADAV)
-    oa_record = _court_record("079-oa-0014", "कुनै व्यक्ति")
+    cr_record = _record(number="079-cr-0151",
+                        parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव",
+                                  "nes_id": YADAV}])
+    oa_record = _record(number="079-oa-0014",
+                        parties=[{"side": "defendant", "name": "कुनै व्यक्ति"}])
     items, rows, skips = _accused_binds(
         _SearchApi(), _case(), [cr_record, oa_record],
         live_prefixes=["person"], run_entities={}, dry_run=True)
@@ -568,7 +563,9 @@ def test_accused_binds_binds_the_pre_fy073_no_code_format():
     # references in the corpus. A rule spelled "the number must contain
     # `-CR-`" would misclassify this as an unrecognised code and silently
     # drop these prosecutions.
-    record = _court_record("93-068-0194", "सिताराम यादव", nes_id=YADAV)
+    record = _record(number="93-068-0194",
+                     parties=[{"side": "defendant", "name": "सिताराम यादव",
+                               "nes_id": YADAV}])
     items, rows, skips = _accused_binds(
         _SearchApi(), _case(), [record],
         live_prefixes=["person"], run_entities={}, dry_run=True)
@@ -581,7 +578,8 @@ def test_accused_binds_skips_an_unrecognised_code_not_on_any_documented_skip_lis
     # "ZZ" is on neither list. It must skip anyway -- an unrecognised code
     # risks naming an office, and skipping one only costs a bind a later run
     # recovers, so the allow-list, not a deny-list, is what must gate this.
-    record = _court_record("079-zz-0001", "कुनै व्यक्ति", nes_id=YADAV)
+    record = _record(number="079-zz-0001",
+                     parties=[{"side": "defendant", "name": "कुनै व्यक्ति", "nes_id": YADAV}])
     items, rows, skips = _accused_binds(
         _SearchApi(), _case(), [record],
         live_prefixes=["person"], run_entities={}, dry_run=True)
@@ -595,7 +593,8 @@ def test_accused_binds_binds_a_person_named_through_their_firm():
     # filter on "एशोसियटस" or "कार्यालय" would drop this real defendant --
     # only the code, never the name text, may gate the bind.
     firm_name = "अनिल गुप्ता एण्ड एशोसियटस का प्रोपराइटर अनिल कुमार गुप्ता"
-    record = _court_record("079-fj-0001", firm_name, nes_id=YADAV)
+    record = _record(number="079-fj-0001",
+                     parties=[{"side": "defendant", "name": firm_name, "nes_id": YADAV}])
     items, rows, skips = _accused_binds(
         _SearchApi(), _case(), [record],
         live_prefixes=["person"], run_entities={}, dry_run=True)
