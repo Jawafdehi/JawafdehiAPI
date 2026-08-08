@@ -919,12 +919,24 @@ class _CliApi(_PlanApi):
         self._etag = etag
         self._patch_error = patch_error
         self.patch_calls = []
+        # Pins the two load-bearing call counts the two-pass split promises:
+        # `get_case_with_etag` runs once per pass (a fresh ETag each time),
+        # `get_courtcase` only in pass 1 (pass 2 reuses the cache).
+        self.call_counts = {}
+
+    def _count(self, name):
+        self.call_counts[name] = self.call_counts.get(name, 0) + 1
 
     def iter_cases(self, params=None, timeout=60, progress=None):
         yield self._case
 
     def get_case_with_etag(self, slug, timeout=60):
+        self._count("get_case_with_etag")
         return self._case, self._etag
+
+    def get_courtcase(self, court, number, timeout=60):
+        self._count("get_courtcase")
+        return super().get_courtcase(court, number, timeout=timeout)
 
     def entity_prefixes(self, timeout=60):
         return ["person"]
@@ -996,7 +1008,10 @@ def test_a_case_missing_the_entities_key_is_skipped_and_logged(tmp_path, monkeyp
     rc = main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
                "--review-file", str(tmp_path / "review.md")])
     assert rc == 0
-    events = _events(tmp_path)
+    # Filtered to this case's own slug: the run also emits one run-level
+    # `held_index` event (slug="") for every run, which is not this case's
+    # concern.
+    events = [e for e in _events(tmp_path) if e["slug"] == "case-079-cr-0151"]
     assert [e["step"] for e in events] == ["select"]
     assert events[0]["status"] == "skip_no_entities_key"
     # The ONE line this case leaves must say WHY, not just THAT -- an operator
@@ -1024,7 +1039,7 @@ def test_a_non_draft_case_is_skipped_with_the_state_in_the_detail(tmp_path, monk
                "--slug", "case-079-cr-0151",
                "--review-file", str(tmp_path / "review.md")])
     assert rc == 0
-    events = _events(tmp_path)
+    events = [e for e in _events(tmp_path) if e["slug"] == "case-079-cr-0151"]
     assert [e["step"] for e in events] == ["select"]
     assert events[0]["status"] == "skip_state"
     assert "PUBLISHED" in events[0]["detail"]
@@ -1109,31 +1124,32 @@ def test_a_non_prosecution_court_reference_is_logged_as_bind_plan_not_dates(
 def test_a_held_defendant_is_logged_under_defendant_resolve_not_silently_dropped(
     tmp_path, monkeypatch,
 ):
-    # `main()` does not build a held set yet -- a later task wires the
-    # two-pass index (`defendant_name_index`/`held_names`) into it. Until
-    # then this pins the `_log_plan` routing for a `how="held"` row end to
-    # end by monkeypatching `plan_case` to inject a held set the same way
-    # that later task will, rather than only unit-testing `_log_plan`
-    # directly. Guards `_RUNG_WORDS` carrying a `"held"` entry (its absence
+    # Real two-pass wiring: `case-b` names the same defendant, so `held` is
+    # the genuine cross-case index `main()` builds, not an injected
+    # stand-in. Guards `_RUNG_WORDS` carrying a `"held"` entry (its absence
     # would raise `KeyError` here, not silently drop the row) and that the
     # held defendant never reaches a bind.
     monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
-    case = _case()
-    api = _CliApi(case, detail={"registration_date_ad": "2023-06-22"}, hearings=[DECIDED],
-                  parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव"}])
+    shared = "कृष्ण प्रसाद यादव"
+    case_a = _case()
+    case_b = _case(slug="case-b",
+                   court_cases=["https://jawafdehi.org/courtcase/special/080-cr-0002"])
+    api = _MultiCaseApi(
+        [case_a, case_b],
+        {"079-cr-0151": {"detail": {"registration_date_ad": "2023-06-22"},
+                        "hearings": [DECIDED],
+                        "parties": [{"side": "defendant", "name": shared}]},
+         "080-cr-0002": {"detail": {"registration_date_ad": "2023-06-22"},
+                        "hearings": [DECIDED],
+                        "parties": [{"side": "defendant", "name": shared}]}})
     import casework.enrich_court_record as ecr
     monkeypatch.setattr(ecr, "build_api", lambda args: api)
-    held = {normalise_name("कृष्ण प्रसाद यादव"): frozenset({"case-079-cr-0151", "case-b"})}
-    real_plan_case = ecr.plan_case
-    monkeypatch.setattr(
-        ecr, "plan_case",
-        lambda *a, **kw: real_plan_case(*a, **{**kw, "held": held}))
 
     rc = main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
                "--review-file", str(tmp_path / "review.md")])
     assert rc == 0
-    events = _events(tmp_path)
-    resolve_events = [e for e in events if e["step"] == "defendant_resolve"]
+    resolve_events = [e for e in _events(tmp_path)
+                      if e["step"] == "defendant_resolve" and e["slug"] == "case-079-cr-0151"]
     assert len(resolve_events) == 1
     assert resolve_events[0]["detail"].startswith("held: कृष्ण प्रसाद यादव -> ")
     assert "case-b" in resolve_events[0]["detail"]
@@ -1148,25 +1164,31 @@ def test_a_held_defendant_is_excluded_from_resolved_and_accused_counts(tmp_path,
     # row as "resolved" and as part of "accused+N" too -- the bind_plan
     # summary read "2 defendant(s) resolved" and the review file's Generated
     # field read "accused+2" for a plan that only ever bound one person.
+    # `case-b` supplies the real second occurrence of the held name.
     monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
-    case = _case(case_start_date="2020-01-01", case_end_date="2021-01-01")
-    api = _CliApi(
-        case, detail={"registration_date_ad": "2023-06-22"}, hearings=[DECIDED],
-        parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव"},
-                 {"side": "defendant", "name": "सिताराम यादव", "nes_id": YADAV}])
+    shared = "कृष्ण प्रसाद यादव"
+    case_a = _case(case_start_date="2020-01-01", case_end_date="2021-01-01")
+    case_b = _case(slug="case-b", case_start_date="2020-01-01", case_end_date="2021-01-01",
+                   court_cases=["https://jawafdehi.org/courtcase/special/080-cr-0002"])
+    api = _MultiCaseApi(
+        [case_a, case_b],
+        {"079-cr-0151": {"detail": {"registration_date_ad": "2023-06-22"},
+                        "hearings": [DECIDED],
+                        "parties": [{"side": "defendant", "name": shared},
+                                   {"side": "defendant", "name": "सिताराम यादव",
+                                    "nes_id": YADAV}]},
+         "080-cr-0002": {"detail": {"registration_date_ad": "2023-06-22"},
+                        "hearings": [DECIDED],
+                        "parties": [{"side": "defendant", "name": shared}]}})
     import casework.enrich_court_record as ecr
     monkeypatch.setattr(ecr, "build_api", lambda args: api)
-    held = {normalise_name("कृष्ण प्रसाद यादव"): frozenset({"case-079-cr-0151", "case-b"})}
-    real_plan_case = ecr.plan_case
-    monkeypatch.setattr(
-        ecr, "plan_case",
-        lambda *a, **kw: real_plan_case(*a, **{**kw, "held": held}))
 
     rc = main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
                "--review-file", str(tmp_path / "review.md")])
     assert rc == 0
 
-    bind_plan = [e for e in _events(tmp_path) if e["step"] == "bind_plan"]
+    bind_plan = [e for e in _events(tmp_path)
+                if e["step"] == "bind_plan" and e["slug"] == "case-079-cr-0151"]
     assert any("1 defendant(s) resolved" in e["detail"] for e in bind_plan)
     assert not any("2 defendant(s) resolved" in e["detail"] for e in bind_plan)
     assert any("1 name(s) held for review" in e["detail"] for e in bind_plan)
@@ -1184,24 +1206,29 @@ def test_a_held_only_nothing_to_do_case_is_not_recorded_as_already(tmp_path, mon
     # `already` is excluded from nothing here: `casework.ledger.NON_OUTCOME_STATUSES`
     # does not contain it, so `build_ledger` would otherwise record this
     # stage as a COMPLETED outcome for a case whose whole point is that it
-    # isn't.
+    # isn't. `case-b` supplies the real second occurrence of the held name.
     monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
-    case = _case(case_start_date="2020-01-01", case_end_date="2021-01-01")
-    api = _CliApi(case, detail={"registration_date_ad": "2023-06-22"}, hearings=[DECIDED],
-                  parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव"}])
+    shared = "कृष्ण प्रसाद यादव"
+    case_a = _case(case_start_date="2020-01-01", case_end_date="2021-01-01")
+    case_b = _case(slug="case-b", case_start_date="2020-01-01", case_end_date="2021-01-01",
+                   court_cases=["https://jawafdehi.org/courtcase/special/080-cr-0002"])
+    api = _MultiCaseApi(
+        [case_a, case_b],
+        {"079-cr-0151": {"detail": {"registration_date_ad": "2023-06-22"},
+                        "hearings": [DECIDED],
+                        "parties": [{"side": "defendant", "name": shared}]},
+         "080-cr-0002": {"detail": {"registration_date_ad": "2023-06-22"},
+                        "hearings": [DECIDED],
+                        "parties": [{"side": "defendant", "name": shared}]}})
     import casework.enrich_court_record as ecr
     monkeypatch.setattr(ecr, "build_api", lambda args: api)
-    held = {normalise_name("कृष्ण प्रसाद यादव"): frozenset({"case-079-cr-0151", "case-b"})}
-    real_plan_case = ecr.plan_case
-    monkeypatch.setattr(
-        ecr, "plan_case",
-        lambda *a, **kw: real_plan_case(*a, **{**kw, "held": held}))
 
     assert main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
                  "--review-file", str(tmp_path / "review.md")]) == 0
     assert api.patch_calls == []
 
-    idempotency = [e for e in _events(tmp_path) if e["step"] == "idempotency"]
+    idempotency = [e for e in _events(tmp_path)
+                  if e["step"] == "idempotency" and e["slug"] == "case-079-cr-0151"]
     assert len(idempotency) == 1
     assert idempotency[0]["status"] == "held_for_review"
     assert "1 name(s) held for review" in idempotency[0]["detail"]
@@ -1365,11 +1392,7 @@ def test_a_slug_containing_412_does_not_mislabel_a_missing_etag_as_a_conflict(
 
 
 class _MultiCaseApi(_CliApi):
-    """`_CliApi` serving several cases in one run, looked up by slug for the
-    case detail and by court case NUMBER for the court record -- the
-    two-pass / held-file tests below need more than the one canned case
-    `_CliApi` alone can serve.
-    """
+    """`_CliApi` serving several cases at once, keyed by slug and by court case number."""
 
     def __init__(self, cases, courtcase_data, *, etag='W/"7"', patch_error=None,
                 fail_slugs=(), **kw):
@@ -1579,6 +1602,174 @@ def test_a_failed_patchs_review_row_reads_the_failure_status(tmp_path, monkeypat
     assert rc == 0
     text = review_path.read_text(encoding="utf-8")
     assert "| 1 | `case-079-cr-0151` | etag_conflict |" in text
+
+
+def test_a_non_412_patch_failure_review_row_reads_rejected(tmp_path, monkeypatch):
+    # The other half of the failure-status fix: a non-412 PATCH failure (a
+    # 400, say) must read `rejected`, not `would-patch` and not `etag_conflict`
+    # -- only 412 gets the retry-worthy label.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    bad_request = urllib.error.HTTPError(
+        "https://jawafdehi.org/api/cases/case-079-cr-0151/", 400,
+        "Bad Request", {}, None)
+    api = _CliApi(
+        _case(), patch_error=bad_request,
+        detail={"registration_date_ad": "2023-06-22"}, hearings=[DECIDED],
+        parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव", "nes_id": YADAV}],
+    )
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    review_path = tmp_path / "review.md"
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--apply",
+               "--review-file", str(review_path)])
+    assert rc == 0
+    text = review_path.read_text(encoding="utf-8")
+    assert "| 1 | `case-079-cr-0151` | rejected |" in text
+    assert "etag_conflict" not in text
+    assert "would-patch" not in text
+
+
+def test_write_held_file_creates_a_review_directory_that_does_not_exist_yet(
+    tmp_path, monkeypatch,
+):
+    # Reviewer repro: an APPLIED run whose review directory has never been
+    # created (the default `work/reviews/` on a fresh worktree, or a fresh
+    # `--review-file`/`CASEWORK_REVIEW_DIR` target) used to crash inside
+    # `write_held_file` -- called before `review.write()`, the only thing
+    # that ever `mkdir`s -- AFTER the PATCH had already landed. That would
+    # lose the review file, the held file, the run footer, and the summary,
+    # and exit by exception instead of returning 0.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    fresh_dir = tmp_path / "fresh-reviews"
+    assert not fresh_dir.exists()
+    api = _CliApi(
+        _case(),
+        detail={"registration_date_ad": "2023-06-22"}, hearings=[DECIDED],
+        parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव", "nes_id": YADAV}],
+    )
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--apply",
+               "--review-file", str(fresh_dir / "review.md")])
+    assert rc == 0
+    assert api.patch_calls, "the PATCH must have actually landed before the crash point"
+    assert (fresh_dir / "review.md").exists()
+    assert (fresh_dir / "review.held.json").exists()
+
+
+def test_the_held_index_event_reports_a_shrunk_index_after_a_pass_1_failure(
+    tmp_path, monkeypatch,
+):
+    # Known, accepted limitation: a pass-1 failure on one case removes its
+    # defendants from the index entirely, so a name it shares with a
+    # SURVIVING case is no longer protected there either -- case-a binds the
+    # shared name instead of holding it, because case-b's occurrence of it
+    # was never read. Not fixed here (no in-run retry is in scope); this
+    # pins that the run log at least SURFACES the shrink -- `selected` vs
+    # `readable` in the `held_index` event -- rather than leaving `error=1`
+    # in the footer as the only signal something is off.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    shared = "कृष्ण प्रसाद यादव"
+    case_a = _case(slug="case-a",
+                   court_cases=["https://jawafdehi.org/courtcase/special/079-cr-0151"])
+    case_b = _case(slug="case-b",
+                   court_cases=["https://jawafdehi.org/courtcase/special/080-cr-0002"])
+    api = _MultiCaseApi(
+        [case_a, case_b],
+        {"079-cr-0151": {"detail": {"registration_date_ad": "2023-06-22"},
+                        "hearings": [DECIDED],
+                        "parties": [{"side": "defendant", "name": shared}]}},
+        fail_slugs=["case-b"])
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+               "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+
+    events = _events(tmp_path)
+    # Documents the gap: case-a binds instead of holding, because the index
+    # never saw case-b's occurrence of the shared name.
+    case_a_resolve = [e for e in events
+                      if e["step"] == "defendant_resolve" and e["slug"] == "case-a"]
+    assert case_a_resolve and case_a_resolve[0]["detail"].startswith("created: ")
+
+    index_events = [e for e in events if e["step"] == "held_index"]
+    assert len(index_events) == 1
+    assert "selected=2" in index_events[0]["detail"]
+    assert "readable=1" in index_events[0]["detail"]
+
+
+def test_the_held_index_event_warns_when_the_selection_is_narrowed(tmp_path, monkeypatch):
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    case_a = _case(slug="case-a",
+                   court_cases=["https://jawafdehi.org/courtcase/special/079-cr-0151"])
+    case_b = _case(slug="case-b",
+                   court_cases=["https://jawafdehi.org/courtcase/special/080-cr-0002"])
+    api = _MultiCaseApi(
+        [case_a, case_b],
+        {"079-cr-0151": {"detail": {"registration_date_ad": "2023-06-22"}},
+         "080-cr-0002": {"detail": {"registration_date_ad": "2023-06-22"}}})
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+               "--limit", "1", "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+    index_events = [e for e in _events(tmp_path) if e["step"] == "held_index"]
+    assert len(index_events) == 1
+    assert "WARNING" in index_events[0]["detail"]
+    assert "selected=1" in index_events[0]["detail"]
+
+
+def test_the_held_index_event_has_no_warning_for_an_unrestricted_run(tmp_path, monkeypatch):
+    # The companion: a wrong implementation that always prints the warning
+    # (regardless of selection) would still pass the test above but fail
+    # this one -- a plain bulk sweep over both cases, no --limit/--slug/
+    # --court-case/--batch-csv, must not carry it.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    case_a = _case(slug="case-a",
+                   court_cases=["https://jawafdehi.org/courtcase/special/079-cr-0151"])
+    case_b = _case(slug="case-b",
+                   court_cases=["https://jawafdehi.org/courtcase/special/080-cr-0002"])
+    api = _MultiCaseApi(
+        [case_a, case_b],
+        {"079-cr-0151": {"detail": {"registration_date_ad": "2023-06-22"}},
+         "080-cr-0002": {"detail": {"registration_date_ad": "2023-06-22"}}})
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+               "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+    index_events = [e for e in _events(tmp_path) if e["step"] == "held_index"]
+    assert len(index_events) == 1
+    assert "WARNING" not in index_events[0]["detail"]
+    assert "selected=2" in index_events[0]["detail"]
+
+
+def test_pass_2_reuses_the_cached_court_record_but_gets_a_fresh_etag(tmp_path, monkeypatch):
+    # The two load-bearing properties the brief warns against silently
+    # regressing: `get_case_with_etag` must fire ONCE PER PASS (a fresh ETag
+    # each time -- "optimising away the second read" would drop this to 1),
+    # and `get_courtcase` must fire only in pass 1 (dropping `court_record=`
+    # and re-reading in pass 2 would push this to 2).
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    api = _CliApi(
+        _case(),
+        detail={"registration_date_ad": "2023-06-22"}, hearings=[DECIDED],
+        parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव", "nes_id": YADAV}],
+    )
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--apply",
+               "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+    assert api.call_counts["get_case_with_etag"] == 2
+    assert api.call_counts["get_courtcase"] == 1
 
 
 def test_the_module_imports_without_django(tmp_path):

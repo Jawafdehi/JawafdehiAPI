@@ -49,6 +49,14 @@ alone is distributed to each defendant -- and only ever corrects an unfairly
 plain "Accused" label. `charged` is true by construction everywhere else: every
 case in this corpus is a Special Court `-CR-` case, so CIAA filed a charge sheet.
 
+THE HOLD IS SCOPED TO ONE RUN. `held_names` only sees a name on 2+ cases
+INSIDE the current selection, so `--limit`, `--slug`, `--court-case`, or a
+`--batch-csv` split can each shrink that selection below the cases sharing a
+name -- silently disabling the hold for exactly the pair it exists to catch.
+The run log states the index's scope (`step="held_index"`) and warns when the
+selection looks narrowed; an unrestricted or fiscal-year-scoped sweep is what
+actually makes the hold protective.
+
 Usage:
     uv run python -m casework.enrich_court_record --dry-run --verbose
 """
@@ -776,22 +784,22 @@ def _log_plan(logger, events, run_id, plan):
 
 
 def _held_report(held, court_records):
-    """One entry per held name: the cases it appears on and the defendant
-    rows behind it, so a human can rule on all of them without re-reading
-    the court record themselves.
+    """One entry per held name: its cases and the defendant rows behind it.
 
     Recomputed from `court_records` (the pass-1 cache) rather than collected
-    from `plan.rows` during pass 2, so a case that never reaches
-    `_accused_binds` -- wrong state, no `entities` key -- still shows up
-    here. The same `BINDABLE_CODES`/`is_defendant`/`party_name` filter as
-    `defendant_name_index` applies, so this cannot list a row that index
-    itself would have excluded.
+    from `plan.rows` -- a case that never reaches `_accused_binds` (wrong
+    state, no `entities` key) still needs to show up here, and re-applies
+    `defendant_name_index`'s own `BINDABLE_CODES` filter since `court_records`
+    holds every reference read, not just the bindable ones.
     """
     report = []
     for name, slugs in sorted(held.items()):
         rows = []
         for slug in sorted(slugs):
-            records, _ = court_records.get(slug, ([], []))
+            # `slug` came from `held`, which was built from `court_records`
+            # itself (see `main`) -- a miss here is a real bug, not a case
+            # this function should quietly render as having no rows.
+            records, _ = court_records[slug]
             for record in records:
                 if case_number_code(record["number"]) not in BINDABLE_CODES:
                     continue
@@ -808,9 +816,12 @@ def _held_report(held, court_records):
 
 
 def write_held_file(path, held, court_records, *, run_id):
-    """Write the held-names file: every cross-case name a human must rule
-    on before it can be bound. Devanagari unescaped, matching every other
-    casework output file."""
+    """Write the held-names file beside the review file.
+
+    Devanagari unescaped (`ensure_ascii=False`), matching every other
+    casework output file -- an escaped `\\u0915` cannot be reviewed.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"run_id": run_id, "held": _held_report(held, court_records)}
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
@@ -837,14 +848,12 @@ def main(argv=None):
     run_entities, stats = {}, {}
 
     # Pass 1: read every selected case's court record before planning any of
-    # them, so the held index sees every defendant in the run. A per-case
-    # index would hold a name on case A and bind it on case B -- the exact
-    # collapse this two-pass split exists to close (see the module
-    # docstring). A read failure here costs only that case: it is dropped
-    # from `readable_cases` and never reaches pass 2, the same way a pass-2
-    # read failure below drops a case from the write loop.
+    # them, so the held index sees every defendant in the run -- a per-case
+    # index would hold a name on case A and bind it on case B, the exact
+    # collapse this split exists to close. A read failure here costs only
+    # that case; it is dropped from `readable_cases` before pass 2 runs.
     court_records, readable_cases = {}, []
-    for case in cases:
+    for i, case in enumerate(cases, 1):
         slug = case.get("slug") or ""
         try:
             case_detail, _ = api.get_case_with_etag(slug)
@@ -856,9 +865,33 @@ def main(argv=None):
             continue
         readable_cases.append(case)
         court_records[slug] = court_record_for_case(api, case_detail)
+        # Pass 1 pays one HTTP round trip per case before any write happens,
+        # so a full-corpus run is silent for hours without this -- the same
+        # reason `CaseworkApi.iter_cases` narrates its own page fetches.
+        logger.info("pass 1: read %d/%d selected cases (%s)", i, len(cases), slug)
 
-    held = held_names(defendant_name_index(
-        {slug: records for slug, (records, _) in court_records.items()}))
+    name_index = defendant_name_index(
+        {slug: records for slug, (records, _) in court_records.items()})
+    held = held_names(name_index)
+
+    # A pass-1 failure shrinks the index by removing that case's defendants
+    # from it entirely -- not just that case's own hold coverage, but any
+    # OTHER case's protection for a name the two would have shared. There is
+    # no in-run fix for that (the case's own data is simply unread), so this
+    # is the visibility half: an operator can see readable < selected instead
+    # of inferring it from `error=N` in the footer. `--limit`/`--slug`/
+    # `--court-case`/`--batch-csv` narrow the SAME index deliberately, so the
+    # warning below applies regardless of why the count is small.
+    narrowed = bool(args.limit or args.slug or args.court_case or args.batch_csv)
+    index_detail = (f"selected={len(cases)}, readable={len(readable_cases)}, "
+                    f"names_in_index={len(name_index)}, held={len(held)}")
+    if narrowed:
+        index_detail += ("; WARNING: selection narrowed by --limit/--slug/"
+                         "--court-case/--batch-csv -- the held index only "
+                         "covers this run's cases, so a name shared with a "
+                         "case OUTSIDE this selection will not be held")
+    log_event(logger, events, run_id=run_id, stage=STAGE, slug="",
+              step="held_index", status="ok", detail=index_detail)
 
     # Pass 2: plan (and maybe write) every case against that SAME `held`
     # mapping. `get_case_with_etag` is re-read here for a FRESH ETag --
@@ -876,9 +909,14 @@ def main(argv=None):
             stats["error"] = stats.get("error", 0) + 1
             continue
 
+        # `court_records[slug]`, never `.get`: every slug in `readable_cases`
+        # was inserted into `court_records` in the same pass-1 iteration, so
+        # a miss here is a real bug -- falling back to `.get(slug)` would
+        # silently re-read a fresh, un-indexed court record and plan off it
+        # with no hold protection at all.
         plan = plan_case(api, case_detail, etag, live_prefixes=live_prefixes,
                          run_entities=run_entities, dry_run=args.dry_run,
-                         held=held, court_record=court_records.get(slug))
+                         held=held, court_record=court_records[slug])
         # `detail=` carries `plan.skips` even on a clean "selected": a case
         # can reach "would-patch"/"nothing-to-do" with a partially-unreadable
         # court record (some references 404, at least one did not), and the
@@ -914,11 +952,10 @@ def main(argv=None):
                  f"{len(case_detail.get('entities') or [])} bind(s)")
         note = "; ".join(plan.skips)
 
-        # The review row is added in EACH terminal branch below, carrying the
-        # status the case actually reached -- never `plan.status` (always
-        # "would-patch" here) written before the write was attempted. That
-        # was the bug: every row read `would-patch` even under `Mode:
-        # APPLIED`, because `review.add` used to run before `apply_plan`.
+        # Recorded in EACH terminal branch below with that branch's own
+        # outcome, not `plan.status` -- which stays "would-patch" here
+        # regardless of whether the case is applied, held back by
+        # --dry-run, or rejected.
         if plan.status == "nothing-to-do":
             # The one TERMINAL event this path gets. Without it the case ends on
             # `ok`-statused intermediates only and vanishes from the ledger
