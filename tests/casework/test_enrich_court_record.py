@@ -216,6 +216,22 @@ def test_a_dry_run_posts_nothing_but_reports_the_iri_it_would_use():
     assert api.posted == []
 
 
+def test_a_dry_run_admits_apply_could_refuse_this_bind():
+    # `dry_run` returns the pre-POST IRI without ever attempting the create,
+    # so it never reaches the `EntityAlreadyExists` handler an --apply run
+    # would hit on the COMMON path for a common name: this exact slug
+    # already belongs to a person the ladder declined to identify. The
+    # review file this row feeds is approved BEFORE --apply runs, so the
+    # reason must say a collision is possible, not imply this IRI is the
+    # one that will be bound.
+    api = _SearchApi(results=[])
+    got = resolve_defendant(api, "कृष्ण प्रसाद यादव", None, citation="",
+                            live_prefixes=["person"], run_entities={}, dry_run=True)
+    assert got.how == "created"
+    assert "refuse" in got.reason
+    assert "--apply" in got.reason
+
+
 def test_the_same_person_across_two_cases_creates_one_entity():
     api = _SearchApi(results=[], created={"@id": YADAV})
     run_entities = {}
@@ -560,6 +576,27 @@ def test_accused_binds_skips_a_non_prosecution_record_but_binds_a_prosecution_on
     assert [r["name"] for r in rows] == ["कृष्ण प्रसाद यादव"]
     assert len(skips) == 1
     assert "079-oa-0014" in skips[0] and "OA" in skips[0]
+
+
+def test_the_new_entity_citation_comes_from_the_first_bindable_record():
+    # Reviewer repro: `citation` used to read `records[0]` before the
+    # per-record filter ran, so a CR defendant's new entity could be cited
+    # to a writ (`OA`) material that never names them -- a false provenance
+    # claim on a public NES record. The OA reference is listed FIRST here on
+    # purpose, so only a fix that skips it when picking the citation (not
+    # just when binding) can pass.
+    oa_record = _record(number="079-oa-0014",
+                        parties=[{"side": "defendant", "name": "कुनै व्यक्ति"}])
+    oa_record["detail"]["material_id"] = "https://jawafdehi.org/material/court/special.079-oa-0014"
+    cr_record = _record(number="079-cr-0151",
+                        parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव"}])
+    cr_record["detail"]["material_id"] = "https://jawafdehi.org/material/court/special.079-cr-0151"
+    api = _SearchApi(results=[], created={"@id": YADAV})
+    items, rows, skips = _accused_binds(
+        api, _case(), [oa_record, cr_record],
+        live_prefixes=["person"], run_entities={}, dry_run=False, held={})
+    assert [i["nes_id"] for i in items] == [YADAV]
+    assert api.posted[0]["citation"] == "https://jawafdehi.org/material/court/special.079-cr-0151"
 
 
 def test_accused_binds_binds_the_pre_fy073_no_code_format():
@@ -1212,6 +1249,40 @@ def test_a_held_defendant_is_excluded_from_resolved_and_accused_counts(tmp_path,
     assert "1 name(s) held for review" in review_text
 
 
+def test_a_failed_resolution_is_not_counted_as_resolved_or_bound(tmp_path, monkeypatch):
+    # Reviewer repro, verbatim: parties `["कृष्ण प्रसाद यादव", "!!!", "???"]`
+    # produce exactly ONE bind item (the `nes_id` copy), but the old
+    # `resolved_count = len(plan.rows) - held_count` reported "2
+    # defendant(s) resolved" and `accused+2` -- it counted the `how="failed"`
+    # row (an unslugabble punctuation-only name) as resolved. `"!!!"` and
+    # `"???"` both normalise to "" (`normalise_name` strips all punctuation),
+    # so the per-case dedup in `_accused_binds` collapses them to ONE row --
+    # which is exactly why the real repro used two different symbols and
+    # still only produced a single extra row to miscount.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    api = _CliApi(
+        _case(),
+        detail={"registration_date_ad": "2023-06-22"}, hearings=[DECIDED],
+        parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव", "nes_id": YADAV},
+                 {"side": "defendant", "name": "!!!"},
+                 {"side": "defendant", "name": "???"}],
+    )
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+               "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+
+    bind_plan = [e for e in _events(tmp_path) if e["step"] == "bind_plan"]
+    assert any("1 defendant(s) resolved" in e["detail"] for e in bind_plan)
+    assert not any("2 defendant(s) resolved" in e["detail"] for e in bind_plan)
+
+    review_text = (tmp_path / "review.md").read_text(encoding="utf-8")
+    assert "accused+1" in review_text
+    assert "accused+2" not in review_text
+
+
 def test_a_held_only_nothing_to_do_case_is_not_recorded_as_already(tmp_path, monkeypatch):
     # The companion to `test_a_case_with_nothing_to_change_records_already_not_nothing`:
     # when the ONLY reason a case reaches "nothing-to-do" is a held name, the
@@ -1431,6 +1502,68 @@ class _MultiCaseApi(_CliApi):
 
     def get_court_case_entities(self, court, number, timeout=60):
         return self._courtcase_data[number].get("parties", [])
+
+
+class _EmptySlugApi:
+    """Two cases, deliberately both slug-less. `_MultiCaseApi` cannot express
+    this fixture at all -- it keys its own case map by slug, so two cases
+    sharing `""` would collide there first."""
+
+    def __init__(self, cases):
+        self._cases = cases
+
+    def iter_cases(self, params=None, timeout=60, progress=None):
+        yield from self._cases
+
+    def get_case_with_etag(self, slug, timeout=60):
+        raise AssertionError("a slug-less case must never reach a case read")
+
+    def get_courtcase(self, court, number, timeout=60):
+        raise AssertionError("a slug-less case must never reach a court read")
+
+    def list_hearings(self, court, number, timeout=60):
+        raise AssertionError("a slug-less case must never reach a court read")
+
+    def get_court_case_entities(self, court, number, timeout=60):
+        raise AssertionError("a slug-less case must never reach a court read")
+
+    def entity_prefixes(self, timeout=60):
+        return ["person"]
+
+    def patch_case(self, slug, *, fields=(), lists=(), timeout=60, if_match=None):
+        raise AssertionError("a slug-less case must never reach a patch")
+
+
+def test_two_slug_less_cases_do_not_collide_on_an_empty_key(tmp_path, monkeypatch):
+    # Reviewer repro: pass 1 did `slug = case.get("slug") or ""` with no
+    # guard, so two slug-less cases both keyed `court_records[""]`, both
+    # entered `readable_cases`, and pass 2 planned BOTH against whichever
+    # record set pass 1 wrote there last -- case B's court record reaching
+    # case A's `_accused_binds`. Each stub method below raises if pass 1
+    # ever gets far enough to call it, so this fails loudly rather than
+    # quietly proving nothing if the guard regresses.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    case_a = {"state": "DRAFT",
+             "court_cases": ["https://jawafdehi.org/courtcase/special/079-cr-0151"],
+             "entities": []}
+    case_b = {"state": "DRAFT",
+             "court_cases": ["https://jawafdehi.org/courtcase/special/080-cr-0002"],
+             "entities": []}
+    api = _EmptySlugApi([case_a, case_b])
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+               "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+
+    events = _events(tmp_path)
+    unreadable = [e for e in events if e["step"] == "court_read" and e["status"] == "unreadable"]
+    assert len(unreadable) == 2
+    assert all("no slug" in e["detail"] for e in unreadable)
+    # Neither case may reach planning: no `select`, `patch`, or a resolved
+    # `defendant_resolve` event of any kind should exist.
+    assert not any(e["step"] in ("select", "patch", "defendant_resolve") for e in events)
 
 
 def test_a_pass_1_read_failure_on_one_case_does_not_stop_the_run(tmp_path, monkeypatch):
@@ -1780,6 +1913,65 @@ def test_the_held_index_event_has_no_warning_for_an_unrestricted_run(tmp_path, m
     assert len(index_events) == 1
     assert "WARNING" not in index_events[0]["detail"]
     assert "selected=2" in index_events[0]["detail"]
+
+
+def test_the_held_index_event_states_it_cannot_see_published_binds(
+    tmp_path, monkeypatch,
+):
+    # Reviewer repro: bulk selection filters to `ENRICHABLE_STATES`, so a
+    # PUBLISHED case's confirmed accused binds are absent from the index
+    # unconditionally -- not because of `--limit`/a pass-1 failure, so this
+    # must appear even on a clean, unrestricted, un-shrunk run where neither
+    # WARNING branch fires. Before this fix the line said nothing about it,
+    # which reads as "the index is complete" when it structurally cannot be.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    case_a = _case(slug="case-a")
+    api = _MultiCaseApi(
+        [case_a],
+        {"079-cr-0151": {"detail": {"registration_date_ad": "2023-06-22"}}})
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+               "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+    index_events = [e for e in _events(tmp_path) if e["step"] == "held_index"]
+    assert len(index_events) == 1
+    assert "WARNING" not in index_events[0]["detail"]
+    assert "DRAFT" in index_events[0]["detail"] and "IN_REVIEW" in index_events[0]["detail"]
+    assert "PUBLISHED" in index_events[0]["detail"]
+
+
+def test_the_held_index_event_warns_when_fiscal_year_narrows_the_selection(
+    tmp_path, monkeypatch,
+):
+    # Reviewer repro: `narrowed` checked `--limit`/`--slug`/`--court-case`/
+    # `--batch-csv` but not `--fiscal-year` -- the selector an operator
+    # scoping a whole campaign is most likely to use. Two DRAFT cases in
+    # different fiscal years; `--fiscal-year 79` selects only one, so
+    # `selected=1` with nothing failing its pass-1 read (`shrunk` stays
+    # False) -- only the `narrowed` branch can produce this WARNING.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    case_a = _case(slug="case-a",
+                   court_cases=["https://jawafdehi.org/courtcase/special/079-cr-0151"])
+    case_b = _case(slug="case-b",
+                   court_cases=["https://jawafdehi.org/courtcase/special/080-cr-0002"])
+    api = _MultiCaseApi(
+        [case_a, case_b],
+        {"079-cr-0151": {"detail": {"registration_date_ad": "2023-06-22"}},
+         "080-cr-0002": {"detail": {"registration_date_ad": "2023-06-22"}}})
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+               "--fiscal-year", "79", "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+    index_events = [e for e in _events(tmp_path) if e["step"] == "held_index"]
+    assert len(index_events) == 1
+    assert "selected=1" in index_events[0]["detail"]
+    assert "readable=1" in index_events[0]["detail"]
+    assert "WARNING" in index_events[0]["detail"]
+    assert "--fiscal-year" in index_events[0]["detail"]
 
 
 def test_pass_2_reuses_the_cached_court_record_but_gets_a_fresh_etag(tmp_path, monkeypatch):

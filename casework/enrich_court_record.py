@@ -49,13 +49,19 @@ alone is distributed to each defendant -- and only ever corrects an unfairly
 plain "Accused" label. `charged` is true by construction everywhere else: every
 case in this corpus is a Special Court `-CR-` case, so CIAA filed a charge sheet.
 
-THE HOLD IS SCOPED TO ONE RUN. `held_names` only sees a name on 2+ cases
-INSIDE the current selection, so `--limit`, `--slug`, `--court-case`, or a
-`--batch-csv` split can each shrink that selection below the cases sharing a
-name -- silently disabling the hold for exactly the pair it exists to catch.
-The run log states the index's scope (`step="held_index"`) and warns when the
-selection looks narrowed; an unrestricted or fiscal-year-scoped sweep is what
-actually makes the hold protective.
+THE HOLD IS SCOPED TO ONE RUN, AND TO THE ENRICHABLE STATES. `held_names` only
+sees a name on 2+ cases INSIDE the current selection, so `--limit`, `--slug`,
+`--court-case`, `--batch-csv`, or a narrow `--fiscal-year` can each shrink
+that selection below the cases sharing a name -- silently disabling the hold
+for exactly the pair it exists to catch. An unrestricted sweep does not fix
+this the way it might seem to: `casework.common.select.select_cases` filters
+bulk selection to `ENRICHABLE_STATES` (DRAFT, IN_REVIEW), so a name already
+bound as accused on a PUBLISHED case is invisible to the index by
+construction, not by narrowing -- and PUBLISHED is exactly where a confirmed
+bind already lives. Widening the index past that state gate is a
+cost/coverage call for a human, not something this module defaults to. The
+run log states both limits every run (`step="held_index"`) and warns
+separately when the selection looks narrowed or a pass-1 read shrank it.
 
 Usage:
     uv run python -m casework.enrich_court_record --dry-run --verbose
@@ -81,7 +87,7 @@ from casework.common.cli import (
     setup_logging,
 )
 from casework.common.review import ReviewRow, build_review_file
-from casework.common.select import select_for_run
+from casework.common.select import ENRICHABLE_STATES, select_for_run
 from casework.court_record import (
     BINDABLE_CODES,
     case_number_code,
@@ -344,10 +350,20 @@ def resolve_defendant(api, name, row_nes_id, *, citation, live_prefixes,
 
     iri = build_entity_iri(PERSON_PREFIX, slug)
     if dry_run:
-        # POST nothing, but report the IRI an --apply run would use, so the
-        # printed patch is the one that would be sent.
+        # POST nothing, and report the IRI an --apply run would use IF
+        # nothing already owns this slug. That "if" is real: a dry run never
+        # reaches the `EntityAlreadyExists` handler below, so on the COMMON
+        # path for a common name -- this slug already belongs to a person
+        # the ladder declined to identify -- --apply refuses the bind this
+        # row reports as made. The review file is approved BEFORE --apply, so
+        # the reason says that plainly rather than implying the printed
+        # patch is guaranteed to be the one sent.
         run_entities[key] = iri
-        return Resolution(iri, "created", "would create")
+        return Resolution(iri, "created",
+                          "would create -- if this slug already belongs to "
+                          "another entity, --apply refuses the bind instead "
+                          "of using this IRI (a dry run has no network read "
+                          "to check that here)")
 
     # `slug` is sent explicitly, not left for the server to derive:
     # `normalize_authoring_payload` raises "slug is required" on a payload
@@ -503,7 +519,11 @@ def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run, 
     by anything this function alone can see.
     """
     outcome = bind_outcome(records)
-    citation = (records[0].get("detail") or {}).get("material_id", "") if records else ""
+    # The first BINDABLE record, never `records[0]`: a rejected reference
+    # (an `OA`/`RE`/writ) never names these defendants, so citing it would
+    # put a false provenance claim on the NES entity this creates.
+    bindable = [r for r in records if case_number_code(r["number"]) in BINDABLE_CODES]
+    citation = (bindable[0].get("detail") or {}).get("material_id", "") if bindable else ""
     items, rows, skips, seen = [], [], [], set()
     for record in records:
         code = case_number_code(record["number"])
@@ -716,13 +736,30 @@ _RUNG_WORDS = {"nes_id": "nes_id_copied", "exact": "exact_match",
                "created": "created", "failed": "failed", "held": "held"}
 
 
+def _rung_counts(rows):
+    """`(resolved_count, held_count)` over a plan's per-defendant rows.
+
+    Resolved means the ladder actually named an entity -- `how` in
+    `{"nes_id", "exact", "created"}` -- so a `"failed"` row (an unslugabble
+    name, a search error, a slug collision) counts as neither resolved nor
+    held. `len(rows) - held_count` alone still counts a failed row as
+    resolved, which is where "accused+N"/"N defendant(s) resolved" picked up
+    a phantom bind: a name a run never turned into an entity read the same
+    as one it did.
+    """
+    held = sum(1 for row in rows if row["how"] == "held")
+    resolved = sum(1 for row in rows if row["how"] not in ("held", "failed"))
+    return resolved, held
+
+
 def _log_plan(logger, events, run_id, plan):
-    """Emit the per-step events for one planned case. Returns the held count.
+    """Emit the per-step events for one planned case. Returns `(held, resolved)`.
 
     Every event here is intermediate and therefore `ok`-statused; see
     `_RUNG_WORDS` for why, and `main` for the terminal events that follow.
-    The held count is returned so `main` can subtract it from its own
-    "accused+N" and already-bound counts without recomputing `plan.rows`.
+    Both counts are returned so `main` can build its own "accused+N" and
+    already-bound text from the SAME numbers this summary line reports,
+    rather than recomputing them from `plan.rows` a second time.
 
     `run_id`/`stage`/`slug` are passed as explicit keywords on every call
     rather than once via a `**common` dict: `ty` cannot verify that a plain
@@ -732,9 +769,8 @@ def _log_plan(logger, events, run_id, plan):
     `enrich_related_entities.py`'s own `log_event` calls use the same
     explicit-keyword style for the identical reason.
     """
-    held_count = 0
+    resolved_count, held_count = _rung_counts(plan.rows)
     for row in plan.rows:
-        held_count += row["how"] == "held"
         log_event(logger, events, run_id=run_id, stage=STAGE, slug=plan.slug,
                   step="defendant_resolve", status="ok",
                   detail=f"{_RUNG_WORDS[row['how']]}: {row['name']} -> "
@@ -770,17 +806,17 @@ def _log_plan(logger, events, run_id, plan):
     # "resolved", not "on the court record": when `code_skips` is non-zero the
     # court record named at least one defendant this run declined to look at,
     # and the earlier count must not be read as "the record named none". A
-    # held row sits in `plan.rows` too but was never resolved, so it is
-    # subtracted out here as well.
+    # held row and a failed row both sit in `plan.rows` too but neither was
+    # resolved (see `_rung_counts`), so both are excluded here.
     summary = (f"{'merged' if plan.entities is not None else 'no_additions'}: "
-               f"{len(plan.rows) - held_count} defendant(s) resolved")
+               f"{resolved_count} defendant(s) resolved")
     if code_skips:
         summary += f"; {code_skips} court reference(s) skipped as non-prosecution"
     if held_count:
         summary += f"; {held_count} name(s) held for review"
     log_event(logger, events, run_id=run_id, stage=STAGE, slug=plan.slug,
               step="bind_plan", status="ok", detail=summary)
-    return held_count
+    return held_count, resolved_count
 
 
 def _held_report(held, court_records):
@@ -855,6 +891,18 @@ def main(argv=None):
     court_records, readable_cases = {}, []
     for i, case in enumerate(cases, 1):
         slug = case.get("slug") or ""
+        if not slug:
+            # Two slug-less cases would both key `court_records` on the SAME
+            # `""` -- pass 2 would then plan both against whichever record
+            # set landed there last, one case's court record reaching the
+            # other's `_accused_binds`. Refusing to index either closes that
+            # collision rather than picking a loser between them.
+            log_event(logger, events, run_id=run_id, stage=STAGE, slug="",
+                      step="court_read", status="unreadable",
+                      detail=f"pass 1: case {i} of {len(cases)} has no slug "
+                             "-- cannot be read or indexed")
+            stats["error"] = stats.get("error", 0) + 1
+            continue
         try:
             case_detail, _ = api.get_case_with_etag(slug)
         except Exception as exc:  # noqa: BLE001 - one case's read failure is not the run's
@@ -881,16 +929,28 @@ def main(argv=None):
     # is the visibility half: an operator can see readable < selected instead
     # of inferring it from `error=N` in the footer. The WARNING below fires
     # on EITHER cause of a small index -- a narrowed selection
-    # (--limit/--slug/--court-case/--batch-csv) or a pass-1 read failure --
-    # and names which one applied: an operator needs to tell "I asked for a
-    # subset" apart from "a read failed" to know whether a re-run would help.
-    narrowed = bool(args.limit or args.slug or args.court_case or args.batch_csv)
+    # (--limit/--slug/--court-case/--batch-csv/--fiscal-year) or a pass-1
+    # read failure -- and names which one applied: an operator needs to tell
+    # "I asked for a subset" apart from "a read failed" to know whether a
+    # re-run would help.
+    narrowed = bool(args.limit or args.slug or args.court_case or args.batch_csv
+                    or args.fiscal_year)
     shrunk = len(readable_cases) != len(cases)
+    # The index is ALSO narrower than "every case", unconditionally: bulk
+    # selection (`select_cases`) only ever returns `ENRICHABLE_STATES`, so a
+    # PUBLISHED case -- exactly the ones already carrying a confirmed accused
+    # bind -- is absent here regardless of any CLI flag. Stated every run,
+    # not folded into the WARNING branch below: an unrestricted, unshrunk
+    # sweep must not read as "the index sees everything".
     index_detail = (f"selected={len(cases)}, readable={len(readable_cases)}, "
-                    f"names_in_index={len(name_index)}, held={len(held)}")
+                    f"names_in_index={len(name_index)}, held={len(held)} "
+                    f"(covers only {'/'.join(ENRICHABLE_STATES)} cases -- a "
+                    "name already bound on a PUBLISHED case is invisible to "
+                    "this index)")
     reasons = []
     if narrowed:
-        reasons.append("selection narrowed by --limit/--slug/--court-case/--batch-csv")
+        reasons.append("selection narrowed by --limit/--slug/--court-case/"
+                       "--batch-csv/--fiscal-year")
     if shrunk:
         reasons.append(f"{len(cases) - len(readable_cases)} case(s) failed their "
                        "pass-1 read")
@@ -948,8 +1008,7 @@ def main(argv=None):
             continue
         log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
                   step="court_read", status="ok")
-        held_count = _log_plan(logger, events, run_id, plan)
-        resolved_count = len(plan.rows) - held_count
+        held_count, resolved_count = _log_plan(logger, events, run_id, plan)
 
         generated_parts = [f"{k}={v}" for k, v in plan.fields]
         if plan.entities is not None:
