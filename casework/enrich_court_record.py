@@ -879,19 +879,29 @@ def main(argv=None):
     # OTHER case's protection for a name the two would have shared. There is
     # no in-run fix for that (the case's own data is simply unread), so this
     # is the visibility half: an operator can see readable < selected instead
-    # of inferring it from `error=N` in the footer. `--limit`/`--slug`/
-    # `--court-case`/`--batch-csv` narrow the SAME index deliberately, so the
-    # warning below applies regardless of why the count is small.
+    # of inferring it from `error=N` in the footer. The WARNING below fires
+    # on EITHER cause of a small index -- a narrowed selection
+    # (--limit/--slug/--court-case/--batch-csv) or a pass-1 read failure --
+    # and names which one applied: an operator needs to tell "I asked for a
+    # subset" apart from "a read failed" to know whether a re-run would help.
     narrowed = bool(args.limit or args.slug or args.court_case or args.batch_csv)
+    shrunk = len(readable_cases) != len(cases)
     index_detail = (f"selected={len(cases)}, readable={len(readable_cases)}, "
                     f"names_in_index={len(name_index)}, held={len(held)}")
+    reasons = []
     if narrowed:
-        index_detail += ("; WARNING: selection narrowed by --limit/--slug/"
-                         "--court-case/--batch-csv -- the held index only "
-                         "covers this run's cases, so a name shared with a "
-                         "case OUTSIDE this selection will not be held")
+        reasons.append("selection narrowed by --limit/--slug/--court-case/--batch-csv")
+    if shrunk:
+        reasons.append(f"{len(cases) - len(readable_cases)} case(s) failed their "
+                       "pass-1 read")
+    if reasons:
+        index_detail += ("; WARNING: " + " AND ".join(reasons) +
+                         " -- the held index only covers readable, selected "
+                         "cases, so a name shared with a case OUTSIDE it "
+                         "will not be held")
     log_event(logger, events, run_id=run_id, stage=STAGE, slug="",
-              step="held_index", status="ok", detail=index_detail)
+              step="held_index", status="ok", detail=index_detail,
+              level=logging.WARNING if reasons else logging.INFO)
 
     # Pass 2: plan (and maybe write) every case against that SAME `held`
     # mapping. `get_case_with_etag` is re-read here for a FRESH ETag --

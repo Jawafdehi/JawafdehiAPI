@@ -956,6 +956,19 @@ def _events(tmp_path):
     return [json.loads(line) for line in paths[0].read_text().splitlines() if line]
 
 
+def _log_lines(tmp_path):
+    """Every line from the one `*.log` a run leaves in `tmp_path`.
+
+    Reads the rendered log file rather than `caplog`: `configure_run_logging`
+    sets `propagate = False` on its logger precisely so this logger's output
+    isn't doubled through root's handlers, which also means `caplog` (which
+    only ever attaches to root) never sees these records.
+    """
+    paths = list(tmp_path.glob("*.log"))
+    assert paths, "the run must leave a log file"
+    return paths[0].read_text(encoding="utf-8").splitlines()
+
+
 def test_a_dry_run_writes_the_events_file_and_no_patch(tmp_path, monkeypatch):
     monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
     monkeypatch.setenv("CASEWORK_API_USER", "dev")
@@ -1670,6 +1683,12 @@ def test_the_held_index_event_reports_a_shrunk_index_after_a_pass_1_failure(
     # pins that the run log at least SURFACES the shrink -- `selected` vs
     # `readable` in the `held_index` event -- rather than leaving `error=1`
     # in the footer as the only signal something is off.
+    #
+    # Review round 2 found the WARNING wired to the wrong condition: it only
+    # fired for a narrowed CLI selection (`--limit`/`--slug`/etc.), never for
+    # THIS scenario -- no selection flag at all, the shrink comes entirely
+    # from the pass-1 read failure. A wrong fix that keeps checking only the
+    # CLI flags would leave this test's WARNING assertions red.
     monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
     shared = "कृष्ण प्रसाद यादव"
     case_a = _case(slug="case-a",
@@ -1700,6 +1719,19 @@ def test_the_held_index_event_reports_a_shrunk_index_after_a_pass_1_failure(
     assert len(index_events) == 1
     assert "selected=2" in index_events[0]["detail"]
     assert "readable=1" in index_events[0]["detail"]
+    # No selection flag narrowed this run -- the WARNING must still fire,
+    # and must name the read failure, not the (absent) CLI-flag reason.
+    assert "WARNING" in index_events[0]["detail"]
+    assert "pass-1 read" in index_events[0]["detail"]
+    assert "--limit" not in index_events[0]["detail"]
+
+    # The marker must be visible to level-based filtering too, not only to
+    # someone grepping `detail` -- `log_event` takes a `level` kwarg for
+    # exactly this, and the rendered log line must actually carry it.
+    held_index_lines = [ln for ln in _log_lines(tmp_path) if "step=held_index" in ln]
+    assert held_index_lines
+    assert " WARNING [" in held_index_lines[0]
+    assert " INFO " not in held_index_lines[0]
 
 
 def test_the_held_index_event_warns_when_the_selection_is_narrowed(tmp_path, monkeypatch):
