@@ -64,12 +64,17 @@ class Stage:
     reads source text from -- if non-empty, `unmet_prerequisites` checks
     that at least one bound material of those types has a MARKDOWN link.
     `requires_fields` are case fields that must already be populated (e.g.
-    `tags` needs `bigo` filled in first). `requires_stages` is the DAG edge
-    set consumed by `order_stages`.
+    `tags` needs `bigo` filled in first). `requires_entity_roles` narrows that
+    for `entities`: a non-empty list is not enough when a stage needs a
+    PARTICULAR role -- production `entities` carry `accused, related, location,
+    respondent, petitioner, alleged`, so a case holding only `location` binds
+    satisfies "entities is non-empty" while giving a name-driven stage nothing to
+    work with. `requires_stages` is the DAG edge set consumed by `order_stages`.
     """
     name: str
     provides: Tuple[str, ...] = ()
     requires_fields: Tuple[str, ...] = ()
+    requires_entity_roles: Tuple[str, ...] = ()
     requires_materials: Tuple[str, ...] = ()
     requires_stages: Tuple[str, ...] = ()
     run: Optional[Callable] = None
@@ -183,6 +188,43 @@ STAGES = {
         requires_fields=("description",),
         requires_stages=("description",),
     ),
+    # `news` searches the open web for independent coverage, LLM-verifies each
+    # candidate is about THIS case, and binds the survivors as `evidence`.
+    #
+    # `requires_fields` is the whole search query, and every one of the three is
+    # a hard gate rather than an ordering preference:
+    #   - `title` because the query is built from the accused name, the location
+    #     and the organisation, all of which `news_search.build_queries` reads
+    #     off the title. 2,666 of 2,918 DRAFT titles are the importer's template
+    #     ("CIAA Special Court Case 076-CR-0182: बिनोद कुमार भूजेल समेत ५"),
+    #     which carries no विरुद्ध clause -- so `accused_names`' title fallback
+    #     returns the template string ITSELF as the "name" and every query is
+    #     garbage. That is why `card`, the sole owner of `title`, is a
+    #     `requires_stages` edge: this stage is worthless before it.
+    #   - `entities` because the accused NAMES are the query. The title fallback
+    #     exists for a real "X विरुद्ध Y" title, not for a template stub.
+    #     `requires_entity_roles=("accused",)` is what actually enforces that:
+    #     "entities is non-empty" passed a case carrying only `location` or
+    #     `related` binds, which then hit the template-title fallback and spent 12
+    #     searches plus a premium batch on garbage queries. The roles in
+    #     production are accused/related/location/respondent/petitioner/alleged.
+    #   - `court_cases` because the case number is what lets the verifier answer
+    #     "high" instead of "medium" (see `news_search.VERIFY_SYSTEM_PROMPT`),
+    #     and `high` is the bind bar.
+    #
+    # `requires_materials` is deliberately EMPTY. The press release is passed to
+    # the verifier as context when a converted one exists and its absence is
+    # recorded, exactly as the donor did ("No official press release text
+    # available", donor:997) -- gating on it would strand the single-document
+    # cases the brief specifically requires this stage to be sampled on.
+    #
+    # `provides` is ("evidence",) -- the same whole-list path `bind` writes.
+    "news": Stage(
+        "news", provides=("evidence",),
+        requires_fields=("title", "entities", "court_cases"),
+        requires_entity_roles=("accused",),
+        requires_stages=("card", "entities"),
+    ),
     # `court_record` reads the case's NGM court record over HTTP -- not a bound
     # document -- so unlike `entities` it needs no material and no `convert`
     # pass. That independence is the point: the accused path used to live inside
@@ -278,6 +320,19 @@ def unmet_prerequisites(stage, case):
     for f in stage.requires_fields:
         if case.get(f) in (None, "", [], {}):
             unmet.append(f"required field {f} is empty")
+    # Only when there ARE entities. An empty list is already reported by the
+    # `requires_fields` loop above, and adding "no entity with role accused
+    # (has: none)" next to "required field entities is empty" says the same thing
+    # twice and double-counts the case in the unmet totals.
+    entities = case.get("entities") or []
+    if stage.requires_entity_roles and entities:
+        roles = {(e.get("type") or "").lower()
+                 for e in entities if isinstance(e, dict)}
+        wanted = {r.lower() for r in stage.requires_entity_roles}
+        if not (roles & wanted):
+            unmet.append(
+                f"no entity with role {'/'.join(sorted(wanted))} "
+                f"(has: {', '.join(sorted(roles)) or 'none'})")
     return unmet
 
 

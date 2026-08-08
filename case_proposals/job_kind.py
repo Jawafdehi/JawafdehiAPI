@@ -249,11 +249,21 @@ def on_result(job, result: dict) -> None:
 
     try:
         # Passing a missing key's None into float() is the INTENT here: the
-        # `except (TypeError, ValueError)` immediately below is what handles both
-        # "absent" and "not a number", in one place. Narrowing first would just
+        # `except` immediately below is what handles "absent", "not a number" and
+        # "too big to be a float", in one place. Narrowing first would just
         # duplicate that branch.
+        #
+        # OverflowError is in the tuple because a JSON number is not bounded by
+        # what a float can hold. `json.loads` parses a few-hundred-digit integer
+        # into an unbounded Python int, and `float()` on that raises OverflowError — an
+        # ArithmeticError, so NOT covered by TypeError/ValueError. Without it a
+        # runaway integer escapes this handler, and because `jobs.queue.finalize`
+        # swallows whatever `on_result` raises, the result is a DONE job with no
+        # proposal and no recorded reason: the one outcome this module's docstring
+        # promises cannot happen. (A JSON `1e400` is different — it parses to
+        # float `inf`, converts fine, and is then caught by the range check below.)
         confidence = float(result.get("confidence"))  # ty: ignore[invalid-argument-type]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return _validation_failure(job, "confidence is missing or not a number")
     if not 0.0 <= confidence <= 1.0:
         return _validation_failure(job, "confidence out of range", confidence=confidence)

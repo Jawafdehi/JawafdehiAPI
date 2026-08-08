@@ -3,6 +3,7 @@ from rest_framework import serializers
 
 from materials.jsonld import court_case_material_iri
 
+from . import case_status as cs
 from .models import (
     BlacklistedFirm,
     CaseEntity,
@@ -27,6 +28,8 @@ class CourtCaseSerializer(serializers.ModelSerializer):
     # The court-case row's synthesized @id IRI (/courtcase/<court>/<case_number>),
     # distinct from the material IRI above. Derived from the composite key.
     courtcase_iri = serializers.CharField(source="iri", read_only=True)
+    # Whitelisted against cs.VERDICT_TYPES — see get_verdict_type below.
+    verdict_type = serializers.SerializerMethodField()
 
     class Meta:
         model = CourtCase
@@ -35,10 +38,28 @@ class CourtCaseSerializer(serializers.ModelSerializer):
             "registration_date_ad", "case_type", "case_status",
             "plaintiff", "defendant", "nes_id", "document_sources",
             "material_id", "courtcase_iri",
+            "verdict_type", "verdict_date_bs", "verdict_date_ad",
         ]
 
     def get_material_id(self, obj: CourtCase) -> str:
         return court_case_material_iri(obj.court_id, obj.case_number)
+
+    def get_verdict_type(self, obj: CourtCase) -> str | None:
+        """Expose ``verdict_type`` only when it is a real enum member.
+
+        The column carries no DB constraint and historic Supreme enrichment
+        wrote raw portal text into it (see ``cs.VERDICT_TYPES``). Publishing
+        that verbatim would state an outcome the court never reached — a bench
+        referral such as ``पूर्ण इजलासमा पेस हुने`` ("to be presented to the full
+        bench") reads like a disposition but means the case is still live.
+
+        Unrecognised values become ``None`` rather than leaking: the honest
+        public claim is "we hold no classified verdict for this docket", which
+        is what a null says. The raw value stays in the database for the DQ
+        backfill to repair.
+        """
+        value = (obj.verdict_type or "").strip()
+        return value if value in cs.VERDICT_TYPES else None
 
 
 class CourtCaseHearingSerializer(serializers.ModelSerializer):

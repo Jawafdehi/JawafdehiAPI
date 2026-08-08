@@ -549,6 +549,37 @@ class CaseworkApi:
         self._entity_doc_cache[ref] = document
         return document
 
+    def create_material(self, doc, material_type, timeout=60):
+        """Upsert one material from a JSON-LD document. `POST /api/materials/`.
+
+        The server (`materials/views.py::material_by_iri`) takes either a bare
+        JSON-LD doc or the `{"material": ..., "material_type": ...}` envelope and
+        is NGM-role gated. The envelope is sent explicitly rather than letting
+        the server infer the type from `additionalType`/`@type`: `news` maps to a
+        plain `NewsArticle` with no `additionalType`, so inference has nothing
+        distinctive to read and a mis-inferred `material_type` lands in a
+        promoted, indexed column.
+
+        UPSERT, NOT CREATE. Re-posting the same `@id` overwrites that row rather
+        than erroring, which is what makes a re-run of the news enricher safe:
+        the ident is derived from the article
+        (`casework.news_search.news_material_ident`), so the second run rewrites
+        the same document instead of minting a duplicate.
+
+        A WRITE, so `_request`'s guard applies -- this refuses any non-loopback
+        host unless `allow_remote_writes=True`. The news enricher additionally
+        refuses off-loopback at its own call site regardless of that flag; see
+        `casework/enrich_news_articles.py::_require_loopback`.
+        """
+        body = json.dumps({"material": doc, "material_type": material_type},
+                          ensure_ascii=False).encode("utf-8")
+        url = self.base_url + "/materials/"
+        with self._request("POST", url, data=body,
+                           headers=self._headers("application/json"),
+                           timeout=timeout) as r:
+            raw = r.read().decode()
+        return json.loads(raw) if raw.strip() else {}
+
     def _patch(self, slug, ops, timeout=60, if_match=None):
         """The choke point for FIELD writes (`patch_field`, `replace_list`) --
         NOT "every write": `convert.py`'s `upload_markdown` writes via a

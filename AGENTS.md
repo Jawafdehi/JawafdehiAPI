@@ -29,14 +29,24 @@ suite that *errors* rather than skips when the stack is down.
 **Baseline the suite on your untouched branch and compare against that**, rather
 than against a number written down here — the totals move whenever upstream lands
 tests, and a stale figure here would just make a green run look wrong. What is
-stable is the shape: green, a handful of skips, exactly one warning.
+stable is the shape: green, and a handful of skips.
 
 The skips are `materials/tests/test_patch_concurrency_postgres.py`, which needs a
 real Postgres `ngm` alias AND `DJANGO_SETTINGS_MODULE=config.settings` — see that
 module's docstring; `settings_test` hardcodes sqlite, so they can never run on the
-default gate. The one warning is upstream's own un-awaited `_drain_tasks`
-coroutine in `case_events`, not something this tree introduced. **A second
-warning is a real signal** — see the note under Conventions.
+default gate.
+
+**The warning count depends on whether `staticfiles/` exists, so baseline it in
+the same tree you will compare in.** With the directory present the suite settles
+at one warning — upstream's own un-awaited `_drain_tasks` coroutine in
+`case_events`, not something this tree introduced. Without it, whitenoise emits
+`UserWarning: No directory at: .../staticfiles/` from nearly every test that
+builds a Django handler, which is worth hundreds. `staticfiles/` is a
+`collectstatic` artifact and is gitignored, so a FRESH clone or worktree does not
+have one and shows the large number. Re-derive it in one step if you doubt this:
+run `uv run pytest -q newsletter/tests/test_api.py` either side of
+`mkdir staticfiles` and watch the warnings go to zero. Do not go looking for what
+you broke; make the directory, or just compare like for like.
 
 Run one test: `uv run pytest tests/api/test_public_api.py -k name`. Security suite
 only: `uv run pytest -m security`.
@@ -65,25 +75,39 @@ now, beyond ty's defaults: `invalid-argument-type`, `not-subscriptable`,
 plus `possibly-unresolved-reference` and `possibly-missing-import`, which ty
 ships OFF and which found real bugs.
 
-Two families remain exempt: `unresolved-attribute` (the one genuine plugin gap —
-implicit FK `_id`, reverse accessors, `get_user_model()`) and `unresolved-import`
-(optional lazily-imported deps; permanent). Tests and a list of named source
-files are scoped out of the four new families via `[[tool.ty.overrides]]` —
-**deleting an entry from that list is how a file opts in**, and only once
-`ty check <file>` is already 0.
+One family remains exempt tree-wide: `unresolved-attribute` (the one genuine
+plugin gap — implicit FK `_id`, reverse accessors, `get_user_model()`).
+`unresolved-import` used to be the second, and is now ON with four named files
+scoped out instead — two genuinely-optional deps absent from the venv, two
+django-stubs re-export gaps. A tree-wide ignore there bought silence about typos
+and nothing else: a misspelled module resolves to nothing and blows up at import
+time in whatever environment first runs that path.
 
-**The measured cost of every exemption lives in `pyproject.toml`, next to the
-config it justifies — not here.** That is deliberate: a number is only useful
-where you can act on it, and a count in this file rots silently while a count
-beside the `include =` list is read by whoever is about to delete an entry. Each
-block records how it was measured, so re-derive rather than trust.
+Tests and a list of named source files are scoped out of the four new families via
+`[[tool.ty.overrides]]` — **deleting an entry from that list is how a file opts
+in**, and only once `ty check <file>` is already 0.
+
+**Costs and the recipe for re-deriving them live in `pyproject.toml`, next to the
+config they justify — not here.** A number is only useful where you can act on it,
+and a count in this file rots silently while a count beside the `include =` list is
+read by whoever is about to delete an entry.
+
+Which counts survived is itself the durable lesson, and it is a three-way split.
+A figure scoped to an explicit file list moves when someone edits the list it sits
+beside, so it stays honest — the two debt blocks keep theirs. A count in the past
+tense about a finished change ("these six annotations removed 91 diagnostics")
+describes an event, not a state, so it cannot go stale either. A whole-tree total
+of the CURRENT state has neither anchor: three of those were written down, and all
+three were wrong within two rebases. Those are gone, replaced by the command that
+reproduces them.
 
 **The gate's diagnostic set is a function of the resolved DEPENDENCY set.** This
-is the trap most likely to waste your afternoon. Families like
-`unresolved-import` are exempt, so before a package resolves, everything
-downstream of it infers as `Unknown` and no rule can fire on it. Promote that
-package into the main dependency set and its consumers become checked code
-overnight — so `ty check` can go red in files nobody edited. It happened here:
+is the trap most likely to waste your afternoon. Until a package resolves,
+everything downstream of it infers as `Unknown` and no rule can fire on it —
+which is still true for the four files whose imports are exempted per-file, so
+enabling `unresolved-import` did not close this. Promote that package into the
+main dependency set and its consumers become checked code overnight — so
+`ty check` can go red in files nobody edited. It happened here:
 PR #427 moved `markitdown`, `httpcore` and `likhit` out of extras, which
 surfaced findings in `review/converter.py` and `materials/sourcing/ppmo/ocr.py`,
 both untouched for weeks. **Re-measure after a dependency change; do not assume
@@ -180,10 +204,14 @@ fallback path to add.
   set `FORMS_URLFIELD_ASSUME_HTTPS`; that transitional setting is itself deprecated
   and warns on assignment (verified: `django/conf/__init__.py:239`). Swapping the
   field class needs a state-only `AlterField` migration (see `cases/migrations/0055`).
-- **The suite must stay at one warning.** It was 916 before 2026-08-04 (98% one
-  repeated whitenoise `UserWarning`); the 1 that remains is upstream's un-awaited
-  `_drain_tasks` coroutine in `case_events`. A *second* new warning is a real
-  signal; keep it that way rather than letting volume rebuild.
+- **The suite stays at one warning — in a tree that has `staticfiles/`.** The
+  repeated whitenoise `UserWarning` that used to dominate (98% of ~916) is
+  suppressed by the directory existing, not by a code fix, and the directory is a
+  gitignored `collectstatic` artifact. So the invariant holds for a working clone
+  and NOT for a fresh worktree, where the count is back in the hundreds. See the
+  note under Tests. What remains in a `staticfiles/`-bearing tree is upstream's
+  un-awaited `_drain_tasks` coroutine in `case_events`. A *second* new warning
+  there is a real signal; keep it that way rather than letting volume rebuild.
 
 ## Working model
 
@@ -222,14 +250,31 @@ do not push to it.
   `cases/api_views.py` is still a 1989-line module even after the split.
 - **`ty` is clean and gated** — the debt this bullet used to list is gone. The
   `__str__`-returning-`CharField` family evaporated with django-stubs; the rest
-  were fixed. Keep reading its output rather than dismissing it, because that pass
-  found more real bugs: a SECOND Optional-`response.text` in `case_scraper.py` (the
-  phase-2 structuring call, one function below the phase-1 one already fixed);
-  `build_convert_payload` annotated `Optional[dict]` while all three of its failure
-  paths `raise`; `_die()` missing `-> NoReturn`, which made six reads genuinely
-  possibly-unbound; a `get_form` override silently dropping Django's `change`; and
-  `case_events.bus` passing a possibly-None loop *after* building the coroutine,
-  orphaning it.
+  were fixed. Keep reading its output rather than dismissing it. What that pass
+  actually turned up, sorted by whether runtime behaviour changed — the distinction
+  matters, because an earlier version of this bullet ran all of it together and
+  claimed more than was true:
+  - **Behaviour changed.** `case_events.bus` built the publish coroutine as an
+    argument to `run_coroutine_threadsafe` and only then passed a possibly-None
+    loop, so a publish before the bus started raised, left the coroutine unawaited,
+    and lost the message. Now the loop is checked first and the coroutine is closed
+    by hand if the handoff throws.
+  - **Unhandled `None` on a live path.** A SECOND Optional-`response.text` in
+    `case_scraper.py` (the phase-2 structuring call, one function below the phase-1
+    one already fixed). The scrape failed either way; what changed is that a blocked
+    candidate now says so instead of raising a pydantic error about the schema.
+  - **Annotation-only — runtime identical before and after.** `_die()` missing
+    `-> NoReturn` (it always raised; the six reads were only *statically*
+    possibly-unbound), and `build_convert_payload` annotated `Optional[dict]` while
+    all three of its failure paths `raise`.
+  - **Not a bug at all**, recorded because the claim outlived its correction: this
+    bullet used to say a `get_form` override silently dropped Django's `change`. It
+    did not. `_changeform_view` passes `change` as a keyword, so a `**kwargs`-only
+    override forwards it untouched — verified with a spy on `ModelAdmin.get_form`,
+    which reports `change=True` for both the old and the new signature. Spelling the
+    parameter out is a readability and typing change only. The same overstatement is
+    baked into the merged commit message for the gate and into PR #428's body, and
+    cannot be edited out of the former.
 - **Two real defects sit behind the MCP type debt** (found 2026-08-05 while
   gating ty over PR #427; each wants its own PR, neither is a typing fix):
   `jawafdehi_mcp/tools/ngm_extract.py` `_validate_environment` is annotated
@@ -243,10 +288,14 @@ do not push to it.
   also why ty reports most of that file — `all()` does not narrow.
 - **The remaining type debt is enumerated, not vague** — read the
   `[[tool.ty.overrides]]` blocks in `pyproject.toml`, which name every file and
-  carry the per-block measurement and reasoning. The THIRD block is source files
-  predating the gate (the first is `urls.py`, the second tests); the FOURTH is
-  everything PR #427 brought in. Nearly all of it is two shapes: bs4 attribute
-  values (`str | AttributeValueList | None`) used as plain `str`, and unnarrowed
+  carry the per-block reasoning. Find a block by its opening comment, not by
+  position — this list used to identify them by ordinal, and the ordinals went
+  stale the moment a block was inserted above them. The two that hold actual debt
+  are the SOURCE-files one (files predating the gate) and the PR #427 one (the MCP
+  server, which merged while ty was still advisory); the rest are permanent
+  exemptions — `urls.py`, tests, and two `unresolved-import` blocks.
+  Nearly all the debt is two shapes: bs4 attribute values
+  (`str | AttributeValueList | None`) used as plain `str`, and unnarrowed
   Optionals. The `dict(...)`-splat lever — annotating a heterogeneous carrier dict
   `dict[str, Any]` so a typed constructor stops unioning every field — is the
   biggest single win available and is mostly spent.

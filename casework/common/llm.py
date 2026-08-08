@@ -16,13 +16,13 @@ import os
 # These values are NOT judgements about how expensive/cheap a stage "feels" --
 # they mirror the donor's actual `tier=` arguments to `invoke_text`/
 # `invoke_with_tools`, verified at donor commit 0321a85:
-#   enrich_missing_bigo.py:446      tier="premium"
-#   enrich_tags.py:1088             tier="cheap"
-#   enrich_timeline.py:518          tier="premium"
-#   enrich_allegations.py:350       tier="premium"
-#   enrich_related_entities.py:421  tier="premium"
-#   enrich_description.py:576       tier="premium"
-#   enrich_card.py:337              tier="cheap"
+#   enrich_missing_bigo.py       tier="premium"
+#   enrich_tags.py               tier="cheap"
+#   enrich_timeline.py           tier="premium"
+#   enrich_allegations.py        tier="premium"
+#   enrich_related_entities.py   tier="premium"
+#   enrich_description.py        tier="premium"
+#   enrich_card.py               tier="cheap"
 TIERS = {
     "bigo": "premium",
     "tags": "cheap",
@@ -30,14 +30,45 @@ TIERS = {
     "allegations": "premium",
     "entities": "premium",
     "description": "premium",
-    # `card` is cheap on the donor's own authority (enrich_card.py:337) and on
+    # `card` is cheap on the donor's own authority (`enrich_card.py`) and on
     # the merits: it fetches no source document, only summarising a
     # `description` already on the case. NOTE the donor's OTHER title writer,
-    # the standalone `enrich_title.py`, used tier="premium" (line 275) for the
+    # the standalone `enrich_title.py`, used tier="premium" for the
     # same no-fetch inputs -- the two donors disagreed. `enrich_title.py` folds
     # into this stage as `--only title`, and the brief resolves the conflict in
     # favour of cheap. See `casework/enrich_card.py`'s deviation 2.
     "card": "cheap",
+    # `news` is premium, and unlike every other entry here that is a MEASURED
+    # choice rather than an inherited one. It was moved to cheap on cost and
+    # moved back when the measurement came in.
+    #
+    # This is the tier of ONE call. Three of the stage's four are already cheap
+    # -- query generation, Devanagari names, and the gate that sees EVERY
+    # candidate. The fourth is the DECISION: it returns the relevance verdict
+    # and the confidence `Verdict.is_bindable` gates on, i.e. whether to
+    # publicly link a named person to a corruption case.
+    #
+    # Same 20 labelled pairs, same code path, one run each, 2026-08-07, via
+    # `tests/casework/test_news_verifier_live.py`:
+    #
+    #     haiku  (cheap)    1 false positive of 10     3 missed of 10
+    #     sonnet (premium)  0 false positives of 10    2 missed of 10
+    #
+    # The false positive is pair 12: case 080-CR-0174 against an article about
+    # the same accused's OTHER corruption case. haiku answered `high` on
+    # defendant + institution + corruption, which this stage's own rubric grades
+    # MEDIUM -- precisely what the `confidence == "high"` bar exists to refuse,
+    # and a reproduction of one of the two live production mis-binds the
+    # labelled set was built from. sonnet rejects it. So the failure is the
+    # MODEL's, not the prompt's, which is the one thing a single-model run could
+    # not have told us.
+    #
+    # Cost, since that was the reason to move it: premium here is CHEAPER than
+    # the alternative that was on the table. Forcing quality with `--model
+    # sonnet` sets both tiers, dragging the gate up too; this entry lifts only
+    # the decision and leaves the gate cheap. Re-measure with the live test
+    # before changing it again -- do not re-argue it from first principles.
+    "news": "premium",
     # Registered because `test_stage_names_match_llm_tier_names` pins the pair,
     # not because a model runs. `court_record` makes ZERO LLM calls -- a run
     # that spends no tokens is its success case, not a shortfall.

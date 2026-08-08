@@ -29,6 +29,8 @@ from jawafdehi_shared.search.opensearch import (
     make_client,
 )
 
+from .analytics import normalize_query
+
 logger = logging.getLogger("jawafdehi.search")
 
 # Result ``type`` token  ->  the index that holds it + the owning source_app.
@@ -321,6 +323,9 @@ def build_query(
 
     body: dict[str, Any] = {
         "size": page_size,
+        # Count past OpenSearch's default 10,000-hit cap so ``count`` in the
+        # envelope is exact rather than a "gte" lower bound presented as exact.
+        "track_total_hits": True,
         # Deterministic order (chosen by ``sort``, always iri-tiebroken) so
         # search_after pages are stable + complete.
         "sort": _sort_spec(sort),
@@ -619,6 +624,7 @@ class SearchService:
 
         return {
             "query": q,
+            "normalized_query": normalize_query(q),
             "lang": lang,
             "sort": sort,
             "page": page,
