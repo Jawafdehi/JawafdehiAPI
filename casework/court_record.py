@@ -103,9 +103,13 @@ def is_defendant(party):
 def party_name(party):
     """The party's name, stripped, or "" when the row carries none.
 
-    Shared with `is_defendant` for the same reason: the de-dup on both paths
-    keys on this exact string, so one path stripping and the other not would
-    make the same person two entities.
+    Shared with `is_defendant` so the two paths cannot disagree on WHICH string
+    a party's name is. They no longer de-dup on the same key, though:
+    `defendant_names` keys on this exact string, while
+    `enrich_court_record._accused_binds` keys on `normalise_name` of it, so that
+    two punctuation variants of one name on one case collapse to a single row
+    and match the held-name index. Strictly coarser, and benign only because
+    `defendant_names` is off the enricher path.
     """
     return (party.get("name") or "").strip()
 

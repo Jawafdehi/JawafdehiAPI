@@ -1069,12 +1069,45 @@ def test_get_courtcase_hits_the_composite_path(monkeypatch):
 def test_list_hearings_follows_pages_by_number(monkeypatch):
     api = CaseworkApi("http://127.0.0.1:48010", token="t")
     pages = {
-        1: {"results": [{"hearing_date_ad": "2024-06-04"}] * 100},
-        2: {"results": [{"hearing_date_ad": "2024-06-03"}]},
+        1: {"results": [{"hearing_date_ad": "2024-06-04"}] * 100, "next": "?page=2"},
+        2: {"results": [{"hearing_date_ad": "2024-06-03"}], "next": None},
     }
     monkeypatch.setattr(api, "get", lambda path, params=None, timeout=60: pages[params["page"]])
     rows = api.list_hearings("special", "079-CR-0151")
     assert len(rows) == 101
+
+
+def test_list_hearings_keeps_paging_when_a_short_page_still_carries_next(monkeypatch):
+    # The production shape, and the bug this pins. `config.settings` configures
+    # plain `PageNumberPagination`, which defines no `page_size_query_param`, so
+    # the `page_size=100` this method sends is IGNORED and every page comes back
+    # at PAGE_SIZE (20). Exiting on `len(batch) < 100` therefore stopped after
+    # page 1 on every case: 3 of 77 sampled FY078/079 cases carry more than 20
+    # hearings (special/078-CR-0100 has 27), and a deciding `फैसला` row in the
+    # dropped tail silently changes `end_date` and `bind_outcome`.
+    api = CaseworkApi("http://127.0.0.1:48010", token="t")
+    pages = {
+        1: {"results": [{"hearing_date_ad": "2024-01-01", "case_status": "स्थगित"}] * 20,
+            "next": "https://api.jawafdehi.org/api/courtcases/special/078-CR-0100/hearings?page=2"},
+        2: {"results": [{"hearing_date_ad": "2024-06-04", "case_status": "फैसला"}] * 7,
+            "next": None},
+    }
+    monkeypatch.setattr(api, "get", lambda path, params=None, timeout=60: pages[params["page"]])
+    rows = api.list_hearings("special", "078-CR-0100")
+    assert len(rows) == 27
+    # The deciding rows live only on page 2 -- a length-based exit drops them all.
+    assert any(r["case_status"] == "फैसला" for r in rows)
+
+
+def test_list_hearings_stops_on_an_empty_page_even_if_next_lies(monkeypatch):
+    # A `next` that points past the end must not spin forever.
+    api = CaseworkApi("http://127.0.0.1:48010", token="t")
+    pages = {
+        1: {"results": [{"hearing_date_ad": "2024-06-04"}] * 20, "next": "?page=2"},
+        2: {"results": [], "next": "?page=3"},
+    }
+    monkeypatch.setattr(api, "get", lambda path, params=None, timeout=60: pages[params["page"]])
+    assert len(api.list_hearings("special", "079-CR-0151")) == 20
 
 
 def test_patch_case_sends_scalars_and_a_whole_list_in_one_request(monkeypatch):

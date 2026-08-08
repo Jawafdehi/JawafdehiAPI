@@ -148,6 +148,21 @@ def test_a_row_carrying_an_nes_id_is_a_pure_copy():
     assert api.posted == []
 
 
+def test_a_row_nes_id_that_is_not_a_person_is_refused():
+    # Rungs 2 and 3 can only ever produce a `person`, so rung 1 is the single
+    # way a non-person IRI could reach an `accused` bind -- an office named as
+    # the accused individual. Not a dead path: the FY078/079 cohort carries no
+    # `nes_id` at all, but `special/080-cr-0111` was backfilled with 185 of them.
+    api = _SearchApi()
+    office = "https://jawafdehi.org/entity/organization/malpot-karyalaya-jhapa"
+    got = resolve_defendant(api, "मालपोत कार्यालय झापा", office, citation="",
+                            live_prefixes=["person"], run_entities={}, dry_run=True)
+    assert got.nes_id == ""
+    assert got.how == "failed"
+    assert "not a person entity" in got.reason
+    assert api.posted == []
+
+
 def test_one_exact_person_match_binds():
     # A COMPLETE window with one hit is the clean case: nothing else can be
     # hiding, so the match is safe to bind.
@@ -2041,6 +2056,30 @@ def test_pass_2_reuses_the_cached_court_record_but_gets_a_fresh_etag(tmp_path, m
     assert rc == 0
     assert api.call_counts["get_case_with_etag"] == 2
     assert api.call_counts["get_courtcase"] == 1
+
+
+def test_a_dry_run_does_not_re_read_a_case_for_an_etag_it_cannot_use(
+    tmp_path, monkeypatch,
+):
+    # Pass 2's second read exists ONLY for a fresh If-Match ETag, and a dry run
+    # never PATCHes -- so on --dry-run it is a wasted request per case, ~2,900
+    # on a full-corpus sweep against a measured 4,470/hour budget. The --apply
+    # test above pins that the re-read is still unconditional when it matters.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    api = _CliApi(
+        _case(),
+        detail={"registration_date_ad": "2023-06-22"}, hearings=[DECIDED],
+        parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव", "nes_id": YADAV}],
+    )
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+               "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+    assert api.call_counts["get_case_with_etag"] == 1
+    assert api.call_counts["get_courtcase"] == 1
+    assert api.patch_calls == []
 
 
 def test_the_module_imports_without_django(tmp_path):

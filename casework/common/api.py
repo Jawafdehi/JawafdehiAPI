@@ -407,7 +407,15 @@ class CaseworkApi:
 
         Pages by page NUMBER and ignores the response's `next` URL, for the same
         reason `get_court_case_entities` does: `get()` concatenates path onto
-        base_url, so an absolute `next` would produce a doubled prefix.
+        base_url, so an absolute `next` would produce a doubled prefix. Its
+        PRESENCE is still the termination signal, though -- a short page is not
+        the end. `config.settings` configures plain `PageNumberPagination`,
+        which defines no `page_size_query_param`, so `page_size` is IGNORED and
+        every page is `PAGE_SIZE` (20) rows. Exiting on `len(batch) < 100`
+        therefore returned page 1 and stopped on EVERY case: 3 of 77 sampled
+        FY078/079 cases carry more than 20 hearings (max 27), and a deciding
+        `फैसला` row sitting in the dropped tail silently changes `end_date` and
+        `bind_outcome`.
         """
         path = (f"/courtcases/{urllib.parse.quote(str(court), safe='')}"
                 f"/{urllib.parse.quote(str(number), safe='')}/hearings")
@@ -416,7 +424,7 @@ class CaseworkApi:
             data = self.get(path, {"page": page, "page_size": 100}, timeout=timeout)
             batch = data.get("results") or []
             rows.extend(batch)
-            if len(batch) < 100:
+            if not batch or not data.get("next"):
                 return rows
             page += 1
 

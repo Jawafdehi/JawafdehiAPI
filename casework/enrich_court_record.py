@@ -316,6 +316,15 @@ def resolve_defendant(api, name, row_nes_id, *, citation, live_prefixes,
     """
     row_nes_id = (row_nes_id or "").strip()
     if row_nes_id and is_valid_entity_iri(row_nes_id):
+        # `_is_person` too, not just a well-formed IRI: rungs 2 and 3 can only
+        # ever produce a `person`, so without this rung 1 is the one way a
+        # non-person IRI reaches an `accused` bind -- an office or a company
+        # named as the accused individual. Not dead: this cohort carries no
+        # `nes_id` at all, but `special/080-cr-0111` was backfilled with 185.
+        if not _is_person(row_nes_id):
+            return Resolution("", "failed",
+                              f"the court row's nes_id {row_nes_id} is not a "
+                              f"{PERSON_PREFIX} entity")
         return Resolution(row_nes_id, "nes_id")
 
     try:
@@ -902,6 +911,11 @@ def main(argv=None):
     # collapse this split exists to close. A read failure here costs only
     # that case; it is dropped from `readable_cases` before pass 2 runs.
     court_records, readable_cases = {}, []
+    # Dry runs only. Pass 2 re-reads each case for a FRESH ETag, but a dry run
+    # never PATCHes, so that ETag is read and discarded -- one wasted request
+    # per case, ~2,900 on a full-corpus dry run against a measured 4,470/hour
+    # budget. Kept empty under --apply so the re-read there is unconditional.
+    dry_run_details = {}
     for i, case in enumerate(cases, 1):
         slug = case.get("slug") or ""
         if not slug:
@@ -925,6 +939,8 @@ def main(argv=None):
             stats["error"] = stats.get("error", 0) + 1
             continue
         readable_cases.append(case)
+        if args.dry_run:
+            dry_run_details[slug] = case_detail
         court_records[slug] = court_record_for_case(api, case_detail)
         # Pass 1 pays one HTTP round trip per case before any write happens,
         # so a full-corpus run is silent for hours without this -- the same
@@ -983,14 +999,21 @@ def main(argv=None):
     # read: it is cached from pass 1 and passed straight into `plan_case`.
     for case in readable_cases:
         slug = case.get("slug") or ""
-        try:
-            case_detail, etag = api.get_case_with_etag(slug)
-        except Exception as exc:  # noqa: BLE001 - one case's read failure is not the run's
-            log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
-                      step="court_read", status="unreadable",
-                      detail=f"{type(exc).__name__}")
-            stats["error"] = stats.get("error", 0) + 1
-            continue
+        if slug in dry_run_details:
+            # Dry run: reuse pass 1's read. The ETag is deliberately "" because
+            # nothing here will send an If-Match -- `apply_plan` is unreachable
+            # under --dry-run, and handing back a real ETag would imply this
+            # path could write.
+            case_detail, etag = dry_run_details[slug], ""
+        else:
+            try:
+                case_detail, etag = api.get_case_with_etag(slug)
+            except Exception as exc:  # noqa: BLE001 - one case's read failure is not the run's
+                log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
+                          step="court_read", status="unreadable",
+                          detail=f"{type(exc).__name__}")
+                stats["error"] = stats.get("error", 0) + 1
+                continue
 
         # `court_records[slug]`, never `.get`: every slug in `readable_cases`
         # was inserted into `court_records` in the same pass-1 iteration, so
