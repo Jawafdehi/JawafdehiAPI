@@ -4,19 +4,10 @@
 from a case's CIAA press-release markdown, at the premium tier, and writes ONLY
 `key_allegations` (`api.patch_field(slug, "key_allegations", allegations)`).
 
-BRIEF-VS-DONOR DIFFERENCE (see module docstring for the full writeup): the
-task-14 brief asked for a `normalise_missing_details(value) -> str | None`
-helper and treated `missing_details` as a second field this stage writes.
-Neither exists in the donor at commit `0321a85` -- `git log --all -p --
-casework/enrich_allegations.py` never mentions `missing_details` anywhere in
-this script's history, and the 367-line donor writes exactly one field.
-`STAGES["allegations"].provides == ("key_allegations", "missing_details")`
-in `casework/common/pipeline.py` traces back to `task-11-brief.md`, written
-before this donor was ever recovered. This test file does NOT implement or
-test `normalise_missing_details` (it would be an invented function with no
-donor basis -- exactly the trap flagged for this task), and instead pins the
-donor's real behavior: `key_allegations` is the only field ever PATCHed
-(`test_only_key_allegations_field_is_ever_patched`).
+`missing_details` is NOT this stage's field -- it belongs to
+`casework/enrich_description.py`, which has the verdict in hand. This stage only
+ever reads the press release. `test_only_key_allegations_field_is_ever_patched`
+pins that.
 
 The `TestDonorFidelity` class re-derives `SYSTEM_PROMPT` / `USER_PROMPT_TEMPLATE`
 directly from the donor at commit `0321a85` (via `git show` + `ast.literal_eval`,

@@ -5,55 +5,48 @@ Ported from the deleted `casework/enrich_description.py` (recovered at donor com
 `0321a85`, 619 lines). Reads a case's charge sheet, CIAA press release and Special
 Court verdict entirely over the Jawafdehi HTTP API and asks the premium LLM tier for
 the अभियोगदावी / बयान / फैसला structure of https://github.com/Jawafdehi/JawafdehiAPI/issues/199.
-Never touches the database directly -- writes go through `CaseworkApi.patch_field`,
+Never touches the database directly -- writes go through `CaseworkApi.patch_fields`,
 which this project's binding constraint restricts to loopback (`127.0.0.1:48010`).
 
 It is the field production is emptiest on: 188 of 3,003 cases carry a description.
 
-ONE FIELD. This script writes `description` and NOTHING else -- see the three
-deliberate deviations from the donor below.
+TWO FIELDS, ONE CALL. This script writes `description` and `missing_details`,
+and nothing else. The second rides in the SAME generate call because that call
+has already paid to summarise the verdict -- `summarize_verdict` bills one
+premium request per 150,000-char chunk, and batch verdicts run to a 141,000-char
+median. A standalone stage would re-read the same फैसला from scratch, roughly
+doubling the batch's premium spend.
+
+Derivation stays independent: `missing_details` comes from which materials are
+BOUND plus which documents the sources cite, never from the finished narrative.
+`casework/common/missing_details.py` holds that logic, LLM- and API-free.
+
+The gates DIFFER, so `build` returns None on cases this stage still describes:
+`description` needs press release OR verdict, `missing_details` needs the verdict
+specifically. Press-only cases are reported as `no verdict bound`, not an error.
 
 DEVIATION 1 -- THE DONOR'S TITLE PASS IS DROPPED. The donor regenerated
-`Case.title` in the same LLM call, gated by `--skip-title`, because it had the
-source documents in hand and the title came free. `title` now has exactly one
-owner, `casework/enrich_card.py`. So `--skip-title`, the `TITLE_RULES` import from
-`casework/common/titles.py`, `validate_title`, `title_has_headcount` and the
-`"title"` key in the response contract are all gone, and `STAGES["description"]
-.provides` is `("description",)` alone. What that buys: one prompt holding the
-title rules instead of two, one answer to "why does this case have this title",
-and a title that can be regenerated without re-fetching charge sheets. What it
-costs: one extra cheap LLM call per case, since `enrich_card` reads the
-`description` this script just wrote. `test_never_writes_title` pins it.
+`Case.title` in the same call, gated by `--skip-title`. `title` now has exactly
+one owner, `casework/enrich_card.py`, so `--skip-title`, `validate_title`,
+`title_has_headcount` and the `"title"` response key are all gone. Costs one
+extra cheap call per case, since `enrich_card` reads the description this script
+wrote. `test_never_writes_title` pins it.
 
 DEVIATION 2 -- `invoke_text`, NOT the donor's `invoke_with_tools` +
-`convert_date` tool. Two reasons, in order of weight:
-  1. The donor passed the tool but never told the model it existed. Compare
-     `enrich_timeline.py`'s `EXTRACTION_SYSTEM_PROMPT`, which spends a 12-line
-     "DATE CONVERSION TOOL (MANDATORY)" block on it, against the donor's
-     description prompt, which mentions dates only under QUALITY RULES and never
-     names the tool. An unadvertised tool in a prose-generation call is a
-     tool-loop the model has no reason to enter.
-  2. This stage emits prose, not structured dates. Every date reaching it is
-     already converted -- the FACTUAL TIMELINE block carries `date` (AD) and
-     `date_bs` written by `enrich_timeline`, which DID use the tool -- or is
-     copied verbatim from a source document, where the correct behaviour is to
-     leave the BS date exactly as written.
-A single-turn call is also the cheaper shape: `invoke_with_tools` bills every
-turn of the loop, and this is the most expensive call in the casework pipeline.
-The safety pairing for removing the tool is one added QUALITY RULE forbidding the
-model from converting dates itself; without it, dropping the tool would invite
-exactly the silent BS<->AD arithmetic error the tool existed to prevent.
+`convert_date` tool. The donor passed the tool but never told the model it
+existed, and this stage emits prose, not structured dates: every date reaching it
+is already converted by `enrich_timeline` or copied verbatim from a source, where
+leaving the BS date as written is correct. The paired safety change is the
+QUALITY RULE forbidding the model from converting dates itself -- without it,
+dropping the tool invites the silent BS<->AD arithmetic error it prevented.
 
-DEVIATION 3 -- THE DONOR'S NGM SECTION IS NOT PORTED. The donor fetched
-`GET /ngm/court_case/{special:NNN-CR-NNNN}` and formatted it as a prompt block.
-That path is doubly dead and `casework/enrich_timeline.py` documents the
-measurements: the colon-prefixed `special:` reference it scans for matches 0 of
-109 real `court_cases` entries (they are full IRIs), and the endpoint itself was
-removed in the 2026-07-01 hard cut of `config/urls.py`. `enrich_timeline` kept its
-copy dead-but-intact for a port-vs-donor A/B that this task has no part in;
-porting an unreachable HTTP call a second time would add a code path no run can
-enter. Prompt-identical on current data either way: the donor's `{ngm_section}`
-renders to the empty string whenever the fetch returns None, which is always.
+DEVIATION 3 -- THE DONOR'S NGM SECTION IS NOT PORTED. It fetched
+`GET /ngm/court_case/{special:NNN-CR-NNNN}`, a doubly dead path: the
+colon-prefixed reference matches 0 of 109 real `court_cases` entries (they are
+full IRIs), and the endpoint was removed in the 2026-07-01 cut of `config/urls.py`.
+Prompt-identical either way -- the donor's `{ngm_section}` renders empty whenever
+the fetch returns None, which is always. `casework/enrich_timeline.py` has the
+measurements.
 
 Usage:
     uv run python -m casework.enrich_description --dry-run
@@ -67,7 +60,6 @@ import json
 import logging
 import sys
 import time
-from typing import Optional
 
 from casework.common.api import CaseworkApi
 from casework.common.cli import (
@@ -83,6 +75,9 @@ from casework.common.cli import (
 from casework.common.format import format_bigo, format_entities, format_list
 from casework.common.llm import bootstrap, tier_for
 from casework.common.materials import source_chunks
+from casework.common.missing_details import accept_items
+from casework.common.missing_details import build as build_missing_details
+from casework.common.missing_details import has_verdict, held_summary
 from casework.common.parse import parse_object_response
 from casework.common.pipeline import (
     COURT_TYPES,
@@ -206,8 +201,51 @@ QUALITY RULES:
 - This is an official public record drawn from government/court documents; do not
   soften, editorialise, or add commentary. Neutral, factual tone only.
 
+MISSING DOCUMENTS — a SECOND, separate output, independent of the description:
+
+The source documents REFER to other documents — witness depositions, defendant
+statements, contracts, audit reports, bid papers, bank records, court orders. Some
+of those we hold; most we do not. Your job is the DIFFERENCE.
+
+You are told below, under DOCUMENTS WE ALREADY HOLD, exactly what is in our
+evidence. List the documents the sources REFERENCE OR RELY ON that are NOT in
+that list, up to 4, most significant first.
+
+Rules:
+- Each item must be a document the sources actually mention, cite, or quote.
+  If you cannot point to where it is referenced, leave it out.
+- NEVER list something that appears in DOCUMENTS WE ALREADY HOLD.
+- Be SPECIFIC. Name the document, with its date, party, phase, or number when the
+  sources give one. Specificity is the whole value of this output.
+- Short Nepali noun phrases (देवनागरी), not sentences. No "… छैन।" — the page
+  already frames these as missing. Keep each under ~15 words.
+- Do NOT list: अन्य आवश्यक स्रोतहरू, थप आधार र प्रमाण, अन्य प्रमाण, or any
+  catch-all filler. An item a reader cannot go and look for is worthless.
+- Do NOT list the अभियोगपत्र/आरोपपत्र, and do NOT comment on whether an appeal
+  (पुनरावेदन) was filed. Both are already handled.
+- Do not criticise the court's reasoning or the CIAA's investigation. This output
+  is about our archive's completeness, not the case's merits.
+- Return [] when the sources reference nothing beyond what we hold. An empty list
+  is a perfectly good answer; padding it with vague items is not.
+
+Good (all from published cases):
+- ३ चरणका ठेक्का सम्झौताका प्रतिलिपि
+- मूल सम्झौता (2011) र पुरक सम्झौता
+- लेखापरीक्षण प्रतिवेदन र महालेखापरीक्षकको टिप्पणी
+- सुनिल पौडेलको UOB Singapore बैंक खातामा जम्मा भएको लेनदेन विवरण र मिति
+- मिति २०८१।१२।१८ गते विशेष अदालतबाट भएको आदेश
+- प्रतिवादीहरूले अदालतमा गरेको बयानको ब्याहोरा
+- साक्षीहरूको वकपत्र
+
+Bad:
+- अन्य आवश्यक स्रोतहरू।  →  filler; names nothing
+- थप आधार र प्रमाण पुष्टि गर्ने प्रमाणिक स्रोत  →  filler
+- अभियोगपत्र  →  already handled
+- प्रेस विज्ञप्ति  →  we hold it; check the list before you write
+- अदालतले पर्याप्त प्रमाण मूल्याङ्कन गरेको छैन।  →  a criticism, and a sentence
+
 OUTPUT FORMAT — return ONLY a single JSON object, no markdown fences, no prose:
-{"description": "### क) …\\n…"}
+{"description": "### क) …\\n…", "missing_documents": []}
 """
 
 EXTRACTION_USER_PROMPT = """\
@@ -230,6 +268,11 @@ section ग, so prefer it over inferring the split from the source prose. Any ot
 trailing text is an INTERNAL caseworker note: read it for context, never quote or
 paraphrase it, and never treat it as a published fact.
 {entities}
+
+DOCUMENTS WE ALREADY HOLD (our complete evidence for this case — anything the
+sources reference that is NOT here is what `missing_documents` must report; never
+list one of these):
+{held_documents}
 
 SOURCE DOCUMENTS (press release, charge sheet, verdict — the factual basis for
 the description; quote specifics from here):
@@ -338,7 +381,11 @@ def _assemble_source_text(chunks, invoke_text, usage):
 
 
 def _generate_description(detail, court_number, source_text, invoke_text, usage):
-    """One premium-tier call. Returns the description string, or None."""
+    """One premium-tier call. Returns `(description, documents)`.
+
+    `documents` is raw model output, unvalidated on purpose --
+    `missing_details.accept_items` owns every acceptance rule.
+    """
     prompt = EXTRACTION_USER_PROMPT.format(
         case_title=detail.get("title") or "",
         # UPPERCASED. `select.court_number()` reads the number off the canonical
@@ -354,6 +401,7 @@ def _generate_description(detail, court_number, source_text, invoke_text, usage)
         key_allegations=format_list(detail.get("key_allegations")),
         timeline=json.dumps(detail.get("timeline") or [], ensure_ascii=False),
         entities=format_entities(detail.get("entities")),
+        held_documents=held_summary(detail),
         source_text=source_text,
     )
     response_text = invoke_text(
@@ -366,20 +414,69 @@ def _generate_description(detail, court_number, source_text, invoke_text, usage)
     return _parse_description_response(response_text)
 
 
-def _parse_description_response(response_text: str) -> Optional[str]:
-    """Pull `description` out of the JSON object reply.
+def _parse_description_response(response_text: str):
+    """Pull `description` and `missing_documents` out of the JSON object reply.
 
-    A `title` key in the reply is IGNORED, not written -- see deviation 1. The
-    model can still emit one (the OUTPUT FORMAT block does not ask for it, but
-    models volunteer keys); silently dropping it here is what makes the
-    single-owner rule hold even against a chatty response.
+    `description` may be None; `documents` is always a list. `description` is the
+    REQUIRED key for the object scan -- requiring `missing_documents` too would
+    reject every correct empty-list reply. A volunteered `title` key is ignored,
+    which is what holds the single-owner rule against a chatty response.
     """
     obj = parse_object_response(response_text, "description")
     if obj is None:
         log.warning("No JSON object with a description found in the LLM response")
-        return None
+        return None, []
     description = (obj.get("description") or "").strip()
-    return description or None
+    return (description or None), _coerce_documents(obj.get("missing_documents"))
+
+
+def _coerce_documents(raw) -> list:
+    """Normalise the `missing_documents` value into a list of strings.
+
+    Tolerant on SHAPE, strict on content -- content rules live in
+    `missing_details.reject_item`, where they can be tested. A bare string, a
+    quoted `"[]"`, or a newline-joined blob is a formatting slip, not a wrong
+    answer, so rejecting it would throw away a correct finding over punctuation.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        log.warning("missing_documents was %s, not a list -- ignored", type(raw).__name__)
+        return []
+    out = []
+    for entry in raw:
+        if not isinstance(entry, str):
+            continue
+        # Split a newline-joined blob, and strip any enumerator the model added
+        # despite being asked for plain phrases.
+        for line in entry.splitlines():
+            line = line.strip().lstrip("-–•").strip()
+            for mark in ("क)", "ख)", "ग)", "घ)", "ङ)", "च)",
+                         "१.", "२.", "३.", "४.", "५.",
+                         "1.", "2.", "3.", "4.", "5."):
+                if line.startswith(mark):
+                    line = line[len(mark):].strip()
+                    break
+            # Checked PER ENTRY, not just on a bare string. A model that answers
+            # `["कुनै छैन"]` means "nothing"; treated as an item it publishes the
+            # word "none" as a missing document, and no content rule catches it.
+            if _is_nothing(line):
+                continue
+            if line:
+                out.append(line)
+    return out
+
+
+# "no documents" spelled as text rather than as an empty list.
+_NOTHING = ("", "null", "none", "n/a", "na", "-", "[]", "{}", "nil")
+_NOTHING_NE = ("कुनै छैन", "कुनै पनि छैन", "छैन", "कुनै कागजात छैन")
+
+
+def _is_nothing(line: str) -> bool:
+    text = (line or "").strip().strip("।.")
+    return text.lower() in _NOTHING or text in _NOTHING_NE
 
 
 def _has_substantial_description(case: dict) -> bool:
@@ -505,8 +602,18 @@ def main(argv=None):
 
         before = (detail.get("description") or "").strip()
 
-        if _has_substantial_description(detail) and not args.force:
+        # PER FIELD, because this stage writes two. A description-only check
+        # skipped every case that already had a description before `missing_details`
+        # was even computed -- and `provides` names both fields, so an orchestrator
+        # reading it would call exactly those cases complete. The description itself
+        # is still never overwritten without --force; see the write below.
+        description_done = _has_substantial_description(detail)
+        missing_done = bool((detail.get("missing_details") or "").strip())
+        if description_done and (missing_done or not has_verdict(detail)) \
+                and not args.force:
             reason = f"description already {len(before):,} chars"
+            if not missing_done:
+                reason += "; missing_details needs a verdict"
             report.record(slug, "description", "already", reason)
             review.add(ReviewRow(slug=slug, status="already", before=before, note=reason))
             log_event(logger, paths["events"], run_id=run_id, stage="description",
@@ -569,7 +676,7 @@ def main(argv=None):
             continue
 
         try:
-            description = _generate_description(
+            description, documents = _generate_description(
                 detail=detail,
                 court_number=court_number(detail),
                 source_text=source_block,
@@ -598,17 +705,130 @@ def main(argv=None):
             log_event(logger, paths["events"], run_id=run_id, stage="description",
                       slug=slug, step="generate", status="skipped",
                       detail="LLM returned no description", level=logging.WARNING)
+            if documents:
+                # This stage abandons the case here, so the findings die with it.
+                # Unlogged they are indistinguishable from a model that found
+                # nothing -- the exact confusion the rejection logging exists for.
+                log_event(logger, paths["events"], run_id=run_id, stage="description",
+                          slug=slug, step="documents", status="discarded",
+                          detail=f"{len(documents)} item(s) lost with the blank "
+                                 "description: " + " | ".join(documents),
+                          level=logging.WARNING)
             continue
 
+        before_missing = (detail.get("missing_details") or "").strip()
+
+        # A PARTIAL FETCH IS THE TRAP HERE. `has_verdict` is BINDING-based, so a
+        # case whose court order failed to fetch still reports True and
+        # `held_summary` still tells the model we hold the verdict -- so it is asked
+        # to diff the sources against an inventory it could not read, and the result
+        # would be published. The description path has `source_note` for this; this
+        # field falls back to the deterministic floor, which is binding-based and
+        # therefore still true.
+        #
+        # Read off `chunks`, NOT off `text_unmet`'s prose. Parsing `f"{mtype}: …"`
+        # out of a human-readable reason meant rewording that message silently
+        # disabled the guard, and a case with two court orders where one failed
+        # tripped it even though a verdict HAD been read.
+        verdict_read = any(mtype in COURT_TYPES for mtype, _, _ in chunks)
+        verdict_lost = has_verdict(detail) and not verdict_read
+
+        blocked = None
+        if not has_verdict(detail):
+            blocked = "no verdict bound"
+        elif verdict_lost:
+            blocked = "verdict source was not fetched; deterministic floor only"
+        elif before_missing:
+            blocked = f"missing_details already {len(before_missing):,} chars"
+
+        # Every rejection is logged with the rule that fired: a silently dropped
+        # item looks identical to a model that found nothing, and those need
+        # opposite follow-up (prompt problem vs sourcing problem). Rejections
+        # never block the write -- the floor alone is a publishable value.
+        kept, rejected = accept_items(documents, detail)
+        for item, reason in rejected:
+            log_event(logger, paths["events"], run_id=run_id, stage="description",
+                      slug=slug, step="documents", status="rejected",
+                      detail=f"{reason}: {item[:120]}", level=logging.WARNING)
+        if kept and blocked:
+            # "accepted" followed by "skipped: <reason>" reads as a contradiction,
+            # and this log exists to tell a prompt problem from a sourcing problem.
+            log_event(logger, paths["events"], run_id=run_id, stage="description",
+                      slug=slug, step="documents", status="discarded",
+                      detail=f"{len(kept)} item(s) found but {blocked}: "
+                             + " | ".join(kept), level=logging.WARNING)
+        elif kept:
+            log_event(logger, paths["events"], run_id=run_id, stage="description",
+                      slug=slug, step="documents", status="accepted",
+                      detail=f"{len(kept)} of {len(documents)}: " + " | ".join(kept))
+        elif documents:
+            log_event(logger, paths["events"], run_id=run_id, stage="description",
+                      slug=slug, step="documents", status="none-kept",
+                      detail=f"all {len(documents)} proposed item(s) rejected",
+                      level=logging.WARNING)
+
+        missing = build_missing_details(detail, [] if verdict_lost else kept)
+
+        # NEVER TOUCH A NON-EMPTY VALUE -- not even with --force. Two things share
+        # this field and neither can be safely merged into:
+        #  - the importer's truncation guard
+        #    (`CIAADraftCaseService._flag_truncated_roster`) appends
+        #    `ACCUSED LIST INCOMPLETE`, and losing it would let a case publish with
+        #    a knowingly truncated accused list;
+        #  - the 61 hand-written published values.
+        # Appending was tried and withdrawn. A repeat --force run reads run 1's own
+        # output back as `before_missing`, and the floor items alone are not a
+        # usable signature for "this stage wrote it" -- they were copied verbatim
+        # FROM hand-written cases. So any append duplicates the floor and restarts
+        # the enumeration (`क) … ख) … क) … ख) …`), unbounded across runs, and the
+        # concatenation never passes back through `build` so MAX_CHARS never sees
+        # it. Refusing costs a manual clear; appending corrupts the page.
+        if missing and before_missing:
+            log_event(logger, paths["events"], run_id=run_id, stage="description",
+                      slug=slug, step="missing_details", status="already",
+                      detail=f"missing_details already {len(before_missing):,} chars; "
+                             "not appending (clear the field by hand to regenerate)"
+                             + (" -- --force does NOT override this" if args.force else ""),
+                      level=logging.WARNING if args.force else logging.INFO)
+            missing = None
+        elif not missing:
+            # Distinct reasons needing different follow-up: a press-only case wants
+            # sourcing, a case with both floor items satisfied wants nothing.
+            log_event(logger, paths["events"], run_id=run_id, stage="description",
+                      slug=slug, step="missing_details", status="skipped",
+                      detail=blocked or "no gap to report")
+
         detail_msg = f"description={len(description):,} chars"
+        if missing:
+            detail_msg += f", missing_details={len(missing):,} chars"
         log_event(logger, paths["events"], run_id=run_id, stage="description", slug=slug,
                   step="generate", status="ok", detail=detail_msg)
+
+        # `generated` stays the DESCRIPTION ALONE. The review file prints
+        # `len(generated)` in its summary table and section heading under a header
+        # naming `description`, and that before/after size comparison is what flags
+        # a truncated or runaway description -- folding a second field into it
+        # over-reported by the length of that field.
+        #
+        # missing_details rides in `note` instead, which the file prints per case.
+        # Discarded findings go there too: without them, "found four documents and
+        # threw them away" looks identical to "found nothing" to the person
+        # approving the run, which is the confusion the reject logging exists to
+        # prevent.
+        md_note = ""
+        if missing:
+            md_note = "missing_details → " + " · ".join(missing.splitlines())
+        elif blocked and kept:
+            md_note = (f"missing_details NOT written ({blocked}); discarded: "
+                       + " · ".join(kept))
+        elif blocked:
+            md_note = f"missing_details NOT written ({blocked})"
+        note = "; ".join(filter(None, (source_note, md_note)))
 
         if args.dry_run:
             report.record(slug, "description", "would-enrich", detail_msg)
             review.add(ReviewRow(slug=slug, status="would-enrich", before=before,
-                                 generated=description, sources=fed,
-                                 note=source_note))
+                                 generated=description, sources=fed, note=note))
             log_event(logger, paths["events"], run_id=run_id, stage="description",
                       slug=slug, step="write", status="would-enrich", detail=detail_msg)
             continue
@@ -626,18 +846,36 @@ def main(argv=None):
             report.record(slug, "description", "error", reason)
             review.add(ReviewRow(slug=slug, status="error", before=before,
                                  generated=description, sources=fed,
-                                 note="; ".join(filter(None, (reason, source_note)))))
+                                 note="; ".join(filter(None, (reason, note)))))
             log_event(logger, paths["events"], run_id=run_id, stage="description",
                       slug=slug, step="write", status="error", detail=reason,
                       level=logging.ERROR)
             continue
 
         try:
-            api.patch_field(slug, "description", description, if_match=etag)
+            # ONE conditional request for both fields. `patch_fields`, not two
+            # `patch_field` calls: the second call's ETag would already be stale
+            # from the first write, so a loop cannot stay conditional.
+            #
+            # The description is omitted when the case already had a substantial
+            # one and --force was not passed. That is what lets the per-field gate
+            # above admit a described case for its EMPTY missing_details without
+            # silently rewriting prose a human may have approved.
+            pairs = []
+            if not description_done or args.force:
+                pairs.append(("description", description))
+            if missing:
+                pairs.append(("missing_details", missing))
+            if not pairs:
+                log_event(logger, paths["events"], run_id=run_id, stage="description",
+                          slug=slug, step="write", status="skipped",
+                          detail="nothing left to write")
+                report.record(slug, "description", "already", "nothing left to write")
+                continue
+            api.patch_fields(slug, pairs, if_match=etag)
             report.record(slug, "description", "enriched", detail_msg)
             review.add(ReviewRow(slug=slug, status="enriched", before=before,
-                                 generated=description, sources=fed,
-                                 note=source_note))
+                                 generated=description, sources=fed, note=note))
             log_event(logger, paths["events"], run_id=run_id, stage="description",
                       slug=slug, step="write", status="enriched", detail=detail_msg)
         except Exception as exc:  # noqa: BLE001 - a PATCH failure is recorded per-case and the run continues
@@ -645,7 +883,7 @@ def main(argv=None):
             review.add(ReviewRow(slug=slug, status="error", before=before,
                                  generated=description, sources=fed,
                                  note="; ".join(filter(None, (
-                                     f"PATCH failed: {exc}", source_note)))))
+                                     f"PATCH failed: {exc}", note)))))
             log_event(logger, paths["events"], run_id=run_id, stage="description",
                       slug=slug, step="write", status="error", detail=str(exc),
                       level=logging.ERROR)
