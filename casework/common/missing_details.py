@@ -6,8 +6,8 @@ referenced in the sources but absent from our evidence.
 
 Every constant below is measured against the 61 PUBLISHED cases carrying this
 field, read 2026-08-07. Items are short Nepali NOUN PHRASES naming a document,
-not sentences. Rationale and the corpus numbers:
-`docs/superpowers/specs/2026-08-07-missing-details-enricher-design.md` (meta-repo).
+not sentences. The rationale, the corpus numbers and the two known limits are in
+the pull request that added this module.
 """
 
 import re
