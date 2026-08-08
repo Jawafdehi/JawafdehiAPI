@@ -13,6 +13,8 @@ import urllib.error
 import pytest
 
 from casework.court_record import (
+    BINDABLE_CODES,
+    UNPARSEABLE,
     case_number_code,
     court_record_for_case,
     court_ref,
@@ -219,8 +221,32 @@ def test_no_court_reference_reports_why():
     ("93-068-0194", ""),
     ("081-RE-1730", "RE"),
     # No hyphens at all: a `.split("-")[1]` implementation would raise
-    # IndexError here instead of falling back to "".
-    ("0791234", ""),
+    # IndexError here instead of falling back to a safe value. Not the
+    # legacy shape either (no hyphens at all), so this is UNPARSEABLE, not
+    # the pre-FY073 "" bucket -- an allow-list miss, not a silent prosecution.
+    ("0791234", UNPARSEABLE),
 ])
 def test_case_number_code_classifies_the_court_case_type(number, expected):
     assert case_number_code(number) == expected
+
+
+@pytest.mark.parametrize("number", [
+    "W-081-0037",     # a writ code, but not between two hyphens -- must not
+                      # fall into the pre-FY073 "" bucket and bind as a
+                      # prosecution.
+    "RE-081-1730",    # code-first ordering: no `-<letters>-` segment exists.
+    "079_CR_0151",    # underscores, not hyphens: not the legacy shape either.
+    "०८१-आरई-१७३०",   # Devanagari digits and letters: `_CODE_SEGMENT` only
+                      # matches ASCII letters, and the middle segment is not
+                      # `[0-9]+`, so this cannot be the legacy shape.
+])
+def test_case_number_code_refuses_to_guess_an_unparseable_number(number):
+    # Reviewer repro: all four used to return "" (BINDABLE), inverting the
+    # allow-list rule for a number the parser genuinely cannot read.
+    code = case_number_code(number)
+    assert code == UNPARSEABLE
+    assert code not in BINDABLE_CODES
+
+
+def test_the_legacy_all_digit_shape_still_classifies_as_a_prosecution():
+    assert case_number_code("93-068-0194") == ""

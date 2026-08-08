@@ -62,11 +62,30 @@ BINDABLE_CODES = frozenset({"CR", "CB", "FJ", ""})
 
 _CODE_SEGMENT = re.compile(r"-([A-Za-z]+)-")
 
+#: The pre-FY073 shape: three all-ASCII-digit groups, nothing else (`93-068-0194`).
+_LEGACY_NUMBER = re.compile(r"^[0-9]+-[0-9]+-[0-9]+$")
+
+#: Returned for a number that is neither `-<letters>-` coded nor the legacy
+#: all-digit shape -- NOT in `BINDABLE_CODES`, so it skips and logs rather
+#: than joining the `""` (pre-FY073 prosecution) bucket by default. Allow-list,
+#: not deny-list: a number this parser cannot read is treated the same as an
+#: unrecognised code, never as a silent prosecution.
+UNPARSEABLE = "UNPARSEABLE"
+
 
 def case_number_code(number):
-    """The court's case-type letters from `079-CR-0151`, upper-cased, or "" if none."""
-    match = _CODE_SEGMENT.search(str(number or ""))
-    return match.group(1).upper() if match else ""
+    """The court's case-type letters from `079-CR-0151`, upper-cased.
+
+    `""` only for the genuine pre-FY073 shape (`93-068-0194`); anything else
+    this cannot read -- wrong separator, letters in the wrong place, a
+    non-ASCII transliteration -- returns `UNPARSEABLE`, never `""`, so it
+    cannot be mistaken for that legacy prosecution format.
+    """
+    text = str(number or "")
+    match = _CODE_SEGMENT.search(text)
+    if match:
+        return match.group(1).upper()
+    return "" if _LEGACY_NUMBER.match(text) else UNPARSEABLE
 
 
 def is_defendant(party):
