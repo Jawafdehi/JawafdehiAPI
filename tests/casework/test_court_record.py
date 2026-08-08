@@ -12,7 +12,13 @@ import urllib.error
 
 import pytest
 
-from casework.court_record import court_record_for_case, court_ref, defendant_names
+from casework.court_record import (
+    BINDABLE_CODES,
+    case_number_code,
+    court_record_for_case,
+    court_ref,
+    defendant_names,
+)
 
 
 class _Api:
@@ -201,3 +207,28 @@ def test_no_court_reference_reports_why():
     records, skips = court_record_for_case(_FullApi(), {"court_cases": []})
     assert records == []
     assert "no court reference" in skips[0]
+
+
+@pytest.mark.parametrize("number, expected", [
+    ("079-CR-0151", "CR"),
+    # Lower-case in, upper-case out: a case-sensitive `"-CR-" in number` check
+    # would miss this and wrongly skip the bind.
+    ("078-cb-1372", "CB"),
+    # The pre-FY073 format carries no type segment at all. A rule spelled
+    # "must contain a `-XX-` code" would misclassify this as unrecognised and
+    # skip 139 real prosecutions in the corpus.
+    ("93-068-0194", ""),
+    ("081-RE-1730", "RE"),
+    # No hyphens at all: a `.split("-")[1]` implementation would raise
+    # IndexError here instead of falling back to "".
+    ("0791234", ""),
+])
+def test_case_number_code_classifies_the_court_case_type(number, expected):
+    assert case_number_code(number) == expected
+
+
+def test_bindable_codes_names_only_the_prosecution_codes():
+    # Pins the allow-list itself: a deny-list rewrite (skip only OA/RE/W*)
+    # would still pass every `case_number_code` test above but silently bind
+    # an unrecognised code instead of skipping it.
+    assert BINDABLE_CODES == frozenset({"CR", "CB", "FJ", ""})

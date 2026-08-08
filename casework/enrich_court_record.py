@@ -73,7 +73,13 @@ from casework.common.cli import (
 )
 from casework.common.review import ReviewRow, build_review_file
 from casework.common.select import select_for_run
-from casework.court_record import court_record_for_case, is_defendant, party_name
+from casework.court_record import (
+    BINDABLE_CODES,
+    case_number_code,
+    court_record_for_case,
+    is_defendant,
+    party_name,
+)
 from casework.entity_identity import entity_slug, prefix_is_creatable
 from casework.entity_resolver import normalise_name
 from casework.enrich_related_entities import (
@@ -447,7 +453,8 @@ def bind_outcome(records):
 
 
 def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run):
-    """`(items, rows)` -- one bind per named defendant, plus a report row each.
+    """`(items, rows, skips)` -- one bind per named defendant, a report row each,
+    and a line per record whose case type is not a prosecution.
 
     De-duplicated by name across every court reference on the case, order
     preserved, exactly like `defendant_names` does -- through the SAME
@@ -456,11 +463,23 @@ def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run):
     here (its `nes_id` for ladder rung 1, its `address` for the run-entity key),
     which is why this reads the parties itself rather than calling
     `defendant_names`.
+
+    A record whose `case_number_code` is not in `BINDABLE_CODES` (`OA`, `RE`,
+    the `W*` writ codes, ...) is skipped whole: on those the defendant column
+    names a government office, not a person. This is the only filter on this
+    path -- `start_date`/`end_date` still read every record.
     """
     outcome = bind_outcome(records)
     citation = (records[0].get("detail") or {}).get("material_id", "") if records else ""
-    items, rows, seen = [], [], set()
+    items, rows, skips, seen = [], [], [], set()
     for record in records:
+        code = case_number_code(record["number"])
+        if code not in BINDABLE_CODES:
+            skips.append(
+                f"skipping accused bind for court reference "
+                f"{record['court']}/{record['number']}: case type {code!r} "
+                "is not a prosecution")
+            continue
         for party in record.get("parties") or ():
             if not is_defendant(party):
                 continue
@@ -485,7 +504,7 @@ def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run):
                 items.append(validate_bind_item(item))
             except ValueError as exc:
                 row.update(how="failed", reason=str(exc))
-    return items, rows
+    return items, rows, skips
 
 
 def plan_case(api, case, etag, *, live_prefixes, run_entities, dry_run):
@@ -525,9 +544,10 @@ def plan_case(api, case, etag, *, live_prefixes, run_entities, dry_run):
         elif why:
             skips.append(f"case_end_date left empty: {why}")
 
-    items, rows = _accused_binds(
+    items, rows, accused_skips = _accused_binds(
         api, case, records, live_prefixes=live_prefixes,
         run_entities=run_entities, dry_run=dry_run)
+    skips.extend(accused_skips)
 
     # `current_entity_binds`, NOT the raw `case["entities"]` list: the read
     # shape keys the relationship type under `type`, and `relationship_type`

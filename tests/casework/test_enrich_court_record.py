@@ -97,6 +97,7 @@ from casework.common.api import EntityAlreadyExists  # noqa: E402
 from casework.entity_identity import entity_slug  # noqa: E402
 from casework.enrich_court_record import (  # noqa: E402
     PERSON_PREFIX,
+    _accused_binds,
     _is_person,
     exact_person_match,
     resolve_defendant,
@@ -435,6 +436,14 @@ def _plan(api, case, **kw):
     return plan_case(api, case, 'W/"7"', **kw)
 
 
+def _court_record(number, name, *, nes_id=None, court="special"):
+    """One court reference, one defendant party, for `_accused_binds` tests."""
+    party = {"side": "defendant", "name": name}
+    if nes_id:
+        party["nes_id"] = nes_id
+    return {"court": court, "number": number, "detail": {}, "hearings": [], "parties": [party]}
+
+
 def test_a_whole_case_acquittal_labels_every_defendant_acquitted():
     assert bind_outcome([_record(hearings=[DECIDED])]) == ACQUITTED
 
@@ -535,6 +544,79 @@ def test_a_plaintiff_is_never_bound():
     api = _PlanApi(detail={"registration_date_ad": "2023-06-22"},
                    parties=[{"side": "plaintiff", "name": "नेपाल सरकार"}])
     assert _plan(api, _case()).entities is None
+
+
+def test_accused_binds_skips_a_non_prosecution_record_but_binds_a_prosecution_one():
+    # The OA party is deliberately named something other than नेपाल सरकार (its
+    # real value per the brief's probe): a wrong implementation that filters
+    # on THAT literal name string would still pass a fixture using it, for the
+    # wrong reason. Naming it "कुनै व्यक्ति" (an ordinary person's placeholder)
+    # means only a code-based filter can make this record skip.
+    cr_record = _court_record("079-cr-0151", "कृष्ण प्रसाद यादव", nes_id=YADAV)
+    oa_record = _court_record("079-oa-0014", "कुनै व्यक्ति")
+    items, rows, skips = _accused_binds(
+        _SearchApi(), _case(), [cr_record, oa_record],
+        live_prefixes=["person"], run_entities={}, dry_run=True)
+    assert [i["nes_id"] for i in items] == [YADAV]
+    assert [r["name"] for r in rows] == ["कृष्ण प्रसाद यादव"]
+    assert len(skips) == 1
+    assert "079-oa-0014" in skips[0] and "OA" in skips[0]
+
+
+def test_accused_binds_binds_the_pre_fy073_no_code_format():
+    # `93-068-0194`-style numbers carry no `-<letters>-` segment at all -- 139
+    # references in the corpus. A rule spelled "the number must contain
+    # `-CR-`" would misclassify this as an unrecognised code and silently
+    # drop these prosecutions.
+    record = _court_record("93-068-0194", "सिताराम यादव", nes_id=YADAV)
+    items, rows, skips = _accused_binds(
+        _SearchApi(), _case(), [record],
+        live_prefixes=["person"], run_entities={}, dry_run=True)
+    assert [i["nes_id"] for i in items] == [YADAV]
+    assert skips == []
+
+
+def test_accused_binds_skips_an_unrecognised_code_not_on_any_documented_skip_list():
+    # A deny-list rewrite (skip only OA/RE/WC/WF/WH/WO) would still bind this:
+    # "ZZ" is on neither list. It must skip anyway -- an unrecognised code
+    # risks naming an office, and skipping one only costs a bind a later run
+    # recovers, so the allow-list, not a deny-list, is what must gate this.
+    record = _court_record("079-zz-0001", "कुनै व्यक्ति", nes_id=YADAV)
+    items, rows, skips = _accused_binds(
+        _SearchApi(), _case(), [record],
+        live_prefixes=["person"], run_entities={}, dry_run=True)
+    assert items == []
+    assert len(skips) == 1 and "ZZ" in skips[0]
+
+
+def test_accused_binds_binds_a_person_named_through_their_firm():
+    # FJ's one reference in the corpus names a proprietor through their firm:
+    # "अनिल गुप्ता एण्ड एशोसियटस का प्रोपराइटर अनिल कुमार गुप्ता". A keyword
+    # filter on "एशोसियटस" or "कार्यालय" would drop this real defendant --
+    # only the code, never the name text, may gate the bind.
+    firm_name = "अनिल गुप्ता एण्ड एशोसियटस का प्रोपराइटर अनिल कुमार गुप्ता"
+    record = _court_record("079-fj-0001", firm_name, nes_id=YADAV)
+    items, rows, skips = _accused_binds(
+        _SearchApi(), _case(), [record],
+        live_prefixes=["person"], run_entities={}, dry_run=True)
+    assert [i["nes_id"] for i in items] == [YADAV]
+    assert skips == []
+
+
+def test_a_case_with_only_a_non_prosecution_reference_still_gets_both_dates():
+    # Guards "dates are not filtered": `plan_case` reads `start_date`/`end_date`
+    # off `records` directly, so the accused-bind filter must live inside
+    # `_accused_binds` and never upstream in `court_record_for_case` -- if it
+    # did, this case's only reference would vanish from `records` entirely and
+    # both date fields would stay empty rather than just the bind.
+    api = _PlanApi(detail={"registration_date_ad": "2023-06-22"}, hearings=[DECIDED],
+                   parties=[{"side": "defendant", "name": "कुनै व्यक्ति"}])
+    case = _case(court_cases=["https://jawafdehi.org/courtcase/special/079-oa-0014"])
+    plan = _plan(api, case)
+    assert dict(plan.fields) == {"case_start_date": "2023-06-22",
+                                 "case_end_date": "2024-06-04"}
+    assert plan.entities is None
+    assert any("079-oa-0014" in s and "OA" in s for s in plan.skips)
 
 
 def test_an_existing_bind_survives_untouched():

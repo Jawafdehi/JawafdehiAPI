@@ -41,6 +41,7 @@ resolution path and one veto path in the enricher.
 """
 
 import logging
+import re
 import urllib.error
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,26 @@ _COURTCASE_MARKER = "/courtcase/"
 #: The one spelling of "defendant" NGM's party rows use (`courts.models`'s
 #: `CaseEntity.side` is free text, documented `plaintiff | defendant`).
 _DEFENDANT_SIDE = "defendant"
+
+#: Case-type codes whose defendant column names an actual defendant. `""` is
+#: the pre-FY073 format (`93-068-0194`), which carries no type segment and is
+#: a prosecution -- 139 references in the corpus. Everything else (`OA`, `RE`,
+#: the `W*` writ codes, and any code not yet seen) is an allow-list miss and
+#: skips: an unrecognised code risks naming a government office as accused,
+#: where skipping one only costs a bind a later run recovers.
+BINDABLE_CODES = frozenset({"CR", "CB", "FJ", ""})
+
+_CODE_SEGMENT = re.compile(r"-([A-Za-z]+)-")
+
+
+def case_number_code(number):
+    """The court's case-type letters from `079-CR-0151`, upper-cased, or "".
+
+    Matches the first `-<letters>-` segment; a number with none (the old
+    pre-FY073 format, or anything malformed) yields "".
+    """
+    match = _CODE_SEGMENT.search(str(number or ""))
+    return match.group(1).upper() if match else ""
 
 
 def is_defendant(party):
