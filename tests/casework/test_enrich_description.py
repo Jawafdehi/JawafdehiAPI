@@ -1564,3 +1564,30 @@ def test_the_prompt_and_the_enforced_item_cap_agree():
     reliably produces one item that `accept_items` then logs as over-cap on every
     single case."""
     assert f"up to {md.MAX_LLM_ITEMS}," in ed.EXTRACTION_SYSTEM_PROMPT
+
+
+def test_nothing_left_to_write_when_both_fields_are_satisfied(monkeypatch,
+                                                              patched_fetch_markdown):
+    """The per-field gate admits a described case for its EMPTY missing_details --
+    but if BOTH floor items are already satisfied (charge sheet bound AND a Supreme
+    reference on file) and the model finds nothing, there is nothing honest to say
+    and no reason to rewrite the description either. That leaves an empty patch,
+    which must not become a request. Raised by CodeRabbit on #441."""
+    case = dict(
+        CASE_WITH_APPEAL,                       # Supreme ref -> appeal item drops
+        slug="case-nothing-left",
+        description="क" * 900,                  # substantial -> not rewritten
+        evidence=CASE_WITH_APPEAL["evidence"] + [
+            {"material_iri": "https://jawafdehi.org/material/charge_sheet/1",
+             "additional_details": "",
+             "material": {"material_type": "charge_sheet",
+                          "urls": [{"link": _PRESS_MD, "role": "MARKDOWN"}]}},
+        ],                                      # charge sheet -> that item drops too
+    )
+    api = _StubApi([case])
+    report = _run_main(monkeypatch, api, _stub_with_documents("नयाँ विवरण।", []),
+                       BASE_ARGV + ["--apply"])
+    assert api.patched == [], "sent a PATCH with nothing in it"
+    assert api.patch_calls == []
+    assert report.rows[-1]["status"] == "already"
+    assert report.rows[-1]["reason"] == "nothing left to write"
