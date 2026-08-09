@@ -282,9 +282,9 @@ class Verdict:
         All four conditions are load-bearing. `high` is the bar (see the module
         docstring). `event_type` must be a real lifecycle value because the
         per-event cap and the bind ordering both key on it. `summary` must be
-        SUBSTANTIAL because it IS the evidence note -- binding without one is the
-        blank-note behaviour in `bind_materials.merge_evidence` that this port
-        exists to avoid, and a one-line note is that behaviour with extra steps.
+        SUBSTANTIAL because it IS the evidence note -- an entry bound blank is
+        what this stage exists to avoid, and a one-line note is that with extra
+        steps.
 
         The length floor is not cosmetic. `salvage_json` repairs a reply truncated
         at `max_tokens` by closing the open string, so an overflowing verify call

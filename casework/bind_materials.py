@@ -36,6 +36,7 @@ import time
 from dataclasses import dataclass, field
 
 from casework.common.api import CaseworkApi
+from casework.common.evidence import current_evidence, merge_evidence
 from casework.common.cli import (
     _utc_iso_now, add_common_args, basic_auth_from_env, configure_run_logging,
     log_run_footer, log_run_header, print_summary,
@@ -121,44 +122,6 @@ class BindPlan:
         return len(self.patch_items) if self.action == "WOULD_PATCH" else self.n_current
 
 
-def current_evidence(case):
-    """Normalize the case's evidence into the {material_iri, additional_details}
-    shape the PATCH expects, preserving order.
-
-    DELIBERATELY DUPLICATED in `casework/enrich_news_articles.py`. Both stages
-    write the same destructive whole-list `PATCH /evidence`, so both must
-    normalise it identically; the copy is kept rather than shared because these
-    are standalone scripts with no shared sequencing. Change one, change the
-    other -- a divergence here silently drops evidence rows.
-    """
-    return [
-        {"material_iri": e.get("material_iri"),
-         "additional_details": e.get("additional_details") or ""}
-        for e in (case.get("evidence") or [])
-        if e.get("material_iri")
-    ]
-
-
-def merge_evidence(current, add_iris):
-    """Append each new IRI not already present, preserving existing order and
-    de-duplicating. Never reorders or drops an existing entry -- the whole-list
-    replace makes any omission destructive.
-
-    DELIBERATELY DUPLICATED as `merge_news_evidence` in
-    `casework/enrich_news_articles.py`, which differs in ONE respect: it binds
-    the Nepali evidence note at the same time instead of `additional_details:
-    ""` (its deviation 2). The append-only contract is identical and must stay
-    that way in both.
-    """
-    have = {e["material_iri"] for e in current}
-    merged = list(current)
-    for iri in add_iris:
-        if iri not in have:
-            merged.append({"material_iri": iri, "additional_details": ""})
-            have.add(iri)
-    return merged
-
-
 def missing_candidates(case, candidates):
     """Return the ``(source, ident)`` candidates NOT already bound to ``case``.
 
@@ -213,7 +176,8 @@ def plan_case(api, case, etag, candidates, required_state=REQUIRED_STATE):
                         dropped=dropped, uncertain=uncertain, probes=probes,
                         reason=f"{len(uncertain)} material(s) uncertain")
 
-    merged = merge_evidence(current, add)
+    # This stage binds no note; the news stage passes a real one.
+    merged = merge_evidence(current, [(iri, "") for iri in add])
     if merged == current:
         return BindPlan(slug=slug, action="NOOP", state=state, if_match=etag,
                         n_current=len(current), dropped=dropped, probes=probes)

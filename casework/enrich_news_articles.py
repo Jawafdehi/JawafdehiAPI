@@ -40,9 +40,9 @@ shaper, `materials.jsonld.documentsource_to_jsonld`, so what this writes is
 byte-compatible with the 48 `/material/news/*` rows already in production; the
 IRI form is not invented here (see `news_search.news_material_ident`).
 
-DEVIATION 2 -- THE NOTE IS WRITTEN AT BIND TIME, NEVER BLANK. `bind_materials.py
-:143` appends new evidence with `additional_details: ""` and leaves a later stage
-to backfill. This stage has the article in hand and the verifier has already
+DEVIATION 2 -- THE NOTE IS WRITTEN AT BIND TIME, NEVER BLANK. `bind_materials`
+appends new evidence with `additional_details: ""` and leaves a later stage to
+backfill. This stage has the article in hand and the verifier has already
 produced the Nepali note, so binding blank would cost a second document fetch of
 a document already read and strand the entry meanwhile. The register and length
 come from the 33 news notes on the 15 IN_REVIEW cases, read from production
@@ -103,6 +103,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 
 from casework.common.api import CaseworkApi
+from casework.common.evidence import current_evidence, merge_evidence
 from casework.common.cli import (
     add_common_args,
     basic_auth_from_env,
@@ -190,24 +191,6 @@ def _require_loopback(api):
 # ---------------------------------------------------------------------------
 
 
-def current_evidence(case):
-    """The case's evidence normalised to the `{material_iri, additional_details}`
-    shape the PATCH expects, order preserved.
-
-    Byte-identical to `bind_materials.current_evidence` and imported-by-copy on
-    purpose: this is the contract for what a whole-list replace must send back,
-    and the two writers of `/evidence` must not be able to disagree about it.
-    Consolidating them into `casework/common/` is a separate change that would
-    edit a module this port has no other reason to touch.
-    """
-    return [
-        {"material_iri": e.get("material_iri"),
-         "additional_details": e.get("additional_details") or ""}
-        for e in (case.get("evidence") or [])
-        if e.get("material_iri")
-    ]
-
-
 def bound_news_urls(case):
     """Every article URL already bound to this case, normalised for comparison.
 
@@ -226,27 +209,6 @@ def bound_news_urls(case):
 
 def count_news_evidence(case):
     return len(materials_of_type(case, (NEWS_MATERIAL_TYPE,)))
-
-
-def merge_news_evidence(current, additions):
-    """Union-merge `additions` into `current`, preserving existing order.
-
-    `bind_materials.merge_evidence` with one difference: an appended entry
-    carries its note instead of `""` (deviation 2). Everything else is that
-    function's contract, and it is the load-bearing half -- an existing entry is
-    never reordered, rewritten or dropped, because the server deletes every row
-    and recreates from exactly what is sent, so any omission destroys data. An
-    addition whose IRI is already present is skipped rather than allowed to
-    overwrite the note a human may have edited.
-    """
-    have = {e["material_iri"] for e in current}
-    merged = list(current)
-    for iri, note in additions:
-        if iri in have:
-            continue
-        merged.append({"material_iri": iri, "additional_details": note})
-        have.add(iri)
-    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -531,7 +493,7 @@ def plan_case(case, etag, outcome, *, client=None, save_permalinks=True):
         materials.append((iri, doc, verdict.summary, article))
         additions.append((iri, verdict.summary))
 
-    merged = merge_news_evidence(current, additions)
+    merged = merge_evidence(current, additions)
     if merged == current:
         return NewsPlan(slug=slug, action="NOOP", state=state, if_match=etag,
                         n_current=len(current), outcome=outcome,

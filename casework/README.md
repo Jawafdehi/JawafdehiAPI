@@ -197,17 +197,18 @@ against a bound case and left its `evidence` rows and their notes untouched.
 ### Writing `evidence` or `entities` — read, merge, send the whole list
 
 `PATCH /evidence` **replaces the entire list.** The server deletes every existing
-row and recreates from exactly what you send (`_write_material_references`,
-`cases/api_views.py:647`). Send only your new document and you delete the press
-release and court order someone bound last month.
+row and recreates from exactly what you send (`cases.api_views._write_material_references`).
+Send only your new document and you delete the press release and court order
+someone bound last month.
 
 Never send a delta. Read the case, merge into what is already there, send it all:
 
 ```python
-from casework.bind_materials import current_evidence, merge_evidence
+from casework.common.evidence import current_evidence, merge_evidence
 
 case, etag = api.get_case_with_etag(slug)
-merged = merge_evidence(current_evidence(case), [new_iri])   # append, keep order
+# (material_iri, note) pairs. Pass "" when the stage has no note to bind yet.
+merged = merge_evidence(current_evidence(case), [(new_iri, "")])
 api.replace_list(slug, "evidence", merged, if_match=etag)
 ```
 
