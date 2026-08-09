@@ -130,15 +130,10 @@ STAGES = {
         requires_materials=PRESS_TYPES + COURT_TYPES,
         requires_stages=("convert",),
     ),
-    # provides is ("key_allegations",) ONLY. An earlier draft of the plan also
-    # listed "missing_details"; that field is real on the case API but this
-    # enricher never writes it -- the donor has zero references to it anywhere
-    # in its history, and patches exactly one field
-    # (enrich_allegations.py:303 `api.patch_field(case_slug, "key_allegations", ...)`).
-    # `provides` feeds the "already enriched, skip it" idempotency checks, so a
-    # phantom entry here would make a case look complete that this stage never
-    # touched -- silently skipping work, the same over-gating shape as the
-    # tags/entities defects.
+    # ("key_allegations",) ONLY -- this stage reads the press release, never the
+    # verdict, so it cannot answer `missing_details`. `provides` feeds the
+    # "already enriched, skip it" checks: a phantom entry would make a case look
+    # complete that this stage never touched.
     "allegations": Stage(
         "allegations", provides=("key_allegations",),
         requires_materials=PRESS_TYPES,
@@ -155,21 +150,20 @@ STAGES = {
         requires_materials=PRESS_TYPES + COURT_TYPES,
         requires_stages=("convert",),
     ),
-    # `description` writes the long public narrative. It reads the charge
-    # sheet, the press release AND the verdict, so it gates on both material
-    # families -- the same PRESS+COURT pair as `timeline`/`entities`, and for
-    # the same reason: a court-order-only case is still describable, so
-    # gating on PRESS_TYPES alone would strand it.
+    # Gates on both material families, like `timeline`/`entities`: a
+    # court-order-only case is still describable.
     #
-    # provides is ("description",) ONLY -- deliberately NOT ("description",
-    # "title"). The donor regenerated `Case.title` as a side effect of this
-    # pass; this port drops that (see `casework/enrich_description.py`'s
-    # docstring) and `title` has exactly one owner, `enrich_card`. Naming
-    # "title" here would be the phantom-`provides` mistake documented on
-    # `allegations` above: an idempotency check reading `provides` would call
-    # a case title-complete that this stage never touched.
+    # `missing_details` is the one CONDITIONAL entry in this table. The stage
+    # writes it from an extra key in the same generate call, but that field
+    # needs the COURT ORDER specifically, while this stage runs on either
+    # family -- so a press-only case gets a description and no missing_details.
+    # Read the tuple as "can provide": an idempotency check requiring BOTH
+    # fields would loop forever on those cases.
+    #
+    # NOT ("description", "title"). The donor regenerated `Case.title` here;
+    # `title` now has exactly one owner, `enrich_card`.
     "description": Stage(
-        "description", provides=("description",),
+        "description", provides=("description", "missing_details"),
         requires_materials=PRESS_TYPES + COURT_TYPES,
         requires_stages=("convert",),
     ),

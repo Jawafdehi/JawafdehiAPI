@@ -30,6 +30,7 @@ from pathlib import Path
 import pytest
 
 from casework import enrich_description as ed
+from casework.common import missing_details as md
 from casework.enrich_description import (
     _allocate_budget,
     _assemble_source_text,
@@ -276,17 +277,43 @@ def test_stage_is_registered_with_both_material_families():
     assert stage.requires_stages == ("convert",)
 
 
-def test_stage_provides_description_only():
-    """`title` must NOT appear in `provides`.
+def test_stage_provides_description_and_missing_details_but_never_title():
+    """`title` must NOT appear in `provides`; `missing_details` must.
 
-    `provides` feeds "already enriched, skip it" idempotency checks, so
-    naming a field this stage never writes makes a case look title-complete
-    that this stage never touched -- the phantom-entry defect documented on
-    STAGES["allegations"].
+    `provides` feeds "already enriched, skip it" idempotency checks, so naming a
+    field this stage never writes makes a case look complete that this stage
+    never touched -- the phantom-entry defect documented on STAGES["allegations"].
+    `title` stays out because `enrich_card` owns it.
+
+    `missing_details` is in because this stage really does write it, from one
+    extra key in the same generate call. See the conditional caveat below.
     """
     from casework.common.pipeline import STAGES
 
-    assert STAGES["description"].provides == ("description",)
+    assert STAGES["description"].provides == ("description", "missing_details")
+
+
+def test_provides_is_conditional_for_missing_details():
+    """`missing_details` is the one CONDITIONAL entry in the STAGES table.
+
+    This stage's own gate is any-of(press, court), but `missing_details` needs the
+    COURT ORDER specifically, so a press-release-only case gets a description and
+    no missing_details. An idempotency check that required BOTH fields before
+    calling the stage done would therefore loop forever on press-only cases.
+
+    Pinned as behaviour, not just a comment: `build` must return None on exactly
+    that shape.
+    """
+    from casework.common.missing_details import build
+
+    press_only = {
+        "court_cases": [],
+        "evidence": [{"material_iri": "x",
+                      "material": {"material_type": "ciaa_press_release"}}],
+    }
+    assert build(press_only) is None
+    assert build(press_only, ["साक्षीहरूको वकपत्र"]) is None, (
+        "no verdict means no missing_details, even with accepted model items")
 
 
 def test_tier_is_premium():
@@ -301,23 +328,31 @@ def test_tier_is_premium():
 
 
 class TestParseDescriptionResponse:
+    """`_parse_description_response` returns `(description, documents)`.
+
+    `documents` is ALWAYS a list -- never None -- so callers can iterate without
+    a guard. `description` stays the required key for the object scan: a reply
+    carrying only a document list is not a usable answer.
+    """
+
     def test_parses_the_object(self):
         body = json.dumps({"description": "### क) अभियोगदावीको सार\nविवरण।"})
-        assert _parse_description_response(body) == "### क) अभियोगदावीको सार\nविवरण।"
+        assert _parse_description_response(body) == (
+            "### क) अभियोगदावीको सार\nविवरण।", [])
 
     def test_a_volunteered_title_key_is_ignored_not_returned(self):
         """The single-owner rule has to hold against a chatty model.
 
         The OUTPUT FORMAT block no longer asks for a title, but models
-        volunteer keys. Returning only the string is what makes it impossible
-        for a stray `"title"` to reach a PATCH.
+        volunteer keys. Never returning it is what makes it impossible for a
+        stray `"title"` to reach a PATCH.
         """
         body = json.dumps({"title": "नयाँ शीर्षक (081-CR-0091)", "description": "विवरण।"})
-        assert _parse_description_response(body) == "विवरण।"
+        assert _parse_description_response(body) == ("विवरण।", [])
 
     def test_fenced_json_is_parsed(self):
         body = 'यहाँ छ:\n```json\n{"description": "विवरण।"}\n```\n'
-        assert _parse_description_response(body) == "विवरण।"
+        assert _parse_description_response(body) == ("विवरण।", [])
 
     def test_a_leading_unrelated_object_does_not_stop_the_scan(self):
         """Donor behaviour: every `{` is tried, not just the first.
@@ -326,19 +361,75 @@ class TestParseDescriptionResponse:
         tool argument) returns None under a `text.find("{")` parser.
         """
         body = '{"note": "thinking"} then: {"description": "असली विवरण।"}'
-        assert _parse_description_response(body) == "असली विवरण।"
+        assert _parse_description_response(body) == ("असली विवरण।", [])
 
     def test_returns_none_when_the_key_is_absent(self):
-        assert _parse_description_response('{"other": "value"}') is None
+        assert _parse_description_response('{"other": "value"}') == (None, [])
 
     def test_returns_none_for_a_blank_description(self):
-        assert _parse_description_response(json.dumps({"description": "   "})) is None
+        assert _parse_description_response(
+            json.dumps({"description": "   "})) == (None, [])
 
     def test_returns_none_for_unparseable_text(self):
-        assert _parse_description_response("not json at all") is None
+        assert _parse_description_response("not json at all") == (None, [])
 
     def test_returns_none_for_empty_input(self):
-        assert _parse_description_response("") is None
+        assert _parse_description_response("") == (None, [])
+
+    def test_missing_documents_are_returned(self):
+        body = json.dumps({
+            "description": "विवरण।",
+            "missing_documents": ["३ चरणका ठेक्का सम्झौताका प्रतिलिपि", "साक्षीहरूको वकपत्र"],
+        })
+        assert _parse_description_response(body) == (
+            "विवरण।", ["३ चरणका ठेक्का सम्झौताका प्रतिलिपि", "साक्षीहरूको वकपत्र"])
+
+    def test_a_bare_string_is_accepted_as_one_document(self):
+        """A formatting slip, not a wrong answer -- rejecting it would throw away
+        a correct finding over punctuation."""
+        body = json.dumps({"description": "विवरण।", "missing_documents": "मूल सम्झौता (2011)"})
+        assert _parse_description_response(body) == ("विवरण।", ["मूल सम्झौता (2011)"])
+
+    def test_a_quoted_empty_list_is_no_documents(self):
+        body = json.dumps({"description": "विवरण।", "missing_documents": "[]"})
+        assert _parse_description_response(body) == ("विवरण।", [])
+
+    def test_enumerators_the_model_added_are_stripped(self):
+        """The prompt asks for plain phrases; models number them anyway. Leaving
+        the marks in would double-enumerate once `render` adds its own."""
+        body = json.dumps({
+            "description": "विवरण।",
+            "missing_documents": ["क) साक्षीहरूको वकपत्र", "- मूल सम्झौता", "२. लेखापरीक्षण प्रतिवेदन"],
+        })
+        _, docs = _parse_description_response(body)
+        assert docs == ["साक्षीहरूको वकपत्र", "मूल सम्झौता", "लेखापरीक्षण प्रतिवेदन"]
+
+    def test_a_newline_joined_blob_is_split(self):
+        body = json.dumps({
+            "description": "विवरण।",
+            "missing_documents": ["साक्षीहरूको वकपत्र\nमूल सम्झौता (2011)"],
+        })
+        _, docs = _parse_description_response(body)
+        assert docs == ["साक्षीहरूको वकपत्र", "मूल सम्झौता (2011)"]
+
+    def test_a_non_list_non_string_shape_is_ignored(self):
+        body = json.dumps({"description": "विवरण।", "missing_documents": {"a": 1}})
+        assert _parse_description_response(body) == ("विवरण।", [])
+
+    @pytest.mark.parametrize("sentinel", ["कुनै छैन", "कुनै पनि छैन", "[]", "N/A",
+                                          "none", "-", "छैन।"])
+    def test_a_nothing_sentinel_INSIDE_a_list_is_not_an_item(self, sentinel):
+        """The sentinel test used to run only on a bare string. A model answering
+        `["कुनै छैन"]` means "nothing" -- treated as an item it publishes the word
+        "none" as a missing document, and no content rule in `reject_item` catches
+        it."""
+        body = json.dumps({"description": "विवरण।", "missing_documents": [sentinel]})
+        assert _parse_description_response(body) == ("विवरण।", [])
+
+    def test_a_sentinel_mixed_with_real_findings_drops_only_the_sentinel(self):
+        body = json.dumps({"description": "विवरण।",
+                           "missing_documents": ["साक्षीहरूको वकपत्र", "कुनै छैन"]})
+        assert _parse_description_response(body) == ("विवरण।", ["साक्षीहरूको वकपत्र"])
 
 
 def test_prompt_context_comes_from_the_shared_formatters(donor_source):
@@ -549,7 +640,7 @@ def test_generate_uses_premium_tier_and_8000_max_tokens():
         detail=DETAIL_FOR_PROMPT, court_number="081-cr-0091",
         source_text="स्रोत पाठ", invoke_text=stub, usage=None,
     )
-    assert result == "विवरण।"
+    assert result == ("विवरण।", [])
     assert seen["tier"] == "premium"
     assert seen["max_tokens"] == 8000
     assert seen["system"] == ed.EXTRACTION_SYSTEM_PROMPT
@@ -657,6 +748,38 @@ CASE_UNCONVERTED = dict(
 
 CASE_ALREADY = dict(CASE_READY, slug="case-already", description="क" * 900)
 
+# `CASE_READY` holds a press release and a court order, no charge sheet, and a
+# `special:` court-case ref only -- so BOTH deterministic floor items fire. That
+# is the shape 24 of the 25 cases in the first production batch have.
+MD_FLOOR_BOTH = (
+    "१. अख्तियार दुरुपयोग अनुसन्धान आयोगले दायर गरेको अभियोगपत्र\n"
+    "२. हदम्याद भित्र वादी वा प्रतिवादीले सर्वोच्च अदालतमा पुनरावेदन गरे नगरेको ब्याहोरा"
+)
+
+# Same case with a Supreme Court reference on file: the appeal item drops, so the
+# floor is one item and renders bare, with no enumerator.
+CASE_WITH_APPEAL = dict(
+    CASE_READY, slug="case-with-appeal",
+    court_cases=["https://jawafdehi.org/courtcase/special/081-cr-0091",
+                 "https://jawafdehi.org/courtcase/supreme/081-cr-2319"],
+)
+
+# Press release only. `description` still runs (its gate is any-of), but
+# `missing_details` must not be written -- there is no verdict to diff against.
+CASE_PRESS_ONLY = dict(
+    CASE_READY, slug="case-press-only",
+    evidence=[CASE_READY["evidence"][0]],
+)
+
+# A case the importer already flagged. The truncation marker must survive.
+TRUNCATION_MARKER = (
+    "ACCUSED LIST INCOMPLETE: 2 defendant(s) imported (NGM parsed 2); court "
+    "record states ≈5. Roster truncated at source — rebuild from the court "
+    "order before publishing."
+)
+CASE_FLAGGED = dict(
+    CASE_READY, slug="case-flagged", missing_details=TRUNCATION_MARKER)
+
 # A template stub title plus a stub description: the case a title-writing
 # regression would visibly damage.
 CASE_STUB_TITLE = dict(
@@ -674,6 +797,10 @@ class _StubApi:
         self._etag = etag
         self._fail_detail_for = set(fail_detail_for)
         self.patched = []
+        # One entry per PATCH REQUEST, as `(slug, [field, ...], if_match)` --
+        # `patched` is per-field and cannot show that both fields went in a
+        # single conditional write.
+        self.patch_calls = []
 
     def iter_cases(self, params=None, timeout=60):
         yield from self._cases.values()
@@ -686,6 +813,21 @@ class _StubApi:
     def patch_field(self, slug, field, value, timeout=60, if_match=None):
         self.patched.append((slug, field, value, if_match))
         self._cases[slug][field] = value
+        return {}
+
+    def patch_fields(self, slug, pairs, timeout=60, if_match=None):
+        """Record each pair as its own `patched` entry.
+
+        Flattened deliberately: every existing assertion in this file reads
+        `api.patched` as `(slug, field, value, if_match)` tuples, and the fused
+        write is still ONE conditional request per case. `patch_calls` below
+        counts requests for the tests that care about that instead.
+        """
+        pairs = list(pairs)
+        self.patch_calls.append((slug, [f for f, _ in pairs], if_match))
+        for field, value in pairs:
+            self.patched.append((slug, field, value, if_match))
+            self._cases[slug][field] = value
         return {}
 
 
@@ -763,15 +905,33 @@ def test_unmet_prerequisite_is_recorded_not_silently_skipped(
     assert api.patched == []
 
 
-def test_an_already_described_case_is_skipped_without_calling_the_llm(
+def test_an_already_described_case_is_skipped_when_BOTH_fields_are_done(
     monkeypatch, patched_fetch_markdown
 ):
-    api = _StubApi([CASE_ALREADY])
+    """The gate is PER FIELD now that the stage writes two."""
+    case = dict(CASE_ALREADY)
+    case["missing_details"] = MD_FLOOR_BOTH
+    api = _StubApi([case])
     stub = _tracking_stub()
     report = _run_main(monkeypatch, api, stub, BASE_ARGV + ["--dry-run"])
     assert report.rows[0]["status"] == "already"
     assert stub.calls == []
     assert api.patched == []
+
+
+def test_a_described_case_with_an_empty_missing_details_is_still_processed(
+    monkeypatch, patched_fetch_markdown
+):
+    """A description-only gate skipped these before `missing_details` was even
+    computed -- so the ~188 production cases that already carry a description could
+    never get the new field, while `provides` claimed they were complete. The
+    description itself is NOT rewritten: only the empty field is patched."""
+    api = _StubApi([CASE_ALREADY])          # substantial description, no missing_details
+    _run_main(monkeypatch, api, _stub_with_documents("नयाँ विवरण।", []),
+              BASE_ARGV + ["--apply"])
+    written = {f: v for _, f, v, _ in api.patched}
+    assert "missing_details" in written
+    assert "description" not in written, "rewrote a description without --force"
 
 
 def test_force_regenerates_an_already_described_case(monkeypatch, patched_fetch_markdown):
@@ -781,8 +941,12 @@ def test_force_regenerates_an_already_described_case(monkeypatch, patched_fetch_
         BASE_ARGV + ["--force", "--apply"],
     )
     assert report.rows[0]["status"] == "enriched"
-    assert [(s, f, v) for s, f, v, _ in api.patched] == [
-        ("case-already", "description", "नयाँ विवरण।")]
+    written = {f: v for _, f, v, _ in api.patched}
+    assert written["description"] == "नयाँ विवरण।"
+    # CASE_ALREADY carries no prior missing_details, so the floor is written
+    # outright. That --force does NOT touch a populated value is pinned by
+    # test_force_never_touches_an_existing_missing_details.
+    assert MD_FLOOR_BOTH in written["missing_details"]
 
 
 def test_dry_run_generates_but_does_not_patch(monkeypatch, patched_fetch_markdown):
@@ -801,7 +965,11 @@ def test_apply_patches_description_with_the_etag_as_if_match(
     report = _run_main(
         monkeypatch, api, _tracking_stub("विवरण।"), BASE_ARGV + ["--apply"])
     assert report.rows[0]["status"] == "enriched"
-    assert api.patched == [("case-ready", "description", "विवरण।", 'W/"etag-42"')]
+    assert ("case-ready", "description", "विवरण।", 'W/"etag-42"') in api.patched
+    # BOTH fields go in ONE conditional request. Two `patch_field` calls could
+    # not stay conditional -- the second would carry an ETag the first invalidated.
+    assert api.patch_calls == [
+        ("case-ready", ["description", "missing_details"], 'W/"etag-42"')]
 
 
 def test_never_writes_title(monkeypatch, patched_fetch_markdown):
@@ -824,7 +992,12 @@ def test_never_writes_title(monkeypatch, patched_fetch_markdown):
     report = _run_main(monkeypatch, api, stub, BASE_ARGV + ["--force", "--apply"])
 
     assert report.rows[0]["status"] == "enriched"
-    assert {field for _, field, _, _ in api.patched} == {"description"}
+    fields = {field for _, field, _, _ in api.patched}
+    # Asserted as an exclusion, not an exact set: this test is about `title`
+    # never being written, and pinning the exact set makes it fail whenever an
+    # unrelated field is legitimately added (as `missing_details` was).
+    assert "title" not in fields
+    assert fields <= {"description", "missing_details"}
     assert api._cases["case-stub-title"]["title"] == before_title
 
 
@@ -1123,3 +1296,298 @@ def test_a_dry_run_is_not_blocked_by_a_missing_etag(
     assert api.patched == []
     text = _review_file(tmp_path).read_text(encoding="utf-8")
     assert "ठेक्का विवरण।" in text
+
+
+# --------------------------------------------------------------------------
+# missing_details: the second field this stage writes
+#
+# The value is assembled from a DETERMINISTIC floor (what is bound) plus up to
+# four specific documents the model found referenced in the sources but absent
+# from our evidence. Pure-function rules live in
+# tests/casework/test_missing_details.py; these are the end-to-end paths.
+# --------------------------------------------------------------------------
+
+
+def _stub_with_documents(description, documents):
+    def stub(**kw):
+        return json.dumps(
+            {"description": description, "missing_documents": documents})
+
+    return stub
+
+
+def test_apply_writes_the_floor_when_the_model_finds_nothing(
+    monkeypatch, patched_fetch_markdown
+):
+    """An empty document list is a good answer, not a failure.
+
+    The floor alone is a complete, publishable value -- it is what 5 published
+    cases carry -- so the field is still written.
+    """
+    api = _StubApi([CASE_READY])
+    report = _run_main(monkeypatch, api, _stub_with_documents("विवरण।", []),
+                       BASE_ARGV + ["--apply"])
+    assert report.rows[0]["status"] == "enriched"
+    written = {f: v for _, f, v, _ in api.patched}
+    assert written["missing_details"] == MD_FLOOR_BOTH
+
+
+def test_model_documents_are_appended_and_switch_the_enumerator(
+    monkeypatch, patched_fetch_markdown
+):
+    """Two floor items plus two found documents = 4 items, so the enumerator
+    moves from Devanagari numerals to Nepali letters. Chosen AFTER the model's
+    items are accepted -- never before."""
+    api = _StubApi([CASE_READY])
+    _run_main(
+        monkeypatch, api,
+        _stub_with_documents(
+            "विवरण।", ["३ चरणका ठेक्का सम्झौताका प्रतिलिपि", "साक्षीहरूको वकपत्र"]),
+        BASE_ARGV + ["--apply"],
+    )
+    value = {f: v for _, f, v, _ in api.patched}["missing_details"]
+    assert value.startswith("क) अख्तियार")
+    assert "ग) ३ चरणका ठेक्का सम्झौताका प्रतिलिपि" in value
+    assert "घ) साक्षीहरूको वकपत्र" in value
+    assert "१." not in value, "numerals are for the 2-item shape only"
+
+
+def test_a_document_we_already_hold_is_rejected(monkeypatch, patched_fetch_markdown):
+    """THE CHECKABLE GROUNDING RULE. The model is told what we hold; a claim that
+    a held document is missing is contradicted by our own bindings, so it is
+    dropped in code rather than trusted."""
+    api = _StubApi([CASE_READY])
+    _run_main(
+        monkeypatch, api,
+        _stub_with_documents("विवरण।", ["प्रेस विज्ञप्ति", "साक्षीहरूको वकपत्र"]),
+        BASE_ARGV + ["--apply"],
+    )
+    value = {f: v for _, f, v, _ in api.patched}["missing_details"]
+    assert "प्रेस विज्ञप्ति" not in value
+    assert "साक्षीहरूको वकपत्र" in value
+
+
+def test_filler_items_are_rejected(monkeypatch, patched_fetch_markdown):
+    """`अन्य आवश्यक स्रोतहरू` appears in 15 published cases and names nothing a
+    reader can go and look for. It must not consume an item slot."""
+    api = _StubApi([CASE_READY])
+    _run_main(
+        monkeypatch, api,
+        _stub_with_documents(
+            "विवरण।", ["अन्य आवश्यक स्रोतहरू।", "थप आधार र प्रमाण पुष्टि गर्ने प्रमाणिक स्रोत"]),
+        BASE_ARGV + ["--apply"],
+    )
+    value = {f: v for _, f, v, _ in api.patched}["missing_details"]
+    assert value == MD_FLOOR_BOTH
+
+
+def test_a_document_restating_the_floor_is_rejected(monkeypatch, patched_fetch_markdown):
+    """A copy of a floor document, and bare commentary about the appeal, both go --
+    leaving the floor exactly as it was."""
+    api = _StubApi([CASE_READY])
+    _run_main(
+        monkeypatch, api,
+        _stub_with_documents("विवरण।", ["अभियोगपत्रको पूर्णपाठ",
+                                        "पुनरावेदन भएको वा नभएको ब्यहोरा"]),
+        BASE_ARGV + ["--apply"],
+    )
+    value = {f: v for _, f, v, _ in api.patched}["missing_details"]
+    assert value == MD_FLOOR_BOTH
+
+
+def test_a_supreme_reference_drops_the_appeal_item(monkeypatch, patched_fetch_markdown):
+    """One floor item renders BARE, with no enumerator -- the 1-item corpus shape
+    (mishra-revenue-leakage-080-cr-0061)."""
+    api = _StubApi([CASE_WITH_APPEAL])
+    _run_main(monkeypatch, api, _stub_with_documents("विवरण।", []),
+              BASE_ARGV + ["--apply"])
+    value = {f: v for _, f, v, _ in api.patched}["missing_details"]
+    assert value == "अख्तियार दुरुपयोग अनुसन्धान आयोगले दायर गरेको अभियोगपत्र"
+    assert "पुनरावेदन" not in value
+
+
+def test_a_press_only_case_gets_a_description_but_no_missing_details(
+    monkeypatch, patched_fetch_markdown
+):
+    """The two fields have DIFFERENT gates. `description` needs press OR verdict;
+    `missing_details` needs the verdict specifically. Reported, not an error."""
+    api = _StubApi([CASE_PRESS_ONLY])
+    report = _run_main(monkeypatch, api, _stub_with_documents("विवरण।", ["साक्षीको वकपत्र"]),
+                       BASE_ARGV + ["--apply"])
+    assert report.rows[0]["status"] == "enriched"
+    fields = {f for _, f, _, _ in api.patched}
+    assert fields == {"description"}
+
+
+def test_an_existing_missing_details_is_not_overwritten(
+    monkeypatch, patched_fetch_markdown
+):
+    api = _StubApi([CASE_FLAGGED])
+    report = _run_main(monkeypatch, api, _stub_with_documents("विवरण।", []),
+                       BASE_ARGV + ["--apply"])
+    assert report.rows[0]["status"] == "enriched"
+    fields = {f for _, f, _, _ in api.patched}
+    assert fields == {"description"}, "description still writes; missing_details does not"
+    assert api._cases["case-flagged"]["missing_details"] == TRUNCATION_MARKER
+
+
+def test_force_never_touches_an_existing_missing_details(monkeypatch,
+                                                        patched_fetch_markdown):
+    """NEVER TOUCH A NON-EMPTY VALUE, not even with --force. The importer's
+    truncation guard puts `ACCUSED LIST INCOMPLETE` in this same field, and the 61
+    published values are hand-written. The description is still rewritten."""
+    api = _StubApi([CASE_FLAGGED])
+    _run_main(monkeypatch, api, _stub_with_documents("विवरण।", []),
+              BASE_ARGV + ["--force", "--apply"])
+    written = {f: v for _, f, v, _ in api.patched}
+    assert "missing_details" not in written
+    assert written["description"] == "विवरण।"
+
+
+@pytest.mark.parametrize("second_run_item", [
+    None,                       # byte-identical repeat
+    "मूल सम्झौता (2011)",       # a DIFFERENT model item -- the case a substring test missed
+])
+def test_a_repeated_forced_run_never_duplicates_the_floor(
+        monkeypatch, patched_fetch_markdown, second_run_item):
+    """An earlier fix tested `missing in before_missing`, which only caught the
+    byte-identical repeat. The floor is deterministic but the model's items are
+    not, so one changed item made the new value a non-substring and it appended
+    wholesale -- both floor items twice and a restarted `क)` enumeration, growing
+    every run. The floor strings cannot serve as a "we wrote this" signature
+    either: they were copied verbatim FROM hand-written published cases."""
+    case = dict(CASE_READY)
+    case["missing_details"] = f"{TRUNCATION_MARKER}\n\n{MD_FLOOR_BOTH}"
+    api = _StubApi([case])
+    _run_main(monkeypatch, api,
+              _stub_with_documents("विवरण।", [second_run_item] if second_run_item else []),
+              BASE_ARGV + ["--force", "--apply"])
+    written = {f: v for _, f, v, _ in api.patched}
+    assert "missing_details" not in written, "wrote over or appended to a live value"
+
+
+def test_a_lost_verdict_source_falls_back_to_the_floor(monkeypatch, tmp_path):
+    """`has_verdict` is BINDING-based, so a case whose court order failed to fetch
+    still reports True and `held_summary` still tells the model we hold the verdict.
+    The model is then diffing against an inventory it could not read, so its items
+    are dropped and only the deterministic floor -- which is binding-based and
+    therefore still true -- is written."""
+
+    def one_source_fails(link):
+        if "court" in link:
+            raise RuntimeError("500 from the material store")
+        return "प्रेस विज्ञप्तिको पाठ"
+
+    monkeypatch.setattr("casework.common.materials.fetch_markdown", one_source_fails)
+    api = _StubApi([CASE_READY])
+    _run_main(monkeypatch, api,
+              _stub_with_documents("विवरण।", ["साक्षी रामु खनालको वकपत्र"]),
+              BASE_ARGV + ["--apply"])
+    written = {f: v for _, f, v, _ in api.patched}
+    assert written["missing_details"] == MD_FLOOR_BOTH, "used items from an unread verdict"
+    events = "\n".join(p.read_text() for p in tmp_path.glob("*.events.jsonl"))
+    assert "verdict source was not fetched" in events
+
+
+def test_no_accepted_documents_are_logged_on_a_case_that_writes_nothing(
+        monkeypatch, patched_fetch_markdown, tmp_path):
+    """`build` writes nothing without a verdict, so "accepted" would be followed by
+    "skipped: no verdict bound". This log exists to tell a prompt problem from a
+    sourcing problem, which a contradictory pair defeats."""
+    api = _StubApi([CASE_PRESS_ONLY])
+    _run_main(monkeypatch, api, _stub_with_documents("विवरण।", ["साक्षीहरूको वकपत्र"]),
+              BASE_ARGV + ["--dry-run"])
+    events = "\n".join(p.read_text() for p in tmp_path.glob("*.events.jsonl"))
+    assert '"status": "accepted"' not in events
+    assert '"status": "discarded"' in events
+
+
+def test_the_prompt_tells_the_model_what_we_hold(monkeypatch, patched_fetch_markdown):
+    """Without the inventory the model guesses at absence instead of computing a
+    difference -- and the held-document rejection rule has nothing to check."""
+    seen = {}
+
+    def stub(**kw):
+        seen.update(kw)
+        return json.dumps({"description": "विवरण।", "missing_documents": []})
+
+    _run_main(monkeypatch, _StubApi([CASE_READY]), stub, BASE_ARGV + ["--dry-run"])
+    assert "DOCUMENTS WE ALREADY HOLD" in ed.EXTRACTION_USER_PROMPT
+    assert "प्रेस विज्ञप्ति" in seen["content"]
+    assert "विशेष अदालतको फैसला" in seen["content"]
+
+
+def test_missing_details_appears_in_the_review_file(monkeypatch, patched_fetch_markdown,
+                                                    tmp_path):
+    """The review file is what a human reads before approving a run, so the
+    value has to be IN it, not only in the events log."""
+    api = _StubApi([CASE_READY])
+    _run_main(monkeypatch, api,
+              _stub_with_documents("### क) सार\nविवरण।", ["साक्षीहरूको वकपत्र"]),
+              BASE_ARGV + ["--dry-run"])
+    text = _review_file(tmp_path).read_text(encoding="utf-8")
+    assert "missing_details →" in text
+    assert "साक्षीहरूको वकपत्र" in text
+
+
+def test_the_review_files_char_count_measures_the_description_alone(
+        monkeypatch, patched_fetch_markdown, tmp_path):
+    """The file's header names `description`, and its before/after size comparison
+    is what flags a truncated or runaway one. Folding missing_details into
+    `generated` over-reported it by the length of a second field."""
+    description = "### क) सार\n" + "क" * 400
+    api = _StubApi([CASE_READY])
+    _run_main(monkeypatch, api,
+              _stub_with_documents(description, ["साक्षीहरूको वकपत्र"]),
+              BASE_ARGV + ["--dry-run"])
+    text = _review_file(tmp_path).read_text(encoding="utf-8")
+    assert f"### Generated ({len(description):,} chars)" in text
+
+
+def test_discarded_findings_reach_the_review_file_not_just_the_events_log(
+        monkeypatch, patched_fetch_markdown, tmp_path):
+    """Otherwise "found four documents and threw them away" is indistinguishable
+    from "found nothing" to the person approving the run."""
+    api = _StubApi([CASE_PRESS_ONLY])       # no verdict -> nothing is written
+    _run_main(monkeypatch, api,
+              _stub_with_documents("विवरण।", ["साक्षी रामु खनालको वकपत्र"]),
+              BASE_ARGV + ["--dry-run"])
+    text = _review_file(tmp_path).read_text(encoding="utf-8")
+    assert "NOT written" in text and "no verdict bound" in text
+    assert "साक्षी रामु खनालको वकपत्र" in text
+
+
+def test_the_prompt_and_the_enforced_item_cap_agree():
+    """`MAX_LLM_ITEMS` is duplicated as a bare literal in the system prompt, which
+    cannot be an f-string because of the JSON braces in OUTPUT FORMAT. Raise the
+    constant and the model keeps returning the old number; lower it and the model
+    reliably produces one item that `accept_items` then logs as over-cap on every
+    single case."""
+    assert f"up to {md.MAX_LLM_ITEMS}," in ed.EXTRACTION_SYSTEM_PROMPT
+
+
+def test_nothing_left_to_write_when_both_fields_are_satisfied(monkeypatch,
+                                                              patched_fetch_markdown):
+    """The per-field gate admits a described case for its EMPTY missing_details --
+    but if BOTH floor items are already satisfied (charge sheet bound AND a Supreme
+    reference on file) and the model finds nothing, there is nothing honest to say
+    and no reason to rewrite the description either. That leaves an empty patch,
+    which must not become a request. Raised by CodeRabbit on #441."""
+    case = dict(
+        CASE_WITH_APPEAL,                       # Supreme ref -> appeal item drops
+        slug="case-nothing-left",
+        description="क" * 900,                  # substantial -> not rewritten
+        evidence=CASE_WITH_APPEAL["evidence"] + [
+            {"material_iri": "https://jawafdehi.org/material/charge_sheet/1",
+             "additional_details": "",
+             "material": {"material_type": "charge_sheet",
+                          "urls": [{"link": _PRESS_MD, "role": "MARKDOWN"}]}},
+        ],                                      # charge sheet -> that item drops too
+    )
+    api = _StubApi([case])
+    report = _run_main(monkeypatch, api, _stub_with_documents("नयाँ विवरण।", []),
+                       BASE_ARGV + ["--apply"])
+    assert api.patched == [], "sent a PATCH with nothing in it"
+    assert api.patch_calls == []
+    assert report.rows[-1]["status"] == "already"
+    assert report.rows[-1]["reason"] == "nothing left to write"

@@ -8,34 +8,9 @@ Nepali allegation sentences. Never touches the database directly -- writes go
 through `CaseworkApi.patch_field`, which this project's binding constraint
 restricts to loopback (`127.0.0.1:48010`) only.
 
-CONCERN -- phantom `missing_details` field (flagged for the dispatcher, not
-silently "fixed"): `STAGES["allegations"]` in `casework/common/pipeline.py`
-declares `provides=("key_allegations", "missing_details")`, and the task-14
-brief accordingly asked for a `normalise_missing_details(value) -> str | None`
-helper. Neither exists anywhere in the donor: `git log --all -p -- casework/
-enrich_allegations.py` never mentions `missing_details` in the DB-free script's
-history, and the 367-line donor at 0321a85 (read in full) writes exactly ONE
-field via `api.patch_field(case_slug, "key_allegations", allegations)`. The
-`provides` tuple traces back to `task-11-brief.md` (written before this
-donor was ever recovered for a Task-12-14 dispatch), not to any donor
-behavior. `missing_details` IS a real `Case` field (see `cases/models.py`,
-`cases/services/ciaa_draft_case_service.py`, and the OLD, still-live DB-based
-`cases/management/commands/enrich_ciaa_allegations.py`), but this DB-free
-enricher never wrote it, before or after deletion. Per this task's explicit
-"donor is the source of truth" instruction, this port writes ONLY
-`key_allegations` and does NOT invent a `normalise_missing_details` helper.
-`STAGES["allegations"].provides` is left uncorrected (out of this task's
-Create-file scope -- it is shared Task-11 infrastructure) but should be
-revisited: a future idempotency check that requires ALL `provides` fields to
-be populated before considering this stage "done" would never see it as
-complete.
-
-The donor's own prompt-context construction is also narrower than
-`enrich_missing_bigo.py`'s `_source_metadata`: the donor's
-`USER_PROMPT_TEMPLATE` only ever includes the case title, the bigo display
-string, and the full press-release markdown body -- it never built a
-DocumentSource-title/description prompt block the way the bigo donor did, so
-there is no analogous metadata-surfacing helper to port here.
+Writes exactly ONE field, `key_allegations`. `missing_details` is written by
+`casework/enrich_description.py`, which has the verdict in hand; this stage only
+ever reads the press release.
 
 Usage:
     uv run python -m casework.enrich_allegations --dry-run
