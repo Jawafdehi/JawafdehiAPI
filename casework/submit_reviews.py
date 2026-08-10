@@ -13,6 +13,7 @@ either.
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 import urllib.error
@@ -27,6 +28,7 @@ from casework.common.cli import (
     log_run_footer,
     log_run_header,
 )
+from casework.common.review import review_path
 from casework.common.select import slugs_from_batch_csv
 
 STAGE = "submit_reviews"
@@ -118,6 +120,113 @@ def submit_batch(api, slugs, *, dry_run, force, logger, events_path, run_id):
     return stats
 
 
+def report_rows(api, slugs):
+    """One row per batch slug: what the review queue did with it.
+
+    Everything but `error` comes off the list row. `error` lives only on the detail
+    serializer, so it is fetched for failed rows and nothing else.
+    """
+    rows = []
+    for slug in slugs:
+        review = existing_review(api, slug)
+        if review is None:
+            rows.append({"slug": slug, "review_id": None, "status": "never-submitted",
+                         "score": None, "disposition": None, "duration": None,
+                         "title": "", "error": ""})
+            continue
+        error = ""
+        if review.get("status") == "failed":
+            detail = api.review_detail(review["id"]) or {}
+            first_line = (detail.get("error") or "").strip().splitlines()
+            error = first_line[0] if first_line else ""
+        rows.append({
+            "slug": slug,
+            "review_id": review.get("id"),
+            "status": review.get("status") or "?",
+            "score": review.get("overall_score"),
+            "disposition": review.get("disposition"),
+            "duration": review.get("duration_seconds"),
+            "title": review.get("case_title") or "",
+            "error": error,
+        })
+    return rows
+
+
+def summarize(rows):
+    """Status counts, disposition counts, score spread, and the never-submitted."""
+    statuses, dispositions, scores, never = {}, {}, [], []
+    for row in rows:
+        statuses[row["status"]] = statuses.get(row["status"], 0) + 1
+        if row["status"] == "never-submitted":
+            never.append(row["slug"])
+        if row.get("disposition"):
+            dispositions[row["disposition"]] = dispositions.get(row["disposition"], 0) + 1
+        if isinstance(row.get("score"), (int, float)):
+            scores.append(row["score"])
+    return {
+        "statuses": statuses,
+        "dispositions": dispositions,
+        "scored": len(scores),
+        "avg": round(sum(scores) / len(scores), 1) if scores else None,
+        "min": min(scores) if scores else None,
+        "max": max(scores) if scores else None,
+        "never_submitted": never,
+    }
+
+
+def _counts_table(title, counts):
+    lines = [f"| {title} | Cases |", "|---|---|"]
+    lines += [f"| {k} | {v} |" for k, v in sorted(counts.items())]
+    return lines + [""]
+
+
+def render_report(rows, summary, *, base_url, run_id, batch):
+    """The markdown the report run writes. Read top-down: totals, then cases."""
+    lines = [
+        f"# Review batch report — `{batch}`",
+        "",
+        f"- Target: `{base_url}`",
+        f"- Run id: `{run_id}`",
+        f"- Cases in batch: {len(rows)}",
+        "",
+        "## Summary",
+        "",
+    ]
+    lines += _counts_table("Status", summary["statuses"])
+    lines += _counts_table("Disposition", summary["dispositions"])
+    if summary["avg"] is not None:
+        lines += [f"Score: avg **{summary['avg']}**, min {summary['min']}, "
+                  f"max {summary['max']} (over {summary['scored']} graded).", ""]
+
+    lines += ["## Cases", "",
+              "| # | Slug | Review | Status | Score | Disposition | Seconds |",
+              "|---|---|---|---|---|---|---|"]
+    for i, row in enumerate(rows, 1):
+        duration = (f"{row['duration']:.0f}"
+                    if isinstance(row.get("duration"), (int, float)) else "—")
+        lines.append(
+            f"| {i} | `{row['slug']}` | {row['review_id'] or '—'} | {row['status']} "
+            f"| {row['score'] if row['score'] is not None else '—'} "
+            f"| {row['disposition'] or '—'} | {duration} |")
+    lines.append("")
+
+    failed = [r for r in rows if r["status"] == "failed"]
+    if failed:
+        lines += ["## Failed", ""]
+        lines += [f"- `{r['slug']}` — review {r['review_id']} — "
+                  f"{r['error'] or '(no error recorded)'}" for r in failed]
+        lines.append("")
+
+    if summary["never_submitted"]:
+        lines += ["## Never submitted", "",
+                  "These batch slugs carry no review at all. Re-run without "
+                  "`--report` to submit them.", ""]
+        lines += [f"- `{slug}`" for slug in summary["never_submitted"]]
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def build_parser():
     p = argparse.ArgumentParser(
         description="Submit a batch of cases to the casework review queue, or report "
@@ -156,6 +265,26 @@ def main(argv=None):
                    run_id=run_id, paths=paths)
 
     started = time.monotonic()
+    if args.report:
+        rows = report_rows(api, slugs)
+        summary = summarize(rows)
+        path = review_path(STAGE, run_id, args.review_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            render_report(rows, summary, base_url=api.base_url, run_id=run_id,
+                          batch=os.path.basename(args.batch_csv or "(--slug)")),
+            encoding="utf-8")
+        log_run_footer(logger, stage=STAGE, stats=summary["statuses"],
+                       duration_s=time.monotonic() - started)
+        print("\n=== review batch report (READ-ONLY) ===")
+        print(f"  {len(rows)} cases — {format_counts(summary['statuses'])}")
+        if summary["dispositions"]:
+            print(f"  {format_counts(summary['dispositions'])}   "
+                  f"score avg {summary['avg']} "
+                  f"(min {summary['min']}, max {summary['max']})")
+        print(f"  Wrote {path}")
+        return 0
+
     stats = submit_batch(api, slugs, dry_run=args.dry_run, force=args.force,
                          logger=logger, events_path=paths["events"], run_id=run_id)
     log_run_footer(logger, stage=STAGE, stats=stats,

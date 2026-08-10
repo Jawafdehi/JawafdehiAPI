@@ -106,3 +106,72 @@ def test_limit_takes_the_batch_in_file_order(tmp_path):
     batch.write_text(f"slug\n{SLUG_A}\n{SLUG_B}\n", encoding="utf-8")
     args = sr.build_parser().parse_args(["--batch-csv", str(batch), "--limit", "1"])
     assert sr.slugs_for_run(args) == [SLUG_A]
+
+
+class _ReportApi(_StubApi):
+    """Adds the detail read the report makes for failed rows only."""
+
+    def __init__(self, reviews=None, details=None):
+        super().__init__(reviews=reviews)
+        self.details = details or {}
+        self.detail_calls = []
+
+    def review_detail(self, review_id):
+        self.detail_calls.append(review_id)
+        return self.details.get(review_id, {})
+
+
+def test_report_reads_score_and_disposition_off_the_list_row():
+    api = _ReportApi(reviews={SLUG_A: [{"id": 1841, "status": "done",
+                                        "overall_score": 84, "disposition": "PASS",
+                                        "case_title": "ओक्सिजन प्लान्ट",
+                                        "duration_seconds": 92.4}]})
+    rows = sr.report_rows(api, [SLUG_A])
+    assert rows[0]["review_id"] == 1841
+    assert rows[0]["disposition"] == "PASS"
+    assert rows[0]["score"] == 84
+    assert api.detail_calls == []          # a done row needs no detail fetch
+
+
+def test_report_fetches_the_error_only_for_failed_rows():
+    api = _ReportApi(
+        reviews={SLUG_A: [{"id": 1841, "status": "done"}],
+                 SLUG_B: [{"id": 1842, "status": "failed"}]},
+        details={1842: {"error": "convert failed: no MARKDOWN role\ntraceback…"}},
+    )
+    rows = sr.report_rows(api, [SLUG_A, SLUG_B])
+    assert api.detail_calls == [1842]
+    failed = [r for r in rows if r["status"] == "failed"][0]
+    assert failed["error"] == "convert failed: no MARKDOWN role"
+
+
+def test_a_batch_slug_with_no_review_is_reported_as_never_submitted():
+    api = _ReportApi()
+    rows = sr.report_rows(api, [SLUG_A])
+    assert rows[0]["status"] == "never-submitted"
+    assert sr.summarize(rows)["never_submitted"] == [SLUG_A]
+
+
+def test_summary_counts_dispositions_and_scores():
+    rows = [
+        {"slug": SLUG_A, "status": "done", "score": 84, "disposition": "PASS"},
+        {"slug": SLUG_B, "status": "done", "score": 58, "disposition": "REVISE"},
+        {"slug": "case-c", "status": "pending", "score": None, "disposition": None},
+    ]
+    summary = sr.summarize(rows)
+    assert summary["statuses"]["done"] == 2
+    assert summary["dispositions"]["PASS"] == 1
+    assert summary["scored"] == 2
+    assert summary["avg"] == 71.0
+    assert (summary["min"], summary["max"]) == (58, 84)
+
+
+def test_the_rendered_report_names_every_case_and_the_totals():
+    rows = [{"slug": SLUG_A, "review_id": 1841, "status": "done", "score": 84,
+             "disposition": "PASS", "duration": 92.4, "title": "", "error": ""}]
+    text = sr.render_report(rows, sr.summarize(rows),
+                            base_url="http://127.0.0.1:48010/api",
+                            run_id="testrun", batch="batch.csv")
+    assert SLUG_A in text
+    assert "PASS" in text
+    assert "1841" in text
