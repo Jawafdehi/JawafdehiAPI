@@ -1164,3 +1164,82 @@ def test_patch_case_makes_no_request_when_nothing_changed(monkeypatch):
     api = CaseworkApi("http://127.0.0.1:48010", token="t")
     monkeypatch.setattr(api, "_patch", lambda *a, **k: pytest.fail("should not PATCH"))
     assert api.patch_case("case-079-cr-0151") == {}
+
+
+class _FakeResponse:
+    """Minimal stand-in for what `_request` returns: a context manager with `.read()`."""
+
+    def __init__(self, body=b"{}"):
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_reviews_for_slug_unwraps_the_paginated_envelope(monkeypatch):
+    api = CaseworkApi("http://127.0.0.1:48010", basic=("u", "p"))
+    seen = {}
+
+    def fake_get(path, params=None, timeout=60):
+        seen["path"] = path
+        seen["params"] = params
+        return {"count": 1, "results": [{"id": 1841, "status": "done"}]}
+
+    monkeypatch.setattr(api, "get", fake_get)
+    rows = api.reviews_for_slug("case-078-cr-0038-ciaa-special-court-case-078-cr-9a")
+
+    assert seen["path"] == "/casework/reviews/"
+    assert seen["params"] == {
+        "slug": "case-078-cr-0038-ciaa-special-court-case-078-cr-9a"
+    }
+    assert rows == [{"id": 1841, "status": "done"}]
+
+
+def test_reviews_for_slug_on_a_never_reviewed_case_is_empty(monkeypatch):
+    api = CaseworkApi("http://127.0.0.1:48010", basic=("u", "p"))
+    monkeypatch.setattr(api, "get", lambda *a, **kw: {"count": 0, "results": []})
+    assert api.reviews_for_slug("case-078-cr-0044-ciaa-special-court-case-078-cr-12") == []
+
+
+def test_review_detail_reads_one_review_by_id(monkeypatch):
+    api = CaseworkApi("http://127.0.0.1:48010", basic=("u", "p"))
+    seen = {}
+
+    def fake_get(path, params=None, timeout=60):
+        seen["path"] = path
+        return {"id": 1842, "error": "convert failed"}
+
+    monkeypatch.setattr(api, "get", fake_get)
+    assert api.review_detail(1842)["error"] == "convert failed"
+    assert seen["path"] == "/casework/reviews/1842/"
+
+
+def test_submit_review_posts_only_the_slug(monkeypatch):
+    api = CaseworkApi("http://127.0.0.1:48010", basic=("u", "p"))
+    sent = {}
+
+    def fake_request(method, url, data=None, headers=None, timeout=60):
+        sent.update(method=method, url=url, body=json.loads(data.decode()),
+                    content_type=headers.get("Content-Type"))
+        return _FakeResponse(b'{"id": 1901, "status": "pending"}')
+
+    monkeypatch.setattr(api, "_request", fake_request)
+    review = api.submit_review("case-078-cr-0038-ciaa-special-court-case-078-cr-9a")
+
+    assert sent["method"] == "POST"
+    assert sent["url"] == "http://127.0.0.1:48010/api/casework/reviews/submit/"
+    assert sent["body"] == {"slug": "case-078-cr-0038-ciaa-special-court-case-078-cr-9a"}
+    assert sent["content_type"] == "application/json"
+    assert review["id"] == 1901
+
+
+def test_submit_review_to_a_remote_host_is_refused_without_the_flag():
+    api = CaseworkApi("https://example.invalid", token="t")
+    with pytest.raises(RuntimeError, match="refusing to write to non-loopback"):
+        api.submit_review("case-078-cr-0038-ciaa-special-court-case-078-cr-9a")

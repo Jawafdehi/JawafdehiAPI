@@ -297,6 +297,38 @@ class CaseworkApi:
                     f"{exc.read().decode(errors='replace')}") from exc
             raise
 
+    def reviews_for_slug(self, slug, timeout=60):
+        """Every review run for `slug`, newest first; `[]` when never reviewed.
+
+        Page one answers "has this case been reviewed": the list view orders by
+        `-created_at` (`CaseReview.Meta.ordering`), so the newest run is row zero.
+        Both the paginated envelope and a bare list are handled -- pagination is a
+        project-wide DRF setting, not a promise this view makes.
+        """
+        payload = self.get("/casework/reviews/", params={"slug": slug}, timeout=timeout)
+        if isinstance(payload, dict):
+            return list(payload.get("results") or ())
+        return list(payload or ())
+
+    def review_detail(self, review_id, timeout=60):
+        """One review, including `error` -- which the list serializer omits."""
+        return self.get(f"/casework/reviews/{int(review_id)}/", timeout=timeout)
+
+    def submit_review(self, slug, timeout=60):
+        """POST one case into the review queue. Returns the created review row.
+
+        Goes through `_request` rather than a bespoke opener, which is what puts it
+        under the host write-guard: a non-loopback POST is refused unless
+        `allow_remote_writes` is set.
+        """
+        url = self.base_url + "/casework/reviews/submit/"
+        body = json.dumps({"slug": slug}).encode("utf-8")
+        headers = dict(self._headers())
+        headers["Content-Type"] = "application/json"
+        with self._request("POST", url, data=body, headers=headers,
+                           timeout=timeout) as r:
+            return json.loads(r.read().decode())
+
     # The list endpoint's server-side default is 20 per page, so walking all
     # 3,003 cases costs 151 round trips -- ~2m45s against production, paid by
     # every enricher run before it processes a single case. The API caps
