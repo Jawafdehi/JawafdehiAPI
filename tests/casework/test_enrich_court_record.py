@@ -2086,8 +2086,8 @@ def test_the_module_imports_without_django(tmp_path):
     """The standalone constraint, pinned deterministically.
 
     Checking only `returncode == 0` proves little on its own:
-    `casework.common.llm.bootstrap` (never called by this module, but the
-    thing this test guards against a future edit calling) sets
+    `casework.common.llm.bootstrap` -- which `main` DOES call, but only inside
+    the held-name comparison branch, never at import -- sets
     `DJANGO_SETTINGS_MODULE` itself via `os.environ.setdefault` and would
     fail closed here only because this shell has no `SECRET_KEY` -- a shell
     that exports a complete `.env` would let Django configure successfully,
@@ -2107,3 +2107,472 @@ def test_the_module_imports_without_django(tmp_path):
          "assert not loaded, loaded"],
         env=env, capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
+
+
+# --------------------------------------------------------------------------
+# The held-name comparison (`casework.held_identity`) and what the binder is
+# allowed to do with its answer.
+# --------------------------------------------------------------------------
+
+from casework.enrich_court_record import (  # noqa: E402
+    _held_outcome,
+    bindable_defendants,
+    write_held_file,
+)
+from casework.held_identity import CaseIdentity, HeldVerdict  # noqa: E402
+
+SHARED = "कृष्ण प्रसाद यादव"
+SHARED_KEY = normalise_name(SHARED)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_model(monkeypatch):
+    """No test in this module may reach a real provider.
+
+    Under pytest `DJANGO_SETTINGS_MODULE` is already configured, so `main`'s
+    `bootstrap()` and `from llm.invoke import invoke_json` both SUCCEED here --
+    every CLI test that produces a held name would otherwise spend a real
+    premium call. Returning `{}` means "no verdict for any name", which is
+    precisely the pre-comparison behaviour those tests already assert, so this
+    stub changes no existing expectation. Tests about the comparison itself
+    override it; `test_the_comparison_sweep_runs_unless_it_is_turned_off` pins
+    that the sweep is genuinely reached, so this fixture cannot hide a removed
+    or broken sweep.
+    """
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "compare_held", lambda *a, **kw: {})
+
+
+def _verdict(**over):
+    base = {"verdict": "different", "confidence": "high",
+            "evidence": ("Rautahat elected ward chair versus Jhapa contracted "
+                         "environment officer -- different districts and posts."),
+            "per_case": {"case-a": "वडा अध्यक्ष, रौतहट",
+                         "case-b": "वातावरण अधिकृत, झापा"}}
+    base.update(over)
+    return HeldVerdict(**base)
+
+
+def _identity(slug, *, districts=(), court_cases=()):
+    return CaseIdentity(slug=slug, districts=tuple(districts),
+                        court_cases=tuple(court_cases))
+
+
+def _binds(case_slug, *, held, decisions=None, identity=None, api=None,
+           run_entities=None, parties=None, dry_run=True):
+    record = _record(parties=parties or [{"side": "defendant", "name": SHARED}])
+    return _accused_binds(
+        api or _SearchApi(), _case(slug=case_slug), [record],
+        live_prefixes=["person"],
+        run_entities={} if run_entities is None else run_entities,
+        dry_run=dry_run, held=held, decisions=decisions, identity=identity)
+
+
+class _SlugStoreApi(_SearchApi):
+    """One slug, one entity -- what the server actually enforces.
+
+    Needed for any test about entity SHARING: under `--dry-run`
+    `resolve_defendant` derives the IRI from the slug and never posts, so two
+    cases resolving the same name produce the same IRI whether or not they
+    shared a `run_entities` entry. Only a real create can tell reuse (one POST,
+    both bound) from a collision (two POSTs, the second binding nothing).
+    """
+
+    def create_entity(self, payload, timeout=60):
+        taken = {p["slug"] for p in self.posted}
+        self.posted.append(payload)
+        iri = build_entity_iri(PERSON_PREFIX, payload["slug"])
+        if payload["slug"] in taken:
+            raise EntityAlreadyExists(iri)
+        return {"@id": iri}
+
+
+# ------------------------------------------------- the hold, verdict by verdict
+
+def test_no_verdict_at_all_leaves_a_held_name_held():
+    # The regression guard for the whole feature: an absent verdict must behave
+    # exactly as the binder did before the comparison existed.
+    items, rows, _ = _binds("case-a",
+                            held={SHARED_KEY: frozenset({"case-a", "case-b"})})
+    assert items == []
+    assert rows[0]["how"] == "held"
+    assert "held for a human to rule on" in rows[0]["reason"]
+
+
+@pytest.mark.parametrize("over", [
+    {"confidence": "medium"},
+    {"verdict": "unclear"},
+    {"evidence": "छोटो"},
+    {"per_case": {}},
+])
+def test_a_verdict_short_of_the_bar_leaves_the_name_held(over):
+    held = {SHARED_KEY: frozenset({"case-a", "case-b"})}
+    items, rows, _ = _binds("case-a", held=held,
+                            decisions={SHARED_KEY: _verdict(**over)})
+    assert items == []
+    assert rows[0]["how"] == "held"
+
+
+def test_a_held_row_quotes_what_the_model_actually_said():
+    # The operator must see WHY it is still held: "unclear/low" and "the model
+    # never answered" call for different follow-up.
+    held = {SHARED_KEY: frozenset({"case-a", "case-b"})}
+    items, rows, _ = _binds(
+        "case-a", held=held,
+        decisions={SHARED_KEY: _verdict(verdict="unclear", confidence="low",
+                                        evidence="both cases name a मालपोत office")})
+    assert items == []
+    assert "unclear/low" in rows[0]["reason"]
+    assert "मालपोत" in rows[0]["reason"]
+
+
+def test_a_failed_comparison_is_reported_as_the_model_not_answering():
+    held = {SHARED_KEY: frozenset({"case-a", "case-b"})}
+    _, rows, _ = _binds("case-a", held=held,
+                        decisions={SHARED_KEY: _verdict(failed=True)})
+    assert "the model did not answer" in rows[0]["reason"]
+
+
+# ------------------------------------------------------------ different: split
+
+def test_a_different_verdict_gives_each_case_its_own_entity():
+    # Two real creates, two distinct slugs, neither colliding -- the split has
+    # to survive a server that enforces one slug per entity, not just produce
+    # two different strings in a dry run.
+    held = {SHARED_KEY: frozenset({"case-a", "case-b"})}
+    decisions = {SHARED_KEY: _verdict()}
+    api, run_entities = _SlugStoreApi(), {}
+    items_a, rows_a, _ = _binds("case-a", held=held, decisions=decisions, api=api,
+                                identity=_identity("case-a", districts=["rautahat"]),
+                                run_entities=run_entities, dry_run=False)
+    items_b, rows_b, _ = _binds("case-b", held=held, decisions=decisions, api=api,
+                                identity=_identity("case-b", districts=["jhapa"]),
+                                run_entities=run_entities, dry_run=False)
+    assert [p["slug"] for p in api.posted] == ["krishna-prasada-yadava-rautahat",
+                                               "krishna-prasada-yadava-jhapa"]
+    assert items_a[0]["nes_id"].endswith("-rautahat")
+    assert items_b[0]["nes_id"].endswith("-jhapa")
+    assert rows_a[0]["how"] == "created" and rows_b[0]["how"] == "created"
+
+
+def test_a_different_verdict_refuses_the_one_existing_namesake_entity():
+    # Ladder rung 2 binds the single person entity carrying this name. The
+    # verdict has just said these cases name two people, so at most one of them
+    # IS that entity and nothing here can say which -- matching would hand both
+    # cases the same IRI, the merge the split exists to prevent.
+    api = _SearchApi(results=[_hit(YADAV, SHARED)], complete=True)
+    held = {SHARED_KEY: frozenset({"case-a", "case-b"})}
+    items, rows, _ = _binds("case-a", held=held, decisions={SHARED_KEY: _verdict()},
+                            identity=_identity("case-a", districts=["rautahat"]),
+                            api=api)
+    assert items[0]["nes_id"] != YADAV
+    assert items[0]["nes_id"].endswith("-rautahat")
+    assert rows[0]["how"] == "created"
+    # The verdict itself is the row's record of why the match was passed over.
+    assert rows[0]["reason"].startswith("held verdict different/high")
+
+
+def test_a_different_verdict_falls_back_to_the_court_case_number():
+    held = {SHARED_KEY: frozenset({"case-a", "case-b"})}
+    items, _, _ = _binds(
+        "case-a", held=held, decisions={SHARED_KEY: _verdict()},
+        identity=_identity("case-a", districts=["jhapa", "morang"],
+                           court_cases=["079-CR-0071"]))
+    assert items[0]["nes_id"].endswith("-079-cr-0071")
+
+
+def test_a_different_verdict_with_nothing_to_separate_by_binds_nothing():
+    # No single district and no court case number: both cases would derive the
+    # SAME slug, so the split cannot be carried out. Reported as that, rather
+    # than left to surface as a slug collision on whichever case ran second.
+    held = {SHARED_KEY: frozenset({"case-a", "case-b"})}
+    items, rows, _ = _binds("case-a", held=held, decisions={SHARED_KEY: _verdict()},
+                            identity=_identity("case-a"))
+    assert items == []
+    assert rows[0]["how"] == "failed"
+    assert "neither a single district nor a court case number" in rows[0]["reason"]
+
+
+# ------------------------------------------------------------- same: one entity
+
+def test_a_same_verdict_creates_the_entity_once_and_binds_it_to_both_cases():
+    held = {SHARED_KEY: frozenset({"case-a", "case-b"})}
+    decisions = {SHARED_KEY: _verdict(verdict="same")}
+    api, run_entities = _SlugStoreApi(), {}
+    items_a, _, _ = _binds("case-a", held=held, decisions=decisions, api=api,
+                           run_entities=run_entities, dry_run=False)
+    items_b, rows_b, _ = _binds("case-b", held=held, decisions=decisions, api=api,
+                                run_entities=run_entities, dry_run=False)
+    assert len(api.posted) == 1
+    assert items_a[0]["nes_id"] == items_b[0]["nes_id"]
+    assert rows_b[0]["reason"].startswith("held verdict same/high")
+
+
+def test_a_same_verdict_shares_the_entity_even_when_one_row_carries_an_address():
+    # `run_entity_key` normally keys on name AND address to keep namesakes
+    # apart. A `same` verdict has replaced the address as the thing
+    # establishing identity, so an address on one case's row only must not
+    # split the person that verdict just merged. Without the override the two
+    # cases key differently, case-b reaches the create rung, collides on the
+    # slug case-a already took, and binds NOTHING.
+    held = {SHARED_KEY: frozenset({"case-a", "case-b"})}
+    decisions = {SHARED_KEY: _verdict(verdict="same")}
+    api, run_entities = _SlugStoreApi(), {}
+    items_a, _, _ = _binds(
+        "case-a", held=held, decisions=decisions, api=api, dry_run=False,
+        run_entities=run_entities,
+        parties=[{"side": "defendant", "name": SHARED,
+                  "address": "सर्लाही, हरिपुर-४"}])
+    items_b, rows_b, _ = _binds("case-b", held=held, decisions=decisions, api=api,
+                                run_entities=run_entities, dry_run=False)
+    assert len(api.posted) == 1
+    assert items_b and items_a[0]["nes_id"] == items_b[0]["nes_id"]
+    assert rows_b[0]["how"] == "created"
+
+
+def test_a_same_verdict_still_uses_the_one_exact_match_when_there_is_one():
+    # The opposite of the `different` case: if NES holds exactly one person
+    # with this name and the verdict says both cases mean one man, that entity
+    # is the answer and nothing needs creating.
+    api = _SearchApi(results=[_hit(YADAV, SHARED)], complete=True)
+    held = {SHARED_KEY: frozenset({"case-a", "case-b"})}
+    items, rows, _ = _binds("case-a", held=held,
+                            decisions={SHARED_KEY: _verdict(verdict="same")},
+                            api=api)
+    assert items[0]["nes_id"] == YADAV
+    assert rows[0]["how"] == "exact"
+
+
+# ------------------------------------------------------------------ provenance
+
+def test_an_acted_on_verdict_is_recorded_on_the_row_it_bound():
+    held = {SHARED_KEY: frozenset({"case-a", "case-b"})}
+    _, rows, _ = _binds("case-a", held=held, decisions={SHARED_KEY: _verdict()},
+                        identity=_identity("case-a", districts=["rautahat"]))
+    assert rows[0]["reason"].startswith("held verdict different/high")
+    assert "Rautahat elected ward chair" in rows[0]["reason"]
+
+
+def test_the_court_rows_own_nes_id_outranks_a_different_verdict():
+    # Rung 1 is a pure copy of what the portal itself asserts about this row,
+    # and the portal is the authority on its own records -- a model's inference
+    # does not override a stated identity. This cohort carries no `nes_id` at
+    # all, so the path is documented here rather than exercised in production.
+    held = {SHARED_KEY: frozenset({"case-a", "case-b"})}
+    items, rows, _ = _binds(
+        "case-a", held=held, decisions={SHARED_KEY: _verdict()},
+        identity=_identity("case-a", districts=["rautahat"]),
+        parties=[{"side": "defendant", "name": SHARED, "nes_id": YADAV}])
+    assert items[0]["nes_id"] == YADAV
+    assert rows[0]["how"] == "nes_id"
+
+
+def test_held_outcome_names_only_the_other_cases():
+    reason, distinct, disc, override = _held_outcome(
+        frozenset({"case-a", "case-b"}), "case-a", None, None)
+    assert "case-b" in reason and "case-a" not in reason
+    assert (distinct, disc, override) == (False, "", None)
+
+
+# -------------------------------------------------------------- the held file
+
+def test_the_held_file_records_the_verdict_and_whether_it_was_acted_on(tmp_path):
+    records = [_record(parties=[{"side": "defendant", "name": SHARED}])]
+    court_records = {"case-a": (records, []), "case-b": (records, [])}
+    path = write_held_file(
+        tmp_path / "review.held.json",
+        {SHARED_KEY: frozenset({"case-a", "case-b"})}, court_records,
+        run_id="r1", verdicts={SHARED_KEY: _verdict()})
+    entry = json.loads(path.read_text(encoding="utf-8"))["held"][0]
+    assert entry["comparison"]["verdict"] == "different"
+    assert entry["comparison"]["acted_on"] is True
+    assert entry["comparison"]["model_answered"] is True
+    assert "Rautahat" in entry["comparison"]["evidence"]
+
+
+def test_the_held_file_says_so_when_a_name_was_never_compared(tmp_path):
+    records = [_record(parties=[{"side": "defendant", "name": SHARED}])]
+    court_records = {"case-a": (records, []), "case-b": (records, [])}
+    path = write_held_file(
+        tmp_path / "review.held.json",
+        {SHARED_KEY: frozenset({"case-a", "case-b"})}, court_records,
+        run_id="r1", verdicts={})
+    assert json.loads(path.read_text(encoding="utf-8"))["held"][0]["comparison"] is None
+
+
+# ------------------------------------------------------------------ card input
+
+def test_bindable_defendants_skips_a_non_prosecution_reference():
+    # The identity cards must see the same defendants the index does: a
+    # ministry named on an `OA` writ was never a bind candidate, so scanning
+    # the case description for its name would be wasted work.
+    records = [_record(number="079-OA-0004",
+                       parties=[{"side": "defendant", "name": "नेपाल सरकार"}]),
+               _record(parties=[{"side": "defendant", "name": SHARED}])]
+    assert bindable_defendants(records) == [SHARED]
+
+
+def test_bindable_defendants_de_duplicates_across_references():
+    records = [_record(parties=[{"side": "defendant", "name": SHARED}]),
+               _record(number="080-cr-0002",
+                       parties=[{"side": "defendant", "name": SHARED}])]
+    assert bindable_defendants(records) == [SHARED]
+
+
+# ------------------------------------------------------------------ CLI wiring
+
+def _canned_compare(**over):
+    """A `compare_held` stand-in that honours the real one's `on_verdict` hook.
+
+    Calling the hook matters: `main` logs each verdict through it, so a stub
+    that skipped it would leave the per-name `held_compare` events untested.
+    """
+    def _compare(held, cards, invoke_json, *, on_verdict=None, **kw):
+        verdicts = {}
+        for name, slugs in sorted(held.items()):
+            verdicts[name] = _verdict(**over)
+            if on_verdict:
+                on_verdict(name, sorted(slugs), verdicts[name])
+        return verdicts
+    return _compare
+
+
+def _two_case_api(shared=SHARED):
+    case_a = _case(slug="case-a")
+    case_b = _case(slug="case-b", court_cases=[
+        "https://jawafdehi.org/courtcase/special/080-cr-0002"])
+    return _MultiCaseApi(
+        [case_a, case_b],
+        {"079-cr-0151": {"detail": {"registration_date_ad": "2023-06-22"},
+                         "hearings": [DECIDED],
+                         "parties": [{"side": "defendant", "name": shared}]},
+         "080-cr-0002": {"detail": {"registration_date_ad": "2023-06-22"},
+                         "hearings": [DECIDED],
+                         "parties": [{"side": "defendant", "name": shared}]}})
+
+
+def test_the_comparison_sweep_runs_unless_it_is_turned_off(tmp_path, monkeypatch):
+    # Pins that `main` genuinely reaches `compare_held` for a run with a held
+    # name -- without this, the module-wide `_no_live_model` stub could hide a
+    # removed sweep and every other test here would still pass.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("CASEWORK_API_USER", "dev")
+    monkeypatch.setenv("CASEWORK_API_PASSWORD", "dev")
+    api = _two_case_api()
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+    seen = {}
+
+    def _fake(held, cards, invoke_json, **kw):
+        seen["held"] = dict(held)
+        seen["cards"] = set(cards)
+        seen["tier"] = kw.get("tier")
+        return {name: _verdict() for name in held}
+
+    monkeypatch.setattr(ecr, "compare_held", _fake)
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+               "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+    assert list(seen["held"]) == [SHARED_KEY]
+    assert seen["cards"] == {"case-a", "case-b"}
+    assert seen["tier"] == "premium"
+
+
+def test_no_held_compare_asks_no_model_and_holds_every_name(tmp_path, monkeypatch):
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("CASEWORK_API_USER", "dev")
+    monkeypatch.setenv("CASEWORK_API_PASSWORD", "dev")
+    api = _two_case_api()
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    def _never(*a, **kw):
+        raise AssertionError("--no-held-compare must not reach the model")
+
+    monkeypatch.setattr(ecr, "compare_held", _never)
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+               "--no-held-compare", "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+    resolve = [e for e in _events(tmp_path) if e["step"] == "defendant_resolve"]
+    assert resolve and all(e["detail"].startswith("held: ") for e in resolve)
+    assert not [e for e in _events(tmp_path) if e["step"] == "held_compare"]
+
+
+def test_a_run_that_holds_nothing_never_asks_the_model(tmp_path, monkeypatch):
+    # The stage's ordinary case: only 80 of ~1,414 measured defendant rows
+    # carry a name that lands on two cases, so most runs must spend no tokens.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("CASEWORK_API_USER", "dev")
+    monkeypatch.setenv("CASEWORK_API_PASSWORD", "dev")
+    api = _MultiCaseApi(
+        [_case()],
+        {"079-cr-0151": {"detail": {"registration_date_ad": "2023-06-22"},
+                         "hearings": [DECIDED],
+                         "parties": [{"side": "defendant", "name": SHARED}]}})
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    def _never(*a, **kw):
+        raise AssertionError("a run with no held name must not reach the model")
+
+    monkeypatch.setattr(ecr, "compare_held", _never)
+    assert main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+                 "--review-file", str(tmp_path / "review.md")]) == 0
+
+
+def test_each_held_verdict_is_logged_with_its_evidence(tmp_path, monkeypatch):
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("CASEWORK_API_USER", "dev")
+    monkeypatch.setenv("CASEWORK_API_PASSWORD", "dev")
+    api = _two_case_api()
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+    monkeypatch.setattr(ecr, "compare_held", _canned_compare())
+    main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+          "--review-file", str(tmp_path / "review.md")])
+    compare = [e for e in _events(tmp_path) if e["step"] == "held_compare"]
+    assert any("different/high" in e["detail"] for e in compare)
+    assert any("Rautahat elected ward chair" in e["detail"] for e in compare)
+    assert any("1 settled by the model" in e["detail"] for e in compare)
+
+
+def test_a_still_held_verdict_is_logged_as_still_held(tmp_path, monkeypatch):
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("CASEWORK_API_USER", "dev")
+    monkeypatch.setenv("CASEWORK_API_PASSWORD", "dev")
+    api = _two_case_api()
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+    monkeypatch.setattr(ecr, "compare_held",
+                        _canned_compare(verdict="unclear", confidence="low"))
+    main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+          "--review-file", str(tmp_path / "review.md")])
+    compare = [e for e in _events(tmp_path) if e["step"] == "held_compare"]
+    assert any("(still held)" in e["detail"] for e in compare)
+    assert any("0 settled by the model" in e["detail"] for e in compare)
+
+
+def test_an_unavailable_provider_holds_every_name_instead_of_crashing(
+    tmp_path, monkeypatch,
+):
+    # A provider outage must cost the held names and nothing else: the dates on
+    # both cases are still planned.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("CASEWORK_API_USER", "dev")
+    monkeypatch.setenv("CASEWORK_API_PASSWORD", "dev")
+    api = _two_case_api()
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    def _boom(*a, **kw):
+        raise RuntimeError("no provider keys")
+
+    monkeypatch.setattr(ecr, "bootstrap", _boom)
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+               "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+    events = _events(tmp_path)
+    unavailable = [e for e in events if e["step"] == "held_compare"]
+    assert unavailable and unavailable[0]["status"] == "unavailable"
+    assert "stays held for a human" in unavailable[0]["detail"]
+    assert [e for e in events if e["step"] == "dates"]

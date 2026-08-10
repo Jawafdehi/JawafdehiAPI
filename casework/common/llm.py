@@ -69,10 +69,16 @@ TIERS = {
     # the decision and leaves the gate cheap. Re-measure with the live test
     # before changing it again -- do not re-argue it from first principles.
     "news": "premium",
-    # Registered because `test_stage_names_match_llm_tier_names` pins the pair,
-    # not because a model runs. `court_record` makes ZERO LLM calls -- a run
-    # that spends no tokens is its success case, not a shortfall.
-    "court_record": "cheap",
+    # `court_record` reads its dates and defendants straight off the court
+    # record and needs no model for either. Its ONE call is
+    # `held_identity.compare_held`, fired only for a name the run found on two
+    # or more cases -- 80 of ~1,414 measured defendant rows -- and it decides
+    # whether two same-named defendants are one person. Getting that wrong
+    # either attaches someone to a case they were never in or splits one
+    # person's record, so it takes the same tier as `news`'s bind decision for
+    # the same reason. A run that holds no name spends nothing and never
+    # reaches the provider at all.
+    "court_record": "premium",
 }
 DEFAULT_TIER = "cheap"
 

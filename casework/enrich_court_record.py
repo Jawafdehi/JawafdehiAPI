@@ -1,10 +1,18 @@
 #!/usr/bin/env python
 """Accused binds and case dates, read from the case's own NGM court record.
 
-Zero LLM calls, zero Django, zero source documents. The court record states
-these facts rather than inferring them: a defendant is a defendant because a
-charge sheet says so, and a verdict date is a verdict date because the Special
-Court's docket says so.
+Zero Django, zero source documents. The court record states these facts rather
+than inferring them: a defendant is a defendant because a charge sheet says so,
+and a verdict date is a verdict date because the Special Court's docket says so.
+
+ONE THING IS NOT IN THE COURT RECORD: whether two cases naming the same person
+mean the same human being. Those rows carry a name and nothing else -- no
+address on any of the 1,414 in the census -- so `held_names` holds such a name
+and `casework.held_identity` asks the model to compare the cases' press
+releases, which do state district and office. That is this stage's only model
+call, it fires once per HELD name rather than per case, and an answer that is
+not high-confidence leaves the name held exactly as before. `--no-held-compare`
+turns it off, restoring a run that spends no tokens at all.
 
 WHAT IT WRITES, in one conditional PATCH per case (`CaseworkApi.patch_case`):
 
@@ -86,6 +94,7 @@ from casework.common.cli import (
     print_summary,
     setup_logging,
 )
+from casework.common.llm import bootstrap, tier_for
 from casework.common.review import ReviewRow, build_review_file
 from casework.common.select import ENRICHABLE_STATES, select_for_run
 from casework.court_record import (
@@ -97,6 +106,8 @@ from casework.court_record import (
 )
 from casework.entity_identity import entity_slug, prefix_is_creatable
 from casework.entity_resolver import normalise_name
+from casework.held_identity import case_identity, compare_held
+from casework.held_identity import discriminator as held_discriminator
 from casework.enrich_related_entities import (
     bind_key,
     current_entity_binds,
@@ -271,8 +282,15 @@ def exact_person_match(api, name):
     return next(iter(hits)), ""
 
 
-def run_entity_key(name, address):
+def run_entity_key(name, address, discriminator=""):
     """The `run_entities` key for one court-record party row.
+
+    `discriminator` is set only for a name a `different` held verdict split
+    (see `held_identity.discriminator`). It is part of the key because that
+    verdict's whole content is "these two are not the same person", and a
+    shared key would hand the second case the first case's entity -- the exact
+    reuse this map exists to perform, applied to the one pair where it is
+    wrong.
 
     NAME PLUS ADDRESS, never the bare name. `run_entities` is shared across
     every case in the run so that one person named on two cases becomes ONE
@@ -295,17 +313,25 @@ def run_entity_key(name, address):
     halves go through `normalise_name` so a spacing or punctuation difference in
     the portal's transcription does not split one person into two entities.
     """
-    return normalise_name(name), normalise_name(address or "")
+    return normalise_name(name), normalise_name(address or ""), discriminator
 
 
 def resolve_defendant(api, name, row_nes_id, *, citation, live_prefixes,
-                      run_entities, dry_run, address=""):
+                      run_entities, dry_run, address="", discriminator="",
+                      distinct=False):
     """Turn one court-record defendant name into an NES entity id.
 
     The ladder, top to bottom:
       1. the court row's own `nes_id`  -- a pure copy, no judgment
       2. exactly one person entity with that identical name
       3. create the entity from the court record
+
+    `distinct` SKIPS rung 2, and is set only for a name a `different` held
+    verdict split. Rung 2 binds the single existing person carrying this name,
+    and the verdict has just said the cases name two people -- so at most one
+    of them is that entity and nothing here can say which. Matching would give
+    both cases the same IRI, which is the merge the split exists to prevent.
+    `discriminator` then separates their created slugs.
 
     `run_entities` maps a `run_entity_key` (name AND address) to an IRI already
     created THIS RUN, and is shared across cases on purpose: without it, two
@@ -327,14 +353,20 @@ def resolve_defendant(api, name, row_nes_id, *, citation, live_prefixes,
                               f"{PERSON_PREFIX} entity")
         return Resolution(row_nes_id, "nes_id")
 
-    try:
-        matched, why = exact_person_match(api, name)
-    except Exception as exc:  # noqa: BLE001 - one bad search costs this name, not the case
-        return Resolution("", "failed", f"could not search for a match ({type(exc).__name__})")
-    if matched:
-        return Resolution(matched, "exact")
+    if distinct:
+        why = ("a held verdict split this name across cases, so the one "
+               "existing entity carrying it cannot be assumed to be this "
+               "defendant")
+    else:
+        try:
+            matched, why = exact_person_match(api, name)
+        except Exception as exc:  # noqa: BLE001 - one bad search costs this name, not the case
+            return Resolution("", "failed",
+                              f"could not search for a match ({type(exc).__name__})")
+        if matched:
+            return Resolution(matched, "exact")
 
-    key = run_entity_key(name, address)
+    key = run_entity_key(name, address, discriminator)
     if key in run_entities:
         return Resolution(run_entities[key], "created", "reused from this run")
 
@@ -356,6 +388,17 @@ def resolve_defendant(api, name, row_nes_id, *, citation, live_prefixes,
     slug = entity_slug(name)
     if not slug:
         return Resolution("", "failed", f"{why}; the name cannot be slugged")
+    if distinct:
+        # Without a discriminator both split cases derive the SAME slug, so the
+        # second create 409s and binds nothing -- safe, but it reports a
+        # collision where the real problem is that the case carries no fact to
+        # name its own person by. Said plainly instead.
+        if not discriminator:
+            return Resolution("", "failed",
+                              f"{why}; and the case carries neither a single "
+                              "district nor a court case number to separate "
+                              "this defendant's entity from the namesake's")
+        slug = f"{slug}-{discriminator}"
 
     iri = build_entity_iri(PERSON_PREFIX, slug)
     if dry_run:
@@ -513,7 +556,60 @@ def held_names(index):
     return {name: slugs for name, slugs in index.items() if len(slugs) > 1}
 
 
-def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run, held):
+def bindable_defendants(records):
+    """Defendant names on this case's bindable references, order preserved.
+
+    The same `BINDABLE_CODES`/`is_defendant`/`party_name` filter
+    `defendant_name_index` applies, over records already in hand. Feeds the
+    identity cards, so a name that could never be held never costs a
+    `description` scan either.
+    """
+    names, seen = [], set()
+    for record in records:
+        if case_number_code(record["number"]) not in BINDABLE_CODES:
+            continue
+        for party in record.get("parties") or ():
+            if not is_defendant(party):
+                continue
+            name = party_name(party)
+            key = normalise_name(name)
+            if not name or key in seen:
+                continue
+            seen.add(key)
+            names.append(name)
+    return names
+
+
+def _held_outcome(slugs, case_slug, verdict, identity):
+    """`(row_reason, distinct, discriminator, address_override)` for a held name.
+
+    Returns `row_reason` non-empty when the name stays HELD -- the caller emits
+    the report row and binds nothing. Otherwise the three write parameters that
+    an actionable verdict earns.
+
+    A `same` verdict returns `address_override=""` so both cases key the same
+    `run_entities` entry and share one created entity. The address is what
+    `run_entity_key` normally uses to keep namesakes apart, and this verdict has
+    replaced it as the thing establishing identity -- without the override, one
+    case carrying an address and the other not would key differently and mint
+    two entities for the person a `same` verdict just merged.
+    """
+    others = sorted(s for s in slugs if s != case_slug)
+    shared = "also names a defendant on " + ", ".join(others)
+    if verdict is None:
+        return f"{shared} -- held for a human to rule on", False, "", None
+    stated = f"{verdict.verdict}/{verdict.confidence or 'no confidence'}"
+    if not verdict.is_actionable:
+        why = "the model did not answer" if verdict.failed else stated
+        return (f"{shared} -- held for a human to rule on ({why}: "
+                f"{verdict.evidence})"), False, "", None
+    if verdict.verdict == "different":
+        return "", True, held_discriminator(identity) if identity else "", None
+    return "", False, "", ""
+
+
+def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run,
+                   held, decisions=None, identity=None):
     """`(items, rows, skips)` -- binds, a report row each, and non-prosecution skips.
 
     De-duplicated by name across every court reference on the case, order
@@ -524,8 +620,10 @@ def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run, 
     which is why this reads the parties itself rather than calling
     `defendant_names`.
 
-    A held name (see `held_names`) is never told apart from a genuine match
-    by anything this function alone can see.
+    A held name (see `held_names`) is never told apart from a genuine match by
+    anything this function alone can see. `decisions` -- `{normalised name:
+    HeldVerdict}` from `held_identity.compare_held` -- is what can, and an
+    absent or non-actionable verdict leaves the name held exactly as before.
     """
     outcome = bind_outcome(records)
     # The first BINDABLE record, never `records[0]`: a rejected reference
@@ -551,21 +649,30 @@ def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run, 
                 continue
             seen.add(key)
             other_slugs = held.get(key)
+            distinct, disc, address = False, "", party.get("address")
+            settled = ""
             if other_slugs is not None:
-                others = sorted(s for s in other_slugs if s != case.get("slug"))
-                rows.append({
-                    "slug": case.get("slug"), "name": name, "how": "held",
-                    "nes_id": "", "outcome": outcome,
-                    "reason": ("also names a defendant on " + ", ".join(others)
-                              + " -- held for a human to rule on"),
-                    "court_case": f"{record['court']}/{record['number']}"})
-                continue
+                verdict = (decisions or {}).get(key)
+                reason, distinct, disc, override = _held_outcome(
+                    other_slugs, case.get("slug"), verdict, identity)
+                if reason:
+                    rows.append({
+                        "slug": case.get("slug"), "name": name, "how": "held",
+                        "nes_id": "", "outcome": outcome, "reason": reason,
+                        "court_case": f"{record['court']}/{record['number']}"})
+                    continue
+                if override is not None:
+                    address = override
+                settled = (f"held verdict {verdict.verdict}/{verdict.confidence}"
+                           f": {verdict.evidence}")
             got = resolve_defendant(
                 api, name, party.get("nes_id"), citation=citation,
                 live_prefixes=live_prefixes, run_entities=run_entities,
-                dry_run=dry_run, address=party.get("address"))
+                dry_run=dry_run, address=address, discriminator=disc,
+                distinct=distinct)
             row = {"slug": case.get("slug"), "name": name, "how": got.how,
-                   "nes_id": got.nes_id, "outcome": outcome, "reason": got.reason,
+                   "nes_id": got.nes_id, "outcome": outcome,
+                   "reason": "; ".join(p for p in (settled, got.reason) if p),
                    "court_case": f"{record['court']}/{record['number']}"}
             rows.append(row)
             if not got.nes_id:
@@ -581,7 +688,7 @@ def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run, 
 
 
 def plan_case(api, case, etag, *, live_prefixes, run_entities, dry_run, held,
-              court_record=None):
+              court_record=None, decisions=None, identity=None):
     """Build the write for one case; writes nothing.
 
     Reads the court record itself unless `court_record` -- a pass-1
@@ -628,7 +735,8 @@ def plan_case(api, case, etag, *, live_prefixes, run_entities, dry_run, held,
 
     items, rows, accused_skips = _accused_binds(
         api, case, records, live_prefixes=live_prefixes,
-        run_entities=run_entities, dry_run=dry_run, held=held)
+        run_entities=run_entities, dry_run=dry_run, held=held,
+        decisions=decisions, identity=identity)
     skips.extend(accused_skips)
 
     # `current_entity_binds`, NOT the raw `case["entities"]` list: the read
@@ -841,14 +949,29 @@ def _log_plan(logger, events, run_id, plan):
     return held_count, resolved_count
 
 
-def _held_report(held, court_records):
-    """One entry per held name: its cases and the defendant rows behind it.
+def _verdict_report(verdict):
+    """One held verdict as JSON, or None when the name was never compared."""
+    if verdict is None:
+        return None
+    return {"verdict": verdict.verdict, "confidence": verdict.confidence,
+            "evidence": verdict.evidence, "per_case": verdict.per_case,
+            "acted_on": verdict.is_actionable,
+            "model_answered": not verdict.failed}
+
+
+def _held_report(held, court_records, verdicts=None):
+    """One entry per held name: its cases, the rows behind it, and any verdict.
 
     Recomputed from `court_records` (the pass-1 cache) rather than collected
     from `plan.rows` -- a case that never reaches `_accused_binds` (wrong
     state, no `entities` key) still needs to show up here, and re-applies
     `defendant_name_index`'s own `BINDABLE_CODES` filter since `court_records`
     holds every reference read, not just the bindable ones.
+
+    A name with an ACTED-ON verdict stays in this file. It is no longer waiting
+    on a human, but it is the record of a merge or a split this run performed on
+    the model's word, which is exactly what a reviewer needs to be able to find
+    afterwards -- `acted_on` tells the two apart.
     """
     report = []
     for name, slugs in sorted(held.items()):
@@ -869,18 +992,20 @@ def _held_report(held, court_records):
                     rows.append({"slug": slug,
                                 "court_case": f"{record['court']}/{record['number']}",
                                 "name": party_name(party)})
-        report.append({"name": name, "cases": sorted(slugs), "rows": rows})
+        report.append({"name": name, "cases": sorted(slugs), "rows": rows,
+                       "comparison": _verdict_report((verdicts or {}).get(name))})
     return report
 
 
-def write_held_file(path, held, court_records, *, run_id):
+def write_held_file(path, held, court_records, *, run_id, verdicts=None):
     """Write the held-names file beside the review file.
 
     Devanagari unescaped (`ensure_ascii=False`), matching every other
     casework output file -- an escaped `\\u0915` cannot be reviewed.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"run_id": run_id, "held": _held_report(held, court_records)}
+    payload = {"run_id": run_id,
+               "held": _held_report(held, court_records, verdicts)}
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
 
@@ -888,6 +1013,11 @@ def write_held_file(path, held, court_records, *, run_id):
 def main(argv=None):
     parser = add_common_args(argparse.ArgumentParser(
         description="Bind court-record defendants and fill the case date fields."))
+    parser.add_argument(
+        "--no-held-compare", action="store_true",
+        help="Do not ask the model whether two same-named defendants are one "
+             "person; leave every held name for a human. Restores the "
+             "pre-comparison behaviour, and makes the run spend no tokens.")
     args = parser.parse_args(argv)
     setup_logging(args.verbose)
     logger, run_id, paths = configure_run_logging(STAGE, verbose=args.verbose)
@@ -910,7 +1040,7 @@ def main(argv=None):
     # index would hold a name on case A and bind it on case B, the exact
     # collapse this split exists to close. A read failure here costs only
     # that case; it is dropped from `readable_cases` before pass 2 runs.
-    court_records, readable_cases = {}, []
+    court_records, readable_cases, identities = {}, [], {}
     # Dry runs only. Pass 2 re-reads each case for a FRESH ETag, but a dry run
     # never PATCHes, so that ETag is read and discarded -- one wasted request
     # per case, ~2,900 on a full-corpus dry run against a measured 4,470/hour
@@ -942,6 +1072,15 @@ def main(argv=None):
         if args.dry_run:
             dry_run_details[slug] = case_detail
         court_records[slug] = court_record_for_case(api, case_detail)
+        # Built HERE, not after `held` is known, because this is the only
+        # moment the run holds both the case payload and that case's defendant
+        # names without a second read. The card keeps only short fields plus a
+        # bounded excerpt per name, so retaining one per case costs far less
+        # than retaining `case_detail` itself would.
+        records_for_card, _ = court_records[slug]
+        identities[slug] = case_identity(
+            case_detail, bindable_defendants(records_for_card),
+            court_cases=[r["number"] for r in records_for_card])
         # Pass 1 pays one HTTP round trip per case before any write happens,
         # so a full-corpus run is silent for hours without this -- the same
         # reason `CaseworkApi.iter_cases` narrates its own page fetches.
@@ -992,6 +1131,45 @@ def main(argv=None):
               step="held_index", status="ok", detail=index_detail,
               level=logging.WARNING if reasons else logging.INFO)
 
+    # The stage's ONLY model calls: one per HELD name, between the two passes.
+    # A run holding nothing spends no tokens and never imports the LLM stack --
+    # which is still this stage's ordinary case, since only 80 of ~1,414
+    # measured defendant rows carry a name that lands on two cases.
+    verdicts = {}
+    if held and not args.no_held_compare:
+        try:
+            bootstrap(args.provider, args.model)
+            from llm.invoke import invoke_json
+        except Exception as exc:  # noqa: BLE001 - no model means every name stays held
+            log_event(logger, events, run_id=run_id, stage=STAGE, slug="",
+                      step="held_compare", status="unavailable",
+                      detail=f"{type(exc).__name__}: {exc} -- every held name "
+                             "stays held for a human",
+                      level=logging.WARNING)
+        else:
+            def _log_verdict(name, slugs, verdict):
+                log_event(logger, events, run_id=run_id, stage=STAGE, slug="",
+                          step="held_compare",
+                          status="ok" if not verdict.failed else "failed",
+                          detail=(f"{name} on {', '.join(slugs)} -> "
+                                  f"{verdict.verdict}/"
+                                  f"{verdict.confidence or 'no confidence'}"
+                                  f"{'' if verdict.is_actionable else ' (still held)'}"
+                                  f": {verdict.evidence}"))
+
+            logger.info("comparing %d held name(s) against their press releases",
+                        len(held))
+            verdicts = compare_held(held, identities, invoke_json,
+                                    tier=tier_for(STAGE), on_verdict=_log_verdict)
+            acted = sum(1 for v in verdicts.values() if v.is_actionable)
+            stats["held_compared"] = len(verdicts)
+            stats["held_settled"] = acted
+            log_event(logger, events, run_id=run_id, stage=STAGE, slug="",
+                      step="held_compare", status="ok",
+                      detail=f"compared {len(verdicts)} held name(s); {acted} "
+                             f"settled by the model, {len(verdicts) - acted} "
+                             "still held for a human")
+
     # Pass 2: plan (and maybe write) every case against that SAME `held`
     # mapping. `get_case_with_etag` is re-read here for a FRESH ETag --
     # pass 1's is stale by the time this write would land, and a stale
@@ -1022,7 +1200,8 @@ def main(argv=None):
         # with no hold protection at all.
         plan = plan_case(api, case_detail, etag, live_prefixes=live_prefixes,
                          run_entities=run_entities, dry_run=args.dry_run,
-                         held=held, court_record=court_records[slug])
+                         held=held, court_record=court_records[slug],
+                         decisions=verdicts, identity=identities.get(slug))
         # `detail=` carries `plan.skips` even on a clean "selected": a case
         # can reach "would-patch"/"nothing-to-do" with a partially-unreadable
         # court record (some references 404, at least one did not), and the
@@ -1121,7 +1300,8 @@ def main(argv=None):
         stats["patched"] = stats.get("patched", 0) + 1
 
     held_path = review.path.parent / (review.path.stem + ".held.json")
-    write_held_file(held_path, held, court_records, run_id=run_id)
+    write_held_file(held_path, held, court_records, run_id=run_id,
+                    verdicts=verdicts)
 
     review.write()
     log_run_footer(logger, stage=STAGE, stats=stats, duration_s=time.time() - started)
