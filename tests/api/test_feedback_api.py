@@ -3,6 +3,7 @@ Tests for the public Feedback API endpoint.
 """
 
 import io
+from unittest.mock import Mock
 
 import pytest
 from django.core.cache import cache
@@ -271,3 +272,133 @@ class TestFeedbackFileUpload:
         )
 
         assert response.status_code == 201
+
+
+@pytest.mark.django_db
+class TestCaseReportPrivacy:
+    """A corruption report must not carry its reporter's network identity."""
+
+    def test_case_report_stores_no_ip_or_user_agent(self, api_client):
+        response = api_client.post(
+            "/api/feedback/",
+            {
+                "feedbackType": "case_report",
+                "subject": "Alleged procurement irregularity",
+                "description": "Details of the allegation.",
+            },
+            format="json",
+            REMOTE_ADDR="203.0.113.7",
+            HTTP_USER_AGENT="Mozilla/5.0 (identifying string)",
+        )
+        assert response.status_code == 201
+
+        feedback = Feedback.objects.get(pk=response.json()["id"])
+        assert feedback.feedback_type == FeedbackType.CASE_REPORT
+        assert feedback.ip_address is None
+        assert feedback.user_agent == ""
+
+    def test_platform_feedback_still_stores_ip_and_user_agent(self, api_client):
+        """The privacy carve-out is for reports only, not all feedback."""
+        response = api_client.post(
+            "/api/feedback/",
+            {
+                "feedbackType": "bug",
+                "subject": "Search is broken",
+                "description": "Nothing happens when I search.",
+            },
+            format="json",
+            REMOTE_ADDR="203.0.113.7",
+            HTTP_USER_AGENT="Mozilla/5.0 (identifying string)",
+        )
+        assert response.status_code == 201
+
+        feedback = Feedback.objects.get(pk=response.json()["id"])
+        assert feedback.ip_address == "203.0.113.7"
+        assert feedback.user_agent == "Mozilla/5.0 (identifying string)"
+
+    def test_case_report_is_still_throttled_without_a_stored_ip(self, api_client):
+        """Dropping the column must not weaken rate limiting."""
+        for i in range(5):
+            assert (
+                api_client.post(
+                    "/api/feedback/",
+                    {
+                        "feedbackType": "case_report",
+                        "subject": f"Report {i}",
+                        "description": "Details.",
+                    },
+                    format="json",
+                    REMOTE_ADDR="203.0.113.9",
+                ).status_code
+                == 201
+            )
+
+        blocked = api_client.post(
+            "/api/feedback/",
+            {
+                "feedbackType": "case_report",
+                "subject": "Sixth",
+                "description": "Details.",
+            },
+            format="json",
+            REMOTE_ADDR="203.0.113.9",
+        )
+        assert blocked.status_code == 429
+
+
+@pytest.mark.django_db
+class TestCaseReportNotification:
+    """The casework inbox is told a report landed, but not what it says."""
+
+    SECRET = "The minister took a bribe from the contractor."
+
+    def _submit(self, api_client):
+        return api_client.post(
+            "/api/feedback/",
+            {
+                "feedbackType": "case_report",
+                "subject": "Alleged bribery",
+                "description": self.SECRET,
+            },
+            format="json",
+        )
+
+    def test_no_notification_when_disabled(self, api_client, settings, monkeypatch):
+        settings.CASE_REPORT_NOTIFY = False
+        get_client = Mock()
+        monkeypatch.setattr("newsletter.sendpulse.get_client", get_client)
+
+        assert self._submit(api_client).status_code == 201
+        get_client.assert_not_called()
+
+    def test_notification_carries_no_report_content(
+        self, api_client, settings, monkeypatch
+    ):
+        settings.CASE_REPORT_NOTIFY = True
+        settings.CASE_REPORT_NOTIFY_EMAIL = "report@jawafdehi.org"
+        client = Mock(can_send_email=True)
+        monkeypatch.setattr("newsletter.sendpulse.get_client", Mock(return_value=client))
+
+        response = self._submit(api_client)
+        assert response.status_code == 201
+
+        client.send_email.assert_called_once()
+        recipient, subject, html = client.send_email.call_args[0]
+        assert recipient == "report@jawafdehi.org"
+        assert str(response.json()["id"]) in subject
+        # The whole point: the allegation stays in the database.
+        assert self.SECRET not in html
+        assert "Alleged bribery" not in html
+        assert "/django-admin/cases/feedback/" in html
+
+    def test_submission_survives_a_failing_notification(
+        self, api_client, settings, monkeypatch
+    ):
+        settings.CASE_REPORT_NOTIFY = True
+        client = Mock(can_send_email=True)
+        client.send_email.side_effect = RuntimeError("SendPulse down")
+        monkeypatch.setattr("newsletter.sendpulse.get_client", Mock(return_value=client))
+
+        response = self._submit(api_client)
+        assert response.status_code == 201
+        assert Feedback.objects.filter(pk=response.json()["id"]).exists()

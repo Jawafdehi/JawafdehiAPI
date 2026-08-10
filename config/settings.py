@@ -970,6 +970,14 @@ SENDPULSE_MESSAGE_LANG = os.getenv("SENDPULSE_MESSAGE_LANG", "en")
 SENDPULSE_WELCOME_EMAIL = env_flag("SENDPULSE_WELCOME_EMAIL", False)
 SENDPULSE_WELCOME_SUBJECT = os.getenv("SENDPULSE_WELCOME_SUBJECT", "Welcome to Jawafdehi")
 
+# Corruption case reports arrive through the public feedback endpoint and have no
+# read API, so without an alert they sit unseen until someone opens Django admin.
+# When on, each one triggers a SendPulse notification carrying only a reference
+# number and an admin link — never the report's contents. Best-effort: a send
+# failure never fails the submission.
+CASE_REPORT_NOTIFY = env_flag("CASE_REPORT_NOTIFY", False)
+CASE_REPORT_NOTIFY_EMAIL = os.getenv("CASE_REPORT_NOTIFY_EMAIL", "report@jawafdehi.org")
+
 # ---------------------------------------------------------------------------
 # NES/NGM config. After the service consolidation NES and NGM run IN-PROCESS — the
 # nes_resolver seam + in-process ORM calls, NOT REST hops. The dead NGM REST

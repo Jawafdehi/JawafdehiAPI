@@ -57,6 +57,7 @@ from .models import (
     CaseSlugHistory,
     CaseState,
     CaseStateChange,
+    FeedbackType,
     RelationshipOutcome,
     RelationshipType,
     StatisticsSnapshot,
@@ -1628,6 +1629,53 @@ class FeedbackRateThrottle(AnonRateThrottle):
     rate = "5/hour"
 
 
+def _notify_case_report(feedback) -> None:
+    """Best-effort alert to the casework inbox that a report has landed.
+
+    Feedback has no read API and no notification of any kind, so without this a
+    corruption report is only discovered by someone opening Django admin. Django's
+    mail backend is the dummy one on this platform (it accepts and discards), so
+    SendPulse's transactional endpoint is the only path that actually sends.
+
+    Deliberately carries no report content — subject line, description, contact
+    details and attachment all stay in the database. The mail says only that a
+    report exists and where to read it, so a third-party mail system never holds
+    a whistleblower's account of events.
+
+    Never raises: a failed notification must not fail the submission, or the
+    reporter sees an error and may not try again.
+    """
+    if not getattr(settings, "CASE_REPORT_NOTIFY", False):
+        return
+    recipient = getattr(settings, "CASE_REPORT_NOTIFY_EMAIL", "")
+    if not recipient:
+        return
+    try:
+        from newsletter.sendpulse import get_client
+
+        client = get_client()
+        if client is None or not client.can_send_email:
+            return
+        base = getattr(settings, "WAGTAILADMIN_BASE_URL", "").rstrip("/")
+        admin_url = f"{base}/django-admin/cases/feedback/{feedback.pk}/change/"
+        html = (
+            "<p>A corruption case report was submitted through the website.</p>"
+            f"<p>Reference: <strong>#{feedback.pk}</strong><br>"
+            f"Received: {feedback.submitted_at:%Y-%m-%d %H:%M} UTC<br>"
+            f"Contact details supplied: {'yes' if feedback.contact_info else 'no'}<br>"
+            f"Attachment: {'yes' if feedback.attachment else 'no'}</p>"
+            "<p>The report itself is not included in this email. Read it here:<br>"
+            f"<a href=\"{admin_url}\">{admin_url}</a></p>"
+        )
+        client.send_email(recipient, f"New case report #{feedback.pk}", html)
+    except Exception as exc:  # noqa: BLE001 — notification is best-effort
+        logger.warning(
+            "Case report notification failed (submission #%s was still saved): %s",
+            feedback.pk,
+            exc,
+        )
+
+
 @extend_schema(
     summary="Submit platform feedback",
     description="""
@@ -1693,11 +1741,26 @@ class FeedbackView(APIView):
         serializer = FeedbackSerializer(data=request.data)
 
         if serializer.is_valid():
-            # Capture metadata
-            feedback = serializer.save(
-                ip_address=self.get_client_ip(request),
-                user_agent=request.META.get("HTTP_USER_AGENT", ""),
+            is_case_report = (
+                serializer.validated_data.get("feedback_type")
+                == FeedbackType.CASE_REPORT
             )
+
+            # Corruption reports are stored without their reporter's IP or user
+            # agent. Someone naming an official is exposed by those two fields in
+            # a way a bug report's author is not, and the anonymity offered by the
+            # form would be hollow if we kept them. Throttling is unaffected:
+            # AnonRateThrottle derives the caller's identity from the request
+            # itself and never reads the column.
+            feedback = serializer.save(
+                ip_address=None if is_case_report else self.get_client_ip(request),
+                user_agent=(
+                    "" if is_case_report else request.META.get("HTTP_USER_AGENT", "")
+                ),
+            )
+
+            if is_case_report:
+                _notify_case_report(feedback)
 
             return Response(
                 serializer.to_representation(feedback), status=status.HTTP_201_CREATED

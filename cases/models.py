@@ -1089,6 +1089,10 @@ class FeedbackType(models.TextChoices):
     USABILITY = "usability", "Usability Issue"
     CONTENT = "content", "Content Feedback"
     GENERAL = "general", "General Feedback"
+    # A member of the public reporting alleged corruption, as opposed to
+    # feedback about the platform. Handled differently on submission: the
+    # reporter's IP and user agent are never stored (see FeedbackView.post).
+    CASE_REPORT = "case_report", "Corruption Case Report"
 
 
 class FeedbackStatus(models.TextChoices):
