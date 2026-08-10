@@ -5,9 +5,9 @@ reads back what the grading produced and writes nothing. They are one module bec
 they share the batch selection and the review-row shape.
 
 The script reads no case. A slug is all the POST needs, and the review list row already
-carries the title, state, score and disposition the report shows -- so a 238-case batch
-costs 2 requests per case to submit and 1 to report, with no corpus listing in front of
-either.
+carries the status, score and disposition the report shows -- so a 238-case batch costs
+2 requests per case to submit and 1 to report, with no corpus listing in front of
+either. Only a failed row costs a third request, for the `error` the list row omits.
 """
 
 import argparse
@@ -59,6 +59,42 @@ def existing_review(api, slug):
     return rows[0] if rows else None
 
 
+#: Statuses that mean the credential itself is wrong, not this one case. 401 is an
+#: expired, malformed or wrong-audience token -- `OIDCAuthentication` raises
+#: `AuthenticationFailed` and supplies `authenticate_header`, so DRF answers 401, not
+#: 403. 403 is a valid token without the Caseworker role. Counting either per-case
+#: turns one stale token into several hundred logged errors and a zero exit code.
+CREDENTIAL_STATUSES = (401, 403)
+
+
+def _raise_if_credential_failure(exc, slug, note=""):
+    """Turn a 401/403 into a run-ending SystemExit. Any other status returns."""
+    if exc.code not in CREDENTIAL_STATUSES:
+        return
+    raise SystemExit(
+        f"HTTP {exc.code} on {slug}: the API rejected this credential (401 = expired "
+        "or invalid token, 403 = valid token without the Caseworker role). Every "
+        f"remaining case would fail the same way, so the run stopped here.{note}"
+    ) from exc
+
+
+def _warn_on_slug_drift(logger, requested, review):
+    """Warn when the review came back filed under a different slug than we asked for.
+
+    The two sides resolve slugs differently: `SubmitSerializer` falls back to
+    `CaseSlugHistory` for a retired slug, while the list endpoint filters on
+    `case__slug` and sees live slugs only. So a stale batch row submits fine but is
+    invisible to the next run's skip check, and the case is re-graded at full LLM
+    cost on every run. One warning naming both slugs is what makes that visible.
+    """
+    landed = (review.get("slug") or "").strip()
+    if landed and landed != requested:
+        logger.warning(
+            "%s is a retired slug -- the review was filed under %s. The skip check "
+            "reads live slugs only, so this case will be re-submitted on every run "
+            "until the batch CSV is updated.", requested, landed)
+
+
 def _describe(review):
     """`"review 1841 done PASS 84"` -- what a skip line says about the run it found."""
     bits = [f"review {review.get('id')}", str(review.get("status") or "?")]
@@ -72,12 +108,12 @@ def _describe(review):
 def submit_batch(api, slugs, *, dry_run, force, logger, events_path, run_id):
     """POST each slug that has no review yet. Returns a status->count mapping.
 
-    Two failures abort the whole run instead of being counted: a 403 (the role check
-    fails identically on every remaining case) and the write-guard's `RuntimeError`
-    (so does a non-loopback base URL without `--allow-remote-writes`). Counting either
-    per-case would turn one configuration mistake into several hundred logged errors
-    and a zero exit code. Any other HTTP failure is recorded and the batch continues --
-    a re-run skips whatever already landed.
+    Two classes of failure abort the whole run instead of being counted: a credential
+    rejection (`CREDENTIAL_STATUSES`) and the write-guard's `RuntimeError`. Both fail
+    identically on every remaining case, so counting them per-case would turn one
+    configuration mistake into several hundred logged errors and a zero exit code.
+    Every other failure -- on the pre-check read as much as on the POST -- is recorded
+    and the batch continues; a re-run skips whatever already landed.
     """
     stats = {"selected": len(slugs), "submitted": 0, "would_submit": 0,
              "already_reviewed": 0, "error": 0}
@@ -88,7 +124,23 @@ def submit_batch(api, slugs, *, dry_run, force, logger, events_path, run_id):
 
     for slug in slugs:
         if not force:
-            found = existing_review(api, slug)
+            # The pre-check read is half of this run's requests. A blip on one of
+            # them must cost that case, not the batch -- the same rule the POST
+            # below follows, and the one `bind_materials` follows on its case read.
+            try:
+                found = existing_review(api, slug)
+            except urllib.error.HTTPError as exc:
+                _raise_if_credential_failure(
+                    exc, slug, f" {stats['submitted']} case(s) were submitted first.")
+                stats["error"] += 1
+                event(slug, "error", f"HTTP {exc.code} reading reviews",
+                      level=logging.WARNING)
+                continue
+            except Exception as exc:  # noqa: BLE001 - network, decode, anything else
+                stats["error"] += 1
+                event(slug, "error", f"{type(exc).__name__} reading reviews: {exc}",
+                      level=logging.WARNING)
+                continue
             if found is not None:
                 stats["already_reviewed"] += 1
                 event(slug, "already-reviewed", _describe(found))
@@ -103,11 +155,8 @@ def submit_batch(api, slugs, *, dry_run, force, logger, events_path, run_id):
         try:
             review = api.submit_review(slug)
         except urllib.error.HTTPError as exc:
-            if exc.code == 403:
-                raise SystemExit(
-                    f"HTTP 403 submitting {slug}: this token lacks the Caseworker "
-                    "role, which every remaining case would fail on too. Nothing "
-                    f"further was submitted ({stats['submitted']} landed).") from exc
+            _raise_if_credential_failure(
+                exc, slug, f" {stats['submitted']} case(s) were submitted first.")
             stats["error"] += 1
             event(slug, "error", f"HTTP {exc.code}", level=logging.WARNING)
             continue
@@ -122,9 +171,16 @@ def submit_batch(api, slugs, *, dry_run, force, logger, events_path, run_id):
 
         stats["submitted"] += 1
         event(slug, "submitted", f"review {review.get('id')}")
+        _warn_on_slug_drift(logger, slug, review)
         logger.debug("submitted %s in %dms", slug,
                      int((time.monotonic() - started) * 1000))
     return stats
+
+
+def _row(slug, status, **kw):
+    """A report row with every column present, so the renderer never key-errors."""
+    return {"slug": slug, "review_id": None, "status": status, "score": None,
+            "disposition": None, "duration": None, "error": "", **kw}
 
 
 def report_rows(api, slugs):
@@ -132,30 +188,45 @@ def report_rows(api, slugs):
 
     Everything but `error` comes off the list row. `error` lives only on the detail
     serializer, so it is fetched for failed rows and nothing else.
+
+    A read that fails becomes an `unreadable` row rather than ending the report. This
+    pass runs over a batch that took hours to grade, so losing the whole file to one
+    blip on case 200 of 238 is the expensive outcome. A credential rejection still
+    aborts -- every remaining read would fail the same way.
     """
     rows = []
     for slug in slugs:
-        review = existing_review(api, slug)
-        if review is None:
-            rows.append({"slug": slug, "review_id": None, "status": "never-submitted",
-                         "score": None, "disposition": None, "duration": None,
-                         "title": "", "error": ""})
+        try:
+            review = existing_review(api, slug)
+        except urllib.error.HTTPError as exc:
+            _raise_if_credential_failure(exc, slug)
+            rows.append(_row(slug, "unreadable", error=f"HTTP {exc.code}"))
             continue
+        except Exception as exc:  # noqa: BLE001 - network, decode, anything else
+            rows.append(_row(slug, "unreadable", error=f"{type(exc).__name__}: {exc}"))
+            continue
+
+        if review is None:
+            rows.append(_row(slug, "never-submitted"))
+            continue
+
         error = ""
         if review.get("status") == "failed":
-            detail = api.review_detail(review["id"]) or {}
+            try:
+                detail = api.review_detail(review["id"]) or {}
+            except Exception as exc:  # noqa: BLE001 - the error line is a nicety
+                detail = {"error": f"({type(exc).__name__} reading the detail)"}
             first_line = (detail.get("error") or "").strip().splitlines()
             error = first_line[0] if first_line else ""
-        rows.append({
-            "slug": slug,
-            "review_id": review.get("id"),
-            "status": review.get("status") or "?",
-            "score": review.get("overall_score"),
-            "disposition": review.get("disposition"),
-            "duration": review.get("duration_seconds"),
-            "title": review.get("case_title") or "",
-            "error": error,
-        })
+        rows.append(_row(
+            slug,
+            review.get("status") or "?",
+            review_id=review.get("id"),
+            score=review.get("overall_score"),
+            disposition=review.get("disposition"),
+            duration=review.get("duration_seconds"),
+            error=error,
+        ))
     return rows
 
 
@@ -217,11 +288,16 @@ def render_report(rows, summary, *, base_url, run_id, batch):
             f"| {row['disposition'] or '—'} | {duration} |")
     lines.append("")
 
-    failed = [r for r in rows if r["status"] == "failed"]
-    if failed:
-        lines += ["## Failed", ""]
-        lines += [f"- `{r['slug']}` — review {r['review_id']} — "
-                  f"{r['error'] or '(no error recorded)'}" for r in failed]
+    problems = [r for r in rows if r["status"] in ("failed", "unreadable")]
+    if problems:
+        lines += ["## Failed and unreadable", "",
+                  "Re-submit these on their own — `--slug <a> --slug <b> --force` — "
+                  "rather than re-running the batch with `--force`, which re-grades "
+                  "every passing case too.", ""]
+        for r in problems:
+            named = f"review {r['review_id']}" if r["review_id"] else "no review read"
+            lines.append(f"- `{r['slug']}` — {named} — "
+                         f"{r['error'] or '(no error recorded)'}")
         lines.append("")
 
     if summary["never_submitted"]:
@@ -266,8 +342,10 @@ def main(argv=None):
     logger, run_id, paths = configure_run_logging(STAGE, verbose=args.verbose)
     api = build_api(args)
 
+    # `--report` writes nothing, so the header must never say APPLY on one -- the
+    # `.log` file is the record of what a run was allowed to do.
     log_run_header(logger, stage=STAGE, base_url=api.base_url,
-                   dry_run=args.dry_run and not args.report,
+                   dry_run=args.dry_run or args.report,
                    provider="(none)", model="", n_selected=len(slugs),
                    run_id=run_id, paths=paths)
 

@@ -505,9 +505,16 @@ run you make later. It writes `work/reviews/<ts>-submit_reviews-<run>.md`.
 every case in the corpus for grading. There is no state gate and no enrichment gate:
 the batch is the authority, and a PUBLISHED case is a legitimate review target.
 
-Two failures abort the run instead of being counted per case — an HTTP 403 (the token
-lacks the Caseworker role) and the write-guard refusal (a remote host without
-`--allow-remote-writes`). Both fail identically on every remaining case.
+Two failures abort the run instead of being counted per case: a credential rejection
+(**401** an expired or invalid token, **403** a valid token without the Caseworker
+role) and the write-guard refusal (a remote host without `--allow-remote-writes`). All
+three fail identically on every remaining case, so counting them would bury one
+configuration mistake under several hundred warnings and still exit 0.
+
+Everything else is per-case. A read or POST that fails on one slug costs that slug and
+the batch continues; in `--report` it becomes an `unreadable` row rather than losing the
+whole file. Recover a failed subset with `--slug <a> --slug <b> --force` — re-running
+the whole batch with `--force` re-grades every passing case too.
 
 ---
 

@@ -14,6 +14,8 @@ SLUG_B = "case-078-cr-0044-ciaa-special-court-case-078-cr-12"
 class _StubApi:
     """Stands in for `CaseworkApi` at the two methods submit mode calls."""
 
+    base_url = "http://127.0.0.1:48010/api"
+
     def __init__(self, reviews=None, errors=None):
         self.reviews = {k: list(v) for k, v in (reviews or {}).items()}
         self.errors = errors or {}
@@ -186,3 +188,118 @@ def test_the_rendered_report_names_every_case_and_the_totals():
     assert SLUG_A in text
     assert "PASS" in text
     assert "1841" in text
+
+
+# --- what aborts a run vs what it counts -----------------------------------
+
+
+class _ReadFailApi(_StubApi):
+    """Fails the pre-check READ for named slugs; the POST itself is fine."""
+
+    def __init__(self, read_errors, **kw):
+        super().__init__(**kw)
+        self.read_errors = read_errors
+
+    def reviews_for_slug(self, slug):
+        if slug in self.read_errors:
+            raise self.read_errors[slug]
+        return super().reviews_for_slug(slug)
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_a_credential_rejection_on_the_post_aborts_the_run(code, tmp_path):
+    """401 is the one that used to slip through: OIDCAuthentication supplies
+    `authenticate_header`, so an expired token is a 401, not a 403."""
+    api = _StubApi(errors={SLUG_A: _http_error(code)})
+    with pytest.raises(SystemExit, match=f"HTTP {code}"):
+        _submit(api, [SLUG_A, SLUG_B], tmp_path)
+    assert api.submitted == []
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_a_credential_rejection_on_the_precheck_read_aborts_the_run(code, tmp_path):
+    api = _ReadFailApi({SLUG_A: _http_error(code)})
+    with pytest.raises(SystemExit, match=f"HTTP {code}"):
+        _submit(api, [SLUG_A, SLUG_B], tmp_path)
+    assert api.submitted == []
+
+
+def test_a_transient_read_failure_costs_one_case_not_the_batch(tmp_path):
+    """The pre-check read is half of a run's requests; a 502 on one of them must
+    not discard the stats and the footer for the other 237."""
+    api = _ReadFailApi({SLUG_A: _http_error(502)})
+    stats = _submit(api, [SLUG_A, SLUG_B], tmp_path)
+    assert api.submitted == [SLUG_B]
+    assert stats["error"] == 1
+
+
+def test_a_non_http_read_failure_also_costs_only_one_case(tmp_path):
+    api = _ReadFailApi({SLUG_A: TimeoutError("read timed out")})
+    stats = _submit(api, [SLUG_A, SLUG_B], tmp_path)
+    assert api.submitted == [SLUG_B]
+    assert stats["error"] == 1
+
+
+def test_a_retired_slug_warns_that_it_will_be_resubmitted_forever(tmp_path, caplog):
+    """The submit path resolves retired slugs through CaseSlugHistory; the skip
+    check reads live slugs only. The mismatch is silent without this warning."""
+    class _ReslugApi(_StubApi):
+        def submit_review(self, slug):
+            row = super().submit_review(slug)
+            row["slug"] = "case-078-cr-0038-renamed"
+            return row
+
+    with caplog.at_level(logging.WARNING):
+        _submit(_ReslugApi(), [SLUG_A], tmp_path)
+    assert "retired slug" in caplog.text
+    assert "case-078-cr-0038-renamed" in caplog.text
+
+
+# --- report resilience ------------------------------------------------------
+
+
+def test_an_unreadable_case_becomes_a_row_not_a_dead_report():
+    class _Boom(_ReportApi):
+        def reviews_for_slug(self, slug):
+            if slug == SLUG_A:
+                raise _http_error(502)
+            return super().reviews_for_slug(slug)
+
+    api = _Boom(reviews={SLUG_B: [{"id": 1842, "status": "done"}]})
+    rows = sr.report_rows(api, [SLUG_A, SLUG_B])
+    assert rows[0]["status"] == "unreadable"
+    assert rows[0]["error"] == "HTTP 502"
+    assert rows[1]["status"] == "done"
+
+
+def test_a_credential_rejection_aborts_the_report():
+    class _Boom(_ReportApi):
+        def reviews_for_slug(self, slug):
+            raise _http_error(401)
+
+    with pytest.raises(SystemExit, match="HTTP 401"):
+        sr.report_rows(_Boom(), [SLUG_A])
+
+
+def test_unreadable_rows_are_listed_with_the_failures():
+    rows = [{"slug": SLUG_A, "review_id": None, "status": "unreadable", "score": None,
+             "disposition": None, "duration": None, "error": "HTTP 502"}]
+    text = sr.render_report(rows, sr.summarize(rows), base_url="x", run_id="r",
+                            batch="b.csv")
+    assert "## Failed and unreadable" in text
+    assert "HTTP 502" in text
+
+
+def test_the_report_header_never_claims_apply_on_a_read_only_run(tmp_path, monkeypatch):
+    """`--report` writes nothing, so the persisted .log must not say APPLY."""
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("CASEWORK_REVIEW_DIR", str(tmp_path))
+    monkeypatch.setattr(sr, "build_api", lambda args: _ReportApi())
+    batch = tmp_path / "batch.csv"
+    batch.write_text(f"slug\n{SLUG_A}\n", encoding="utf-8")
+
+    sr.main(["--batch-csv", str(batch), "--report",
+             "--api-base-url", "http://127.0.0.1:48010", "--api-token", "t"])
+
+    log = next(p for p in tmp_path.iterdir() if p.suffix == ".log")
+    assert "mode        : DRY-RUN" in log.read_text(encoding="utf-8")
