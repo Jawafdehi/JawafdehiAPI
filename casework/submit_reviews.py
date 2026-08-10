@@ -376,7 +376,11 @@ def main(argv=None):
                    duration_s=time.monotonic() - started)
     print(f"\n=== submit reviews ({'DRY RUN' if args.dry_run else 'APPLIED'}) ===")
     print(f"  {format_counts(stats)}")
-    return 0
+    # Exit non-zero when any case failed. This DIVERGES from the sibling enrichers,
+    # which always return 0: a wrapper cannot otherwise tell a clean batch from one
+    # where every POST 500'd, and the abort paths above exist precisely to stop a
+    # configuration mistake exiting 0. Skipped and would-submit cases are not errors.
+    return 1 if stats["error"] else 0
 
 
 if __name__ == "__main__":

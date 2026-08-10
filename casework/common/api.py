@@ -323,9 +323,8 @@ class CaseworkApi:
         """
         url = self.base_url + "/casework/reviews/submit/"
         body = json.dumps({"slug": slug}).encode("utf-8")
-        headers = dict(self._headers())
-        headers["Content-Type"] = "application/json"
-        with self._request("POST", url, data=body, headers=headers,
+        with self._request("POST", url, data=body,
+                           headers=self._headers("application/json"),
                            timeout=timeout) as r:
             return json.loads(r.read().decode())
 

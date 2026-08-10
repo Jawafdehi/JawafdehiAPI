@@ -1201,6 +1201,15 @@ def test_reviews_for_slug_unwraps_the_paginated_envelope(monkeypatch):
     assert rows == [{"id": 1841, "status": "done"}]
 
 
+def test_reviews_for_slug_accepts_an_unpaginated_list(monkeypatch):
+    """Pagination is a project-wide DRF setting, not this view's promise -- turning
+    it off must not make the skip check see zero reviews and re-grade the corpus."""
+    api = CaseworkApi("http://127.0.0.1:48010", basic=("u", "p"))
+    monkeypatch.setattr(api, "get", lambda *a, **kw: [{"id": 1841, "status": "done"}])
+    rows = api.reviews_for_slug("case-078-cr-0038-ciaa-special-court-case-078-cr-9a")
+    assert rows == [{"id": 1841, "status": "done"}]
+
+
 def test_reviews_for_slug_on_a_never_reviewed_case_is_empty(monkeypatch):
     api = CaseworkApi("http://127.0.0.1:48010", basic=("u", "p"))
     monkeypatch.setattr(api, "get", lambda *a, **kw: {"count": 0, "results": []})

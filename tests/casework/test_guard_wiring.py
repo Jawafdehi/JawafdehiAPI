@@ -196,6 +196,9 @@ def test_submit_reviews_remote_post_is_stopped_by_the_real_guard(monkeypatch, tm
     batch.write_text(
         "slug\ncase-078-cr-0038-ciaa-special-court-case-078-cr-9a\n", encoding="utf-8")
 
+    # `--force` is load-bearing: it skips the pre-check GET. Reads are not
+    # write-guarded, so an unforced run would reach `no_sockets` first and fail with
+    # AssertionError before the POST guard ever fires.
     with pytest.raises(RuntimeError, match="refusing to write to non-loopback"):
         sr.main(["--batch-csv", str(batch), "--api-base-url", NON_LOOPBACK_BASE_URL,
                  "--api-token", "t", "--apply", "--force"])

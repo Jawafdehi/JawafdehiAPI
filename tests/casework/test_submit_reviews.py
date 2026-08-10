@@ -180,8 +180,8 @@ def test_summary_counts_dispositions_and_scores():
 
 
 def test_the_rendered_report_names_every_case_and_the_totals():
-    rows = [{"slug": SLUG_A, "review_id": 1841, "status": "done", "score": 84,
-             "disposition": "PASS", "duration": 92.4, "title": "", "error": ""}]
+    rows = [sr._row(SLUG_A, "done", review_id=1841, score=84,
+                    disposition="PASS", duration=92.4)]
     text = sr.render_report(rows, sr.summarize(rows),
                             base_url="http://127.0.0.1:48010/api",
                             run_id="testrun", batch="batch.csv")
@@ -303,3 +303,30 @@ def test_the_report_header_never_claims_apply_on_a_read_only_run(tmp_path, monke
 
     log = next(p for p in tmp_path.iterdir() if p.suffix == ".log")
     assert "mode        : DRY-RUN" in log.read_text(encoding="utf-8")
+
+
+# --- exit code --------------------------------------------------------------
+
+
+def _main_exit(api, batch_rows, tmp_path, monkeypatch, *args):
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    monkeypatch.setattr(sr, "build_api", lambda a: api)
+    batch = tmp_path / "batch.csv"
+    batch.write_text("slug\n" + "".join(f"{s}\n" for s in batch_rows), encoding="utf-8")
+    return sr.main(["--batch-csv", str(batch), "--api-base-url",
+                    "http://127.0.0.1:48010", "--api-token", "t", *args])
+
+
+def test_a_clean_run_exits_zero(tmp_path, monkeypatch):
+    assert _main_exit(_StubApi(), [SLUG_A], tmp_path, monkeypatch, "--apply") == 0
+
+
+def test_a_run_with_any_failed_case_exits_non_zero(tmp_path, monkeypatch):
+    """A wrapper cannot otherwise tell a clean batch from one where every POST 500'd."""
+    api = _StubApi(errors={SLUG_A: _http_error(500)})
+    assert _main_exit(api, [SLUG_A, SLUG_B], tmp_path, monkeypatch, "--apply") == 1
+
+
+def test_skipped_cases_are_not_errors(tmp_path, monkeypatch):
+    api = _StubApi(reviews={SLUG_A: [{"id": 1841, "status": "done"}]})
+    assert _main_exit(api, [SLUG_A], tmp_path, monkeypatch, "--apply") == 0

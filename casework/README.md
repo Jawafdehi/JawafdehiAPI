@@ -507,14 +507,20 @@ the batch is the authority, and a PUBLISHED case is a legitimate review target.
 
 Two failures abort the run instead of being counted per case: a credential rejection
 (**401** an expired or invalid token, **403** a valid token without the Caseworker
-role) and the write-guard refusal (a remote host without `--allow-remote-writes`). All
-three fail identically on every remaining case, so counting them would bury one
-configuration mistake under several hundred warnings and still exit 0.
+role) and the write-guard refusal (a remote host without `--allow-remote-writes`). Both
+fail identically on every remaining case, so counting them would bury one configuration
+mistake under several hundred warnings.
 
 Everything else is per-case. A read or POST that fails on one slug costs that slug and
 the batch continues; in `--report` it becomes an `unreadable` row rather than losing the
 whole file. Recover a failed subset with `--slug <a> --slug <b> --force` — re-running
 the whole batch with `--force` re-grades every passing case too.
+
+**Exit code, and how it differs from the other stages.** `submit_reviews` returns **1**
+when any case failed, 0 otherwise. Every other stage in this package always returns 0.
+The divergence is deliberate: this one is meant to be chained after the enrichers in a
+script, and a batch where every POST 500'd is otherwise indistinguishable from a clean
+run. Skips and dry-run `would_submit` counts are not errors.
 
 ---
 
