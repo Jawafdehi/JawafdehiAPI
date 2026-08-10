@@ -302,6 +302,23 @@ class TestMaxTokensConfig:
     def test_the_ceiling_is_the_one_the_cli_reports(self):
         assert ed.MODEL_MAX_OUTPUT_TOKENS == 64000
 
+    def test_the_env_is_never_read_at_import_time(self):
+        # Regression: resolving this at module scope made a typo take out anything
+        # that merely IMPORTS the module -- pytest reported INTERNALERROR and
+        # `--help` printed the config error instead of help. `main` resolves it.
+        # Only top-level statements that are not defs -- walking a FunctionDef
+        # descends into it and would flag the legitimate call inside `main`.
+        module_scope = [
+            call for node in ast.parse(_shipped_source()).body
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                     ast.ClassDef))
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call)
+            and getattr(call.func, "id", "") == "_max_tokens_from_env"
+        ]
+        assert not module_scope, (
+            "_max_tokens_from_env() must not be called at module scope")
+
 
 def _imported_modules(source):
     """Every module name imported by `source`, for the "must not import" pin."""
@@ -697,6 +714,23 @@ def test_generate_uses_premium_tier_and_8000_max_tokens():
     assert seen["system"] == ed.EXTRACTION_SYSTEM_PROMPT
     # No tool loop -- deviation 2. `tools=` would make the call uncacheable.
     assert "tools" not in seen
+
+
+def test_generate_honours_a_raised_max_tokens():
+    """`main` resolves the env override and threads it through, so the cap has to
+    actually reach `invoke_text` -- not just sit in a module constant."""
+    seen = {}
+
+    def stub(**kw):
+        seen.update(kw)
+        return json.dumps({"description": "विवरण।"})
+
+    _generate_description(
+        detail=DETAIL_FOR_PROMPT, court_number="081-cr-0091",
+        source_text="स्रोत पाठ", invoke_text=stub, usage=None,
+        max_tokens=16000,
+    )
+    assert seen["max_tokens"] == 16000
 
 
 def test_generate_prompt_carries_every_context_block():

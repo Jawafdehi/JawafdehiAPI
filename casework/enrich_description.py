@@ -136,6 +136,9 @@ def _max_tokens_from_env() -> int:
     chars needs more and the CLI hard-errors rather than truncating (078-CR-0038,
     078-CR-0073). Validated rather than trusted because a bad value is expensive:
     one extra zero and every request fails after ~10 minutes of model time.
+
+    Called from `main`, never at import -- doing it at module scope turned a typo
+    into a pytest INTERNALERROR and made `--help` fail.
     """
     raw = (os.getenv("CASEWORK_DESCRIPTION_MAX_TOKENS") or "").strip()
     if not raw:
@@ -154,7 +157,7 @@ def _max_tokens_from_env() -> int:
     return value
 
 
-DESCRIPTION_MAX_TOKENS = _max_tokens_from_env()
+DESCRIPTION_MAX_TOKENS = DONOR_MAX_TOKENS
 
 EXTRACTION_SYSTEM_PROMPT = """\
 You are a Nepali legal analyst writing the public case summary (description) for \
@@ -411,7 +414,8 @@ def _assemble_source_text(chunks, invoke_text, usage):
     return "\n\n---\n\n".join(parts), fed
 
 
-def _generate_description(detail, court_number, source_text, invoke_text, usage):
+def _generate_description(detail, court_number, source_text, invoke_text, usage,
+                          max_tokens=DESCRIPTION_MAX_TOKENS):
     """One premium-tier call. Returns `(description, documents)`.
 
     `documents` is raw model output, unvalidated on purpose --
@@ -438,7 +442,7 @@ def _generate_description(detail, court_number, source_text, invoke_text, usage)
     response_text = invoke_text(
         system=EXTRACTION_SYSTEM_PROMPT,
         content=prompt,
-        max_tokens=DESCRIPTION_MAX_TOKENS,
+        max_tokens=max_tokens,
         tier=tier_for("description"),
         usage=usage,
     )
@@ -537,6 +541,9 @@ def main(argv=None):
     )
     add_common_args(ap)
     args = ap.parse_args(argv)
+    # After parse_args so `--help` still works, before any API or LLM call so a
+    # typo costs nothing.
+    max_tokens = _max_tokens_from_env()
 
     setup_logging(args.verbose)
     logger, run_id, paths = configure_run_logging("description", verbose=args.verbose)
@@ -713,6 +720,7 @@ def main(argv=None):
                 source_text=source_block,
                 invoke_text=invoke_text,
                 usage=usage,
+                max_tokens=max_tokens,
             )
         except Exception as exc:  # noqa: BLE001 - an LLM failure is recorded per-case and the run continues
             report.record(slug, "description", "error", f"LLM generation failed: {exc}")
