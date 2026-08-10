@@ -135,6 +135,7 @@ flowchart LR
 | entities | `enrich_related_entities` | `entities` (+ NES entities with `--create-entities`) | `patch_field`, `POST /api/entities` | yes ¹ | premium |
 | court_record | `enrich_court_record` | `case_start_date`, `case_end_date`, `entities` (accused) (+ NES person entities) | `patch_case`, `POST /api/entities` | yes ¹ | — (no LLM) |
 | ledger | `ledger` | ledger JSON (local file) | none (reads run logs) | local file | — |
+| submit reviews | `submit_reviews` | review queue (no case field) | `POST /api/casework/reviews/submit/` | yes ¹ | — |
 
 ¹ Remote write requires **`--apply` + `--allow-remote-writes` + `--api-token`** together.
 
@@ -477,6 +478,36 @@ uv run python -m casework.ledger
 uv run python -m casework.ledger --stage bigo --stage tags --status ok
 uv run python -m casework.ledger --no-write        # print only, don't write ledger file
 ```
+
+### 5. Submit a batch for review — `submit_reviews`
+
+Enqueues one LLM grading run per case. A case that already carries a review of any
+status is skipped, so a re-run after a crash resumes rather than re-grading.
+
+```bash
+# DRY-RUN: prints the exact POST body per case
+uv run python -m casework.submit_reviews --batch-csv batch.csv --dry-run
+
+# APPLY (remote / production)
+uv run python -m casework.submit_reviews --batch-csv batch.csv \
+    --api-base-url https://api.jawafdehi.org --api-token "$JAWAFDEHI_API_TOKEN" \
+    --apply --allow-remote-writes
+
+# Read the grades back, any time after. Read-only.
+uv run python -m casework.submit_reviews --batch-csv batch.csv --report
+```
+
+Submitting is instant and tells you nothing — every case comes back `pending`. Grading
+happens out of process on the jobs queue and takes hours, so `--report` is a separate
+run you make later. It writes `work/reviews/<ts>-submit_reviews-<run>.md`.
+
+`--batch-csv` or `--slug` is required. A bare run is refused rather than submitting
+every case in the corpus for grading. There is no state gate and no enrichment gate:
+the batch is the authority, and a PUBLISHED case is a legitimate review target.
+
+Two failures abort the run instead of being counted per case — an HTTP 403 (the token
+lacks the Caseworker role) and the write-guard refusal (a remote host without
+`--allow-remote-writes`). Both fail identically on every remaining case.
 
 ---
 

@@ -180,3 +180,22 @@ def test_apply_with_allow_remote_writes_lets_the_patch_reach_urlopen(monkeypatch
 
     assert any(method == "PATCH" for method, _ in calls)
     assert any(r["status"] == "enriched" for r in report.rows)
+
+
+def test_submit_reviews_remote_post_is_stopped_by_the_real_guard(monkeypatch, tmp_path):
+    """`main()` -> real `build_api` -> real `CaseworkApi` -> the guard. No stub stands
+    in for the client, so this is what proves the wiring, not the flag."""
+    from casework import submit_reviews as sr
+
+    def no_sockets(*a, **kw):
+        raise AssertionError("the guard must refuse before any request is opened")
+
+    monkeypatch.setattr(urllib.request, "urlopen", no_sockets)
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    batch = tmp_path / "batch.csv"
+    batch.write_text(
+        "slug\ncase-078-cr-0038-ciaa-special-court-case-078-cr-9a\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="refusing to write to non-loopback"):
+        sr.main(["--batch-csv", str(batch), "--api-base-url", NON_LOOPBACK_BASE_URL,
+                 "--api-token", "t", "--apply", "--force"])

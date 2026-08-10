@@ -72,9 +72,12 @@ def _describe(review):
 def submit_batch(api, slugs, *, dry_run, force, logger, events_path, run_id):
     """POST each slug that has no review yet. Returns a status->count mapping.
 
-    A 403 aborts the run: the role check fails identically on every remaining case,
-    so one clear error beats several hundred. Any other HTTP failure is recorded and
-    the batch continues -- a re-run skips whatever already landed.
+    Two failures abort the whole run instead of being counted: a 403 (the role check
+    fails identically on every remaining case) and the write-guard's `RuntimeError`
+    (so does a non-loopback base URL without `--allow-remote-writes`). Counting either
+    per-case would turn one configuration mistake into several hundred logged errors
+    and a zero exit code. Any other HTTP failure is recorded and the batch continues --
+    a re-run skips whatever already landed.
     """
     stats = {"selected": len(slugs), "submitted": 0, "would_submit": 0,
              "already_reviewed": 0, "error": 0}
@@ -108,6 +111,10 @@ def submit_batch(api, slugs, *, dry_run, force, logger, events_path, run_id):
             stats["error"] += 1
             event(slug, "error", f"HTTP {exc.code}", level=logging.WARNING)
             continue
+        except RuntimeError:
+            # The write-guard, raised before any socket opens. Not a per-case
+            # failure: every remaining slug would raise it too.
+            raise
         except Exception as exc:  # noqa: BLE001 - network, decode, anything else
             stats["error"] += 1
             event(slug, "error", f"{type(exc).__name__}: {exc}", level=logging.WARNING)

@@ -95,6 +95,17 @@ def test_a_403_aborts_the_whole_run(tmp_path):
     assert api.submitted == []
 
 
+def test_the_write_guard_aborts_the_run_rather_than_counting_it(tmp_path):
+    """A non-loopback base URL without --allow-remote-writes raises before any
+    socket opens. Counting it per-case would turn one configuration mistake into
+    several hundred logged errors and a zero exit code."""
+    api = _StubApi(errors={SLUG_A: RuntimeError(
+        "refusing to write to non-loopback base_url")})
+    with pytest.raises(RuntimeError, match="non-loopback"):
+        _submit(api, [SLUG_A, SLUG_B], tmp_path)
+    assert api.submitted == []
+
+
 def test_a_run_with_no_batch_and_no_slug_is_refused():
     args = sr.build_parser().parse_args([])
     with pytest.raises(SystemExit, match="--batch-csv or --slug"):
