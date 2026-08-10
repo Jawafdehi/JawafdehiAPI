@@ -58,6 +58,7 @@ Usage:
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 
@@ -123,7 +124,10 @@ DESCRIPTION_SOURCE_ORDER = ("charge_sheet", "ciaa_press_release", "press_release
 # enricher (see `enrich_allegations.py`'s identical note). Fixed at the
 # donor's own default.
 SOURCE_TEXT_BUDGET = 60000
-DESCRIPTION_MAX_TOKENS = 8000
+# Default holds the donor's 8000, but a case whose verdict summarises to ~16k chars
+# needs more and the CLI hard-errors rather than truncating (078-CR-0038,
+# 078-CR-0073). Raise per run; the model's own per-call ceiling is 64000.
+DESCRIPTION_MAX_TOKENS = int(os.getenv("CASEWORK_DESCRIPTION_MAX_TOKENS", "8000"))
 
 EXTRACTION_SYSTEM_PROMPT = """\
 You are a Nepali legal analyst writing the public case summary (description) for \

@@ -247,9 +247,14 @@ class TestDonorDeviations:
         assert ">= 600" in donor_source
         assert ed.SUBSTANTIAL_DESCRIPTION_CHARS == 600
 
-    def test_max_tokens_matches_the_donor(self, donor_source):
+    def test_max_tokens_defaults_to_the_donor_but_is_raisable(self, donor_source):
+        # The default must stay at donor parity. The env escape exists because the
+        # CLI hard-errors rather than truncating when a description wants more --
+        # 078-CR-0038 and 078-CR-0073 both died there on a ~16k-char verdict summary.
         assert "max_tokens=8000" in donor_source
         assert ed.DESCRIPTION_MAX_TOKENS == 8000
+        assert ('os.getenv("CASEWORK_DESCRIPTION_MAX_TOKENS", "8000")'
+                in _shipped_source())
 
 
 def _imported_modules(source):
