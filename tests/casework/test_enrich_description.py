@@ -247,14 +247,60 @@ class TestDonorDeviations:
         assert ">= 600" in donor_source
         assert ed.SUBSTANTIAL_DESCRIPTION_CHARS == 600
 
-    def test_max_tokens_defaults_to_the_donor_but_is_raisable(self, donor_source):
-        # The default must stay at donor parity. The env escape exists because the
-        # CLI hard-errors rather than truncating when a description wants more --
-        # 078-CR-0038 and 078-CR-0073 both died there on a ~16k-char verdict summary.
+    def test_max_tokens_defaults_to_the_donor(self, donor_source):
+        # The shipped default must stay at parity so the 23 descriptions already
+        # written from it keep reproducing. The env escape is covered by
+        # TestMaxTokensConfig.
         assert "max_tokens=8000" in donor_source
         assert ed.DESCRIPTION_MAX_TOKENS == 8000
-        assert ('os.getenv("CASEWORK_DESCRIPTION_MAX_TOKENS", "8000")'
-                in _shipped_source())
+        assert ed.DONOR_MAX_TOKENS == 8000
+
+
+class TestMaxTokensConfig:
+    """`CASEWORK_DESCRIPTION_MAX_TOKENS` is an operator knob, so it validates.
+
+    The typo that matters is one extra zero: `160000` would reach the model and
+    fail every description request after ~10 minutes of work per case.
+    """
+
+    VAR = "CASEWORK_DESCRIPTION_MAX_TOKENS"
+
+    def test_an_unset_variable_gives_the_donor_default(self, monkeypatch):
+        monkeypatch.delenv(self.VAR, raising=False)
+        assert ed._max_tokens_from_env() == ed.DONOR_MAX_TOKENS
+
+    @pytest.mark.parametrize("raw", ["", "   "])
+    def test_a_blank_variable_is_treated_as_unset(self, monkeypatch, raw):
+        monkeypatch.setenv(self.VAR, raw)
+        assert ed._max_tokens_from_env() == ed.DONOR_MAX_TOKENS
+
+    @pytest.mark.parametrize("raw,expected",
+                             [("12000", 12000), ("1", 1), ("64000", 64000),
+                              (" 16000 ", 16000)])
+    def test_a_usable_value_is_taken_including_both_boundaries(
+            self, monkeypatch, raw, expected):
+        monkeypatch.setenv(self.VAR, raw)
+        assert ed._max_tokens_from_env() == expected
+
+    @pytest.mark.parametrize("raw", ["0", "-1", "64001", "160000"])
+    def test_a_value_the_model_would_refuse_is_rejected(self, monkeypatch, raw):
+        monkeypatch.setenv(self.VAR, raw)
+        with pytest.raises(SystemExit) as exc:
+            ed._max_tokens_from_env()
+        assert self.VAR in str(exc.value)
+
+    @pytest.mark.parametrize("raw", ["16k", "16.5", "abc", "1e4"])
+    def test_a_non_integer_exits_cleanly_instead_of_raising_valueerror(
+            self, monkeypatch, raw):
+        # SystemExit, not ValueError: an operator typo should print a message, not a
+        # traceback. Matches `casework.common.select`'s handling of bad --batch-csv.
+        monkeypatch.setenv(self.VAR, raw)
+        with pytest.raises(SystemExit) as exc:
+            ed._max_tokens_from_env()
+        assert self.VAR in str(exc.value) and raw in str(exc.value)
+
+    def test_the_ceiling_is_the_one_the_cli_reports(self):
+        assert ed.MODEL_MAX_OUTPUT_TOKENS == 64000
 
 
 def _imported_modules(source):

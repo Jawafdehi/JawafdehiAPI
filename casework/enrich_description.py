@@ -124,10 +124,37 @@ DESCRIPTION_SOURCE_ORDER = ("charge_sheet", "ciaa_press_release", "press_release
 # enricher (see `enrich_allegations.py`'s identical note). Fixed at the
 # donor's own default.
 SOURCE_TEXT_BUDGET = 60000
-# Default holds the donor's 8000, but a case whose verdict summarises to ~16k chars
-# needs more and the CLI hard-errors rather than truncating (078-CR-0038,
-# 078-CR-0073). Raise per run; the model's own per-call ceiling is 64000.
-DESCRIPTION_MAX_TOKENS = int(os.getenv("CASEWORK_DESCRIPTION_MAX_TOKENS", "8000"))
+DONOR_MAX_TOKENS = 8000
+# `maxOutputTokens` for this model, as the CLI reports it in its result JSON.
+MODEL_MAX_OUTPUT_TOKENS = 64000
+
+
+def _max_tokens_from_env() -> int:
+    """Description output cap, from `CASEWORK_DESCRIPTION_MAX_TOKENS`.
+
+    The donor's 8000 is the default, but a case whose verdict summarises to ~16k
+    chars needs more and the CLI hard-errors rather than truncating (078-CR-0038,
+    078-CR-0073). Validated rather than trusted because a bad value is expensive:
+    one extra zero and every request fails after ~10 minutes of model time.
+    """
+    raw = (os.getenv("CASEWORK_DESCRIPTION_MAX_TOKENS") or "").strip()
+    if not raw:
+        return DONOR_MAX_TOKENS
+    try:
+        value = int(raw)
+    except ValueError:
+        raise SystemExit(
+            f"CASEWORK_DESCRIPTION_MAX_TOKENS must be a whole number, got {raw!r}"
+        ) from None
+    if not 1 <= value <= MODEL_MAX_OUTPUT_TOKENS:
+        raise SystemExit(
+            "CASEWORK_DESCRIPTION_MAX_TOKENS must be between 1 and "
+            f"{MODEL_MAX_OUTPUT_TOKENS:,}, got {value:,}"
+        )
+    return value
+
+
+DESCRIPTION_MAX_TOKENS = _max_tokens_from_env()
 
 EXTRACTION_SYSTEM_PROMPT = """\
 You are a Nepali legal analyst writing the public case summary (description) for \
