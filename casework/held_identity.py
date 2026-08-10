@@ -35,7 +35,15 @@ compared at all, and is refused before the model is ever called.
 import re
 from dataclasses import dataclass, field
 
+from casework.common.pipeline import PRESS_TYPES
 from casework.entity_resolver import normalise_name
+
+#: IRI prefix of a real district entity. NOT the bare `/district/` substring:
+#: this corpus binds government offices under `organization/government/district/dfo`
+#: (see `enrich_related_entities.PREFIX_PROMPT_TEMPLATE`), so a substring test
+#: reads a District Forest Office as the district `dfo` -- and `discriminator`
+#: would then bake `-dfo` into a permanent public person IRI.
+DISTRICT_PREFIX = "location/district/"
 
 #: Characters of `description` kept either side of a name mention.
 MENTION_WINDOW = 220
@@ -108,15 +116,22 @@ def _windows(text, name, *, window=MENTION_WINDOW, limit=MAX_MENTIONS):
 
 
 def _press_titles(case_detail):
-    """The `display_name` of every press release bound to the case.
+    """The `display_name` of every charge-stage document bound to the case.
 
     This is the highest-signal line available and it costs nothing: CIAA's own
     title names the district, the local unit and the office.
+
+    Gated on the shared `PRESS_TYPES`, not on `press_release` alone. Task 8
+    measured MARKDOWN coverage at 100% for `charge_sheet` against 8.6% for
+    `press_release`, so accepting only the latter would leave the commonest
+    case contributing no title at all -- and a card with no title, no district
+    and no verbatim mention is refused by `carries_identity` without a call.
+    The narrow test made this feature no-op on exactly the cases it is for.
     """
     titles = []
     for entry in case_detail.get("evidence") or ():
         material = (entry or {}).get("material") or {}
-        if material.get("material_type") != "press_release":
+        if material.get("material_type") not in PRESS_TYPES:
             continue
         name = (material.get("display_name") or "").strip()
         if name:
@@ -135,7 +150,7 @@ def _districts(case_detail):
     names = []
     for bind in case_detail.get("entities") or ():
         nes_id = (bind or {}).get("nes_id") or ""
-        if "/district/" not in nes_id:
+        if DISTRICT_PREFIX not in nes_id:
             continue
         tail = nes_id.rstrip("/").rsplit("/", 1)[-1]
         tail = _LOCATION_CODE.sub("", tail)
@@ -182,6 +197,26 @@ def discriminator(card):
         if number:
             return normalise_name(number).replace(" ", "-")
     return ""
+
+
+def splittable(cards):
+    """Whether these cards yield a DISTINCT discriminator each.
+
+    A `different` verdict is only actionable if the cases can be told apart in
+    the IRI. Two cases bound to the same single district -- one person in each,
+    different municipality and post, which is precisely the distinction the
+    prompt asks the model to weigh -- both discriminate to that district, so
+    both derive the same entity slug and the split silently becomes the merge it
+    was ordered to prevent. Same for two duplicate case records sharing one
+    court case number, a known production condition.
+
+    Checked before acting rather than left to the create's 409: with the run
+    cache keyed per case the second create does refuse, but "this name is not
+    unique to this person" is the wrong reason to report when the real problem
+    is that this RUN cannot name the two apart.
+    """
+    discriminators = [discriminator(c) for c in cards]
+    return all(discriminators) and len(set(discriminators)) == len(discriminators)
 
 
 @dataclass(frozen=True)

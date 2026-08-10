@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 """Accused binds and case dates, read from the case's own NGM court record.
 
-Zero Django, zero source documents. The court record states these facts rather
+No source documents, and no Django at IMPORT (the guard test pins that) --
+though `bootstrap()` does configure it at runtime on any run that holds a name,
+for the one comparison call below. The court record states these facts rather
 than inferring them: a defendant is a defendant because a charge sheet says so,
 and a verdict date is a verdict date because the Special Court's docket says so.
 
@@ -106,7 +108,12 @@ from casework.court_record import (
 )
 from casework.entity_identity import entity_slug, prefix_is_creatable
 from casework.entity_resolver import normalise_name
-from casework.held_identity import case_identity, compare_held
+from casework.held_identity import (
+    HeldVerdict,
+    case_identity,
+    compare_held,
+    splittable,
+)
 from casework.held_identity import discriminator as held_discriminator
 from casework.enrich_related_entities import (
     bind_key,
@@ -282,15 +289,21 @@ def exact_person_match(api, name):
     return next(iter(hits)), ""
 
 
-def run_entity_key(name, address, discriminator=""):
+def run_entity_key(name, address, scope=""):
     """The `run_entities` key for one court-record party row.
 
-    `discriminator` is set only for a name a `different` held verdict split
-    (see `held_identity.discriminator`). It is part of the key because that
-    verdict's whole content is "these two are not the same person", and a
-    shared key would hand the second case the first case's entity -- the exact
-    reuse this map exists to perform, applied to the one pair where it is
-    wrong.
+    `scope` is the CASE SLUG, and is set only for a name a `different` held
+    verdict split. That verdict's whole content is "these two are not the same
+    person", so the cross-case reuse this map exists to perform is exactly
+    wrong for it, and the key must not let the second case find the first's
+    entry.
+
+    The case slug, not the discriminator: two split cases bound to the same
+    single district produce the SAME discriminator, so keying on that shares
+    the entry again and hands case B case A's entity -- reintroducing the merge
+    through the run cache, with the create's 409 guard never reached.
+    `held_identity.splittable` refuses that verdict up front; this keying is the
+    second line.
 
     NAME PLUS ADDRESS, never the bare name. `run_entities` is shared across
     every case in the run so that one person named on two cases becomes ONE
@@ -313,12 +326,12 @@ def run_entity_key(name, address, discriminator=""):
     halves go through `normalise_name` so a spacing or punctuation difference in
     the portal's transcription does not split one person into two entities.
     """
-    return normalise_name(name), normalise_name(address or ""), discriminator
+    return normalise_name(name), normalise_name(address or ""), scope
 
 
 def resolve_defendant(api, name, row_nes_id, *, citation, live_prefixes,
                       run_entities, dry_run, address="", discriminator="",
-                      distinct=False):
+                      distinct=False, scope=""):
     """Turn one court-record defendant name into an NES entity id.
 
     The ladder, top to bottom:
@@ -331,7 +344,8 @@ def resolve_defendant(api, name, row_nes_id, *, citation, live_prefixes,
     and the verdict has just said the cases name two people -- so at most one
     of them is that entity and nothing here can say which. Matching would give
     both cases the same IRI, which is the merge the split exists to prevent.
-    `discriminator` then separates their created slugs.
+    `discriminator` then separates their created slugs, and `scope` (the case
+    slug) keeps the run cache from sharing one entity between them.
 
     `run_entities` maps a `run_entity_key` (name AND address) to an IRI already
     created THIS RUN, and is shared across cases on purpose: without it, two
@@ -366,7 +380,7 @@ def resolve_defendant(api, name, row_nes_id, *, citation, live_prefixes,
         if matched:
             return Resolution(matched, "exact")
 
-    key = run_entity_key(name, address, discriminator)
+    key = run_entity_key(name, address, scope)
     if key in run_entities:
         return Resolution(run_entities[key], "created", "reused from this run")
 
@@ -669,7 +683,8 @@ def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run,
                 api, name, party.get("nes_id"), citation=citation,
                 live_prefixes=live_prefixes, run_entities=run_entities,
                 dry_run=dry_run, address=address, discriminator=disc,
-                distinct=distinct)
+                distinct=distinct,
+                scope=case.get("slug") or "" if distinct else "")
             row = {"slug": case.get("slug"), "name": name, "how": got.how,
                    "nes_id": got.nes_id, "outcome": outcome,
                    "reason": "; ".join(p for p in (settled, got.reason) if p),
@@ -1078,9 +1093,15 @@ def main(argv=None):
         # bounded excerpt per name, so retaining one per case costs far less
         # than retaining `case_detail` itself would.
         records_for_card, _ = court_records[slug]
+        # BINDABLE references only, matching `_accused_binds`'s own "the first
+        # BINDABLE record, never `records[0]`" rule: `discriminator` falls back
+        # to `court_cases[0]`, and naming a permanent public entity IRI after a
+        # reference this binder refuses to bind from would be a false claim
+        # about where the person came from.
         identities[slug] = case_identity(
             case_detail, bindable_defendants(records_for_card),
-            court_cases=[r["number"] for r in records_for_card])
+            court_cases=[r["number"] for r in records_for_card
+                         if case_number_code(r["number"]) in BINDABLE_CODES])
         # Pass 1 pays one HTTP round trip per case before any write happens,
         # so a full-corpus run is silent for hours without this -- the same
         # reason `CaseworkApi.iter_cases` narrates its own page fetches.
@@ -1135,11 +1156,14 @@ def main(argv=None):
     # A run holding nothing spends no tokens and never imports the LLM stack --
     # which is still this stage's ordinary case, since only 80 of ~1,414
     # measured defendant rows carry a name that lands on two cases.
-    verdicts = {}
+    verdicts, usage = {}, None
     if held and not args.no_held_compare:
         try:
             bootstrap(args.provider, args.model)
             from llm.invoke import invoke_json
+            from llm.usage import UsageAccumulator
+
+            usage = UsageAccumulator()
         except Exception as exc:  # noqa: BLE001 - no model means every name stays held
             log_event(logger, events, run_id=run_id, stage=STAGE, slug="",
                       step="held_compare", status="unavailable",
@@ -1160,7 +1184,30 @@ def main(argv=None):
             logger.info("comparing %d held name(s) against their press releases",
                         len(held))
             verdicts = compare_held(held, identities, invoke_json,
-                                    tier=tier_for(STAGE), on_verdict=_log_verdict)
+                                    tier=tier_for(STAGE), usage=usage,
+                                    on_verdict=_log_verdict)
+            # A `different` verdict is only actionable if the cases can be told
+            # apart in the IRI. Two cases bound to the same single district each
+            # discriminate to that district, so both would derive one slug and
+            # the split would land as the merge it was ordered to prevent.
+            for name, verdict in list(verdicts.items()):
+                if verdict.verdict != "different" or not verdict.is_actionable:
+                    continue
+                cards = [identities[s] for s in sorted(held[name])
+                         if s in identities]
+                if splittable(cards):
+                    continue
+                verdicts[name] = HeldVerdict(
+                    "unclear", confidence=verdict.confidence,
+                    per_case=verdict.per_case,
+                    evidence=(f"{verdict.evidence} [downgraded: these cases "
+                              "yield no distinct district or court case number, "
+                              "so this run cannot name the two people apart]"))
+                log_event(logger, events, run_id=run_id, stage=STAGE, slug="",
+                          step="held_compare", status="ok",
+                          detail=f"{name}: split refused -- no distinct "
+                                 "discriminator across its cases; held for a human",
+                          level=logging.WARNING)
             acted = sum(1 for v in verdicts.values() if v.is_actionable)
             stats["held_compared"] = len(verdicts)
             stats["held_settled"] = acted
@@ -1306,6 +1353,13 @@ def main(argv=None):
     review.write()
     log_run_footer(logger, stage=STAGE, stats=stats, duration_s=time.time() - started)
     print_summary(stats, args.dry_run, "court-record binder")
+    if usage is not None and usage.calls:
+        # Recorded because this stage now spends tokens. Without it an 80-call
+        # run and a 0-call run leave an identical footer, and every sibling
+        # enricher reports its usage (`enrich_news_articles.main`).
+        from llm.usage import render_usage_table
+        print(render_usage_table(usage.totals(),
+                                 title="held-name comparison"))
     print(f"review file: {review.path}")
     print(f"held-names file: {held_path}")
     return 0

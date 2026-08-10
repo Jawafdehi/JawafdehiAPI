@@ -2272,6 +2272,60 @@ def test_a_different_verdict_refuses_the_one_existing_namesake_entity():
     assert rows[0]["reason"].startswith("held verdict different/high")
 
 
+def test_two_split_cases_in_one_district_never_share_an_entity():
+    """Review finding 1: the split silently became the merge it prevents.
+
+    Both cases bound to the same single district discriminate to that district,
+    so with the run cache keyed on the discriminator they computed the IDENTICAL
+    key -- case-b found case-a's entry and returned "reused from this run",
+    binding one entity to two people the verdict had just separated. The create's
+    409 guard never ran, because the cache short-circuited it.
+
+    `main` now refuses such a verdict up front (`splittable`); this pins the
+    second line of defence, the per-case cache scope, by handing
+    `_accused_binds` the verdict `main` would have downgraded.
+    """
+    held = {SHARED_KEY: frozenset({"case-a", "case-b"})}
+    decisions = {SHARED_KEY: _verdict()}
+    api, run_entities = _SlugStoreApi(), {}
+    items_a, _, _ = _binds("case-a", held=held, decisions=decisions, api=api,
+                           identity=_identity("case-a", districts=["jhapa"]),
+                           run_entities=run_entities, dry_run=False)
+    items_b, rows_b, _ = _binds("case-b", held=held, decisions=decisions, api=api,
+                                identity=_identity("case-b", districts=["jhapa"]),
+                                run_entities=run_entities, dry_run=False)
+    # case-a binds its entity; case-b must NOT be handed the same one.
+    assert items_a and items_a[0]["nes_id"].endswith("-jhapa")
+    assert items_b == []
+    assert rows_b[0]["how"] == "failed"
+    assert "reused from this run" not in rows_b[0]["reason"]
+
+
+def test_a_split_with_no_distinct_discriminator_is_downgraded_before_it_binds(
+    tmp_path, monkeypatch,
+):
+    # The first line of defence: `main` sees both cases discriminate to the same
+    # district and holds the name instead of acting on `different`.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("CASEWORK_API_USER", "dev")
+    monkeypatch.setenv("CASEWORK_API_PASSWORD", "dev")
+    # Both cases bound to the SAME single district, so both discriminate to it.
+    api = _two_case_api(entities=[
+        {"nes_id": "https://jawafdehi.org/entity/location/district/jhapa-np0104"}])
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+    monkeypatch.setattr(ecr, "compare_held", _canned_compare())
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+               "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+    events = _events(tmp_path)
+    assert any("split refused" in e["detail"] for e in events
+               if e["step"] == "held_compare")
+    resolve = [e for e in events if e["step"] == "defendant_resolve"]
+    assert resolve and all(e["detail"].startswith("held: ") for e in resolve)
+    assert api.posted == []
+
+
 def test_a_different_verdict_falls_back_to_the_court_case_number():
     held = {SHARED_KEY: frozenset({"case-a", "case-b"})}
     items, _, _ = _binds(
@@ -2437,9 +2491,9 @@ def _canned_compare(**over):
     return _compare
 
 
-def _two_case_api(shared=SHARED):
-    case_a = _case(slug="case-a")
-    case_b = _case(slug="case-b", court_cases=[
+def _two_case_api(shared=SHARED, entities=None):
+    case_a = _case(slug="case-a", entities=list(entities or []))
+    case_b = _case(slug="case-b", entities=list(entities or []), court_cases=[
         "https://jawafdehi.org/courtcase/special/080-cr-0002"])
     return _MultiCaseApi(
         [case_a, case_b],
@@ -2476,6 +2530,37 @@ def test_the_comparison_sweep_runs_unless_it_is_turned_off(tmp_path, monkeypatch
     assert list(seen["held"]) == [SHARED_KEY]
     assert seen["cards"] == {"case-a", "case-b"}
     assert seen["tier"] == "premium"
+
+
+def test_the_fallback_discriminator_ignores_a_non_prosecution_reference(
+    tmp_path, monkeypatch,
+):
+    # Review finding 6: `court_cases` was built from EVERY reference, so a case
+    # whose first reference is an `OA` writ named its person's permanent entity
+    # IRI after a court reference this binder refuses to bind from.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("CASEWORK_API_USER", "dev")
+    monkeypatch.setenv("CASEWORK_API_PASSWORD", "dev")
+    # case-a cites an OA writ FIRST, then the CR prosecution. No district bind
+    # on either case, so `discriminator` takes the court-number fallback.
+    case_a = _case(slug="case-a", entities=[], court_cases=[
+        "https://jawafdehi.org/courtcase/special/079-oa-0004",
+        "https://jawafdehi.org/courtcase/special/079-cr-0151"])
+    case_b = _case(slug="case-b", entities=[], court_cases=[
+        "https://jawafdehi.org/courtcase/special/080-cr-0002"])
+    ref = {"detail": {"registration_date_ad": "2023-06-22"}, "hearings": [DECIDED],
+           "parties": [{"side": "defendant", "name": SHARED}]}
+    api = _MultiCaseApi([case_a, case_b],
+                        {"079-oa-0004": ref, "079-cr-0151": ref, "080-cr-0002": ref})
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+    monkeypatch.setattr(ecr, "compare_held", _canned_compare())
+    assert main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+                 "--review-file", str(tmp_path / "review.md")]) == 0
+    detail = [e["detail"] for e in _events(tmp_path)
+              if e["step"] == "defendant_resolve" and e["slug"] == "case-a"][0]
+    assert "-079-cr-0151" in detail
+    assert "-079-oa-0004" not in detail
 
 
 def test_no_held_compare_asks_no_model_and_holds_every_name(tmp_path, monkeypatch):

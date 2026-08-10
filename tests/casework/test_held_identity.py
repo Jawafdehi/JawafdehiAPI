@@ -17,6 +17,7 @@ from casework.held_identity import (
     compare_held,
     compare_identities,
     discriminator,
+    splittable,
 )
 
 HELD_NAME = "ज्ञानेन्द्र चौधरी"
@@ -324,3 +325,79 @@ def test_case_identity_needs_no_api_object():
     # The whole point: cards are built from a payload pass 1 already read, so a
     # comparison adds no HTTP request to a run measured at 8.8 per case.
     assert isinstance(_card(JHAPA), CaseIdentity)
+
+
+# --------------------------------------------------- review findings 1, 2, 3
+
+def test_a_district_office_is_not_read_as_a_district():
+    # This corpus binds government offices under
+    # `organization/government/district/dfo`. A bare `/district/` substring test
+    # reads that as the district `dfo` -- and `discriminator` would then bake
+    # `-dfo` into a permanent public person IRI.
+    payload = dict(JHAPA, entities=[
+        {"nes_id": "https://jawafdehi.org/entity/organization/government/district/dfo"}])
+    card = _card(payload)
+    assert card.districts == ()
+    assert not discriminator(card).endswith("dfo")
+
+
+def test_a_district_office_does_not_suppress_the_real_district():
+    # Counted as a second "district", the office would push a
+    # single-district case onto the court-number fallback.
+    payload = dict(JHAPA, entities=JHAPA["entities"] + [
+        {"nes_id": "https://jawafdehi.org/entity/organization/government/district/dfo"}])
+    assert discriminator(_card(payload)) == "jhapa"
+
+
+@pytest.mark.parametrize("material_type", ["press_release", "ciaa_press_release",
+                                           "charge_sheet"])
+def test_every_established_press_type_contributes_its_title(material_type):
+    # `PRESS_TYPES` is deliberately wide: `charge_sheet` was measured at 100%
+    # MARKDOWN coverage against 8.6% for `press_release`, so accepting only the
+    # latter would leave the commonest case with no title, no comparison, and
+    # the name held -- the feature no-oping on what it exists for.
+    payload = dict(JHAPA, evidence=[{"material": {
+        "material_type": material_type,
+        "display_name": "जिल्ला झापा, दमक नगरपालिकाका वातावरण अधिकृत"}}])
+    assert _card(payload).press_titles != ()
+    assert _card(payload).carries_identity("ज्ञानेन्द्र चौधरी")
+
+
+def test_a_court_order_still_does_not_count_as_a_press_title():
+    payload = dict(JHAPA, evidence=[
+        {"material": {"material_type": "court_order", "display_name": "फैसला"}}])
+    assert _card(payload).press_titles == ()
+
+
+def test_two_cases_in_one_district_are_not_splittable():
+    # Each discriminates to the same district, so both would derive one entity
+    # slug and the split would land as the merge it was ordered to prevent.
+    a = CaseIdentity(slug="case-a", districts=("jhapa",))
+    b = CaseIdentity(slug="case-b", districts=("jhapa",))
+    assert not splittable([a, b])
+
+
+def test_two_cases_sharing_one_court_number_are_not_splittable():
+    # Duplicate case records citing one court reference: a known prod condition.
+    a = CaseIdentity(slug="case-a", court_cases=("079-CR-0071",))
+    b = CaseIdentity(slug="case-b", court_cases=("079-CR-0071",))
+    assert not splittable([a, b])
+
+
+def test_a_case_with_no_discriminator_at_all_is_not_splittable():
+    a = CaseIdentity(slug="case-a", districts=("jhapa",))
+    assert not splittable([a, CaseIdentity(slug="case-b")])
+
+
+def test_distinct_districts_are_splittable():
+    a = CaseIdentity(slug="case-a", districts=("rautahat",))
+    b = CaseIdentity(slug="case-b", districts=("jhapa",))
+    assert splittable([a, b])
+
+
+def test_the_configured_usage_accumulator_reaches_the_provider():
+    stub = _Recorder(ACTIONABLE)
+    sentinel = object()
+    compare_identities(HELD_NAME, [_card(RAUTAHAT), _card(JHAPA)], stub,
+                       usage=sentinel)
+    assert stub.calls[0]["usage"] is sentinel
