@@ -37,13 +37,23 @@ from dataclasses import dataclass, field
 
 from casework.common.pipeline import PRESS_TYPES
 from casework.entity_resolver import normalise_name
+from jawafdehi_shared.entities.ids import parse_entity_iri
 
-#: IRI prefix of a real district entity. NOT the bare `/district/` substring:
-#: this corpus binds government offices under `organization/government/district/dfo`
-#: (see `enrich_related_entities.PREFIX_PROMPT_TEMPLATE`), so a substring test
-#: reads a District Forest Office as the district `dfo` -- and `discriminator`
-#: would then bake `-dfo` into a permanent public person IRI.
-DISTRICT_PREFIX = "location/district/"
+#: NES prefix of a real district entity, compared against `parse_entity_iri`'s
+#: own `prefix` -- never matched as a substring of the IRI.
+#:
+#: Three things a substring test lets through, and this does not. This corpus
+#: binds government offices under `organization/government/district/dfo` (see
+#: `enrich_related_entities.PREFIX_PROMPT_TEMPLATE`), so `/district/` reads a
+#: District Forest Office as the district `dfo`. A nested path
+#: (`organization/foo/location/district/bar`) matches too. And the legacy
+#: `entity:location/district/<slug>` scheme matches, which the repo's IRI rules
+#: forbid reintroducing -- `parse_entity_iri` raises on it.
+#:
+#: Compared by equality, unlike `_is_person`'s first-segment test: a person
+#: entity nests real subtypes (`person/politician`) that are all still people,
+#: while nothing nests under a district.
+DISTRICT_PREFIX = "location/district"
 
 #: Characters of `description` kept either side of a name mention.
 MENTION_WINDOW = 220
@@ -149,11 +159,13 @@ def _districts(case_detail):
     """
     names = []
     for bind in case_detail.get("entities") or ():
-        nes_id = (bind or {}).get("nes_id") or ""
-        if DISTRICT_PREFIX not in nes_id:
+        try:
+            parsed = parse_entity_iri((bind or {}).get("nes_id") or "")
+        except Exception:  # noqa: BLE001 - a malformed IRI is simply not a district
             continue
-        tail = nes_id.rstrip("/").rsplit("/", 1)[-1]
-        tail = _LOCATION_CODE.sub("", tail)
+        if parsed.prefix != DISTRICT_PREFIX:
+            continue
+        tail = _LOCATION_CODE.sub("", parsed.slug)
         if tail:
             names.append(tail)
     return tuple(dict.fromkeys(names))
@@ -342,20 +354,27 @@ def compare_identities(name, cards, invoke_json, *, tier="premium", usage=None,
                        max_tokens=700):
     """One model call: is `name` one person across `cards`, or several?
 
-    Refused WITHOUT a call when fewer than two cards carry a distinguishing
-    fact. A card with no press release, no district and no mention of the name
+    Refused WITHOUT a call unless EVERY card carries a distinguishing fact. A
+    card with no press release, no district and no mention of the name
     contributes only its slug and its templated title, so the model would be
     left comparing the shared name against itself -- the one input the system
     prompt forbids it to reason from. Cheaper and more honest to hold.
+
+    Every card, not merely two of them: a name on three cases where two are rich
+    and one is thin still sent the thin one, and the reply could then describe
+    that slug from nothing, satisfy `covers`, and go actionable -- so the binder
+    would bind an entity on the one case carrying no evidence at all. There is
+    no way to settle two of a name's cases and hold the third: a verdict covers
+    the whole name. So a single thin card holds all of them.
     """
     key = normalise_name(name)
-    usable = [c for c in cards if c.carries_identity(key)]
-    if len(usable) < 2:
-        thin = ", ".join(c.slug for c in cards if not c.carries_identity(key))
+    thin = [c.slug for c in cards if not c.carries_identity(key)]
+    if len(cards) < 2 or thin:
         return HeldVerdict(
             "unclear",
             evidence=("not compared: no press release, district or summary "
-                      f"mention to tell this name apart on {thin or 'these cases'}"))
+                      "mention to tell this name apart on "
+                      f"{', '.join(thin) or 'these cases'}"))
     try:
         reply = invoke_json(SYSTEM, build_content(name, cards),
                             max_tokens=max_tokens, tier=tier, usage=usage)

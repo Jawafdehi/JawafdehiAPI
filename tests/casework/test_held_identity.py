@@ -225,6 +225,32 @@ def test_a_thin_card_is_held_without_spending_a_call():
     assert "no press release" in got.evidence
 
 
+def test_one_thin_card_among_three_holds_the_whole_name():
+    """Two rich cards no longer license a call that includes a thin one.
+
+    The reply could describe the thin case's slug from nothing, satisfy
+    `covers`, go actionable, and the binder would then bind an entity on the one
+    case carrying no identifying evidence at all.
+    """
+    bare = {"slug": "case-thin", "title": "", "description": "", "evidence": [],
+            "entities": []}
+    stub = _Recorder(ACTIONABLE)
+    got = compare_identities(HELD_NAME,
+                             [_card(RAUTAHAT), _card(JHAPA), _card(bare)], stub)
+    assert stub.calls == []
+    assert not got.is_actionable
+    assert "case-thin" in got.evidence
+
+
+def test_three_rich_cards_are_still_compared_in_one_call():
+    # The guard must not refuse a name simply for being on three cases.
+    third = dict(JHAPA, slug="case-080-cr-0001")
+    stub = _Recorder(ACTIONABLE)
+    compare_identities(HELD_NAME,
+                       [_card(RAUTAHAT), _card(JHAPA), _card(third)], stub)
+    assert len(stub.calls) == 1
+
+
 def test_a_raising_provider_leaves_the_name_held_and_says_the_model_failed():
     stub = _Recorder(RuntimeError("provider down"))
     got = compare_identities(HELD_NAME, [_card(RAUTAHAT), _card(JHAPA)], stub)
@@ -339,6 +365,29 @@ def test_a_district_office_is_not_read_as_a_district():
     card = _card(payload)
     assert card.districts == ()
     assert not discriminator(card).endswith("dfo")
+
+
+def test_a_legacy_scheme_district_iri_is_refused():
+    # The repo's IRI rules forbid reintroducing `entity:<prefix>/<slug>`, and a
+    # substring test on `location/district/` accepted it. `parse_entity_iri`
+    # raises on the legacy form, so it can never reach a public person IRI as a
+    # discriminator.
+    payload = dict(JHAPA, entities=[{"nes_id": "entity:location/district/jhapa"}])
+    assert _card(payload).districts == ()
+
+
+def test_a_district_nested_under_another_prefix_is_refused():
+    # `organization/foo/location/district/bar` contains the district path but is
+    # not a district. Equality on the parsed prefix rejects it; a substring
+    # test did not.
+    payload = dict(JHAPA, entities=[{
+        "nes_id": "https://jawafdehi.org/entity/organization/foo/location/district/bar"}])
+    assert _card(payload).districts == ()
+
+
+def test_a_malformed_bind_iri_does_not_break_the_card():
+    payload = dict(JHAPA, entities=[{"nes_id": "not-an-iri"}, {"nes_id": None}, {}])
+    assert _card(payload).districts == ()
 
 
 def test_a_district_office_does_not_suppress_the_real_district():
