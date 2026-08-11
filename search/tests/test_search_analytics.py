@@ -129,6 +129,38 @@ def test_build_event_records_active_facets_and_sorted_types():
     assert event["filters"] == {"case_type": ["CORRUPTION"]}
 
 
+def test_build_event_records_active_range_bounds():
+    """Which refine controls readers actually reach for is the point of this event,
+    so the बिगो bounds are recorded — in their own key, since they are scalars
+    rather than the term lists ``filters`` holds."""
+    event = build_search_event(
+        search_id="x",
+        params=_params(ranges={"bigo_min": 10_000_000, "bigo_max": None}),
+        response={"count": 1, "counts": {}, "results": []},
+        took_ms=1.0,
+    )
+    assert event["ranges"] == {"bigo_min": 10_000_000}
+
+
+def test_build_event_ranges_none_when_unbounded_and_keeps_a_zero_bound():
+    """No bound → ``None`` (consistent with ``filters``). But ``0`` is a real
+    bound: dropping it on falsiness would misreport the query that was run."""
+    unbounded = build_search_event(
+        search_id="x",
+        params=_params(),
+        response={"count": 0, "counts": {}, "results": []},
+        took_ms=1.0,
+    )
+    assert unbounded["ranges"] is None
+    zero = build_search_event(
+        search_id="x",
+        params=_params(ranges={"bigo_min": 0}),
+        response={"count": 0, "counts": {}, "results": []},
+        took_ms=1.0,
+    )
+    assert zero["ranges"] == {"bigo_min": 0}
+
+
 def test_build_event_carries_no_user_identity():
     """The event is aggregate product telemetry — it must never carry identity."""
     event = build_search_event(

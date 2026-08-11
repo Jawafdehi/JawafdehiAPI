@@ -218,6 +218,16 @@ def common_mappings() -> dict[str, Any]:
                 # this declared type — an existing one picks the field up by dynamic
                 # mapping on reindex, which is why _sort_spec sets ``unmapped_type``.
                 "weight": {"type": "integer"},
+                # बिगो — the alleged embezzled/disputed amount, in whole NPR.
+                # ``long`` mirrors ``Case.bigo`` (a BigIntegerField): the corpus
+                # already holds values into the tens of अरब, which overflow a 32-bit
+                # ``integer``. Promoted to a TOP-LEVEL field purely so it can be
+                # range-queried — the copy inside the card payload lives under
+                # ``raw``, which is ``enabled: false`` and therefore not indexed at
+                # all. Only Jawafdehi cases set this; other doc types leave it
+                # absent (and a ``range`` clause excludes a doc missing the field,
+                # which is the behaviour we want for an unrecorded amount).
+                "bigo": {"type": "long"},
                 # Full serialized JSON-LD / record, return-only (not searchable).
                 "raw": {"type": "object", "enabled": False},
             }

@@ -108,6 +108,19 @@ def test_raw_is_disabled_object():
     assert raw["enabled"] is False
 
 
+def test_bigo_is_a_long_at_the_top_level():
+    """बिगो must be range-queryable, which needs a TOP-LEVEL numeric field.
+
+    ``long``, not ``integer``: the published corpus already holds amounts into the
+    tens of अरब (6.6e10), well past the 2^31 ceiling. And top-level, not the copy
+    inside the card, because ``raw`` is ``enabled: false`` — nothing under it is
+    indexed, so ``raw.card.bigo`` cannot be filtered on at all.
+    """
+    props = common_mappings()["properties"]
+    assert props["bigo"] == {"type": "long"}
+    assert props["raw"]["enabled"] is False
+
+
 def test_bilingual_title_analyzers():
     props = common_mappings()["properties"]
     assert props["title_ne"]["analyzer"] == "devanagari"

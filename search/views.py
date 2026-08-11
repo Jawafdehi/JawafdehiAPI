@@ -28,6 +28,7 @@ from .service import (
     ALL_SORTS,
     ALL_TYPES,
     MAX_PAGE_SIZE,
+    RANGE_FIELDS,
     SORT_RELEVANCE,
     SearchError,
     SearchService,
@@ -84,6 +85,31 @@ class SearchQuerySerializer(serializers.Serializer):
     status = serializers.ListField(
         child=serializers.CharField(allow_blank=False), required=False, default=list
     )
+    # बिगो (alleged embezzled amount, whole NPR) range bounds — the first NON
+    # exact-match refine control. Inclusive on both sides (gte/lte).
+    #
+    # No default: an absent bound must stay ABSENT from validated_data so the view
+    # can tell "not requested" from a real ``0`` lower bound.
+    #
+    # ``max_value`` is the signed-64-bit ceiling, matching both the ``long`` index
+    # mapping and ``Case.bigo``'s BigIntegerField. Without it a larger integer
+    # reaches OpenSearch and comes back as a number_format_exception — i.e. a 503
+    # for what is plainly a bad request. ``min_value=0`` for the same reason in
+    # reverse: a negative बिगो is not a thing, so it is a client error, not an
+    # empty result set.
+    bigo_min = serializers.IntegerField(required=False, min_value=0, max_value=2**63 - 1)
+    bigo_max = serializers.IntegerField(required=False, min_value=0, max_value=2**63 - 1)
+
+    def validate(self, attrs):
+        # An inverted interval matches nothing. Say so with a 400 rather than
+        # serving a confident, empty, indistinguishable-from-"no such cases" page.
+        low, high = attrs.get("bigo_min"), attrs.get("bigo_max")
+        if low is not None and high is not None and low > high:
+            raise serializers.ValidationError(
+                "bigo_min must be less than or equal to bigo_max."
+            )
+        return attrs
+
     page = serializers.IntegerField(required=False, min_value=1, default=1)
     page_size = serializers.IntegerField(
         required=False, min_value=1, max_value=MAX_PAGE_SIZE, default=10
@@ -162,6 +188,30 @@ class SearchQuerySerializer(serializers.Serializer):
                 "Case-scoped in practice."
             ),
         ),
+        OpenApiParameter(
+            "bigo_min",
+            OpenApiTypes.INT,
+            OpenApiParameter.QUERY,
+            required=False,
+            description=(
+                "Refine filter: minimum बिगो — the alleged embezzled/disputed "
+                "amount, in whole NPR (inclusive). CASE-SCOPED: only Jawafdehi "
+                "cases carry an amount, so any bigo bound also excludes every "
+                "entity, material and court-case result — pair it with "
+                "?type=case. Cases with no recorded amount are excluded too."
+            ),
+        ),
+        OpenApiParameter(
+            "bigo_max",
+            OpenApiTypes.INT,
+            OpenApiParameter.QUERY,
+            required=False,
+            description=(
+                "Refine filter: maximum बिगो in whole NPR (inclusive). Same "
+                "case-scoping caveat as bigo_min. A bigo_min greater than "
+                "bigo_max is rejected with 400 rather than returning nothing."
+            ),
+        ),
         OpenApiParameter("page", OpenApiTypes.INT, OpenApiParameter.QUERY, required=False),
         OpenApiParameter(
             "page_size", OpenApiTypes.INT, OpenApiParameter.QUERY, required=False
@@ -196,6 +246,17 @@ class UnifiedSearchView(APIView):
             "status": data["status"],
         }
         active_filters = {k: v for k, v in filters.items() if v}
+        # Range bounds are kept SEPARATE from the exact-match facets: they are a
+        # different clause kind (``range`` vs ``terms``) and a different value shape
+        # (a scalar, not a list). Emptiness is ``is None`` — a truthiness test would
+        # drop a legitimate ``bigo_min=0``.
+        # Driven off RANGE_FIELDS rather than a hand-listed pair, so adding
+        # date_from/date_to there does not silently fail to reach the service.
+        active_ranges = {
+            param: value
+            for param in RANGE_FIELDS
+            if (value := data.get(param)) is not None
+        }
         # Ephemeral per-response id: it join-keys the server-side analytics event to
         # a future client result-click beacon (query -> shown -> clicked) WITHOUT
         # attaching any identity. Echoed in the envelope so the SPA can send it back.
@@ -208,6 +269,7 @@ class UnifiedSearchView(APIView):
                 lang=data["lang"],
                 sort=data["sort"],
                 filters=active_filters,
+                ranges=active_ranges,
                 page=data["page"],
                 page_size=data["page_size"],
                 cursor=data.get("cursor"),
@@ -245,6 +307,7 @@ class UnifiedSearchView(APIView):
                 "page": data["page"],
                 "page_size": data["page_size"],
                 "filters": active_filters,
+                "ranges": active_ranges,
                 # Under a cursor the service ignores ``page`` (stays 1); pass it so
                 # the builder doesn't mistake a deep cursor page for the first page.
                 "cursor": data.get("cursor"),

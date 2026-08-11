@@ -163,6 +163,46 @@ FACET_FIELDS: dict[str, str] = {
     "status": "case_status",
 }
 
+# RANGE filters: the request param name -> (indexed field, the ``range`` bound it
+# sets). The second filter KIND, alongside the exact-match ``terms`` facets above
+# — every filter before this one was exact-match, and there was no range path in
+# the query builder at all.
+#
+# Params sharing a field are merged into ONE ``range`` clause, so
+# ``?bigo_min=X&bigo_max=Y`` becomes a single bounded interval rather than two
+# clauses that read as unrelated constraints.
+#
+# ``bigo`` is CASE-ONLY: no entity/material/court-case document carries an amount,
+# so a bound excludes every non-case hit. That is the same shape as the ``status``
+# facet above (also case-only, also applied globally) and callers should pair a
+# bound with ``?type=case``; the API view's OpenAPI description says so outright.
+#
+# Adding ``date_from``/``date_to`` is two entries here — ``("date", "gte")`` and
+# ``("date", "lte")`` — and nothing else. That generality is the point: the range
+# mechanism is deliberately field-agnostic so a second one never gets built.
+RANGE_FIELDS: dict[str, tuple[str, str]] = {
+    "bigo_min": ("bigo", "gte"),
+    "bigo_max": ("bigo", "lte"),
+}
+
+
+def _range_clauses(ranges: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """``range`` filter clauses for the given bounds (one clause per field).
+
+    Iterates :data:`RANGE_FIELDS` (not the caller's dict) so unknown params are
+    ignored and the emitted DSL is byte-stable regardless of query-string order.
+
+    A bound of ``None`` means "not requested" and is skipped. The test is
+    ``is None``, NOT falsiness: ``0`` is a legitimate lower bound and must survive.
+    """
+    bounds: dict[str, dict[str, Any]] = {}
+    for param, (field, bound) in RANGE_FIELDS.items():
+        value = (ranges or {}).get(param)
+        if value is None:
+            continue
+        bounds.setdefault(field, {})[bound] = value
+    return [{"range": {field: b}} for field, b in bounds.items()]
+
 
 class SearchError(Exception):
     """A client-side search error (→ HTTP 400), e.g. a malformed cursor or an
@@ -250,6 +290,7 @@ def build_query(
     lang: str = "both",
     sort: str = SORT_RELEVANCE,
     filters: dict[str, list[str]] | None = None,
+    ranges: dict[str, Any] | None = None,
     page: int = 1,
     page_size: int = 10,
     search_after: list[Any] | None = None,
@@ -277,6 +318,10 @@ def build_query(
     ``max_result_window`` ceiling. Otherwise shallow offset (``from``/``size``)
     paging is used.
 
+    Narrowing comes in two kinds, both ANDed into the bool ``filter`` (no scoring
+    impact): exact-match ``terms`` from ``filters`` (:data:`FACET_FIELDS`) and
+    numeric/date ``range`` bounds from ``ranges`` (:data:`RANGE_FIELDS`).
+
     Per-type facet counts come from a ``_index`` terms aggregation (one index per
     type — exact regardless of ``source_app``, which is not 1:1 with type since
     ngm owns both materials and courtcases).
@@ -291,6 +336,9 @@ def build_query(
         field = FACET_FIELDS.get(param)
         if field and values:
             filter_clauses.append({"terms": {field: list(values)}})
+    # Range filters (bigo_min/bigo_max) narrow the same way — ANDed alongside the
+    # exact-match ones, and equally inert for scoring.
+    filter_clauses.extend(_range_clauses(ranges))
 
     # ``q`` is OPTIONAL. With a term, build the tuned recall+precision bool query;
     # with an empty/blank ``q`` it's a BROWSE — ``match_all`` so the facet filters,
@@ -569,6 +617,7 @@ class SearchService:
         lang: str = "both",
         sort: str = SORT_RELEVANCE,
         filters: dict[str, list[str]] | None = None,
+        ranges: dict[str, Any] | None = None,
         page: int = 1,
         page_size: int = 10,
         cursor: str | None = None,
@@ -605,6 +654,7 @@ class SearchService:
             lang=lang,
             sort=sort,
             filters=filters,
+            ranges=ranges,
             page=page,
             page_size=page_size,
             search_after=search_after,

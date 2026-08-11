@@ -554,6 +554,102 @@ def test_build_query_includes_status_facet_and_filter():
     assert {"terms": {"case_status": ["ongoing"]}} in body["query"]["bool"]["filter"]
 
 
+# ── range filters (बिगो amount) ────────────────────────────────────────────────
+#
+# The SECOND filter kind. Everything above is exact-match ``terms``; these emit a
+# ``range`` clause, and the mechanism is deliberately field-agnostic so
+# date_from/date_to can reuse it instead of growing a second one.
+
+
+def test_range_fields_map_bigo_bounds_to_one_numeric_field():
+    """Both params address the SAME indexed field, one bound each."""
+    assert svc.RANGE_FIELDS["bigo_min"] == ("bigo", "gte")
+    assert svc.RANGE_FIELDS["bigo_max"] == ("bigo", "lte")
+
+
+def test_build_query_bigo_min_emits_a_range_clause():
+    body = build_query(q="x", ranges={"bigo_min": 10_000_000})
+    assert {"range": {"bigo": {"gte": 10_000_000}}} in body["query"]["bool"]["filter"]
+
+
+def test_build_query_bigo_max_emits_an_upper_bound():
+    body = build_query(q="x", ranges={"bigo_max": 500_000})
+    assert {"range": {"bigo": {"lte": 500_000}}} in body["query"]["bool"]["filter"]
+
+
+def test_build_query_merges_both_bounds_into_a_single_range_clause():
+    """One bounded interval, not two clauses that read as unrelated constraints."""
+    body = build_query(q="x", ranges={"bigo_min": 10_000_000, "bigo_max": 10**11})
+    clauses = body["query"]["bool"]["filter"]
+    assert clauses == [{"range": {"bigo": {"gte": 10_000_000, "lte": 10**11}}}]
+
+
+def test_build_query_range_clause_targets_the_promoted_field_not_the_card_copy():
+    """``raw`` is mapped ``enabled: false``, so a clause on ``raw.card.bigo`` would
+    match nothing. The filter must name the promoted top-level field."""
+    body = build_query(q="x", ranges={"bigo_min": 1})
+    (clause,) = body["query"]["bool"]["filter"]
+    assert set(clause["range"]) == {"bigo"}
+
+
+def test_build_query_no_range_clause_by_default():
+    assert build_query(q="x")["query"]["bool"]["filter"] == []
+    assert build_query(q="x", ranges={})["query"]["bool"]["filter"] == []
+
+
+def test_build_query_ignores_unknown_range_param_and_none_bounds():
+    body = build_query(
+        q="x", ranges={"bogus_min": 5, "bigo_min": None, "bigo_max": None}
+    )
+    assert body["query"]["bool"]["filter"] == []
+
+
+def test_build_query_keeps_a_zero_lower_bound():
+    """``0`` is a real bound. Skipping on falsiness rather than ``is None`` would
+    silently drop it and widen the search the user asked to narrow."""
+    body = build_query(q="x", ranges={"bigo_min": 0})
+    assert {"range": {"bigo": {"gte": 0}}} in body["query"]["bool"]["filter"]
+
+
+def test_build_query_range_composes_with_terms_filters():
+    """Both filter kinds are ANDed into the same bool ``filter`` — the amount
+    bound narrows a case-type/status selection rather than replacing it."""
+    body = build_query(
+        q="x",
+        filters={"case_type": ["CORRUPTION"], "status": ["ongoing"]},
+        ranges={"bigo_min": 10_000_000},
+    )
+    clauses = body["query"]["bool"]["filter"]
+    assert {"terms": {"case_type": ["CORRUPTION"]}} in clauses
+    assert {"terms": {"case_status": ["ongoing"]}} in clauses
+    assert {"range": {"bigo": {"gte": 10_000_000}}} in clauses
+
+
+def test_build_query_range_applies_in_browse_mode():
+    """The case list browses with an empty ``q``; the amount bound must still
+    narrow it (an empty query is the primary way this filter gets used)."""
+    body = build_query(q="", ranges={"bigo_min": 10_000_000}, sort="newest")
+    bq = body["query"]["bool"]
+    assert bq["must"] == [{"match_all": {}}]
+    assert {"range": {"bigo": {"gte": 10_000_000}}} in bq["filter"]
+
+
+def test_build_query_range_clause_order_is_stable():
+    """The DSL is built from RANGE_FIELDS, not the caller's dict, so query-string
+    order can't change the emitted body (keeps it diffable + cacheable)."""
+    assert build_query(q="x", ranges={"bigo_max": 9, "bigo_min": 1}) == build_query(
+        q="x", ranges={"bigo_min": 1, "bigo_max": 9}
+    )
+
+
+def test_search_threads_ranges_to_client():
+    client = MagicMock()
+    client.search.return_value = _canned_response()
+    SearchService(client=client).search(q="x", ranges={"bigo_min": 10_000_000})
+    body = client.search.call_args.kwargs["body"]
+    assert {"range": {"bigo": {"gte": 10_000_000}}} in body["query"]["bool"]["filter"]
+
+
 def _case_card_response():
     """A single case hit carrying the denormalized ``raw.card`` render payload."""
     return {

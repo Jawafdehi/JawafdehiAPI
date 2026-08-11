@@ -337,3 +337,79 @@ def test_case_build_doc_card_entities_default_empty():
     """Pure shaping (no ``entities`` arg) still emits a card, with no entities."""
     doc = case_index.build_doc(_card_case())
     assert doc["raw"]["card"]["entities"] == []
+
+
+# ── बिगो promoted to a top-level range-queryable field ─────────────────────────
+
+
+def test_case_build_doc_promotes_bigo_to_top_level():
+    """बिगो must be a TOP-LEVEL field, not only the card copy.
+
+    ``raw`` is mapped ``enabled: false``, so ``raw.card.bigo`` is stored but never
+    indexed — a range filter can only see the promoted field. Both must be
+    present: the promoted one to filter on, the card one to render from.
+    """
+    doc = case_index.build_doc(_card_case())
+    assert doc["bigo"] == 12345678
+    assert doc["raw"]["card"]["bigo"] == 12345678
+
+
+def test_case_build_doc_omits_bigo_when_unrecorded():
+    """No amount → the key is ABSENT (not null).
+
+    A ``range`` clause excludes a document missing the field, which is exactly the
+    wanted behaviour for a case with no known amount; a ``null`` would instead be
+    rejected by the ``long`` mapping and drop the whole case from the index.
+    """
+    doc = case_index.build_doc(_card_case(bigo=None))
+    assert "bigo" not in doc
+    # The card still carries its own (null) copy — the SPA renders "not recorded".
+    assert doc["raw"]["card"]["bigo"] is None
+
+
+def test_case_build_doc_coerces_a_numeric_string_bigo():
+    """An API-shaped record can carry बिगो as a string; index it as a number."""
+    assert case_index.build_doc(_card_case(bigo="66000000000"))["bigo"] == 66000000000
+    assert case_index.build_doc(_card_case(bigo="1.9"))["bigo"] == 1
+
+
+def test_case_build_doc_drops_an_uncoercible_bigo_without_losing_the_case():
+    """Garbage in ``bigo`` must cost the FIELD, never the whole document.
+
+    Sending a non-numeric value against the ``long`` mapping would have OpenSearch
+    reject the doc outright, silently removing a published case from search.
+    """
+    junk_values = (
+        "not-a-number",
+        object(),
+        True,  # a bool is not an amount; would otherwise index as 1
+        2**63,  # past the ``long`` ceiling — rejected by the mapping
+        -(2**63) - 1,
+        float("inf"),  # int(float("inf")) raises OverflowError
+        float("nan"),  # int(float("nan")) raises ValueError
+    )
+    for junk in junk_values:
+        doc = case_index.build_doc(_card_case(bigo=junk))
+        assert "bigo" not in doc, junk
+        assert doc["iri"] == "https://jawafdehi.org/case/land-grab-2081"
+
+
+def test_case_build_doc_keeps_the_largest_real_amount_exactly():
+    """The screen must reject only what the ``long`` mapping cannot hold, and must
+    not mangle what it keeps.
+
+    The corpus already holds amounts into the tens of अरब. Coercing through
+    ``float`` is lossy above 2**53 — it would round the ceiling value UP past the
+    ceiling and silently drop a valid figure — so the coercion tries ``int`` first.
+    """
+    assert case_index.build_doc(_card_case(bigo=66_000_000_000))["bigo"] == 66_000_000_000
+    assert case_index.build_doc(_card_case(bigo=2**63 - 1))["bigo"] == 2**63 - 1
+    # Same for the string form an API-shaped record carries.
+    assert case_index.build_doc(_card_case(bigo=str(2**63 - 1)))["bigo"] == 2**63 - 1
+
+
+def test_case_build_doc_keeps_a_zero_bigo():
+    """``0`` is a recorded amount, not a synonym for "unknown" — so it is indexed
+    and remains filterable. (No published case records one; inventing the rule
+    here would make an honest zero invisible to every bound.)"""
+    assert case_index.build_doc(_card_case(bigo=0))["bigo"] == 0

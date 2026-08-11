@@ -177,6 +177,12 @@ class SearchControlPlaneTool(_ControlPlaneTool):
                     "type": "array",
                     "items": {"type": "string"},
                 },
+                # बिगो (alleged embezzled amount, whole NPR) range bounds,
+                # inclusive. CASE-ONLY: no entity/material/court-case document
+                # carries an amount, so either bound also excludes every non-case
+                # result — pair with type: ["case"].
+                "bigo_min": {"type": "integer", "minimum": 0},
+                "bigo_max": {"type": "integer", "minimum": 0},
                 "page": {"type": "integer", "minimum": 1, "default": 1},
                 "page_size": {
                     "type": "integer",
@@ -201,6 +207,8 @@ class SearchControlPlaneTool(_ControlPlaneTool):
                 "case_type",
                 "tags",
                 "status",
+                "bigo_min",
+                "bigo_max",
                 "page",
                 "page_size",
                 "cursor",

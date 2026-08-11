@@ -70,8 +70,9 @@ def build_search_event(
 
     Pure/inspectable so the field contract is unit-tested without touching the log
     pipeline. ``params`` carries the validated request inputs (``q``, ``lang``,
-    ``types``, ``sort``, ``page``, ``page_size``, ``filters``); ``response`` is the
-    :class:`SearchService` envelope (``count``, ``counts``, ``results``).
+    ``types``, ``sort``, ``page``, ``page_size``, ``filters``, ``ranges``);
+    ``response`` is the :class:`SearchService` envelope (``count``, ``counts``,
+    ``results``).
 
     ``types`` is emitted as a sorted list; an empty list means "all types" (no
     filter). ``top_type``/``top_score`` are recorded only for the TRUE first page
@@ -88,6 +89,14 @@ def build_search_event(
     active_filters = {
         facet: values for facet, values in (params.get("filters") or {}).items() if values
     }
+    # Range bounds (bigo_min/bigo_max) ride in their own key, not folded into
+    # ``filters``: they are scalars, not term lists, and the emptiness test above
+    # is truthiness — which would quietly discard a real ``bigo_min=0``.
+    active_ranges = {
+        param: bound
+        for param, bound in (params.get("ranges") or {}).items()
+        if bound is not None
+    }
 
     event: dict[str, Any] = {
         "search_id": search_id,
@@ -100,6 +109,7 @@ def build_search_event(
         "page": page,
         "page_size": params.get("page_size"),
         "filters": active_filters or None,
+        "ranges": active_ranges or None,
         "result_count": count,
         # The key gap signal: a real query the corpus/analyzers could not answer.
         # A browse (no query term) that returns nothing is NOT a zero-result miss.
