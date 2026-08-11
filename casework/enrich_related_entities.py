@@ -123,6 +123,7 @@ from casework.common.pipeline import (
     RunReport,
     unmet_prerequisites,
 )
+from casework.common.review import md_cell
 from casework.common.select import select_for_run
 # `defendant_names` is deliberately NOT imported. Reading accused from the case's
 # NGM court record was removed from this enricher: it needs no document and no LLM,
@@ -1395,16 +1396,10 @@ def report_paths(paths):
             "created": f"{stem}.created.jsonl"}
 
 
-def _md_cell(text):
-    """One Markdown table cell: pipes escaped, newlines flattened.
-
-    The no-match report's cells hold an LLM-extracted name and an NES title,
-    neither of which this module controls. A literal `|` or newline in either one
-    ends the cell early and shifts every column after it, so the row a caseworker
-    is meant to act on becomes unreadable -- and this report IS the queue.
-    """
-    return (str(text or "").replace("|", r"\|")
-            .replace("\r", " ").replace("\n", " "))
+#: The no-match report IS the caseworker queue, so an unescaped `|` in an
+#: extracted name breaks the row someone is meant to act on. Shared with the
+#: review file's own tables.
+_md_cell = md_cell
 
 
 def write_jsonl(path, rows):

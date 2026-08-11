@@ -1,16 +1,21 @@
 """Accused names, read from the case's own NGM court record.
 
-CURRENTLY UNWIRED -- NOTHING IMPORTS `defendant_names`. This module is complete and
-tested; it just has no caller yet. `enrich_related_entities` used to call it, and
-that was removed: reading accused needs neither a document nor an LLM, so sitting
-inside a document-and-LLM enricher put it behind five gates it has no use for (the
-already-enriched skip, the MARKDOWN-role prerequisite, the no-source gate, the
-empty-prompt gate, and any LLM failure). A case with a complete court record bound
-zero defendants whenever its press-release PDF lacked a MARKDOWN role.
+WHO CALLS WHAT. `casework.enrich_court_record` is this module's CLI -- pure HTTP,
+no model, no token spend -- and it calls `court_record_for_case`, the full read
+(detail + hearings + parties), because it needs the dates and the party rows'
+`nes_id`/`address`, not just the names. `defendant_names` is the narrow read for
+callers that want ONLY the names; it is kept for them and is not on the enricher's
+path. Neither is authoritative over the other on WHO COUNTS AS A DEFENDANT: both
+route that judgement through `is_defendant`/`party_name` below, so the filter, the
+strip and the de-dup cannot drift apart.
 
-The intended home is its own CLI -- pure HTTP, no model, no token spend, minutes
-across the corpus instead of hours. That is pending a decision; do not delete this
-in the meantime, and do not wire it back into an LLM enricher.
+Do not wire either of them back into an LLM enricher. `enrich_related_entities`
+used to call this module, and that was removed: reading accused needs neither a
+document nor an LLM, so sitting inside a document-and-LLM enricher put it behind
+five gates it has no use for (the already-enriched skip, the MARKDOWN-role
+prerequisite, the no-source gate, the empty-prompt gate, and any LLM failure). A
+case with a complete court record bound zero defendants whenever its
+press-release PDF lacked a MARKDOWN role.
 
 WHY THIS EXISTS. Accused binds used to have no source at all: the LLM prompt's
 PART 3 extracted accused names, counted them, and threw them away. The obvious
@@ -36,19 +41,126 @@ resolution path and one veto path in the enricher.
 """
 
 import logging
+import re
 import urllib.error
 
 logger = logging.getLogger(__name__)
 
-# A verdict is legal only on an accused bind (the `outcome_only_on_accused` CHECK
-# constraint). Every case in this corpus is a Special Court `-CR-` case, which
-# means CIAA filed a charge sheet, so 'charged' is true by construction rather
-# than inferred. Sent explicitly so the claim is visible in the request body
-# instead of implied by the API's omitted-outcome fallback
-# (`cases/api_views.py`).
-CHARGED = "charged"
-
 _COURTCASE_MARKER = "/courtcase/"
+
+#: The one spelling of "defendant" NGM's party rows use (`courts.models`'s
+#: `CaseEntity.side` is free text, documented `plaintiff | defendant`).
+_DEFENDANT_SIDE = "defendant"
+
+#: Case-type codes whose defendant column names an actual defendant. `""` is
+#: the pre-FY073 format (`93-068-0194`), which carries no type segment and is
+#: a prosecution -- 139 references in the corpus. Everything else (`OA`, `RE`,
+#: the `W*` writ codes, and any code not yet seen) is an allow-list miss and
+#: skips: an unrecognised code risks naming a government office as accused,
+#: where skipping one only costs a bind a later run recovers.
+BINDABLE_CODES = frozenset({"CR", "CB", "FJ", ""})
+
+_CODE_SEGMENT = re.compile(r"-([A-Za-z]+)-")
+
+#: The pre-FY073 shape: three all-ASCII-digit groups, nothing else (`93-068-0194`).
+_LEGACY_NUMBER = re.compile(r"^[0-9]+-[0-9]+-[0-9]+$")
+
+#: Returned for a number that is neither `-<letters>-` coded nor the legacy
+#: all-digit shape -- NOT in `BINDABLE_CODES`, so it skips and logs rather
+#: than joining the `""` (pre-FY073 prosecution) bucket by default. Allow-list,
+#: not deny-list: a number this parser cannot read is treated the same as an
+#: unrecognised code, never as a silent prosecution.
+UNPARSEABLE = "UNPARSEABLE"
+
+
+def case_number_code(number):
+    """The court's case-type letters from `079-CR-0151`, upper-cased.
+
+    `""` only for the genuine pre-FY073 shape (`93-068-0194`); anything else
+    this cannot read -- wrong separator, letters in the wrong place, a
+    non-ASCII transliteration -- returns `UNPARSEABLE`, never `""`, so it
+    cannot be mistaken for that legacy prosecution format.
+    """
+    text = str(number or "")
+    match = _CODE_SEGMENT.search(text)
+    if match:
+        return match.group(1).upper()
+    return "" if _LEGACY_NUMBER.match(text) else UNPARSEABLE
+
+
+def is_defendant(party):
+    """Whether this party row names a defendant rather than a plaintiff.
+
+    The ONE place that test lives. `enrich_court_record._accused_binds` needs
+    the whole party row (its `nes_id` and `address`) and so cannot call
+    `defendant_names`, but it must not re-spell the filter either: a side test
+    that drifts between the two would bind plaintiffs on one path and not the
+    other, and `नेपाल सरकार` is the plaintiff on every case in this corpus.
+    """
+    return (party.get("side") or "").strip().lower() == _DEFENDANT_SIDE
+
+
+def party_name(party):
+    """The party's name, stripped, or "" when the row carries none.
+
+    Shared with `is_defendant` so the two paths cannot disagree on WHICH string
+    a party's name is. They no longer de-dup on the same key, though:
+    `defendant_names` keys on this exact string, while
+    `enrich_court_record._accused_binds` keys on `normalise_name` of it, so that
+    two punctuation variants of one name on one case collapse to a single row
+    and match the held-name index. Strictly coarser, and benign only because
+    `defendant_names` is off the enricher path.
+    """
+    return (party.get("name") or "").strip()
+
+
+#: The alias marker in a court-record party name: `<alias> भन्ने <legal name>`.
+#: Measured over 240 FY078/079 Special Court cases -- 14 of 1,069 defendant names
+#: (1.3%) carry it, and `उर्फ`/`उर्फे` carry zero, so this one word is the whole
+#: vocabulary the corpus uses.
+ALIAS_MARKER = "भन्ने"
+
+
+def split_alias(name):
+    """`(legal_name, [alias, ...])` for one court-record party name.
+
+    The legal name FOLLOWS the marker: `आवास भन्ने आभाश अर्याल` is आभाश अर्याल,
+    also known as आवास. Every one of the corpus's 14 occurrences reads that way,
+    and the post-marker half is the one carrying a real surname (मुसलमान, आदाटे,
+    लोखण्डे, बानिया, परियार, खात्री, साह).
+
+    Binding the raw string creates an NES person named
+    `आवास भन्ने आभाश अर्याल`, slugged `avasa-bhanne-abhasha-aryala` -- a name
+    that person holds nowhere, that no search for either half can match, and
+    that reads as nonsense on a public corruption case.
+
+    Split on the LAST marker. `बलराम भन्ने विनि बहादुर भन्ने विनि बहादुर बानिया`
+    (078-CR-0062) carries two, and only the final segment is the legal name;
+    splitting on the first would keep `विनि बहादुर भन्ने विनि बहादुर बानिया`.
+
+    A marker with nothing after it (or nothing before) is left ALONE -- the whole
+    string comes back as the name. A trailing `भन्ने` is a truncated record, not
+    an instruction to bind the empty string.
+    """
+    text = (name or "").strip()
+    if ALIAS_MARKER not in text:
+        return text, []
+    head, _, legal = text.rpartition(ALIAS_MARKER)
+    legal, head = legal.strip(), head.strip()
+    if not legal or not head:
+        return text, []
+    aliases = [part.strip() for part in head.split(ALIAS_MARKER) if part.strip()]
+    return legal, aliases
+
+
+def party_legal_name(party):
+    """`party_name` with any alias prefix stripped -- the name to bind.
+
+    `party_name` stays the raw record string: it is what `is_defendant`'s
+    companion reads, and the review file quotes it so a caseworker can see what
+    the court actually wrote.
+    """
+    return split_alias(party_name(party))[0]
 
 
 def court_ref(iri):
@@ -105,11 +217,55 @@ def defendant_names(api, case):
             continue
 
         for party in parties:
-            if (party.get("side") or "").strip().lower() != "defendant":
+            if not is_defendant(party):
                 continue
-            name = (party.get("name") or "").strip()
+            name = party_name(party)
             if not name or name in seen:
                 continue
             seen.add(name)
             names.append(name)
     return names, skips
+
+
+def court_record_for_case(api, case):
+    """`(records, skips)` -- the full court record behind every reference on `case`.
+
+    Each record is `{"court", "number", "detail", "hearings", "parties"}`. The
+    three reads are made per reference; any one of them failing drops that
+    reference into `skips` with a human-readable reason and moves on, because 9
+    of the 49 published court references 404 and one stale number must not cost
+    a case its other references.
+
+    Deliberately separate from `defendant_names`, which answers the narrower
+    "who are the defendants" question and stays the entry point for callers that
+    need only names.
+    """
+    refs = [ref for ref in (court_ref(raw) for raw in (case.get("court_cases") or []))
+            if ref]
+    if not refs:
+        return [], ["no court reference on the case: neither dates nor accused "
+                    "can be read from the court record"]
+
+    records, skips = [], []
+    for court, number in refs:
+        try:
+            record = {
+                "court": court,
+                "number": number,
+                "detail": api.get_courtcase(court, number) or {},
+                "hearings": api.list_hearings(court, number) or [],
+                "parties": api.get_court_case_entities(court, number) or [],
+            }
+        except urllib.error.HTTPError as exc:
+            skips.append(f"court reference {court}/{number} could not be read "
+                         f"(HTTP {exc.code})")
+            logger.warning("court record %s/%s unreadable: HTTP %s",
+                           court, number, exc.code)
+            continue
+        except Exception as exc:  # noqa: BLE001 - network, decode, anything else: a read failure is a skip
+            skips.append(f"court reference {court}/{number} could not be read "
+                         f"({type(exc).__name__})")
+            logger.warning("court record %s/%s unreadable: %s", court, number, exc)
+            continue
+        records.append(record)
+    return records, skips

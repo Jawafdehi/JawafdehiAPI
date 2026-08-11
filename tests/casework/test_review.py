@@ -17,6 +17,7 @@ from casework.common.review import (
     ReviewRow,
     _quote,
     build_review_file,
+    md_cell,
     review_path,
 )
 
@@ -229,3 +230,37 @@ def test_a_file_valued_override_is_still_used_verbatim(tmp_path):
     """Naming one file stays a deliberate act -- no stamp, no stage suffix."""
     target = tmp_path / "exactly-this.md"
     assert review_path("card", "dddd4444", override=str(target)) == target
+
+
+def test_a_detail_block_is_rendered_as_markdown_not_blockquoted(tmp_path):
+    """A stage whose write is a LIST supplies its rows here. Blockquoting them
+    the way `generated` is quoted would stop the table rendering as a table."""
+    rf = _file(tmp_path)
+    table = "| # | Defendant |\n|---|---|\n| 1 | कृष्ण प्रसाद यादव |"
+    rf.add(ReviewRow(slug="case-1", status="would-patch", generated="accused+1",
+                     detail=("Court-record defendants", table)))
+    text = rf.write().read_text(encoding="utf-8")
+    assert "### Court-record defendants" in text
+    assert "| 1 | कृष्ण प्रसाद यादव |" in text
+    assert "> | 1 |" not in text
+
+
+def test_a_row_without_a_detail_block_renders_no_empty_heading(tmp_path):
+    rf = _file(tmp_path)
+    rf.add(ReviewRow(slug="case-1", status="would-enrich", generated="विवरण"))
+    assert "###" in (text := rf.write().read_text(encoding="utf-8"))
+    assert "Court-record defendants" not in text
+
+
+def test_md_cell_escapes_a_pipe_that_would_shift_every_column():
+    assert md_cell("यादव | समेत") == r"यादव \| समेत"
+    assert md_cell("two\nlines") == "two lines"
+    assert md_cell(None) == ""
+
+
+def test_md_cell_keeps_a_falsy_value_that_is_not_none():
+    """Only `None` is missing. Blanking `0` prints an empty cell where the value
+    was legitimately zero -- which reads as "not known" instead."""
+    assert md_cell(0) == "0"
+    assert md_cell(False) == "False"
+    assert md_cell("") == ""

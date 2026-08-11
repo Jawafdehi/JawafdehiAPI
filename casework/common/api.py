@@ -13,9 +13,13 @@ LOOPBACK_HOSTS = ("127.0.0.1", "localhost")
 class EntityAlreadyExists(Exception):
     """A create POST hit an entity that is already there.
 
-    Its own type because the caller's response is to BIND the existing entity,
-    not to record an error: someone -- a caseworker, or an earlier run over the
-    same case -- got there first, which is the outcome we wanted. The server
+    Its own type because the caller's response is usually to BIND the existing
+    entity, not to record an error: someone -- a caseworker, or an earlier run
+    over the same case -- got there first, which is the outcome we wanted. NOT
+    universally, though: a caller that reached the create BECAUSE it could not
+    identify the entity by name must refuse instead, since the collision says
+    only that the slug is taken, not that it is taken by this person. See
+    `casework.enrich_court_record.resolve_defendant`. The server
     answers 409 `ENTITY_EXISTS`: `_map_service_value_error` maps the duplicate
     `@id` check (`entities/services/publication/service.py:68`) to 409, and
     reserves 422 for `validate_create_payload` failures (`entities/views.py:220,
@@ -383,6 +387,81 @@ class CaseworkApi:
             if not data.get("next"):
                 return rows
             page += 1
+
+    def get_courtcase(self, court, number, timeout=60):
+        """One NGM court case: registration date, case_status, parties summary.
+
+        The composite-key detail route, keyed on (court, case_number). Public on
+        the read plane, so this works with no credentials at all.
+        """
+        path = (f"/courtcases/{urllib.parse.quote(str(court), safe='')}"
+                f"/{urllib.parse.quote(str(number), safe='')}/")
+        return self.get(path, timeout=timeout)
+
+    def list_hearings(self, court, number, timeout=60):
+        """Every hearing row on one court case, following pagination.
+
+        Rows are NOT returned in date order -- the deciding hearing can sort
+        before an earlier one. Callers pick by max `hearing_date_ad`, never by
+        list position.
+
+        Pages by page NUMBER and ignores the response's `next` URL, for the same
+        reason `get_court_case_entities` does: `get()` concatenates path onto
+        base_url, so an absolute `next` would produce a doubled prefix. Its
+        PRESENCE is still the termination signal, though -- a short page is not
+        the end. `config.settings` configures plain `PageNumberPagination`,
+        which defines no `page_size_query_param`, so `page_size` is IGNORED and
+        every page is `PAGE_SIZE` (20) rows. Exiting on `len(batch) < 100`
+        therefore returned page 1 and stopped on EVERY case: 3 of 77 sampled
+        FY078/079 cases carry more than 20 hearings (max 27), and a deciding
+        `फैसला` row sitting in the dropped tail silently changes `end_date` and
+        `bind_outcome`.
+        """
+        path = (f"/courtcases/{urllib.parse.quote(str(court), safe='')}"
+                f"/{urllib.parse.quote(str(number), safe='')}/hearings")
+        rows, page = [], 1
+        while True:
+            data = self.get(path, {"page": page, "page_size": 100}, timeout=timeout)
+            batch = data.get("results") or []
+            rows.extend(batch)
+            if not batch or not data.get("next"):
+                return rows
+            page += 1
+
+    def patch_case(self, slug, *, fields=(), lists=(), timeout=60, if_match=None):
+        """Write scalar fields AND whole-list paths in ONE conditional request.
+
+        `fields` is `[(name, value)]` of scalars; `lists` is `[(path, items)]`
+        of whole-list paths (`WHOLE_LIST_PATHS`).
+
+        WHY THIS EXISTS. `patch_fields` refuses whole-list paths and
+        `replace_list` takes one path at a time, so a caller writing
+        `case_start_date` and `entities` had to send two requests -- and the
+        first changes the ETag, so the second 412s under the ETag read at the
+        top. `build_replace_ops` records the same failure from `enrich_card`.
+
+        THE MERGE-FIRST CONTRACT OF `replace_list` APPLIES IN FULL to every
+        entry in `lists`: the server deletes every existing join row for that
+        path and recreates from exactly the items given. Pass the FULL merged
+        list, never a delta. Omitting a row deletes it, with no warning and no
+        recovery.
+
+        Empty in -> no request and `{}` out, so a case with nothing to change
+        costs no write.
+        """
+        fields, lists = list(fields), list(lists)
+        for name, _ in fields:
+            if name in WHOLE_LIST_PATHS:
+                raise ValueError(
+                    f"{name} is a whole-list path -- pass it in `lists`, which "
+                    "carries the merge-first contract")
+        for path, _ in lists:
+            if path not in WHOLE_LIST_PATHS:
+                raise ValueError(f"{path} is not a whole-list path")
+        ops = build_replace_ops(fields) + build_replace_ops(lists)
+        if not ops:
+            return {}
+        return self._patch(slug, ops, timeout, if_match=if_match)
 
     def search_entities(self, query, *, page_size=ENTITY_SEARCH_PAGE_SIZE,
                         pages=ENTITY_SEARCH_MAX_PAGES, timeout=60):

@@ -219,6 +219,17 @@ STAGES = {
         requires_entity_roles=("accused",),
         requires_stages=("card", "entities"),
     ),
+    # `court_record` reads the case's NGM court record over HTTP -- not a bound
+    # document -- so unlike `entities` it needs no material and no `convert`
+    # pass. That independence is the point: the accused path used to live inside
+    # `enrich_related_entities`, where five gates it had no use for (the
+    # already-enriched skip, the MARKDOWN-role prerequisite, the no-source gate,
+    # the empty-prompt gate, and any LLM failure) cost a case all its defendants
+    # whenever its press release lacked a MARKDOWN role.
+    "court_record": Stage(
+        "court_record",
+        provides=("case_start_date", "case_end_date", "entities"),
+    ),
 }
 
 

@@ -39,12 +39,24 @@ from casework.common.cli import _DEFAULT_LOG_DIR, _REPO_ROOT
 # EXCEPT the known intermediate step signals below. A ledger must fail toward
 # inclusion, not omission.
 #
-# `planned` is the one dry-run status that IS excluded: bind_materials maps a
+# `planned` is one dry-run status that IS excluded: bind_materials maps a
 # dry-run WOULD_PATCH to `planned` precisely so it stays out of the "what did we
 # change, when" audit (bind_materials.py::_ledger_status). It is a non-outcome
 # by design -- a bind dry run changed nothing -- so it belongs here, not with
 # the `would-*` extraction previews that DO record a per-case verdict.
-NON_OUTCOME_STATUSES = frozenset({"ok", "start", "fallback", "none", "planned"})
+#
+# `dry_run` joins it for the same reason, on `enrich_court_record.py`'s
+# `patch` step: that stage plans a whole-case scalar+list PATCH against
+# EXISTING case fields (dates, accused binds), not an extraction preview of
+# NEW content the way `would-convert`/`would-enrich` are -- so, like a bind
+# dry run, it changed nothing and must not read as a per-case outcome either.
+# Excluding the terminal status is only half of that: every INTERMEDIATE event
+# a stage emits must carry one of these statuses too, or the latest of THOSE
+# becomes the recorded outcome instead. That is why every enricher reports its
+# intermediate steps as `ok` and puts the specifics in `detail`; nothing
+# stage-specific belongs in this frozenset (`failed`, for one, is a real
+# terminal status for `casework.convert`).
+NON_OUTCOME_STATUSES = frozenset({"ok", "start", "fallback", "none", "planned", "dry_run"})
 
 _DEFAULT_LEDGER = _REPO_ROOT / "work" / "enrichment-ledger.jsonl"
 
