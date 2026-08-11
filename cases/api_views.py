@@ -110,6 +110,7 @@ _PATCH_SCALAR_FIELDS = frozenset(
         "slug",
         "missing_details",
         "bigo",
+        "weight",
         # Internal casework notes (Case.notes TextField). A scalar column, so it
         # persists via the bulk UPDATE like the other scalars — the missing entry
         # here is what silently dropped a patched note (BB-28).
@@ -640,6 +641,7 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             "court_cases",
             "missing_details",
             "bigo",
+            "weight",
         ]
     )
 
@@ -1481,6 +1483,8 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             "court_cases": case.court_cases,
             "missing_details": case.missing_details,
             "bigo": case.bigo,
+            # Coerce a NULL read-back to 0 for the same reason as notes below.
+            "weight": case.weight or 0,
             # Internal casework notes (BB-04-gated on read; casework-only). This
             # is the top-level case ``notes`` TextField, distinct from the nested
             # per-entity relationship ``notes`` above. Carried here so the editor's

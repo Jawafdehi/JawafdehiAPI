@@ -324,6 +324,16 @@ class CaseWriteFieldsSerializer(serializers.Serializer):
         min_value=-9223372036854775808,
         max_value=9223372036854775807,
     )
+    # This PATCH path is the only way to set the editorial weight — cases are
+    # read-only in Django admin. NOT ``allow_null``, because the column is NOT NULL
+    # (``default=0``): send 0 to unrank. 32-bit bounds because the model field is an
+    # IntegerField, not bigo's BigInteger, so a wider value would pass here and then
+    # fail at the DB.
+    weight = serializers.IntegerField(
+        required=False,
+        min_value=-2147483648,
+        max_value=2147483647,
+    )
 
     def validate_missing_details(self, value):
         """Normalize empty/whitespace missing_details to None."""

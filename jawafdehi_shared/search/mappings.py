@@ -213,6 +213,11 @@ def common_mappings() -> dict[str, Any]:
                 # internal scraper enrichment flag pending/enriched/failed). Only
                 # Jawafdehi cases set this; other doc types leave it absent.
                 "case_status": {"type": "keyword"},
+                # Editorial priority behind the ``featured`` sort; cases-only, same
+                # single-type pattern as ``case_status`` above. Only FRESH indices get
+                # this declared type — an existing one picks the field up by dynamic
+                # mapping on reindex, which is why _sort_spec sets ``unmapped_type``.
+                "weight": {"type": "integer"},
                 # Full serialized JSON-LD / record, return-only (not searchable).
                 "raw": {"type": "object", "enabled": False},
             }

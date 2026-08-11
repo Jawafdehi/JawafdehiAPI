@@ -53,6 +53,7 @@ from jobs.serializers import (
     JobStageSerializer,
 )
 from review.serializers import ReviewConfigSerializer, SubmitSerializer
+from search.service import ALL_SORTS
 
 
 async def _call(tool, arguments):
@@ -128,6 +129,14 @@ def _writable_field_names(serializer_class):
 )
 def test_control_plane_body_schemas_track_drf_serializers(schema, serializer_class):
     assert set(schema["properties"]) == _writable_field_names(serializer_class)
+
+
+def test_search_sort_enum_tracks_all_sorts():
+    """The tool schema is static so it builds without Django, so nothing stops it
+    drifting from the ChoiceField that ``/api/search/`` actually validates against —
+    a mode missing here is unreachable, and one that shouldn't be here 400s."""
+    schema = SearchControlPlaneTool().input_schema
+    assert schema["properties"]["sort"]["enum"] == list(ALL_SORTS)
 
 
 @pytest.mark.parametrize(

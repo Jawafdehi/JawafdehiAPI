@@ -735,6 +735,16 @@ class Case(models.Model):
         null=True,
         help_text="Bigo (बिगो) — the total disputed or embezzled amount claimed in the case (in NPR)",
     )
+    # Plain unbounded integer rather than fractional/gap positioning: there is no
+    # drag-to-reorder UI, staff just type a number.
+    weight = models.IntegerField(
+        default=0,
+        help_text=(
+            "Editorial priority weight — higher values surface first in the "
+            "homepage 'Featured Cases' section. 0 (the default) means unranked; "
+            "ties fall back to newest-first."
+        ),
+    )
 
     class Meta:
         ordering = ["-created_at"]

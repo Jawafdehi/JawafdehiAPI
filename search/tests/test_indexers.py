@@ -208,6 +208,23 @@ def test_case_build_doc_shape_published():
     assert "supreme:081-cr-0081" not in doc["identifiers"]
 
 
+def test_case_build_doc_weight_defaults_to_zero_when_absent():
+    """build_doc must not REQUIRE ``weight`` — it shapes objects predating the field."""
+    assert case_index.build_doc(_published_case())["weight"] == 0
+
+
+def test_case_build_doc_carries_weight():
+    case = _published_case()
+    case.weight = 50
+    assert case_index.build_doc(case)["weight"] == 50
+
+
+def test_case_build_doc_weight_coerces_none_to_zero():
+    case = _published_case()
+    case.weight = None
+    assert case_index.build_doc(case)["weight"] == 0
+
+
 def test_case_should_index_only_published():
     assert case_index.should_index(_published_case()) is True
     for state in ("DRAFT", "IN_REVIEW", "CLOSED"):

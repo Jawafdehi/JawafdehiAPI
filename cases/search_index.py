@@ -272,6 +272,10 @@ def build_doc(case: Any, *, entities: list[dict[str, Any]] | None = None) -> dic
     if case_type and isinstance(case_type, str):
         doc["case_type"] = case_type.upper()
 
+    # ``getattr`` with a default because build_doc is pure — it shapes whatever it
+    # is given, including objects (and fixtures) predating the field.
+    doc["weight"] = int(getattr(case, "weight", 0) or 0)
+
     _apply_dates(doc, case)
 
     # Coarse lifecycle as a dedicated indexed keyword so the unified search can

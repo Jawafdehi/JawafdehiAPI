@@ -125,6 +125,12 @@ CASE_CREATE_PROPERTIES: dict[str, Any] = {
             "maximum": 9223372036854775807,
         }
     ),
+    # Not nullable and narrower than bigo above: a NOT NULL IntegerField.
+    "weight": {
+        "type": "integer",
+        "minimum": -2147483648,
+        "maximum": 2147483647,
+    },
 }
 CASE_CREATE_FIELDS = tuple(CASE_CREATE_PROPERTIES)
 

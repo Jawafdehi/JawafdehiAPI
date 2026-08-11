@@ -154,9 +154,11 @@ class SearchControlPlaneTool(_ControlPlaneTool):
                     "enum": ["ne", "en", "both"],
                     "default": "both",
                 },
+                # Static (this schema must build without Django) but contract-tested
+                # against search.service.ALL_SORTS, which rejects anything else 400.
                 "sort": {
                     "type": "string",
-                    "enum": ["relevance", "newest", "oldest", "title"],
+                    "enum": ["relevance", "newest", "oldest", "title", "featured"],
                     "default": "relevance",
                 },
                 "entity_type": {

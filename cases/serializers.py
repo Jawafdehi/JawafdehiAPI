@@ -338,6 +338,9 @@ class CaseSerializer(serializers.ModelSerializer):
             "court_cases",
             "missing_details",
             "bigo",
+            # Readable, not just writable: the SPA editor renders its form from this
+            # payload, so without it an editor would set weights blind.
+            "weight",
             "versionInfo",
             "created_at",
             "updated_at",

@@ -418,6 +418,41 @@ def test_build_query_title_sorts_by_keyword_subfield():
     assert body["sort"][-1] == {"iri": {"order": "asc"}}
 
 
+def test_build_query_featured_sorts_by_weight_then_date_then_iri():
+    body = build_query(q="x", sort="featured")
+    # ``unmapped_type`` keeps the query valid against an index whose mapping has no
+    # ``weight`` at all; without it OpenSearch hard-errors instead of skipping.
+    assert body["sort"][0] == {
+        "weight": {"order": "desc", "missing": 0, "unmapped_type": "integer"}
+    }
+    assert body["sort"][1] == svc._sort_spec("newest")[0]
+    assert body["sort"][-1] == {"iri": {"order": "asc"}}
+
+
+def test_featured_is_an_allowed_sort_mode():
+    """The API ``sort`` ChoiceField is built from ALL_SORTS, so absence here is a 400."""
+    assert "featured" in svc.ALL_SORTS
+
+
+def test_featured_tiebreakers_are_the_newest_spec_verbatim():
+    """Why featured collapses onto newest once weights tie — the equal-weight case
+    while nothing is curated. This asserts the clause, not the resulting order."""
+    assert svc._sort_spec("featured")[1:] == svc._sort_spec("newest")
+
+
+def test_serialize_hit_surfaces_weight_so_a_featured_order_explains_itself():
+    hit = {
+        "_index": "jawafdehi-cases",
+        "_source": {"iri": "https://jawafdehi.org/case/x", "weight": 50},
+    }
+    assert svc._serialize_hit(hit)["extra"]["weight"] == 50
+
+
+def test_serialize_hit_omits_weight_for_a_doc_indexed_before_the_field():
+    hit = {"_index": "jawafdehi-cases", "_source": {"iri": "https://jawafdehi.org/case/x"}}
+    assert "weight" not in svc._serialize_hit(hit)["extra"]
+
+
 # ── facet filters ────────────────────────────────────────────────────────────
 
 

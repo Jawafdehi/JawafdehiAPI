@@ -162,6 +162,70 @@ def test_patch_notes_persists_and_survives_read_back_for_caseworker():
 
 
 @pytest.mark.django_db
+def test_patch_weight_persists_and_survives_read_back():
+    # Guards the BB-28 shape: a field the serializer accepts but no allowlist
+    # persists validates fine and is silently discarded.
+    user = create_user_with_role("bimala", "bimala@example.com", "Caseworker")
+    case = _make_case()
+    assert case.weight == 0
+
+    client = _authed_client(user)
+    response = client.patch(
+        URL.format(case.slug),
+        data=[{"op": "replace", "path": "/weight", "value": 100}],
+        format="json",
+    )
+    assert response.status_code == 200, response.data
+
+    case.refresh_from_db()
+    assert case.weight == 100
+
+    # The editor reloads before the next PATCH; it must see the value it just set
+    # or it cannot tell what the current top weight is.
+    reload = client.get(URL.format(case.slug))
+    assert reload.status_code == 200
+    assert reload.data["weight"] == 100
+
+
+@pytest.mark.django_db
+def test_patch_weight_accepts_negative_and_zero():
+    """0 unranks; negatives demote below untouched cases (which sort as 0)."""
+    user = create_user_with_role("bimala", "bimala@example.com", "Caseworker")
+    case = _make_case(weight=42)
+    client = _authed_client(user)
+
+    for value in (0, -5):
+        response = client.patch(
+            URL.format(case.slug),
+            data=[{"op": "replace", "path": "/weight", "value": value}],
+            format="json",
+        )
+        assert response.status_code == 200, response.data
+        case.refresh_from_db()
+        assert case.weight == value
+
+
+@pytest.mark.django_db
+def test_patch_weight_rejects_null_and_out_of_range():
+    """The column is NOT NULL and 32-bit: both must 422 at the serializer rather
+    than reach the DB (a bigo-sized value fits IntegerField's serializer only if
+    the bounds are declared)."""
+    user = create_user_with_role("bimala", "bimala@example.com", "Caseworker")
+    case = _make_case(weight=7)
+    client = _authed_client(user)
+
+    for bad in (None, 2147483648):
+        response = client.patch(
+            URL.format(case.slug),
+            data=[{"op": "replace", "path": "/weight", "value": bad}],
+            format="json",
+        )
+        assert response.status_code == 422, response.data
+        case.refresh_from_db()
+        assert case.weight == 7
+
+
+@pytest.mark.django_db
 def test_patch_rejects_invalid_state_transition_in_multi_op_without_partial_write():
     # v3 authz: a Caseworker is authorized to publish, but publishing an
     # incomplete case (no accused entity / key allegation) fails validation.

@@ -135,8 +135,14 @@ class CaseAdminForm(forms.ModelForm):
         model = Case
         fields = "__all__"
         exclude = [
-            "unified_entities"
-        ]  # Exclude unified_entities as it's managed through the inline
+            "unified_entities",  # managed through the inline
+            # A NOT NULL IntegerField with no ``blank=True`` is a REQUIRED field
+            # under ``fields = "__all__"``, which silently invalidates every
+            # CaseAdminForm built without it. Excluded rather than ``blank=True``,
+            # which would loosen the model's contract everywhere to satisfy a form
+            # that cannot write anyway; ``readonly_fields`` still renders the value.
+            "weight",
+        ]
         widgets = {
             "description": ToastUIEditorWidget(),
             "notes": ToastUIEditorWidget(),
@@ -440,6 +446,7 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         "title_with_view_link",
         "case_type",
         "state_badge",
+        "weight",
         "created_at",
         "updated_at",
     ]
@@ -463,6 +470,7 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         "updated_at",
         "version_info_display",
         "public_case_url",
+        "weight",
     ]
 
     fieldsets = (
@@ -479,6 +487,7 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
                     "case_type",
                     "state",
                     "bigo",
+                    "weight",
                 )
             },
         ),

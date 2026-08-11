@@ -115,7 +115,7 @@ SORT_SPEC: list[dict[str, Any]] = [
 # search_after cursor paging stays stable + complete regardless of the primary key
 # (a non-unique primary like ``date`` can skip/repeat rows without it).
 SORT_RELEVANCE = "relevance"
-ALL_SORTS: tuple[str, ...] = ("relevance", "newest", "oldest", "title")
+ALL_SORTS: tuple[str, ...] = ("relevance", "newest", "oldest", "title", "featured")
 
 
 def _sort_spec(sort: str) -> list[dict[str, Any]]:
@@ -123,8 +123,21 @@ def _sort_spec(sort: str) -> list[dict[str, Any]]:
 
     ``newest``/``oldest`` order by the Gregorian ``date`` field (missing dates sort
     last either way); ``title`` orders by the untokenized ``title_en.keyword``
-    subfield. Every mode appends the ``iri`` tiebreaker for stable cursor paging.
+    subfield. ``featured`` orders by the editorial ``weight`` (cases only), then
+    falls back to ``newest``. Every mode appends the ``iri`` tiebreaker for stable
+    cursor paging.
     """
+    if sort == "featured":
+        # ``missing: 0`` so a doc indexed before ``weight`` existed ranks as unranked
+        # rather than below an explicit 0. ``unmapped_type`` because sorting on a
+        # field absent from the index MAPPING is a hard error, not a graceful skip —
+        # create_index no-ops on an existing index, so no live index carries
+        # ``weight`` until the next reindex. With it the sort degrades to ``newest``.
+        return [
+            {"weight": {"order": "desc", "missing": 0, "unmapped_type": "integer"}},
+            {"date": {"order": "desc", "missing": "_last"}},
+            {"iri": {"order": "asc"}},
+        ]
     if sort == "newest":
         return [{"date": {"order": "desc", "missing": "_last"}}, {"iri": {"order": "asc"}}]
     if sort == "oldest":
@@ -472,7 +485,9 @@ def _serialize_hit(hit: dict[str, Any]) -> dict[str, Any]:
     highlight = hit.get("highlight") or {}
 
     extra: dict[str, Any] = {}
-    for key in ("date", "date_bs", "type"):
+    # ``weight`` is here so a ``sort=featured`` response explains its own order;
+    # absent from docs indexed before the field existed, hence the None guard.
+    for key in ("date", "date_bs", "type", "weight"):
         if source.get(key) is not None:
             extra[key] = source[key]
     raw = source.get("raw") or {}
