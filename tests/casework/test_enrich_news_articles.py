@@ -30,12 +30,14 @@ import pathlib
 import sys
 import types
 import urllib.parse
+import urllib.request
 from datetime import date
 
 import pytest
 
 from casework import bind_materials
 from casework import enrich_news_articles as en
+from casework.common.api import CaseworkApi
 from casework import news_search as ns
 from tests.casework.fakes import FakeUsage
 from tests.casework.news_labelled_set import LABELLED_PAIRS, MATCHES, NON_MATCHES
@@ -763,12 +765,38 @@ def _bindable_plan(state="DRAFT", etag='W/"1"'):
     return plan
 
 
-def test_the_writer_refuses_a_non_loopback_host_even_with_remote_writes_allowed():
+def test_the_writer_writes_off_loopback_when_remote_writes_are_allowed():
+    # 2026-08-11: this stage used to carry a SECOND, unconditional host guard
+    # that `--allow-remote-writes` could not open, on the reasoning that the
+    # production credential was read-only by policy. It is not -- the same
+    # `sa-ingestion` token writes `description`, `title` and `short_description`
+    # to production. The stage now behaves like every other enricher: the single
+    # host write-guard in `CaseworkApi._request` governs, and the operator opts
+    # in with --apply --allow-remote-writes.
     api = FakeApi(case_payload(), base_url="https://api.jawafdehi.org/api")
     api.allow_remote_writes = True
-    with pytest.raises(ValueError, match="loopback ONLY"):
+
+    written = en.apply_plan(api, _bindable_plan())
+
+    assert written == 1
+    assert [mt for _, mt in api.materials] == ["news"]
+    assert api.replaced and api.replaced[0]["path"] == en.EVIDENCE_PATH
+
+
+def test_the_writer_still_refuses_off_loopback_without_the_opt_in(monkeypatch):
+    # THE PROTECTION THAT REPLACED THE UNCONDITIONAL GUARD. `FakeApi` cannot
+    # prove this -- it is a double with no guard of its own -- so this drives a
+    # REAL client and pins that the refusal still happens, one layer down, and
+    # still before any request leaves the process.
+    def _fail(*a, **k):
+        pytest.fail("no request may be attempted when the write-guard blocks")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fail)
+    api = CaseworkApi("https://api.jawafdehi.org/api", token="t")
+    api.get_case_with_etag = lambda slug, timeout=60: (case_payload(), 'W/"1"')
+
+    with pytest.raises(RuntimeError, match="refusing to write to non-loopback"):
         en.apply_plan(api, _bindable_plan())
-    assert api.materials == [] and api.replaced == []
 
 
 @pytest.mark.parametrize("state", ["IN_REVIEW", "PUBLISHED", ""])

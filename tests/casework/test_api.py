@@ -667,6 +667,31 @@ def test_request_post_allowed_for_non_loopback_with_opt_in(monkeypatch):
     assert len(calls) == 1
 
 
+def test_create_material_raises_for_non_loopback_without_opt_in(monkeypatch):
+    # Through the PUBLIC method the news enricher actually calls, not `_request`
+    # directly. Since 2026-08-11 that enricher has no host guard of its own, so
+    # this is the only thing standing between a production run and an unopted
+    # write into the SHARED materials store.
+    monkeypatch.setattr(urllib.request, "urlopen", _failing_urlopen)
+    api = CaseworkApi(base_url="https://example.invalid", token="t")
+
+    with pytest.raises(RuntimeError, match="example.invalid"):
+        api.create_material({"@id": "https://jawafdehi.org/material/news/x"}, "news")
+
+
+def test_create_material_allowed_for_non_loopback_with_opt_in(monkeypatch):
+    calls = []
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_spy(calls))
+    api = CaseworkApi(
+        base_url="https://example.invalid", token="t", allow_remote_writes=True
+    )
+
+    api.create_material({"@id": "https://jawafdehi.org/material/news/x"}, "news")
+
+    assert len(calls) == 1
+    assert calls[0].method == "POST"
+
+
 def test_request_get_is_never_guarded_against_non_loopback(monkeypatch):
     calls = []
     monkeypatch.setattr(urllib.request, "urlopen", _urlopen_spy(calls))
