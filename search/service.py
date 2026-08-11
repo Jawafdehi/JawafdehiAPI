@@ -128,15 +128,11 @@ def _sort_spec(sort: str) -> list[dict[str, Any]]:
     cursor paging.
     """
     if sort == "featured":
-        # ``missing: 0`` — a doc indexed before ``weight`` existed carries no value;
-        # without this it would sort BELOW an explicitly-weighted-0 case.
-        # ``unmapped_type`` — sorting on a field absent from the index MAPPING is a
-        # hard error, not a graceful skip. An index that predates the mapping (i.e.
-        # any live index until the next reindex, since create_index no-ops on an
-        # existing one) would otherwise fail the whole query. With it, every doc
-        # reads as 0 and the order falls through to ``date`` — exactly ``newest``.
-        # The ``date`` secondary is what keeps the homepage byte-identical to its
-        # pre-weight order while every case is still 0.
+        # ``missing: 0`` so a doc indexed before ``weight`` existed ranks as unranked
+        # rather than below an explicit 0. ``unmapped_type`` because sorting on a
+        # field absent from the index MAPPING is a hard error, not a graceful skip —
+        # create_index no-ops on an existing index, so no live index carries
+        # ``weight`` until the next reindex. With it the sort degrades to ``newest``.
         return [
             {"weight": {"order": "desc", "missing": 0, "unmapped_type": "integer"}},
             {"date": {"order": "desc", "missing": "_last"}},
@@ -489,7 +485,9 @@ def _serialize_hit(hit: dict[str, Any]) -> dict[str, Any]:
     highlight = hit.get("highlight") or {}
 
     extra: dict[str, Any] = {}
-    for key in ("date", "date_bs", "type"):
+    # ``weight`` is here so a ``sort=featured`` response explains its own order;
+    # absent from docs indexed before the field existed, hence the None guard.
+    for key in ("date", "date_bs", "type", "weight"):
         if source.get(key) is not None:
             extra[key] = source[key]
     raw = source.get("raw") or {}
