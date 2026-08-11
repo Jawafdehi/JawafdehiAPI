@@ -57,6 +57,7 @@ from .models import (
     CaseSlugHistory,
     CaseState,
     CaseStateChange,
+    FeedbackType,
     RelationshipOutcome,
     RelationshipType,
     StatisticsSnapshot,
@@ -1628,6 +1629,60 @@ class FeedbackRateThrottle(AnonRateThrottle):
     rate = "5/hour"
 
 
+def _notify_case_report(feedback) -> None:
+    """Best-effort alert to the casework inbox that a report has landed.
+
+    Feedback has no read API and no notification of any kind, so without this a
+    corruption report is only discovered by someone opening Django admin. Django's
+    mail backend is the dummy one on this platform (it accepts and discards), so
+    SendPulse's transactional endpoint is the only path that actually sends.
+
+    The mail carries a reference number and an admin link, and nothing else. Not
+    the subject, not the description, not whether contact details or an
+    attachment were supplied — presence metadata still tells a reader of the
+    mailbox something about the source. Everything stays in the database, so a
+    third-party mail system never holds any part of a whistleblower's account.
+
+    Never raises: a failed notification must not fail the submission, or the
+    reporter sees an error and may not try again.
+    """
+    if not getattr(settings, "CASE_REPORT_NOTIFY", False):
+        return
+    recipient = getattr(settings, "CASE_REPORT_NOTIFY_EMAIL", "")
+    if not recipient:
+        return
+    # A relative link is useless in an email client, so an absolute admin base
+    # is a precondition for sending rather than something to paper over.
+    base = getattr(settings, "WAGTAILADMIN_BASE_URL", "").strip().rstrip("/")
+    if not base.startswith(("http://", "https://")):
+        logger.warning(
+            "Case report notification skipped for #%s: WAGTAILADMIN_BASE_URL is not an absolute URL (%r)",
+            feedback.pk,
+            base,
+        )
+        return
+    try:
+        from newsletter.sendpulse import get_client
+
+        client = get_client()
+        if client is None or not client.can_send_email:
+            return
+        admin_url = f"{base}/django-admin/cases/feedback/{feedback.pk}/change/"
+        html = (
+            "<p>A corruption case report was submitted through the website.</p>"
+            f"<p>Reference: <strong>#{feedback.pk}</strong></p>"
+            "<p>Nothing about the report is included in this email. Read it here:<br>"
+            f'<a href="{admin_url}">{admin_url}</a></p>'
+        )
+        client.send_email(recipient, f"New case report #{feedback.pk}", html)
+    except Exception as exc:  # noqa: BLE001 — notification is best-effort
+        logger.warning(
+            "Case report notification failed (submission #%s was still saved): %s",
+            feedback.pk,
+            exc,
+        )
+
+
 @extend_schema(
     summary="Submit platform feedback",
     description="""
@@ -1693,11 +1748,26 @@ class FeedbackView(APIView):
         serializer = FeedbackSerializer(data=request.data)
 
         if serializer.is_valid():
-            # Capture metadata
-            feedback = serializer.save(
-                ip_address=self.get_client_ip(request),
-                user_agent=request.META.get("HTTP_USER_AGENT", ""),
+            is_case_report = (
+                serializer.validated_data.get("feedback_type")
+                == FeedbackType.CASE_REPORT
             )
+
+            # Corruption reports are stored without their reporter's IP or user
+            # agent. Someone naming an official is exposed by those two fields in
+            # a way a bug report's author is not, and the anonymity offered by the
+            # form would be hollow if we kept them. Throttling is unaffected:
+            # AnonRateThrottle derives the caller's identity from the request
+            # itself and never reads the column.
+            feedback = serializer.save(
+                ip_address=None if is_case_report else self.get_client_ip(request),
+                user_agent=(
+                    "" if is_case_report else request.META.get("HTTP_USER_AGENT", "")
+                ),
+            )
+
+            if is_case_report:
+                _notify_case_report(feedback)
 
             return Response(
                 serializer.to_representation(feedback), status=status.HTTP_201_CREATED
