@@ -2671,6 +2671,40 @@ def test_a_still_held_verdict_is_logged_as_still_held(tmp_path, monkeypatch):
     assert any("0 settled by the model" in e["detail"] for e in compare)
 
 
+def test_the_usage_footer_survives_a_real_accumulator(tmp_path, monkeypatch, capsys):
+    # Production repro, run 684a9bbf: all 25 cases planned, then `main` died in
+    # the footer on `usage.totals()` -- a method of the OTHER accumulator in
+    # `llm/usage.py`. The exit code went with it, so a wrapper checking rc would
+    # read a fully successful dry run as a failure.
+    #
+    # Every other test here stubs `compare_held` without touching `usage`, so
+    # `usage.calls` stayed 0 and the footer branch was never entered. This stub
+    # records a call on the REAL accumulator `main` built, which is the only way
+    # to reach the line that broke.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("CASEWORK_API_USER", "dev")
+    monkeypatch.setenv("CASEWORK_API_PASSWORD", "dev")
+    api = _two_case_api()
+    import casework.enrich_court_record as ecr
+
+    def _compare(held, cards, invoke_json, *, on_verdict=None, usage=None, **kw):
+        if usage is not None:
+            usage.add(10, 20, provider="claude_cli", tier="premium", model="sonnet")
+        return {}
+
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+    monkeypatch.setattr(ecr, "compare_held", _compare)
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+               "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "held-name comparison" in out
+    # The lines after the table must still print -- they are how an operator
+    # finds the artefacts, and the crash swallowed both.
+    assert "review file:" in out
+    assert "held-names file:" in out
+
+
 def test_an_unavailable_provider_holds_every_name_instead_of_crashing(
     tmp_path, monkeypatch,
 ):

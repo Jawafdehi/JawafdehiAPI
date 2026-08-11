@@ -1465,9 +1465,18 @@ def main(argv=None):
     if usage is not None and usage.calls:
         # Recorded because this stage now spends tokens. Without it an 80-call
         # run and a 0-call run leave an identical footer, and every sibling
-        # enricher reports its usage (`enrich_news_articles.main`).
+        # enricher reports its usage.
+        #
+        # `as_dict()["by_provider"]`, which is what `render_usage_table` takes
+        # and what every sibling passes it (`enrich_missing_bigo`,
+        # `enrich_tags`). NOT `totals()` -- that belongs to the OTHER
+        # accumulator in `llm/usage.py`, so this line raised AttributeError and
+        # took the run's exit code with it. It only ever ran when the held
+        # comparison genuinely reached a provider, which is why every earlier
+        # dry run (held_compare unavailable -> usage stays None) missed it.
         from llm.usage import render_usage_table
-        print(render_usage_table(usage.totals(),
+        print()
+        print(render_usage_table(usage.as_dict()["by_provider"],
                                  title="held-name comparison"))
     print(f"review file: {review.path}")
     print(f"held-names file: {held_path}")
