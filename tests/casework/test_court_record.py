@@ -19,6 +19,8 @@ from casework.court_record import (
     court_record_for_case,
     court_ref,
     defendant_names,
+    party_legal_name,
+    split_alias,
 )
 
 
@@ -250,3 +252,54 @@ def test_case_number_code_refuses_to_guess_an_unparseable_number(number):
 
 def test_the_legacy_all_digit_shape_still_classifies_as_a_prosecution():
     assert case_number_code("93-068-0194") == ""
+
+
+# ------------------------------------------------------- the `भन्ने` alias form
+
+def test_the_legal_name_follows_the_alias_marker():
+    # The bug this fixes: binding the raw string created an NES person named
+    # `आवास भन्ने आभाश अर्याल`, slugged `avasa-bhanne-abhasha-aryala`.
+    assert split_alias("आवास भन्ने आभाश अर्याल") == ("आभाश अर्याल", ["आवास"])
+
+
+def test_a_name_with_two_markers_splits_on_the_last_one():
+    # Real: special/078-CR-0062. Splitting on the FIRST marker would keep
+    # `विनि बहादुर भन्ने विनि बहादुर बानिया` as the name.
+    legal, aliases = split_alias("बलराम भन्ने विनि बहादुर भन्ने विनि बहादुर बानिया")
+    assert legal == "विनि बहादुर बानिया"
+    assert aliases == ["बलराम", "विनि बहादुर"]
+
+
+@pytest.mark.parametrize(("raw", "legal"), [
+    # Every remaining occurrence in the FY078/079 corpus. The post-marker half
+    # is the one carrying a real surname in all of them.
+    ("हश्मुल्लाह खाँ भन्ने हश्मुल्लाह मुसलमान", "हश्मुल्लाह मुसलमान"),
+    ("सागर माली भन्ने सागर सािताराम लोखण्डे", "सागर सािताराम लोखण्डे"),
+    ("गज बहादुर रावत भन्ने गजरा रावत", "गजरा रावत"),
+    ("करिष्मा नेपाली भन्ने करिष्मा परियार", "करिष्मा परियार"),
+    ("बाबुराम शर्मा भन्ने उद्धव बहादुर खात्री", "उद्धव बहादुर खात्री"),
+    ("श्याम प्रदेशी भन्ने श्यामकृष्ण साह", "श्यामकृष्ण साह"),
+])
+def test_every_corpus_alias_resolves_to_the_post_marker_name(raw, legal):
+    assert split_alias(raw)[0] == legal
+
+
+def test_a_name_without_the_marker_is_returned_whole():
+    assert split_alias("कृष्ण प्रसाद यादव") == ("कृष्ण प्रसाद यादव", [])
+
+
+@pytest.mark.parametrize("raw", [
+    "कृष्ण प्रसाद यादव भन्ने",      # truncated record -- nothing after
+    "भन्ने कृष्ण प्रसाद यादव",      # nothing before
+    "भन्ने",
+])
+def test_a_marker_with_an_empty_side_leaves_the_name_alone(raw):
+    # Refusing to bind the empty string is the whole point: a truncated record
+    # is a record to look at, not an instruction to name someone "".
+    assert split_alias(raw) == (raw, [])
+
+
+def test_party_legal_name_strips_the_alias_from_a_party_row():
+    party = {"side": "defendant", "name": "  आवास भन्ने आभाश अर्याल  "}
+    assert party_legal_name(party) == "आभाश अर्याल"
+    assert party_legal_name({"side": "defendant"}) == ""

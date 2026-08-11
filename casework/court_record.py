@@ -114,6 +114,55 @@ def party_name(party):
     return (party.get("name") or "").strip()
 
 
+#: The alias marker in a court-record party name: `<alias> भन्ने <legal name>`.
+#: Measured over 240 FY078/079 Special Court cases -- 14 of 1,069 defendant names
+#: (1.3%) carry it, and `उर्फ`/`उर्फे` carry zero, so this one word is the whole
+#: vocabulary the corpus uses.
+ALIAS_MARKER = "भन्ने"
+
+
+def split_alias(name):
+    """`(legal_name, [alias, ...])` for one court-record party name.
+
+    The legal name FOLLOWS the marker: `आवास भन्ने आभाश अर्याल` is आभाश अर्याल,
+    also known as आवास. Every one of the corpus's 14 occurrences reads that way,
+    and the post-marker half is the one carrying a real surname (मुसलमान, आदाटे,
+    लोखण्डे, बानिया, परियार, खात्री, साह).
+
+    Binding the raw string creates an NES person named
+    `आवास भन्ने आभाश अर्याल`, slugged `avasa-bhanne-abhasha-aryala` -- a name
+    that person holds nowhere, that no search for either half can match, and
+    that reads as nonsense on a public corruption case.
+
+    Split on the LAST marker. `बलराम भन्ने विनि बहादुर भन्ने विनि बहादुर बानिया`
+    (078-CR-0062) carries two, and only the final segment is the legal name;
+    splitting on the first would keep `विनि बहादुर भन्ने विनि बहादुर बानिया`.
+
+    A marker with nothing after it (or nothing before) is left ALONE -- the whole
+    string comes back as the name. A trailing `भन्ने` is a truncated record, not
+    an instruction to bind the empty string.
+    """
+    text = (name or "").strip()
+    if ALIAS_MARKER not in text:
+        return text, []
+    head, _, legal = text.rpartition(ALIAS_MARKER)
+    legal, head = legal.strip(), head.strip()
+    if not legal or not head:
+        return text, []
+    aliases = [part.strip() for part in head.split(ALIAS_MARKER) if part.strip()]
+    return legal, aliases
+
+
+def party_legal_name(party):
+    """`party_name` with any alias prefix stripped -- the name to bind.
+
+    `party_name` stays the raw record string: it is what `is_defendant`'s
+    companion reads, and the review file quotes it so a caseworker can see what
+    the court actually wrote.
+    """
+    return split_alias(party_name(party))[0]
+
+
 def court_ref(iri):
     """`(court, case_number)` from a courtcase IRI, or None.
 

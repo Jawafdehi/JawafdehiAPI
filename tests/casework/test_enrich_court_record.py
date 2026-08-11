@@ -438,7 +438,9 @@ from casework.enrich_court_record import (  # noqa: E402
     CasePlan,
     accused_table,
     bind_outcome,
+    court_read_summary,
     plan_case,
+    rung_summary,
 )
 
 CASE_IRI = "https://jawafdehi.org/courtcase/special/079-cr-0151"
@@ -1157,7 +1159,11 @@ def test_a_partially_unreadable_court_record_is_logged_as_court_read_not_dates(
     events = _events(tmp_path)
 
     court_read = [e for e in events if e["step"] == "court_read"]
-    assert any(e["detail"] == "" for e in court_read), "the successful read"
+    # The successful read now states what it found -- one reference, no parties,
+    # since this fixture's readable reference carries none. Still a SEPARATE
+    # event from the unreadable annotation, which is what this asserts.
+    assert any("court reference(s)" in e["detail"] and "unreadable" not in e["detail"]
+               for e in court_read), "the successful read"
     assert any("unreadable: " in e["detail"] and "079-cr-0999" in e["detail"]
                for e in court_read)
     # The 404 must not also (or instead) show up as a `dates` event -- only
@@ -2691,11 +2697,104 @@ def test_an_unavailable_provider_holds_every_name_instead_of_crashing(
     assert [e for e in events if e["step"] == "dates"]
 
 
+# --------------------------------------------------- the `भन्ने` alias, end to end
+
+ALIAS_RAW = "आवास भन्ने आभाश अर्याल"
+ALIAS_LEGAL = "आभाश अर्याल"
+
+
+def test_the_bind_uses_the_legal_name_not_the_raw_court_string():
+    # Run b2f31c03 created `person/avasa-bhanne-abhasha-aryala` for this row --
+    # a name the man holds nowhere. The entity must be built from the legal name.
+    api = _SearchApi(results=[], created={"@id": YADAV})
+    items, rows, _ = _accused_binds(
+        api, _case(), [_record(parties=[{"side": "defendant", "name": ALIAS_RAW}])],
+        live_prefixes=["person"], run_entities={}, dry_run=False, held={})
+    assert api.posted[0]["name"] == ALIAS_LEGAL
+    assert rows[0]["name"] == ALIAS_LEGAL
+    assert rows[0]["aliases"] == ["आवास"]
+    assert len(items) == 1
+
+
+def test_the_stripped_alias_is_recorded_on_the_bind_note():
+    # The court called this person something. Dropping it loses the only place
+    # the record says so, so it rides on the bind rather than the entity name.
+    api = _SearchApi(results=[], created={"@id": YADAV})
+    items, _, _ = _accused_binds(
+        api, _case(), [_record(parties=[{"side": "defendant", "name": ALIAS_RAW}])],
+        live_prefixes=["person"], run_entities={}, dry_run=False, held={})
+    assert ALIAS_RAW in items[0]["notes"]
+    assert "प्रतिवादी" in items[0]["notes"]
+
+
+def test_the_dry_run_slug_no_longer_carries_the_alias_marker():
+    got = resolve_defendant(_SearchApi(results=[]), ALIAS_LEGAL, None, citation="",
+                            live_prefixes=["person"], run_entities={}, dry_run=True)
+    assert "bhanne" not in got.nes_id
+    assert got.nes_id.endswith("abhasha-aryala")
+
+
+def test_the_held_index_keys_the_alias_form_and_the_plain_form_together():
+    # One man, two cases: one record writes the alias form, the other the plain
+    # name. Keyed on the raw string these are two buckets, so the hold that
+    # exists to stop a wrong bind never fires for him.
+    index = defendant_name_index({
+        "case-a": [_record(parties=[{"side": "defendant", "name": ALIAS_RAW}])],
+        "case-b": [_record(number="080-cr-0002",
+                           parties=[{"side": "defendant", "name": ALIAS_LEGAL}])],
+    })
+    assert index == {normalise_name(ALIAS_LEGAL): frozenset({"case-a", "case-b"})}
+    assert held_names(index)
+
+
+def test_bindable_defendants_reports_the_legal_name():
+    records = [_record(parties=[{"side": "defendant", "name": ALIAS_RAW}])]
+    assert bindable_defendants(records) == [ALIAS_LEGAL]
+
+
+def test_the_accused_table_shows_the_alias_beside_the_legal_name():
+    table = accused_table([_row(name=ALIAS_LEGAL, aliases=["आवास"])])
+    assert ALIAS_LEGAL in table
+    assert "भन्ने: आवास" in table
+
+
+# --------------------------------------------------------------- run-level tally
+
+def test_the_rung_tally_prints_every_rung_including_its_zeroes():
+    # `0 matched` is the number worth reading in this corpus: 142 of 142
+    # defendants in the 25-case run were created, not matched. A tally that
+    # dropped zeroes would hide it.
+    rows = [_row(how="created"), _row(how="created"), _row(how="exact")]
+    assert rung_summary(rows) == ("3 defendant(s): 0 copied, 1 matched, "
+                                 "2 created, 0 held, 0 failed")
+
+
+def test_the_rung_tally_of_no_defendants_still_reads():
+    assert rung_summary([]) == ("0 defendant(s): 0 copied, 0 matched, "
+                               "0 created, 0 held, 0 failed")
+
+
+def test_the_rung_tally_counts_held_and_failed_rows_separately():
+    rows = [_row(how="held", nes_id=""), _row(how="failed", nes_id=""),
+            _row(how="nes_id")]
+    assert rung_summary(rows) == ("3 defendant(s): 1 copied, 0 matched, "
+                                 "0 created, 1 held, 1 failed")
+
+
+def test_the_court_read_summary_counts_references_parties_and_defendants():
+    records = [_record(parties=[{"side": "defendant", "name": "क"},
+                                {"side": "plaintiff", "name": "नेपाल सरकार"}]),
+               _record(number="080-cr-0002",
+                       parties=[{"side": "defendant", "name": "ख"}])]
+    assert court_read_summary(records) == ("2 court reference(s), 3 part(ies), "
+                                          "2 defendant(s)")
+
+
 # ----------------------------------------------- the review file's accused table
 
 def _row(**over):
     base = {"slug": "case-1", "name": "कृष्ण प्रसाद यादव", "how": "created",
-            "nes_id": YADAV, "outcome": CHARGED, "reason": "",
+            "nes_id": YADAV, "outcome": CHARGED, "reason": "", "aliases": [],
             "court_case": "special/079-cr-0151"}
     base.update(over)
     return base

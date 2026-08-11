@@ -104,7 +104,9 @@ from casework.court_record import (
     case_number_code,
     court_record_for_case,
     is_defendant,
+    party_legal_name,
     party_name,
+    split_alias,
 )
 from casework.entity_identity import entity_slug, prefix_is_creatable
 from casework.entity_resolver import normalise_name
@@ -558,7 +560,12 @@ def defendant_name_index(records_by_slug):
             for party in record.get("parties") or ():
                 if not is_defendant(party):
                     continue
-                name = party_name(party)
+                # The LEGAL name, so the index keys on the same string
+                # `_accused_binds` resolves and binds. Keying on the raw record
+                # string would put `आवास भन्ने आभाश अर्याल` and a second case's
+                # plain `आभाश अर्याल` in different buckets -- one man, two keys,
+                # and the hold that exists to catch exactly that never fires.
+                name = party_legal_name(party)
                 if not name:
                     continue
                 index.setdefault(normalise_name(name), set()).add(slug)
@@ -573,7 +580,7 @@ def held_names(index):
 def bindable_defendants(records):
     """Defendant names on this case's bindable references, order preserved.
 
-    The same `BINDABLE_CODES`/`is_defendant`/`party_name` filter
+    The same `BINDABLE_CODES`/`is_defendant`/`party_legal_name` filter
     `defendant_name_index` applies, over records already in hand. Feeds the
     identity cards, so a name that could never be held never costs a
     `description` scan either.
@@ -585,7 +592,7 @@ def bindable_defendants(records):
         for party in record.get("parties") or ():
             if not is_defendant(party):
                 continue
-            name = party_name(party)
+            name = party_legal_name(party)
             key = normalise_name(name)
             if not name or key in seen:
                 continue
@@ -657,7 +664,10 @@ def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run,
         for party in record.get("parties") or ():
             if not is_defendant(party):
                 continue
-            name = party_name(party)
+            # The alias prefix is stripped before ANY of this: the name that
+            # resolves, creates the entity, keys the dedup and keys the held
+            # index must be the one the index itself was built from.
+            name, aliases = split_alias(party_name(party))
             key = normalise_name(name)
             if not name or key in seen:
                 continue
@@ -673,6 +683,7 @@ def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run,
                     rows.append({
                         "slug": case.get("slug"), "name": name, "how": "held",
                         "nes_id": "", "outcome": outcome, "reason": reason,
+                        "aliases": aliases,
                         "court_case": f"{record['court']}/{record['number']}"})
                     continue
                 if override is not None:
@@ -686,15 +697,20 @@ def _accused_binds(api, case, records, *, live_prefixes, run_entities, dry_run,
                 distinct=distinct,
                 scope=case.get("slug") or "" if distinct else "")
             row = {"slug": case.get("slug"), "name": name, "how": got.how,
-                   "nes_id": got.nes_id, "outcome": outcome,
+                   "nes_id": got.nes_id, "outcome": outcome, "aliases": aliases,
                    "reason": "; ".join(p for p in (settled, got.reason) if p),
                    "court_case": f"{record['court']}/{record['number']}"}
             rows.append(row)
             if not got.nes_id:
                 continue
+            # The stripped alias rides on the bind, not the entity name: the
+            # court called this person something, and dropping that on the floor
+            # loses the only place the record says so.
+            note = f"प्रतिवादी — विशेष अदालत मुद्दा {record['number']}"
+            if aliases:
+                note += f"; अदालतको अभिलेखमा: {' भन्ने '.join([*aliases, name])}"
             item = {"nes_id": got.nes_id, "relationship_type": "accused",
-                    "outcome": outcome,
-                    "notes": f"प्रतिवादी — विशेष अदालत मुद्दा {record['number']}"}
+                    "outcome": outcome, "notes": note}
             try:
                 items.append(validate_bind_item(item))
             except ValueError as exc:
@@ -867,6 +883,46 @@ _NON_PROSECUTION_SKIP_PREFIX = "skipping accused bind for "
 _RUNG_WORDS = {"nes_id": "nes_id_copied", "exact": "exact_match",
                "created": "created", "failed": "failed", "held": "held"}
 
+#: Short label per rung for the tally lines, in print order. Insertion order is
+#: the display order, so a case's line and the run footer read the same way.
+_RUNG_LABELS = {"nes_id_copied": "copied", "exact_match": "matched",
+                "created": "created", "held": "held", "failed": "failed"}
+
+
+def rung_summary(rows):
+    """`"5 defendant(s): 0 copied, 1 matched, 4 created, 0 held, 0 failed"`.
+
+    EVERY rung prints, including its zero. `0 matched` is the load-bearing
+    number in this corpus: 142 of 142 defendants in the 25-case run were
+    CREATED, not matched, which is what tells an operator to expect duplicate
+    entities rather than reuse of existing ones. A tally that dropped its zeroes
+    would hide exactly the number worth reading.
+
+    `_RUNG_WORDS[...]` is indexed, not `.get`: an unrecognised `how` is a bug in
+    `resolve_defendant`, and counting it under some fallback rung would report a
+    tally that silently does not add up.
+    """
+    counts = dict.fromkeys(_RUNG_LABELS.values(), 0)
+    for row in rows:
+        counts[_RUNG_LABELS[_RUNG_WORDS[row["how"]]]] += 1
+    return (f"{len(rows)} defendant(s): "
+            + ", ".join(f"{n} {label}" for label, n in counts.items()))
+
+
+def court_read_summary(records):
+    """`"2 court reference(s), 7 part(ies), 5 defendant(s)"` for one case.
+
+    The `court_read` event carried no detail at all, so a case whose references
+    read fine but named nobody looked identical in the log to one that named
+    twenty. Counts every party row, not just the bindable ones -- a reference
+    refused for its case type still reports what it held.
+    """
+    parties = sum(len(r.get("parties") or ()) for r in records)
+    defendants = sum(1 for r in records for p in (r.get("parties") or ())
+                     if is_defendant(p))
+    return (f"{len(records)} court reference(s), {parties} part(ies), "
+            f"{defendants} defendant(s)")
+
 
 def accused_table(rows):
     """One Markdown row per court-record defendant, or "" if the case had none.
@@ -879,6 +935,11 @@ def accused_table(rows):
     `Outcome` is blank for a name that resolved to nothing: no bind is written,
     so quoting the case's outcome against it would claim a verdict was recorded
     for someone who was never bound.
+
+    A stripped alias is printed beside the name it was stripped from, so a
+    reviewer can see BOTH what the court wrote and what this run will bind --
+    the two differ on 1.3% of defendants and that is exactly where a wrong
+    entity would be hardest to spot.
     """
     if not rows:
         return ""
@@ -888,7 +949,10 @@ def accused_table(rows):
         bound = row["nes_id"]
         rung = _RUNG_WORDS.get(row["how"], row["how"])
         entity = f"`{md_cell(bound)}`" if bound else md_cell(row["reason"]) or "—"
-        out.append(f"| {i} | {md_cell(row['name'])} | {md_cell(row['outcome']) if bound else '—'} "
+        who = md_cell(row["name"])
+        if row.get("aliases"):
+            who += f" _(भन्ने: {md_cell(', '.join(row['aliases']))})_"
+        out.append(f"| {i} | {who} | {md_cell(row['outcome']) if bound else '—'} "
                    f"| {rung} | {entity} |")
     return "\n".join(out)
 
@@ -979,7 +1043,8 @@ def _log_plan(logger, events, run_id, plan):
     # held row and a failed row both sit in `plan.rows` too but neither was
     # resolved (see `_rung_counts`), so both are excluded here.
     summary = (f"{'merged' if plan.entities is not None else 'no_additions'}: "
-               f"{resolved_count} defendant(s) resolved")
+               f"{resolved_count} defendant(s) resolved"
+               f" [{rung_summary(plan.rows)}]")
     if code_skips:
         summary += f"; {code_skips} court reference(s) skipped as non-prosecution"
     if held_count:
@@ -1182,6 +1247,11 @@ def main(argv=None):
     # which is still this stage's ordinary case, since only 80 of ~1,414
     # measured defendant rows carry a name that lands on two cases.
     verdicts, usage = {}, None
+    # Every per-defendant row the run produces, so the footer can tally the
+    # ladder across cases. `stats` cannot carry this: it counts CASES by status,
+    # and mixing defendant counts into it would print `would-patch=5 created=142`
+    # as though both were case outcomes.
+    all_rows = []
     if held and not args.no_held_compare:
         try:
             bootstrap(args.provider, args.model)
@@ -1294,8 +1364,10 @@ def main(argv=None):
             stats[plan.status] = stats.get(plan.status, 0) + 1
             continue
         log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
-                  step="court_read", status="ok")
+                  step="court_read", status="ok",
+                  detail=court_read_summary(court_records[slug][0]))
         held_count, resolved_count = _log_plan(logger, events, run_id, plan)
+        all_rows.extend(plan.rows)
 
         generated_parts = [f"{k}={v}" for k, v in plan.fields]
         if plan.entities is not None:
@@ -1385,8 +1457,11 @@ def main(argv=None):
                     verdicts=verdicts)
 
     review.write()
+    log_event(logger, events, run_id=run_id, stage=STAGE, slug="",
+              step="defendant_totals", status="ok", detail=rung_summary(all_rows))
     log_run_footer(logger, stage=STAGE, stats=stats, duration_s=time.time() - started)
     print_summary(stats, args.dry_run, "court-record binder")
+    print(f"  defendants : {rung_summary(all_rows)}")
     if usage is not None and usage.calls:
         # Recorded because this stage now spends tokens. Without it an 80-call
         # run and a 0-call run leave an identical footer, and every sibling
