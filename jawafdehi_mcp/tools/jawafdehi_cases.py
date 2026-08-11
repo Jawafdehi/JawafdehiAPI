@@ -125,6 +125,14 @@ CASE_CREATE_PROPERTIES: dict[str, Any] = {
             "maximum": 9223372036854775807,
         }
     ),
+    # Editorial priority for the homepage "Featured Cases" order; higher floats
+    # up, 0 is unranked. NOT nullable (unlike bigo) and a narrower 32-bit range —
+    # the column is a NOT NULL IntegerField, not a nullable BigIntegerField.
+    "weight": {
+        "type": "integer",
+        "minimum": -2147483648,
+        "maximum": 2147483647,
+    },
 }
 CASE_CREATE_FIELDS = tuple(CASE_CREATE_PROPERTIES)
 

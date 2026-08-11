@@ -115,7 +115,7 @@ SORT_SPEC: list[dict[str, Any]] = [
 # search_after cursor paging stays stable + complete regardless of the primary key
 # (a non-unique primary like ``date`` can skip/repeat rows without it).
 SORT_RELEVANCE = "relevance"
-ALL_SORTS: tuple[str, ...] = ("relevance", "newest", "oldest", "title")
+ALL_SORTS: tuple[str, ...] = ("relevance", "newest", "oldest", "title", "featured")
 
 
 def _sort_spec(sort: str) -> list[dict[str, Any]]:
@@ -123,8 +123,25 @@ def _sort_spec(sort: str) -> list[dict[str, Any]]:
 
     ``newest``/``oldest`` order by the Gregorian ``date`` field (missing dates sort
     last either way); ``title`` orders by the untokenized ``title_en.keyword``
-    subfield. Every mode appends the ``iri`` tiebreaker for stable cursor paging.
+    subfield. ``featured`` orders by the editorial ``weight`` (cases only), then
+    falls back to ``newest``. Every mode appends the ``iri`` tiebreaker for stable
+    cursor paging.
     """
+    if sort == "featured":
+        # ``missing: 0`` — a doc indexed before ``weight`` existed carries no value;
+        # without this it would sort BELOW an explicitly-weighted-0 case.
+        # ``unmapped_type`` — sorting on a field absent from the index MAPPING is a
+        # hard error, not a graceful skip. An index that predates the mapping (i.e.
+        # any live index until the next reindex, since create_index no-ops on an
+        # existing one) would otherwise fail the whole query. With it, every doc
+        # reads as 0 and the order falls through to ``date`` — exactly ``newest``.
+        # The ``date`` secondary is what keeps the homepage byte-identical to its
+        # pre-weight order while every case is still 0.
+        return [
+            {"weight": {"order": "desc", "missing": 0, "unmapped_type": "integer"}},
+            {"date": {"order": "desc", "missing": "_last"}},
+            {"iri": {"order": "asc"}},
+        ]
     if sort == "newest":
         return [{"date": {"order": "desc", "missing": "_last"}}, {"iri": {"order": "asc"}}]
     if sort == "oldest":

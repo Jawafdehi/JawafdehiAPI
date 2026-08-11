@@ -418,6 +418,32 @@ def test_build_query_title_sorts_by_keyword_subfield():
     assert body["sort"][-1] == {"iri": {"order": "asc"}}
 
 
+def test_build_query_featured_sorts_by_weight_then_date_then_iri():
+    body = build_query(q="x", sort="featured")
+    # ``missing: 0`` so a doc indexed before ``weight`` existed ranks as unranked
+    # rather than last; ``unmapped_type`` so the query stays VALID against an index
+    # whose mapping has no ``weight`` at all (otherwise a hard OpenSearch error).
+    assert body["sort"][0] == {
+        "weight": {"order": "desc", "missing": 0, "unmapped_type": "integer"}
+    }
+    # The date secondary is what keeps the homepage identical to its pre-weight
+    # order while every case is still 0 — it must match the ``newest`` primary.
+    assert body["sort"][1] == svc._sort_spec("newest")[0]
+    assert body["sort"][-1] == {"iri": {"order": "asc"}}
+
+
+def test_featured_is_an_allowed_sort_mode():
+    """The API ``sort`` ChoiceField is built from ALL_SORTS — without this the
+    homepage's ``?sort=featured`` is rejected as an invalid choice."""
+    assert "featured" in svc.ALL_SORTS
+
+
+def test_featured_degrades_to_newest_when_no_case_carries_a_weight():
+    """All-zero (or all-unmapped) weights must leave the pre-weight order intact:
+    past the equal primary, ``featured`` and ``newest`` agree key-for-key."""
+    assert svc._sort_spec("featured")[1:] == svc._sort_spec("newest")
+
+
 # ── facet filters ────────────────────────────────────────────────────────────
 
 

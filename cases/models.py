@@ -735,6 +735,19 @@ class Case(models.Model):
         null=True,
         help_text="Bigo (बिगो) — the total disputed or embezzled amount claimed in the case (in NPR)",
     )
+    # Editorial curation knob for the homepage "Featured Cases" section. Plain
+    # unbounded integer (Drupal-style typed weight) rather than fractional/gap
+    # positioning — there is no drag-to-reorder UI, staff just type a number.
+    # NOTE the sign convention is the OPPOSITE of Drupal core's: here HIGHER
+    # floats to the top. No index — same reasoning as ``created_at`` above.
+    weight = models.IntegerField(
+        default=0,
+        help_text=(
+            "Editorial priority weight — higher values surface first in the "
+            "homepage 'Featured Cases' section. 0 (the default) means unranked; "
+            "ties fall back to newest-first."
+        ),
+    )
 
     class Meta:
         ordering = ["-created_at"]

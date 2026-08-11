@@ -135,8 +135,18 @@ class CaseAdminForm(forms.ModelForm):
         model = Case
         fields = "__all__"
         exclude = [
-            "unified_entities"
-        ]  # Exclude unified_entities as it's managed through the inline
+            "unified_entities",  # managed through the inline
+            # ``weight`` is a NOT NULL IntegerField with a default and no
+            # ``blank=True``, so under ``fields = "__all__"`` it would be a
+            # REQUIRED form field — silently invalidating every CaseAdminForm
+            # built without it. Excluded rather than made ``blank=True`` because
+            # that would loosen the model's validation contract everywhere just
+            # to satisfy a form that cannot write: cases are read-only in Django
+            # admin, and PATCH /api/cases/{id}/ is the write path. CaseAdmin
+            # lists it in ``readonly_fields``, which renders from the instance,
+            # so the value still shows without joining the form contract.
+            "weight",
+        ]
         widgets = {
             "description": ToastUIEditorWidget(),
             "notes": ToastUIEditorWidget(),
@@ -440,9 +450,16 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         "title_with_view_link",
         "case_type",
         "state_badge",
+        "weight",
         "created_at",
         "updated_at",
     ]
+
+    # NOTE: ``weight`` is display-only here, like every other field. Django admin
+    # is a read-only surface for cases (all three mutation permissions return
+    # False below) — the SPA `/admin` panel writes via PATCH /api/cases/{id}/.
+    # ``list_editable`` would render nothing. What DOES work is sorting by the
+    # column header, which is the "what is currently featured?" view.
 
     list_filter = [
         "state",
@@ -463,6 +480,14 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
         "updated_at",
         "version_info_display",
         "public_case_url",
+        # Displayed, never a form field. ``weight`` is a NOT NULL IntegerField
+        # with a default and no ``blank=True``, so a plain fieldset entry becomes
+        # a REQUIRED CaseAdminForm field — which silently invalidates any form
+        # built without it (this broke the admin state-transition e2e tests).
+        # ``readonly_fields`` is excluded from the generated form, so the value
+        # renders on the detail page without joining the form contract. Honest
+        # either way: cases are read-only in Django admin; PATCH is the write path.
+        "weight",
     ]
 
     fieldsets = (
@@ -479,6 +504,7 @@ class CaseAdmin(UserFullNameAdminMixin, admin.ModelAdmin):
                     "case_type",
                     "state",
                     "bigo",
+                    "weight",
                 )
             },
         ),

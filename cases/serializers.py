@@ -338,6 +338,11 @@ class CaseSerializer(serializers.ModelSerializer):
             "court_cases",
             "missing_details",
             "bigo",
+            # Editorial homepage weight. Readable (not just writable) because the
+            # SPA `/admin` editor is the sole write surface and renders its form
+            # from this payload — without it an editor sets weights blind, unable
+            # to see the current value or what the top case is already at.
+            "weight",
             "versionInfo",
             "created_at",
             "updated_at",
