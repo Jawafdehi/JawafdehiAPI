@@ -172,9 +172,13 @@ def md_cell(text):
     which the caller controls. A literal `|` or newline ends the cell early and
     shifts every column after it, so the row a caseworker is meant to act on
     becomes unreadable.
+
+    Only `None` is missing. `str(text or "")` would blank `0` and `False`, which
+    for a counted or boolean column prints an empty cell where the value was
+    legitimately zero -- indistinguishable from "not known".
     """
-    return (str(text or "").replace("|", r"\|")
-            .replace("\r", " ").replace("\n", " "))
+    value = "" if text is None else str(text)
+    return value.replace("|", r"\|").replace("\r", " ").replace("\n", " ")
 
 
 def _quote(text):

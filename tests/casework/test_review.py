@@ -256,3 +256,11 @@ def test_md_cell_escapes_a_pipe_that_would_shift_every_column():
     assert md_cell("यादव | समेत") == r"यादव \| समेत"
     assert md_cell("two\nlines") == "two lines"
     assert md_cell(None) == ""
+
+
+def test_md_cell_keeps_a_falsy_value_that_is_not_none():
+    """Only `None` is missing. Blanking `0` prints an empty cell where the value
+    was legitimately zero -- which reads as "not known" instead."""
+    assert md_cell(0) == "0"
+    assert md_cell(False) == "False"
+    assert md_cell("") == ""
