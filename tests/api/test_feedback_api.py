@@ -386,10 +386,43 @@ class TestCaseReportNotification:
         recipient, subject, html = client.send_email.call_args[0]
         assert recipient == "report@jawafdehi.org"
         assert str(response.json()["id"]) in subject
+
         # The whole point: the allegation stays in the database.
         assert self.SECRET not in html
         assert "Alleged bribery" not in html
+
+        # Presence metadata is content too — whether a source left contact
+        # details, or attached evidence, tells a reader of the mailbox
+        # something about them. Reference and link only.
+        for leaked in ("Received:", "Contact details supplied:", "Attachment:"):
+            assert leaked not in html
+
         assert "/django-admin/cases/feedback/" in html
+
+    def test_no_notification_without_an_absolute_admin_url(
+        self, api_client, settings, monkeypatch
+    ):
+        """A relative link cannot be resolved by a mail client, so don't send."""
+        settings.CASE_REPORT_NOTIFY = True
+        settings.WAGTAILADMIN_BASE_URL = ""
+        client = Mock(can_send_email=True)
+        monkeypatch.setattr("newsletter.sendpulse.get_client", Mock(return_value=client))
+
+        assert self._submit(api_client).status_code == 201
+        client.send_email.assert_not_called()
+
+    def test_notification_link_is_absolute(self, api_client, settings, monkeypatch):
+        settings.CASE_REPORT_NOTIFY = True
+        settings.WAGTAILADMIN_BASE_URL = "https://portal.jawafdehi.org/"
+        client = Mock(can_send_email=True)
+        monkeypatch.setattr("newsletter.sendpulse.get_client", Mock(return_value=client))
+
+        response = self._submit(api_client)
+        _, _, html = client.send_email.call_args[0]
+        assert (
+            f'https://portal.jawafdehi.org/django-admin/cases/feedback/{response.json()["id"]}/change/'
+            in html
+        )
 
     def test_submission_survives_a_failing_notification(
         self, api_client, settings, monkeypatch

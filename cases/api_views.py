@@ -1637,10 +1637,11 @@ def _notify_case_report(feedback) -> None:
     mail backend is the dummy one on this platform (it accepts and discards), so
     SendPulse's transactional endpoint is the only path that actually sends.
 
-    Deliberately carries no report content — subject line, description, contact
-    details and attachment all stay in the database. The mail says only that a
-    report exists and where to read it, so a third-party mail system never holds
-    a whistleblower's account of events.
+    The mail carries a reference number and an admin link, and nothing else. Not
+    the subject, not the description, not whether contact details or an
+    attachment were supplied — presence metadata still tells a reader of the
+    mailbox something about the source. Everything stays in the database, so a
+    third-party mail system never holds any part of a whistleblower's account.
 
     Never raises: a failed notification must not fail the submission, or the
     reporter sees an error and may not try again.
@@ -1650,22 +1651,28 @@ def _notify_case_report(feedback) -> None:
     recipient = getattr(settings, "CASE_REPORT_NOTIFY_EMAIL", "")
     if not recipient:
         return
+    # A relative link is useless in an email client, so an absolute admin base
+    # is a precondition for sending rather than something to paper over.
+    base = getattr(settings, "WAGTAILADMIN_BASE_URL", "").strip().rstrip("/")
+    if not base.startswith(("http://", "https://")):
+        logger.warning(
+            "Case report notification skipped for #%s: WAGTAILADMIN_BASE_URL is not an absolute URL (%r)",
+            feedback.pk,
+            base,
+        )
+        return
     try:
         from newsletter.sendpulse import get_client
 
         client = get_client()
         if client is None or not client.can_send_email:
             return
-        base = getattr(settings, "WAGTAILADMIN_BASE_URL", "").rstrip("/")
         admin_url = f"{base}/django-admin/cases/feedback/{feedback.pk}/change/"
         html = (
             "<p>A corruption case report was submitted through the website.</p>"
-            f"<p>Reference: <strong>#{feedback.pk}</strong><br>"
-            f"Received: {feedback.submitted_at:%Y-%m-%d %H:%M} UTC<br>"
-            f"Contact details supplied: {'yes' if feedback.contact_info else 'no'}<br>"
-            f"Attachment: {'yes' if feedback.attachment else 'no'}</p>"
-            "<p>The report itself is not included in this email. Read it here:<br>"
-            f"<a href=\"{admin_url}\">{admin_url}</a></p>"
+            f"<p>Reference: <strong>#{feedback.pk}</strong></p>"
+            "<p>Nothing about the report is included in this email. Read it here:<br>"
+            f'<a href="{admin_url}">{admin_url}</a></p>'
         )
         client.send_email(recipient, f"New case report #{feedback.pk}", html)
     except Exception as exc:  # noqa: BLE001 — notification is best-effort
