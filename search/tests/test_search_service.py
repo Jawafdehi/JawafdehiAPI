@@ -434,8 +434,9 @@ def test_featured_is_an_allowed_sort_mode():
     assert "featured" in svc.ALL_SORTS
 
 
-def test_featured_degrades_to_newest_when_no_case_carries_a_weight():
-    """Past the equal primary, ``featured`` and ``newest`` must agree key-for-key."""
+def test_featured_tiebreakers_are_the_newest_spec_verbatim():
+    """Why featured collapses onto newest once weights tie — the equal-weight case
+    while nothing is curated. This asserts the clause, not the resulting order."""
     assert svc._sort_spec("featured")[1:] == svc._sort_spec("newest")
 
 
