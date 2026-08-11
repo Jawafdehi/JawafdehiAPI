@@ -9,6 +9,7 @@ from rest_framework.routers import DefaultRouter
 
 from .api_views import (
     CaseViewSet,
+    FeedbackTriageViewSet,
     FeedbackView,
     OEmbedView,
     StatisticsView,
@@ -22,6 +23,12 @@ from .api_views import (
 # JawafEntity-backed entities endpoint was removed with the JawafEntity model.
 router = DefaultRouter()
 router.register(r"cases", CaseViewSet, basename="case")
+# Staff read/triage queue. Registered on a path of its own rather than as a GET
+# on ``feedback/`` because that route is the public, deliberately
+# unauthenticated submission endpoint (see FeedbackTriageViewSet's docstring).
+router.register(
+    r"feedback-submissions", FeedbackTriageViewSet, basename="feedback-submission"
+)
 
 urlpatterns = [
     # NOTE: ``search/`` is no longer mounted here. The platform-wide unified

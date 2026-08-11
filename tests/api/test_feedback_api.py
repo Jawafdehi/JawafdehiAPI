@@ -397,32 +397,54 @@ class TestCaseReportNotification:
         for leaked in ("Received:", "Contact details supplied:", "Attachment:"):
             assert leaked not in html
 
-        assert "/django-admin/cases/feedback/" in html
+        assert "/admin/feedback/" in html
 
-    def test_no_notification_without_an_absolute_admin_url(
+    def test_notification_links_to_the_spa_queue_not_django_admin(
         self, api_client, settings, monkeypatch
     ):
-        """A relative link cannot be resolved by a mail client, so don't send."""
+        """The recipient is the casework inbox, and a caseworker has no Django
+        admin feedback permission — the link has to open for them."""
         settings.CASE_REPORT_NOTIFY = True
-        settings.WAGTAILADMIN_BASE_URL = ""
         client = Mock(can_send_email=True)
         monkeypatch.setattr("newsletter.sendpulse.get_client", Mock(return_value=client))
 
-        assert self._submit(api_client).status_code == 201
-        client.send_email.assert_not_called()
+        self._submit(api_client)
+        _, _, html = client.send_email.call_args[0]
+        assert "/django-admin/" not in html
+
+    @pytest.mark.parametrize("configured", ["", "   ", "/admin", None])
+    def test_a_blank_frontend_url_still_sends_using_the_default(
+        self, api_client, settings, monkeypatch, configured
+    ):
+        """A blank or relative setting must not silence the alert.
+
+        ``os.getenv``'s default only applies when the variable is ABSENT, so a
+        ConfigMap key rendered as "" arrives blank. Suppressing the mail on
+        blank would be the worst failure mode available: nothing polls the
+        queue, so the report would simply never be read, and the only signal
+        would be a log line. Fall back to the canonical host instead — the same
+        thing ``case_events.notify._base_url`` does with this setting.
+        """
+        settings.CASE_REPORT_NOTIFY = True
+        settings.FRONTEND_BASE_URL = configured
+        client = Mock(can_send_email=True)
+        monkeypatch.setattr("newsletter.sendpulse.get_client", Mock(return_value=client))
+
+        response = self._submit(api_client)
+        assert response.status_code == 201
+        client.send_email.assert_called_once()
+        _, _, html = client.send_email.call_args[0]
+        assert f'https://jawafdehi.org/admin/feedback/{response.json()["id"]}' in html
 
     def test_notification_link_is_absolute(self, api_client, settings, monkeypatch):
         settings.CASE_REPORT_NOTIFY = True
-        settings.WAGTAILADMIN_BASE_URL = "https://portal.jawafdehi.org/"
+        settings.FRONTEND_BASE_URL = "https://jawafdehi.org/"
         client = Mock(can_send_email=True)
         monkeypatch.setattr("newsletter.sendpulse.get_client", Mock(return_value=client))
 
         response = self._submit(api_client)
         _, _, html = client.send_email.call_args[0]
-        assert (
-            f'https://portal.jawafdehi.org/django-admin/cases/feedback/{response.json()["id"]}/change/'
-            in html
-        )
+        assert f'https://jawafdehi.org/admin/feedback/{response.json()["id"]}' in html
 
     def test_submission_survives_a_failing_notification(
         self, api_client, settings, monkeypatch

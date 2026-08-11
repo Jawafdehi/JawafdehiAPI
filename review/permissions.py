@@ -83,6 +83,13 @@ class IsContentStaff(permissions.BasePermission):
     v3 authz model: there is one content role (Caseworker, folding in the old
     Moderator). Used to gate review-wide settings (e.g. the global scoring
     thresholds) to content staff; ReadOnly may read but not change them.
+
+    DUPLICATE: ``cases.permissions.IsFeedbackTriager`` admits the same principals
+    for the feedback queue. It is a separate class because ``cases`` cannot
+    import ``review`` (this module imports ``cases.rules.predicates``, so the
+    reverse edge would close a cycle). **Change both together** — they share the
+    ``is_admin_or_moderator`` predicate, so a change there covers both, but a
+    change to the class logic here does not.
     """
 
     message = "This action requires the Caseworker role."
