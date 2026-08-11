@@ -91,3 +91,10 @@ def test_rewrite_leaves_an_unrelated_document_untouched():
     out, count = rewrite_references(doc, {LOOSE: JHAPA})
     assert out == doc
     assert count == 0
+
+
+def test_an_untouched_list_keeps_its_pre_existing_duplicates():
+    doc = {"@id": KOSHI, "tags": ["a", "a"]}
+    out, count = rewrite_references(doc, {LOOSE: JHAPA})
+    assert out["tags"] == ["a", "a"]
+    assert count == 0

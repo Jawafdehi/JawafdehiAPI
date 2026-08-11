@@ -91,14 +91,17 @@ def rewrite_references(
                 out[key] = walk(value, top=False)
             return out
         if isinstance(node, list):
+            count_before = count
             walked = [walk(v, top=False) for v in node]
-            seen, deduped = set(), []
-            for value in walked:
-                key = _entry_key(value)
-                if key not in seen:
-                    seen.add(key)
-                    deduped.append(value)
-            return deduped
+            if count > count_before:  # Only deduplicate if a rewrite happened in this list
+                seen, deduped = set(), []
+                for value in walked:
+                    key = _entry_key(value)
+                    if key not in seen:
+                        seen.add(key)
+                        deduped.append(value)
+                return deduped
+            return walked
         return node
 
     return walk(doc, top=True), count
