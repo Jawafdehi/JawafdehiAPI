@@ -9,7 +9,9 @@ JHAPA = "https://jawafdehi.org/entity/location/district/jhapa-np0104"
 LOOSE = "https://jawafdehi.org/entity/location/jhapa"
 OLDER = "https://jawafdehi.org/entity/location/jhapa-old"
 
-pytestmark = pytest.mark.django_db(databases=["default", "nes", "ngm"])
+# "__all__", never an explicit alias list: conftest.py documents that an explicit
+# set enrolls the secondary connections for reads but not reliably for writes.
+pytestmark = pytest.mark.django_db(databases="__all__")
 
 
 def _entity(iri, **kwargs):
