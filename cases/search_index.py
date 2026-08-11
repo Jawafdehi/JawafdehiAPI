@@ -101,10 +101,12 @@ _LONG_MIN, _LONG_MAX = -(2**63), 2**63 - 1
 def _bigo(case: Any) -> int | None:
     """बिगो as a whole-rupee ``int`` for the top-level numeric field (or ``None``).
 
-    The model column is a ``BigIntegerField``, but this indexer also shapes plain
-    objects and API-shaped dicts, where the same value arrives as a numeric string
-    (DRF serializes some amount fields that way — ``enrich_tags._detect_amount_tier``
-    copes with the same thing).
+    The model column is a ``BigIntegerField``, so the live index paths hand this a
+    plain ``int``. The coercion is for the attribute-shaped stand-ins that also
+    reach ``build_doc`` (test doubles, records rehydrated from API JSON), where an
+    amount can arrive as a numeric string — ``enrich_tags._detect_amount_tier``
+    copes with the same thing. Like every other field here, the value is read with
+    ``getattr``; this indexer shapes objects, not mappings.
 
     Anything the ``long`` mapping would refuse — non-numeric, a bool, or a
     magnitude past the 64-bit bounds — yields ``None`` so the FIELD is dropped.

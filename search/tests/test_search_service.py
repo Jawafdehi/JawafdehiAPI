@@ -568,11 +568,13 @@ def test_range_fields_map_bigo_bounds_to_one_numeric_field():
 
 
 def test_build_query_bigo_min_emits_a_range_clause():
+    """A lower bound is inclusive (``gte``) — "over रु १ करोड" includes रु १ करोड."""
     body = build_query(q="x", ranges={"bigo_min": 10_000_000})
     assert {"range": {"bigo": {"gte": 10_000_000}}} in body["query"]["bool"]["filter"]
 
 
 def test_build_query_bigo_max_emits_an_upper_bound():
+    """And an upper bound is inclusive too (``lte``), for symmetry."""
     body = build_query(q="x", ranges={"bigo_max": 500_000})
     assert {"range": {"bigo": {"lte": 500_000}}} in body["query"]["bool"]["filter"]
 
@@ -593,11 +595,15 @@ def test_build_query_range_clause_targets_the_promoted_field_not_the_card_copy()
 
 
 def test_build_query_no_range_clause_by_default():
+    """No bound requested → no clause. An implicit ``bigo >= 0`` would drop every
+    non-case result from an ordinary search."""
     assert build_query(q="x")["query"]["bool"]["filter"] == []
     assert build_query(q="x", ranges={})["query"]["bool"]["filter"] == []
 
 
 def test_build_query_ignores_unknown_range_param_and_none_bounds():
+    """Unknown params are ignored (the builder reads RANGE_FIELDS, not the caller's
+    keys), and ``None`` means "not requested" — mirrors the ``terms`` behaviour."""
     body = build_query(
         q="x", ranges={"bogus_min": 5, "bigo_min": None, "bigo_max": None}
     )
@@ -643,6 +649,8 @@ def test_build_query_range_clause_order_is_stable():
 
 
 def test_search_threads_ranges_to_client():
+    """``search()`` forwards ``ranges`` to the builder — the bound reaches the
+    cluster, not just the pure query function the other tests exercise."""
     client = MagicMock()
     client.search.return_value = _canned_response()
     SearchService(client=client).search(q="x", ranges={"bigo_min": 10_000_000})

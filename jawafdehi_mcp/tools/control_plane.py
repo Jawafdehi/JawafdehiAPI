@@ -124,6 +124,28 @@ class _ControlPlaneTool(BaseTool):
 
 
 class SearchControlPlaneTool(_ControlPlaneTool):
+    #: The query params forwarded to ``/api/search/``. A single list, used by both
+    #: ``input_schema`` and ``execute``, so the advertised surface and the
+    #: forwarded surface cannot drift apart — a param declared but not forwarded
+    #: fails silently, which is how the बिगो bounds first shipped half-wired.
+    #: ``test_unified_search_schema_tracks_the_search_endpoint`` pins this to
+    #: ``SearchQuerySerializer``.
+    PARAMS: tuple[str, ...] = (
+        "q",
+        "type",
+        "lang",
+        "sort",
+        "entity_type",
+        "case_type",
+        "tags",
+        "status",
+        "bigo_min",
+        "bigo_max",
+        "page",
+        "page_size",
+        "cursor",
+    )
+
     @property
     def name(self) -> str:
         return "search_control_plane"
@@ -181,8 +203,10 @@ class SearchControlPlaneTool(_ControlPlaneTool):
                 # inclusive. CASE-ONLY: no entity/material/court-case document
                 # carries an amount, so either bound also excludes every non-case
                 # result — pair with type: ["case"].
-                "bigo_min": {"type": "integer", "minimum": 0},
-                "bigo_max": {"type": "integer", "minimum": 0},
+                # Bounds mirror the endpoint's own validation, so a schema-valid
+                # call cannot come back as a 400 from the API's clamp.
+                "bigo_min": {"type": "integer", "minimum": 0, "maximum": 2**63 - 1},
+                "bigo_max": {"type": "integer", "minimum": 0, "maximum": 2**63 - 1},
                 "page": {"type": "integer", "minimum": 1, "default": 1},
                 "page_size": {
                     "type": "integer",
@@ -196,24 +220,7 @@ class SearchControlPlaneTool(_ControlPlaneTool):
         }
 
     async def execute(self, arguments: dict[str, Any]) -> list[TextContent]:
-        params = _query_params(
-            arguments,
-            (
-                "q",
-                "type",
-                "lang",
-                "sort",
-                "entity_type",
-                "case_type",
-                "tags",
-                "status",
-                "bigo_min",
-                "bigo_max",
-                "page",
-                "page_size",
-                "cursor",
-            ),
-        )
+        params = _query_params(arguments, self.PARAMS)
         return await self._call("GET", "/api/search/", params=params)
 
 
