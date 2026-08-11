@@ -475,6 +475,30 @@ def plan_case(case, etag, outcome, *, client=None, save_permalinks=True):
                         n_current=len(current), outcome=outcome,
                         reason="no article cleared the verification gate")
 
+    # PAST HERE A DESTRUCTIVE WRITE IS ON THE TABLE, so the payload the merge
+    # will be built from has to be trustworthy. Checked here and not at the top
+    # of the function on purpose: with nothing accepted there is no write to
+    # protect, and reporting a payload problem then would bury the real reason.
+    if "evidence" not in case:
+        return NewsPlan(slug=slug, action="NOOP", state=state, if_match=etag,
+                        n_current=len(current), outcome=outcome,
+                        reason="case payload has no 'evidence' key -- absent is "
+                               "not empty, and `PATCH /evidence` is a whole-list "
+                               "replace, so merging an incomplete read would "
+                               "DELETE every entry it omits. Re-read the case "
+                               "(get_case_with_etag) before retrying")
+    # `current_evidence` drops an entry with no `material_iri`, which for a
+    # whole-list replace means deleting it from the case. Better to write
+    # nothing and say so.
+    malformed = len(case["evidence"] or []) - len(current)
+    if malformed:
+        return NewsPlan(slug=slug, action="NOOP", state=state, if_match=etag,
+                        n_current=len(current), outcome=outcome,
+                        reason=f"{malformed} of {len(case['evidence'])} existing "
+                               "evidence entries carry no material_iri, so a "
+                               "whole-list replace built from this read would "
+                               "drop them")
+
     materials, additions = [], []
     for article, verdict in outcome.accepted:
         permalink = (resolve_permalink(client, article.url, save_missing=save_permalinks)

@@ -765,6 +765,54 @@ def _bindable_plan(state="DRAFT", etag='W/"1"'):
     return plan
 
 
+def _accepting_outcome():
+    """A `SearchOutcome` with one accepted article, so a write is on the table.
+
+    Built directly rather than through `collect_for_case`: these tests are about
+    what `plan_case` does with the CASE payload, and driving the search half
+    would only add ways for them to fail for an unrelated reason.
+    """
+    outcome = ns.SearchOutcome(queries=["q"], n_candidates=1)
+    outcome.accepted = [(
+        ns.Article(url="https://example.np/a", title="शीर्षक",
+                   text="विवरण " * 60, published=date(2022, 1, 5)),
+        ns.Verdict(relevant=True, confidence="high", event_type="filing",
+                   summary="यो समाचार लेख यस मुद्दासँग सम्बन्धित छ। " * 8),
+    )]
+    return outcome
+
+
+def test_a_payload_with_no_evidence_key_is_refused_not_merged():
+    # `case.get("evidence") or []` cannot tell "no evidence" from "this payload
+    # does not carry evidence at all". Merged, the second reads as empty and the
+    # whole-list replace DELETES every real entry -- the same hole
+    # `plan_case_entities` already refuses for `entities`. Now that this stage
+    # writes to production, that is live data loss, not a hypothetical.
+    case = case_payload()
+    del case["evidence"]
+
+    plan = en.plan_case(case, 'W/"1"', _accepting_outcome(),
+                        client=None, save_permalinks=False)
+
+    assert plan.action == "NOOP"
+    assert not plan.patch_items
+    assert "absent is not empty" in plan.reason
+
+
+def test_an_evidence_entry_with_no_material_iri_is_refused_not_dropped():
+    # `current_evidence` filters these out. Silently: the entry then vanishes
+    # from the merged list, and the replace deletes it from the case.
+    case = case_payload()
+    case["evidence"] = list(case["evidence"]) + [{"additional_details": "no iri"}]
+
+    plan = en.plan_case(case, 'W/"1"', _accepting_outcome(),
+                        client=None, save_permalinks=False)
+
+    assert plan.action == "NOOP"
+    assert not plan.patch_items
+    assert "material_iri" in plan.reason
+
+
 def test_the_writer_writes_off_loopback_when_remote_writes_are_allowed():
     # 2026-08-11: this stage used to carry a SECOND, unconditional host guard
     # that `--allow-remote-writes` could not open, on the reasoning that the
