@@ -97,7 +97,7 @@ from casework.common.cli import (
     setup_logging,
 )
 from casework.common.llm import bootstrap, tier_for
-from casework.common.review import ReviewRow, build_review_file
+from casework.common.review import ReviewRow, build_review_file, md_cell
 from casework.common.select import ENRICHABLE_STATES, select_for_run
 from casework.court_record import (
     BINDABLE_CODES,
@@ -868,6 +868,31 @@ _RUNG_WORDS = {"nes_id": "nes_id_copied", "exact": "exact_match",
                "created": "created", "failed": "failed", "held": "held"}
 
 
+def accused_table(rows):
+    """One Markdown row per court-record defendant, or "" if the case had none.
+
+    `generated` can only ever say `accused+21`, and the review file's summary
+    table counts characters -- so without this a reviewer cannot see WHICH people
+    a case would bind or WHAT verdict each bind claims. Both are the whole point
+    of reviewing this stage.
+
+    `Outcome` is blank for a name that resolved to nothing: no bind is written,
+    so quoting the case's outcome against it would claim a verdict was recorded
+    for someone who was never bound.
+    """
+    if not rows:
+        return ""
+    out = ["| # | Defendant | Outcome | Resolution | NES entity |",
+           "|---|---|---|---|---|"]
+    for i, row in enumerate(rows, 1):
+        bound = row["nes_id"]
+        rung = _RUNG_WORDS.get(row["how"], row["how"])
+        entity = f"`{md_cell(bound)}`" if bound else md_cell(row["reason"]) or "—"
+        out.append(f"| {i} | {md_cell(row['name'])} | {md_cell(row['outcome']) if bound else '—'} "
+                   f"| {rung} | {entity} |")
+    return "\n".join(out)
+
+
 def _rung_counts(rows):
     """`(resolved_count, held_count)` over a plan's per-defendant rows.
 
@@ -1274,10 +1299,19 @@ def main(argv=None):
 
         generated_parts = [f"{k}={v}" for k, v in plan.fields]
         if plan.entities is not None:
-            generated_parts.append(f"accused+{resolved_count}")
+            # The outcome rides on every accused bind this case writes, so a
+            # reviewer reading only the summary line still sees which verdict is
+            # being claimed. `plan.rows` all carry the same one -- `bind_outcome`
+            # is per case, not per defendant.
+            outcome = next((r["outcome"] for r in plan.rows if r["nes_id"]), "")
+            generated_parts.append(f"accused+{resolved_count}"
+                                   + (f" ({outcome})" if outcome else ""))
         if held_count:
             generated_parts.append(f"{held_count} name(s) held for review")
         generated = "; ".join(generated_parts)
+        detail = ("Court-record defendants", accused_table(plan.rows))
+        if not detail[1]:
+            detail = ()
         before = (f"case_start_date={case_detail.get('case_start_date')}, "
                  f"case_end_date={case_detail.get('case_end_date')}, "
                  f"{len(case_detail.get('entities') or [])} bind(s)")
@@ -1311,14 +1345,14 @@ def main(argv=None):
                       status="held_for_review" if held_count else "already",
                       detail=nothing_to_do_note)
             review.add(ReviewRow(slug=slug, status="nothing-to-do", before=before,
-                                 generated=generated, note=note))
+                                 generated=generated, note=note, detail=detail))
             stats["nothing-to-do"] = stats.get("nothing-to-do", 0) + 1
             continue
         if args.dry_run:
             log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
                       step="patch", status="dry_run", detail=generated)
             review.add(ReviewRow(slug=slug, status="would-patch", before=before,
-                                 generated=generated, note=note))
+                                 generated=generated, note=note, detail=detail))
             stats["would-patch"] = stats.get("would-patch", 0) + 1
             continue
         try:
@@ -1337,13 +1371,13 @@ def main(argv=None):
                       step="patch", status=status,
                       detail=f"{type(exc).__name__}: {exc}")
             review.add(ReviewRow(slug=slug, status=status, before=before,
-                                 generated=generated, note=note))
+                                 generated=generated, note=note, detail=detail))
             stats["error"] = stats.get("error", 0) + 1
             continue
         log_event(logger, events, run_id=run_id, stage=STAGE, slug=slug,
                   step="patch", status="applied", detail=generated)
         review.add(ReviewRow(slug=slug, status="patched", before=before,
-                             generated=generated, note=note))
+                             generated=generated, note=note, detail=detail))
         stats["patched"] = stats.get("patched", 0) + 1
 
     held_path = review.path.parent / (review.path.stem + ".held.json")

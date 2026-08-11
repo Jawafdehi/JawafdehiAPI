@@ -436,6 +436,7 @@ from casework.enrich_court_record import (  # noqa: E402
     CHARGED,
     REQUIRED_WRITE_STATE,
     CasePlan,
+    accused_table,
     bind_outcome,
     plan_case,
 )
@@ -1309,6 +1310,33 @@ def test_a_held_defendant_is_excluded_from_resolved_and_accused_counts(tmp_path,
     assert "accused+1" in review_text
     assert "accused+2" not in review_text
     assert "1 name(s) held for review" in review_text
+
+
+def test_the_review_file_names_the_accused_and_states_the_outcome(tmp_path, monkeypatch):
+    # The reason this exists: a reviewer reading a dry run saw `52 chars -> 63
+    # chars` and `accused+2`, and could not check a single name or verdict --
+    # which is the whole thing this stage is meant to be reviewed for.
+    monkeypatch.setenv("CASEWORK_RUN_LOG_DIR", str(tmp_path))
+    api = _CliApi(
+        _case(),
+        detail={"registration_date_ad": "2023-06-22"}, hearings=[DECIDED],
+        parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव", "nes_id": YADAV},
+                 {"side": "defendant", "name": "सिताराम यादव"}],
+    )
+    import casework.enrich_court_record as ecr
+    monkeypatch.setattr(ecr, "build_api", lambda args: api)
+
+    rc = main(["--api-base-url", "http://127.0.0.1:48010", "--dry-run",
+               "--review-file", str(tmp_path / "review.md")])
+    assert rc == 0
+    text = (tmp_path / "review.md").read_text(encoding="utf-8")
+    assert "### Court-record defendants" in text
+    assert "कृष्ण प्रसाद यादव" in text
+    assert "सिताराम यादव" in text
+    # DECIDED is a plain सफाई on the only reference, so the case acquits -- and
+    # the summary line has to say so, not just count the binds.
+    assert f"accused+2 ({ACQUITTED})" in text
+    assert ACQUITTED in text.split("### Court-record defendants")[1]
 
 
 def test_a_failed_resolution_is_not_counted_as_resolved_or_bound(tmp_path, monkeypatch):
@@ -2661,3 +2689,217 @@ def test_an_unavailable_provider_holds_every_name_instead_of_crashing(
     assert unavailable and unavailable[0]["status"] == "unavailable"
     assert "stays held for a human" in unavailable[0]["detail"]
     assert [e for e in events if e["step"] == "dates"]
+
+
+# ----------------------------------------------- the review file's accused table
+
+def _row(**over):
+    base = {"slug": "case-1", "name": "कृष्ण प्रसाद यादव", "how": "created",
+            "nes_id": YADAV, "outcome": CHARGED, "reason": "",
+            "court_case": "special/079-cr-0151"}
+    base.update(over)
+    return base
+
+
+def test_the_accused_table_names_every_defendant_with_its_outcome():
+    # The gap this closes: `generated` says `accused+21` and the summary table
+    # counts characters, so before this a reviewer could not see WHO would be
+    # bound or WHAT verdict the bind claims.
+    table = accused_table([_row(), _row(name="सीता देवी पौडेल", how="exact")])
+    assert "कृष्ण प्रसाद यादव" in table
+    assert "सीता देवी पौडेल" in table
+    assert table.count(CHARGED) == 2
+    assert "created" in table and "exact_match" in table
+
+
+def test_an_unbound_defendant_shows_no_outcome():
+    # A held or failed name writes no bind, so printing the case's outcome next
+    # to it would claim a verdict was recorded for someone who was never bound.
+    table = accused_table([_row(how="held", nes_id="", reason="also on case-b")])
+    assert CHARGED not in table
+    assert "also on case-b" in table
+    assert "| — |" in table
+
+
+def test_the_accused_table_escapes_a_pipe_in_a_court_record_name():
+    # Court-record names are portal free text. An unescaped `|` shifts every
+    # column after it and the row a caseworker must act on becomes unreadable.
+    table = accused_table([_row(name="यादव | समेत")])
+    assert r"यादव \| समेत" in table
+
+
+def test_a_case_with_no_defendants_gets_no_table():
+    assert accused_table([]) == ""
+
+
+# --------------------------------------------------------- many accused per case
+
+def test_a_case_with_several_defendants_binds_every_one_in_order():
+    # The production shape: 142 binds across 25 cases, 22 of them carrying more
+    # than one defendant and the largest carrying 27. Every defendant needs its
+    # own bind, in court-record order, each `accused` and each carrying the
+    # case's outcome.
+    ids = [build_entity_iri(PERSON_PREFIX, f"defendant-{n}") for n in range(1, 6)]
+    names = ["राम बहादुर थापा", "सीता देवी पौडेल", "हरि प्रसाद शर्मा",
+             "गीता कुमारी राई", "बिनोद कुमार यादव"]
+    parties = [{"side": "defendant", "name": name, "nes_id": iri}
+               for name, iri in zip(names, ids, strict=True)]
+    api = _PlanApi(detail={"registration_date_ad": "2023-06-22"}, hearings=[DECIDED],
+                   parties=[*parties, {"side": "plaintiff", "name": "नेपाल सरकार"}])
+    plan = _plan(api, _case())
+    assert [i["nes_id"] for i in plan.entities] == ids
+    assert {i["relationship_type"] for i in plan.entities} == {"accused"}
+    assert {i["outcome"] for i in plan.entities} == {ACQUITTED}
+    assert [r["name"] for r in plan.rows] == names
+
+
+def test_defendants_on_one_case_settle_on_different_rungs_independently():
+    # The ladder is per-DEFENDANT, not per-case: one row carries its own
+    # `nes_id` (rung 1), one matches an existing NES person exactly (rung 2),
+    # and one matches nothing and is created (rung 3) -- all on one case. An
+    # implementation that picked a rung per case would flatten these to one
+    # `how`, and the 27th defendant on a case would inherit the 1st one's fate.
+    matched = build_entity_iri(PERSON_PREFIX, "sita-devi-poudel")
+    parties = [{"side": "defendant", "name": "कृष्ण प्रसाद यादव", "nes_id": YADAV},
+               {"side": "defendant", "name": "सीता देवी पौडेल"},
+               {"side": "defendant", "name": "हरि प्रसाद शर्मा"}]
+    # One search stub serves all three names, and only सीता देवी पौडेल matches it
+    # exactly -- so हरि प्रसाद शर्मा falls through to rung 3 for the right reason.
+    api = _SearchApi(results=[_hit(matched, "सीता देवी पौडेल")], complete=True)
+    items, rows, _ = _accused_binds(
+        api, _case(), [_record(parties=parties)],
+        live_prefixes=["person"], run_entities={}, dry_run=True, held={})
+    assert [r["how"] for r in rows] == ["nes_id", "exact", "created"]
+    assert [i["nes_id"] for i in items][:2] == [YADAV, matched]
+    assert len(items) == 3
+
+
+def test_one_defendant_named_on_two_references_of_one_case_binds_once():
+    # De-duplication is by normalised NAME across every reference on the case.
+    # Without it a person named on both references of a two-reference case
+    # would get two identical binds in the same PATCH body.
+    party = {"side": "defendant", "name": "कृष्ण प्रसाद यादव", "nes_id": YADAV}
+    records = [_record(number="079-cr-0151", parties=[party]),
+               _record(number="080-cr-0002", parties=[dict(party)])]
+    items, rows, _ = _accused_binds(
+        _SearchApi(), _case(), records,
+        live_prefixes=["person"], run_entities={}, dry_run=True, held={})
+    assert [i["nes_id"] for i in items] == [YADAV]
+    assert len(rows) == 1
+
+
+# ------------------------------------------------------- the outcome vocabulary
+
+#: Real deciding-hearing `decision_type` cells and the outcome each must earn.
+#: `convicted` and `abated` are legal values of the model field
+#: (`cases.models.CaseEntityRelationship.Outcome`) and this stage emits NEITHER
+#: -- see `bind_outcome`. A court cell states what happened to the CASE; only a
+#: whole-case acquittal distributes to each defendant unchanged.
+OUTCOME_CELLS = [
+    ("सफाई", ACQUITTED),           # plain acquittal -- the one non-default
+    ("ठहर", CHARGED),              # conviction: does not say WHICH defendant
+    ("आंशिक ठहर", CHARGED),        # some convicted, some cleared
+    ("आंशिक सफाई", CHARGED),       # qualified acquittal
+    ("तामेली", CHARGED),           # struck off / abated
+    ("खारेज", CHARGED),            # quashed
+    ("मुद्दा खारेज", CHARGED),
+]
+
+
+def test_the_stage_emits_only_charged_or_acquitted_never_convicted_or_abated():
+    # `validate_bind_item` checks that `outcome` is legal only on an `accused`
+    # bind; it does NOT check the value against the field's choices. So this is
+    # the only gate standing between a decision cell and the request body.
+    for cell, want in OUTCOME_CELLS:
+        hearing = {**DECIDED, "decision_type": cell}
+        got = bind_outcome([_record(hearings=[hearing])])
+        assert got == want, f"{cell!r} produced {got!r}, wanted {want!r}"
+        assert got in (CHARGED, ACQUITTED)
+
+
+def test_an_abated_reference_is_charged_and_earns_no_end_date():
+    # `तामेली` is how this corpus spells struck-off/abated. It reaches the
+    # binder two ways and both must stay conservative. As a `decision_type` on
+    # a decided row the case still ends (फैसला names a verdict) but the
+    # defendants stay CHARGED, never ABATED. As the reference's whole
+    # `case_status` it is not a verdict at all: `parse_case_status` extracts no
+    # date from it, so the case gets NO end date rather than a guessed one.
+    as_decision = _record(reg="2023-06-22", hearings=[{**DECIDED, "decision_type": "तामेली"}])
+    assert bind_outcome([as_decision]) == CHARGED
+    assert end_date([as_decision])[0] == "2024-06-04"
+
+    as_status = _record(reg="2023-06-22", status="तामेली")
+    assert bind_outcome([as_status]) == CHARGED
+    value, reason = end_date([as_status])
+    assert value == ""
+    assert reason
+
+
+def test_an_abated_reference_mixed_with_an_acquittal_is_charged():
+    # The `all(acquitted)` rule has to hold for abatement too: one struck-off
+    # reference must stop the other reference's सफाई from acquitting the case.
+    records = [_record(hearings=[DECIDED]),
+               _record(hearings=[{**DECIDED, "decision_type": "तामेली"}])]
+    assert bind_outcome(records) == CHARGED
+
+
+# -------------------------------------------------- a mis-typed existing accused
+
+RELATED_ROLES = ["related", "witness", "alleged", "victim", "respondent"]
+
+
+def test_an_existing_wrong_typed_bind_gains_an_accused_bind_beside_it():
+    # What the related-entity enricher leaves behind. That stage may never
+    # propose `accused` (`enrich_related_entities.validate_new_bind`), so a
+    # person it judged to be a defendant lands under `related`/`witness`/
+    # `alleged` instead. When the court record then STATES they are a
+    # defendant, this binder adds the authoritative `accused` bind --
+    # `bind_key` is `(nes_id, relationship_type)`, so the pair is new.
+    #
+    # It does NOT retype or remove the wrong bind: `merge_entity_binds` never
+    # overwrites, because the whole-list PATCH makes any omission destructive
+    # and an existing bind can carry a human's notes. Both binds therefore
+    # survive, and the stale one is a human's call, not this stage's.
+    for role in RELATED_ROLES:
+        existing = {"nes_id": YADAV, "type": role, "notes": "from the summary"}
+        api = _PlanApi(detail={"registration_date_ad": "2023-06-22"},
+                       parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव",
+                                 "nes_id": YADAV}])
+        plan = _plan(api, _case(entities=[existing]))
+        assert [(i["nes_id"], i["relationship_type"]) for i in plan.entities] == [
+            (YADAV, role), (YADAV, "accused")], f"role {role!r}"
+        # The human's note on the pre-existing bind survives the merge.
+        assert plan.entities[0]["notes"] == "from the summary"
+        # And the accused bind is the only one carrying an outcome -- the
+        # `outcome_only_on_accused` CHECK constraint rejects any other.
+        assert "outcome" not in plan.entities[0]
+        assert plan.entities[1]["outcome"] == CHARGED
+
+
+def test_a_name_variant_of_an_already_bound_person_is_not_matched_to_them():
+    # The failure mode behind the mis-typing question. If the related-entity
+    # enricher already created an entity for this human under a DIFFERENT
+    # spelling, rung 2's exact-name test cannot see it -- so the binder creates
+    # a second person and the case carries two entities for one man, one
+    # `related` and one `accused`. Asserted rather than fixed: only equality is
+    # safe here, since कमला/कमल proves near-matches are different people.
+    variant = build_entity_iri(PERSON_PREFIX, "krishna-prasad-yadab")
+    api = _SearchApi([_hit(variant, "कृष्ण प्रसाद यादब")], complete=True)
+    got = resolve_defendant(api, "कृष्ण प्रसाद यादव", None, citation="",
+                            live_prefixes=["person"], run_entities={}, dry_run=True)
+    assert got.how == "created"
+    assert got.nes_id != variant
+
+
+def test_an_existing_accused_bind_is_never_duplicated_or_reset():
+    # The other half: when the wrong-typed bind is already the RIGHT type, the
+    # pair matches and nothing is written at all -- so a re-run cannot reset a
+    # caseworker's `convicted` verdict to this stage's `charged`. Whole-list
+    # replace means "no change" has to mean sending no list.
+    existing = {"nes_id": YADAV, "type": "accused", "outcome": "convicted",
+                "notes": "hand-written by a caseworker"}
+    api = _PlanApi(detail={"registration_date_ad": "2023-06-22"},
+                   parties=[{"side": "defendant", "name": "कृष्ण प्रसाद यादव",
+                             "nes_id": YADAV}])
+    plan = _plan(api, _case(entities=[existing]))
+    assert plan.entities is None

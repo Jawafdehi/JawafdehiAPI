@@ -59,6 +59,11 @@ class ReviewRow:
     generated: str = ""
     sources: list = field(default_factory=list)
     note: str = ""
+    #: `(heading, markdown_body)` rendered verbatim in this case's section.
+    #: For a stage whose write is a LIST rather than one prose field, `generated`
+    #: can only ever summarise it ("accused+21") -- this is where the individual
+    #: rows go, so a reviewer can check them.
+    detail: tuple = ()
 
 
 @dataclass
@@ -125,6 +130,11 @@ class ReviewFile:
         lines.append(_quote(r.before) if r.before.strip() else "_(empty)_")
         lines += ["", f"### Generated ({len(r.generated):,} chars)", ""]
         lines.append(_quote(r.generated) if r.generated.strip() else "_(nothing generated)_")
+        if r.detail:
+            heading, body = r.detail
+            # NOT blockquoted: this is a Markdown table this code built, not
+            # model prose that might carry headings of its own.
+            lines += ["", f"### {heading}", "", body]
         lines += ["", "### Sources fed to the model", ""]
         if not r.sources:
             lines.append("_(none)_")
@@ -153,6 +163,18 @@ class ReviewFile:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(self.render(), encoding="utf-8")
         return self.path
+
+
+def md_cell(text):
+    """One Markdown table cell: pipes escaped, newlines flattened.
+
+    Cells hold court-record names, LLM-extracted names and NES titles -- none of
+    which the caller controls. A literal `|` or newline ends the cell early and
+    shifts every column after it, so the row a caseworker is meant to act on
+    becomes unreadable.
+    """
+    return (str(text or "").replace("|", r"\|")
+            .replace("\r", " ").replace("\n", " "))
 
 
 def _quote(text):
