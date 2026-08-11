@@ -1624,8 +1624,27 @@ class StatisticsView(APIView):
 
 
 class FeedbackRateThrottle(AnonRateThrottle):
-    """Rate throttle for feedback submissions: 5 per hour."""
+    """Rate throttle for feedback submissions: 5 per hour, in its OWN bucket.
 
+    ``scope`` is set explicitly. Without it this inherits ``AnonRateThrottle``'s
+    ``scope = "anon"``, and DRF derives the cache key from the scope alone
+    (``throttle_anon_<ident>``) — so this 5/hour throttle would share one history
+    list with the GLOBAL ``SyncedAnonRateThrottle``, which also has scope
+    ``anon`` and runs on every other public endpoint at 1000/hour. A visitor who
+    had merely browsed the site (5+ anonymous API calls in the past hour) would
+    then be refused on their FIRST feedback or corruption-report submission,
+    because those unrelated reads had already filled this bucket.
+
+    ``NewsletterRateThrottle`` sets ``scope = "newsletter"`` for exactly this
+    reason; the omission here was an oversight rather than a decision.
+
+    Not caught by the existing tests because the global throttle classes are
+    emptied under ``TESTING`` (config/settings.py), so the two never collide
+    there — see ``test_feedback_throttle_scope.py``, which asserts on the cache
+    key instead of trying to reproduce the collision.
+    """
+
+    scope = "feedback"
     rate = "5/hour"
 
 
