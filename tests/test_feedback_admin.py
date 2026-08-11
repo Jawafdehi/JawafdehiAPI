@@ -4,6 +4,7 @@ Tests for Feedback admin interface.
 
 import pytest
 from django.contrib.admin.sites import AdminSite
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import RequestFactory
 
 from cases.admin import FeedbackAdmin
@@ -75,6 +76,44 @@ class TestFeedbackAdmin:
         assert feedback_admin.has_delete_permission(request, feedback) is True
         assert feedback_admin.has_view_permission(request) is True
         assert feedback_admin.has_view_permission(request, feedback) is True
+
+    def test_the_change_page_actually_renders_read_only(self, admin_user, client):
+        """GET the real page, not just the permission predicates.
+
+        Turning off change permission makes Django take a path this admin never
+        took before: ``get_form`` replaces ``readonly_fields`` with the flattened
+        fieldsets, so ``attachment`` (a FileField, rendered via
+        ``display_for_field`` → ``value.url``) and the ``contact_info`` JSONField
+        go through ``AdminReadonlyField`` instead of a widget. Asserting only on
+        ``has_change_permission()`` would leave that rendering untested, and this
+        page is the escalation path the SPA's "ask an administrator" hint points
+        at — it must not 500.
+        """
+        feedback = Feedback.objects.create(
+            feedback_type=FeedbackType.CASE_REPORT,
+            subject="Alleged irregularity",
+            description="Details of the allegation.",
+            contact_info={
+                "name": "Test Reporter",
+                "contactMethods": [{"type": "email", "value": "reporter@example.com"}],
+            },
+            attachment=SimpleUploadedFile("evidence.txt", b"attachment body"),
+        )
+        client.force_login(admin_user)
+
+        response = client.get(
+            f"/django-admin/cases/feedback/{feedback.pk}/change/"
+        )
+
+        assert response.status_code == 200
+        body = response.content.decode()
+        # Readable...
+        assert "Alleged irregularity" in body
+        # ...and this is the ONE surface that still shows the reporter, which is
+        # why the SPA can afford to omit them.
+        assert "reporter@example.com" in body
+        # ...but with no way to submit a change.
+        assert 'name="_save"' not in body
 
     def test_feedback_list_display(self, feedback_admin):
         """Test that feedback list displays correct fields."""

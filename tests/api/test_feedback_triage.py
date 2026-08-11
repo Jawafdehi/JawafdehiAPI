@@ -173,6 +173,21 @@ class TestFeedbackTriagePrivacy:
         assert rows[without.pk]["hasContactInfo"] is False
         assert rows[with_contact.pk]["hasAttachment"] is False
 
+    def test_a_name_alone_counts_as_contact_info(self, caseworker):
+        """``name`` without ``contactMethods`` is a valid submission.
+
+        Reporting ``false`` for it would tell a triager the report is anonymous
+        while the reporter's name sits in the row — the exact mistake that leads
+        to forwarding a "safe" report onward, or to answering an erasure request
+        with "we hold no personal data".
+        """
+        named = _feedback(subject="Name only", contact_info={"name": "A Reporter"})
+
+        row = _authed_client(caseworker).get(DETAIL_URL.format(named.pk)).json()
+
+        assert row["hasContactInfo"] is True
+        assert "A Reporter" not in str(row)
+
     def test_reported_content_is_readable(self, caseworker):
         """Triage would be pointless without the report itself."""
         feedback = _feedback()
@@ -227,7 +242,6 @@ class TestFeedbackTriageWrites:
                 "subject": "Rewritten by staff",
                 "description": "Rewritten body",
                 "relatedPage": "Elsewhere",
-                "feedbackType": "general",
                 "status": "in_review",
             },
             format="json",
@@ -238,9 +252,124 @@ class TestFeedbackTriageWrites:
         assert feedback.subject == "Search is broken"
         assert feedback.description == "Searching for a case returns nothing."
         assert feedback.related_page == "Cases page"
-        assert feedback.feedback_type == FeedbackType.BUG
         # The one field that was supposed to move, moved.
         assert feedback.status == FeedbackStatus.IN_REVIEW
+
+    def test_a_submission_can_be_reclassified(self, caseworker):
+        """Re-filing is a triage decision, and this is now the only surface for it.
+
+        The public form lets anyone pick "general" for what is actually a
+        corruption allegation. Only ``case_report`` gets the notification and the
+        distinct treatment in the queue, and Django admin can no longer edit, so
+        without this the misfiling would be permanent.
+        """
+        feedback = _feedback(feedback_type=FeedbackType.GENERAL)
+
+        response = _authed_client(caseworker).patch(
+            DETAIL_URL.format(feedback.pk),
+            {"feedbackType": "case_report"},
+            format="json",
+        )
+
+        assert response.status_code == 200
+        feedback.refresh_from_db()
+        assert feedback.feedback_type == FeedbackType.CASE_REPORT
+
+    def test_reclassifying_to_an_unknown_type_is_rejected(self, caseworker):
+        feedback = _feedback()
+        response = _authed_client(caseworker).patch(
+            DETAIL_URL.format(feedback.pk),
+            {"feedbackType": "not_a_type"},
+            format="json",
+        )
+
+        assert response.status_code == 400
+        feedback.refresh_from_db()
+        assert feedback.feedback_type == FeedbackType.BUG
+
+    def test_triage_never_writes_a_pii_column(self, caseworker, django_assert_num_queries):
+        """The write is column-scoped, so a PATCH cannot touch reporter data.
+
+        ``Feedback.save()`` runs ``full_clean()``, which reads every concrete
+        field — that would un-defer ip_address/user_agent and emit a
+        full-column UPDATE rewriting them. The serializer writes via a scoped
+        QuerySet.update() instead; this asserts the columns survive untouched
+        and that no extra SELECT pulled them into the process.
+        """
+        feedback = _feedback()
+
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with CaptureQueriesContext(connection) as ctx:
+            response = _authed_client(caseworker).patch(
+                DETAIL_URL.format(feedback.pk), {"status": "resolved"}, format="json"
+            )
+        assert response.status_code == 200
+
+        # Match on the statement VERB, not a substring — every SELECT of this
+        # table contains the column `updated_at`, which contains "update".
+        updates = [
+            q["sql"]
+            for q in ctx.captured_queries
+            if q["sql"].lstrip().upper().startswith("UPDATE")
+        ]
+        assert updates, "expected an UPDATE"
+        for sql in updates:
+            assert "ip_address" not in sql
+            assert "user_agent" not in sql
+            assert "contact_info" not in sql
+            assert "attachment" not in sql
+
+        feedback.refresh_from_db()
+        assert feedback.status == FeedbackStatus.RESOLVED
+        assert feedback.ip_address == "203.0.113.9"
+        assert feedback.user_agent == "Mozilla/5.0 (test)"
+        assert feedback.contact_info["contactMethods"][0]["value"] == "ram@example.com"
+
+    def test_triage_still_lands_in_the_audit_trail(self, caseworker):
+        """A scoped UPDATE skips post_save, so the entry is written explicitly.
+
+        Without this the whole point of AuditlogActorMixin would be lost: the
+        edit would happen with no record of who made it.
+        """
+        from auditlog.models import LogEntry
+
+        feedback = _feedback()
+        _authed_client(caseworker).patch(
+            DETAIL_URL.format(feedback.pk),
+            {"status": "in_review", "adminNotes": "Looking into it"},
+            format="json",
+        )
+
+        entries = LogEntry.objects.filter(
+            content_type__model="feedback",
+            object_pk=str(feedback.pk),
+            action=LogEntry.Action.UPDATE,
+        )
+        # EXACTLY one. AuditedQuerySet.update() already logs the write, so an
+        # explicit log_bulk_update() alongside it double-records every triage
+        # edit — which is what this asserted before the count was pinned.
+        assert entries.count() == 1
+        entry = entries.get()
+        assert "status" in entry.changes
+        assert entry.actor == caseworker
+
+    def test_triage_bumps_updated_at(self, caseworker):
+        """auto_now doesn't fire for QuerySet.update(), so it's stamped by hand.
+
+        The queue shows "last updated" from this column; if it stopped moving,
+        a triaged submission would look untouched.
+        """
+        feedback = _feedback()
+        before = feedback.updated_at
+
+        _authed_client(caseworker).patch(
+            DETAIL_URL.format(feedback.pk), {"status": "in_review"}, format="json"
+        )
+
+        feedback.refresh_from_db()
+        assert feedback.updated_at > before
 
     def test_put_is_not_allowed(self, caseworker):
         """Only two fields are writable, so a full replace has no meaning."""

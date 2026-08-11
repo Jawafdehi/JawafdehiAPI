@@ -412,17 +412,29 @@ class TestCaseReportNotification:
         _, _, html = client.send_email.call_args[0]
         assert "/django-admin/" not in html
 
-    def test_no_notification_without_an_absolute_frontend_url(
-        self, api_client, settings, monkeypatch
+    @pytest.mark.parametrize("configured", ["", "   ", "/admin", None])
+    def test_a_blank_frontend_url_still_sends_using_the_default(
+        self, api_client, settings, monkeypatch, configured
     ):
-        """A relative link cannot be resolved by a mail client, so don't send."""
+        """A blank or relative setting must not silence the alert.
+
+        ``os.getenv``'s default only applies when the variable is ABSENT, so a
+        ConfigMap key rendered as "" arrives blank. Suppressing the mail on
+        blank would be the worst failure mode available: nothing polls the
+        queue, so the report would simply never be read, and the only signal
+        would be a log line. Fall back to the canonical host instead — the same
+        thing ``case_events.notify._base_url`` does with this setting.
+        """
         settings.CASE_REPORT_NOTIFY = True
-        settings.FRONTEND_BASE_URL = ""
+        settings.FRONTEND_BASE_URL = configured
         client = Mock(can_send_email=True)
         monkeypatch.setattr("newsletter.sendpulse.get_client", Mock(return_value=client))
 
-        assert self._submit(api_client).status_code == 201
-        client.send_email.assert_not_called()
+        response = self._submit(api_client)
+        assert response.status_code == 201
+        client.send_email.assert_called_once()
+        _, _, html = client.send_email.call_args[0]
+        assert f'https://jawafdehi.org/admin/feedback/{response.json()["id"]}' in html
 
     def test_notification_link_is_absolute(self, api_client, settings, monkeypatch):
         settings.CASE_REPORT_NOTIFY = True

@@ -6,6 +6,7 @@ See: .kiro/specs/accountability-platform-core/design.md
 
 import logging
 
+from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema_field, inline_serializer
 from rest_framework import serializers
@@ -15,6 +16,7 @@ from .models import (
     CaseEntityRelationship,
     CaseStateChange,
     Feedback,
+    FeedbackType,
 )
 
 logger = logging.getLogger(__name__)
@@ -521,29 +523,30 @@ class FeedbackSerializer(serializers.ModelSerializer):
 
 
 class FeedbackTriageSerializer(serializers.ModelSerializer):
-    """Staff-facing read + triage view of a submission. Deliberately PII-free.
+    """Staff-facing read + triage view of a submission. Carries no reporter PII.
 
-    This is the shape the SPA admin panel reads, and it is NOT
-    ``FeedbackSerializer`` with extra fields — it is narrower on purpose. The
-    reporter's identifying data (``contact_info``, ``ip_address``,
-    ``user_agent``) and the attachment's URL are absent from the field list
-    entirely, so no combination of query params can surface them. A triager
-    sees what was reported and can move it through the workflow; reaching the
-    person who reported it stays a superuser action in Django admin.
+    Narrower than ``FeedbackSerializer`` on purpose: ``contact_info``,
+    ``ip_address``, ``user_agent`` and the attachment's URL are absent from the
+    field list, so no combination of query params surfaces them. A triager sees
+    what was reported and moves it through the workflow; reaching the person who
+    reported it stays a superuser action in Django admin.
 
-    That mirrors the masking already applied to this model's audit trail
-    (``cases.apps``: ``mask_fields=["description", "contact_info",
-    "ip_address"]``) and the submission path's refusal to store an IP at all
-    for ``case_report`` (see ``FeedbackView.post``). Presence booleans are
-    exposed rather than the values, because "there is an attachment you cannot
-    open here" is what tells a triager to escalate.
-
-    Only ``status`` and ``adminNotes`` are writable. Everything the reporter
-    wrote is read-only: triage records a decision about a submission, it does
-    not get to rewrite what was submitted.
+    Writable: ``status``, ``adminNotes``, and ``feedbackType``. Everything the
+    reporter wrote is read-only — triage records a decision about a submission
+    and re-files it, but does not rewrite it.
     """
 
-    feedbackType = serializers.CharField(source="feedback_type", read_only=True)
+    # Reclassification is a triage decision, not a rewrite: the public form lets
+    # anyone pick "general" for what is actually a corruption allegation, and
+    # only ``case_report`` gets the notification and the distinct treatment in
+    # the queue. Writable here because this is now the ONLY surface that can fix
+    # it — Django admin is view-only, and the public endpoint is create-only.
+    feedbackType = serializers.ChoiceField(
+        source="feedback_type",
+        choices=FeedbackType.choices,
+        required=False,
+        help_text="Reclassify the submission (e.g. a corruption report filed as 'general')",
+    )
     relatedPage = serializers.CharField(source="related_page", read_only=True)
     adminNotes = serializers.CharField(
         source="admin_notes",
@@ -560,6 +563,10 @@ class FeedbackTriageSerializer(serializers.ModelSerializer):
     submittedAt = serializers.DateTimeField(source="submitted_at", read_only=True)
     updatedAt = serializers.DateTimeField(source="updated_at", read_only=True)
 
+    #: The only model columns a triage PATCH may touch. Used to scope the write
+    #: (see ``update``) so the statement can never carry a PII column.
+    TRIAGE_FIELDS = ("status", "admin_notes", "feedback_type")
+
     class Meta:
         model = Feedback
         fields = [
@@ -575,18 +582,65 @@ class FeedbackTriageSerializer(serializers.ModelSerializer):
             "submittedAt",
             "updatedAt",
         ]
-        read_only_fields = [
-            "id",
-            "feedbackType",
-            "subject",
-            "description",
-            "relatedPage",
-            "submittedAt",
-            "updatedAt",
-        ]
+        # ONLY the undeclared model fields belong here. DRF short-circuits
+        # declared fields before it consults extra_kwargs (serializers.py:
+        # ``if field_name in declared_fields: ... continue``), so listing
+        # ``relatedPage``/``submittedAt``/``updatedAt`` here would be inert —
+        # their immutability comes from ``read_only=True`` on the declaration
+        # above, and a list that looks like the guard but isn't is worse than no
+        # list. ``id`` is read-only automatically.
+        read_only_fields = ["subject", "description"]
 
     def get_hasAttachment(self, obj) -> bool:
         return bool(obj.attachment)
 
     def get_hasContactInfo(self, obj) -> bool:
-        return bool(obj.contact_info and obj.contact_info.get("contactMethods"))
+        # ``name`` alone counts. ContactInfoSerializer makes both `name` and
+        # `contactMethods` optional, so {"name": "..."} with no methods is a
+        # valid submission — and reporting `false` for it would tell a triager a
+        # report is anonymous while the reporter's name sits in the row.
+        if not obj.contact_info:
+            return False
+        return bool(
+            obj.contact_info.get("contactMethods") or obj.contact_info.get("name")
+        )
+
+    def update(self, instance, validated_data):
+        """Write ONLY the triage columns, without running ``Model.save()``.
+
+        ``Feedback.save()`` calls ``full_clean()``, which is wrong for this path
+        in three ways. It reads every concrete field, so the ``ip_address`` /
+        ``user_agent`` columns this endpoint defers get pulled back into the
+        process on each edit and the resulting UPDATE rewrites them. It calls
+        ``Feedback.clean()``, which evaluates ``self.attachment.size`` — a HEAD
+        request to object storage on every status change, and an unhandled
+        exception (not a ValidationError) if the object has been purged from the
+        bucket, which would make such a row permanently un-triageable now that
+        Django admin cannot edit it either. And it re-validates reporter fields
+        this request never touched, so one legacy row that predates a constraint
+        would 500 a status change.
+
+        A column-scoped ``QuerySet.update()`` avoids all three, and the audit
+        trail survives it: this model's manager mixes in
+        ``jawafdehi_shared.db.audited.AuditedQuerySet``, whose ``update()``
+        already writes the UPDATE entry that ``post_save`` would have, with the
+        actor bound by ``AuditlogActorMixin`` on the viewset. Do NOT add an
+        explicit ``log_bulk_update`` here — that logs the edit a second time.
+        """
+        updates = {
+            field: validated_data[field]
+            for field in self.TRIAGE_FIELDS
+            if field in validated_data
+        }
+        if not updates:
+            return instance
+
+        # auto_now doesn't fire for QuerySet.update(), so stamp it ourselves —
+        # the queue's "last updated" reads this column. AuditedQuerySet omits
+        # auto_now-only columns from the diff, so this doesn't pollute the trail.
+        updates["updated_at"] = timezone.now()
+        Feedback.objects.filter(pk=instance.pk).update(**updates)
+
+        for field, value in updates.items():
+            setattr(instance, field, value)
+        return instance
