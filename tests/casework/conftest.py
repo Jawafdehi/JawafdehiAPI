@@ -20,6 +20,17 @@ def _isolate_casework_run_logs(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_description_max_tokens(monkeypatch):
+    """Keep a stale `CASEWORK_DESCRIPTION_MAX_TOKENS` export out of the suite.
+
+    `enrich_description.main()` validates it and exits, so a shell holding a bad
+    value for a real run would fail every test that drives `main()`.
+    `TestMaxTokensConfig` sets it per test and still wins -- fixtures run first.
+    """
+    monkeypatch.delenv("CASEWORK_DESCRIPTION_MAX_TOKENS", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_review_files(monkeypatch, tmp_path):
     """Enricher `main()`s write a human review file on EVERY run, dry runs
     included (`casework/common/review.py`), defaulting to
