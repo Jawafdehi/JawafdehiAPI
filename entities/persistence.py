@@ -190,6 +190,25 @@ class EntityRepository:
         entity.save(update_fields=["is_deleted", "updated_at"])
         return True
 
+    def resolve_tombstone(self, iri: str, *, max_hops: int = 10) -> Optional[str]:
+        """The live survivor a retired ``iri`` was merged into, or None if it is not a tombstone.
+
+        Follows a chain of merges. ``max_hops`` bounds it so a cycle terminates.
+        """
+        current = iri
+        for _ in range(max_hops):
+            target = (
+                StoredEntity.objects.filter(pk=current, is_deleted=True)
+                .values_list("merged_into", flat=True)
+                .first()
+            )
+            if not target or target == current:
+                return None if current == iri else current
+            current = target
+            if not StoredEntity.objects.filter(pk=current, is_deleted=True).exists():
+                return current
+        return current
+
     def entity_version(self, iri: str) -> Optional[int]:
         """The current promoted version number for a live entity (or None)."""
         return (
