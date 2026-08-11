@@ -518,3 +518,75 @@ class FeedbackSerializer(serializers.ModelSerializer):
             "submittedAt": data["submittedAt"],
             "message": "Thank you for your feedback! We will review it and get back to you if needed.",
         }
+
+
+class FeedbackTriageSerializer(serializers.ModelSerializer):
+    """Staff-facing read + triage view of a submission. Deliberately PII-free.
+
+    This is the shape the SPA admin panel reads, and it is NOT
+    ``FeedbackSerializer`` with extra fields — it is narrower on purpose. The
+    reporter's identifying data (``contact_info``, ``ip_address``,
+    ``user_agent``) and the attachment's URL are absent from the field list
+    entirely, so no combination of query params can surface them. A triager
+    sees what was reported and can move it through the workflow; reaching the
+    person who reported it stays a superuser action in Django admin.
+
+    That mirrors the masking already applied to this model's audit trail
+    (``cases.apps``: ``mask_fields=["description", "contact_info",
+    "ip_address"]``) and the submission path's refusal to store an IP at all
+    for ``case_report`` (see ``FeedbackView.post``). Presence booleans are
+    exposed rather than the values, because "there is an attachment you cannot
+    open here" is what tells a triager to escalate.
+
+    Only ``status`` and ``adminNotes`` are writable. Everything the reporter
+    wrote is read-only: triage records a decision about a submission, it does
+    not get to rewrite what was submitted.
+    """
+
+    feedbackType = serializers.CharField(source="feedback_type", read_only=True)
+    relatedPage = serializers.CharField(source="related_page", read_only=True)
+    adminNotes = serializers.CharField(
+        source="admin_notes",
+        required=False,
+        allow_blank=True,
+        help_text="Internal triage notes (staff-visible only)",
+    )
+    hasAttachment = serializers.SerializerMethodField(
+        help_text="Whether an attachment was supplied (the file itself is not exposed here)"
+    )
+    hasContactInfo = serializers.SerializerMethodField(
+        help_text="Whether contact details were supplied (the details are not exposed here)"
+    )
+    submittedAt = serializers.DateTimeField(source="submitted_at", read_only=True)
+    updatedAt = serializers.DateTimeField(source="updated_at", read_only=True)
+
+    class Meta:
+        model = Feedback
+        fields = [
+            "id",
+            "feedbackType",
+            "subject",
+            "description",
+            "relatedPage",
+            "status",
+            "adminNotes",
+            "hasAttachment",
+            "hasContactInfo",
+            "submittedAt",
+            "updatedAt",
+        ]
+        read_only_fields = [
+            "id",
+            "feedbackType",
+            "subject",
+            "description",
+            "relatedPage",
+            "submittedAt",
+            "updatedAt",
+        ]
+
+    def get_hasAttachment(self, obj) -> bool:
+        return bool(obj.attachment)
+
+    def get_hasContactInfo(self, obj) -> bool:
+        return bool(obj.contact_info and obj.contact_info.get("contactMethods"))

@@ -27,7 +27,7 @@ from drf_spectacular.utils import (
     extend_schema,
     extend_schema_view,
 )
-from rest_framework import filters, status, viewsets
+from rest_framework import filters, mixins, permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
@@ -57,6 +57,7 @@ from .models import (
     CaseSlugHistory,
     CaseState,
     CaseStateChange,
+    Feedback,
     FeedbackType,
     RelationshipOutcome,
     RelationshipType,
@@ -74,6 +75,7 @@ from .serializers import (
     CaseSerializer,
     CaseStateChangeSerializer,
     FeedbackSerializer,
+    FeedbackTriageSerializer,
 )
 from .services.statistics import (
     STATISTICS_SNAPSHOT_KEY,
@@ -1632,10 +1634,11 @@ class FeedbackRateThrottle(AnonRateThrottle):
 def _notify_case_report(feedback) -> None:
     """Best-effort alert to the casework inbox that a report has landed.
 
-    Feedback has no read API and no notification of any kind, so without this a
-    corruption report is only discovered by someone opening Django admin. Django's
-    mail backend is the dummy one on this platform (it accepts and discards), so
-    SendPulse's transactional endpoint is the only path that actually sends.
+    Reports are now visible in the SPA admin panel's feedback queue
+    (``FeedbackTriageViewSet``), but nothing polls it, so without this mail a
+    corruption report waits until someone happens to look. Django's mail backend
+    is the dummy one on this platform (it accepts and discards), so SendPulse's
+    transactional endpoint is the only path that actually sends.
 
     The mail carries a reference number and an admin link, and nothing else. Not
     the subject, not the description, not whether contact details or an
@@ -1651,12 +1654,18 @@ def _notify_case_report(feedback) -> None:
     recipient = getattr(settings, "CASE_REPORT_NOTIFY_EMAIL", "")
     if not recipient:
         return
-    # A relative link is useless in an email client, so an absolute admin base
-    # is a precondition for sending rather than something to paper over.
-    base = getattr(settings, "WAGTAILADMIN_BASE_URL", "").strip().rstrip("/")
+    # A relative link is useless in an email client, so an absolute base is a
+    # precondition for sending rather than something to paper over.
+    #
+    # This points at the SPA feedback queue, not Django admin. The recipient is
+    # the casework inbox, and a caseworker has no Django admin feedback
+    # permission at all (``create_groups`` grants none) — the old link 403'd for
+    # exactly the people it was sent to. The SPA queue is gated on the Caseworker
+    # role, so it opens for them.
+    base = getattr(settings, "FRONTEND_BASE_URL", "").strip().rstrip("/")
     if not base.startswith(("http://", "https://")):
         logger.warning(
-            "Case report notification skipped for #%s: WAGTAILADMIN_BASE_URL is not an absolute URL (%r)",
+            "Case report notification skipped for #%s: FRONTEND_BASE_URL is not an absolute URL (%r)",
             feedback.pk,
             base,
         )
@@ -1667,7 +1676,7 @@ def _notify_case_report(feedback) -> None:
         client = get_client()
         if client is None or not client.can_send_email:
             return
-        admin_url = f"{base}/django-admin/cases/feedback/{feedback.pk}/change/"
+        admin_url = f"{base}/admin/feedback/{feedback.pk}"
         html = (
             "<p>A corruption case report was submitted through the website.</p>"
             f"<p>Reference: <strong>#{feedback.pk}</strong></p>"
@@ -1786,6 +1795,96 @@ class FeedbackView(APIView):
         else:
             ip = request.META.get("REMOTE_ADDR")
         return ip
+
+
+class IsFeedbackTriager(permissions.BasePermission):
+    """Superuser (admin) or the Caseworker content-staff role.
+
+    Same principal set as ``review.permissions.IsContentStaff`` and built on the
+    same predicate, but declared here so the cases app does not take an import
+    dependency on the review app (review already imports ``cases``). Named for
+    what it gates rather than for the review system, because triaging public
+    feedback is not casework.
+
+    ReadOnly is deliberately excluded even though it is an org-wide *read* role
+    and this class also gates reads. The systemwide-read invariant is about
+    platform records; a feedback submission is a message from a member of the
+    public, sometimes naming an official, and its audience is the people who act
+    on it rather than everyone who can read the platform.
+    """
+
+    message = "Reading or triaging feedback requires the Caseworker role."
+
+    def has_permission(self, request, view):
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+        return bool(user.is_superuser or is_admin_or_moderator(user))
+
+
+@extend_schema_view(
+    list=extend_schema(
+        summary="List feedback submissions (staff)",
+        description=(
+            "Staff-facing queue of everything submitted through the public feedback "
+            "and case-report forms. Requires the Caseworker role or superuser.\n\n"
+            "The reporter's contact details, IP address and user agent are NOT "
+            "returned by this endpoint — only whether contact details exist. "
+            "Retrieving them remains a superuser action in Django admin."
+        ),
+    ),
+    retrieve=extend_schema(summary="Retrieve one feedback submission (staff)"),
+    partial_update=extend_schema(
+        summary="Triage a feedback submission (staff)",
+        description=(
+            "Update the workflow ``status`` and/or the internal ``adminNotes``. "
+            "Everything the reporter wrote is read-only."
+        ),
+    ),
+)
+class FeedbackTriageViewSet(
+    AuditlogActorMixin,
+    mixins.UpdateModelMixin,
+    viewsets.ReadOnlyModelViewSet,
+):
+    """Staff read + triage surface for feedback, at ``/api/feedback-submissions/``.
+
+    Separate from the public ``FeedbackView`` on purpose, and not simply a GET
+    added to it. That view sets ``authentication_classes = []`` so an anonymous
+    reporter can always POST; with no authenticator running, ``request.user`` is
+    always anonymous there and a staff GET could never be identified. Restoring
+    authentication to serve a read would also mean a stale bearer token in a
+    reporter's browser could 401 the public form — a regression paid by the
+    person least able to work around it. Two routes, two auth postures.
+
+    ``AuditlogActorMixin`` binds the DRF-authenticated user so a triage edit is
+    attributed to whoever made it; the model is auditlog-registered with
+    ``description`` / ``contact_info`` / ``ip_address`` masked, so the trail
+    records who moved a submission through the workflow without copying the
+    reporter's words into a second table.
+    """
+
+    serializer_class = FeedbackTriageSerializer
+    permission_classes = [IsFeedbackTriager]
+    pagination_class = CasePagination
+    filter_backends = [
+        DjangoFilterBackend,
+        filters.SearchFilter,
+        filters.OrderingFilter,
+    ]
+    filterset_fields = ["status", "feedback_type"]
+    search_fields = ["subject", "description", "related_page"]
+    ordering_fields = ["submitted_at", "updated_at", "status", "feedback_type"]
+    ordering = ["-submitted_at"]
+    # No PUT: only two fields are writable, so a full replace has no meaning
+    # here and would invite a client to send back the read-only reporter fields.
+    http_method_names = ["get", "patch", "head", "options"]
+
+    # ``defer`` rather than relying on the serializer's field list alone. The
+    # two columns this endpoint must never disclose are then not loaded into the
+    # process at all, so a later field added to the serializer by mistake shows
+    # up as an extra query in review rather than as a silent PII leak.
+    queryset = Feedback.objects.defer("ip_address", "user_agent")
 
 
 OEMBED_URL_PATTERN = re.compile(

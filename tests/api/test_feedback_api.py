@@ -397,14 +397,27 @@ class TestCaseReportNotification:
         for leaked in ("Received:", "Contact details supplied:", "Attachment:"):
             assert leaked not in html
 
-        assert "/django-admin/cases/feedback/" in html
+        assert "/admin/feedback/" in html
 
-    def test_no_notification_without_an_absolute_admin_url(
+    def test_notification_links_to_the_spa_queue_not_django_admin(
+        self, api_client, settings, monkeypatch
+    ):
+        """The recipient is the casework inbox, and a caseworker has no Django
+        admin feedback permission — the link has to open for them."""
+        settings.CASE_REPORT_NOTIFY = True
+        client = Mock(can_send_email=True)
+        monkeypatch.setattr("newsletter.sendpulse.get_client", Mock(return_value=client))
+
+        self._submit(api_client)
+        _, _, html = client.send_email.call_args[0]
+        assert "/django-admin/" not in html
+
+    def test_no_notification_without_an_absolute_frontend_url(
         self, api_client, settings, monkeypatch
     ):
         """A relative link cannot be resolved by a mail client, so don't send."""
         settings.CASE_REPORT_NOTIFY = True
-        settings.WAGTAILADMIN_BASE_URL = ""
+        settings.FRONTEND_BASE_URL = ""
         client = Mock(can_send_email=True)
         monkeypatch.setattr("newsletter.sendpulse.get_client", Mock(return_value=client))
 
@@ -413,16 +426,13 @@ class TestCaseReportNotification:
 
     def test_notification_link_is_absolute(self, api_client, settings, monkeypatch):
         settings.CASE_REPORT_NOTIFY = True
-        settings.WAGTAILADMIN_BASE_URL = "https://portal.jawafdehi.org/"
+        settings.FRONTEND_BASE_URL = "https://jawafdehi.org/"
         client = Mock(can_send_email=True)
         monkeypatch.setattr("newsletter.sendpulse.get_client", Mock(return_value=client))
 
         response = self._submit(api_client)
         _, _, html = client.send_email.call_args[0]
-        assert (
-            f'https://portal.jawafdehi.org/django-admin/cases/feedback/{response.json()["id"]}/change/'
-            in html
-        )
+        assert f'https://jawafdehi.org/admin/feedback/{response.json()["id"]}' in html
 
     def test_submission_survives_a_failing_notification(
         self, api_client, settings, monkeypatch

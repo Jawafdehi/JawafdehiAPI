@@ -752,7 +752,22 @@ admin.site.index_title = "Welcome to Jawafdehi Contributor Portal"
 
 @admin.register(Feedback)
 class FeedbackAdmin(admin.ModelAdmin):
-    """Admin interface for Feedback model."""
+    """Read-and-delete admin for Feedback. Triage happens in the SPA panel.
+
+    The SPA ``/admin/feedback`` queue (``FeedbackTriageViewSet``) is the sole
+    write surface for ``status`` and ``admin_notes``, following the same rule as
+    ``CaseAdmin`` above: one editor, so two surfaces can't disagree about a
+    submission and so every triage edit is attributed through DRF's
+    authenticated user.
+
+    Reading stays here because this is the only place the reporter's contact
+    details, IP and user agent are visible at all — the API deliberately does
+    not serialize them — and that remains a superuser action.
+
+    Delete is deliberately NOT disabled. Purging spam and honouring an erasure
+    request are destructive and irreversible, so they stay with the superuser
+    who can see the whole record rather than moving to the role-gated queue.
+    """
 
     list_display = [
         "id",
@@ -800,6 +815,14 @@ class FeedbackAdmin(admin.ModelAdmin):
             },
         ),
     )
+
+    def has_add_permission(self, request):
+        """Feedback arrives through the public form; nobody hand-creates it."""
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        """View-only: the SPA panel is the sole feedback write surface."""
+        return False
 
     def has_contact_info(self, obj):
         """Check if feedback has contact information."""
