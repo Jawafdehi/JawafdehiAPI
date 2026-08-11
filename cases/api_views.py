@@ -110,9 +110,6 @@ _PATCH_SCALAR_FIELDS = frozenset(
         "slug",
         "missing_details",
         "bigo",
-        # Editorial homepage weight — a scalar column, so it persists via the same
-        # bulk UPDATE. Omitting it here would validate and silently discard a
-        # patched weight, exactly as happened to ``notes`` in BB-28 below.
         "weight",
         # Internal casework notes (Case.notes TextField). A scalar column, so it
         # persists via the bulk UPDATE like the other scalars — the missing entry
@@ -644,10 +641,6 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             "court_cases",
             "missing_details",
             "bigo",
-            # Editorial homepage weight. In this set because CaseWriteFieldsSerializer
-            # accepts it, and a field the API validates but never persists is the
-            # BB-28 silent-drop bug. A new case is forced DRAFT (so unindexed and
-            # inert until publish), but the value it was created with survives.
             "weight",
         ]
     )
@@ -1490,11 +1483,8 @@ class CaseViewSet(AuditlogActorMixin, viewsets.ReadOnlyModelViewSet):
             "court_cases": case.court_cases,
             "missing_details": case.missing_details,
             "bigo": case.bigo,
-            # Editorial homepage weight. Carried here so a ``replace /weight`` op
-            # resolves against an existing key (JSON Patch ``replace`` fails on a
-            # missing path), and coerced past a NULL read-back on a legacy row
-            # because the serializer is not ``allow_null``.
-            "weight": case.weight if case.weight is not None else 0,
+            # Coerce a NULL read-back to 0 for the same reason as notes below.
+            "weight": case.weight or 0,
             # Internal casework notes (BB-04-gated on read; casework-only). This
             # is the top-level case ``notes`` TextField, distinct from the nested
             # per-entity relationship ``notes`` above. Carried here so the editor's

@@ -77,8 +77,7 @@ def test_common_mappings_has_expected_fields():
 
 
 def test_weight_is_a_sortable_numeric():
-    """``weight`` drives the homepage "Featured Cases" order — a text mapping
-    would make it unsortable and silently break that sort."""
+    """A text mapping would make the ``featured`` sort silently meaningless."""
     props = common_mappings()["properties"]
     assert props["weight"]["type"] == "integer"
 

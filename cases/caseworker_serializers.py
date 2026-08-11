@@ -324,14 +324,11 @@ class CaseWriteFieldsSerializer(serializers.Serializer):
         min_value=-9223372036854775808,
         max_value=9223372036854775807,
     )
-    # Editorial priority for the homepage "Featured Cases" order. This PATCH path
-    # is the ONLY way to set it: Django admin is read-only for cases, so the SPA
-    # `/admin` panel is the sole write surface.
-    #
-    # NOT ``allow_null``: the column is NOT NULL (``default=0``), so a JSON
-    # ``null`` can't be stored — send 0 to unrank. Bounded to a 32-bit signed
-    # range because the model field is an IntegerField, not bigo's BigInteger;
-    # without min/max, a larger value would validate here and fail at the DB.
+    # This PATCH path is the only way to set the editorial weight — cases are
+    # read-only in Django admin. NOT ``allow_null``, because the column is NOT NULL
+    # (``default=0``): send 0 to unrank. 32-bit bounds because the model field is an
+    # IntegerField, not bigo's BigInteger, so a wider value would pass here and then
+    # fail at the DB.
     weight = serializers.IntegerField(
         required=False,
         min_value=-2147483648,

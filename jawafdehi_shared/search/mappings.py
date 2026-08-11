@@ -213,14 +213,10 @@ def common_mappings() -> dict[str, Any]:
                 # internal scraper enrichment flag pending/enriched/failed). Only
                 # Jawafdehi cases set this; other doc types leave it absent.
                 "case_status": {"type": "keyword"},
-                # Editorial priority driving the homepage "Featured Cases" order.
-                # Only Jawafdehi cases set this; other doc types leave it absent —
-                # the same single-type pattern as ``case_status`` above. Declared
-                # here so FRESHLY created indices get an explicit integer mapping;
-                # a live index predating this picks the field up via dynamic
-                # mapping instead (inferred ``long`` — identical for sorting), so
-                # the ``featured`` sort pairs ``missing: 0`` with ``unmapped_type``
-                # to stay valid either way. See search/service.py:_sort_spec.
+                # Editorial priority behind the ``featured`` sort; cases-only, same
+                # single-type pattern as ``case_status`` above. Only FRESH indices get
+                # this declared type — an existing one picks the field up by dynamic
+                # mapping on reindex, which is why _sort_spec sets ``unmapped_type``.
                 "weight": {"type": "integer"},
                 # Full serialized JSON-LD / record, return-only (not searchable).
                 "raw": {"type": "object", "enabled": False},

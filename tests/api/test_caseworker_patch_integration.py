@@ -163,9 +163,8 @@ def test_patch_notes_persists_and_survives_read_back_for_caseworker():
 
 @pytest.mark.django_db
 def test_patch_weight_persists_and_survives_read_back():
-    # PATCH is the ONLY way to set weight — Django admin is read-only for cases,
-    # so the SPA `/admin` panel is the sole write surface. Guards the BB-28 shape:
-    # a field the serializer accepts but no allowlist persists is silently dropped.
+    # Guards the BB-28 shape: a field the serializer accepts but no allowlist
+    # persists validates fine and is silently discarded.
     user = create_user_with_role("bimala", "bimala@example.com", "Caseworker")
     case = _make_case()
     assert case.weight == 0

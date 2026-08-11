@@ -209,8 +209,7 @@ def test_case_build_doc_shape_published():
 
 
 def test_case_build_doc_weight_defaults_to_zero_when_absent():
-    """build_doc is pure and must not REQUIRE ``weight``: it shapes whatever it is
-    given, including objects predating the field (and this module's fixtures)."""
+    """build_doc must not REQUIRE ``weight`` — it shapes objects predating the field."""
     assert case_index.build_doc(_published_case())["weight"] == 0
 
 
