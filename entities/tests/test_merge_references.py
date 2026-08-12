@@ -11,7 +11,6 @@ from entities.services.merge import references
 
 JHAPA = "https://jawafdehi.org/entity/location/district/jhapa-np0104"
 LOOSE = "https://jawafdehi.org/entity/location/jhapa"
-RAM = "https://jawafdehi.org/entity/person/ram-bahadur"
 
 pytestmark = pytest.mark.django_db(databases="__all__")
 
@@ -31,7 +30,7 @@ def _entity(iri, data=None):
 
 
 def test_count_reports_every_store_key_even_when_zero():
-    counts = references.count_references([LOOSE])
+    counts = references.count_references([LOOSE], JHAPA)
     assert set(counts) == set(references.STORE_KEYS)
     assert all(v == 0 for v in counts.values())
 
@@ -160,3 +159,67 @@ def test_repointing_twice_is_a_noop_the_second_time():
     counts, manifest = references.repoint_case_binds([LOOSE], JHAPA)
     assert counts.repointed == 0
     assert manifest == []
+
+
+def test_two_duplicates_disagreeing_on_a_verdict_are_reported_as_a_conflict():
+    # The survivor has no bind at all — the disagreement is between the duplicates.
+    case = _case("jhapa-revenue-5")
+    other = "https://jawafdehi.org/entity/location/jhapa-district"
+    CaseEntityRelationship.objects.create(
+        case=case, nes_id=LOOSE, relationship_type=RelationshipType.ACCUSED,
+        outcome=RelationshipOutcome.CONVICTED,
+    )
+    CaseEntityRelationship.objects.create(
+        case=case, nes_id=other, relationship_type=RelationshipType.ACCUSED,
+        outcome=RelationshipOutcome.ACQUITTED,
+    )
+    conflicts = references.detect_outcome_conflicts([LOOSE, other], JHAPA)
+    assert len(conflicts) == 1
+    assert conflicts[0]["case_id"] == case.id
+    assert {conflicts[0]["survivor_outcome"], conflicts[0]["duplicate_outcome"]} == {
+        RelationshipOutcome.CONVICTED, RelationshipOutcome.ACQUITTED
+    }
+
+
+def test_the_link_count_matches_what_the_repoint_reports():
+    _entity(JHAPA)
+    damak = "https://jawafdehi.org/entity/location/localunit/damak-10502"
+    _entity(damak, data={
+        "@id": damak, "@type": "Place", "name": {"en": "Damak"},
+        "containedInPlace": {"@id": LOOSE},
+        "jawafdehi:supersedes": {"@id": LOOSE},
+    })
+    counted = references.count_references([LOOSE], JHAPA)["entity_to_entity_links"]
+    moved, _ = references.repoint_entity_links(
+        [LOOSE], JHAPA, author_id="oidc:seed", merge_id="test-merge"
+    )
+    assert counted == 2
+    assert moved.repointed == counted
+
+
+def test_counts_reach_zero_once_the_links_are_repointed():
+    # What makes the endpoint able to answer "already_merged" on a repeat request.
+    _entity(JHAPA, data={"@id": JHAPA, "@type": "Place", "name": {"en": "Jhapa"},
+                         "sameAs": [LOOSE]})
+    damak = "https://jawafdehi.org/entity/location/localunit/damak-10502"
+    _entity(damak, data={
+        "@id": damak, "@type": "Place", "name": {"en": "Damak"},
+        "containedInPlace": {"@id": LOOSE},
+    })
+    references.repoint_entity_links(
+        [LOOSE], JHAPA, author_id="oidc:seed", merge_id="test-merge"
+    )
+    assert references.count_references([LOOSE], JHAPA)["entity_to_entity_links"] == 0
+
+
+def test_the_survivors_own_document_is_never_rewritten():
+    _entity(JHAPA, data={
+        "@id": JHAPA, "@type": "Place", "name": {"en": "Jhapa"},
+        "jawafdehi:supersedes": {"@id": LOOSE},
+    })
+    counts, manifest = references.repoint_entity_links(
+        [LOOSE], JHAPA, author_id="oidc:seed", merge_id="test-merge"
+    )
+    assert counts.repointed == 0
+    assert manifest == []
+    assert StoredEntity.objects.get(pk=JHAPA).data["jawafdehi:supersedes"]["@id"] == LOOSE

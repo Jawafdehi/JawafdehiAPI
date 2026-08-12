@@ -2,9 +2,8 @@
 
 Five stores across three databases. Each repoint is idempotent — it selects rows
 still holding a retired IRI, so re-running after a partial failure finds nothing
-left to do. Rows are saved one at a time rather than with ``QuerySet.update()``
-because ``CaseEntityRelationship`` is auditlog-registered and bulk updates emit no
-audit entry.
+left to do. Rows are saved one at a time because the manifest needs each row's pk
+and the colliding-bind path branches per row.
 """
 
 from __future__ import annotations
@@ -47,8 +46,8 @@ class _Manifest:
         })
 
 
-def _link_candidates(retired: List[str]):
-    """Live entities whose document text mentions any retired IRI.
+def _link_candidates(retired: List[str], survivor: str):
+    """Live entities, other than the survivor, whose document text mentions a retired IRI.
 
     One OR'd Q over a single annotated queryset — combining annotated querysets with
     ``|`` collides on the annotation alias.
@@ -62,46 +61,64 @@ def _link_candidates(retired: List[str]):
         condition |= Q(_text__contains=iri)
     return (
         StoredEntity.objects.filter(is_deleted=False)
-        .exclude(iri__in=retired)
+        .exclude(iri__in=[*retired, survivor])
         .annotate(_text=Cast("data", TextField()))
         .filter(condition)
     )
 
 
-def count_references(retired: List[str]) -> Dict[str, int]:
-    """How many references each store holds for the retired IRIs."""
+def count_references(retired: List[str], survivor: str) -> Dict[str, int]:
+    """How many references each store holds for the retired IRIs.
+
+    The entity-link count runs the same rewrite the repoint runs and sums what it
+    would change. Counting candidate documents instead would report a different
+    unit from ``repoint_entity_links`` and would count a bare-string ``sameAs``
+    mention that no rewrite can ever clear.
+    """
     from cases.models import CaseEntityRelationship
     from courts.models import BlacklistedFirm, CaseEntity, CourtCase
+
+    mapping = {iri: survivor for iri in retired}
+    links = 0
+    for row in _link_candidates(retired, survivor).only("iri", "data"):
+        _, changed = rewrite_references(row.data, mapping)
+        links += changed
 
     return {
         "case_entity_binds": CaseEntityRelationship.objects.filter(nes_id__in=retired).count(),
         "court_cases": CourtCase.objects.filter(nes_id__in=retired).count(),
         "court_case_parties": CaseEntity.objects.filter(nes_id__in=retired).count(),
         "blacklisted_firms": BlacklistedFirm.objects.filter(nes_id__in=retired).count(),
-        "entity_to_entity_links": _link_candidates(retired).count(),
+        "entity_to_entity_links": links,
     }
 
 
 def detect_outcome_conflicts(retired: List[str], survivor: str) -> List[Dict[str, Any]]:
-    """Cases where the survivor and a duplicate carry different settled verdicts."""
+    """Cases where two entities in this merge carry different settled verdicts.
+
+    Every entity is compared against every other, not just against the survivor:
+    two duplicates can disagree on a case the survivor was never bound to, and
+    folding them would delete one verdict silently.
+    """
     from cases.models import CaseEntityRelationship
 
-    survivor_rows = {
-        (r.case_id, r.relationship_type): r.outcome
-        for r in CaseEntityRelationship.objects.filter(nes_id=survivor)
-    }
+    order = [survivor, *retired]
+    rank = {iri: position for position, iri in enumerate(order)}
+    groups: Dict[Tuple[Any, str], Dict[str, str]] = {}
+    for row in CaseEntityRelationship.objects.filter(nes_id__in=order):
+        if row.outcome not in TERMINAL_OUTCOMES:
+            continue
+        groups.setdefault((row.case_id, row.relationship_type), {})[row.nes_id] = row.outcome
+
     conflicts = []
-    for row in CaseEntityRelationship.objects.filter(nes_id__in=retired):
-        theirs = survivor_rows.get((row.case_id, row.relationship_type))
-        if (
-            theirs in TERMINAL_OUTCOMES
-            and row.outcome in TERMINAL_OUTCOMES
-            and theirs != row.outcome
-        ):
+    for (case_id, _relationship_type), by_iri in sorted(groups.items()):
+        verdicts = [by_iri[iri] for iri in sorted(by_iri, key=lambda i: rank[i])]
+        differing = next((v for v in verdicts if v != verdicts[0]), None)
+        if differing is not None:
             conflicts.append({
-                "case_id": row.case_id,
-                "survivor_outcome": theirs,
-                "duplicate_outcome": row.outcome,
+                "case_id": case_id,
+                "survivor_outcome": verdicts[0],
+                "duplicate_outcome": differing,
             })
     return conflicts
 
@@ -189,7 +206,7 @@ def repoint_entity_links(
     service = PublicationService()
     counts, manifest = RefCounts(), _Manifest()
 
-    for row in list(_link_candidates(retired)):
+    for row in list(_link_candidates(retired, survivor)):
         rewritten, changed = rewrite_references(row.data, mapping)
         if not changed:
             continue
