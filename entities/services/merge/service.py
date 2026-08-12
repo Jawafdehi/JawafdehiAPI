@@ -1,22 +1,23 @@
 """Merge duplicate entities into one survivor.
 
-Phase 1 is a single transaction in the ``nes`` database: it records the merge,
-merges the survivor's document, and tombstones the duplicates — which is also what
-makes the retired IRIs redirect. Phases 2 and 3 repoint the other stores per
-database. Because every repoint selects rows still holding a retired IRI, a failure
-between phases leaves work that the next identical request finishes.
+References are repointed FIRST, each store in its own single-database transaction,
+and only then are the duplicates retired in one ``nes`` transaction. Nothing has to
+remember an interrupted merge: the duplicates stay live and resolvable until the
+last step, every repoint selects rows still holding a retired IRI, and the request
+itself names the duplicates — so re-sending it continues from where it stopped.
 """
 
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any, Dict, List, Optional
 
 from django.db import transaction
 from jawafdehi_shared.entities.ids import canonicalize_entity_iri
 
-from entities.models import EntityMerge, StoredEntity
-from entities.persistence import EntityRepository
+from entities.models import StoredEntity
+from entities.persistence import MERGED_INTO_KEY, EntityRepository
 from entities.services.publication import PublicationService
 
 from . import references
@@ -27,14 +28,6 @@ logger = logging.getLogger(__name__)
 
 MAX_DUPLICATES = 25
 MAX_REFERENCES = 1000
-
-
-def _accumulate(per_store: Dict[str, Dict[str, int]], counts: Dict[str, Dict[str, int]]) -> None:
-    """Fold one phase-two result into a running per-store total."""
-    for store, value in counts.items():
-        running = per_store.setdefault(store, {"repointed": 0, "deduplicated": 0})
-        running["repointed"] += value["repointed"]
-        running["deduplicated"] += value["deduplicated"]
 
 
 class MergeError(Exception):
@@ -69,40 +62,10 @@ class EntityMergeService:
         candidates = self._classify(survivor_iri, duplicate_iris, survivor_doc, type_family)
 
         if not candidates:
-            pending = self._pending_merges(survivor_iri)
-            if not pending:
-                return self._response(
-                    merge_id=None, status="already_merged", dry_run=dry_run,
-                    survivor=survivor_doc, retired=duplicate_iris,
-                    inherited={}, per_store={}, warnings=[],
-                )
-            # Every duplicate is tombstoned but an earlier attempt stopped before it
-            # finished repointing. Returning "already_merged" here would strand those
-            # references on a retired entity forever.
-            pending_duplicates = sorted({iri for record in pending for iri in record.duplicate_iris})
-            if dry_run:
-                counts = references.count_references(pending_duplicates, survivor_iri)
-                return self._response(
-                    merge_id=None, status="planned", dry_run=True,
-                    survivor=survivor_doc, retired=pending_duplicates, inherited={},
-                    per_store={k: {"repointed": v, "deduplicated": 0}
-                               for k, v in counts.items()},
-                    warnings=[],
-                )
-            per_store: Dict[str, Dict[str, int]] = {}
-            warnings: List[str] = []
-            for record in pending:
-                _accumulate(
-                    per_store,
-                    self._phase_two(record, record.duplicate_iris, survivor_iri, author_id),
-                )
-                warnings.extend(self._phase_three(record))
             return self._response(
-                # The newest record resumed — one id has to stand for the batch.
-                merge_id=str(pending[-1].id), status="complete", dry_run=False,
-                survivor=self.repo.get_entity(survivor_iri), retired=pending_duplicates,
-                inherited={}, per_store=per_store,
-                warnings=warnings,
+                merge_id=None, status="already_merged", dry_run=dry_run,
+                survivor=survivor_doc, retired=duplicate_iris,
+                inherited={}, per_store={}, warnings=[],
             )
 
         retired = list(candidates)
@@ -146,47 +109,65 @@ class EntityMergeService:
                 warnings=warnings,
             )
 
-        # Sweep up any earlier attempt into this survivor that stopped partway, even
-        # when this request names different duplicates. Nothing else can find them:
-        # EntityMerge has no failed state and there is no listing of stalled merges.
-        per_store: Dict[str, Dict[str, int]] = {}
-        for record in self._pending_merges(survivor_iri):
-            _accumulate(
-                per_store,
-                self._phase_two(record, record.duplicate_iris, survivor_iri, author_id),
-            )
-            warnings.extend(self._phase_three(record))
+        # Correlates the log lines of one request. Nothing stores it: the request
+        # names the duplicates, so a resend needs no record to find its own work.
+        merge_id = str(uuid.uuid4())
+        description = change_description or f"Merged {len(retired)} duplicate(s)"
+        logger.info("merge %s: %s <= %s", merge_id, survivor_iri, ", ".join(retired))
 
-        merge = self._phase_one(
-            survivor_iri=survivor_iri, retired=retired, candidates=candidates,
-            survivor_doc=survivor_doc, merged_doc=merged_doc,
-            author_id=author_id, change_description=change_description,
+        per_store, manifest = self._repoint(retired, survivor_iri, author_id, merge_id)
+        self._retire(
+            survivor_iri=survivor_iri, retired=retired, merged_doc=merged_doc,
+            author_id=author_id, description=description,
         )
-        _accumulate(per_store, self._phase_two(merge, retired, survivor_iri, author_id))
-        warnings = [*warnings, *self._phase_three(merge)]
+        warnings = [*warnings, *self._reindex(manifest, merge_id)]
 
         return self._response(
-            merge_id=str(merge.id), status="complete", dry_run=False,
+            merge_id=merge_id, status="complete", dry_run=False,
             survivor=self.repo.get_entity(survivor_iri), retired=retired,
             inherited=inherited, per_store=per_store, warnings=warnings,
         )
 
     # --- phases ---------------------------------------------------------
 
-    def _phase_one(self, *, survivor_iri, retired, candidates, survivor_doc,
-                   merged_doc, author_id, change_description) -> EntityMerge:
-        """Record the merge, merge the survivor, tombstone the duplicates. Atomic in nes."""
-        description = change_description or f"Merged {len(retired)} duplicate(s)"
+    def _repoint(self, retired, survivor_iri, author_id, merge_id):
+        """Repoint each store in its own transaction. Idempotent, so a resend resumes.
+
+        The returned counts are what THIS call moved, not a running total across
+        attempts — a resend after a crash reports only its own work.
+        """
+        per_store: Dict[str, Dict[str, int]] = {}
+        manifest: List[Dict[str, Any]] = []
+        try:
+            with transaction.atomic(using="default"):
+                counts, entries = references.repoint_case_binds(retired, survivor_iri)
+                per_store["case_entity_binds"] = vars(counts)
+                manifest.extend(entries)
+
+            with transaction.atomic(using="ngm"):
+                court_counts, entries = references.repoint_court_rows(retired, survivor_iri)
+                per_store.update({k: vars(v) for k, v in court_counts.items()})
+                manifest.extend(entries)
+
+            with transaction.atomic(using="nes"):
+                counts, entries = references.repoint_entity_links(
+                    retired, survivor_iri, author_id=author_id, merge_id=merge_id
+                )
+                per_store["entity_to_entity_links"] = vars(counts)
+                manifest.extend(entries)
+        except Exception as exc:
+            logger.exception("merge %s incomplete", merge_id)
+            raise MergeError(
+                "MERGE_INCOMPLETE",
+                "Repointing did not finish, so no duplicate has been retired. "
+                "Send the same request again to continue from where it stopped.",
+                500, merge_id=merge_id,
+            ) from exc
+        return per_store, manifest
+
+    def _retire(self, *, survivor_iri, retired, merged_doc, author_id, description) -> None:
+        """Publish the merged survivor and tombstone the duplicates. Atomic in nes."""
         with transaction.atomic(using="nes"):
-            merge = EntityMerge.objects.create(
-                survivor_iri=survivor_iri,
-                duplicate_iris=retired,
-                duplicate_snapshots={iri: candidates[iri] for iri in retired},
-                survivor_snapshot_before=survivor_doc,
-                status=EntityMerge.PENDING,
-                author_id=author_id,
-                change_description=description,
-            )
             self.publication.update_entity(
                 doc=merged_doc, author_id=author_id, change_description=description
             )
@@ -204,82 +185,32 @@ class EntityMergeService:
                         "DUPLICATE_ALREADY_MERGED",
                         f"{iri} was retired by a concurrent merge.", 409,
                     )
-                row.is_deleted = True
-                row.merged_into = survivor_iri
-                row.updated_at = references.utcnow()
-                row.save(update_fields=["is_deleted", "merged_into", "updated_at"])
-        return merge
-
-    def _phase_two(self, merge, retired, survivor_iri, author_id) -> Dict[str, Dict[str, int]]:
-        """Repoint each store in its own transaction. Idempotent, so a retry resumes.
-
-        The returned counts are what THIS call moved, not the merge's running total —
-        a resume reports only its own work, same as ``repoint_entity_links``' per-link
-        counts already differ from its per-document manifest entries.
-        """
-        per_store: Dict[str, Dict[str, int]] = {}
-        # Seed from whatever an earlier, interrupted attempt already saved, and
-        # de-duplicate by identity, so a resume's save doesn't erase entries a crash
-        # already recorded (e.g. a dedup that deleted a row on the first attempt).
-        manifest: List[Dict[str, Any]] = list(merge.reference_manifest or [])
-        seen = {(e["store"], e["pk"], e["field"]) for e in manifest}
-
-        def record(entries: List[Dict[str, Any]]) -> None:
-            for entry in entries:
-                key = (entry["store"], entry["pk"], entry["field"])
-                if key in seen:
-                    continue
-                seen.add(key)
-                manifest.append(entry)
-
-        try:
-            with transaction.atomic(using="default"):
-                counts, entries = references.repoint_case_binds(retired, survivor_iri)
-                per_store["case_entity_binds"] = vars(counts)
-                record(entries)
-
-            with transaction.atomic(using="ngm"):
-                court_counts, entries = references.repoint_court_rows(retired, survivor_iri)
-                per_store.update({k: vars(v) for k, v in court_counts.items()})
-                record(entries)
-
-            with transaction.atomic(using="nes"):
-                counts, entries = references.repoint_entity_links(
-                    retired, survivor_iri, author_id=author_id, merge_id=str(merge.id)
+                doc = dict(row.data)
+                doc[MERGED_INTO_KEY] = {"@id": survivor_iri}
+                # Document first: every upsert forces is_deleted=False (see
+                # persistence._entity_row_fields), so the other order undoes the
+                # tombstone. validate=False because this is a mechanical flag write on
+                # an already-stored document, as in ``repoint_entity_links``.
+                self.publication.update_entity(
+                    doc=doc, author_id=author_id, change_description=description,
+                    validate=False,
                 )
-                per_store["entity_to_entity_links"] = vars(counts)
-                record(entries)
-        except Exception as exc:
-            merge.reference_manifest = manifest
-            merge.save(update_fields=["reference_manifest"])
-            logger.exception("merge %s incomplete", merge.id)
-            raise MergeError(
-                "MERGE_INCOMPLETE",
-                "The duplicates were retired but repointing did not finish. "
-                "Send the same request again to resume.",
-                500, merge_id=str(merge.id),
-            ) from exc
+                row.is_deleted = True
+                row.updated_at = references.utcnow()
+                row.save(update_fields=["is_deleted", "updated_at"])
 
-        merge.reference_manifest = manifest
-        merge.status = EntityMerge.COMPLETE
-        merge.completed_at = references.utcnow()
-        merge.save(update_fields=["reference_manifest", "status", "completed_at"])
-        return per_store
-
-    def _phase_three(self, merge) -> List[str]:
+    def _reindex(self, manifest, merge_id) -> List[str]:
         """Re-index the cases this merge touched, warning rather than failing on an outage.
 
-        Phase two already marked the merge complete and moved every row, so a search
-        outage must not present as a failed merge. The spec's ``warnings`` array is
-        advisory and never blocks.
+        Every row has moved and every duplicate is retired by now, so a search outage
+        must not present as a failed merge. The spec's ``warnings`` array is advisory
+        and never blocks.
         """
         from cases.models import Case
         from cases import search_index as case_search
 
         case_ids = sorted({
-            entry["case_id"]
-            for entry in (merge.reference_manifest or [])
-            if entry.get("case_id") is not None
+            entry["case_id"] for entry in manifest if entry.get("case_id") is not None
         })
         stale = 0
         for case_id in case_ids:
@@ -288,10 +219,10 @@ class EntityMergeService:
                 continue
             try:
                 # index_now, not index — index() is the best_effort wrapper and
-                # returns None on failure, so phase three could not count stale cases.
+                # returns None on failure, so this could not count stale cases.
                 case_search.index_now(case)
             except Exception:
-                logger.exception("merge %s could not re-index case %s", merge.id, case_id)
+                logger.exception("merge %s could not re-index case %s", merge_id, case_id)
                 stale += 1
         if not stale:
             return []
@@ -328,22 +259,6 @@ class EntityMergeService:
                 "SELF_MERGE", "The survivor cannot also be listed as a duplicate.", 422
             )
         return survivor, duplicates
-
-    def _pending_merges(self, survivor_iri: str) -> List[EntityMerge]:
-        """Unfinished merges into this survivor, oldest first.
-
-        Matched on the survivor alone, not on the duplicates: an attempt that stopped
-        partway is invisible to every other code path, so any merge into the same
-        survivor is the only chance to finish it. Also matches a record whose own
-        survivor has since been merged away.
-        """
-        found = []
-        for merge in EntityMerge.objects.filter(status=EntityMerge.PENDING).order_by("created_at"):
-            if merge.survivor_iri == survivor_iri:
-                found.append(merge)
-            elif self.repo.resolve_tombstone(merge.survivor_iri) == survivor_iri:
-                found.append(merge)
-        return found
 
     def _load_survivor(self, survivor_iri):
         doc = self.repo.get_entity(survivor_iri)

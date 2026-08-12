@@ -1,4 +1,4 @@
-"""EntityMergeService — phases, rejections, idempotency, resume."""
+"""EntityMergeService — phases, rejections, idempotency, resend after a crash."""
 
 import json
 
@@ -8,7 +8,8 @@ from cases.models import (
     Case, CaseEntityRelationship, CaseState, CaseType, RelationshipOutcome, RelationshipType,
 )
 from courts.models import Court, CourtCase
-from entities.models import EntityMerge, StoredEntity
+from entities.models import StoredEntity
+from entities.persistence import MERGED_INTO_KEY, EntityRepository
 from entities.services.merge import EntityMergeService, MergeError
 from entities.services.publication import PublicationService
 from entities.write_validation import normalize_authoring_payload
@@ -42,7 +43,7 @@ def _merge(**kwargs):
 
 
 def _crash_once_in_court_rows(monkeypatch, **kwargs):
-    """Run a merge that dies in the ngm phase; return the PENDING merge's id."""
+    """Run a merge that dies in the ngm phase; return its correlation id."""
     from entities.services.merge import service as svc
 
     def _boom(*args, **kwargs):
@@ -51,7 +52,7 @@ def _crash_once_in_court_rows(monkeypatch, **kwargs):
     monkeypatch.setattr(svc.references, "repoint_court_rows", _boom)
     with pytest.raises(MergeError) as exc:
         _merge(**kwargs)
-    # Restored now, not at test teardown — callers resume with the real function.
+    # Restored now, not at test teardown — callers resend with the real function.
     monkeypatch.undo()
     assert exc.value.code == "MERGE_INCOMPLETE"
     assert exc.value.http_status == 500
@@ -64,7 +65,7 @@ def test_happy_path_tombstones_the_duplicate_and_keeps_the_survivor():
     assert result["status"] == "complete"
     dup = StoredEntity.objects.get(pk=LOOSE)
     assert dup.is_deleted is True
-    assert dup.merged_into == JHAPA
+    assert dup.data[MERGED_INTO_KEY] == {"@id": JHAPA}
     survivor = StoredEntity.objects.get(pk=JHAPA)
     assert survivor.is_deleted is False
     assert survivor.version == 2
@@ -72,14 +73,21 @@ def test_happy_path_tombstones_the_duplicate_and_keeps_the_survivor():
     assert LOOSE in survivor.data["sameAs"]
 
 
-def test_merge_record_captures_snapshots_and_completes():
+def test_the_survivor_pointer_lives_in_the_retired_document():
     _seed_pair()
     result = _merge()
-    merge = EntityMerge.objects.get(pk=result["merge_id"])
-    assert merge.status == EntityMerge.COMPLETE
-    assert merge.completed_at is not None
-    assert merge.duplicate_snapshots[LOOSE]["@type"] == "Place"
-    assert merge.survivor_snapshot_before["@id"] == JHAPA
+    assert result["merge_id"]
+    assert StoredEntity.objects.get(pk=LOOSE).data[MERGED_INTO_KEY]["@id"] == JHAPA
+    assert EntityRepository().resolve_tombstone(LOOSE) == JHAPA
+
+
+def test_a_chain_of_merges_resolves_to_the_last_survivor():
+    _seed_pair()
+    _seed("location/district", "jhapa-far-east", "AdministrativeArea")
+    final = "https://jawafdehi.org/entity/location/district/jhapa-far-east"
+    _merge()
+    _merge(survivor_iri=final, duplicate_iris=[JHAPA])
+    assert EntityRepository().resolve_tombstone(LOOSE) == final
 
 
 def test_dry_run_writes_nothing():
@@ -89,7 +97,6 @@ def test_dry_run_writes_nothing():
     assert result["merge_id"] is None
     assert StoredEntity.objects.get(pk=LOOSE).is_deleted is False
     assert StoredEntity.objects.get(pk=JHAPA).version == 1
-    assert not EntityMerge.objects.exists()
 
 
 def test_rerunning_the_same_merge_is_a_safe_noop():
@@ -100,7 +107,6 @@ def test_rerunning_the_same_merge_is_a_safe_noop():
     assert result["merge_id"] is None
     assert result["total_references"] == 0
     assert StoredEntity.objects.get(pk=JHAPA).version == 2
-    assert EntityMerge.objects.count() == 1
 
 
 def test_self_merge_is_rejected():
@@ -208,10 +214,36 @@ def test_conflicting_terminal_verdicts_are_rejected_before_anything_is_written()
     assert StoredEntity.objects.get(pk=LOOSE).is_deleted is False
 
 
-def test_a_partial_merge_resumes_on_the_next_attempt(monkeypatch):
+def test_a_crash_during_repointing_retires_nothing(monkeypatch):
+    # The guarantee the reversed phase order buys: a half-done merge leaves every
+    # duplicate live, so no case renders bound to an invisible entity.
     _seed_pair()
     case = Case.objects.create(
-        title="Jhapa case", slug="jhapa-resume", case_type=CaseType.CORRUPTION,
+        title="Jhapa case", slug="jhapa-crash", case_type=CaseType.CORRUPTION,
+        state=CaseState.DRAFT, short_description="t", description="t",
+    )
+    CaseEntityRelationship.objects.create(
+        case=case, nes_id=LOOSE, relationship_type=RelationshipType.LOCATION
+    )
+
+    _crash_once_in_court_rows(monkeypatch)
+
+    dup = StoredEntity.objects.get(pk=LOOSE)
+    assert dup.is_deleted is False
+    assert MERGED_INTO_KEY not in dup.data
+    assert EntityRepository().get_entity(LOOSE) is not None
+    assert EntityRepository().resolve_tombstone(LOOSE) is None
+    # The survivor's merged document is written in the same last step, so it too
+    # is untouched.
+    assert StoredEntity.objects.get(pk=JHAPA).version == 1
+
+
+def test_resending_after_a_crash_completes_the_merge(monkeypatch):
+    _seed_pair()
+    _seed("location", "damak", "Place", containedInPlace={"@id": LOOSE})
+    damak = "https://jawafdehi.org/entity/location/damak"
+    case = Case.objects.create(
+        title="Jhapa case", slug="jhapa-resend", case_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT, short_description="t", description="t",
     )
     CaseEntityRelationship.objects.create(
@@ -223,28 +255,25 @@ def test_a_partial_merge_resumes_on_the_next_attempt(monkeypatch):
     )
     CourtCase.objects.create(case_number="081-CR-0081", court=court, nes_id=LOOSE)
 
-    merge_id = _crash_once_in_court_rows(monkeypatch)
-
-    # Tombstone landed, so the retired IRI already resolves...
-    assert StoredEntity.objects.get(pk=LOOSE).merged_into == JHAPA
-    assert EntityMerge.objects.get(pk=merge_id).status == EntityMerge.PENDING
-    # ...and the case bind that had already moved must not move twice.
+    _crash_once_in_court_rows(monkeypatch)
+    # The case bind moved before the crash; it must not move twice.
     assert CaseEntityRelationship.objects.filter(nes_id=JHAPA).count() == 1
 
     result = _merge()
     assert result["status"] == "complete"
-    assert EntityMerge.objects.get(pk=merge_id).status == EntityMerge.COMPLETE
+    assert StoredEntity.objects.get(pk=LOOSE).is_deleted is True
     assert CaseEntityRelationship.objects.filter(nes_id=JHAPA).count() == 1
     assert not CaseEntityRelationship.objects.filter(nes_id=LOOSE).exists()
-    # The store the first attempt never reached must be repointed by the resume.
+    # The stores the first attempt never reached are repointed by the resend.
     assert not CourtCase.objects.filter(nes_id=LOOSE).exists()
     assert CourtCase.objects.filter(nes_id=JHAPA).count() == 1
+    assert StoredEntity.objects.get(pk=damak).data["containedInPlace"]["@id"] == JHAPA
 
 
-def test_a_dry_run_against_a_half_finished_merge_writes_nothing(monkeypatch):
+def test_a_dry_run_after_a_crash_writes_nothing(monkeypatch):
     _seed_pair()
     case = Case.objects.create(
-        title="Jhapa case", slug="jhapa-dryresume", case_type=CaseType.CORRUPTION,
+        title="Jhapa case", slug="jhapa-drycrash", case_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT, short_description="t", description="t",
     )
     CaseEntityRelationship.objects.create(
@@ -255,92 +284,29 @@ def test_a_dry_run_against_a_half_finished_merge_writes_nothing(monkeypatch):
     result = _merge(dry_run=True)
     assert result["status"] == "planned"
     assert result["merge_id"] is None
-    assert EntityMerge.objects.filter(status=EntityMerge.PENDING).count() == 1
+    assert StoredEntity.objects.get(pk=LOOSE).is_deleted is False
 
 
-def test_a_still_failing_sweep_stops_the_request_before_it_stalls_a_second_merge(monkeypatch):
-    # During an outage this leaves one stalled record instead of one per attempt,
-    # and the second request's duplicate is never tombstoned.
-    _seed_pair()
-    _seed("location", "jhapa-2", "Place")
-    other = "https://jawafdehi.org/entity/location/jhapa-2"
-    _crash_once_in_court_rows(monkeypatch, duplicate_iris=[LOOSE])
-    _crash_once_in_court_rows(monkeypatch, duplicate_iris=[other])
-    assert EntityMerge.objects.filter(status=EntityMerge.PENDING).count() == 1
-    assert StoredEntity.objects.get(pk=other).is_deleted is False
-
-
-def test_every_stalled_merge_for_one_survivor_is_resumed():
-    # Two PENDING records for one survivor now only arise from legacy data, since the
-    # sweep runs before a new record is created — but the resume loop takes a list.
-    _seed_pair()
-    _seed("location", "jhapa-2", "Place")
-    other = "https://jawafdehi.org/entity/location/jhapa-2"
-    court = Court.objects.create(
-        identifier="jhapapair", court_type="district",
-        full_name_nepali="जिल्ला अदालत झापा", full_name_english="District Court Jhapa",
-    )
-    CourtCase.objects.create(case_number="081-CR-0101", court=court, nes_id=LOOSE)
-    CourtCase.objects.create(case_number="081-CR-0102", court=court, nes_id=other)
-
-    records = []
-    for iri in (LOOSE, other):
-        row = StoredEntity.objects.get(pk=iri)
-        row.is_deleted = True
-        row.merged_into = JHAPA
-        row.save(update_fields=["is_deleted", "merged_into"])
-        records.append(
-            EntityMerge.objects.create(
-                survivor_iri=JHAPA, duplicate_iris=[iri], duplicate_snapshots={},
-                survivor_snapshot_before={}, status=EntityMerge.PENDING,
-                author_id="oidc:seed", change_description="stalled",
-            )
-        )
-
-    result = _merge(duplicate_iris=[LOOSE])
-    assert result["status"] == "complete"
-    assert all(
-        EntityMerge.objects.get(pk=r.pk).status == EntityMerge.COMPLETE for r in records
-    )
-    assert not CourtCase.objects.filter(nes_id=LOOSE).exists()
-    assert not CourtCase.objects.filter(nes_id=other).exists()
-
-
-def test_a_pending_merge_survives_its_survivor_being_merged_away(monkeypatch):
-    # A → S stalls, then S → T. Sending A → T must still finish A's repointing.
+def test_references_a_crashed_attempt_moved_follow_the_survivor(monkeypatch):
+    # A → S crashes once the case bind has moved, then S is merged into T. The bind
+    # travels with S, so sending A → T strands nothing.
     _seed_pair()
     _seed("location/district", "jhapa-far-east", "AdministrativeArea")
     final = "https://jawafdehi.org/entity/location/district/jhapa-far-east"
-    court = Court.objects.create(
-        identifier="jhapafareast", court_type="district",
-        full_name_nepali="जिल्ला अदालत झापा पूर्व", full_name_english="District Court Jhapa East",
-    )
-    CourtCase.objects.create(case_number="081-CR-0099", court=court, nes_id=LOOSE)
-    _crash_once_in_court_rows(monkeypatch)
-    _merge(survivor_iri=final, duplicate_iris=[JHAPA])
-
-    result = _merge(survivor_iri=final, duplicate_iris=[LOOSE])
-    assert result["status"] == "complete"
-    assert not CourtCase.objects.filter(nes_id=LOOSE).exists()
-    assert not EntityMerge.objects.filter(status=EntityMerge.PENDING).exists()
-
-
-def test_a_resume_keeps_the_first_attempts_manifest_entries(monkeypatch):
-    _seed_pair()
     case = Case.objects.create(
-        title="Jhapa case", slug="jhapa-manifest", case_type=CaseType.CORRUPTION,
+        title="Jhapa case", slug="jhapa-followed", case_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT, short_description="t", description="t",
     )
     CaseEntityRelationship.objects.create(
         case=case, nes_id=LOOSE, relationship_type=RelationshipType.LOCATION
     )
-    merge_id = _crash_once_in_court_rows(monkeypatch)
-    first = EntityMerge.objects.get(pk=merge_id).reference_manifest
-    assert any(e["store"] == "case_entity_binds" for e in first)
+    _crash_once_in_court_rows(monkeypatch)
+    _merge(survivor_iri=final, duplicate_iris=[JHAPA])
 
-    _merge()
-    after = EntityMerge.objects.get(pk=merge_id).reference_manifest
-    assert all(entry in after for entry in first)
+    result = _merge(survivor_iri=final, duplicate_iris=[LOOSE])
+    assert result["status"] == "complete"
+    assert CaseEntityRelationship.objects.filter(nes_id=final).count() == 1
+    assert not CaseEntityRelationship.objects.filter(nes_id__in=[LOOSE, JHAPA]).exists()
 
 
 def test_a_search_outage_warns_instead_of_failing_a_finished_merge(monkeypatch):
@@ -363,7 +329,7 @@ def test_a_search_outage_warns_instead_of_failing_a_finished_merge(monkeypatch):
 
     assert result["status"] == "complete"
     assert any("re-index" in w for w in result["warnings"])
-    assert EntityMerge.objects.get(pk=result["merge_id"]).status == EntityMerge.COMPLETE
+    assert StoredEntity.objects.get(pk=LOOSE).is_deleted is True
 
 
 def test_warns_when_the_survivor_looks_less_complete_than_the_duplicate():
@@ -373,24 +339,6 @@ def test_warns_when_the_survivor_looks_less_complete_than_the_duplicate():
           description={"ne": "झापा जिल्ला"})
     result = _merge(survivor_iri=LOOSE, duplicate_iris=[JHAPA], dry_run=True)
     assert result["warnings"]
-
-
-def test_a_stalled_merge_is_swept_up_by_the_next_merge_into_the_same_survivor(monkeypatch):
-    # The stalled attempt names a different duplicate, so no other path would find it.
-    _seed_pair()
-    _seed("location", "jhapa-2", "Place")
-    other = "https://jawafdehi.org/entity/location/jhapa-2"
-    court = Court.objects.create(
-        identifier="jhapasweep", court_type="district",
-        full_name_nepali="जिल्ला अदालत झापा", full_name_english="District Court Jhapa",
-    )
-    CourtCase.objects.create(case_number="081-CR-0099", court=court, nes_id=LOOSE)
-    stalled = _crash_once_in_court_rows(monkeypatch, duplicate_iris=[LOOSE])
-
-    result = _merge(duplicate_iris=[other])
-    assert result["status"] == "complete"
-    assert EntityMerge.objects.get(pk=stalled).status == EntityMerge.COMPLETE
-    assert not CourtCase.objects.filter(nes_id=LOOSE).exists()
 
 
 def test_a_neighbour_that_no_longer_validates_does_not_wedge_the_merge():
@@ -456,29 +404,28 @@ def test_only_the_cases_the_merge_touched_are_reindexed():
     assert indexed == [touched.id]
 
 
-def test_a_duplicate_retired_concurrently_is_rejected():
-    # Simulates the concurrent write landing right as this merge's phase one starts:
-    # EntityMerge.objects.create is the first thing _phase_one does after _classify
-    # has already seen the duplicate live.
+def test_a_duplicate_retired_concurrently_is_rejected(monkeypatch):
+    # The concurrent write lands after _classify saw the duplicate live and before
+    # the retire step's row lock re-checks it.
     _seed_pair()
     from entities.services.merge import service as svc
 
-    original_create = svc.EntityMerge.objects.create
+    original = svc.references.repoint_court_rows
 
-    def _tombstone_then_create(*args, **kwargs):
+    def _tombstone_then_repoint(*args, **kwargs):
         row = StoredEntity.objects.get(pk=LOOSE)
         row.is_deleted = True
-        row.merged_into = "https://jawafdehi.org/entity/location/elsewhere"
-        row.save(update_fields=["is_deleted", "merged_into"])
-        return original_create(*args, **kwargs)
+        row.data = {**row.data, MERGED_INTO_KEY: {
+            "@id": "https://jawafdehi.org/entity/location/elsewhere"
+        }}
+        row.save(update_fields=["is_deleted", "data"])
+        return original(*args, **kwargs)
 
-    svc.EntityMerge.objects.create = _tombstone_then_create
-    try:
-        with pytest.raises(MergeError) as exc:
-            _merge()
-        assert exc.value.code == "DUPLICATE_ALREADY_MERGED"
-    finally:
-        svc.EntityMerge.objects.create = original_create
+    monkeypatch.setattr(svc.references, "repoint_court_rows", _tombstone_then_repoint)
+    with pytest.raises(MergeError) as exc:
+        _merge()
+    assert exc.value.code == "DUPLICATE_ALREADY_MERGED"
+    assert exc.value.http_status == 409
 
 
 def test_republishing_a_retired_entity_clears_its_merge_pointer():
@@ -486,7 +433,7 @@ def test_republishing_a_retired_entity_clears_its_merge_pointer():
     _merge()
     dup = StoredEntity.objects.get(pk=LOOSE)
     assert dup.is_deleted is True
-    assert dup.merged_into == JHAPA
+    assert dup.data[MERGED_INTO_KEY] == {"@id": JHAPA}
 
     PublicationService().create_entity(
         doc={"@id": LOOSE, "@type": "Place", "name": {"en": "Jhapa (again)"}},
@@ -494,4 +441,5 @@ def test_republishing_a_retired_entity_clears_its_merge_pointer():
     )
     row = StoredEntity.objects.get(pk=LOOSE)
     assert row.is_deleted is False
-    assert not row.merged_into
+    assert MERGED_INTO_KEY not in row.data
+    assert EntityRepository().resolve_tombstone(LOOSE) is None

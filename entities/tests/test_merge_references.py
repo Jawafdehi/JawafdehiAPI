@@ -63,20 +63,30 @@ def test_colliding_bind_folds_into_its_sibling_instead_of_duplicating():
     assert "from duplicate" in rows.first().notes
 
 
-def test_a_deduplicated_bind_is_recoverable_from_the_manifest():
+def test_a_deduplicated_bind_is_recoverable_from_the_audit_log():
+    # Why the manifest carries no copy of the deleted row: auditlog already keeps
+    # every field of it (cases.apps registers CaseEntityRelationship).
+    from auditlog.models import LogEntry
+
     case = _case("jhapa-revenue-9")
     CaseEntityRelationship.objects.create(
         case=case, nes_id=JHAPA, relationship_type=RelationshipType.ACCUSED,
         outcome=RelationshipOutcome.CHARGED,
     )
-    CaseEntityRelationship.objects.create(
+    dropped = CaseEntityRelationship.objects.create(
         case=case, nes_id=LOOSE, relationship_type=RelationshipType.ACCUSED,
         outcome=RelationshipOutcome.CONVICTED, notes="from duplicate",
     )
     _, manifest = references.repoint_case_binds([LOOSE], JHAPA)
-    entry = next(e for e in manifest if e["action"] == "deduplicated")
-    assert entry["deleted_row"]["outcome"] == RelationshipOutcome.CONVICTED
-    assert entry["deleted_row"]["notes"] == "from duplicate"
+    assert any(e["action"] == "deduplicated" for e in manifest)
+
+    entry = LogEntry.objects.get(
+        object_pk=str(dropped.pk), action=LogEntry.Action.DELETE,
+        content_type__model="caseentityrelationship",
+    )
+    assert entry.changes["nes_id"][0] == LOOSE
+    assert entry.changes["outcome"][0] == RelationshipOutcome.CONVICTED
+    assert entry.changes["notes"][0] == "from duplicate"
 
 
 def test_two_duplicates_on_one_case_fold_into_a_single_bind():

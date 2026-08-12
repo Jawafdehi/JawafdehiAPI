@@ -8,6 +8,7 @@ from django.core.management import CommandError, call_command
 
 from cases.models import Case, CaseEntityRelationship, CaseState, CaseType, RelationshipType
 from entities.models import StoredEntity
+from entities.persistence import EntityRepository
 from entities.services.merge import MergeError
 from entities.services.publication import PublicationService
 from entities.write_validation import normalize_authoring_payload
@@ -32,7 +33,7 @@ def test_command_merges_and_tombstones():
     _seed("location", "jhapa", "Place")
     out = StringIO()
     call_command("merge_entities", survivor=JHAPA, duplicate=[LOOSE], stdout=out)
-    assert StoredEntity.objects.get(pk=LOOSE).merged_into == JHAPA
+    assert EntityRepository().resolve_tombstone(LOOSE) == JHAPA
     summary = json.loads(out.getvalue())
     assert summary["status"] == "complete"
     assert summary["merge_id"]
@@ -69,7 +70,7 @@ def test_the_command_runs_a_merge_the_endpoint_would_refuse(monkeypatch):
     assert exc.value.code == "MERGE_TOO_LARGE"
 
     call_command("merge_entities", survivor=JHAPA, duplicate=[LOOSE])
-    assert StoredEntity.objects.get(pk=LOOSE).merged_into == JHAPA
+    assert EntityRepository().resolve_tombstone(LOOSE) == JHAPA
 
 
 def test_a_refused_merge_surfaces_as_a_command_error():

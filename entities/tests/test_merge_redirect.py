@@ -76,6 +76,16 @@ class RetiredEntityRedirectTests(APITestCase):
         self.assertEqual(resp.data["redirected"][LOOSE], JHAPA)
         self.assertNotIn("not_found", resp.data)
 
+    def test_a_plainly_soft_deleted_entity_404s_instead_of_redirecting(self):
+        # DELETE writes no pointer, so its row is not a tombstone.
+        _seed("location", "jhapa-deleted", "Place")
+        deleted = "https://jawafdehi.org/entity/location/jhapa-deleted"
+        row = StoredEntity.objects.get(pk=deleted)
+        row.is_deleted = True
+        row.save(update_fields=["is_deleted"])
+        resp = self.client.get(f"/api/entities/{quote(deleted, safe='')}")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
     def test_a_survivor_that_was_later_deleted_does_not_redirect(self):
         survivor_row = StoredEntity.objects.get(pk=JHAPA)
         survivor_row.is_deleted = True

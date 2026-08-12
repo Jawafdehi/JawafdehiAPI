@@ -1,9 +1,9 @@
-"""Tombstone pointer + merge audit record."""
+"""The tombstone pointer, which lives in the retired entity's own document."""
 
 import pytest
 
-from entities.models import EntityMerge, StoredEntity
-from entities.persistence import EntityRepository
+from entities.models import StoredEntity
+from entities.persistence import MERGED_INTO_KEY, EntityRepository
 
 JHAPA = "https://jawafdehi.org/entity/location/district/jhapa-np0104"
 LOOSE = "https://jawafdehi.org/entity/location/jhapa"
@@ -14,20 +14,26 @@ OLDER = "https://jawafdehi.org/entity/location/jhapa-old"
 pytestmark = pytest.mark.django_db(databases="__all__")
 
 
-def _entity(iri, **kwargs):
+def _entity(iri, merged_into=None, **kwargs):
+    data = {"@id": iri, "@type": "Place", "name": {"en": "Jhapa"}}
+    if merged_into:
+        data[MERGED_INTO_KEY] = {"@id": merged_into}
     return StoredEntity.objects.create(
         iri=iri, entity_type="Place", prefix="location", slug=iri.rsplit("/", 1)[-1],
-        data={"@id": iri, "@type": "Place", "name": {"en": "Jhapa"}}, **kwargs
+        data=data, **kwargs
     )
-
-
-def test_merged_into_defaults_to_null():
-    assert _entity(JHAPA).merged_into is None
 
 
 def test_resolve_tombstone_returns_none_for_a_live_entity():
     _entity(JHAPA)
     assert EntityRepository().resolve_tombstone(JHAPA) is None
+
+
+def test_a_soft_deleted_entity_without_a_pointer_is_not_a_tombstone():
+    # DELETE /api/entities/{ref} flips is_deleted and writes no pointer; that row
+    # must 404, not redirect.
+    _entity(LOOSE, is_deleted=True)
+    assert EntityRepository().resolve_tombstone(LOOSE) is None
 
 
 def test_resolve_tombstone_follows_a_chain_to_the_final_survivor():
@@ -50,20 +56,3 @@ def test_resolve_tombstone_terminates_on_a_cycle():
     # The guarantee is bounded work, not a particular answer: with max_hops=3 the
     # walk is LOOSE→OLDER→LOOSE→OLDER and returns where it stopped.
     assert EntityRepository().resolve_tombstone(LOOSE, max_hops=3) == OLDER
-
-
-def test_merge_record_round_trips_snapshots_and_manifest():
-    merge = EntityMerge.objects.create(
-        survivor_iri=JHAPA,
-        duplicate_iris=[LOOSE],
-        duplicate_snapshots={LOOSE: {"@id": LOOSE, "@type": "Place"}},
-        survivor_snapshot_before={"@id": JHAPA, "@type": "AdministrativeArea"},
-        status=EntityMerge.PENDING,
-        author_id="oidc:377592055028777324",
-        change_description="Two entities for one Jhapa district",
-    )
-    merge.refresh_from_db()
-    assert merge.status == EntityMerge.PENDING
-    assert merge.duplicate_snapshots[LOOSE]["@type"] == "Place"
-    assert merge.reference_manifest == []
-    assert merge.completed_at is None

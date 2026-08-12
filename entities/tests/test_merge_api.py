@@ -9,6 +9,7 @@ from rest_framework.test import APITestCase
 
 from cases.models import Case, CaseEntityRelationship, CaseState, CaseType, RelationshipType
 from entities.models import StoredEntity
+from entities.persistence import MERGED_INTO_KEY, EntityRepository
 from entities.services.publication import PublicationService
 from entities.write_validation import normalize_authoring_payload
 
@@ -67,7 +68,7 @@ class EntityMergeApiTests(APITestCase):
         self.assertEqual(resp.data["status"], "complete")
         dup = StoredEntity.objects.get(pk=LOOSE)
         self.assertTrue(dup.is_deleted)
-        self.assertEqual(dup.merged_into, JHAPA)
+        self.assertEqual(dup.data[MERGED_INTO_KEY], {"@id": JHAPA})
         self.assertEqual(resp.data["survivor"]["description"], {"ne": "झापा जिल्ला"})
 
     # 2 — relationship transfer, and nothing left pointing at the retired entity
@@ -95,7 +96,11 @@ class EntityMergeApiTests(APITestCase):
         resp = self._post(duplicates=[LOOSE, "https://jawafdehi.org/entity/location/jhapa-alt"])
         self.assertEqual(resp.data["status"], "complete")
         self.assertEqual(len(resp.data["retired"]), 2)
-        self.assertEqual(StoredEntity.objects.filter(merged_into=JHAPA).count(), 2)
+        repo = EntityRepository()
+        self.assertEqual(
+            [repo.resolve_tombstone(iri) for iri in resp.data["retired"]],
+            [JHAPA, JHAPA],
+        )
 
     # 5 — no relationships at all
     def test_merge_with_no_references(self):

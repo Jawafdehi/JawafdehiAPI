@@ -168,16 +168,11 @@ def repoint_case_binds(retired: List[str], survivor: str) -> Tuple[RefCounts, Li
             sibling.notes = " | ".join(p for p in (sibling.notes, row.notes) if p)[:500]
         sibling.outcome = _better_outcome(sibling.outcome, row.outcome)
         sibling.save()
+        # The deleted row's full field values are not copied here: auditlog captures
+        # them on the delete (cases.apps registers CaseEntityRelationship).
         manifest.add(
             "case_entity_binds", row.pk, "nes_id", row.nes_id, survivor, "deduplicated",
             case_id=row.case_id,
-            deleted_row={
-                "case_id": row.case_id,
-                "nes_id": row.nes_id,
-                "relationship_type": row.relationship_type,
-                "outcome": row.outcome,
-                "notes": row.notes,
-            },
         )
         row.delete()
         counts.deduplicated += 1

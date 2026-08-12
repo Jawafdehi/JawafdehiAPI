@@ -24,8 +24,6 @@ SQLAlchemy/asyncpg side is the table authority, so the migration is applied with
 ``--fake`` there; the db_table pins keep both paths mapped to the same tables.
 """
 
-import uuid
-
 from django.contrib.postgres.indexes import GinIndex
 from django.db import models
 from django.utils import timezone
@@ -48,9 +46,8 @@ class StoredEntity(models.Model):
     # Soft-delete flag (accountability platform: rows are never hard-deleted).
     # Reads/list/search exclude ``is_deleted=True`` rows; DELETE flips this True.
     is_deleted = models.BooleanField(default=False, db_index=True)
-    # Merge tombstone: the survivor this row was folded into. Non-null implies
-    # is_deleted — the read plane 301-redirects here instead of 404ing.
-    merged_into = models.TextField(null=True, blank=True, db_index=True)
+    # A merge tombstone additionally carries ``jawafdehi:mergedInto`` in ``data``
+    # (see persistence.resolve_tombstone); the read plane 301-redirects on it.
     # The repository (persistence.EntityRepository) sets these explicitly to carry
     # publish-time provenance (created_at is preserved across re-publishes), so
     # auto_now_add/auto_now would be WRONG — they'd clobber the explicit value.
@@ -130,40 +127,3 @@ class HeldEntity(models.Model):
 
     def __str__(self) -> str:
         return self.iri
-
-
-class EntityMerge(models.Model):
-    """One merge of duplicate entities into a survivor, with enough detail to reverse it.
-
-    Written ``PENDING`` before any reference is repointed, so an interrupted merge is
-    resumable rather than silently half-applied.
-    """
-
-    PENDING = "pending"
-    COMPLETE = "complete"
-    STATUS_CHOICES = [(PENDING, "Pending"), (COMPLETE, "Complete")]
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    survivor_iri = models.TextField(db_index=True)
-    duplicate_iris = models.JSONField(default=list)
-    # Each duplicate's complete document as it was before the merge, keyed by IRI.
-    duplicate_snapshots = models.JSONField(default=dict)
-    survivor_snapshot_before = models.JSONField(default=dict)
-    status = models.CharField(
-        max_length=16, choices=STATUS_CHOICES, default=PENDING, db_index=True
-    )
-    # Every reference that moved: {store, pk, field, from, to, action}. For
-    # entity_to_entity_links this is one entry per document, and `from` names only
-    # the first retired IRI, not necessarily the one that document actually referenced.
-    reference_manifest = models.JSONField(default=list)
-    author_id = models.TextField()
-    change_description = models.TextField(blank=True, default="")
-    created_at = models.DateTimeField(default=timezone.now, db_index=True)
-    completed_at = models.DateTimeField(null=True, blank=True)
-
-    class Meta:
-        db_table = "entity_merges"
-        ordering = ["-created_at"]
-
-    def __str__(self) -> str:
-        return f"{self.survivor_iri} <= {len(self.duplicate_iris)} duplicate(s)"
