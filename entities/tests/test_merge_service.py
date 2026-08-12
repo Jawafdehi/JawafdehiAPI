@@ -263,18 +263,52 @@ def test_a_dry_run_against_a_half_finished_merge_writes_nothing():
     assert EntityMerge.objects.filter(status=EntityMerge.PENDING).count() == 1
 
 
-def test_two_half_finished_merges_for_one_survivor_are_both_resumed():
+def test_a_still_failing_sweep_stops_the_request_before_it_stalls_a_second_merge():
+    # During an outage this leaves one stalled record instead of one per attempt,
+    # and the second request's duplicate is never tombstoned.
     _seed_pair()
     _seed("location", "jhapa-2", "Place")
     other = "https://jawafdehi.org/entity/location/jhapa-2"
     _crash_once_in_court_rows(duplicate_iris=[LOOSE])
     _crash_once_in_court_rows(duplicate_iris=[other])
-    assert EntityMerge.objects.filter(status=EntityMerge.PENDING).count() == 2
+    assert EntityMerge.objects.filter(status=EntityMerge.PENDING).count() == 1
+    assert StoredEntity.objects.get(pk=other).is_deleted is False
 
-    result = _merge(duplicate_iris=[LOOSE, other])
+
+def test_every_stalled_merge_for_one_survivor_is_resumed():
+    # Two PENDING records for one survivor now only arise from legacy data, since the
+    # sweep runs before a new record is created — but the resume loop takes a list.
+    _seed_pair()
+    _seed("location", "jhapa-2", "Place")
+    other = "https://jawafdehi.org/entity/location/jhapa-2"
+    court = Court.objects.create(
+        identifier="jhapapair", court_type="district",
+        full_name_nepali="जिल्ला अदालत झापा", full_name_english="District Court Jhapa",
+    )
+    CourtCase.objects.create(case_number="081-CR-0101", court=court, nes_id=LOOSE)
+    CourtCase.objects.create(case_number="081-CR-0102", court=court, nes_id=other)
+
+    records = []
+    for iri in (LOOSE, other):
+        row = StoredEntity.objects.get(pk=iri)
+        row.is_deleted = True
+        row.merged_into = JHAPA
+        row.save(update_fields=["is_deleted", "merged_into"])
+        records.append(
+            EntityMerge.objects.create(
+                survivor_iri=JHAPA, duplicate_iris=[iri], duplicate_snapshots={},
+                survivor_snapshot_before={}, status=EntityMerge.PENDING,
+                author_id="oidc:seed", change_description="stalled",
+            )
+        )
+
+    result = _merge(duplicate_iris=[LOOSE])
     assert result["status"] == "complete"
-    assert result["retired"] == sorted([LOOSE, other])
-    assert not EntityMerge.objects.filter(status=EntityMerge.PENDING).exists()
+    assert all(
+        EntityMerge.objects.get(pk=r.pk).status == EntityMerge.COMPLETE for r in records
+    )
+    assert not CourtCase.objects.filter(nes_id=LOOSE).exists()
+    assert not CourtCase.objects.filter(nes_id=other).exists()
 
 
 def test_a_pending_merge_survives_its_survivor_being_merged_away():
@@ -348,3 +382,21 @@ def test_warns_when_the_survivor_looks_less_complete_than_the_duplicate():
           description={"ne": "झापा जिल्ला"})
     result = _merge(survivor_iri=LOOSE, duplicate_iris=[JHAPA], dry_run=True)
     assert result["warnings"]
+
+
+def test_a_stalled_merge_is_swept_up_by_the_next_merge_into_the_same_survivor():
+    # The stalled attempt names a different duplicate, so no other path would find it.
+    _seed_pair()
+    _seed("location", "jhapa-2", "Place")
+    other = "https://jawafdehi.org/entity/location/jhapa-2"
+    court = Court.objects.create(
+        identifier="jhapasweep", court_type="district",
+        full_name_nepali="जिल्ला अदालत झापा", full_name_english="District Court Jhapa",
+    )
+    CourtCase.objects.create(case_number="081-CR-0099", court=court, nes_id=LOOSE)
+    stalled = _crash_once_in_court_rows(duplicate_iris=[LOOSE])
+
+    result = _merge(duplicate_iris=[other])
+    assert result["status"] == "complete"
+    assert EntityMerge.objects.get(pk=stalled).status == EntityMerge.COMPLETE
+    assert not CourtCase.objects.filter(nes_id=LOOSE).exists()

@@ -29,6 +29,14 @@ MAX_DUPLICATES = 25
 MAX_REFERENCES = 1000
 
 
+def _accumulate(per_store: Dict[str, Dict[str, int]], counts: Dict[str, Dict[str, int]]) -> None:
+    """Fold one phase-two result into a running per-store total."""
+    for store, value in counts.items():
+        running = per_store.setdefault(store, {"repointed": 0, "deduplicated": 0})
+        running["repointed"] += value["repointed"]
+        running["deduplicated"] += value["deduplicated"]
+
+
 class MergeError(Exception):
     """A refused merge, carrying the spec's error code and HTTP status."""
 
@@ -61,7 +69,7 @@ class EntityMergeService:
         candidates = self._classify(survivor_iri, duplicate_iris, survivor_doc, type_family)
 
         if not candidates:
-            pending = self._pending_merges(survivor_iri, duplicate_iris)
+            pending = self._pending_merges(survivor_iri)
             if not pending:
                 return self._response(
                     merge_id=None, status="already_merged", dry_run=dry_run,
@@ -83,12 +91,7 @@ class EntityMergeService:
                 )
             per_store: Dict[str, Dict[str, int]] = {}
             for record in pending:
-                for store, counts in self._phase_two(
-                    record, record.duplicate_iris, survivor_iri, author_id
-                ).items():
-                    running = per_store.setdefault(store, {"repointed": 0, "deduplicated": 0})
-                    running["repointed"] += counts["repointed"]
-                    running["deduplicated"] += counts["deduplicated"]
+                _accumulate(per_store, self._phase_two(record, record.duplicate_iris, survivor_iri, author_id))
             return self._response(
                 # The newest record resumed — one id has to stand for the batch.
                 merge_id=str(pending[-1].id), status="complete", dry_run=False,
@@ -132,12 +135,22 @@ class EntityMergeService:
                 warnings=warnings,
             )
 
+        # Sweep up any earlier attempt into this survivor that stopped partway, even
+        # when this request names different duplicates. Nothing else can find them:
+        # EntityMerge has no failed state and there is no listing of stalled merges.
+        per_store: Dict[str, Dict[str, int]] = {}
+        for record in self._pending_merges(survivor_iri):
+            _accumulate(
+                per_store,
+                self._phase_two(record, record.duplicate_iris, survivor_iri, author_id),
+            )
+
         merge = self._phase_one(
             survivor_iri=survivor_iri, retired=retired, candidates=candidates,
             survivor_doc=survivor_doc, merged_doc=merged_doc,
             author_id=author_id, change_description=change_description,
         )
-        per_store = self._phase_two(merge, retired, survivor_iri, author_id)
+        _accumulate(per_store, self._phase_two(merge, retired, survivor_iri, author_id))
         warnings = [*warnings, *self._phase_three(merge, survivor_iri)]
 
         return self._response(
@@ -287,18 +300,16 @@ class EntityMergeService:
             )
         return survivor, duplicates
 
-    def _pending_merges(self, survivor_iri: str, duplicate_iris: List[str]) -> List[EntityMerge]:
-        """Unfinished merges these duplicates belong to, oldest first.
+    def _pending_merges(self, survivor_iri: str) -> List[EntityMerge]:
+        """Unfinished merges into this survivor, oldest first.
 
-        Also matches a record whose own survivor has since been merged away: the
-        record still names the old survivor, but its references belong on whatever
-        that survivor now resolves to.
+        Matched on the survivor alone, not on the duplicates: an attempt that stopped
+        partway is invisible to every other code path, so any merge into the same
+        survivor is the only chance to finish it. Also matches a record whose own
+        survivor has since been merged away.
         """
-        requested = set(duplicate_iris)
         found = []
         for merge in EntityMerge.objects.filter(status=EntityMerge.PENDING).order_by("created_at"):
-            if not requested & set(merge.duplicate_iris):
-                continue
             if merge.survivor_iri == survivor_iri:
                 found.append(merge)
             elif self.repo.resolve_tombstone(merge.survivor_iri) == survivor_iri:

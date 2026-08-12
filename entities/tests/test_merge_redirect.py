@@ -7,6 +7,7 @@ from django.contrib.auth.models import Group
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from entities.models import StoredEntity
 from entities.services.publication import PublicationService
 from entities.write_validation import normalize_authoring_payload
 
@@ -73,3 +74,10 @@ class RetiredEntityRedirectTests(APITestCase):
         self.assertEqual(resp.data["entities"][0]["@id"], JHAPA)
         self.assertEqual(resp.data["redirected"][LOOSE], JHAPA)
         self.assertNotIn("not_found", resp.data)
+
+    def test_a_survivor_that_was_later_deleted_does_not_redirect(self):
+        survivor_row = StoredEntity.objects.get(pk=JHAPA)
+        survivor_row.is_deleted = True
+        survivor_row.save(update_fields=["is_deleted"])
+        resp = self.client.get(f"/api/entities/{quote(LOOSE, safe='')}")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)

@@ -25,6 +25,8 @@ shared Q-id) are NOT merged here — they need the entity-resolution service and
 reported as ``--report`` candidates instead.
 
 ``--dry-run`` reports clusters without writing.
+
+Superseded by ``merge_entities`` — do not run; it hard-deletes and repoints nothing.
 """
 
 from __future__ import annotations

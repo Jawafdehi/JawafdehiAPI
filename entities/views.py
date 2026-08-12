@@ -102,8 +102,11 @@ def _resolve_ref(ref: str) -> Optional[str]:
 
 def _redirect_to_survivor(iri: str, *, suffix: str = "") -> Optional[Response]:
     """A 301 to the survivor if ``iri`` is a merge tombstone, else None."""
-    target = EntityRepository().resolve_tombstone(iri)
-    if not target:
+    repo = EntityRepository()
+    target = repo.resolve_tombstone(iri)
+    # Guard that the target is live, the same way the batch lookup does: a survivor
+    # later soft-deleted would otherwise redirect into a 404.
+    if not target or repo.get_entity(target) is None:
         return None
     location = f"/api/entities/{quote(target, safe='')}{suffix}"
     response = Response(status=status.HTTP_301_MOVED_PERMANENTLY)
@@ -128,9 +131,8 @@ def health(request):
 class EntityListCreateView(AuditlogActorMixin, APIView):
     """GET /api/entities (public list/search/batch) + POST /api/entities (create).
 
-    ``AuditlogActorMixin`` attributes any audit entry to the authenticated user
-    (inert until entities models are auditlog-registered; the seam is kept
-    uniform across the platform's write views)."""
+    ``AuditlogActorMixin`` attributes any audit entry to the authenticated user;
+    the seam is kept uniform across the platform's write views."""
 
     def get_permissions(self):
         if self.request.method == "POST":

@@ -152,7 +152,9 @@ class EntityMerge(models.Model):
     status = models.CharField(
         max_length=16, choices=STATUS_CHOICES, default=PENDING, db_index=True
     )
-    # Every reference that moved: {store, pk, field, from, to, action}.
+    # Every reference that moved: {store, pk, field, from, to, action}. For
+    # entity_to_entity_links this is one entry per document, and `from` names only
+    # the first retired IRI, not necessarily the one that document actually referenced.
     reference_manifest = models.JSONField(default=list)
     author_id = models.TextField()
     change_description = models.TextField(blank=True, default="")

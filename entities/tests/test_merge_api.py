@@ -177,3 +177,21 @@ class EntityMergeApiTests(APITestCase):
     def test_authenticated_without_the_caseworker_role_is_403(self):
         self.client.force_authenticate(user=self.norole)
         self.assertEqual(self._post().status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_a_merge_that_fails_partway_is_reported_as_partial(self):
+        from entities.services.merge import service as svc
+
+        original = svc.references.repoint_court_rows
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("ngm unreachable")
+
+        svc.references.repoint_court_rows = _boom
+        try:
+            resp = self._post()
+        finally:
+            svc.references.repoint_court_rows = original
+        self.assertEqual(resp.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertEqual(resp.data["status"], "partial")
+        self.assertEqual(resp.data["error"]["code"], "MERGE_INCOMPLETE")
+        self.assertTrue(resp.data["error"]["merge_id"])
