@@ -58,6 +58,7 @@ from entities.write_validation import (
     validate_create_payload,
 )
 from entities.services.publication import PublicationService
+from entities.services.merge import EntityMergeService, MergeError
 
 logger = logging.getLogger(__name__)
 
@@ -358,6 +359,35 @@ class EntityVersionsView(APIView):
                 "offset": offset,
             }
         )
+
+
+class EntityMergeView(AuditlogActorMixin, APIView):
+    """POST /api/entities/merge — fold duplicate entities into one survivor.
+
+    See docs/superpowers/specs/2026-08-11-entities-merge-api-spec.md for the contract.
+    """
+
+    permission_classes = [HasEntityWriteRole]
+
+    def post(self, request):
+        body = request.data if isinstance(request.data, dict) else {}
+        try:
+            result = EntityMergeService().merge(
+                survivor_iri=body.get("survivor", ""),
+                duplicate_iris=body.get("duplicates", []),
+                author_id=_author_id_from_request(request),
+                change_description=body.get("change_description", ""),
+                type_family=body.get("type_family"),
+                dry_run=bool(body.get("dry_run", False)),
+            )
+        except MergeError as exc:
+            payload = _err(exc.code, exc.message)
+            payload["error"].update(exc.extra)
+            # The spec pairs a 500 MERGE_INCOMPLETE with status "partial".
+            if exc.code == "MERGE_INCOMPLETE":
+                payload["status"] = "partial"
+            return Response(payload, status=exc.http_status)
+        return Response(result, status=status.HTTP_200_OK)
 
 
 @api_view(["GET"])
