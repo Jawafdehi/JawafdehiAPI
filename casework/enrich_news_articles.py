@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Attach verified independent news coverage to a case's `evidence[]`. LOCAL WRITES ONLY.
+"""Attach verified independent news coverage to a case's `evidence[]`.
 
 Ported from the deleted `casework/enrich_news_articles.py` (recovered at donor
 commit `0321a85`, 1,957 lines -- the largest in the donor set), with the
@@ -22,9 +22,20 @@ ethical failure. Production already carries two such binds -- see
 SPLIT IN TWO, AND ONLY ONE HALF CAN WRITE. `casework/news_search.py` does all
 searching, fetching, archive lookup and LLM verification and cannot write
 anything; it does not import `CaseworkApi`. Everything that mutates server state
-is in `apply_plan` below, and `_require_loopback` refuses off-loopback there
-regardless of `--allow-remote-writes`. Between them sits `plan_case`, which is
-pure: it decides, and writes nothing.
+is in `apply_plan` below. Between them sits `plan_case`, which is pure: it
+decides, and writes nothing.
+
+WRITES TO PRODUCTION LIKE ANY OTHER ENRICHER, since 2026-08-11: `--apply
+--allow-remote-writes` and a Bearer token, with the single host write-guard in
+`CaseworkApi._request` as the gate. This stage USED to carry a second,
+unconditional guard that the flag could not open, justified by the production
+credential being "read-only by policy". That premise was false -- the same
+`sa-ingestion` token writes `description`, `title` and `short_description` -- so
+the guard only ever cost a run its writes after it had paid for the searches.
+What the guard was really protecting is unchanged and now stated where it
+belongs: this is the only stage that creates rows in the SHARED materials store,
+a wrong article is visible beyond the case that caused it, and production already
+carries two wrong binds. Read the run's review file before believing it.
 
 Six deliberate deviations from the donor. Two more (the no-publication-date skip
 and the `confidence == "high"` bar) are wholly inside `news_search.py` and are
@@ -99,7 +110,6 @@ import logging
 import os
 import sys
 import time
-import urllib.parse
 from dataclasses import dataclass, field
 
 from casework.common.api import CaseworkApi
@@ -164,26 +174,6 @@ WRITABLE_STATE = "DRAFT"
 DEFAULT_MAX_ARTICLES = 5
 #: Retry rounds of broader fallback queries when nothing was accepted (donor:899).
 RETRY_MAX = 3
-
-
-def _require_loopback(api):
-    """Refuse any non-loopback host at the write itself.
-
-    `CaseworkApi._request` already guards writes and `--allow-remote-writes` is
-    its opt-in. This is a SECOND, unconditional guard that flag cannot open, in
-    the style of `casework/convert.py::upload_markdown` -- and for a stronger
-    reason. This stage is the one that creates rows in the SHARED materials
-    store and binds them to public cases; the credential a production run holds
-    is read-only by policy, and a write attempted with it is a policy breach
-    whether or not it succeeds. So the script refuses to try.
-    """
-    host = urllib.parse.urlsplit(api.base_url).hostname
-    if host not in ("127.0.0.1", "localhost"):
-        raise ValueError(
-            f"enrich_news_articles writes to loopback ONLY; refusing to create "
-            f"materials or bind evidence on {api.base_url!r}. Production is "
-            f"read-only for this stage: run without --apply to produce the "
-            f"review file.")
 
 
 # ---------------------------------------------------------------------------
@@ -485,6 +475,30 @@ def plan_case(case, etag, outcome, *, client=None, save_permalinks=True):
                         n_current=len(current), outcome=outcome,
                         reason="no article cleared the verification gate")
 
+    # PAST HERE A DESTRUCTIVE WRITE IS ON THE TABLE, so the payload the merge
+    # will be built from has to be trustworthy. Checked here and not at the top
+    # of the function on purpose: with nothing accepted there is no write to
+    # protect, and reporting a payload problem then would bury the real reason.
+    if "evidence" not in case:
+        return NewsPlan(slug=slug, action="NOOP", state=state, if_match=etag,
+                        n_current=len(current), outcome=outcome,
+                        reason="case payload has no 'evidence' key -- absent is "
+                               "not empty, and `PATCH /evidence` is a whole-list "
+                               "replace, so merging an incomplete read would "
+                               "DELETE every entry it omits. Re-read the case "
+                               "(get_case_with_etag) before retrying")
+    # `current_evidence` drops an entry with no `material_iri`, which for a
+    # whole-list replace means deleting it from the case. Better to write
+    # nothing and say so.
+    malformed = len(case["evidence"] or []) - len(current)
+    if malformed:
+        return NewsPlan(slug=slug, action="NOOP", state=state, if_match=etag,
+                        n_current=len(current), outcome=outcome,
+                        reason=f"{malformed} of {len(case['evidence'])} existing "
+                               "evidence entries carry no material_iri, so a "
+                               "whole-list replace built from this read would "
+                               "drop them")
+
     materials, additions = [], []
     for article, verdict in outcome.accepted:
         permalink = (resolve_permalink(client, article.url, save_missing=save_permalinks)
@@ -514,7 +528,6 @@ def apply_plan(api, plan):
 
     Refuses, in order:
       * any plan that is not `WOULD_BIND`;
-      * any non-loopback host, unconditionally (`_require_loopback`);
       * any case not in `WRITABLE_STATE` (deviation 6);
       * a missing ETag -- without `If-Match` the whole-list replace is
         unconditional and silently clobbers a concurrent edit, which is the
@@ -528,7 +541,8 @@ def apply_plan(api, plan):
     """
     if plan.action != "WOULD_BIND":
         raise ValueError(f"apply_plan called on a {plan.action} plan for {plan.slug!r}")
-    _require_loopback(api)
+    # No host check here. `CaseworkApi._request` guards every write below and
+    # `--allow-remote-writes` is its opt-in, same as every other enricher.
     if plan.state != WRITABLE_STATE:
         raise RuntimeError(
             f"refusing to write news evidence to {plan.slug!r} in state "
@@ -567,7 +581,9 @@ def build_parser():
     parser = argparse.ArgumentParser(
         description="Attach LLM-verified news coverage to a case's evidence.",
         epilog="Reads cases and writes materials/evidence over the Jawafdehi HTTP "
-               "API. Writes are refused off-loopback unconditionally.")
+               "API. Writing off-loopback needs --apply, --allow-remote-writes and "
+               "a Bearer --api-token together. This stage creates rows in the "
+               "shared materials store -- read the run's review file.")
     add_common_args(parser)
     parser.add_argument("--max-articles", type=int, default=DEFAULT_MAX_ARTICLES,
                         help=f"Max news articles to bind per case "

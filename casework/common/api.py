@@ -575,9 +575,10 @@ class CaseworkApi:
         the same document instead of minting a duplicate.
 
         A WRITE, so `_request`'s guard applies -- this refuses any non-loopback
-        host unless `allow_remote_writes=True`. The news enricher additionally
-        refuses off-loopback at its own call site regardless of that flag; see
-        `casework/enrich_news_articles.py::_require_loopback`.
+        host unless `allow_remote_writes=True`. That guard is the ONLY thing
+        gating a production write into the shared materials store: the news
+        enricher's own unconditional refusal was removed on 2026-08-11, so do
+        not weaken it, and do not add a write path that bypasses `_request`.
         """
         body = json.dumps({"material": doc, "material_type": material_type},
                           ensure_ascii=False).encode("utf-8")
