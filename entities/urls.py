@@ -32,7 +32,7 @@ urlpatterns = [
     # List + create.
     path("entities", views.EntityListCreateView.as_view(), name="entity-list"),
     # Merge (must precede the bare detail route, which captures any {ref}).
-    path("entities/merge", views.EntityMergeView.as_view(), name="entity-merge"),
+    re_path(r"^entities/merge/?$", views.EntityMergeView.as_view(), name="entity-merge"),
     # Entity sub-resources (must precede the bare detail route).
     re_path(
         rf"^entities/{_REF}/versions/?$",

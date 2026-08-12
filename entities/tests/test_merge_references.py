@@ -176,7 +176,7 @@ def test_two_duplicates_disagreeing_on_a_verdict_are_reported_as_a_conflict():
     conflicts = references.detect_outcome_conflicts([LOOSE, other], JHAPA)
     assert len(conflicts) == 1
     assert conflicts[0]["case_id"] == case.id
-    assert {conflicts[0]["survivor_outcome"], conflicts[0]["duplicate_outcome"]} == {
+    assert set(conflicts[0]["outcomes"].values()) == {
         RelationshipOutcome.CONVICTED, RelationshipOutcome.ACQUITTED
     }
 

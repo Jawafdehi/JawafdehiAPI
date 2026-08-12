@@ -39,11 +39,13 @@ class RefCounts:
 class _Manifest:
     entries: List[Dict[str, Any]] = dc_field(default_factory=list)
 
-    def add(self, store, pk, field, from_iri, to_iri, action):
-        self.entries.append({
+    def add(self, store, pk, field, from_iri, to_iri, action, **extra):
+        entry = {
             "store": store, "pk": str(pk), "field": field,
             "from": from_iri, "to": to_iri, "action": action,
-        })
+        }
+        entry.update(extra)
+        self.entries.append(entry)
 
 
 def _link_candidates(retired: List[str], survivor: str):
@@ -117,8 +119,7 @@ def detect_outcome_conflicts(retired: List[str], survivor: str) -> List[Dict[str
         if differing is not None:
             conflicts.append({
                 "case_id": case_id,
-                "survivor_outcome": verdicts[0],
-                "duplicate_outcome": differing,
+                "outcomes": {iri: by_iri[iri] for iri in sorted(by_iri, key=lambda i: rank[i])},
             })
     return conflicts
 
@@ -156,14 +157,20 @@ def repoint_case_binds(retired: List[str], survivor: str) -> Tuple[RefCounts, Li
             row.nes_id = survivor
             row.save()
             counts.repointed += 1
-            manifest.add("case_entity_binds", row.pk, "nes_id", was, survivor, "repointed")
+            manifest.add(
+                "case_entity_binds", row.pk, "nes_id", was, survivor, "repointed",
+                case_id=row.case_id,
+            )
             continue
 
         if row.notes and row.notes not in (sibling.notes or ""):
             sibling.notes = " | ".join(p for p in (sibling.notes, row.notes) if p)[:500]
         sibling.outcome = _better_outcome(sibling.outcome, row.outcome)
         sibling.save()
-        manifest.add("case_entity_binds", row.pk, "nes_id", row.nes_id, survivor, "deduplicated")
+        manifest.add(
+            "case_entity_binds", row.pk, "nes_id", row.nes_id, survivor, "deduplicated",
+            case_id=row.case_id,
+        )
         row.delete()
         counts.deduplicated += 1
     return counts, manifest.entries
@@ -214,22 +221,11 @@ def repoint_entity_links(
             doc=rewritten,
             author_id=author_id,
             change_description=f"Reference repointed by merge {merge_id}",
+            validate=False,
         )
         counts.repointed += changed
         manifest.add("entity_to_entity_links", row.iri, "data", retired[0], survivor, "repointed")
     return counts, manifest.entries
-
-
-def affected_case_ids(survivor: str) -> List[int]:
-    """Cases now bound to the survivor — their search documents denormalize entity names."""
-    from cases.models import CaseEntityRelationship
-
-    return sorted(
-        set(
-            CaseEntityRelationship.objects.filter(nes_id=survivor)
-            .values_list("case_id", flat=True)
-        )
-    )
 
 
 def utcnow() -> datetime:

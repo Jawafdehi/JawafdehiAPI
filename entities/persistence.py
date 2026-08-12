@@ -94,9 +94,12 @@ def _entity_row_fields(doc: Dict[str, Any], *, version: int, created_at: datetim
         "version": version,
         "created_at": created_at,
         "updated_at": updated_at,
-        # A (re-)publish revives a soft-deleted row: the write is the source of
-        # truth, so clear the soft-delete flag on every upsert.
+        # A (re-)publish revives a soft-deleted row: the write is the source of truth,
+        # so clear the soft-delete flag on every upsert. The merge pointer goes with it
+        # — a live row still claiming to be merged away breaks the invariant that a
+        # non-null merged_into implies is_deleted.
         "is_deleted": False,
+        "merged_into": None,
     }
 
 

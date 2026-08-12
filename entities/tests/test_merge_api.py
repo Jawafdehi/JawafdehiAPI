@@ -1,5 +1,7 @@
 """POST /api/entities/merge — the contract in the approved API spec."""
 
+from urllib.parse import quote
+
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
 from rest_framework import status
@@ -177,6 +179,21 @@ class EntityMergeApiTests(APITestCase):
     def test_authenticated_without_the_caseworker_role_is_403(self):
         self.client.force_authenticate(user=self.norole)
         self.assertEqual(self._post().status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_a_tombstone_and_its_survivor_are_returned_once(self):
+        self._post()
+        resp = self.client.get(
+            f"/api/entities?ids={quote(LOOSE, safe='')},{quote(JHAPA, safe='')}"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["total"], 1)
+        self.assertEqual(len(resp.data["entities"]), 1)
+
+    def test_the_merge_route_accepts_a_trailing_slash(self):
+        resp = self.client.post(
+            MERGE_URL + "/", {"survivor": JHAPA, "duplicates": [LOOSE]}, format="json"
+        )
+        self.assertNotEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
     def test_a_merge_that_fails_partway_is_reported_as_partial(self):
         from entities.services.merge import service as svc

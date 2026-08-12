@@ -1,5 +1,7 @@
 """EntityMergeService — phases, rejections, idempotency, resume."""
 
+import json
+
 import pytest
 
 from cases.models import (
@@ -400,3 +402,107 @@ def test_a_stalled_merge_is_swept_up_by_the_next_merge_into_the_same_survivor():
     assert result["status"] == "complete"
     assert EntityMerge.objects.get(pk=stalled).status == EntityMerge.COMPLETE
     assert not CourtCase.objects.filter(nes_id=LOOSE).exists()
+
+
+def test_a_neighbour_that_no_longer_validates_does_not_wedge_the_merge():
+    _seed_pair()
+    neighbour = "https://jawafdehi.org/entity/location/localunit/damak-10502"
+    # A stored entity with an @type validate_jsonld_entity no longer accepts —
+    # written directly so it bypasses the create-time gate, the way a since-tightened
+    # rule would leave a document that already validated at write time.
+    StoredEntity.objects.create(
+        iri=neighbour, entity_type="Wizard", prefix="location/localunit", slug="damak-10502",
+        data={"@id": neighbour, "@type": "Wizard", "name": {"en": "Damak"},
+              "containedInPlace": {"@id": LOOSE}},
+    )
+    result = _merge()
+    assert result["status"] == "complete"
+    row = StoredEntity.objects.get(pk=neighbour)
+    assert row.data["containedInPlace"]["@id"] == JHAPA
+
+
+def test_a_reference_to_another_retired_duplicate_is_dropped_from_the_survivor():
+    _seed("location/district", "jhapa-np0104", ["AdministrativeArea", "jawafdehi:District"])
+    other = "https://jawafdehi.org/entity/location/jhapa-2"
+    _seed("location", "jhapa", "Place", containedInPlace={"@id": other})
+    _seed("location", "jhapa-2", "Place")
+
+    result = _merge(duplicate_iris=[LOOSE, other])
+    assert result["status"] == "complete"
+
+    survivor = StoredEntity.objects.get(pk=JHAPA)
+    without_same_as = {k: v for k, v in survivor.data.items() if k != "sameAs"}
+    assert other not in json.dumps(without_same_as)
+    assert any("removed" in w for w in result["warnings"])
+
+
+def test_only_the_cases_the_merge_touched_are_reindexed():
+    _seed_pair()
+    untouched = Case.objects.create(
+        title="Jhapa case", slug="jhapa-untouched", case_type=CaseType.CORRUPTION,
+        state=CaseState.DRAFT, short_description="t", description="t",
+    )
+    CaseEntityRelationship.objects.create(
+        case=untouched, nes_id=JHAPA, relationship_type=RelationshipType.LOCATION
+    )
+    touched = Case.objects.create(
+        title="Jhapa case", slug="jhapa-touched", case_type=CaseType.CORRUPTION,
+        state=CaseState.DRAFT, short_description="t", description="t",
+    )
+    CaseEntityRelationship.objects.create(
+        case=touched, nes_id=LOOSE, relationship_type=RelationshipType.LOCATION
+    )
+
+    from cases import search_index as case_search
+
+    original = case_search.index_now
+    indexed = []
+    case_search.index_now = lambda case, **kwargs: indexed.append(case.id)
+    try:
+        result = _merge()
+    finally:
+        case_search.index_now = original
+
+    assert result["status"] == "complete"
+    assert indexed == [touched.id]
+
+
+def test_a_duplicate_retired_concurrently_is_rejected():
+    # Simulates the concurrent write landing right as this merge's phase one starts:
+    # EntityMerge.objects.create is the first thing _phase_one does after _classify
+    # has already seen the duplicate live.
+    _seed_pair()
+    from entities.services.merge import service as svc
+
+    original_create = svc.EntityMerge.objects.create
+
+    def _tombstone_then_create(*args, **kwargs):
+        row = StoredEntity.objects.get(pk=LOOSE)
+        row.is_deleted = True
+        row.merged_into = "https://jawafdehi.org/entity/location/elsewhere"
+        row.save(update_fields=["is_deleted", "merged_into"])
+        return original_create(*args, **kwargs)
+
+    svc.EntityMerge.objects.create = _tombstone_then_create
+    try:
+        with pytest.raises(MergeError) as exc:
+            _merge()
+        assert exc.value.code == "DUPLICATE_ALREADY_MERGED"
+    finally:
+        svc.EntityMerge.objects.create = original_create
+
+
+def test_republishing_a_retired_entity_clears_its_merge_pointer():
+    _seed_pair()
+    _merge()
+    dup = StoredEntity.objects.get(pk=LOOSE)
+    assert dup.is_deleted is True
+    assert dup.merged_into == JHAPA
+
+    PublicationService().create_entity(
+        doc={"@id": LOOSE, "@type": "Place", "name": {"en": "Jhapa (again)"}},
+        author_id="oidc:seed", change_description="republish",
+    )
+    row = StoredEntity.objects.get(pk=LOOSE)
+    assert row.is_deleted is False
+    assert not row.merged_into

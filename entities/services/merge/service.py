@@ -20,7 +20,7 @@ from entities.persistence import EntityRepository
 from entities.services.publication import PublicationService
 
 from . import references
-from .document import merge_documents
+from .document import drop_self_references, merge_documents
 from .families import FAMILY_NAMES, families_compatible, families_for
 
 logger = logging.getLogger(__name__)
@@ -90,14 +90,19 @@ class EntityMergeService:
                     warnings=[],
                 )
             per_store: Dict[str, Dict[str, int]] = {}
+            warnings: List[str] = []
             for record in pending:
-                _accumulate(per_store, self._phase_two(record, record.duplicate_iris, survivor_iri, author_id))
+                _accumulate(
+                    per_store,
+                    self._phase_two(record, record.duplicate_iris, survivor_iri, author_id),
+                )
+                warnings.extend(self._phase_three(record))
             return self._response(
                 # The newest record resumed — one id has to stand for the batch.
                 merge_id=str(pending[-1].id), status="complete", dry_run=False,
                 survivor=self.repo.get_entity(survivor_iri), retired=pending_duplicates,
                 inherited={}, per_store=per_store,
-                warnings=self._phase_three(pending[-1], survivor_iri),
+                warnings=warnings,
             )
 
         retired = list(candidates)
@@ -125,7 +130,13 @@ class EntityMergeService:
         merged_doc, inherited = merge_documents(
             survivor_doc, [candidates[iri] for iri in retired]
         )
+        merged_doc, dropped = drop_self_references(merged_doc, retired)
         warnings = self._warnings(survivor_doc, candidates)
+        if dropped:
+            warnings.append(
+                f"{dropped} reference(s) to a retired entity were removed from the "
+                "survivor's own document."
+            )
 
         if dry_run:
             return self._response(
@@ -144,6 +155,7 @@ class EntityMergeService:
                 per_store,
                 self._phase_two(record, record.duplicate_iris, survivor_iri, author_id),
             )
+            warnings.extend(self._phase_three(record))
 
         merge = self._phase_one(
             survivor_iri=survivor_iri, retired=retired, candidates=candidates,
@@ -151,7 +163,7 @@ class EntityMergeService:
             author_id=author_id, change_description=change_description,
         )
         _accumulate(per_store, self._phase_two(merge, retired, survivor_iri, author_id))
-        warnings = [*warnings, *self._phase_three(merge, survivor_iri)]
+        warnings = [*warnings, *self._phase_three(merge)]
 
         return self._response(
             merge_id=str(merge.id), status="complete", dry_run=False,
@@ -179,7 +191,19 @@ class EntityMergeService:
                 doc=merged_doc, author_id=author_id, change_description=description
             )
             for iri in retired:
-                row = StoredEntity.objects.get(pk=iri)
+                row = (
+                    StoredEntity.objects.select_for_update()
+                    .filter(pk=iri, is_deleted=False)
+                    .first()
+                )
+                # Re-checked under the row lock: two operators merging the same
+                # duplicate into different survivors would otherwise both tombstone it
+                # and repoint its references two ways.
+                if row is None:
+                    raise MergeError(
+                        "DUPLICATE_ALREADY_MERGED",
+                        f"{iri} was retired by a concurrent merge.", 409,
+                    )
                 row.is_deleted = True
                 row.merged_into = survivor_iri
                 row.updated_at = references.utcnow()
@@ -242,8 +266,8 @@ class EntityMergeService:
         merge.save(update_fields=["reference_manifest", "status", "completed_at"])
         return per_store
 
-    def _phase_three(self, merge, survivor_iri) -> List[str]:
-        """Re-index affected cases, returning a warning per case that could not be indexed.
+    def _phase_three(self, merge) -> List[str]:
+        """Re-index the cases this merge touched, warning rather than failing on an outage.
 
         Phase two already marked the merge complete and moved every row, so a search
         outage must not present as a failed merge. The spec's ``warnings`` array is
@@ -252,8 +276,13 @@ class EntityMergeService:
         from cases.models import Case
         from cases import search_index as case_search
 
+        case_ids = sorted({
+            entry["case_id"]
+            for entry in (merge.reference_manifest or [])
+            if entry.get("case_id") is not None
+        })
         stale = 0
-        for case_id in references.affected_case_ids(survivor_iri):
+        for case_id in case_ids:
             case = Case.objects.filter(pk=case_id).first()
             if case is None:
                 continue
@@ -322,9 +351,11 @@ class EntityMergeService:
             return doc
         target = self.repo.resolve_tombstone(survivor_iri)
         if target:
+            dead = self.repo.get_entity(target) is None
             raise MergeError(
                 "SURVIVOR_RETIRED",
-                f"{survivor_iri} was already merged into {target}.",
+                f"{survivor_iri} was already merged into {target}."
+                + (" That entity is no longer live." if dead else ""),
                 409, merged_into=target,
             )
         raise MergeError("NOT_FOUND", f"Entity {survivor_iri} not found.", 404)
@@ -351,9 +382,11 @@ class EntityMergeService:
                 if target == survivor_iri:
                     continue
                 if target:
+                    dead = self.repo.get_entity(target) is None
                     raise MergeError(
                         "DUPLICATE_ALREADY_MERGED",
-                        f"{iri} was already merged into {target}.",
+                        f"{iri} was already merged into {target}."
+                        + (" That entity is no longer live." if dead else ""),
                         409, merged_into=target,
                     )
                 raise MergeError("NOT_FOUND", f"Entity {iri} not found.", 404)

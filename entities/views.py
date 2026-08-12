@@ -209,6 +209,7 @@ class EntityListCreateView(AuditlogActorMixin, APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         found, not_found, redirected = [], [], {}
+        seen_ids = set()
         for ref in refs:
             iri = _resolve_ref(ref)
             doc = repo.get_entity(iri) if iri else None
@@ -220,7 +221,8 @@ class EntityListCreateView(AuditlogActorMixin, APIView):
                         redirected[iri] = target
             if doc is None:
                 not_found.append(ref)
-            else:
+            elif doc["@id"] not in seen_ids:
+                seen_ids.add(doc["@id"])
                 found.append(doc)
         body: Dict[str, Any] = {
             "entities": found,

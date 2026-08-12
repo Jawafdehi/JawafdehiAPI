@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, List, Tuple
 
 #: Identity, context and provenance are the survivor's alone.
 NEVER_INHERITED: frozenset = frozenset(
@@ -64,6 +64,46 @@ def merge_documents(
     if same_as:
         merged["sameAs"] = same_as
     return merged, inherited
+
+
+def drop_self_references(
+    doc: Dict[str, Any], retired: Iterable[str], *, keep: FrozenSet[str] = frozenset({"sameAs"})
+) -> Tuple[Dict[str, Any], int]:
+    """Remove references to a retired IRI from the survivor's own document.
+
+    Pointing them at the survivor instead would assert a relation to itself. ``sameAs``
+    is exempt: that is where the merge deliberately records what it retired.
+    """
+    retired = set(retired)
+    count = 0
+
+    def is_retired(value: Any) -> bool:
+        if isinstance(value, dict):
+            return value.get("@id") in retired
+        return isinstance(value, str) and value in retired
+
+    def walk(node: Any, *, top: bool = False) -> Any:
+        nonlocal count
+        if isinstance(node, dict):
+            out: Dict[str, Any] = {}
+            for key, value in node.items():
+                if (top and key in NEVER_INHERITED) or key in keep:
+                    out[key] = value
+                elif is_retired(value):
+                    count += 1
+                elif isinstance(value, list):
+                    kept = [v for v in value if not is_retired(v)]
+                    count += len(value) - len(kept)
+                    if kept:
+                        out[key] = [walk(v) for v in kept]
+                else:
+                    out[key] = walk(value)
+            return out
+        if isinstance(node, list):
+            return [walk(v) for v in node]
+        return node
+
+    return walk(doc, top=True), count
 
 
 def rewrite_references(
