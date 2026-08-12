@@ -1,6 +1,6 @@
 """Document merging + recursive reference rewriting (pure logic, no DB)."""
 
-from entities.services.merge.document import merge_documents, rewrite_references
+from entities.services.merge.document import drop_self_references, merge_documents, rewrite_references
 
 JHAPA = "https://jawafdehi.org/entity/location/district/jhapa-np0104"
 LOOSE = "https://jawafdehi.org/entity/location/jhapa"
@@ -98,3 +98,17 @@ def test_an_untouched_list_keeps_its_pre_existing_duplicates():
     out, count = rewrite_references(doc, {LOOSE: JHAPA})
     assert out["tags"] == ["a", "a"]
     assert count == 0
+
+
+def test_an_already_empty_list_is_left_alone():
+    doc = {"@id": JHAPA, "@type": "Place", "keywords": []}
+    out, count = drop_self_references(doc, {LOOSE})
+    assert out["keywords"] == []
+    assert count == 0
+
+
+def test_an_object_emptied_by_the_drop_is_removed_entirely():
+    doc = {"@id": JHAPA, "@type": "Place", "deep": {"inner": {"@id": LOOSE}}}
+    out, count = drop_self_references(doc, {LOOSE})
+    assert "deep" not in out
+    assert count == 1

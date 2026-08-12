@@ -193,7 +193,8 @@ class EntityMergeApiTests(APITestCase):
         resp = self.client.post(
             MERGE_URL + "/", {"survivor": JHAPA, "duplicates": [LOOSE]}, format="json"
         )
-        self.assertNotEqual(resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["status"], "complete")
 
     def test_a_merge_that_fails_partway_is_reported_as_partial(self):
         from entities.services.merge import service as svc

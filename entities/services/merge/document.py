@@ -93,11 +93,19 @@ def drop_self_references(
                     count += 1
                 elif isinstance(value, list):
                     kept = [v for v in value if not is_retired(v)]
-                    count += len(value) - len(kept)
-                    if kept:
+                    removed = len(value) - len(kept)
+                    count += removed
+                    # An already-empty list stays. Only entries this merge removed
+                    # may make a key disappear.
+                    if kept or not removed:
                         out[key] = [walk(v) for v in kept]
                 else:
-                    out[key] = walk(value)
+                    walked = walk(value)
+                    # A nested object whose only content was a retired reference
+                    # leaves an empty husk; drop it rather than storing {}.
+                    if isinstance(value, dict) and walked == {} and value != {}:
+                        continue
+                    out[key] = walked
             return out
         if isinstance(node, list):
             return [walk(v) for v in node]
