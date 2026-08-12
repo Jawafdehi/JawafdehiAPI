@@ -39,6 +39,26 @@ def _merge(**kwargs):
     return EntityMergeService().merge(**kwargs)
 
 
+def _crash_once_in_court_rows(**kwargs):
+    """Run a merge that dies in the ngm phase; return the PENDING merge's id."""
+    from entities.services.merge import service as svc
+
+    original = svc.references.repoint_court_rows
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("ngm unreachable")
+
+    svc.references.repoint_court_rows = _boom
+    try:
+        with pytest.raises(MergeError) as exc:
+            _merge(**kwargs)
+        assert exc.value.code == "MERGE_INCOMPLETE"
+        assert exc.value.http_status == 500
+        return exc.value.extra["merge_id"]
+    finally:
+        svc.references.repoint_court_rows = original
+
+
 def test_happy_path_tombstones_the_duplicate_and_keeps_the_survivor():
     _seed_pair()
     result = _merge()
@@ -78,6 +98,7 @@ def test_rerunning_the_same_merge_is_a_safe_noop():
     _merge()
     result = _merge()
     assert result["status"] == "already_merged"
+    assert result["merge_id"] is None
     assert result["total_references"] == 0
     assert StoredEntity.objects.get(pk=JHAPA).version == 2
     assert EntityMerge.objects.count() == 1
@@ -88,6 +109,7 @@ def test_self_merge_is_rejected():
     with pytest.raises(MergeError) as exc:
         _merge(duplicate_iris=[JHAPA])
     assert exc.value.code == "SELF_MERGE"
+    assert exc.value.http_status == 422
 
 
 def test_cross_family_merge_is_rejected():
@@ -96,6 +118,7 @@ def test_cross_family_merge_is_rejected():
     with pytest.raises(MergeError) as exc:
         _merge(duplicate_iris=["https://jawafdehi.org/entity/person/ram-bahadur"])
     assert exc.value.code == "TYPE_MISMATCH"
+    assert exc.value.http_status == 422
     assert StoredEntity.objects.get(pk="https://jawafdehi.org/entity/person/ram-bahadur").is_deleted is False
 
 
@@ -104,6 +127,7 @@ def test_declared_type_family_must_agree_with_the_survivor():
     with pytest.raises(MergeError) as exc:
         _merge(type_family="person")
     assert exc.value.code == "TYPE_MISMATCH"
+    assert exc.value.http_status == 422
 
 
 def test_unknown_duplicate_is_a_not_found():
@@ -111,6 +135,7 @@ def test_unknown_duplicate_is_a_not_found():
     with pytest.raises(MergeError) as exc:
         _merge(duplicate_iris=["https://jawafdehi.org/entity/location/nowhere"])
     assert exc.value.code == "NOT_FOUND"
+    assert exc.value.http_status == 404
 
 
 def test_merging_into_a_retired_survivor_is_rejected():
@@ -121,6 +146,7 @@ def test_merging_into_a_retired_survivor_is_rejected():
         _merge(survivor_iri=LOOSE,
                duplicate_iris=["https://jawafdehi.org/entity/location/jhapa-older"])
     assert exc.value.code == "SURVIVOR_RETIRED"
+    assert exc.value.http_status == 409
     assert exc.value.extra["merged_into"] == JHAPA
 
 
@@ -131,6 +157,7 @@ def test_duplicate_already_merged_elsewhere_is_a_conflict():
     with pytest.raises(MergeError) as exc:
         _merge(survivor_iri="https://jawafdehi.org/entity/location/district/kaski-np0439")
     assert exc.value.code == "DUPLICATE_ALREADY_MERGED"
+    assert exc.value.http_status == 409
 
 
 def test_too_many_duplicates_is_rejected():
@@ -138,6 +165,7 @@ def test_too_many_duplicates_is_rejected():
     with pytest.raises(MergeError) as exc:
         _merge(duplicate_iris=[f"{LOOSE}-{n}" for n in range(26)])
     assert exc.value.code == "INVALID_REQUEST"
+    assert exc.value.http_status == 400
 
 
 def test_over_the_reference_cap_is_rejected_before_anything_is_written():
@@ -156,6 +184,7 @@ def test_over_the_reference_cap_is_rejected_before_anything_is_written():
         with pytest.raises(MergeError) as exc:
             _merge()
         assert exc.value.code == "MERGE_TOO_LARGE"
+        assert exc.value.http_status == 409
         assert exc.value.extra["reference_count"] == 1
         assert StoredEntity.objects.get(pk=LOOSE).is_deleted is False
     finally:
@@ -179,6 +208,7 @@ def test_conflicting_terminal_verdicts_are_rejected_before_anything_is_written()
     with pytest.raises(MergeError) as exc:
         _merge()
     assert exc.value.code == "OUTCOME_CONFLICT"
+    assert exc.value.http_status == 409
     # An acquitted defendant must never be rendered as convicted by a merge.
     assert StoredEntity.objects.get(pk=LOOSE).is_deleted is False
 
@@ -198,20 +228,7 @@ def test_a_partial_merge_resumes_on_the_next_attempt():
     )
     CourtCase.objects.create(case_number="081-CR-0081", court=court, nes_id=LOOSE)
 
-    from entities.services.merge import service as svc
-    original = svc.references.repoint_court_rows
-
-    def _boom(*args, **kwargs):
-        raise RuntimeError("ngm unreachable")
-
-    svc.references.repoint_court_rows = _boom
-    try:
-        with pytest.raises(MergeError) as exc:
-            _merge()
-        assert exc.value.code == "MERGE_INCOMPLETE"
-        merge_id = exc.value.extra["merge_id"]
-    finally:
-        svc.references.repoint_court_rows = original
+    merge_id = _crash_once_in_court_rows()
 
     # Tombstone landed, so the retired IRI already resolves...
     assert StoredEntity.objects.get(pk=LOOSE).merged_into == JHAPA
@@ -229,14 +246,72 @@ def test_a_partial_merge_resumes_on_the_next_attempt():
     assert CourtCase.objects.filter(nes_id=JHAPA).count() == 1
 
 
-def test_a_finished_merge_still_answers_already_merged():
-    # The resume path must not fire for a merge that actually completed.
+def test_a_dry_run_against_a_half_finished_merge_writes_nothing():
     _seed_pair()
-    _merge()
-    result = _merge()
-    assert result["status"] == "already_merged"
+    case = Case.objects.create(
+        title="Jhapa case", slug="jhapa-dryresume", case_type=CaseType.CORRUPTION,
+        state=CaseState.DRAFT, short_description="t", description="t",
+    )
+    CaseEntityRelationship.objects.create(
+        case=case, nes_id=LOOSE, relationship_type=RelationshipType.LOCATION
+    )
+    _crash_once_in_court_rows()
+
+    result = _merge(dry_run=True)
+    assert result["status"] == "planned"
     assert result["merge_id"] is None
-    assert result["total_references"] == 0
+    assert EntityMerge.objects.filter(status=EntityMerge.PENDING).count() == 1
+
+
+def test_two_half_finished_merges_for_one_survivor_are_both_resumed():
+    _seed_pair()
+    _seed("location", "jhapa-2", "Place")
+    other = "https://jawafdehi.org/entity/location/jhapa-2"
+    _crash_once_in_court_rows(duplicate_iris=[LOOSE])
+    _crash_once_in_court_rows(duplicate_iris=[other])
+    assert EntityMerge.objects.filter(status=EntityMerge.PENDING).count() == 2
+
+    result = _merge(duplicate_iris=[LOOSE, other])
+    assert result["status"] == "complete"
+    assert result["retired"] == sorted([LOOSE, other])
+    assert not EntityMerge.objects.filter(status=EntityMerge.PENDING).exists()
+
+
+def test_a_pending_merge_survives_its_survivor_being_merged_away():
+    # A → S stalls, then S → T. Sending A → T must still finish A's repointing.
+    _seed_pair()
+    _seed("location/district", "jhapa-far-east", "AdministrativeArea")
+    final = "https://jawafdehi.org/entity/location/district/jhapa-far-east"
+    court = Court.objects.create(
+        identifier="jhapafareast", court_type="district",
+        full_name_nepali="जिल्ला अदालत झापा पूर्व", full_name_english="District Court Jhapa East",
+    )
+    CourtCase.objects.create(case_number="081-CR-0099", court=court, nes_id=LOOSE)
+    _crash_once_in_court_rows()
+    _merge(survivor_iri=final, duplicate_iris=[JHAPA])
+
+    result = _merge(survivor_iri=final, duplicate_iris=[LOOSE])
+    assert result["status"] == "complete"
+    assert not CourtCase.objects.filter(nes_id=LOOSE).exists()
+    assert not EntityMerge.objects.filter(status=EntityMerge.PENDING).exists()
+
+
+def test_a_resume_keeps_the_first_attempts_manifest_entries():
+    _seed_pair()
+    case = Case.objects.create(
+        title="Jhapa case", slug="jhapa-manifest", case_type=CaseType.CORRUPTION,
+        state=CaseState.DRAFT, short_description="t", description="t",
+    )
+    CaseEntityRelationship.objects.create(
+        case=case, nes_id=LOOSE, relationship_type=RelationshipType.LOCATION
+    )
+    merge_id = _crash_once_in_court_rows()
+    first = EntityMerge.objects.get(pk=merge_id).reference_manifest
+    assert any(e["store"] == "case_entity_binds" for e in first)
+
+    _merge()
+    after = EntityMerge.objects.get(pk=merge_id).reference_manifest
+    assert all(entry in after for entry in first)
 
 
 def test_a_search_outage_warns_instead_of_failing_a_finished_merge():
