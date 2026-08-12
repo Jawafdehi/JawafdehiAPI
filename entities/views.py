@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List, Optional
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 import jsonpatch
 from jawafdehi_shared.drf.auditlog import AuditlogActorMixin
@@ -98,6 +98,17 @@ def _resolve_ref(ref: str) -> Optional[str]:
     except ValueError:
         return None
     return iri if is_valid_entity_iri(iri) else None
+
+
+def _redirect_to_survivor(iri: str, *, suffix: str = "") -> Optional[Response]:
+    """A 301 to the survivor if ``iri`` is a merge tombstone, else None."""
+    target = EntityRepository().resolve_tombstone(iri)
+    if not target:
+        return None
+    location = f"/api/entities/{quote(target, safe='')}{suffix}"
+    response = Response(status=status.HTTP_301_MOVED_PERMANENTLY)
+    response["Location"] = location
+    return response
 
 
 @api_view(["GET"])
@@ -195,10 +206,16 @@ class EntityListCreateView(AuditlogActorMixin, APIView):
                      f"Maximum batch size is {MAX_BATCH_SIZE}. Requested: {len(refs)}"),
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        found, not_found = [], []
+        found, not_found, redirected = [], [], {}
         for ref in refs:
             iri = _resolve_ref(ref)
             doc = repo.get_entity(iri) if iri else None
+            if doc is None and iri:
+                target = repo.resolve_tombstone(iri)
+                if target:
+                    doc = repo.get_entity(target)
+                    if doc is not None:
+                        redirected[iri] = target
             if doc is None:
                 not_found.append(ref)
             else:
@@ -210,6 +227,8 @@ class EntityListCreateView(AuditlogActorMixin, APIView):
         }
         if not_found:
             body["not_found"] = not_found
+        if redirected:
+            body["redirected"] = redirected
         return Response(body)
 
     # --- POST: create --------------------------------------------------
@@ -251,6 +270,10 @@ class EntityDetailView(AuditlogActorMixin, APIView):
         iri = _resolve_ref(ref)
         doc = EntityRepository().get_entity(iri) if iri else None
         if doc is None:
+            if iri:
+                redirect = _redirect_to_survivor(iri)
+                if redirect is not None:
+                    return redirect
             return Response(
                 _err("NOT_FOUND", f"Entity {ref} not found"),
                 status=status.HTTP_404_NOT_FOUND,
@@ -347,6 +370,10 @@ class EntityVersionsView(APIView):
                 _err("INVALID_ENTITY_ID", f"Invalid entity reference: {ref}"),
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if EntityRepository().get_entity(iri) is None:
+            redirect = _redirect_to_survivor(iri, suffix="/versions")
+            if redirect is not None:
+                return redirect
         limit = _clamp_limit(_int_param(request.query_params.get("limit"), 100))
         offset = _clamp_offset(_int_param(request.query_params.get("offset"), 0))
         service = PublicationService()
