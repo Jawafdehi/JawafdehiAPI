@@ -5,6 +5,7 @@ import pytest
 from cases.models import (
     Case, CaseEntityRelationship, CaseState, CaseType, RelationshipOutcome, RelationshipType,
 )
+from courts.models import Court, CourtCase
 from entities.models import EntityMerge, StoredEntity
 from entities.services.merge import EntityMergeService, MergeError
 from entities.services.publication import PublicationService
@@ -191,6 +192,11 @@ def test_a_partial_merge_resumes_on_the_next_attempt():
     CaseEntityRelationship.objects.create(
         case=case, nes_id=LOOSE, relationship_type=RelationshipType.LOCATION
     )
+    court = Court.objects.create(
+        identifier="jhapadc", court_type="district",
+        full_name_nepali="जिल्ला अदालत झापा", full_name_english="District Court Jhapa",
+    )
+    CourtCase.objects.create(case_number="081-CR-0081", court=court, nes_id=LOOSE)
 
     from entities.services.merge import service as svc
     original = svc.references.repoint_court_rows
@@ -214,9 +220,50 @@ def test_a_partial_merge_resumes_on_the_next_attempt():
     assert CaseEntityRelationship.objects.filter(nes_id=JHAPA).count() == 1
 
     result = _merge()
-    assert result["status"] in ("complete", "already_merged")
+    assert result["status"] == "complete"
+    assert EntityMerge.objects.get(pk=merge_id).status == EntityMerge.COMPLETE
     assert CaseEntityRelationship.objects.filter(nes_id=JHAPA).count() == 1
     assert not CaseEntityRelationship.objects.filter(nes_id=LOOSE).exists()
+    # The store the first attempt never reached must be repointed by the resume.
+    assert not CourtCase.objects.filter(nes_id=LOOSE).exists()
+    assert CourtCase.objects.filter(nes_id=JHAPA).count() == 1
+
+
+def test_a_finished_merge_still_answers_already_merged():
+    # The resume path must not fire for a merge that actually completed.
+    _seed_pair()
+    _merge()
+    result = _merge()
+    assert result["status"] == "already_merged"
+    assert result["merge_id"] is None
+    assert result["total_references"] == 0
+
+
+def test_a_search_outage_warns_instead_of_failing_a_finished_merge():
+    _seed_pair()
+    case = Case.objects.create(
+        title="Jhapa case", slug="jhapa-index", case_type=CaseType.CORRUPTION,
+        state=CaseState.DRAFT, short_description="t", description="t",
+    )
+    CaseEntityRelationship.objects.create(
+        case=case, nes_id=LOOSE, relationship_type=RelationshipType.LOCATION
+    )
+
+    from cases import search_index as case_search
+    original = case_search.index_now
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("opensearch unreachable")
+
+    case_search.index_now = _boom
+    try:
+        result = _merge()
+    finally:
+        case_search.index_now = original
+
+    assert result["status"] == "complete"
+    assert any("re-index" in w for w in result["warnings"])
+    assert EntityMerge.objects.get(pk=result["merge_id"]).status == EntityMerge.COMPLETE
 
 
 def test_warns_when_the_survivor_looks_less_complete_than_the_duplicate():

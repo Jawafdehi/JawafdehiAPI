@@ -60,10 +60,32 @@ class EntityMergeService:
         candidates = self._classify(survivor_iri, duplicate_iris, survivor_doc, type_family)
 
         if not candidates:
+            pending = self._pending_merge(survivor_iri, duplicate_iris)
+            if pending is None:
+                return self._response(
+                    merge_id=None, status="already_merged", dry_run=dry_run,
+                    survivor=survivor_doc, retired=duplicate_iris,
+                    inherited={}, per_store={}, warnings=[],
+                )
+            # Every duplicate is tombstoned but an earlier attempt stopped before it
+            # finished repointing. Returning "already_merged" here would strand those
+            # references on a retired entity forever.
+            remaining = pending.duplicate_iris
+            if dry_run:
+                counts = references.count_references(remaining, survivor_iri)
+                return self._response(
+                    merge_id=str(pending.id), status="planned", dry_run=True,
+                    survivor=survivor_doc, retired=remaining, inherited={},
+                    per_store={k: {"repointed": v, "deduplicated": 0}
+                               for k, v in counts.items()},
+                    warnings=[],
+                )
+            per_store = self._phase_two(pending, remaining, survivor_iri, author_id)
             return self._response(
-                merge_id=None, status="already_merged", dry_run=dry_run,
-                survivor=survivor_doc, retired=duplicate_iris,
-                inherited={}, per_store={}, warnings=[],
+                merge_id=str(pending.id), status="complete", dry_run=False,
+                survivor=self.repo.get_entity(survivor_iri), retired=remaining,
+                inherited={}, per_store=per_store,
+                warnings=self._phase_three(pending, survivor_iri),
             )
 
         retired = list(candidates)
@@ -104,7 +126,7 @@ class EntityMergeService:
             author_id=author_id, change_description=change_description,
         )
         per_store = self._phase_two(merge, retired, survivor_iri, author_id)
-        self._phase_three(merge, survivor_iri)
+        warnings = [*warnings, *self._phase_three(merge, survivor_iri)]
 
         return self._response(
             merge_id=str(merge.id), status="complete", dry_run=False,
@@ -177,17 +199,34 @@ class EntityMergeService:
         merge.save(update_fields=["reference_manifest", "status", "completed_at"])
         return per_store
 
-    def _phase_three(self, merge, survivor_iri) -> None:
-        """Re-index cases: their search documents denormalize entity names."""
+    def _phase_three(self, merge, survivor_iri) -> List[str]:
+        """Re-index affected cases, returning a warning per case that could not be indexed.
+
+        Phase two already marked the merge complete and moved every row, so a search
+        outage must not present as a failed merge. The spec's ``warnings`` array is
+        advisory and never blocks.
+        """
         from cases.models import Case
         from cases import search_index as case_search
 
+        stale = 0
         for case_id in references.affected_case_ids(survivor_iri):
             case = Case.objects.filter(pk=case_id).first()
-            if case is not None:
-                # index_now, not index — the resumable batch path wants failures to
-                # surface rather than be swallowed the way the write-time signal does.
+            if case is None:
+                continue
+            try:
+                # index_now, not index — index() defers to a signal that swallows
+                # failures, and this path needs to know an index did not refresh.
                 case_search.index_now(case)
+            except Exception:
+                logger.exception("merge %s could not re-index case %s", merge.id, case_id)
+                stale += 1
+        if not stale:
+            return []
+        return [
+            f"{stale} case(s) could not be re-indexed for search. The merge is "
+            "complete; re-index them to refresh search results."
+        ]
 
     # --- validation -----------------------------------------------------
 
@@ -217,6 +256,16 @@ class EntityMergeService:
                 "SELF_MERGE", "The survivor cannot also be listed as a duplicate.", 422
             )
         return survivor, duplicates
+
+    def _pending_merge(self, survivor_iri: str, duplicate_iris: List[str]):
+        """The unfinished merge these duplicates belong to, if an attempt stopped partway."""
+        requested = set(duplicate_iris)
+        for merge in EntityMerge.objects.filter(
+            survivor_iri=survivor_iri, status=EntityMerge.PENDING
+        ).order_by("-created_at"):
+            if requested & set(merge.duplicate_iris):
+                return merge
+        return None
 
     def _load_survivor(self, survivor_iri):
         doc = self.repo.get_entity(survivor_iri)
