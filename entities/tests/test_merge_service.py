@@ -453,20 +453,52 @@ def test_an_edit_to_the_survivor_during_the_merge_is_not_overwritten(monkeypatch
     assert result["survivor"]["url"] == "https://example.np/jhapa"
 
 
-def _tombstone_inside_court_rows(monkeypatch, iri, merged_into):
-    """Retire ``iri`` mid-repoint — after the pre-write re-check, before _retire."""
+ELSEWHERE = "https://jawafdehi.org/entity/location/elsewhere"
+
+
+def _tombstone_inside(monkeypatch, target, iri, merged_into):
+    """Retire ``iri`` from inside ``references.<target>``, then run the real thing.
+
+    ``detect_outcome_conflicts`` lands before the pre-write re-check;
+    ``repoint_court_rows`` lands after it, so only _retire's row lock can notice.
+    """
     from entities.services.merge import service as svc
 
-    original = svc.references.repoint_court_rows
+    original = getattr(svc.references, target)
 
-    def _tombstone_then_repoint(*args, **kwargs):
+    def _tombstone_then_run(*args, **kwargs):
         row = StoredEntity.objects.get(pk=iri)
         row.is_deleted = True
         row.data = {**row.data, MERGED_INTO_KEY: {"@id": merged_into}}
         row.save(update_fields=["is_deleted", "data"])
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(svc.references, "repoint_court_rows", _tombstone_then_repoint)
+    monkeypatch.setattr(svc.references, target, _tombstone_then_run)
+
+
+def test_the_pre_write_check_rejects_before_any_reference_moves(monkeypatch):
+    # What the pre-write re-check is for: catch the concurrent retirement while the
+    # 409 still costs nothing, instead of after a thousand references have moved.
+    _seed_pair()
+    case = _case_with_bind("jhapa-precheck", LOOSE)
+    _tombstone_inside(monkeypatch, "detect_outcome_conflicts", LOOSE, ELSEWHERE)
+
+    with pytest.raises(MergeError) as exc:
+        _merge()
+    assert exc.value.code == "DUPLICATE_ALREADY_MERGED"
+    assert exc.value.http_status == 409
+    assert CaseEntityRelationship.objects.filter(case=case, nes_id=LOOSE).exists()
+
+
+def test_the_pre_write_check_treats_this_survivor_as_done_too(monkeypatch):
+    # Symmetric with _retire: whichever check notices first, a duplicate already
+    # retired into THIS survivor is done, not in conflict.
+    _seed_pair()
+    _tombstone_inside(monkeypatch, "detect_outcome_conflicts", LOOSE, JHAPA)
+
+    result = _merge()
+    assert result["status"] == "complete"
+    assert EntityRepository().resolve_tombstone(LOOSE) == JHAPA
 
 
 def test_a_duplicate_retired_concurrently_is_rejected(monkeypatch):
@@ -476,9 +508,7 @@ def test_a_duplicate_retired_concurrently_is_rejected(monkeypatch):
     _seed("location", "jhapa-alt", "Place")
     other = "https://jawafdehi.org/entity/location/jhapa-alt"
 
-    _tombstone_inside_court_rows(
-        monkeypatch, LOOSE, "https://jawafdehi.org/entity/location/elsewhere"
-    )
+    _tombstone_inside(monkeypatch, "repoint_court_rows", LOOSE, ELSEWHERE)
     with pytest.raises(MergeError) as exc:
         _merge(duplicate_iris=[other, LOOSE])
     assert exc.value.code == "DUPLICATE_ALREADY_MERGED"
@@ -496,7 +526,7 @@ def test_a_duplicate_already_retired_into_this_survivor_does_not_block_the_merge
     # _classify drops such a duplicate before the phases even start, so this is the
     # only path to the retire step's row-lock re-check. It must converge, not 409.
     _seed_pair()
-    _tombstone_inside_court_rows(monkeypatch, LOOSE, JHAPA)
+    _tombstone_inside(monkeypatch, "repoint_court_rows", LOOSE, JHAPA)
 
     result = _merge()
     assert result["status"] == "complete"

@@ -9,6 +9,7 @@ itself names the duplicates — so re-sending it continues from where it stopped
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from typing import Any, Dict, List, Optional
@@ -117,7 +118,7 @@ class EntityMergeService:
         description = change_description or f"Merged {len(retired)} duplicate(s)"
         logger.info("merge %s: %s <= %s", merge_id, survivor_iri, ", ".join(retired))
 
-        self._recheck_duplicates(retired)
+        self._recheck_duplicates(retired, survivor_iri)
         # Computed before any write, from a query that is stable across attempts: a
         # crashed attempt's manifest is gone, so taking the case ids from what THIS
         # attempt moves would skip the cases whose binds already moved. That
@@ -126,8 +127,14 @@ class EntityMergeService:
         # out of the request is the real fix.
         case_ids = references.case_ids_touched(retired, survivor_iri)
 
-        # The manifest is per-row audit detail; re-indexing reads ``case_ids`` instead.
-        per_store, _manifest = self._repoint(retired, survivor_iri, author_id, merge_id)
+        per_store, manifest = self._repoint(retired, survivor_iri, author_id, merge_id)
+        # The merge keeps no record of itself, so this line is the forensic trail: every
+        # row this request moved, joinable by merge id to the auditlog entries and to the
+        # version rows the same id names in their change_description.
+        logger.info(
+            "merge %s repointed %d reference(s): %s",
+            merge_id, len(manifest), json.dumps(manifest, ensure_ascii=False, default=str),
+        )
         try:
             inherited = self._retire(
                 survivor_iri=survivor_iri, retired=retired, candidates=candidates,
@@ -153,7 +160,21 @@ class EntityMergeService:
 
     # --- phases ---------------------------------------------------------
 
-    def _recheck_duplicates(self, retired) -> None:
+    def _require_not_retired_elsewhere(self, iri, survivor_iri) -> None:
+        """Raise unless a vanished duplicate row is already retired into THIS survivor.
+
+        The one rule both liveness checks apply — the pre-write re-check and ``_retire``'s
+        row lock — so a merge racing itself behaves the same whichever notices first.
+        Already retired into this survivor is done, not in conflict; raising there would
+        strand the references on this survivor and fail every resend identically.
+        """
+        if self.repo.resolve_tombstone(iri) != survivor_iri:
+            raise MergeError(
+                "DUPLICATE_ALREADY_MERGED",
+                f"{iri} was retired by a concurrent merge.", 409,
+            )
+
+    def _recheck_duplicates(self, retired, survivor_iri) -> None:
         """Reject a duplicate retired since _classify, before any reference moves.
 
         The lock cannot be held across the repoint phase — three databases, three
@@ -168,10 +189,7 @@ class EntityMergeService:
             )
         for iri in retired:
             if iri not in live:
-                raise MergeError(
-                    "DUPLICATE_ALREADY_MERGED",
-                    f"{iri} was retired by a concurrent merge.", 409,
-                )
+                self._require_not_retired_elsewhere(iri, survivor_iri)
 
     def _repoint(self, retired, survivor_iri, author_id, merge_id):
         """Repoint each store in its own transaction. Idempotent, so a resend resumes.
@@ -242,19 +260,11 @@ class EntityMergeService:
                     .first()
                 )
                 if row is None:
-                    # Already retired into THIS survivor: a concurrent identical merge
-                    # got there first, so the work is done, not in conflict. Raising
-                    # here would leave the references on this survivor and the pointer
-                    # nowhere, and every resend would fail the same way.
-                    if self.repo.resolve_tombstone(iri) == survivor_iri:
-                        continue
                     # Re-checked under the row lock: two operators merging the same
                     # duplicate into different survivors would otherwise both tombstone
                     # it and repoint its references two ways.
-                    raise MergeError(
-                        "DUPLICATE_ALREADY_MERGED",
-                        f"{iri} was retired by a concurrent merge.", 409,
-                    )
+                    self._require_not_retired_elsewhere(iri, survivor_iri)
+                    continue
                 doc = dict(row.data)
                 doc[MERGED_INTO_KEY] = {"@id": survivor_iri}
                 # Document first: every upsert forces is_deleted=False (see
