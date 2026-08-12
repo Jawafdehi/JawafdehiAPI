@@ -41,24 +41,21 @@ def _merge(**kwargs):
     return EntityMergeService().merge(**kwargs)
 
 
-def _crash_once_in_court_rows(**kwargs):
+def _crash_once_in_court_rows(monkeypatch, **kwargs):
     """Run a merge that dies in the ngm phase; return the PENDING merge's id."""
     from entities.services.merge import service as svc
-
-    original = svc.references.repoint_court_rows
 
     def _boom(*args, **kwargs):
         raise RuntimeError("ngm unreachable")
 
-    svc.references.repoint_court_rows = _boom
-    try:
-        with pytest.raises(MergeError) as exc:
-            _merge(**kwargs)
-        assert exc.value.code == "MERGE_INCOMPLETE"
-        assert exc.value.http_status == 500
-        return exc.value.extra["merge_id"]
-    finally:
-        svc.references.repoint_court_rows = original
+    monkeypatch.setattr(svc.references, "repoint_court_rows", _boom)
+    with pytest.raises(MergeError) as exc:
+        _merge(**kwargs)
+    # Restored now, not at test teardown — callers resume with the real function.
+    monkeypatch.undo()
+    assert exc.value.code == "MERGE_INCOMPLETE"
+    assert exc.value.http_status == 500
+    return exc.value.extra["merge_id"]
 
 
 def test_happy_path_tombstones_the_duplicate_and_keeps_the_survivor():
@@ -170,27 +167,23 @@ def test_too_many_duplicates_is_rejected():
     assert exc.value.http_status == 400
 
 
-def test_over_the_reference_cap_is_rejected_before_anything_is_written():
+def test_over_the_reference_cap_is_rejected_before_anything_is_written(monkeypatch):
     _seed_pair()
     from entities.services.merge import service as svc
-    monkey = svc.MAX_REFERENCES
-    svc.MAX_REFERENCES = 0
-    try:
-        case = Case.objects.create(
-            title="Jhapa case", slug="jhapa-cap", case_type=CaseType.CORRUPTION,
-            state=CaseState.DRAFT, short_description="t", description="t",
-        )
-        CaseEntityRelationship.objects.create(
-            case=case, nes_id=LOOSE, relationship_type=RelationshipType.LOCATION
-        )
-        with pytest.raises(MergeError) as exc:
-            _merge()
-        assert exc.value.code == "MERGE_TOO_LARGE"
-        assert exc.value.http_status == 409
-        assert exc.value.extra["reference_count"] == 1
-        assert StoredEntity.objects.get(pk=LOOSE).is_deleted is False
-    finally:
-        svc.MAX_REFERENCES = monkey
+    monkeypatch.setattr(svc, "MAX_REFERENCES", 0)
+    case = Case.objects.create(
+        title="Jhapa case", slug="jhapa-cap", case_type=CaseType.CORRUPTION,
+        state=CaseState.DRAFT, short_description="t", description="t",
+    )
+    CaseEntityRelationship.objects.create(
+        case=case, nes_id=LOOSE, relationship_type=RelationshipType.LOCATION
+    )
+    with pytest.raises(MergeError) as exc:
+        _merge()
+    assert exc.value.code == "MERGE_TOO_LARGE"
+    assert exc.value.http_status == 409
+    assert exc.value.extra["reference_count"] == 1
+    assert StoredEntity.objects.get(pk=LOOSE).is_deleted is False
 
 
 def test_conflicting_terminal_verdicts_are_rejected_before_anything_is_written():
@@ -215,7 +208,7 @@ def test_conflicting_terminal_verdicts_are_rejected_before_anything_is_written()
     assert StoredEntity.objects.get(pk=LOOSE).is_deleted is False
 
 
-def test_a_partial_merge_resumes_on_the_next_attempt():
+def test_a_partial_merge_resumes_on_the_next_attempt(monkeypatch):
     _seed_pair()
     case = Case.objects.create(
         title="Jhapa case", slug="jhapa-resume", case_type=CaseType.CORRUPTION,
@@ -230,7 +223,7 @@ def test_a_partial_merge_resumes_on_the_next_attempt():
     )
     CourtCase.objects.create(case_number="081-CR-0081", court=court, nes_id=LOOSE)
 
-    merge_id = _crash_once_in_court_rows()
+    merge_id = _crash_once_in_court_rows(monkeypatch)
 
     # Tombstone landed, so the retired IRI already resolves...
     assert StoredEntity.objects.get(pk=LOOSE).merged_into == JHAPA
@@ -248,7 +241,7 @@ def test_a_partial_merge_resumes_on_the_next_attempt():
     assert CourtCase.objects.filter(nes_id=JHAPA).count() == 1
 
 
-def test_a_dry_run_against_a_half_finished_merge_writes_nothing():
+def test_a_dry_run_against_a_half_finished_merge_writes_nothing(monkeypatch):
     _seed_pair()
     case = Case.objects.create(
         title="Jhapa case", slug="jhapa-dryresume", case_type=CaseType.CORRUPTION,
@@ -257,7 +250,7 @@ def test_a_dry_run_against_a_half_finished_merge_writes_nothing():
     CaseEntityRelationship.objects.create(
         case=case, nes_id=LOOSE, relationship_type=RelationshipType.LOCATION
     )
-    _crash_once_in_court_rows()
+    _crash_once_in_court_rows(monkeypatch)
 
     result = _merge(dry_run=True)
     assert result["status"] == "planned"
@@ -265,14 +258,14 @@ def test_a_dry_run_against_a_half_finished_merge_writes_nothing():
     assert EntityMerge.objects.filter(status=EntityMerge.PENDING).count() == 1
 
 
-def test_a_still_failing_sweep_stops_the_request_before_it_stalls_a_second_merge():
+def test_a_still_failing_sweep_stops_the_request_before_it_stalls_a_second_merge(monkeypatch):
     # During an outage this leaves one stalled record instead of one per attempt,
     # and the second request's duplicate is never tombstoned.
     _seed_pair()
     _seed("location", "jhapa-2", "Place")
     other = "https://jawafdehi.org/entity/location/jhapa-2"
-    _crash_once_in_court_rows(duplicate_iris=[LOOSE])
-    _crash_once_in_court_rows(duplicate_iris=[other])
+    _crash_once_in_court_rows(monkeypatch, duplicate_iris=[LOOSE])
+    _crash_once_in_court_rows(monkeypatch, duplicate_iris=[other])
     assert EntityMerge.objects.filter(status=EntityMerge.PENDING).count() == 1
     assert StoredEntity.objects.get(pk=other).is_deleted is False
 
@@ -313,7 +306,7 @@ def test_every_stalled_merge_for_one_survivor_is_resumed():
     assert not CourtCase.objects.filter(nes_id=other).exists()
 
 
-def test_a_pending_merge_survives_its_survivor_being_merged_away():
+def test_a_pending_merge_survives_its_survivor_being_merged_away(monkeypatch):
     # A → S stalls, then S → T. Sending A → T must still finish A's repointing.
     _seed_pair()
     _seed("location/district", "jhapa-far-east", "AdministrativeArea")
@@ -323,7 +316,7 @@ def test_a_pending_merge_survives_its_survivor_being_merged_away():
         full_name_nepali="जिल्ला अदालत झापा पूर्व", full_name_english="District Court Jhapa East",
     )
     CourtCase.objects.create(case_number="081-CR-0099", court=court, nes_id=LOOSE)
-    _crash_once_in_court_rows()
+    _crash_once_in_court_rows(monkeypatch)
     _merge(survivor_iri=final, duplicate_iris=[JHAPA])
 
     result = _merge(survivor_iri=final, duplicate_iris=[LOOSE])
@@ -332,7 +325,7 @@ def test_a_pending_merge_survives_its_survivor_being_merged_away():
     assert not EntityMerge.objects.filter(status=EntityMerge.PENDING).exists()
 
 
-def test_a_resume_keeps_the_first_attempts_manifest_entries():
+def test_a_resume_keeps_the_first_attempts_manifest_entries(monkeypatch):
     _seed_pair()
     case = Case.objects.create(
         title="Jhapa case", slug="jhapa-manifest", case_type=CaseType.CORRUPTION,
@@ -341,7 +334,7 @@ def test_a_resume_keeps_the_first_attempts_manifest_entries():
     CaseEntityRelationship.objects.create(
         case=case, nes_id=LOOSE, relationship_type=RelationshipType.LOCATION
     )
-    merge_id = _crash_once_in_court_rows()
+    merge_id = _crash_once_in_court_rows(monkeypatch)
     first = EntityMerge.objects.get(pk=merge_id).reference_manifest
     assert any(e["store"] == "case_entity_binds" for e in first)
 
@@ -350,7 +343,7 @@ def test_a_resume_keeps_the_first_attempts_manifest_entries():
     assert all(entry in after for entry in first)
 
 
-def test_a_search_outage_warns_instead_of_failing_a_finished_merge():
+def test_a_search_outage_warns_instead_of_failing_a_finished_merge(monkeypatch):
     _seed_pair()
     case = Case.objects.create(
         title="Jhapa case", slug="jhapa-index", case_type=CaseType.CORRUPTION,
@@ -361,16 +354,12 @@ def test_a_search_outage_warns_instead_of_failing_a_finished_merge():
     )
 
     from cases import search_index as case_search
-    original = case_search.index_now
 
     def _boom(*args, **kwargs):
         raise RuntimeError("opensearch unreachable")
 
-    case_search.index_now = _boom
-    try:
-        result = _merge()
-    finally:
-        case_search.index_now = original
+    monkeypatch.setattr(case_search, "index_now", _boom)
+    result = _merge()
 
     assert result["status"] == "complete"
     assert any("re-index" in w for w in result["warnings"])
@@ -386,7 +375,7 @@ def test_warns_when_the_survivor_looks_less_complete_than_the_duplicate():
     assert result["warnings"]
 
 
-def test_a_stalled_merge_is_swept_up_by_the_next_merge_into_the_same_survivor():
+def test_a_stalled_merge_is_swept_up_by_the_next_merge_into_the_same_survivor(monkeypatch):
     # The stalled attempt names a different duplicate, so no other path would find it.
     _seed_pair()
     _seed("location", "jhapa-2", "Place")
@@ -396,7 +385,7 @@ def test_a_stalled_merge_is_swept_up_by_the_next_merge_into_the_same_survivor():
         full_name_nepali="जिल्ला अदालत झापा", full_name_english="District Court Jhapa",
     )
     CourtCase.objects.create(case_number="081-CR-0099", court=court, nes_id=LOOSE)
-    stalled = _crash_once_in_court_rows(duplicate_iris=[LOOSE])
+    stalled = _crash_once_in_court_rows(monkeypatch, duplicate_iris=[LOOSE])
 
     result = _merge(duplicate_iris=[other])
     assert result["status"] == "complete"

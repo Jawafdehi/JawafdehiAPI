@@ -38,7 +38,8 @@ class Command(BaseCommand):
                 enforce_reference_cap=False,
             )
         except MergeError as exc:
-            raise CommandError(f"{exc.code}: {exc.message}") from exc
+            detail = f" ({json.dumps(exc.extra, ensure_ascii=False)})" if exc.extra else ""
+            raise CommandError(f"{exc.code}: {exc.message}{detail}") from exc
 
         summary = {k: v for k, v in result.items() if k != "survivor"}
         self.stdout.write(json.dumps(summary, indent=2, ensure_ascii=False))

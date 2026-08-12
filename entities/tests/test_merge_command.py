@@ -1,5 +1,8 @@
 """manage.py merge_entities — the escape hatch for merges over the API's cap."""
 
+import json
+from io import StringIO
+
 import pytest
 from django.core.management import CommandError, call_command
 
@@ -27,8 +30,13 @@ def _seed(prefix, slug, atype):
 def test_command_merges_and_tombstones():
     _seed("location/district", "jhapa-np0104", "AdministrativeArea")
     _seed("location", "jhapa", "Place")
-    call_command("merge_entities", survivor=JHAPA, duplicate=[LOOSE])
+    out = StringIO()
+    call_command("merge_entities", survivor=JHAPA, duplicate=[LOOSE], stdout=out)
     assert StoredEntity.objects.get(pk=LOOSE).merged_into == JHAPA
+    summary = json.loads(out.getvalue())
+    assert summary["status"] == "complete"
+    assert summary["merge_id"]
+    assert "survivor" not in summary
 
 
 def test_dry_run_writes_nothing():

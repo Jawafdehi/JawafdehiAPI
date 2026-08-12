@@ -79,6 +79,14 @@ def test_rewriting_never_touches_the_documents_own_id():
     assert count == 0
 
 
+def test_a_bare_string_reference_is_never_rewritten():
+    # count_references depends on this: a bare-string mention is not repointable.
+    doc = {"@id": KOSHI, "sameAs": [LOOSE]}
+    out, count = rewrite_references(doc, {LOOSE: JHAPA})
+    assert out["sameAs"] == [LOOSE]
+    assert count == 0
+
+
 def test_a_list_holding_both_collapses_to_one():
     doc = {"@id": KOSHI, "about": [{"@id": JHAPA}, {"@id": LOOSE}]}
     out, count = rewrite_references(doc, {LOOSE: JHAPA})

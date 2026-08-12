@@ -113,12 +113,13 @@ def detect_outcome_conflicts(retired: List[str], survivor: str) -> List[Dict[str
         groups.setdefault((row.case_id, row.relationship_type), {})[row.nes_id] = row.outcome
 
     conflicts = []
-    for (case_id, _relationship_type), by_iri in sorted(groups.items()):
+    for (case_id, relationship_type), by_iri in sorted(groups.items()):
         verdicts = [by_iri[iri] for iri in sorted(by_iri, key=lambda i: rank[i])]
         differing = next((v for v in verdicts if v != verdicts[0]), None)
         if differing is not None:
             conflicts.append({
                 "case_id": case_id,
+                "relationship_type": relationship_type,
                 "outcomes": {iri: by_iri[iri] for iri in sorted(by_iri, key=lambda i: rank[i])},
             })
     return conflicts
@@ -170,6 +171,13 @@ def repoint_case_binds(retired: List[str], survivor: str) -> Tuple[RefCounts, Li
         manifest.add(
             "case_entity_binds", row.pk, "nes_id", row.nes_id, survivor, "deduplicated",
             case_id=row.case_id,
+            deleted_row={
+                "case_id": row.case_id,
+                "nes_id": row.nes_id,
+                "relationship_type": row.relationship_type,
+                "outcome": row.outcome,
+                "notes": row.notes,
+            },
         )
         row.delete()
         counts.deduplicated += 1

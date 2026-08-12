@@ -63,6 +63,38 @@ def test_colliding_bind_folds_into_its_sibling_instead_of_duplicating():
     assert "from duplicate" in rows.first().notes
 
 
+def test_a_deduplicated_bind_is_recoverable_from_the_manifest():
+    case = _case("jhapa-revenue-9")
+    CaseEntityRelationship.objects.create(
+        case=case, nes_id=JHAPA, relationship_type=RelationshipType.ACCUSED,
+        outcome=RelationshipOutcome.CHARGED,
+    )
+    CaseEntityRelationship.objects.create(
+        case=case, nes_id=LOOSE, relationship_type=RelationshipType.ACCUSED,
+        outcome=RelationshipOutcome.CONVICTED, notes="from duplicate",
+    )
+    _, manifest = references.repoint_case_binds([LOOSE], JHAPA)
+    entry = next(e for e in manifest if e["action"] == "deduplicated")
+    assert entry["deleted_row"]["outcome"] == RelationshipOutcome.CONVICTED
+    assert entry["deleted_row"]["notes"] == "from duplicate"
+
+
+def test_two_duplicates_on_one_case_fold_into_a_single_bind():
+    # The survivor has no bind: the first duplicate repoints, the second folds into it.
+    case = _case("jhapa-revenue-7")
+    other = "https://jawafdehi.org/entity/location/jhapa-district"
+    CaseEntityRelationship.objects.create(
+        case=case, nes_id=LOOSE, relationship_type=RelationshipType.LOCATION
+    )
+    CaseEntityRelationship.objects.create(
+        case=case, nes_id=other, relationship_type=RelationshipType.LOCATION
+    )
+    counts, _ = references.repoint_case_binds([LOOSE, other], JHAPA)
+    assert counts.repointed == 1
+    assert counts.deduplicated == 1
+    assert CaseEntityRelationship.objects.filter(case=case).count() == 1
+
+
 def test_terminal_verdict_beats_charged_when_binds_collide():
     case = _case("jhapa-revenue-3")
     CaseEntityRelationship.objects.create(
@@ -91,6 +123,22 @@ def test_two_different_terminal_verdicts_are_reported_as_a_conflict():
     conflicts = references.detect_outcome_conflicts([LOOSE], JHAPA)
     assert len(conflicts) == 1
     assert conflicts[0]["case_id"] == case.id
+
+
+def test_a_conflict_reports_its_relationship_type_alongside_the_case_id():
+    case = _case("jhapa-revenue-8")
+    CaseEntityRelationship.objects.create(
+        case=case, nes_id=JHAPA, relationship_type=RelationshipType.ACCUSED,
+        outcome=RelationshipOutcome.ACQUITTED,
+    )
+    CaseEntityRelationship.objects.create(
+        case=case, nes_id=LOOSE, relationship_type=RelationshipType.ACCUSED,
+        outcome=RelationshipOutcome.CONVICTED,
+    )
+    conflicts = references.detect_outcome_conflicts([LOOSE], JHAPA)
+    assert len(conflicts) == 1
+    assert conflicts[0]["case_id"] == case.id
+    assert conflicts[0]["relationship_type"] == RelationshipType.ACCUSED
 
 
 def test_all_three_ngm_stores_are_repointed():
@@ -163,7 +211,7 @@ def test_repointing_twice_is_a_noop_the_second_time():
 
 def test_two_duplicates_disagreeing_on_a_verdict_are_reported_as_a_conflict():
     # The survivor has no bind at all — the disagreement is between the duplicates.
-    case = _case("jhapa-revenue-5")
+    case = _case("jhapa-revenue-6")
     other = "https://jawafdehi.org/entity/location/jhapa-district"
     CaseEntityRelationship.objects.create(
         case=case, nes_id=LOOSE, relationship_type=RelationshipType.ACCUSED,

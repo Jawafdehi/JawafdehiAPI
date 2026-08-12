@@ -39,10 +39,11 @@ class RetiredEntityRedirectTests(APITestCase):
         _seed("location/district", "jhapa-np0104", "AdministrativeArea")
         _seed("location", "jhapa", "Place")
         self.client.force_authenticate(user=self.caseworker)
-        self.client.post(
+        resp = self.client.post(
             "/api/entities/merge",
             {"survivor": JHAPA, "duplicates": [LOOSE]}, format="json",
         )
+        assert resp.status_code == status.HTTP_200_OK, resp.data
         self.client.force_authenticate(user=None)
 
     def test_detail_redirects_to_the_survivor(self):

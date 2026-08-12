@@ -37,6 +37,13 @@ def test_resolve_tombstone_follows_a_chain_to_the_final_survivor():
     assert EntityRepository().resolve_tombstone(OLDER) == JHAPA
 
 
+def test_resolve_tombstone_returns_a_target_that_no_longer_exists():
+    ghost = "https://jawafdehi.org/entity/location/ghost"
+    _entity(LOOSE, is_deleted=True, merged_into=ghost)
+    # No row for `ghost` exists at all — checking it is live is the caller's job.
+    assert EntityRepository().resolve_tombstone(LOOSE) == ghost
+
+
 def test_resolve_tombstone_terminates_on_a_cycle():
     _entity(LOOSE, is_deleted=True, merged_into=OLDER)
     _entity(OLDER, is_deleted=True, merged_into=LOOSE)
