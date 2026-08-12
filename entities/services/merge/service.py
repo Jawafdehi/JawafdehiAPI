@@ -54,6 +54,7 @@ class EntityMergeService:
         change_description: str = "",
         type_family: Optional[str] = None,
         dry_run: bool = False,
+        enforce_reference_cap: bool = True,
     ) -> Dict[str, Any]:
         survivor_iri, duplicate_iris = self._canonicalize(survivor_iri, duplicate_iris)
         survivor_doc = self._load_survivor(survivor_iri)
@@ -99,7 +100,10 @@ class EntityMergeService:
         retired = list(candidates)
         counts = references.count_references(retired, survivor_iri)
         total = sum(counts.values())
-        if total > MAX_REFERENCES:
+        # The cap keeps a large merge from timing out inside a request. manage.py
+        # merge_entities has no request to time out, and is what the spec names as
+        # the way to run one, so it lifts the cap.
+        if enforce_reference_cap and total > MAX_REFERENCES:
             raise MergeError(
                 "MERGE_TOO_LARGE",
                 f"This merge touches {total} references, over the {MAX_REFERENCES} limit. "
