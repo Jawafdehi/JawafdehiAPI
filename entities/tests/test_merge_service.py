@@ -373,59 +373,185 @@ def test_a_reference_to_another_retired_duplicate_is_dropped_from_the_survivor()
     assert any("removed" in w for w in result["warnings"])
 
 
-def test_only_the_cases_the_merge_touched_are_reindexed():
-    _seed_pair()
-    untouched = Case.objects.create(
-        title="Jhapa case", slug="jhapa-untouched", case_type=CaseType.CORRUPTION,
+def _case_with_bind(slug, nes_id):
+    case = Case.objects.create(
+        title="Jhapa case", slug=slug, case_type=CaseType.CORRUPTION,
         state=CaseState.DRAFT, short_description="t", description="t",
     )
     CaseEntityRelationship.objects.create(
-        case=untouched, nes_id=JHAPA, relationship_type=RelationshipType.LOCATION
+        case=case, nes_id=nes_id, relationship_type=RelationshipType.LOCATION
     )
-    touched = Case.objects.create(
-        title="Jhapa case", slug="jhapa-touched", case_type=CaseType.CORRUPTION,
-        state=CaseState.DRAFT, short_description="t", description="t",
-    )
-    CaseEntityRelationship.objects.create(
-        case=touched, nes_id=LOOSE, relationship_type=RelationshipType.LOCATION
-    )
+    return case
 
+
+def _record_reindexed(run):
     from cases import search_index as case_search
 
     original = case_search.index_now
     indexed = []
     case_search.index_now = lambda case, **kwargs: indexed.append(case.id)
     try:
-        result = _merge()
+        return run(), indexed
     finally:
         case_search.index_now = original
 
+
+def test_every_case_bound_to_the_merge_is_reindexed():
+    # Deliberately wider than the binds this attempt moves (see
+    # references.case_ids_touched): the survivor's own cases are included, because a
+    # crashed attempt's already-moved binds are invisible to the resend.
+    _seed_pair()
+    on_survivor = _case_with_bind("jhapa-on-survivor", JHAPA)
+    on_duplicate = _case_with_bind("jhapa-on-duplicate", LOOSE)
+    unrelated = Case.objects.create(
+        title="Jhapa case", slug="jhapa-unrelated", case_type=CaseType.CORRUPTION,
+        state=CaseState.DRAFT, short_description="t", description="t",
+    )
+
+    result, indexed = _record_reindexed(_merge)
+
     assert result["status"] == "complete"
-    assert indexed == [touched.id]
+    assert indexed == sorted([on_survivor.id, on_duplicate.id])
+    assert unrelated.id not in indexed
 
 
-def test_a_duplicate_retired_concurrently_is_rejected(monkeypatch):
-    # The concurrent write lands after _classify saw the duplicate live and before
-    # the retire step's row lock re-checks it.
+def test_a_resend_reindexes_the_cases_a_crashed_attempt_already_moved(monkeypatch):
+    # The bug the manifest hid: the crashed attempt moved this case's bind, so the
+    # resend moves nothing and would contribute no case id — leaving the case document
+    # naming an entity that is now soft-deleted, with the response saying "complete".
+    _seed_pair()
+    case = _case_with_bind("jhapa-reindex-resend", LOOSE)
+    _crash_once_in_court_rows(monkeypatch)
+    assert CaseEntityRelationship.objects.filter(nes_id=JHAPA).count() == 1
+
+    result, indexed = _record_reindexed(_merge)
+
+    assert result["status"] == "complete"
+    assert indexed == [case.id]
+
+
+def test_an_edit_to_the_survivor_during_the_merge_is_not_overwritten(monkeypatch):
+    # merge() reads the survivor before repointing and publishes after it. _retire
+    # rebuilds the document from a fresh read, so an edit inside that window survives.
     _seed_pair()
     from entities.services.merge import service as svc
 
     original = svc.references.repoint_court_rows
 
+    def _edit_then_repoint(*args, **kwargs):
+        PublicationService().update_entity(
+            doc={**EntityRepository().get_entity(JHAPA), "url": "https://example.np/jhapa"},
+            author_id="oidc:someone-else", change_description="concurrent edit",
+        )
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(svc.references, "repoint_court_rows", _edit_then_repoint)
+    result = _merge()
+
+    assert result["status"] == "complete"
+    assert StoredEntity.objects.get(pk=JHAPA).data["url"] == "https://example.np/jhapa"
+    assert result["survivor"]["url"] == "https://example.np/jhapa"
+
+
+def _tombstone_inside_court_rows(monkeypatch, iri, merged_into):
+    """Retire ``iri`` mid-repoint — after the pre-write re-check, before _retire."""
+    from entities.services.merge import service as svc
+
+    original = svc.references.repoint_court_rows
+
     def _tombstone_then_repoint(*args, **kwargs):
-        row = StoredEntity.objects.get(pk=LOOSE)
+        row = StoredEntity.objects.get(pk=iri)
         row.is_deleted = True
-        row.data = {**row.data, MERGED_INTO_KEY: {
-            "@id": "https://jawafdehi.org/entity/location/elsewhere"
-        }}
+        row.data = {**row.data, MERGED_INTO_KEY: {"@id": merged_into}}
         row.save(update_fields=["is_deleted", "data"])
         return original(*args, **kwargs)
 
     monkeypatch.setattr(svc.references, "repoint_court_rows", _tombstone_then_repoint)
+
+
+def test_a_duplicate_retired_concurrently_is_rejected(monkeypatch):
+    # The concurrent write lands after _classify and the pre-write re-check saw the
+    # duplicate live, and before the retire step's row lock re-checks it.
+    _seed_pair()
+    _seed("location", "jhapa-alt", "Place")
+    other = "https://jawafdehi.org/entity/location/jhapa-alt"
+
+    _tombstone_inside_court_rows(
+        monkeypatch, LOOSE, "https://jawafdehi.org/entity/location/elsewhere"
+    )
     with pytest.raises(MergeError) as exc:
-        _merge()
+        _merge(duplicate_iris=[other, LOOSE])
     assert exc.value.code == "DUPLICATE_ALREADY_MERGED"
     assert exc.value.http_status == 409
+    # The 409 must leave no residue: the duplicate the retire step got to before the
+    # conflict is rolled back with it, so a resend sees one consistent world.
+    assert StoredEntity.objects.get(pk=other).is_deleted is False
+    assert MERGED_INTO_KEY not in StoredEntity.objects.get(pk=other).data
+    assert StoredEntity.objects.get(pk=JHAPA).version == 1
+
+
+def test_a_duplicate_already_retired_into_this_survivor_does_not_block_the_merge(monkeypatch):
+    # The state a partial retirement leaves: the duplicate already points at THIS
+    # survivor. Reached here by a concurrent identical merge landing mid-repoint —
+    # _classify drops such a duplicate before the phases even start, so this is the
+    # only path to the retire step's row-lock re-check. It must converge, not 409.
+    _seed_pair()
+    _tombstone_inside_court_rows(monkeypatch, LOOSE, JHAPA)
+
+    result = _merge()
+    assert result["status"] == "complete"
+    assert StoredEntity.objects.get(pk=LOOSE).is_deleted is True
+    assert EntityRepository().resolve_tombstone(LOOSE) == JHAPA
+
+
+def test_a_failure_while_retiring_rolls_the_whole_step_back(monkeypatch):
+    # _retire is one nes transaction, so a duplicate retired before the failure must
+    # come back live — and the failure must reach the caller on contract, not as a
+    # bare 500 with no merge_id.
+    _seed_pair()
+    _seed("location", "jhapa-alt", "Place")
+    other = "https://jawafdehi.org/entity/location/jhapa-alt"
+    from entities.services.merge import service as svc
+
+    real_utcnow = svc.references.utcnow
+    calls = []
+
+    def _boom_on_the_second():
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("nes unreachable")
+        return real_utcnow()
+
+    monkeypatch.setattr(svc.references, "utcnow", _boom_on_the_second)
+    with pytest.raises(MergeError) as exc:
+        _merge(duplicate_iris=[LOOSE, other])
+    assert exc.value.code == "MERGE_INCOMPLETE"
+    assert exc.value.http_status == 500
+    assert exc.value.extra["merge_id"]
+    assert StoredEntity.objects.get(pk=LOOSE).is_deleted is False
+    assert StoredEntity.objects.get(pk=other).is_deleted is False
+    assert StoredEntity.objects.get(pk=JHAPA).version == 1
+
+
+def test_a_survivor_that_no_longer_validates_does_not_wedge_the_merge():
+    # The survivor's stored document carries an @type validate_jsonld_entity no longer
+    # accepts. Its publish is derived from what is already in the store, so re-gating it
+    # would wedge the merge AFTER repointing committed — and every resend identically.
+    # The @type keeps a known place token so the family check still passes; validation
+    # requires EVERY token to be known, so the document is still invalid.
+    survivor = "https://jawafdehi.org/entity/location/district/jhapa-np0104"
+    StoredEntity.objects.create(
+        iri=survivor, entity_type="AdministrativeArea,Wizard",
+        prefix="location/district", slug="jhapa-np0104",
+        data={"@id": survivor, "@type": ["AdministrativeArea", "Wizard"],
+              "name": {"en": "Jhapa"}},
+    )
+    _seed("location", "jhapa", "Place", description={"ne": "झापा जिल्ला"})
+
+    result = _merge()
+    assert result["status"] == "complete"
+    assert StoredEntity.objects.get(pk=LOOSE).is_deleted is True
+    assert StoredEntity.objects.get(pk=survivor).data["description"] == {"ne": "झापा जिल्ला"}
 
 
 def test_republishing_a_retired_entity_clears_its_merge_pointer():

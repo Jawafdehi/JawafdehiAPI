@@ -36,6 +36,14 @@ def test_a_soft_deleted_entity_without_a_pointer_is_not_a_tombstone():
     assert EntityRepository().resolve_tombstone(LOOSE) is None
 
 
+def test_a_live_entity_carrying_the_pointer_is_not_a_tombstone():
+    # A pointer only means anything on a retired row. entities.write_validation rejects
+    # the key on both authoring paths, but the read side must be inert regardless.
+    _entity(JHAPA)
+    _entity(LOOSE, merged_into=JHAPA)
+    assert EntityRepository().resolve_tombstone(LOOSE) is None
+
+
 def test_resolve_tombstone_follows_a_chain_to_the_final_survivor():
     _entity(JHAPA)
     _entity(LOOSE, is_deleted=True, merged_into=JHAPA)

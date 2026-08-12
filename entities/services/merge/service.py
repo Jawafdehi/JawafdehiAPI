@@ -109,18 +109,41 @@ class EntityMergeService:
                 warnings=warnings,
             )
 
-        # Correlates the log lines of one request. Nothing stores it: the request
-        # names the duplicates, so a resend needs no record to find its own work.
+        # Correlates the log lines of one request. It is durable without a record of
+        # its own: repoint_entity_links and the retirement both write it into the
+        # ``change_description`` of every document they touch, so the version history
+        # is joinable to the log line.
         merge_id = str(uuid.uuid4())
         description = change_description or f"Merged {len(retired)} duplicate(s)"
         logger.info("merge %s: %s <= %s", merge_id, survivor_iri, ", ".join(retired))
 
-        per_store, manifest = self._repoint(retired, survivor_iri, author_id, merge_id)
-        self._retire(
-            survivor_iri=survivor_iri, retired=retired, merged_doc=merged_doc,
-            author_id=author_id, description=description,
-        )
-        warnings = [*warnings, *self._reindex(manifest, merge_id)]
+        self._recheck_duplicates(retired)
+        # Computed before any write, from a query that is stable across attempts: a
+        # crashed attempt's manifest is gone, so taking the case ids from what THIS
+        # attempt moves would skip the cases whose binds already moved. That
+        # deliberately re-widens the set to every case bound to the survivor — a
+        # survivor with very many cases makes the request slow, and moving re-indexing
+        # out of the request is the real fix.
+        case_ids = references.case_ids_touched(retired, survivor_iri)
+
+        # The manifest is per-row audit detail; re-indexing reads ``case_ids`` instead.
+        per_store, _manifest = self._repoint(retired, survivor_iri, author_id, merge_id)
+        try:
+            inherited = self._retire(
+                survivor_iri=survivor_iri, retired=retired, candidates=candidates,
+                author_id=author_id, description=description, merge_id=merge_id,
+            )
+        except MergeError:
+            raise
+        except Exception as exc:
+            logger.exception("merge %s could not retire the duplicates", merge_id)
+            raise MergeError(
+                "MERGE_INCOMPLETE",
+                "References were repointed but the duplicates were not retired. "
+                "Send the same request again to finish.",
+                500, merge_id=merge_id,
+            ) from exc
+        warnings = [*warnings, *self._reindex(case_ids, merge_id)]
 
         return self._response(
             merge_id=merge_id, status="complete", dry_run=False,
@@ -129,6 +152,26 @@ class EntityMergeService:
         )
 
     # --- phases ---------------------------------------------------------
+
+    def _recheck_duplicates(self, retired) -> None:
+        """Reject a duplicate retired since _classify, before any reference moves.
+
+        The lock cannot be held across the repoint phase — three databases, three
+        separate transactions — so this narrows the window rather than closing it;
+        ``_retire`` re-checks each row under its own lock as the backstop.
+        """
+        with transaction.atomic(using="nes"):
+            live = set(
+                StoredEntity.objects.select_for_update()
+                .filter(pk__in=retired, is_deleted=False)
+                .values_list("iri", flat=True)
+            )
+        for iri in retired:
+            if iri not in live:
+                raise MergeError(
+                    "DUPLICATE_ALREADY_MERGED",
+                    f"{iri} was retired by a concurrent merge.", 409,
+                )
 
     def _repoint(self, retired, survivor_iri, author_id, merge_id):
         """Repoint each store in its own transaction. Idempotent, so a resend resumes.
@@ -165,11 +208,32 @@ class EntityMergeService:
             ) from exc
         return per_store, manifest
 
-    def _retire(self, *, survivor_iri, retired, merged_doc, author_id, description) -> None:
-        """Publish the merged survivor and tombstone the duplicates. Atomic in nes."""
+    def _retire(self, *, survivor_iri, retired, candidates, author_id, description,
+                merge_id) -> Dict[str, str]:
+        """Publish the merged survivor and tombstone the duplicates. Atomic in nes.
+
+        The survivor document is rebuilt from a fresh read here rather than reused from
+        the pre-write phase: up to ``MAX_REFERENCES`` references have moved since then,
+        and an edit a caseworker made inside that window would otherwise be overwritten.
+        Returns the inherited field → source IRI map the response reports.
+        """
         with transaction.atomic(using="nes"):
+            current = self.repo.get_entity(survivor_iri)
+            if current is None:
+                raise MergeError(
+                    "SURVIVOR_RETIRED",
+                    f"{survivor_iri} was retired while this merge was running.", 409,
+                )
+            merged_doc, inherited = merge_documents(
+                current, [candidates[iri] for iri in retired]
+            )
+            merged_doc, _dropped = drop_self_references(merged_doc, retired)
+            # validate=False: the merged document is assembled from documents already in
+            # the store, so re-gating it on authoring rules can only wedge a merge,
+            # never prevent a bad one.
             self.publication.update_entity(
-                doc=merged_doc, author_id=author_id, change_description=description
+                doc=merged_doc, author_id=author_id, change_description=description,
+                validate=False,
             )
             for iri in retired:
                 row = (
@@ -177,10 +241,16 @@ class EntityMergeService:
                     .filter(pk=iri, is_deleted=False)
                     .first()
                 )
-                # Re-checked under the row lock: two operators merging the same
-                # duplicate into different survivors would otherwise both tombstone it
-                # and repoint its references two ways.
                 if row is None:
+                    # Already retired into THIS survivor: a concurrent identical merge
+                    # got there first, so the work is done, not in conflict. Raising
+                    # here would leave the references on this survivor and the pointer
+                    # nowhere, and every resend would fail the same way.
+                    if self.repo.resolve_tombstone(iri) == survivor_iri:
+                        continue
+                    # Re-checked under the row lock: two operators merging the same
+                    # duplicate into different survivors would otherwise both tombstone
+                    # it and repoint its references two ways.
                     raise MergeError(
                         "DUPLICATE_ALREADY_MERGED",
                         f"{iri} was retired by a concurrent merge.", 409,
@@ -189,17 +259,22 @@ class EntityMergeService:
                 doc[MERGED_INTO_KEY] = {"@id": survivor_iri}
                 # Document first: every upsert forces is_deleted=False (see
                 # persistence._entity_row_fields), so the other order undoes the
-                # tombstone. validate=False because this is a mechanical flag write on
-                # an already-stored document, as in ``repoint_entity_links``.
+                # tombstone. validate=False for the same reason as the survivor above.
                 self.publication.update_entity(
-                    doc=doc, author_id=author_id, change_description=description,
+                    doc=doc, author_id=author_id,
+                    change_description=f"{description} (merge {merge_id})",
                     validate=False,
                 )
                 row.is_deleted = True
                 row.updated_at = references.utcnow()
+                # update_fields is what makes this safe, not tidiness: ``row`` was read
+                # before the publish above, so a plain save() would write its stale
+                # ``data`` and ``version`` back and silently undo both the pointer
+                # document and its version bump.
                 row.save(update_fields=["is_deleted", "updated_at"])
+        return inherited
 
-    def _reindex(self, manifest, merge_id) -> List[str]:
+    def _reindex(self, case_ids, merge_id) -> List[str]:
         """Re-index the cases this merge touched, warning rather than failing on an outage.
 
         Every row has moved and every duplicate is retired by now, so a search outage
@@ -209,9 +284,6 @@ class EntityMergeService:
         from cases.models import Case
         from cases import search_index as case_search
 
-        case_ids = sorted({
-            entry["case_id"] for entry in manifest if entry.get("case_id") is not None
-        })
         stale = 0
         for case_id in case_ids:
             case = Case.objects.filter(pk=case_id).first()

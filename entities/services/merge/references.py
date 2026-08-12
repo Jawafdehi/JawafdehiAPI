@@ -95,6 +95,23 @@ def count_references(retired: List[str], survivor: str) -> Dict[str, int]:
     }
 
 
+def case_ids_touched(retired: List[str], survivor: str) -> List[int]:
+    """Cases whose bind set this merge changes, computed before any write.
+
+    Includes the survivor's own cases deliberately: after a crashed attempt some
+    binds already moved, so a retired-only query would miss them and leave those
+    case documents stale.
+    """
+    from cases.models import CaseEntityRelationship
+
+    return sorted(
+        set(
+            CaseEntityRelationship.objects.filter(nes_id__in=[*retired, survivor])
+            .values_list("case_id", flat=True)
+        )
+    )
+
+
 def detect_outcome_conflicts(retired: List[str], survivor: str) -> List[Dict[str, Any]]:
     """Cases where two entities in this merge carry different settled verdicts.
 

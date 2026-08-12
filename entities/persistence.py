@@ -25,12 +25,12 @@ from jawafdehi_shared.search.transliterate import to_roman_colloquial
 from .models import HeldEntity, StoredAuthor, StoredEntity, StoredVersion
 from .validation import primary_type
 
+#: The survivor pointer a merge writes into a retired entity's own document.
+MERGED_INTO_KEY = "jawafdehi:mergedInto"
+
 # ---------------------------------------------------------------------------
 # Bounds
 # ---------------------------------------------------------------------------
-
-#: The survivor pointer a merge writes into a retired entity's own document.
-MERGED_INTO_KEY = "jawafdehi:mergedInto"
 
 MAX_LIMIT = 1000
 # Textual query has to be scored in Python (no search backend yet); cap the
@@ -85,6 +85,8 @@ def _canonicalize_doc_id(doc: Dict[str, Any]) -> str:
 def _merged_into(data: Any) -> Optional[str]:
     """The survivor IRI a stored document points at, shaped like any other reference."""
     ref = data.get(MERGED_INTO_KEY) if isinstance(data, dict) else None
+    # A list-shaped value reads as absent: ``entities.write_validation`` rejects the
+    # key on both authoring paths, so only the merge's own single-reference shape occurs.
     if isinstance(ref, dict):
         ref = ref.get("@id")
     return ref if isinstance(ref, str) and ref else None

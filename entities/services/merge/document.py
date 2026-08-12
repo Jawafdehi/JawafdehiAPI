@@ -11,9 +11,13 @@ import copy
 import json
 from typing import Any, Dict, FrozenSet, Iterable, List, Tuple
 
-#: Identity, context and provenance are the survivor's alone.
+from entities.persistence import MERGED_INTO_KEY
+
+#: Identity, context and provenance are the survivor's alone. The merge pointer is
+#: here too: inherited onto a live survivor it would turn that survivor into a
+#: tombstone the moment anyone soft-deleted it.
 NEVER_INHERITED: frozenset = frozenset(
-    {"@id", "@type", "@context", "dateCreated", "jawafdehi:version"}
+    {"@id", "@type", "@context", "dateCreated", "jawafdehi:version", MERGED_INTO_KEY}
 )
 
 #: The provenance block records history and must survive a reference rewrite intact.
