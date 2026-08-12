@@ -96,11 +96,11 @@ def count_references(retired: List[str], survivor: str) -> Dict[str, int]:
 
 
 def case_ids_touched(retired: List[str], survivor: str) -> List[int]:
-    """Cases whose bind set this merge changes, computed before any write.
+    """Cases to re-index for this merge, computed before any write.
 
-    Includes the survivor's own cases deliberately: after a crashed attempt some
-    binds already moved, so a retired-only query would miss them and leave those
-    case documents stale.
+    Deliberately wider than the binds that actually move: it includes the survivor's
+    own cases, because after a crashed attempt some binds already moved and a
+    retired-only query would miss them and leave those case documents stale.
     """
     from cases.models import CaseEntityRelationship
 

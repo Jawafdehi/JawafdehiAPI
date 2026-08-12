@@ -16,6 +16,9 @@ from entities.persistence import MERGED_INTO_KEY
 #: Identity, context and provenance are the survivor's alone. The merge pointer is
 #: here too: inherited onto a live survivor it would turn that survivor into a
 #: tombstone the moment anyone soft-deleted it.
+#:
+#: Read by two functions: ``merge_documents`` never inherits these, and
+#: ``drop_self_references`` never strips them from the survivor's own document.
 NEVER_INHERITED: frozenset = frozenset(
     {"@id", "@type", "@context", "dateCreated", "jawafdehi:version", MERGED_INTO_KEY}
 )

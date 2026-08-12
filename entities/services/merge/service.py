@@ -171,7 +171,9 @@ class EntityMergeService:
         if self.repo.resolve_tombstone(iri) != survivor_iri:
             raise MergeError(
                 "DUPLICATE_ALREADY_MERGED",
-                f"{iri} was retired by a concurrent merge.", 409,
+                f"{iri} stopped being available for this merge — it was retired or "
+                "deleted while the merge was running.",
+                409,
             )
 
     def _recheck_duplicates(self, retired, survivor_iri) -> None:
@@ -233,7 +235,8 @@ class EntityMergeService:
         The survivor document is rebuilt from a fresh read here rather than reused from
         the pre-write phase: up to ``MAX_REFERENCES`` references have moved since then,
         and an edit a caseworker made inside that window would otherwise be overwritten.
-        Returns the inherited field → source IRI map the response reports.
+        The fresh read is not itself locked, so this narrows that window rather than
+        closing it. Returns the inherited field → source IRI map the response reports.
         """
         with transaction.atomic(using="nes"):
             current = self.repo.get_entity(survivor_iri)
