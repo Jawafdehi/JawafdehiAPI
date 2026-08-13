@@ -9,7 +9,7 @@ from rest_framework.test import APITestCase
 
 from cases.models import Case, CaseEntityRelationship, CaseState, CaseType, RelationshipType
 from entities.models import StoredEntity
-from entities.persistence import MERGED_INTO_KEY, EntityRepository
+from entities.persistence import EntityRepository
 from entities.services.publication import PublicationService
 from entities.write_validation import normalize_authoring_payload
 
@@ -68,7 +68,7 @@ class EntityMergeApiTests(APITestCase):
         self.assertEqual(resp.data["status"], "complete")
         dup = StoredEntity.objects.get(pk=LOOSE)
         self.assertTrue(dup.is_deleted)
-        self.assertEqual(dup.data[MERGED_INTO_KEY], {"@id": JHAPA})
+        self.assertEqual(dup.merged_into, JHAPA)
         self.assertEqual(resp.data["survivor"]["description"], {"ne": "झापा जिल्ला"})
 
     # 2 — relationship transfer, and nothing left pointing at the retired entity
@@ -200,36 +200,6 @@ class EntityMergeApiTests(APITestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["status"], "complete")
-
-    # the pointer is the merge's alone — a caseworker must not be able to author it
-    def test_the_merge_pointer_cannot_be_created_through_the_write_api(self):
-        # Otherwise: POST the pointer, DELETE the entity, and its URL 301s wherever the
-        # caller said — no family check, no reference repointing, no merge.
-        resp = self.client.post(
-            "/api/entities",
-            {"prefix": "location", "slug": "jhapa-forged", "type": "Place",
-             "name": {"en": "Jhapa"}, MERGED_INTO_KEY: {"@id": JHAPA}},
-            format="json",
-        )
-        self.assertEqual(resp.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
-        self.assertEqual(resp.data["error"]["code"], "VALIDATION_ERROR")
-        self.assertFalse(
-            StoredEntity.objects.filter(
-                pk="https://jawafdehi.org/entity/location/jhapa-forged"
-            ).exists()
-        )
-
-    def test_the_merge_pointer_cannot_be_patched_onto_an_entity(self):
-        resp = self.client.patch(
-            f"/api/entities/{quote(LOOSE, safe='')}",
-            {"patch_ops": [
-                {"op": "add", "path": f"/{MERGED_INTO_KEY}", "value": {"@id": JHAPA}}
-            ]},
-            format="json",
-        )
-        self.assertEqual(resp.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
-        self.assertEqual(resp.data["error"]["code"], "VALIDATION_ERROR")
-        self.assertNotIn(MERGED_INTO_KEY, StoredEntity.objects.get(pk=LOOSE).data)
 
     def test_a_merge_that_fails_partway_is_reported_as_partial(self):
         from entities.services.merge import service as svc

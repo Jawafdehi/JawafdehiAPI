@@ -1,9 +1,9 @@
-"""The tombstone pointer, which lives in the retired entity's own document."""
+"""The tombstone pointer, which lives in the retired entity's ``merged_into`` column."""
 
 import pytest
 
 from entities.models import StoredEntity
-from entities.persistence import MERGED_INTO_KEY, EntityRepository
+from entities.persistence import EntityRepository
 
 JHAPA = "https://jawafdehi.org/entity/location/district/jhapa-np0104"
 LOOSE = "https://jawafdehi.org/entity/location/jhapa"
@@ -15,12 +15,10 @@ pytestmark = pytest.mark.django_db(databases="__all__")
 
 
 def _entity(iri, merged_into=None, **kwargs):
-    data = {"@id": iri, "@type": "Place", "name": {"en": "Jhapa"}}
-    if merged_into:
-        data[MERGED_INTO_KEY] = {"@id": merged_into}
     return StoredEntity.objects.create(
         iri=iri, entity_type="Place", prefix="location", slug=iri.rsplit("/", 1)[-1],
-        data=data, **kwargs
+        data={"@id": iri, "@type": "Place", "name": {"en": "Jhapa"}},
+        merged_into=merged_into, **kwargs
     )
 
 
@@ -37,8 +35,7 @@ def test_a_soft_deleted_entity_without_a_pointer_is_not_a_tombstone():
 
 
 def test_a_live_entity_carrying_the_pointer_is_not_a_tombstone():
-    # A pointer only means anything on a retired row. entities.write_validation rejects
-    # the key on both authoring paths, but the read side must be inert regardless.
+    # A pointer only means anything on a retired row; the read side is inert otherwise.
     _entity(JHAPA)
     _entity(LOOSE, merged_into=JHAPA)
     assert EntityRepository().resolve_tombstone(LOOSE) is None

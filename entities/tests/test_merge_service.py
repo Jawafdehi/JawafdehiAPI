@@ -9,7 +9,7 @@ from cases.models import (
 )
 from courts.models import Court, CourtCase
 from entities.models import StoredEntity
-from entities.persistence import MERGED_INTO_KEY, EntityRepository
+from entities.persistence import EntityRepository
 from entities.services.merge import EntityMergeService, MergeError
 from entities.services.publication import PublicationService
 from entities.write_validation import normalize_authoring_payload
@@ -65,7 +65,7 @@ def test_happy_path_tombstones_the_duplicate_and_keeps_the_survivor():
     assert result["status"] == "complete"
     dup = StoredEntity.objects.get(pk=LOOSE)
     assert dup.is_deleted is True
-    assert dup.data[MERGED_INTO_KEY] == {"@id": JHAPA}
+    assert dup.merged_into == JHAPA
     survivor = StoredEntity.objects.get(pk=JHAPA)
     assert survivor.is_deleted is False
     assert survivor.version == 2
@@ -73,11 +73,11 @@ def test_happy_path_tombstones_the_duplicate_and_keeps_the_survivor():
     assert LOOSE in survivor.data["sameAs"]
 
 
-def test_the_survivor_pointer_lives_in_the_retired_document():
+def test_the_survivor_pointer_lives_in_the_retired_rows_column():
     _seed_pair()
     result = _merge()
     assert result["merge_id"]
-    assert StoredEntity.objects.get(pk=LOOSE).data[MERGED_INTO_KEY]["@id"] == JHAPA
+    assert StoredEntity.objects.get(pk=LOOSE).merged_into == JHAPA
     assert EntityRepository().resolve_tombstone(LOOSE) == JHAPA
 
 
@@ -230,7 +230,7 @@ def test_a_crash_during_repointing_retires_nothing(monkeypatch):
 
     dup = StoredEntity.objects.get(pk=LOOSE)
     assert dup.is_deleted is False
-    assert MERGED_INTO_KEY not in dup.data
+    assert dup.merged_into is None
     assert EntityRepository().get_entity(LOOSE) is not None
     assert EntityRepository().resolve_tombstone(LOOSE) is None
     # The survivor's merged document is written in the same last step, so it too
@@ -469,8 +469,8 @@ def _tombstone_inside(monkeypatch, target, iri, merged_into):
     def _tombstone_then_run(*args, **kwargs):
         row = StoredEntity.objects.get(pk=iri)
         row.is_deleted = True
-        row.data = {**row.data, MERGED_INTO_KEY: {"@id": merged_into}}
-        row.save(update_fields=["is_deleted", "data"])
+        row.merged_into = merged_into
+        row.save(update_fields=["is_deleted", "merged_into"])
         return original(*args, **kwargs)
 
     monkeypatch.setattr(svc.references, target, _tombstone_then_run)
@@ -516,7 +516,7 @@ def test_a_duplicate_retired_concurrently_is_rejected(monkeypatch):
     # The 409 must leave no residue: the duplicate the retire step got to before the
     # conflict is rolled back with it, so a resend sees one consistent world.
     assert StoredEntity.objects.get(pk=other).is_deleted is False
-    assert MERGED_INTO_KEY not in StoredEntity.objects.get(pk=other).data
+    assert StoredEntity.objects.get(pk=other).merged_into is None
     assert StoredEntity.objects.get(pk=JHAPA).version == 1
 
 
@@ -589,7 +589,7 @@ def test_republishing_a_retired_entity_clears_its_merge_pointer():
     _merge()
     dup = StoredEntity.objects.get(pk=LOOSE)
     assert dup.is_deleted is True
-    assert dup.data[MERGED_INTO_KEY] == {"@id": JHAPA}
+    assert dup.merged_into == JHAPA
 
     PublicationService().create_entity(
         doc={"@id": LOOSE, "@type": "Place", "name": {"en": "Jhapa (again)"}},
@@ -597,5 +597,5 @@ def test_republishing_a_retired_entity_clears_its_merge_pointer():
     )
     row = StoredEntity.objects.get(pk=LOOSE)
     assert row.is_deleted is False
-    assert MERGED_INTO_KEY not in row.data
+    assert row.merged_into is None
     assert EntityRepository().resolve_tombstone(LOOSE) is None

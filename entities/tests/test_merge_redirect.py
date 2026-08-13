@@ -8,7 +8,6 @@ from rest_framework import status
 from rest_framework.test import APITestCase
 
 from entities.models import StoredEntity
-from entities.persistence import MERGED_INTO_KEY
 from entities.services.publication import PublicationService
 from entities.write_validation import normalize_authoring_payload
 
@@ -88,13 +87,13 @@ class RetiredEntityRedirectTests(APITestCase):
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_a_live_entity_carrying_the_pointer_does_not_redirect(self):
-        # The pointer alone is not a tombstone: the row must be soft-deleted too. So a
-        # forged pointer on a live entity cannot hijack its URL.
+        # The pointer alone is not a tombstone: the row must be soft-deleted too, so a
+        # pointer left on a live row cannot hijack its URL.
         _seed("location", "jhapa-live", "Place")
         live = "https://jawafdehi.org/entity/location/jhapa-live"
         row = StoredEntity.objects.get(pk=live)
-        row.data = {**row.data, MERGED_INTO_KEY: {"@id": JHAPA}}
-        row.save(update_fields=["data"])
+        row.merged_into = JHAPA
+        row.save(update_fields=["merged_into"])
         resp = self.client.get(f"/api/entities/{quote(live, safe='')}")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["@id"], live)

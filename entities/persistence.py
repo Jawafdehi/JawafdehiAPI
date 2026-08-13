@@ -25,9 +25,6 @@ from jawafdehi_shared.search.transliterate import to_roman_colloquial
 from .models import HeldEntity, StoredAuthor, StoredEntity, StoredVersion
 from .validation import primary_type
 
-#: The survivor pointer a merge writes into a retired entity's own document.
-MERGED_INTO_KEY = "jawafdehi:mergedInto"
-
 # ---------------------------------------------------------------------------
 # Bounds
 # ---------------------------------------------------------------------------
@@ -82,16 +79,6 @@ def _canonicalize_doc_id(doc: Dict[str, Any]) -> str:
     return canonical
 
 
-def _merged_into(data: Any) -> Optional[str]:
-    """The survivor IRI a stored document points at, shaped like any other reference."""
-    ref = data.get(MERGED_INTO_KEY) if isinstance(data, dict) else None
-    # A list-shaped value reads as absent: ``entities.write_validation`` rejects the
-    # key on both authoring paths, so only the merge's own single-reference shape occurs.
-    if isinstance(ref, dict):
-        ref = ref.get("@id")
-    return ref if isinstance(ref, str) and ref else None
-
-
 def _entity_row_fields(doc: Dict[str, Any], *, version: int, created_at: datetime,
                        updated_at: datetime) -> Dict[str, Any]:
     """Promoted-column values + ``data`` for an entity row, derived from the
@@ -108,10 +95,11 @@ def _entity_row_fields(doc: Dict[str, Any], *, version: int, created_at: datetim
         "created_at": created_at,
         "updated_at": updated_at,
         # A (re-)publish revives a soft-deleted row: the write is the source of truth,
-        # so clear the soft-delete flag on every upsert. This is why
-        # EntityMergeService._retire writes the tombstone document BEFORE flipping the
-        # flag — the other order undoes itself.
+        # so clear the soft-delete flag on every upsert.
         "is_deleted": False,
+        # Resetting the pointer here is what makes it unforgeable: no authoring path
+        # writes this column, so only EntityMergeService._retire can set it.
+        "merged_into": None,
     }
 
 
@@ -208,15 +196,14 @@ class EntityRepository:
     def resolve_tombstone(self, iri: str, *, max_hops: int = 10) -> Optional[str]:
         """The live survivor a retired ``iri`` was merged into, or None if it is not a tombstone.
 
-        The pointer is read off the stored document (``jawafdehi:mergedInto``), not a
-        promoted column: nothing queries by it. Follows a chain of merges; ``max_hops``
-        bounds it so a cycle terminates.
+        The pointer only counts on a soft-deleted row, so a live row carrying one is
+        inert. Follows a chain of merges; ``max_hops`` bounds it so a cycle terminates.
         """
         current = iri
         for _ in range(max_hops):
-            target = _merged_into(
+            target = (
                 StoredEntity.objects.filter(pk=current, is_deleted=True)
-                .values_list("data", flat=True)
+                .values_list("merged_into", flat=True)
                 .first()
             )
             if not target or target == current:

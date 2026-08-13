@@ -25,7 +25,6 @@ from typing import Any, Dict, List
 
 from jawafdehi_shared.entities.ids import build_entity_iri
 
-from .persistence import MERGED_INTO_KEY
 from .validation import JAWAFDEHI_NS, validate_jsonld_entity
 
 # JSON-LD @context emitted on normalized documents (schema.org default vocab +
@@ -51,15 +50,11 @@ JSONLD_CONTEXT: List[Any] = [
 # write — so a re-typed doc stays consistent and breaks no inbound references. The
 # patched doc is still re-run through ``validate_jsonld_entity``, which rejects an
 # unknown @type.
-#
-# ``jawafdehi:mergedInto`` is the merge's tombstone pointer and the read plane's 301
-# redirect depends on it, so it is not caller-writable.
 PATCH_BLOCKED_PATH_PREFIXES = frozenset(
     {
         "/@id",
         "/@context",
         "/jawafdehi:version",
-        f"/{MERGED_INTO_KEY}",
     }
 )
 
@@ -133,12 +128,6 @@ def validate_create_payload(body: Dict[str, Any]) -> Dict[str, Any]:
     Raises ``ValueError`` (mapped to 422 by the view) on any failure.
     """
     doc = normalize_authoring_payload(body)
-    if MERGED_INTO_KEY in doc:
-        # Authoring it would forge a tombstone: the read plane would 301 anywhere the
-        # caller named, with no merge, no family check and no reference repointing.
-        raise ValueError(
-            f"{MERGED_INTO_KEY} is written only by the merge endpoint and cannot be authored."
-        )
     validate_jsonld_entity(doc)
     return doc
 

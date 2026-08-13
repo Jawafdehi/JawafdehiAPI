@@ -18,7 +18,7 @@ from django.db import transaction
 from jawafdehi_shared.entities.ids import canonicalize_entity_iri
 
 from entities.models import StoredEntity
-from entities.persistence import MERGED_INTO_KEY, EntityRepository
+from entities.persistence import EntityRepository
 from entities.services.publication import PublicationService
 
 from . import references
@@ -111,9 +111,11 @@ class EntityMergeService:
             )
 
         # Correlates the log lines of one request. It is durable without a record of
-        # its own: repoint_entity_links and the retirement both write it into the
-        # ``change_description`` of every document they touch, so the version history
-        # is joinable to the log line.
+        # its own: repoint_entity_links writes it into the ``change_description`` of
+        # every document it touches, so the version history is joinable to the log
+        # line. The retirement writes no document and so no version row — auditlog
+        # (entities.apps registers StoredEntity) captures that column flip with its
+        # actor instead.
         merge_id = str(uuid.uuid4())
         description = change_description or f"Merged {len(retired)} duplicate(s)"
         logger.info("merge %s: %s <= %s", merge_id, survivor_iri, ", ".join(retired))
@@ -138,7 +140,7 @@ class EntityMergeService:
         try:
             inherited = self._retire(
                 survivor_iri=survivor_iri, retired=retired, candidates=candidates,
-                author_id=author_id, description=description, merge_id=merge_id,
+                author_id=author_id, description=description,
             )
         except MergeError:
             raise
@@ -228,8 +230,8 @@ class EntityMergeService:
             ) from exc
         return per_store, manifest
 
-    def _retire(self, *, survivor_iri, retired, candidates, author_id, description,
-                merge_id) -> Dict[str, str]:
+    def _retire(self, *, survivor_iri, retired, candidates, author_id,
+                description) -> Dict[str, str]:
         """Publish the merged survivor and tombstone the duplicates. Atomic in nes.
 
         The survivor document is rebuilt from a fresh read here rather than reused from
@@ -268,23 +270,12 @@ class EntityMergeService:
                     # it and repoint its references two ways.
                     self._require_not_retired_elsewhere(iri, survivor_iri)
                     continue
-                doc = dict(row.data)
-                doc[MERGED_INTO_KEY] = {"@id": survivor_iri}
-                # Document first: every upsert forces is_deleted=False (see
-                # persistence._entity_row_fields), so the other order undoes the
-                # tombstone. validate=False for the same reason as the survivor above.
-                self.publication.update_entity(
-                    doc=doc, author_id=author_id,
-                    change_description=f"{description} (merge {merge_id})",
-                    validate=False,
-                )
                 row.is_deleted = True
+                row.merged_into = survivor_iri
                 row.updated_at = references.utcnow()
-                # update_fields is what makes this safe, not tidiness: ``row`` was read
-                # before the publish above, so a plain save() would write its stale
-                # ``data`` and ``version`` back and silently undo both the pointer
-                # document and its version bump.
-                row.save(update_fields=["is_deleted", "updated_at"])
+                # update_fields keeps the write (and the auditlog diff) to the flip,
+                # leaving the duplicate's ``data`` and ``version`` as they stand.
+                row.save(update_fields=["is_deleted", "merged_into", "updated_at"])
         return inherited
 
     def _reindex(self, case_ids, merge_id) -> List[str]:
