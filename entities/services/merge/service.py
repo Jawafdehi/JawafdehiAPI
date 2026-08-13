@@ -5,6 +5,10 @@ and only then are the duplicates retired in one ``nes`` transaction. Nothing has
 remember an interrupted merge: the duplicates stay live and resolvable until the
 last step, every repoint selects rows still holding a retired IRI, and the request
 itself names the duplicates — so re-sending it continues from where it stopped.
+
+That re-send is the ONLY recovery. No sweep, job or query finds a merge that stopped,
+so the partial manifest ``_repoint`` logs on failure is what an operator has to work
+from.
 """
 
 from __future__ import annotations
@@ -12,7 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, NoReturn, Optional
 
 from django.db import transaction
 from jawafdehi_shared.entities.ids import canonicalize_entity_iri
@@ -63,10 +67,22 @@ class EntityMergeService:
         candidates = self._classify(survivor_iri, duplicate_iris, survivor_doc, type_family)
 
         if not candidates:
+            # Re-sending is the remedy _reindex's warning names, and is also where a
+            # process that died between the retirement and the re-index lands. Both
+            # arrive here, so this branch has to re-index or the remedy does nothing
+            # and those case documents name a retired entity in search forever.
+            warnings = (
+                []
+                if dry_run
+                else self._reindex(
+                    references.case_ids_touched(duplicate_iris, survivor_iri),
+                    "already-merged",
+                )
+            )
             return self._response(
                 merge_id=None, status="already_merged", dry_run=dry_run,
                 survivor=survivor_doc, retired=duplicate_iris,
-                inherited={}, per_store={}, warnings=[],
+                inherited={}, per_store={}, warnings=warnings,
             )
 
         retired = list(candidates)
@@ -115,7 +131,9 @@ class EntityMergeService:
         # every document it touches, so the version history is joinable to the log
         # line. The retirement writes no document and so no version row — auditlog
         # (entities.apps registers StoredEntity) captures that column flip with its
-        # actor instead.
+        # actor instead. Read that log as a lead, not proof: LogEntry lives in
+        # ``default``, outside _retire's nes transaction, so a retirement that rolls
+        # back still leaves its entry behind. The row itself is the truth.
         merge_id = str(uuid.uuid4())
         description = change_description or f"Merged {len(retired)} duplicate(s)"
         logger.info("merge %s: %s <= %s", merge_id, survivor_iri, ", ".join(retired))
@@ -178,19 +196,34 @@ class EntityMergeService:
                 409,
             )
 
-    def _recheck_duplicates(self, retired, survivor_iri) -> None:
-        """Reject a duplicate retired since _classify, before any reference moves.
+    def _survivor_retired(self, survivor_iri) -> NoReturn:
+        """Raise SURVIVOR_RETIRED, naming where the survivor went if it was merged on."""
+        target = self.repo.resolve_tombstone(survivor_iri)
+        raise MergeError(
+            "SURVIVOR_RETIRED",
+            f"{survivor_iri} was retired while this merge was running."
+            + (f" It is now merged into {target}." if target else ""),
+            409, **({"merged_into": target} if target else {}),
+        )
 
-        The lock cannot be held across the repoint phase — three databases, three
-        separate transactions — so this narrows the window rather than closing it;
-        ``_retire`` re-checks each row under its own lock as the backstop.
+    def _recheck_duplicates(self, retired, survivor_iri) -> None:
+        """Reject a survivor or duplicate retired since _classify, before references move.
+
+        Deliberately unlocked. A lock cannot be held across the repoint phase — three
+        databases, three transactions — and one released before the decision it guards
+        protects nothing while still deadlocking against ``_retire``, which locks the
+        same rows one at a time. This narrows the window; ``_retire`` re-checks each row
+        under its own lock as the backstop. Checking the survivor here matters most:
+        ``count_references`` scans the whole entities table before this point, and a
+        survivor retired during that scan would otherwise be caught only after every
+        reference had already committed onto it.
         """
-        with transaction.atomic(using="nes"):
-            live = set(
-                StoredEntity.objects.select_for_update()
-                .filter(pk__in=retired, is_deleted=False)
-                .values_list("iri", flat=True)
-            )
+        if self.repo.get_entity(survivor_iri) is None:
+            self._survivor_retired(survivor_iri)
+        live = set(
+            StoredEntity.objects.filter(pk__in=retired, is_deleted=False)
+            .values_list("iri", flat=True)
+        )
         for iri in retired:
             if iri not in live:
                 self._require_not_retired_elsewhere(iri, survivor_iri)
@@ -221,7 +254,12 @@ class EntityMergeService:
                 per_store["entity_to_entity_links"] = vars(counts)
                 manifest.extend(entries)
         except Exception as exc:
-            logger.exception("merge %s incomplete", merge_id)
+            # The partial manifest is the only record of what did commit — it dies with
+            # this call, and nothing aggregates a stopped merge. Log it before raising.
+            logger.exception(
+                "merge %s incomplete after %d reference(s): %s",
+                merge_id, len(manifest), json.dumps(manifest, ensure_ascii=False, default=str),
+            )
             raise MergeError(
                 "MERGE_INCOMPLETE",
                 "Repointing did not finish, so no duplicate has been retired. "
@@ -243,10 +281,10 @@ class EntityMergeService:
         with transaction.atomic(using="nes"):
             current = self.repo.get_entity(survivor_iri)
             if current is None:
-                raise MergeError(
-                    "SURVIVOR_RETIRED",
-                    f"{survivor_iri} was retired while this merge was running.", 409,
-                )
+                # Reached only if the survivor was retired during the repoint itself.
+                # Those reference moves are committed and now name a tombstone; the
+                # 409 names its new target so the operator can re-send onto that.
+                self._survivor_retired(survivor_iri)
             merged_doc, inherited = merge_documents(
                 current, [candidates[iri] for iri in retired]
             )

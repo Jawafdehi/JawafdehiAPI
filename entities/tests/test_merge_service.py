@@ -430,6 +430,32 @@ def test_a_resend_reindexes_the_cases_a_crashed_attempt_already_moved(monkeypatc
     assert indexed == [case.id]
 
 
+def test_a_resend_after_a_finished_merge_still_reindexes():
+    # _reindex's warning tells the operator to re-send after a search outage, and a
+    # process that dies between the retirement and the re-index leaves the same job
+    # undone. Both land on already_merged, which used to return without re-indexing —
+    # so the documented remedy did nothing and the case document named a dead entity.
+    _seed_pair()
+    case = _case_with_bind("jhapa-reindex-resend-done", LOOSE)
+    _merge()
+
+    result, indexed = _record_reindexed(_merge)
+
+    assert result["status"] == "already_merged"
+    assert indexed == [case.id]
+
+
+def test_a_dry_run_resend_reindexes_nothing():
+    _seed_pair()
+    _case_with_bind("jhapa-reindex-dry", LOOSE)
+    _merge()
+
+    result, indexed = _record_reindexed(lambda: _merge(dry_run=True))
+
+    assert result["status"] == "already_merged"
+    assert indexed == []
+
+
 def test_an_edit_to_the_survivor_during_the_merge_is_not_overwritten(monkeypatch):
     # merge() reads the survivor before repointing and publishes after it. _retire
     # rebuilds the document from a fresh read, so an edit inside that window survives.
@@ -499,6 +525,25 @@ def test_the_pre_write_check_treats_this_survivor_as_done_too(monkeypatch):
     result = _merge()
     assert result["status"] == "complete"
     assert EntityRepository().resolve_tombstone(LOOSE) == JHAPA
+
+
+def test_a_survivor_retired_before_repointing_is_caught_while_the_409_is_free(monkeypatch):
+    # count_references scans the whole entities table before this point, so the window
+    # is wide. Without the survivor check here, a survivor retired during that scan
+    # surfaced only from _retire — after every reference had committed onto a tombstone,
+    # where no resend can move them back off it.
+    _seed_pair()
+    _seed("location/district", "jhapa-far-east", "AdministrativeArea")
+    final = "https://jawafdehi.org/entity/location/district/jhapa-far-east"
+    case = _case_with_bind("jhapa-survivor-retired", LOOSE)
+    _tombstone_inside(monkeypatch, "detect_outcome_conflicts", JHAPA, final)
+
+    with pytest.raises(MergeError) as exc:
+        _merge()
+    assert exc.value.code == "SURVIVOR_RETIRED"
+    assert exc.value.http_status == 409
+    assert exc.value.extra["merged_into"] == final
+    assert CaseEntityRelationship.objects.filter(case=case, nes_id=LOOSE).exists()
 
 
 def test_a_duplicate_retired_concurrently_is_rejected(monkeypatch):
